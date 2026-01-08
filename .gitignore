@@ -40,3 +40,18 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Internal documentation (keep only README.md and convex/README.md)
+/docs/
+/*_COMPLETE.md
+/*_GUIDE.md
+/*_STATUS.md
+/*_PROGRESS.md
+/*_SUMMARY.md
+/*_REVIEW.md
+/*_FIX.md
+/*_ANALYSIS.md
+/*_GUIDANCE.md
+/*_SETUP.md
+/*_ENGINE.md
+/*_MIGRATION.md
