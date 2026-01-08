@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Google Maps API Key Verification</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .status {
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        pre {
+            background-color: #f4f4f4;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Google Maps API Key Verification</h1>
+    
+    <div class="info status">
+        <strong>Instructions:</strong><br>
+        1. Replace YOUR_API_KEY_HERE below with your actual API key<br>
+        2. Open this file in a web browser<br>
+        3. Check the results below
+    </div>
+
+    <div id="results"></div>
+
+    <script>
+        // Replace this with your actual API key
+        const API_KEY = 'AIzaSyDc27COWLkqsCHxNONVo2P4u2g2laA2asQ';
+        const resultsDiv = document.getElementById('results');
+
+        function addResult(message, type = 'info') {
+            const div = document.createElement('div');
+            div.className = `status ${type}`;
+            div.innerHTML = message;
+            resultsDiv.appendChild(div);
+        }
+
+        async function testPlacesAPI() {
+            addResult('Testing Places Autocomplete API...', 'info');
+            
+            try {
+                const response = await fetch(
+                    `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=New+York&key=${API_KEY}`
+                );
+                const data = await response.json();
+                
+                if (data.status === 'OK') {
+                    addResult('✅ Places Autocomplete API: Working correctly!', 'success');
+                    addResult(`<pre>${JSON.stringify(data, null, 2)}</pre>`, 'info');
+                } else if (data.status === 'REQUEST_DENIED') {
+                    addResult(`❌ Places Autocomplete API: Request denied<br><strong>Error:</strong> ${data.error_message || 'Unknown error'}<br><br><strong>Common causes:</strong><br>
+                        - API key restrictions blocking this domain<br>
+                        - Places API not enabled in Google Cloud Console<br>
+                        - API key is invalid`, 'error');
+                } else {
+                    addResult(`⚠️ Places Autocomplete API: ${data.status}<br>${data.error_message || ''}`, 'error');
+                }
+            } catch (error) {
+                addResult(`❌ Places Autocomplete API: Failed to test<br>${error.message}`, 'error');
+            }
+        }
+
+        async function testDistanceMatrixAPI() {
+            addResult('Testing Distance Matrix API...', 'info');
+            
+            try {
+                const response = await fetch(
+                    `https://maps.googleapis.com/maps/api/distancematrix/json?origins=New+York&destinations=Los+Angeles&key=${API_KEY}`
+                );
+                const data = await response.json();
+                
+                if (data.status === 'OK') {
+                    addResult('✅ Distance Matrix API: Working correctly!', 'success');
+                } else if (data.status === 'REQUEST_DENIED') {
+                    addResult(`❌ Distance Matrix API: Request denied<br><strong>Error:</strong> ${data.error_message || 'Unknown error'}`, 'error');
+                } else {
+                    addResult(`⚠️ Distance Matrix API: ${data.status}`, 'error');
+                }
+            } catch (error) {
+                addResult(`❌ Distance Matrix API: Failed to test<br>${error.message}`, 'error');
+            }
+        }
+
+        async function testGeocodingAPI() {
+            addResult('Testing Geocoding API...', 'info');
+            
+            try {
+                const response = await fetch(
+                    `https://maps.googleapis.com/maps/api/geocode/json?address=New+York&key=${API_KEY}`
+                );
+                const data = await response.json();
+                
+                if (data.status === 'OK') {
+                    addResult('✅ Geocoding API: Working correctly!', 'success');
+                } else if (data.status === 'REQUEST_DENIED') {
+                    addResult(`❌ Geocoding API: Request denied<br><strong>Error:</strong> ${data.error_message || 'Unknown error'}`, 'error');
+                } else {
+                    addResult(`⚠️ Geocoding API: ${data.status}`, 'error');
+                }
+            } catch (error) {
+                addResult(`❌ Geocoding API: Failed to test<br>${error.message}`, 'error');
+            }
+        }
+
+        async function testJavaScriptAPI() {
+            addResult('Testing Maps JavaScript API...', 'info');
+            
+            const script = document.createElement('script');
+            script.src = `https://maps.googleapis.com/maps/api/js?key=${API_KEY}&libraries=places,geocoding`;
+            
+            script.onload = () => {
+                addResult('✅ Maps JavaScript API: Loaded successfully!', 'success');
+            };
+            
+            script.onerror = () => {
+                addResult('❌ Maps JavaScript API: Failed to load<br>Check browser console for details', 'error');
+            };
+            
+            document.head.appendChild(script);
+        }
+
+        // Run all tests
+        addResult('<h2>Starting API Tests...</h2>', 'info');
+        
+        if (API_KEY === 'YOUR_API_KEY_HERE') {
+            addResult('⚠️ Please replace YOUR_API_KEY_HERE with your actual API key in the script!', 'error');
+        } else {
+            testJavaScriptAPI();
+            // Note: CORS will prevent these requests from working directly
+            // These are examples - you'll need to test via your backend
+            addResult('<br><strong>Note:</strong> Direct API tests via fetch will fail due to CORS. These APIs should be tested through your application or backend.', 'info');
+        }
+    </script>
+</body>
+</html>
