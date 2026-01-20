@@ -252,6 +252,20 @@ export const create = mutation({
       });
     }
 
+    // Auto-assign org default pay plan if one exists
+    const orgDefaultPayPlan = await ctx.db
+      .query('payPlans')
+      .withIndex('by_org_active', (q) =>
+        q.eq('workosOrgId', args.organizationId).eq('isActive', true)
+      )
+      .first();
+
+    if (orgDefaultPayPlan) {
+      await ctx.db.patch(driverId, {
+        payPlanId: orgDefaultPayPlan._id,
+      });
+    }
+
     // Log the creation
     await ctx.runMutation(internal.auditLog.logAction, {
       organizationId: args.organizationId,
@@ -261,6 +275,13 @@ export const create = mutation({
       action: 'created',
       performedBy: args.createdBy,
       description: `Created driver ${args.firstName} ${args.lastName}`,
+    });
+
+    // Create Clerk user for mobile app authentication (async, non-blocking)
+    ctx.scheduler.runAfter(0, internal.clerkSync.createClerkUserForDriver, {
+      phone: args.phone,
+      firstName: args.firstName,
+      lastName: args.lastName,
     });
 
     return driverId;
@@ -370,6 +391,16 @@ export const update = mutation({
         description: `Updated driver ${driver.firstName} ${driver.lastName}`,
         changedFields,
         changesAfter: JSON.stringify(allUpdates),
+      });
+    }
+
+    // If phone number changed, update Clerk user (async, non-blocking)
+    if (updates.phone && updates.phone !== driver.phone) {
+      ctx.scheduler.runAfter(0, internal.clerkSync.updateClerkUserPhone, {
+        oldPhone: driver.phone,
+        newPhone: updates.phone,
+        firstName: updates.firstName || driver.firstName,
+        lastName: updates.lastName || driver.lastName,
       });
     }
 
@@ -523,6 +554,13 @@ export const permanentDelete = mutation({
       description: `Permanently deleted driver ${driver.firstName} ${driver.lastName}`,
       changesBefore: JSON.stringify(driver),
     });
+
+    // Delete Clerk user (async, non-blocking)
+    if (driver.phone) {
+      ctx.scheduler.runAfter(0, internal.clerkSync.deleteClerkUser, {
+        phone: driver.phone,
+      });
+    }
 
     await ctx.db.delete(args.id);
     return args.id;

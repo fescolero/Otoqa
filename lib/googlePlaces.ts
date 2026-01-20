@@ -4,6 +4,9 @@ let geocoder: google.maps.Geocoder | null = null;
 let isLoaded = false;
 let loadPromise: Promise<void> | null = null;
 
+// Cache for timezone lookups to avoid redundant API calls
+const timezoneCache: Map<string, string> = new Map();
+
 /**
  * Initialize Google Maps API by loading the script tag
  */
@@ -112,6 +115,7 @@ export async function getAddressPredictions(
 
 /**
  * Get detailed information about a place using its place ID
+ * Includes timezone lookup for the location
  */
 export async function getPlaceDetails(
   placeId: string
@@ -124,6 +128,7 @@ export async function getPlaceDetails(
   latitude: number;
   longitude: number;
   formattedAddress: string;
+  timeZone?: string; // IANA timezone (e.g., "America/Los_Angeles")
 } | null> {
   try {
     await loadGoogleMaps();
@@ -134,7 +139,17 @@ export async function getPlaceDetails(
       placesService = new google.maps.places.PlacesService(div);
     }
 
-    return new Promise((resolve, reject) => {
+    // First, get place details from Google Places API
+    const placeData = await new Promise<{
+      address: string;
+      city: string;
+      state: string;
+      postalCode: string;
+      country: string;
+      latitude: number;
+      longitude: number;
+      formattedAddress: string;
+    } | null>((resolve) => {
       placesService!.getDetails(
         {
           placeId,
@@ -177,14 +192,12 @@ export async function getPlaceDetails(
 
             // Fallback: Extract country from formatted address if not found in components
             if (!country && place.formatted_address) {
-              // Formatted address typically ends with country (e.g., "..., USA" or "..., United States")
               const parts = place.formatted_address.split(',');
               if (parts.length > 0) {
                 const lastPart = parts[parts.length - 1].trim();
-                // Common country codes/names
                 if (lastPart === 'USA' || lastPart.includes('United States')) {
                   country = 'United States';
-                } else if (lastPart.length <= 50) { // Reasonable country name length
+                } else if (lastPart.length <= 50) {
                   country = lastPart;
                 }
               }
@@ -193,16 +206,6 @@ export async function getPlaceDetails(
             const address = `${streetNumber} ${route}`.trim();
             const latitude = place.geometry?.location?.lat() || 0;
             const longitude = place.geometry?.location?.lng() || 0;
-
-            // Debug logging
-            console.log('🗺️ Place Details Extracted:', {
-              address,
-              city,
-              state,
-              postalCode,
-              country,
-              formattedAddress: place.formatted_address,
-            });
 
             resolve({
               address,
@@ -221,6 +224,27 @@ export async function getPlaceDetails(
         }
       );
     });
+
+    if (!placeData) {
+      return null;
+    }
+
+    // Now fetch timezone separately (this is async)
+    let timeZone: string | undefined;
+    if (placeData.latitude && placeData.longitude) {
+      timeZone = await getTimezoneFromCoordinates(placeData.latitude, placeData.longitude) || undefined;
+    }
+
+    // Debug logging
+    console.log('🗺️ Place Details Extracted:', {
+      ...placeData,
+      timeZone,
+    });
+
+    return {
+      ...placeData,
+      timeZone,
+    };
   } catch (error) {
     console.error('Error fetching place details:', error);
     return null;
@@ -258,4 +282,99 @@ export async function geocodeAddress(
     console.error('Error geocoding address:', error);
     return null;
   }
+}
+
+/**
+ * Get timezone for a location using Google Time Zone API
+ * Returns IANA timezone identifier (e.g., "America/Los_Angeles")
+ * Falls back gracefully if API is not enabled or fails
+ */
+export async function getTimezoneFromCoordinates(
+  latitude: number,
+  longitude: number
+): Promise<string | null> {
+  // Check cache first
+  const cacheKey = `${latitude.toFixed(4)},${longitude.toFixed(4)}`;
+  if (timezoneCache.has(cacheKey)) {
+    return timezoneCache.get(cacheKey)!;
+  }
+
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if (!apiKey) {
+    console.warn('⚠️ Google Maps API key not configured for timezone lookup');
+    return null;
+  }
+
+  try {
+    // Use current timestamp for timezone calculation
+    const timestamp = Math.floor(Date.now() / 1000);
+    const url = `https://maps.googleapis.com/maps/api/timezone/json?location=${latitude},${longitude}&timestamp=${timestamp}&key=${apiKey}`;
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      console.warn('⚠️ Timezone API request failed:', response.status);
+      return null;
+    }
+    
+    const data = await response.json();
+
+    if (data.status === 'OK' && data.timeZoneId) {
+      console.log('🕐 Timezone lookup:', { latitude, longitude, timezone: data.timeZoneId });
+      timezoneCache.set(cacheKey, data.timeZoneId);
+      return data.timeZoneId;
+    } else if (data.status === 'REQUEST_DENIED') {
+      // API not enabled - log once and continue without timezone
+      console.warn('⚠️ Time Zone API not enabled. Enable it at: https://console.cloud.google.com/apis/library/timezone-backend.googleapis.com');
+      console.warn('   Stops will be saved without timezone - times will be stored as HH:mm format.');
+      return null;
+    } else {
+      console.warn('⚠️ Timezone API returned:', data.status, data.errorMessage || '');
+      return null;
+    }
+  } catch (error) {
+    // Network error or other issue - fail gracefully
+    console.warn('⚠️ Timezone lookup failed (will continue without timezone):', error);
+    return null;
+  }
+}
+
+/**
+ * Convert a date and time to a full ISO string with timezone offset
+ * @param date - Date in YYYY-MM-DD format
+ * @param time - Time in HH:mm format (24-hour)
+ * @param ianaTimezone - IANA timezone (e.g., "America/Los_Angeles")
+ * @returns Full ISO string like "2026-01-08T12:25:00-08:00"
+ */
+export function createISOStringWithTimezone(
+  date: string,
+  time: string,
+  ianaTimezone: string
+): string {
+  // Create a date object in the specified timezone
+  const dateTimeStr = `${date}T${time}:00`;
+  
+  // Get the timezone offset for this specific date/time
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: ianaTimezone,
+    timeZoneName: 'longOffset',
+  });
+  
+  // Parse to get the offset
+  const parts = formatter.formatToParts(new Date(dateTimeStr));
+  const offsetPart = parts.find(p => p.type === 'timeZoneName');
+  
+  if (offsetPart) {
+    // Convert "GMT-08:00" to "-08:00"
+    const offsetMatch = offsetPart.value.match(/GMT([+-]\d{2}):?(\d{2})?/);
+    if (offsetMatch) {
+      const hours = offsetMatch[1];
+      const minutes = offsetMatch[2] || '00';
+      return `${dateTimeStr}${hours}:${minutes}`;
+    }
+  }
+  
+  // Fallback: use the date/time without offset
+  console.warn('Could not determine timezone offset, using UTC');
+  return `${dateTimeStr}Z`;
 }

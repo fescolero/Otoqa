@@ -8,6 +8,7 @@ import { Container, CheckCircle, XCircle, Wrench, Settings, DollarSign, Trash } 
 import { Doc, Id } from '@/convex/_generated/dataModel';
 import { TrailerFilterBar } from './trailer-filter-bar';
 import { VirtualizedTrailersTable } from './virtualized-trailers-table';
+import { FloatingActionBar } from './floating-action-bar';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useRouter } from 'next/navigation';
@@ -107,12 +108,28 @@ export function TrailerList({ data, organizationId, onDeactivateTrailers }: Trai
 
   const isAllSelected = filteredTrailers.length > 0 && selectedTrailers.size === filteredTrailers.length;
 
-  // Bulk deactivate handler
+  // Bulk action handlers
   const handleBulkDeactivate = async () => {
     if (!onDeactivateTrailers) return;
     const trailerIds = Array.from(selectedTrailers);
     await onDeactivateTrailers(trailerIds);
     setSelectedTrailers(new Set());
+  };
+
+  const handleUpdateStatus = (status: 'Active' | 'Out of Service' | 'In Repair' | 'Maintenance' | 'Sold') => {
+    console.log('Update trailer status to:', status, 'for trailers:', Array.from(selectedTrailers));
+    // TODO: Implement bulk status update functionality
+  };
+
+  const handleExport = () => {
+    const selectedData = filteredTrailers.filter((trailer) => selectedTrailers.has(trailer._id));
+    console.log('Export trailers:', selectedData);
+    // TODO: Implement bulk export functionality
+  };
+
+  const handleDelete = () => {
+    console.log('Delete trailers:', Array.from(selectedTrailers));
+    // TODO: Implement bulk delete functionality
   };
 
   return (
@@ -226,6 +243,15 @@ export function TrailerList({ data, organizationId, onDeactivateTrailers }: Trai
 
             <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
               <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
+                {/* Floating Action Bar */}
+                <FloatingActionBar
+                  selectedCount={selectedTrailers.size}
+                  onClearSelection={() => setSelectedTrailers(new Set())}
+                  onUpdateStatus={handleUpdateStatus}
+                  onExport={handleExport}
+                  onDelete={handleDelete}
+                />
+
                 {/* Virtualized Table */}
                 <VirtualizedTrailersTable
                   trailers={filteredTrailers}
@@ -242,29 +268,6 @@ export function TrailerList({ data, organizationId, onDeactivateTrailers }: Trai
           </div>
         </Tabs>
       </Card>
-
-      {/* Floating Action Bar */}
-      {selectedTrailers.size > 0 && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 sm:left-[calc(50%+8rem)] xl:left-[calc(50%+9rem)] z-50 bg-background border rounded-lg shadow-lg p-3 sm:p-4">
-          <div className="flex items-center gap-4">
-            <p className="text-sm font-medium">
-              {selectedTrailers.size} selected
-            </p>
-            <button
-              onClick={() => setSelectedTrailers(new Set())}
-              className="text-sm text-muted-foreground hover:text-foreground"
-            >
-              Clear
-            </button>
-            <button
-              onClick={handleBulkDeactivate}
-              className="text-sm text-destructive hover:text-destructive/90 font-medium"
-            >
-              Deactivate
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

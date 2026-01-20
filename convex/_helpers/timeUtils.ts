@@ -28,6 +28,10 @@ export function parseStopDateTime(dateStr: string, timeStr: string): number | nu
  * Calculates the time range for a dispatch leg based on its start and end stops.
  * Used for conflict detection when assigning drivers.
  *
+ * Uses windowBeginTime for BOTH start and end stops to represent the actual
+ * appointment times (when the driver is expected to arrive), not the full
+ * delivery window. This prevents false conflicts from overly wide time windows.
+ *
  * @param ctx - Convex query or mutation context
  * @param leg - The dispatch leg document
  * @returns Object with start and end timestamps, or null if stops are missing/invalid
@@ -43,8 +47,11 @@ export async function getLegTimeRange(
 
   if (!startStop || !endStop) return null;
 
+  // Use windowBeginTime for both - represents actual appointment times
+  // Previously used windowEndTime for end, which caused false conflicts
+  // when delivery windows were wide (e.g., 1:45 PM - 10:50 PM)
   const start = parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime);
-  const end = parseStopDateTime(endStop.windowEndDate, endStop.windowEndTime);
+  const end = parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime);
 
   // Return null if either timestamp failed to parse
   if (start === null || end === null) return null;

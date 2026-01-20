@@ -30,4 +30,14 @@ crons.interval(
   {}
 );
 
+// ✅ Archive old driver location data daily
+// Moves location data older than 90 days to cold storage (R2)
+// Keeps hot storage costs low while maintaining historical data
+crons.cron(
+  "archive-old-locations",
+  "0 3 * * *", // Run daily at 3 AM UTC
+  internal.driverLocations.archiveOldLocations,
+  {}
+);
+
 export default crons;

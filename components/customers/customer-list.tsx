@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Users, CheckCircle, Star, MinusCircle, Trash } from "lucide-react";
 import { CustomerFilterBar } from "./customer-filter-bar";
 import { VirtualizedCustomersTable } from "./virtualized-customers-table";
+import { FloatingActionBar } from "./floating-action-bar";
 
 interface CustomerListProps {
   workosOrgId: string;
@@ -61,6 +62,28 @@ export function CustomerList({ workosOrgId }: CustomerListProps) {
 
   const handleCustomerClick = (id: string) => {
     router.push(`/operations/customers/${id}`);
+  };
+
+  // Bulk action handlers
+  const handleBulkMessage = () => {
+    console.log('Message customers:', Array.from(selectedCustomers));
+    // TODO: Implement bulk message functionality
+  };
+
+  const handleUpdateStatus = (status: 'Active' | 'Inactive' | 'Prospect') => {
+    console.log('Update customer status to:', status, 'for customers:', Array.from(selectedCustomers));
+    // TODO: Implement bulk status update functionality
+  };
+
+  const handleBulkExport = () => {
+    const selectedData = customers?.filter((customer) => selectedCustomers.has(customer._id));
+    console.log('Export customers:', selectedData);
+    // TODO: Implement bulk export functionality
+  };
+
+  const handleBulkDeactivate = () => {
+    console.log('Deactivate customers:', Array.from(selectedCustomers));
+    // TODO: Implement bulk deactivate functionality
   };
 
   return (
@@ -146,6 +169,16 @@ export function CustomerList({ workosOrgId }: CustomerListProps) {
 
             <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
               <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
+                {/* Floating Action Bar */}
+                <FloatingActionBar
+                  selectedCount={selectedCustomers.size}
+                  onClearSelection={() => setSelectedCustomers(new Set())}
+                  onMessage={handleBulkMessage}
+                  onUpdateStatus={handleUpdateStatus}
+                  onExport={handleBulkExport}
+                  onDeactivate={handleBulkDeactivate}
+                />
+
                 {customers === undefined ? (
                   <div className="flex items-center justify-center h-full">
                     <div className="text-sm text-muted-foreground">Loading...</div>

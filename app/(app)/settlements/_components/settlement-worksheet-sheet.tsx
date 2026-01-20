@@ -16,7 +16,8 @@ import {
   DollarSign, 
   Truck, 
   Package, 
-  Clock 
+  Clock,
+  RefreshCw 
 } from 'lucide-react';
 import { PayablesList } from './payables-list';
 import { AuditAlertBar } from './audit-alert-bar';
@@ -102,6 +103,10 @@ export function SettlementWorksheetSheet({
   const releaseLoad = useMutation(api.loadHoldWorkflow.releaseLoad);
   const deletePayable = useMutation(api.driverSettlements.deleteManualPayable);
   const updatePayable = useMutation(api.driverSettlements.updateManualPayable);
+  const refreshSettlement = useMutation(api.driverSettlements.refreshDraftSettlement);
+
+  // Refresh state
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Format helpers
   const formatCurrency = (amount: number) => {
@@ -138,6 +143,22 @@ export function SettlementWorksheetSheet({
     } catch (error) {
       toast.error('Failed to approve settlement');
       console.error(error);
+    }
+  };
+
+  // Handle refresh draft
+  const handleRefresh = async () => {
+    if (!settlementId) return;
+
+    setIsRefreshing(true);
+    try {
+      const result = await refreshSettlement({ settlementId });
+      toast.success(`Statement refreshed: ${result.payablesAdded} items in this period`);
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to refresh settlement');
+      console.error(error);
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -318,10 +339,21 @@ export function SettlementWorksheetSheet({
               </Button>
 
               {settlement?.settlement.status === 'DRAFT' && (
-                <Button size="sm" onClick={handleApprove}>
-                  <CheckCircle2 className="w-4 h-4 mr-2" />
-                  Approve
-                </Button>
+                <>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={handleRefresh}
+                    disabled={isRefreshing}
+                  >
+                    <RefreshCw className={cn("w-4 h-4 mr-2", isRefreshing && "animate-spin")} />
+                    {isRefreshing ? 'Refreshing...' : 'Refresh'}
+                  </Button>
+                  <Button size="sm" onClick={handleApprove}>
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                    Approve
+                  </Button>
+                </>
               )}
               
               {settlement?.settlement.status === 'APPROVED' && (

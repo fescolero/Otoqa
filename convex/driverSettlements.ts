@@ -1390,6 +1390,180 @@ export const deleteSettlement = mutation({
   },
 });
 
+/**
+ * Refresh a DRAFT settlement with the latest payables
+ * - Unassigns current load-based payables
+ * - Deletes standalone adjustments (they're per-statement)
+ * - Re-queries for eligible payables in the period
+ * - Re-assigns to the same statement
+ */
+export const refreshDraftSettlement = mutation({
+  args: {
+    settlementId: v.id('driverSettlements'),
+  },
+  returns: v.object({
+    payablesAdded: v.number(),
+    payablesRemoved: v.number(),
+    grossTotal: v.float64(),
+  }),
+  handler: async (ctx, args) => {
+    const settlement = await ctx.db.get(args.settlementId);
+    if (!settlement) throw new Error('Settlement not found');
+
+    // Can only refresh DRAFT settlements
+    if (settlement.status !== 'DRAFT') {
+      throw new Error('Can only refresh DRAFT settlements');
+    }
+
+    // Get current payables
+    const currentPayables = await ctx.db
+      .query('loadPayables')
+      .withIndex('by_settlement', (q) => q.eq('settlementId', args.settlementId))
+      .collect();
+
+    const previousCount = currentPayables.length;
+
+    // Unassign load-based payables, delete standalone adjustments
+    for (const payable of currentPayables) {
+      if (!payable.loadId) {
+        // Standalone adjustment - delete it
+        await ctx.db.delete(payable._id);
+      } else {
+        // Load-based - unassign it
+        await ctx.db.patch(payable._id, {
+          settlementId: undefined,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+
+    // Get the driver's pay plan
+    const driver = await ctx.db.get(settlement.driverId);
+    if (!driver) throw new Error('Driver not found');
+
+    let payablesToAssign: Array<Id<'loadPayables'>> = [];
+    let grossTotal = 0;
+
+    // If driver has a pay plan, use plan-aware filtering
+    if (driver.payPlanId && settlement.payPlanId) {
+      const plan = await ctx.db.get(driver.payPlanId);
+      if (plan && plan.isActive) {
+        // Resolve timezone
+        let timezone = plan.timezone;
+        if (!timezone) {
+          const org = await ctx.db
+            .query('organizations')
+            .withIndex('by_organization', (q: any) => q.eq('workosOrgId', settlement.workosOrgId))
+            .first();
+          timezone = org?.defaultTimezone || 'America/New_York';
+        }
+
+        // Find all unassigned payables for this driver
+        const allUnassigned = await ctx.db
+          .query('loadPayables')
+          .withIndex('by_driver_unassigned', (q) =>
+            q.eq('driverId', settlement.driverId).eq('settlementId', undefined)
+          )
+          .collect();
+
+        const periodStart = new Date(settlement.periodStart);
+        const periodEnd = new Date(settlement.periodEnd);
+
+        for (const payable of allUnassigned) {
+          // Check if load is held
+          let isLoadHeld = false;
+          if (payable.loadId) {
+            const load = await ctx.db.get(payable.loadId);
+            if (load?.isHeld) {
+              isLoadHeld = true;
+            }
+          }
+
+          // Skip held loads
+          if (isLoadHeld) continue;
+
+          // Get the trigger timestamp based on plan configuration
+          const triggerTimestamp = await getPayableTriggerTimestamp(ctx, payable, plan.payableTrigger);
+          
+          if (!triggerTimestamp) {
+            // Skip payables without a valid trigger timestamp
+            continue;
+          }
+
+          // Check if within period
+          const withinPeriod = 
+            triggerTimestamp >= periodStart.getTime() && 
+            triggerTimestamp <= periodEnd.getTime();
+
+          if (withinPeriod) {
+            // Check cutoff time
+            const withinCutoff = isWithinCutoffWindow(
+              triggerTimestamp,
+              periodEnd.getTime(),
+              plan.cutoffTime,
+              timezone
+            );
+
+            if (withinCutoff) {
+              payablesToAssign.push(payable._id);
+              grossTotal += payable.totalAmount;
+            }
+          }
+        }
+      }
+    } else {
+      // No pay plan - use simple date range filtering
+      const allUnassigned = await ctx.db
+        .query('loadPayables')
+        .withIndex('by_driver_unassigned', (q) =>
+          q.eq('driverId', settlement.driverId).eq('settlementId', undefined)
+        )
+        .collect();
+
+      for (const payable of allUnassigned) {
+        // Check if load is held
+        let isLoadHeld = false;
+        if (payable.loadId) {
+          const load = await ctx.db.get(payable.loadId);
+          if (load?.isHeld) {
+            isLoadHeld = true;
+          }
+        }
+
+        // Skip held loads
+        if (isLoadHeld) continue;
+
+        // Simple date range check using createdAt
+        const triggerTime = payable.createdAt;
+        if (triggerTime >= settlement.periodStart && triggerTime <= settlement.periodEnd) {
+          payablesToAssign.push(payable._id);
+          grossTotal += payable.totalAmount;
+        }
+      }
+    }
+
+    // Assign payables to this settlement
+    for (const payableId of payablesToAssign) {
+      await ctx.db.patch(payableId, {
+        settlementId: args.settlementId,
+        updatedAt: Date.now(),
+      });
+    }
+
+    // Update settlement totals
+    await ctx.db.patch(args.settlementId, {
+      grossTotal,
+      updatedAt: Date.now(),
+    });
+
+    return {
+      payablesAdded: payablesToAssign.length,
+      payablesRemoved: previousCount,
+      grossTotal,
+    };
+  },
+});
+
 // ============================================
 // PAY PLAN-AWARE SETTLEMENT GENERATION
 // ============================================

@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Building2, CheckCircle, Search, AlertCircle, Ban, MinusCircle, Trash } from "lucide-react";
 import { CarrierFilterBar } from "./carrier-filter-bar";
 import { VirtualizedCarriersTable } from "./virtualized-carriers-table";
+import { FloatingActionBar } from "./floating-action-bar";
 
 interface CarrierListProps {
   workosOrgId: string;
@@ -61,6 +62,28 @@ export function CarrierList({ workosOrgId }: CarrierListProps) {
 
   const handleCarrierClick = (id: string) => {
     router.push(`/operations/carriers/${id}`);
+  };
+
+  // Bulk action handlers
+  const handleBulkMessage = () => {
+    console.log('Message carriers:', Array.from(selectedCarriers));
+    // TODO: Implement bulk message functionality
+  };
+
+  const handleUpdateStatus = (status: 'Active' | 'Inactive' | 'Vetting' | 'Suspended') => {
+    console.log('Update carrier status to:', status, 'for carriers:', Array.from(selectedCarriers));
+    // TODO: Implement bulk status update functionality
+  };
+
+  const handleBulkExport = () => {
+    const selectedData = carriers?.filter((carrier) => selectedCarriers.has(carrier._id));
+    console.log('Export carriers:', selectedData);
+    // TODO: Implement bulk export functionality
+  };
+
+  const handleBulkDeactivate = () => {
+    console.log('Deactivate carriers:', Array.from(selectedCarriers));
+    // TODO: Implement bulk deactivate functionality
   };
 
   return (
@@ -170,6 +193,16 @@ export function CarrierList({ workosOrgId }: CarrierListProps) {
 
             <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
               <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
+                {/* Floating Action Bar */}
+                <FloatingActionBar
+                  selectedCount={selectedCarriers.size}
+                  onClearSelection={() => setSelectedCarriers(new Set())}
+                  onMessage={handleBulkMessage}
+                  onUpdateStatus={handleUpdateStatus}
+                  onExport={handleBulkExport}
+                  onDeactivate={handleBulkDeactivate}
+                />
+
                 {carriers === undefined ? (
                   <div className="flex items-center justify-center h-full">
                     <div className="text-sm text-muted-foreground">Loading...</div>

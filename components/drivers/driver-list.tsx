@@ -228,9 +228,9 @@ export function DriverList({ data, organizationId, onDeactivateDrivers }: Driver
     // TODO: Implement bulk message functionality
   };
 
-  const handleBulkEdit = () => {
-    console.log('Bulk edit drivers:', Array.from(selectedDrivers));
-    // TODO: Implement bulk edit functionality
+  const handleUpdateStatus = (status: 'Active' | 'Inactive' | 'On Leave') => {
+    console.log('Update driver employment status to:', status, 'for drivers:', Array.from(selectedDrivers));
+    // TODO: Implement bulk status update functionality
   };
 
   const handleBulkExport = () => {
@@ -340,19 +340,14 @@ export function DriverList({ data, organizationId, onDeactivateDrivers }: Driver
             <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
               <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
                 {/* Floating Action Bar */}
-                {selectedDrivers.size > 0 && (
                   <FloatingActionBar
                     selectedCount={selectedDrivers.size}
-                    totalCount={drivers.length}
-                    isAllSelected={selectedDrivers.size === drivers.length}
                     onClearSelection={() => setSelectedDrivers(new Set())}
-                    onSelectAll={filteredDrivers.length < drivers.length ? () => setSelectedDrivers(new Set(drivers.map((d) => d._id))) : undefined}
                     onMessage={handleBulkMessage}
-                    onBulkEdit={handleBulkEdit}
+                  onUpdateStatus={handleUpdateStatus}
                     onExport={handleBulkExport}
                     onDeactivate={handleBulkDeactivate}
                   />
-                )}
 
                 {/* Virtualized Table */}
                 <VirtualizedDriversTable

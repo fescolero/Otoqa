@@ -32,6 +32,7 @@ import {
 import { Id } from '@/convex/_generated/dataModel';
 import { format, differenceInDays, isPast } from 'date-fns';
 import { use } from 'react';
+import { TruckQRCode } from '@/components/trucks/truck-qr-code';
 
 export default function TruckDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { user } = useAuth();
@@ -460,6 +461,15 @@ export default function TruckDetailPage({ params }: { params: Promise<{ id: stri
                   )}
                 </CardContent>
               </Card>
+
+              {/* Vehicle QR Code */}
+              <TruckQRCode
+                truckId={truck._id}
+                unitId={truck.unitId}
+                make={truck.make}
+                model={truck.model}
+                year={truck.year}
+              />
             </div>
           </div>
 

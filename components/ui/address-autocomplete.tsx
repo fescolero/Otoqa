@@ -15,6 +15,7 @@ export interface AddressData {
   latitude?: number;
   longitude?: number;
   formattedAddress?: string;
+  timeZone?: string; // IANA timezone (e.g., "America/Los_Angeles")
 }
 
 interface AddressAutocompleteProps {
@@ -92,7 +93,7 @@ export function AddressAutocomplete({
     try {
       const details = await getPlaceDetails(placeId);
       if (details) {
-        const addressData = {
+        const addressData: AddressData = {
           address: details.address,
           city: details.city,
           state: details.state,
@@ -101,6 +102,7 @@ export function AddressAutocomplete({
           latitude: details.latitude,
           longitude: details.longitude,
           formattedAddress: details.formattedAddress,
+          timeZone: details.timeZone,
         };
         console.log('📍 Calling onSelect with:', addressData);
         onSelect(addressData);

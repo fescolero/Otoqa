@@ -149,7 +149,7 @@ export const getLoads = query({
     if (args.startDate && args.endDate) {
       // Both bounds: inclusive range [startDate, endDate]
       loadsQuery = ctx.db
-        .query('loadInformation')
+      .query('loadInformation')
         .withIndex('by_org_first_stop_date', (q) =>
           q.eq('workosOrgId', args.workosOrgId)
             .gte('firstStopDate', args.startDate!)
@@ -425,9 +425,11 @@ export const getByIdWithRange = query({
       sortedStops[0].windowBeginDate,
       sortedStops[0].windowBeginTime
     );
+    // Use windowBeginTime (appointment time) not windowEndTime (end of delivery window)
+    // This prevents false scheduling conflicts from wide delivery windows
     const endTime = parseStopDateTime(
-      sortedStops[sortedStops.length - 1].windowEndDate,
-      sortedStops[sortedStops.length - 1].windowEndTime
+      sortedStops[sortedStops.length - 1].windowBeginDate,
+      sortedStops[sortedStops.length - 1].windowBeginTime
     );
 
     // Get origin/destination for display
@@ -529,10 +531,11 @@ export const createLoad = mutation({
         postalCode: v.optional(v.string()),
         latitude: v.optional(v.number()),
         longitude: v.optional(v.number()),
+        timeZone: v.optional(v.string()), // IANA timezone (e.g., "America/Los_Angeles")
         windowBeginDate: v.string(),
-        windowBeginTime: v.string(),
+        windowBeginTime: v.string(), // Full ISO string with timezone OR just "HH:mm"
         windowEndDate: v.string(),
-        windowEndTime: v.string(),
+        windowEndTime: v.string(), // Full ISO string with timezone OR just "HH:mm"
         commodityDescription: v.string(),
         commodityUnits: v.union(
           v.literal('Pallets'),
@@ -628,10 +631,11 @@ export const createLoad = mutation({
         postalCode: stop.postalCode,
         latitude: stop.latitude,
         longitude: stop.longitude,
+        timeZone: stop.timeZone, // IANA timezone (e.g., "America/Los_Angeles")
         windowBeginDate: stop.windowBeginDate,
-        windowBeginTime: stop.windowBeginTime,
+        windowBeginTime: stop.windowBeginTime, // Full ISO with timezone OR "HH:mm"
         windowEndDate: stop.windowEndDate,
-        windowEndTime: stop.windowEndTime,
+        windowEndTime: stop.windowEndTime, // Full ISO with timezone OR "HH:mm"
         commodityDescription: stop.commodityDescription,
         commodityUnits: stop.commodityUnits,
         pieces: stop.pieces,

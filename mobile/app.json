@@ -1,0 +1,96 @@
+{
+  "expo": {
+    "name": "Otoqa Driver",
+    "slug": "otoqa-drivers",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "otoqa-driver",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1a1a2e"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.otoqa.driver",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Camera is used to take proof of delivery photos",
+        "NSPhotoLibraryUsageDescription": "Photo library access is used to select delivery photos",
+        "NSLocationWhenInUseUsageDescription": "Location is used for check-in verification at stops",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Location is used to track delivery progress",
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a1a2e"
+      },
+      "package": "com.otoqa.driver",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-task-manager",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Otoqa Driver to access your camera for proof of delivery photos"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow Otoqa Driver to use your location to track your route during deliveries",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isIosBackgroundLocationEnabled": true
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Otoqa Driver to access your photos"
+        }
+      ],
+      "expo-web-browser",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "2.0.21"
+          }
+        }
+      ],
+      "expo-localization"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "6449e793-4e00-49e3-be2f-586c9ffc4dd2"
+      }
+    },
+    "owner": "otoqa"
+  }
+}

@@ -20,6 +20,7 @@ import { Loader2, Plus, Trash2, Calculator } from 'lucide-react';
 import { Id } from '@/convex/_generated/dataModel';
 import { AddressAutocomplete, AddressData } from '@/components/ui/address-autocomplete';
 import { toast } from 'sonner';
+import { createISOStringWithTimezone } from '@/lib/googlePlaces';
 
 interface Stop {
   sequenceNumber: number;
@@ -32,6 +33,7 @@ interface Stop {
   latitude?: number;
   longitude?: number;
   formattedAddress?: string;
+  timeZone?: string; // IANA timezone (e.g., "America/Los_Angeles")
   windowBeginDate: string;
   windowBeginTime: string;
   windowEndDate: string;
@@ -147,6 +149,7 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
       latitude: data.latitude,
       longitude: data.longitude,
       formattedAddress: data.formattedAddress || `${data.address}, ${data.city}, ${data.state} ${data.postalCode}`,
+      timeZone: data.timeZone, // Store the stop's timezone
     };
     setStops(newStops);
   };
@@ -196,27 +199,50 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
         return;
       }
 
-      // Format stops data
-      const formattedStops = stops.map((stop) => ({
-        sequenceNumber: stop.sequenceNumber,
-        stopType: stop.stopType,
-        loadingType: stop.loadingType,
-        address: stop.address,
-        city: stop.city || undefined,
-        state: stop.state || undefined,
-        postalCode: stop.postalCode || undefined,
-        latitude: stop.latitude,
-        longitude: stop.longitude,
-        windowBeginDate: stop.windowBeginDate,
-        windowBeginTime: stop.windowBeginTime,
-        windowEndDate: stop.windowEndDate,
-        windowEndTime: stop.windowEndTime,
-        commodityDescription: stop.commodityDescription,
-        commodityUnits: stop.commodityUnits,
-        pieces: parseFloat(stop.pieces) || 0,
-        weight: parseFloat(stop.weight) || undefined,
-        instructions: stop.instructions || undefined,
-      }));
+      // Format stops data with timezone-aware ISO timestamps
+      const formattedStops = stops.map((stop) => {
+        // Convert date+time to full ISO string if timezone is available
+        let windowBeginTime = stop.windowBeginTime;
+        let windowEndTime = stop.windowEndTime;
+        
+        if (stop.timeZone && stop.windowBeginDate && stop.windowBeginTime) {
+          windowBeginTime = createISOStringWithTimezone(
+            stop.windowBeginDate,
+            stop.windowBeginTime,
+            stop.timeZone
+          );
+        }
+        
+        if (stop.timeZone && stop.windowEndDate && stop.windowEndTime) {
+          windowEndTime = createISOStringWithTimezone(
+            stop.windowEndDate,
+            stop.windowEndTime,
+            stop.timeZone
+          );
+        }
+
+        return {
+          sequenceNumber: stop.sequenceNumber,
+          stopType: stop.stopType,
+          loadingType: stop.loadingType,
+          address: stop.address,
+          city: stop.city || undefined,
+          state: stop.state || undefined,
+          postalCode: stop.postalCode || undefined,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          timeZone: stop.timeZone, // Store timezone on the stop
+          windowBeginDate: stop.windowBeginDate,
+          windowBeginTime, // Now a full ISO string with timezone
+          windowEndDate: stop.windowEndDate,
+          windowEndTime, // Now a full ISO string with timezone
+          commodityDescription: stop.commodityDescription,
+          commodityUnits: stop.commodityUnits,
+          pieces: parseFloat(stop.pieces) || 0,
+          weight: parseFloat(stop.weight) || undefined,
+          instructions: stop.instructions || undefined,
+        };
+      });
 
       await createLoad({
         workosOrgId: organizationId,

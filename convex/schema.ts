@@ -1237,4 +1237,33 @@ export default defineSchema({
     // Timestamps
     updatedAt: v.number(),
   }).index('by_org', ['workosOrgId']),
+
+  // ==========================================
+  // DRIVER LOCATION TRACKING
+  // For helicopter view and route history polylines
+  // ==========================================
+  driverLocations: defineTable({
+    // References
+    driverId: v.id('drivers'),
+    loadId: v.id('loadInformation'), // Required - always tracking for a specific load
+    organizationId: v.string(), // Same pattern as workosOrgId
+
+    // GPS Data
+    latitude: v.float64(),
+    longitude: v.float64(),
+    accuracy: v.optional(v.float64()), // GPS accuracy in meters
+    speed: v.optional(v.float64()), // Speed in m/s
+    heading: v.optional(v.float64()), // Direction 0-360 degrees
+
+    // Tracking Context
+    trackingType: v.literal('LOAD_ROUTE'), // Continuous from first checkout to last checkout
+
+    // Timestamps
+    recordedAt: v.float64(), // Device timestamp (when GPS captured)
+    createdAt: v.float64(), // Server timestamp (when synced)
+  })
+    .index('by_driver_time', ['driverId', 'recordedAt'])
+    .index('by_org_time', ['organizationId', 'recordedAt'])
+    .index('by_load', ['loadId', 'recordedAt'])
+    .index('by_org_created', ['organizationId', 'createdAt']),
 });

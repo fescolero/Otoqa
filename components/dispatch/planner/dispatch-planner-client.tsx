@@ -94,6 +94,7 @@ export function DispatchPlannerClient({
   // Get selected driver/carrier objects
   // Use availableDrivers when a trip is selected, otherwise use allDrivers
   const driversToUse = selectedLoadId ? availableDrivers : allDrivers;
+
   const selectedDriver = useMemo(() => {
     if (!selectedDriverId || !driversToUse) return null;
     return driversToUse.find((d) => d._id === selectedDriverId) ?? null;

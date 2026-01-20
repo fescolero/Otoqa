@@ -154,3 +154,50 @@ export const runFirstStopDateReconciliation = internalAction({
   },
 });
 
+/**
+ * Fix photo URLs that were created with incorrect R2 domain
+ * Updates old URLs to use the correct CLOUDFLARE_DOMAIN
+ */
+export const fixPhotoUrls = internalMutation({
+  args: {
+    oldDomain: v.string(),
+    newDomain: v.string(),
+  },
+  returns: v.object({
+    updated: v.number(),
+    stops: v.array(v.string()),
+  }),
+  handler: async (ctx, args) => {
+    const stops = await ctx.db.query("loadStops").collect();
+    let updated = 0;
+    const updatedStops: string[] = [];
+
+    for (const stop of stops) {
+      if (stop.deliveryPhotos && stop.deliveryPhotos.length > 0) {
+        const newPhotos = stop.deliveryPhotos.map(url => 
+          url.replace(args.oldDomain, args.newDomain)
+        );
+        
+        // Check if any URLs changed
+        const hasChanges = newPhotos.some((url, i) => url !== stop.deliveryPhotos![i]);
+        
+        if (hasChanges) {
+          await ctx.db.patch(stop._id, { deliveryPhotos: newPhotos });
+          updated++;
+          updatedStops.push(stop._id);
+        }
+      }
+
+      // Also fix signatureImage if present
+      if (stop.signatureImage && stop.signatureImage.includes(args.oldDomain)) {
+        await ctx.db.patch(stop._id, {
+          signatureImage: stop.signatureImage.replace(args.oldDomain, args.newDomain)
+        });
+        if (!updatedStops.includes(stop._id)) {
+          updated++;
+          updatedStops.push(stop._id);
+        }
+      }
+    }    return { updated, stops: updatedStops };
+  },
+});

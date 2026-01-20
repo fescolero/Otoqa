@@ -8,6 +8,7 @@ import { Truck as TruckIcon, CheckCircle, XCircle, Wrench, Settings, DollarSign,
 import { Doc, Id } from '@/convex/_generated/dataModel';
 import { TruckFilterBar } from './truck-filter-bar';
 import { VirtualizedTrucksTable } from './virtualized-trucks-table';
+import { FloatingActionBar } from './floating-action-bar';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useRouter } from 'next/navigation';
@@ -107,12 +108,28 @@ export function TruckList({ data, organizationId, onDeactivateTrucks }: TruckLis
 
   const isAllSelected = filteredTrucks.length > 0 && selectedTrucks.size === filteredTrucks.length;
 
-  // Bulk deactivate handler
+  // Bulk action handlers
   const handleBulkDeactivate = async () => {
     if (!onDeactivateTrucks) return;
     const truckIds = Array.from(selectedTrucks);
     await onDeactivateTrucks(truckIds);
     setSelectedTrucks(new Set());
+  };
+
+  const handleUpdateStatus = (status: 'Active' | 'Out of Service' | 'In Repair' | 'Maintenance' | 'Sold') => {
+    console.log('Update truck status to:', status, 'for trucks:', Array.from(selectedTrucks));
+    // TODO: Implement bulk status update functionality
+  };
+
+  const handleExport = () => {
+    const selectedData = filteredTrucks.filter((truck) => selectedTrucks.has(truck._id));
+    console.log('Export trucks:', selectedData);
+    // TODO: Implement bulk export functionality
+  };
+
+  const handleDelete = () => {
+    console.log('Delete trucks:', Array.from(selectedTrucks));
+    // TODO: Implement bulk delete functionality
   };
 
   return (
@@ -227,6 +244,15 @@ export function TruckList({ data, organizationId, onDeactivateTrucks }: TruckLis
 
             <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
               <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
+                {/* Floating Action Bar */}
+                <FloatingActionBar
+                  selectedCount={selectedTrucks.size}
+                  onClearSelection={() => setSelectedTrucks(new Set())}
+                  onUpdateStatus={handleUpdateStatus}
+                  onExport={handleExport}
+                  onDelete={handleDelete}
+                />
+
                 {/* Virtualized Table */}
                 <VirtualizedTrucksTable
                   trucks={filteredTrucks}
@@ -243,29 +269,6 @@ export function TruckList({ data, organizationId, onDeactivateTrucks }: TruckLis
           </div>
         </Tabs>
       </Card>
-
-      {/* Floating Action Bar */}
-      {selectedTrucks.size > 0 && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 sm:left-[calc(50%+8rem)] xl:left-[calc(50%+9rem)] z-50 bg-background border rounded-lg shadow-lg p-3 sm:p-4">
-          <div className="flex items-center gap-4">
-            <p className="text-sm font-medium">
-              {selectedTrucks.size} selected
-            </p>
-            <button
-              onClick={() => setSelectedTrucks(new Set())}
-              className="text-sm text-muted-foreground hover:text-foreground"
-            >
-              Clear
-            </button>
-            <button
-              onClick={handleBulkDeactivate}
-              className="text-sm text-destructive hover:text-destructive/90 font-medium"
-            >
-              Deactivate
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
