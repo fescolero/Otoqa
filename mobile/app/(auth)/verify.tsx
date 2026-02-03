@@ -8,9 +8,13 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  ScrollView,
 } from 'react-native';
 import { useSignIn } from '@clerk/clerk-expo';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
+import { LinearGradient } from 'expo-linear-gradient';
 
 // ============================================
 // OTP VERIFICATION SCREEN
@@ -38,7 +42,6 @@ export default function VerifyScreen() {
 
   // Handle code input
   const handleCodeChange = (text: string, index: number) => {
-    // Only allow numbers
     const digit = text.replace(/\D/g, '').slice(-1);
     
     const newCode = [...code];
@@ -131,144 +134,181 @@ export default function VerifyScreen() {
     : '';
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      style={styles.container}
-    >
-      <View style={styles.content}>
-        {/* Header */}
-        <TouchableOpacity
-          style={styles.backButton}
-          onPress={() => router.back()}
-        >
-          <Text style={styles.backButtonText}>← Back</Text>
-        </TouchableOpacity>
+    <View style={styles.container}>
+      {/* Background gradient effect */}
+      <LinearGradient
+        colors={['rgba(255, 107, 0, 0.15)', 'transparent']}
+        style={styles.gradientTop}
+        start={{ x: 0.5, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+      />
 
-        <View style={styles.header}>
-          <Text style={styles.title}>Enter Verification Code</Text>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.keyboardView}
+      >
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Back Button */}
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => router.back()}
+          >
+            <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+          </TouchableOpacity>
+
+          {/* Header */}
+          <Text style={styles.title}>Enter verification code</Text>
           <Text style={styles.subtitle}>
             We sent a 6-digit code to{'\n'}
             <Text style={styles.phoneText}>{formattedPhone}</Text>
           </Text>
-        </View>
 
-        {/* Code Input */}
-        <View style={styles.codeContainer}>
-          {code.map((digit, index) => (
-            <TextInput
-              key={index}
-              ref={(ref) => (inputRefs.current[index] = ref)}
-              style={[
-                styles.codeInput,
-                digit && styles.codeInputFilled,
-              ]}
-              value={digit}
-              onChangeText={(text) => handleCodeChange(text, index)}
-              onKeyPress={(e) => handleKeyPress(e, index)}
-              keyboardType="number-pad"
-              maxLength={1}
-              selectTextOnFocus
-              autoFocus={index === 0}
-            />
-          ))}
-        </View>
+          {/* Code Input */}
+          <View style={styles.codeContainer}>
+            {code.map((digit, index) => (
+              <TextInput
+                key={index}
+                ref={(ref) => (inputRefs.current[index] = ref)}
+                style={[
+                  styles.codeInput,
+                  digit && styles.codeInputFilled,
+                ]}
+                value={digit}
+                onChangeText={(text) => handleCodeChange(text, index)}
+                onKeyPress={(e) => handleKeyPress(e, index)}
+                keyboardType="number-pad"
+                maxLength={1}
+                selectTextOnFocus
+                autoFocus={index === 0}
+              />
+            ))}
+          </View>
 
-        {/* Verify Button */}
-        <TouchableOpacity
-          style={[styles.button, isLoading && styles.buttonDisabled]}
-          onPress={() => handleVerify()}
-          disabled={isLoading || code.join('').length !== 6}
-        >
-          <Text style={styles.buttonText}>
-            {isLoading ? 'Verifying...' : 'Verify'}
-          </Text>
-        </TouchableOpacity>
+          {/* Verify Button */}
+          <TouchableOpacity
+            style={[styles.button, isLoading && styles.buttonDisabled]}
+            onPress={() => handleVerify()}
+            disabled={isLoading || code.join('').length !== 6}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.buttonText}>
+              {isLoading ? 'Verifying...' : 'Verify'}
+            </Text>
+            {!isLoading && (
+              <Ionicons name="checkmark" size={20} color={colors.primaryForeground} />
+            )}
+          </TouchableOpacity>
 
-        {/* Resend */}
-        <View style={styles.resendContainer}>
-          <Text style={styles.resendText}>Didn't receive the code? </Text>
-          {resendTimer > 0 ? (
-            <Text style={styles.timerText}>Resend in {resendTimer}s</Text>
-          ) : (
-            <TouchableOpacity onPress={handleResend}>
-              <Text style={styles.resendLink}>Resend Code</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      </View>
-    </KeyboardAvoidingView>
+          {/* Resend */}
+          <View style={styles.resendContainer}>
+            <Text style={styles.resendText}>Didn't receive the code? </Text>
+            {resendTimer > 0 ? (
+              <Text style={styles.timerText}>Resend in {resendTimer}s</Text>
+            ) : (
+              <TouchableOpacity onPress={handleResend}>
+                <Text style={styles.resendLink}>Resend Code</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: colors.background,
   },
-  content: {
+  gradientTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 300,
+  },
+  keyboardView: {
     flex: 1,
-    padding: 24,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: spacing.xl,
+    paddingTop: 60,
+    paddingBottom: 40,
   },
   backButton: {
-    marginTop: 48,
-    marginBottom: 24,
-  },
-  backButtonText: {
-    color: '#4f46e5',
-    fontSize: 16,
-  },
-  header: {
-    marginBottom: 48,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.card,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: spacing['2xl'],
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 12,
+    fontSize: typography['3xl'],
+    fontWeight: typography.bold,
+    color: colors.foreground,
+    marginBottom: spacing.md,
   },
   subtitle: {
-    fontSize: 16,
-    color: '#9ca3af',
+    fontSize: typography.base,
+    color: colors.foregroundMuted,
     lineHeight: 24,
+    marginBottom: spacing['2xl'],
   },
   phoneText: {
-    color: '#fff',
-    fontWeight: '600',
+    color: colors.foreground,
+    fontWeight: typography.semibold,
   },
   codeContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 32,
+    marginBottom: spacing['2xl'],
+    gap: spacing.sm,
   },
   codeInput: {
-    width: 48,
+    flex: 1,
     height: 56,
-    backgroundColor: '#16213e',
-    borderRadius: 12,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
     borderWidth: 2,
-    borderColor: '#374151',
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#fff',
+    borderColor: colors.border,
+    fontSize: typography['2xl'],
+    fontWeight: typography.bold,
+    color: colors.foreground,
     textAlign: 'center',
   },
   codeInputFilled: {
-    borderColor: '#4f46e5',
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '10',
   },
   button: {
-    backgroundColor: '#4f46e5',
-    padding: 16,
-    borderRadius: 12,
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 24,
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xl,
+    borderRadius: borderRadius.lg,
+    gap: spacing.sm,
+    marginBottom: spacing.xl,
+    ...shadows.md,
   },
   buttonDisabled: {
-    backgroundColor: '#374151',
+    backgroundColor: colors.muted,
   },
   buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: typography.md,
+    fontWeight: typography.semibold,
+    color: colors.primaryForeground,
   },
   resendContainer: {
     flexDirection: 'row',
@@ -276,17 +316,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   resendText: {
-    color: '#6b7280',
-    fontSize: 14,
+    color: colors.foregroundMuted,
+    fontSize: typography.sm,
   },
   timerText: {
-    color: '#9ca3af',
-    fontSize: 14,
+    color: colors.foregroundSubtle,
+    fontSize: typography.sm,
   },
   resendLink: {
-    color: '#4f46e5',
-    fontSize: 14,
-    fontWeight: '600',
+    color: colors.primary,
+    fontSize: typography.sm,
+    fontWeight: typography.semibold,
   },
 });
-

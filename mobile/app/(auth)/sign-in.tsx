@@ -8,28 +8,32 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  ScrollView,
+  Linking,
 } from 'react-native';
 import { useSignIn } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
+import { LinearGradient } from 'expo-linear-gradient';
 
 // ============================================
 // SIGN IN SCREEN
-// Phone number input for driver authentication
+// Phone number input with invite-only access
 // ============================================
 
 export default function SignInScreen() {
-  const { signIn, setActive, isLoaded } = useSignIn();
+  const { signIn, isLoaded } = useSignIn();
   const router = useRouter();
 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [countryCode, setCountryCode] = useState('+1');
 
   // Format phone number as user types
   const formatPhoneNumber = (text: string) => {
-    // Remove all non-numeric characters
     const cleaned = text.replace(/\D/g, '');
     
-    // Format as (XXX) XXX-XXXX
     if (cleaned.length <= 3) {
       return cleaned;
     } else if (cleaned.length <= 6) {
@@ -44,9 +48,19 @@ export default function SignInScreen() {
   };
 
   const handleSendCode = async () => {
-    if (!isLoaded) return;
+    console.log('🔐 handleSendCode called, isLoaded:', isLoaded, 'signIn:', !!signIn);
+    
+    if (!isLoaded) {
+      console.log('❌ Clerk not loaded yet');
+      return;
+    }
+    
+    if (!signIn) {
+      console.log('❌ signIn object is null/undefined');
+      Alert.alert('Error', 'Authentication not ready. Please restart the app.');
+      return;
+    }
 
-    // Get raw phone number
     const rawPhone = phoneNumber.replace(/\D/g, '');
     
     if (rawPhone.length < 10) {
@@ -55,14 +69,26 @@ export default function SignInScreen() {
     }
 
     setIsLoading(true);
+    
+    // Ensure E.164 format: +1 followed by 10 digits
+    const fullPhoneNumber = `+1${rawPhone}`;
+    console.log('🔐 Attempting sign-in with:', fullPhoneNumber);
+    console.log('🔐 Current signIn state:', signIn.status);
 
     try {
-      // Start the sign-in process with phone number
+      // Clear any existing sign-in attempt first
+      if (signIn.status !== null) {
+        console.log('🔄 Clearing existing sign-in state...');
+      }
+      
       const result = await signIn.create({
-        identifier: `+1${rawPhone}`, // Assuming US numbers
+        identifier: fullPhoneNumber,
       });
+      
+      console.log('✅ Sign-in created successfully!');
+      console.log('✅ Status:', result.status);
+      console.log('✅ Supported factors:', JSON.stringify(result.supportedFirstFactors));
 
-      // Request phone code verification
       await signIn.prepareFirstFactor({
         strategy: 'phone_code',
         phoneNumberId: result.supportedFirstFactors?.find(
@@ -70,24 +96,36 @@ export default function SignInScreen() {
         )?.phoneNumberId as string,
       });
 
-      // Navigate to verification screen
       router.push({
         pathname: '/(auth)/verify',
-        params: { phoneNumber: `+1${rawPhone}` },
+        params: { phoneNumber: fullPhoneNumber },
       });
     } catch (error: any) {
       console.error('Sign in error:', error);
+      console.error('Full error details:', JSON.stringify(error, null, 2));
       
-      // Handle specific errors
-      if (error.errors?.[0]?.code === 'form_identifier_not_found') {
+      const errorCode = error.errors?.[0]?.code;
+      const errorMessage = error.errors?.[0]?.message || error.errors?.[0]?.longMessage;
+      
+      if (errorCode === 'form_identifier_not_found') {
         Alert.alert(
           'Not Registered',
-          'This phone number is not registered as a driver. Please contact your dispatcher.'
+          `This phone number (${fullPhoneNumber}) is not registered. This app is invite-only. Please contact your company administrator.`
+        );
+      } else if (errorCode === 'form_param_format_invalid') {
+        Alert.alert(
+          'Invalid Format',
+          'Please enter a valid phone number in the format (555) 000-0000'
+        );
+      } else if (errorCode === 'strategy_for_user_invalid') {
+        Alert.alert(
+          'Phone Sign-In Not Enabled',
+          'This account exists but is not set up for phone sign-in. Please contact your administrator.'
         );
       } else {
         Alert.alert(
           'Error',
-          error.errors?.[0]?.message || 'Failed to send verification code'
+          errorMessage || `Sign-in failed (${errorCode || 'unknown'})`
         );
       }
     } finally {
@@ -95,135 +133,260 @@ export default function SignInScreen() {
     }
   };
 
-  return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      style={styles.container}
-    >
-      <View style={styles.content}>
-        {/* Logo/Header */}
-        <View style={styles.header}>
-          <Text style={styles.logo}>🚛</Text>
-          <Text style={styles.title}>Otoqa Driver</Text>
-          <Text style={styles.subtitle}>Sign in with your phone number</Text>
-        </View>
+  const isButtonDisabled = isLoading || phoneNumber.replace(/\D/g, '').length < 10;
 
-        {/* Phone Input */}
-        <View style={styles.form}>
-          <Text style={styles.label}>Phone Number</Text>
-          <View style={styles.phoneInputContainer}>
-            <Text style={styles.countryCode}>+1</Text>
-            <TextInput
-              style={styles.phoneInput}
-              value={phoneNumber}
-              onChangeText={handlePhoneChange}
-              placeholder="(555) 555-5555"
-              placeholderTextColor="#6b7280"
-              keyboardType="phone-pad"
-              autoComplete="tel"
-              maxLength={14}
-            />
+  return (
+    <View style={styles.container}>
+      {/* Background gradient effect */}
+      <LinearGradient
+        colors={['rgba(255, 107, 0, 0.15)', 'transparent']}
+        style={styles.gradientTop}
+        start={{ x: 0.5, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+      />
+      
+      {/* Dot pattern overlay - decorative */}
+      <View style={styles.dotPattern} />
+
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.keyboardView}
+      >
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Invite Only Badge */}
+          <View style={styles.badge}>
+            <View style={styles.badgeDot} />
+            <Text style={styles.badgeText}>Invite Only Access</Text>
           </View>
 
+          {/* Header */}
+          <Text style={styles.title}>Enter your number to continue</Text>
+          <Text style={styles.subtitle}>
+            This app is currently invite-only. Enter your mobile number to verify your invitation status and sign in.
+          </Text>
+
+          {/* Phone Input */}
+          <View style={styles.inputSection}>
+            <Text style={styles.label}>Mobile Number</Text>
+            <View style={styles.phoneInputContainer}>
+              {/* Country Code Selector */}
+              <TouchableOpacity style={styles.countrySelector}>
+                <Text style={styles.flag}>🇺🇸</Text>
+                <Text style={styles.countryCode}>{countryCode}</Text>
+                <Ionicons name="chevron-down" size={16} color={colors.foregroundMuted} />
+              </TouchableOpacity>
+              
+              {/* Phone Number Input */}
+              <TextInput
+                style={styles.phoneInput}
+                value={phoneNumber}
+                onChangeText={handlePhoneChange}
+                placeholder="(555) 000-0000"
+                placeholderTextColor={colors.foregroundSubtle}
+                keyboardType="phone-pad"
+                autoComplete="tel"
+                maxLength={14}
+              />
+            </View>
+
+            {/* Helper text */}
+            <View style={styles.helperRow}>
+              <Ionicons name="shield-checkmark-outline" size={14} color={colors.foregroundMuted} />
+              <Text style={styles.helperText}>We'll send you a verification code</Text>
+            </View>
+          </View>
+
+          {/* Continue Button */}
           <TouchableOpacity
-            style={[styles.button, isLoading && styles.buttonDisabled]}
+            style={[
+              styles.button,
+              isButtonDisabled && styles.buttonDisabled,
+            ]}
             onPress={handleSendCode}
-            disabled={isLoading || phoneNumber.replace(/\D/g, '').length < 10}
+            disabled={isButtonDisabled}
+            activeOpacity={0.8}
           >
             <Text style={styles.buttonText}>
-              {isLoading ? 'Sending...' : 'Send Verification Code'}
+              {isLoading ? 'Sending...' : 'Continue'}
             </Text>
+            {!isLoading && (
+              <Ionicons name="arrow-forward" size={20} color={colors.primaryForeground} />
+            )}
           </TouchableOpacity>
-        </View>
 
-        {/* Footer */}
-        <Text style={styles.footer}>
-          Only registered drivers can sign in.{'\n'}
-          Contact your dispatcher if you need access.
-        </Text>
-      </View>
-    </KeyboardAvoidingView>
+          {/* Footer - Terms */}
+          <View style={styles.footer}>
+            <Text style={styles.footerText}>
+              By continuing, you acknowledge that you have read and understood, and agree to our{' '}
+              <Text style={styles.link} onPress={() => Linking.openURL('https://otoqa.com/terms')}>
+                Terms of Service
+              </Text>
+              {' '}and{' '}
+              <Text style={styles.link} onPress={() => Linking.openURL('https://otoqa.com/privacy')}>
+                Privacy Policy
+              </Text>
+              .
+            </Text>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: colors.background,
   },
-  content: {
+  gradientTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 300,
+  },
+  dotPattern: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    opacity: 0.03,
+  },
+  keyboardView: {
     flex: 1,
-    padding: 24,
-    justifyContent: 'center',
   },
-  header: {
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: spacing.xl,
+    paddingTop: 120,
+    paddingBottom: 40,
+  },
+  badge: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 48,
+    backgroundColor: colors.card,
+    alignSelf: 'flex-start',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+    marginBottom: spacing.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  logo: {
-    fontSize: 64,
-    marginBottom: 16,
+  badgeDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.primary,
+    marginRight: spacing.sm,
+  },
+  badgeText: {
+    fontSize: typography.sm,
+    color: colors.primary,
+    fontWeight: typography.medium,
   },
   title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 8,
+    fontSize: typography['3xl'],
+    fontWeight: typography.bold,
+    color: colors.foreground,
+    marginBottom: spacing.md,
+    lineHeight: 38,
   },
   subtitle: {
-    fontSize: 16,
-    color: '#9ca3af',
+    fontSize: typography.base,
+    color: colors.foregroundMuted,
+    lineHeight: 22,
+    marginBottom: spacing['2xl'],
   },
-  form: {
-    marginBottom: 32,
+  inputSection: {
+    marginBottom: spacing.xl,
   },
   label: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#d1d5db',
-    marginBottom: 8,
+    fontSize: typography.sm,
+    fontWeight: typography.medium,
+    color: colors.foregroundMuted,
+    marginBottom: spacing.sm,
   },
   phoneInputContainer: {
     flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#16213e',
-    borderRadius: 12,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
     borderWidth: 1,
-    borderColor: '#374151',
-    marginBottom: 24,
+    borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  countrySelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    backgroundColor: colors.muted,
+    borderRightWidth: 1,
+    borderRightColor: colors.border,
+    gap: spacing.xs,
+  },
+  flag: {
+    fontSize: 20,
   },
   countryCode: {
-    paddingHorizontal: 16,
-    fontSize: 18,
-    color: '#9ca3af',
-    borderRightWidth: 1,
-    borderRightColor: '#374151',
+    fontSize: typography.md,
+    color: colors.foreground,
+    fontWeight: typography.medium,
   },
   phoneInput: {
     flex: 1,
-    padding: 16,
-    fontSize: 18,
-    color: '#fff',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    fontSize: typography.md,
+    color: colors.foreground,
+  },
+  helperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: spacing.sm,
+    gap: spacing.xs,
+  },
+  helperText: {
+    fontSize: typography.xs,
+    color: colors.foregroundMuted,
   },
   button: {
-    backgroundColor: '#4f46e5',
-    padding: 16,
-    borderRadius: 12,
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xl,
+    borderRadius: borderRadius.lg,
+    gap: spacing.sm,
+    ...shadows.md,
   },
   buttonDisabled: {
-    backgroundColor: '#374151',
+    backgroundColor: colors.muted,
   },
   buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: typography.md,
+    fontWeight: typography.semibold,
+    color: colors.primaryForeground,
   },
   footer: {
+    marginTop: 'auto',
+    paddingTop: spacing['2xl'],
+  },
+  footerText: {
+    fontSize: typography.xs,
+    color: colors.foregroundMuted,
     textAlign: 'center',
-    color: '#6b7280',
-    fontSize: 14,
-    lineHeight: 20,
+    lineHeight: 18,
+  },
+  link: {
+    color: colors.foreground,
+    textDecorationLine: 'underline',
   },
 });
-

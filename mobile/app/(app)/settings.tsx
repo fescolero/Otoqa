@@ -3,9 +3,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useClerk } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useDriver } from './_layout';
+import { useDriver, useAppMode } from './_layout';
 import { getBackgroundSyncStatus } from '../../lib/background-sync';
 import { useState, useEffect } from 'react';
+import { useLanguage } from '../../lib/LanguageContext';
 
 // ============================================
 // DESIGN SYSTEM
@@ -51,9 +52,25 @@ export default function SettingsScreen() {
   const { signOut } = useClerk();
   const router = useRouter();
   const { driverName, driverId } = useDriver();
+  const { canSwitchModes, setMode } = useAppMode();
+  const { currentLanguage, t } = useLanguage();
 
   const [syncStatus, setSyncStatus] = useState<string>('Active');
   const [lastSynced, setLastSynced] = useState<string>('2 minutes ago');
+
+  // Get display name for current language
+  const getLanguageDisplayName = () => {
+    switch (currentLanguage) {
+      case 'system':
+        return 'System Default';
+      case 'en':
+        return 'English';
+      case 'es':
+        return 'Español';
+      default:
+        return 'English';
+    }
+  };
 
   // Update sync status periodically
   useEffect(() => {
@@ -70,12 +87,12 @@ export default function SettingsScreen() {
   // Handle sign out
   const handleSignOut = () => {
     Alert.alert(
-      'Sign Out',
-      'Are you sure you want to sign out?',
+      t('profile.signOut'),
+      t('profile.signOutConfirm'),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: 'Sign Out',
+          text: t('profile.signOut'),
           style: 'destructive',
           onPress: async () => {
             await signOut();
@@ -98,16 +115,16 @@ export default function SettingsScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
+      {/* Header - Sticky */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>{t('profile.title')}</Text>
+      </View>
+
       <ScrollView 
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Profile</Text>
-        </View>
-
         {/* Profile Card */}
         <View style={styles.profileCard}>
           <View style={styles.profileRow}>
@@ -119,32 +136,51 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* Role Switch Section - Only shown for owner-operators */}
+        {canSwitchModes && (
+          <>
+            <Text style={styles.sectionTitle}>{t('profile.role')}</Text>
+            <View style={styles.menuSection}>
+              <TouchableOpacity 
+                style={[styles.menuRow, styles.menuRowLast]}
+                onPress={() => setMode('owner')}
+              >
+                <View style={[styles.menuIconContainer, styles.menuIconOrange]}>
+                  <MaterialCommunityIcons name="monitor-dashboard" size={20} color={colors.primary} />
+                </View>
+                <View style={styles.menuTextContainer}>
+                  <Text style={styles.menuLabel}>{t('profile.switchToDispatcher')}</Text>
+                  <Text style={styles.menuSubtitle}>{t('profile.manageLoadsDriversFleet')}</Text>
+                </View>
+                <Ionicons name="swap-horizontal" size={20} color={colors.primary} />
+              </TouchableOpacity>
+            </View>
+          </>
+        )}
+
         {/* Settings Section */}
-        <Text style={styles.sectionTitle}>Settings</Text>
+        <Text style={styles.sectionTitle}>{t('profile.settings')}</Text>
         <View style={styles.menuSection}>
-          <TouchableOpacity style={styles.menuRow}>
+          <TouchableOpacity 
+            style={styles.menuRow}
+            onPress={() => router.push('/notifications')}
+          >
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="notifications" size={20} color={colors.foregroundMuted} />
             </View>
-            <Text style={styles.menuLabel}>Notifications</Text>
+            <Text style={styles.menuLabel}>{t('profile.notifications')}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="bar-chart" size={20} color={colors.foregroundMuted} />
-            </View>
-            <Text style={styles.menuLabel}>Map & Navigation</Text>
-            <Text style={styles.menuValue}>Google Maps</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.menuRow}>
+          <TouchableOpacity 
+            style={styles.menuRow}
+            onPress={() => router.push('/language')}
+          >
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="globe" size={20} color={colors.foregroundMuted} />
             </View>
-            <Text style={styles.menuLabel}>Language</Text>
-            <Text style={styles.menuValue}>English (US)</Text>
+            <Text style={styles.menuLabel}>{t('profile.language')}</Text>
+            <Text style={styles.menuValue}>{getLanguageDisplayName()}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </TouchableOpacity>
 
@@ -155,21 +191,21 @@ export default function SettingsScreen() {
             <View style={[styles.menuIconContainer, styles.menuIconBlue]}>
               <Ionicons name="shield-checkmark" size={20} color="#3b82f6" />
             </View>
-            <Text style={styles.menuLabel}>Permissions</Text>
+            <Text style={styles.menuLabel}>{t('profile.permissions')}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </TouchableOpacity>
         </View>
 
         {/* App Information Section */}
-        <Text style={styles.sectionTitle}>App Information</Text>
+        <Text style={styles.sectionTitle}>{t('profile.appInfo')}</Text>
         <View style={styles.menuSection}>
           <View style={styles.menuRow}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="phone-portrait" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>App Version</Text>
-              <Text style={styles.menuSubtitle}>Current version installed</Text>
+              <Text style={styles.menuLabel}>{t('profile.appVersion')}</Text>
+              <Text style={styles.menuSubtitle}>{t('profile.currentVersion')}</Text>
             </View>
             <Text style={styles.menuValueBold}>v2.4.0</Text>
           </View>
@@ -179,8 +215,8 @@ export default function SettingsScreen() {
               <Ionicons name="sync" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Background Sync</Text>
-              <Text style={styles.menuSubtitle}>Last synced {lastSynced}</Text>
+              <Text style={styles.menuLabel}>{t('profile.backgroundSync')}</Text>
+              <Text style={styles.menuSubtitle}>{t('profile.lastSynced', { time: lastSynced })}</Text>
             </View>
             <View style={styles.activeBadge}>
               <View style={styles.activeDot} />
@@ -190,13 +226,13 @@ export default function SettingsScreen() {
         </View>
 
         {/* Support Section */}
-        <Text style={styles.sectionTitle}>Support</Text>
+        <Text style={styles.sectionTitle}>{t('profile.support')}</Text>
         <View style={styles.menuSection}>
           <TouchableOpacity style={styles.menuRow}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="chatbubble-ellipses" size={20} color={colors.foregroundMuted} />
             </View>
-            <Text style={styles.menuLabel}>Help Center</Text>
+            <Text style={styles.menuLabel}>{t('profile.helpCenter')}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </TouchableOpacity>
 
@@ -204,9 +240,9 @@ export default function SettingsScreen() {
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="call" size={20} color={colors.foregroundMuted} />
             </View>
-            <Text style={styles.menuLabel}>Contact Dispatch</Text>
+            <Text style={styles.menuLabel}>{t('profile.contactDispatch')}</Text>
             <View style={styles.availableBadge}>
-              <Text style={styles.availableBadgeText}>Available</Text>
+              <Text style={styles.availableBadgeText}>{t('profile.available')}</Text>
             </View>
           </TouchableOpacity>
         </View>
@@ -214,7 +250,7 @@ export default function SettingsScreen() {
         {/* Sign Out Button */}
         <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
           <Ionicons name="log-out-outline" size={20} color={colors.destructive} />
-          <Text style={styles.signOutText}>Sign Out</Text>
+          <Text style={styles.signOutText}>{t('profile.signOut')}</Text>
         </TouchableOpacity>
 
         {/* Bottom spacing for nav */}
@@ -238,10 +274,11 @@ const styles = StyleSheet.create({
   
   // Header
   header: {
+    paddingHorizontal: spacing.lg,
     paddingVertical: spacing.lg,
   },
   headerTitle: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: '700',
     color: colors.foreground,
   },
@@ -300,8 +337,7 @@ const styles = StyleSheet.create({
   menuRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.md + 2,
-    paddingHorizontal: spacing.lg,
+    padding: spacing.md,
     borderBottomWidth: 1,
     borderBottomColor: `${colors.border}30`,
     gap: spacing.md,
@@ -321,6 +357,9 @@ const styles = StyleSheet.create({
   },
   menuIconBlue: {
     backgroundColor: '#3b82f620',
+  },
+  menuIconOrange: {
+    backgroundColor: `${colors.primary}20`,
   },
   menuTextContainer: {
     flex: 1,

@@ -177,7 +177,7 @@ export const processOrg = internalAction({
                 const stopId = stop.fourKitesStopID || stop.id;
                 const appointmentTime = stop.schedule?.appointmentTime;
                 
-                const dbStop = existingStops.find(s => s.externalStopId === String(stopId));
+                const dbStop = existingStops.find((s: { externalStopId?: string; _id: any; windowBeginTime?: string; windowEndTime?: string; windowBeginDate?: string; windowEndDate?: string }) => s.externalStopId === String(stopId));
 
                 if (dbStop) {
                   // Update existing stop

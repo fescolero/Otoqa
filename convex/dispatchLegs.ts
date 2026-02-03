@@ -400,7 +400,7 @@ export const assignDriver = mutation({
           driverId: args.driverId,
           truckId: args.truckId,
           trailerId: args.trailerId,
-          carrierId: undefined, // Clear carrier (exclusive assignment)
+          carrierPartnershipId: undefined, // Clear carrier (exclusive assignment)
           updatedAt: now,
         });
         updatedLegCount++;
@@ -411,7 +411,7 @@ export const assignDriver = mutation({
     const nextStatus = load.status === 'Open' ? 'Assigned' : load.status;
     await ctx.db.patch(args.loadId, {
       primaryDriverId: args.driverId,
-      primaryCarrierId: undefined, // Clear carrier
+      primaryCarrierPartnershipId: undefined, // Clear carrier
       status: nextStatus,
       updatedAt: now,
     });
@@ -439,12 +439,12 @@ export const assignDriver = mutation({
   },
 });
 
-// Assign carrier to a load (for brokered/outsourced loads)
+// Assign carrier partnership to a load (for brokered/outsourced loads)
 // Supports "Power Only" scenarios where carrier provides truck but uses your trailer
 export const assignCarrier = mutation({
   args: {
     loadId: v.id('loadInformation'),
-    carrierId: v.id('carriers'),
+    carrierPartnershipId: v.id('carrierPartnerships'),
     trailerId: v.optional(v.id('trailers')), // For "Power Only" - carrier truck + your trailer
     userId: v.string(),
     userName: v.optional(v.string()),
@@ -452,10 +452,10 @@ export const assignCarrier = mutation({
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
-    // 1. Validate carrier exists, is active, and not deleted
-    const carrier = await ctx.db.get(args.carrierId);
-    if (!carrier || carrier.isDeleted || carrier.status !== 'Active') {
-      return { status: 'ERROR' as const, message: 'Carrier is inactive or not found' };
+    // 1. Validate carrier partnership exists and is active
+    const partnership = await ctx.db.get(args.carrierPartnershipId);
+    if (!partnership || partnership.status !== 'ACTIVE') {
+      return { status: 'ERROR' as const, message: 'Carrier partnership is inactive or not found' };
     }
 
     // 2. Validate load exists and is not canceled
@@ -493,7 +493,7 @@ export const assignCarrier = mutation({
 
       const legId = await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
-        carrierId: args.carrierId,
+        carrierPartnershipId: args.carrierPartnershipId,
         trailerId: args.trailerId, // May be undefined for full carrier service
         sequence: 1,
         startStopId: firstStop._id,
@@ -517,7 +517,7 @@ export const assignCarrier = mutation({
     for (const leg of legs) {
       if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
         await ctx.db.patch(leg._id, {
-          carrierId: args.carrierId,
+          carrierPartnershipId: args.carrierPartnershipId,
           driverId: undefined, // Clear driver (exclusive assignment)
           truckId: undefined, // Clear truck (carrier provides power unit)
           trailerId: args.trailerId, // Keep if provided (Power Only), clear if not
@@ -527,10 +527,9 @@ export const assignCarrier = mutation({
       }
     }
 
-    // 6. Update load
+    // 6. Update load - use partnership ID as carrier reference
     const nextStatus = load.status === 'Open' ? 'Assigned' : load.status;
     await ctx.db.patch(args.loadId, {
-      primaryCarrierId: args.carrierId,
       primaryDriverId: undefined, // Clear driver
       status: nextStatus,
       updatedAt: now,
@@ -545,10 +544,20 @@ export const assignCarrier = mutation({
       action: 'ASSIGN_CARRIER',
       performedBy: args.userId,
       performedByName: args.userName,
-      description: `Assigned carrier ${carrier.companyName} to load ${load.orderNumber}${args.trailerId ? ' (Power Only)' : ''} (${updatedLegCount} leg${updatedLegCount !== 1 ? 's' : ''} updated)`,
+      description: `Assigned carrier ${partnership.carrierName} to load ${load.orderNumber}${args.trailerId ? ' (Power Only)' : ''} (${updatedLegCount} leg${updatedLegCount !== 1 ? 's' : ''} updated)`,
     });
 
-    // 8. Return success
+    // 8. Calculate carrier pay for each leg
+    for (const leg of legs) {
+      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+        await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
+          legId: leg._id,
+          userId: args.userId,
+        });
+      }
+    }
+
+    // 9. Return success
     return { status: 'SUCCESS' as const };
   },
 });
@@ -583,7 +592,7 @@ export const unassignResource = mutation({
       if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
         await ctx.db.patch(leg._id, {
           driverId: undefined,
-          carrierId: undefined,
+          carrierPartnershipId: undefined,
           truckId: undefined,
           trailerId: undefined,
           updatedAt: now,
@@ -595,7 +604,7 @@ export const unassignResource = mutation({
     // 4. Update load
     await ctx.db.patch(args.loadId, {
       primaryDriverId: undefined,
-      primaryCarrierId: undefined,
+      primaryCarrierPartnershipId: undefined,
       status: 'Open',
       updatedAt: now,
     });

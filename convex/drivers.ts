@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
+import { Id } from './_generated/dataModel';
 
 // Helper function to check if a date is expiring or expired
 function getDateStatus(dateString?: string): 'expired' | 'expiring' | 'warning' | 'valid' {
@@ -402,6 +403,55 @@ export const update = mutation({
         firstName: updates.firstName || driver.firstName,
         lastName: updates.lastName || driver.lastName,
       });
+    }
+
+    // === DRIVER → PARTNERSHIP SYNC: Update partnerships when owner-driver changes ===
+    // Check if this driver is the owner-driver of their organization
+    // Query the organization to get proper typing
+    const driverOrgId = driver.organizationId as Id<'organizations'>;
+    const driverOrg = await ctx.db
+      .query('organizations')
+      .filter((q) => q.eq(q.field('_id'), driverOrgId))
+      .first();
+    
+    if (driverOrg?.isOwnerOperator && driverOrg.ownerDriverId === id) {
+      // Find all partnerships linked to this carrier org
+      const partnerships = await ctx.db
+        .query('carrierPartnerships')
+        .withIndex('by_carrier', (q) => q.eq('carrierOrgId', driverOrg.clerkOrgId || driverOrg.workosOrgId || driverOrg._id))
+        .collect();
+      
+      // Also check by Convex ID directly
+      const partnershipsByConvexId = await ctx.db
+        .query('carrierPartnerships')
+        .filter((q) => q.eq(q.field('carrierOrgId'), driverOrg._id))
+        .collect();
+      
+      const allPartnerships = [...partnerships, ...partnershipsByConvexId];
+      const seenIds = new Set<string>();
+      
+      for (const partnership of allPartnerships) {
+        if (seenIds.has(partnership._id)) continue;
+        seenIds.add(partnership._id);
+        
+        // Build partnership updates from driver changes
+        const partnershipUpdates: Record<string, unknown> = { updatedAt: Date.now() };
+        
+        if (updates.firstName !== undefined) partnershipUpdates.ownerDriverFirstName = updates.firstName;
+        if (updates.lastName !== undefined) partnershipUpdates.ownerDriverLastName = updates.lastName;
+        if (updates.phone !== undefined) partnershipUpdates.ownerDriverPhone = updates.phone;
+        if (updates.email !== undefined) partnershipUpdates.ownerDriverEmail = updates.email;
+        if (dateOfBirth !== undefined) partnershipUpdates.ownerDriverDOB = dateOfBirth;
+        if (licenseNumber !== undefined) partnershipUpdates.ownerDriverLicenseNumber = licenseNumber;
+        if (updates.licenseState !== undefined) partnershipUpdates.ownerDriverLicenseState = updates.licenseState;
+        if (updates.licenseClass !== undefined) partnershipUpdates.ownerDriverLicenseClass = updates.licenseClass;
+        if (updates.licenseExpiration !== undefined) partnershipUpdates.ownerDriverLicenseExpiration = updates.licenseExpiration;
+        
+        // Only patch if there are actual partnership field updates
+        if (Object.keys(partnershipUpdates).length > 1) {
+          await ctx.db.patch(partnership._id, partnershipUpdates);
+        }
+      }
     }
 
     return id;

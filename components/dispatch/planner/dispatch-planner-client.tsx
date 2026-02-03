@@ -7,9 +7,10 @@ import { Id } from '@/convex/_generated/dataModel';
 import { toast } from 'sonner';
 
 import { TripsTable } from './trips-table';
-import { AssetsTable } from './assets-table';
+import { AssetsTable, CarrierPartnership } from './assets-table';
 import { IntelligenceSidebar } from './intelligence-sidebar';
 import { ConflictModal } from './conflict-modal';
+import { CarrierAssignmentModal } from './carrier-assignment-modal';
 import { FilterToolbar, TripFiltersState } from './trip-filters';
 
 interface DispatchPlannerClientProps {
@@ -26,7 +27,7 @@ export function DispatchPlannerClient({
   // Core selection state
   const [selectedLoadId, setSelectedLoadId] = useState<Id<'loadInformation'> | null>(null);
   const [selectedDriverId, setSelectedDriverId] = useState<Id<'drivers'> | null>(null);
-  const [selectedCarrierId, setSelectedCarrierId] = useState<Id<'carriers'> | null>(null);
+  const [selectedCarrierId, setSelectedCarrierId] = useState<Id<'carrierPartnerships'> | null>(null);
   const [assetType, setAssetType] = useState<'driver' | 'carrier'>('driver');
 
   // Filter state (lifted up for sub-header toolbar)
@@ -47,6 +48,9 @@ export function DispatchPlannerClient({
 
   // Assignment state
   const [isAssigning, setIsAssigning] = useState(false);
+
+  // Carrier assignment modal state
+  const [showCarrierAssignmentModal, setShowCarrierAssignmentModal] = useState(false);
 
   // Reactive queries
   const loadDetails = useQuery(
@@ -72,8 +76,9 @@ export function DispatchPlannerClient({
       : 'skip'
   );
 
-  const activeCarriers = useQuery(api.carriers.getActiveCarriers, {
-    workosOrgId: organizationId,
+  // Get active carrier partnerships (replaces deprecated carriers query)
+  const activeCarriers = useQuery(api.carrierPartnerships.getActiveForDispatch, {
+    brokerOrgId: organizationId,
   });
 
   const driverSchedule = useQuery(
@@ -88,7 +93,6 @@ export function DispatchPlannerClient({
 
   // Mutations
   const assignDriverMutation = useMutation(api.dispatchLegs.assignDriver);
-  const assignCarrierMutation = useMutation(api.dispatchLegs.assignCarrier);
   const unassignResourceMutation = useMutation(api.dispatchLegs.unassignResource);
 
   // Get selected driver/carrier objects
@@ -100,7 +104,7 @@ export function DispatchPlannerClient({
     return driversToUse.find((d) => d._id === selectedDriverId) ?? null;
   }, [selectedDriverId, driversToUse]);
 
-  const selectedCarrier = useMemo(() => {
+  const selectedCarrier = useMemo((): CarrierPartnership | null => {
     if (!selectedCarrierId || !activeCarriers) return null;
     return activeCarriers.find((c) => c._id === selectedCarrierId) ?? null;
   }, [selectedCarrierId, activeCarriers]);
@@ -122,63 +126,64 @@ export function DispatchPlannerClient({
     }
   };
 
-  // Assignment handler
-  const handleAssign = async (force = false) => {
-    if (!selectedLoadId) return;
+  // Assignment handler for drivers
+  const handleAssignDriver = async (force = false) => {
+    if (!selectedLoadId || !selectedDriverId) return;
     setIsAssigning(true);
 
     try {
-      if (assetType === 'driver' && selectedDriverId) {
-        const result = await assignDriverMutation({
-          loadId: selectedLoadId,
-          driverId: selectedDriverId,
-          truckId: selectedDriver?.assignedTruck?._id, // Pass truck from driver's current assignment
-          userId,
-          userName,
-          workosOrgId: organizationId,
-          force,
-        });
+      const result = await assignDriverMutation({
+        loadId: selectedLoadId,
+        driverId: selectedDriverId,
+        truckId: selectedDriver?.assignedTruck?._id, // Pass truck from driver's current assignment
+        userId,
+        userName,
+        workosOrgId: organizationId,
+        force,
+      });
 
-        if (result.status === 'CONFLICT') {
-          setConflictData(result.conflictingLoad);
-          setShowConflictModal(true);
-          setIsAssigning(false);
-          return;
-        }
-
-        if (result.status === 'ERROR') {
-          toast.error(result.message);
-          setIsAssigning(false);
-          return;
-        }
-
-        // SUCCESS
-        toast.success(`Assigned to ${selectedDriver?.firstName} ${selectedDriver?.lastName}`);
-        setSelectedDriverId(null);
-        setShowConflictModal(false);
-      } else if (assetType === 'carrier' && selectedCarrierId) {
-        const result = await assignCarrierMutation({
-          loadId: selectedLoadId,
-          carrierId: selectedCarrierId,
-          userId,
-          userName,
-          workosOrgId: organizationId,
-        });
-
-        if (result.status === 'ERROR') {
-          toast.error(result.message);
-          setIsAssigning(false);
-          return;
-        }
-
-        toast.success(`Assigned to ${selectedCarrier?.companyName}`);
-        setSelectedCarrierId(null);
+      if (result.status === 'CONFLICT') {
+        setConflictData(result.conflictingLoad);
+        setShowConflictModal(true);
+        setIsAssigning(false);
+        return;
       }
+
+      if (result.status === 'ERROR') {
+        toast.error(result.message);
+        setIsAssigning(false);
+        return;
+      }
+
+      // SUCCESS
+      toast.success(`Assigned to ${selectedDriver?.firstName} ${selectedDriver?.lastName}`);
+      setSelectedDriverId(null);
+      setShowConflictModal(false);
     } catch (error) {
       console.error('Assignment error:', error);
       toast.error('Failed to assign. Please try again.');
     } finally {
       setIsAssigning(false);
+    }
+  };
+
+  // Open carrier assignment modal
+  const handleOpenCarrierAssignment = () => {
+    if (!selectedLoadId || !selectedCarrierId) return;
+    setShowCarrierAssignmentModal(true);
+  };
+
+  // Called after successful carrier assignment
+  const handleCarrierAssignmentSuccess = () => {
+    setSelectedCarrierId(null);
+  };
+
+  // Combined assign handler based on asset type
+  const handleAssign = (force = false) => {
+    if (assetType === 'driver') {
+      handleAssignDriver(force);
+    } else if (assetType === 'carrier') {
+      handleOpenCarrierAssignment();
     }
   };
 
@@ -291,6 +296,22 @@ export function DispatchPlannerClient({
           onCancel={handleCancelConflict}
           onForceAssign={handleForceAssign}
           isLoading={isAssigning}
+        />
+
+        {/* Carrier Assignment Modal */}
+        <CarrierAssignmentModal
+          open={showCarrierAssignmentModal}
+          onOpenChange={setShowCarrierAssignmentModal}
+          carrier={selectedCarrier}
+          load={loadDetails ? {
+            _id: loadDetails._id,
+            orderNumber: loadDetails.orderNumber,
+            effectiveMiles: loadDetails.effectiveMiles,
+            customerName: loadDetails.customerName,
+          } : null}
+          organizationId={organizationId}
+          userId={userId}
+          onSuccess={handleCarrierAssignmentSuccess}
         />
       </div>
     </div>

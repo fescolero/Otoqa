@@ -455,7 +455,7 @@ export const archiveOldLocations = internalAction({
     }
 
     // Delete archived records from Convex
-    const idsToDelete = oldLocations.map((l) => l._id);
+    const idsToDelete = oldLocations.map((l: { _id: Id<'driverLocations'> }) => l._id);
     const deleteResult = await ctx.runMutation(
       internal.driverLocations.deleteArchivedLocations,
       { ids: idsToDelete }

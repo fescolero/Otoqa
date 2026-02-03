@@ -33,6 +33,12 @@ export const initialize = internalMutation({
     let failed = 0;
 
     for (const org of orgs) {
+      // Skip carrier orgs without workosOrgId (they use clerkOrgId)
+      if (!org.workosOrgId) {
+        console.log(`Skipping org without workosOrgId: ${org.name}`);
+        continue;
+      }
+
       try {
         console.log(`Processing organization: ${org.name} (${org.workosOrgId})`);
         

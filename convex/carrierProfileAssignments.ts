@@ -1,10 +1,10 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { internal } from './_generated/api';
 
 /**
  * Carrier Profile Assignments
- * Links Carriers (owner-ops, external) to Rate Profiles
+ * Links Carrier Partnerships to Rate Profiles for pay calculation
+ * Mirror of driverProfileAssignments but for external carriers
  */
 
 const selectionStrategyValidator = v.union(
@@ -13,15 +13,15 @@ const selectionStrategyValidator = v.union(
   v.literal('MANUAL_ONLY')
 );
 
-// Get all profile assignments for a carrier
-export const getForCarrier = query({
+// Get all profile assignments for a carrier partnership
+export const getForCarrierPartnership = query({
   args: {
-    carrierId: v.id('carriers'),
+    carrierPartnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
     const assignments = await ctx.db
       .query('carrierProfileAssignments')
-      .withIndex('by_carrier', (q) => q.eq('carrierId', args.carrierId))
+      .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
       .collect();
 
     // Enrich with profile details and base rate
@@ -59,10 +59,10 @@ export const getForCarrier = query({
   },
 });
 
-// Assign a profile to a carrier
+// Assign a profile to a carrier partnership
 export const assign = mutation({
   args: {
-    carrierId: v.id('carriers'),
+    carrierPartnershipId: v.id('carrierPartnerships'),
     profileId: v.id('rateProfiles'),
     isDefault: v.optional(v.boolean()),
     selectionStrategy: selectionStrategyValidator,
@@ -70,15 +70,16 @@ export const assign = mutation({
     effectiveDate: v.optional(v.string()),
     userId: v.string(),
     userName: v.optional(v.string()),
+    workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
-    // Verify carrier and profile exist
-    const [carrier, profile] = await Promise.all([
-      ctx.db.get(args.carrierId),
+    // Verify carrier partnership and profile exist
+    const [partnership, profile] = await Promise.all([
+      ctx.db.get(args.carrierPartnershipId),
       ctx.db.get(args.profileId),
     ]);
 
-    if (!carrier) throw new Error('Carrier not found');
+    if (!partnership) throw new Error('Carrier partnership not found');
     if (!profile) throw new Error('Rate profile not found');
 
     // Verify profile is for CARRIER type
@@ -94,50 +95,41 @@ export const assign = mutation({
     // Get existing assignments
     const existingAssignments = await ctx.db
       .query('carrierProfileAssignments')
-      .withIndex('by_carrier', (q) => q.eq('carrierId', args.carrierId))
+      .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
       .collect();
 
     // Check if this profile is already assigned
-    const alreadyAssigned = existingAssignments.find(
+    const existingForProfile = existingAssignments.find(
       (a) => a.profileId === args.profileId
     );
-    if (alreadyAssigned) {
-      throw new Error('This profile is already assigned to the carrier');
+    if (existingForProfile) {
+      throw new Error('This profile is already assigned to this carrier');
     }
 
-    // If setting as default, unset other defaults for this carrier
-    const shouldBeDefault = args.isDefault ?? (existingAssignments.length === 0); // First assignment is default
-    if (shouldBeDefault) {
-      for (const existing of existingAssignments) {
-        if (existing.isDefault) {
-          await ctx.db.patch(existing._id, { isDefault: false });
+    // If setting as default, remove default from others
+    if (args.isDefault) {
+      for (const assignment of existingAssignments) {
+        if (assignment.isDefault) {
+          await ctx.db.patch(assignment._id, { isDefault: false });
         }
       }
     }
 
+    // If this is the first assignment, make it default
+    const shouldBeDefault = args.isDefault || existingAssignments.length === 0;
+
+    // Create the assignment
     const assignmentId = await ctx.db.insert('carrierProfileAssignments', {
-      carrierId: args.carrierId,
+      carrierPartnershipId: args.carrierPartnershipId,
       profileId: args.profileId,
-      workosOrgId: carrier.workosOrgId,
+      workosOrgId: args.workosOrgId,
       isDefault: shouldBeDefault,
       selectionStrategy: args.selectionStrategy,
       thresholdValue: args.thresholdValue,
       effectiveDate: args.effectiveDate,
     });
 
-    // Log the assignment
-    await ctx.runMutation(internal.auditLog.logAction, {
-      organizationId: carrier.workosOrgId,
-      entityType: 'carrierProfileAssignment',
-      entityId: assignmentId,
-      entityName: `${carrier.companyName} - ${profile.name}`,
-      action: 'created',
-      performedBy: args.userId,
-      performedByName: args.userName,
-      description: `Assigned profile "${profile.name}" to carrier ${carrier.companyName}${shouldBeDefault ? ' (default)' : ''}`,
-    });
-
-    return assignmentId;
+    return { assignmentId, isDefault: shouldBeDefault };
   },
 });
 
@@ -149,76 +141,44 @@ export const update = mutation({
     selectionStrategy: v.optional(selectionStrategyValidator),
     thresholdValue: v.optional(v.number()),
     effectiveDate: v.optional(v.string()),
-    userId: v.string(),
-    userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
 
-    const { assignmentId, userId, userName, ...updates } = args;
-
-    // Validate threshold if switching to DISTANCE_THRESHOLD
-    if (
-      updates.selectionStrategy === 'DISTANCE_THRESHOLD' &&
-      !updates.thresholdValue &&
-      !assignment.thresholdValue
-    ) {
-      throw new Error('Threshold value is required for DISTANCE_THRESHOLD strategy');
+    // Validate threshold for DISTANCE_THRESHOLD
+    const newStrategy = args.selectionStrategy ?? assignment.selectionStrategy;
+    if (newStrategy === 'DISTANCE_THRESHOLD') {
+      const newThreshold = args.thresholdValue ?? assignment.thresholdValue;
+      if (!newThreshold) {
+        throw new Error('Threshold value is required for DISTANCE_THRESHOLD strategy');
+      }
     }
 
-    // If setting as default, unset other defaults for this carrier
-    if (updates.isDefault === true) {
+    // If setting as default, remove default from others
+    if (args.isDefault && !assignment.isDefault) {
       const otherAssignments = await ctx.db
         .query('carrierProfileAssignments')
-        .withIndex('by_carrier', (q) => q.eq('carrierId', assignment.carrierId))
+        .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', assignment.carrierPartnershipId))
         .collect();
-      
+
       for (const other of otherAssignments) {
-        if (other._id !== assignmentId && other.isDefault) {
+        if (other._id !== args.assignmentId && other.isDefault) {
           await ctx.db.patch(other._id, { isDefault: false });
         }
       }
     }
 
-    // Build update object
-    const updateData: Record<string, unknown> = {};
-    if (updates.isDefault !== undefined) {
-      updateData.isDefault = updates.isDefault;
-    }
-    if (updates.selectionStrategy !== undefined) {
-      updateData.selectionStrategy = updates.selectionStrategy;
-    }
-    if (updates.thresholdValue !== undefined) {
-      updateData.thresholdValue = updates.thresholdValue;
-    }
-    if (updates.effectiveDate !== undefined) {
-      updateData.effectiveDate = updates.effectiveDate;
-    }
+    // Build updates object
+    const updates: Record<string, unknown> = {};
+    if (args.isDefault !== undefined) updates.isDefault = args.isDefault;
+    if (args.selectionStrategy !== undefined) updates.selectionStrategy = args.selectionStrategy;
+    if (args.thresholdValue !== undefined) updates.thresholdValue = args.thresholdValue;
+    if (args.effectiveDate !== undefined) updates.effectiveDate = args.effectiveDate;
 
-    if (Object.keys(updateData).length > 0) {
-      await ctx.db.patch(assignmentId, updateData);
+    await ctx.db.patch(args.assignmentId, updates);
 
-      // Get carrier and profile for logging
-      const [carrier, profile] = await Promise.all([
-        ctx.db.get(assignment.carrierId),
-        ctx.db.get(assignment.profileId),
-      ]);
-
-      await ctx.runMutation(internal.auditLog.logAction, {
-        organizationId: assignment.workosOrgId,
-        entityType: 'carrierProfileAssignment',
-        entityId: assignmentId,
-        entityName: `${carrier?.companyName} - ${profile?.name}`,
-        action: 'updated',
-        performedBy: userId,
-        performedByName: userName,
-        description: `Updated profile assignment for ${carrier?.companyName}`,
-        changedFields: Object.keys(updateData),
-      });
-    }
-
-    return assignmentId;
+    return { success: true };
   },
 });
 
@@ -226,56 +186,53 @@ export const update = mutation({
 export const remove = mutation({
   args: {
     assignmentId: v.id('carrierProfileAssignments'),
-    userId: v.string(),
-    userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
 
-    // Get carrier and profile for logging
-    const [carrier, profile] = await Promise.all([
-      ctx.db.get(assignment.carrierId),
-      ctx.db.get(assignment.profileId),
-    ]);
+    const wasDefault = assignment.isDefault;
 
-    // Log before deletion
-    await ctx.runMutation(internal.auditLog.logAction, {
-      organizationId: assignment.workosOrgId,
-      entityType: 'carrierProfileAssignment',
-      entityId: args.assignmentId,
-      entityName: `${carrier?.companyName} - ${profile?.name}`,
-      action: 'deleted',
-      performedBy: args.userId,
-      performedByName: args.userName,
-      description: `Removed profile "${profile?.name}" from carrier ${carrier?.companyName}`,
-    });
-
+    // Delete the assignment
     await ctx.db.delete(args.assignmentId);
 
-    return args.assignmentId;
+    // If we deleted the default, make another one default
+    if (wasDefault) {
+      const remainingAssignments = await ctx.db
+        .query('carrierProfileAssignments')
+        .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', assignment.carrierPartnershipId))
+        .collect();
+
+      if (remainingAssignments.length > 0) {
+        await ctx.db.patch(remainingAssignments[0]._id, { isDefault: true });
+      }
+    }
+
+    return { success: true };
   },
 });
 
-// Set a specific assignment as the carrier's default
+// Set a profile as the default for a carrier partnership
 export const setDefault = mutation({
   args: {
     assignmentId: v.id('carrierProfileAssignments'),
-    userId: v.string(),
-    userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
 
-    // Unset other defaults for this carrier
-    const otherAssignments = await ctx.db
+    if (assignment.isDefault) {
+      return { success: true, message: 'Already the default' };
+    }
+
+    // Remove default from all other assignments
+    const allAssignments = await ctx.db
       .query('carrierProfileAssignments')
-      .withIndex('by_carrier', (q) => q.eq('carrierId', assignment.carrierId))
+      .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', assignment.carrierPartnershipId))
       .collect();
-    
-    for (const other of otherAssignments) {
-      if (other._id !== args.assignmentId && other.isDefault) {
+
+    for (const other of allAssignments) {
+      if (other.isDefault) {
         await ctx.db.patch(other._id, { isDefault: false });
       }
     }
@@ -283,38 +240,104 @@ export const setDefault = mutation({
     // Set this one as default
     await ctx.db.patch(args.assignmentId, { isDefault: true });
 
-    // Get carrier and profile for logging
-    const [carrier, profile] = await Promise.all([
-      ctx.db.get(assignment.carrierId),
-      ctx.db.get(assignment.profileId),
-    ]);
-
-    await ctx.runMutation(internal.auditLog.logAction, {
-      organizationId: assignment.workosOrgId,
-      entityType: 'carrierProfileAssignment',
-      entityId: args.assignmentId,
-      entityName: `${carrier?.companyName} - ${profile?.name}`,
-      action: 'set_default',
-      performedBy: args.userId,
-      performedByName: args.userName,
-      description: `Set "${profile?.name}" as default profile for ${carrier?.companyName}`,
-    });
-
-    return args.assignmentId;
+    return { success: true };
   },
 });
 
-// Check if a carrier has any profile assignments
+// Check if a carrier partnership has any profile assignments
 export const hasAssignments = query({
   args: {
-    carrierId: v.id('carriers'),
+    carrierPartnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
     const assignment = await ctx.db
       .query('carrierProfileAssignments')
-      .withIndex('by_carrier', (q) => q.eq('carrierId', args.carrierId))
+      .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
       .first();
 
-    return assignment !== null;
+    return !!assignment;
+  },
+});
+
+// Get the default profile for a carrier partnership
+export const getDefaultProfile = query({
+  args: {
+    carrierPartnershipId: v.id('carrierPartnerships'),
+  },
+  handler: async (ctx, args) => {
+    const assignments = await ctx.db
+      .query('carrierProfileAssignments')
+      .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
+      .collect();
+
+    const defaultAssignment = assignments.find((a) => a.isDefault);
+    if (!defaultAssignment) return null;
+
+    const profile = await ctx.db.get(defaultAssignment.profileId);
+    if (!profile) return null;
+
+    // Get the base rate
+    const rules = await ctx.db
+      .query('rateRules')
+      .withIndex('by_profile', (q) => q.eq('profileId', defaultAssignment.profileId))
+      .collect();
+    const baseRule = rules.find((r) => r.category === 'BASE' && r.isActive);
+
+    return {
+      assignment: defaultAssignment,
+      profile,
+      baseRate: baseRule?.rateAmount,
+    };
+  },
+});
+
+// Select the appropriate profile for a load based on miles
+export const selectProfileForLoad = query({
+  args: {
+    carrierPartnershipId: v.id('carrierPartnerships'),
+    loadMiles: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const assignments = await ctx.db
+      .query('carrierProfileAssignments')
+      .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
+      .collect();
+
+    if (assignments.length === 0) return null;
+
+    // First, check for DISTANCE_THRESHOLD profiles that match
+    const distanceProfiles = assignments.filter(
+      (a) => a.selectionStrategy === 'DISTANCE_THRESHOLD' && 
+             a.thresholdValue && 
+             args.loadMiles >= a.thresholdValue
+    );
+
+    // Sort by threshold descending (use most specific match)
+    distanceProfiles.sort((a, b) => (b.thresholdValue ?? 0) - (a.thresholdValue ?? 0));
+
+    if (distanceProfiles.length > 0) {
+      const selected = distanceProfiles[0];
+      const profile = await ctx.db.get(selected.profileId);
+      return { assignment: selected, profile, selectionReason: 'DISTANCE_THRESHOLD' };
+    }
+
+    // Next, check for ALWAYS_ACTIVE profiles
+    const alwaysActive = assignments.find((a) => a.selectionStrategy === 'ALWAYS_ACTIVE');
+    if (alwaysActive) {
+      const profile = await ctx.db.get(alwaysActive.profileId);
+      return { assignment: alwaysActive, profile, selectionReason: 'ALWAYS_ACTIVE' };
+    }
+
+    // Fall back to default
+    const defaultAssignment = assignments.find((a) => a.isDefault);
+    if (defaultAssignment) {
+      const profile = await ctx.db.get(defaultAssignment.profileId);
+      return { assignment: defaultAssignment, profile, selectionReason: 'DEFAULT' };
+    }
+
+    // Last resort: first assignment
+    const firstAssignment = assignments[0];
+    const profile = await ctx.db.get(firstAssignment.profileId);
+    return { assignment: firstAssignment, profile, selectionReason: 'FIRST_AVAILABLE' };
   },
 });

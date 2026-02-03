@@ -72,9 +72,14 @@ interface LoadDetails {
     state?: string;
   } | null;
   assignedCarrier?: {
-    _id: Id<'carriers'>;
+    _id: Id<'carrierPartnerships'>;
     companyName: string;
     phone?: string;
+    mcNumber?: string;
+    // From loadCarrierAssignments
+    carrierRate?: number;
+    driverName?: string;
+    driverPhone?: string;
   } | null;
   assignedTruck?: {
     _id: Id<'trucks'>;
@@ -102,13 +107,23 @@ interface SelectedDriver {
   } | null;
 }
 
+// Carrier partnership type (from carrierPartnerships.getActiveForDispatch)
 interface SelectedCarrier {
-  _id: Id<'carriers'>;
-  companyName: string;
+  _id: Id<'carrierPartnerships'>;
+  carrierOrgId?: string;
+  carrierName: string;
   mcNumber: string;
-  firstName: string;
-  lastName: string;
-  phoneNumber: string;
+  contactFirstName?: string;
+  contactLastName?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  city?: string;
+  state?: string;
+  hasDefaultRate: boolean;
+  defaultRate?: number;
+  defaultRateType?: 'FLAT' | 'PER_MILE' | 'PERCENTAGE';
+  defaultCurrency?: 'USD' | 'CAD' | 'MXN';
+  isOwnerOperator?: boolean;
 }
 
 interface TripDetailsSidebarProps {
@@ -216,15 +231,16 @@ export function TripDetailsSidebar({
 
   // Resource display logic
   const hasResource = !!(activeDriver || activeCarrier);
+
   // Handle different name formats: assignedDriver has `name`, selectedDriver has firstName/lastName
   const resourceName = activeDriver 
     ? (isAssigned 
         ? (loadDetails.assignedDriver as { name: string })?.name 
         : `${selectedDriver?.firstName} ${selectedDriver?.lastName}`)
-    : activeCarrier?.companyName || null;
-  // Handle phone: assignedCarrier might have phone, selectedCarrier has phoneNumber
+    : (isAssigned ? activeCarrier?.companyName : selectedCarrier?.carrierName) || null;
+  // Handle phone: assignedCarrier might have phone, selectedCarrier has contactPhone
   const resourcePhone = activeDriver?.phone 
-    || (isAssigned ? loadDetails.assignedCarrier?.phone : selectedCarrier?.phoneNumber);
+    || (isAssigned ? loadDetails.assignedCarrier?.phone : selectedCarrier?.contactPhone);
 
   // Equipment checks
   const loadRequiresEquipment = loadDetails.equipmentType && loadDetails.equipmentType.trim() !== '';
@@ -399,6 +415,36 @@ export function TripDetailsSidebar({
                     <div className="mt-2 flex items-center gap-1 text-amber-700 text-[10px]">
                       <AlertTriangle className="h-3 w-3" />
                       <span>Needs {loadDetails.equipmentType}</span>
+                    </div>
+                  )}
+
+                  {/* Carrier Rate Info */}
+                  {activeCarrier && !activeDriver && isAssigned && loadDetails.assignedCarrier?.carrierRate && (
+                    <div className="mt-2 p-2 bg-green-50 rounded-md border border-green-100">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-green-700">Carrier Rate</span>
+                        <span className="text-xs font-bold text-green-700">
+                          ${loadDetails.assignedCarrier.carrierRate.toLocaleString(undefined, { 
+                            minimumFractionDigits: 2, 
+                            maximumFractionDigits: 2 
+                          })}
+                        </span>
+                      </div>
+                      {loadDetails.assignedCarrier.driverName && (
+                        <div className="mt-1 text-[10px] text-green-600">
+                          Driver: {loadDetails.assignedCarrier.driverName}
+                          {loadDetails.assignedCarrier.driverPhone && (
+                            <span className="ml-1">• {loadDetails.assignedCarrier.driverPhone}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Carrier MC Number */}
+                  {activeCarrier && !activeDriver && (
+                    <div className="mt-1.5 text-[10px] text-slate-500">
+                      MC# {isAssigned ? loadDetails.assignedCarrier?.mcNumber : selectedCarrier?.mcNumber}
                     </div>
                   )}
                 </div>
@@ -599,14 +645,28 @@ export function TripDetailsSidebar({
         {isOpen ? (
           // OPEN: Show Assign button
           canAssign ? (
-            <Button
-              className="w-full h-11"
-              onClick={onAssign}
-              disabled={isAssigning}
-            >
-              {isAssigning && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Assign {assetType === 'driver' ? 'Driver' : 'Carrier'}
-            </Button>
+            <div className="space-y-2">
+              {/* Show contract rate indicator for carriers */}
+              {assetType === 'carrier' && selectedCarrier?.hasDefaultRate && (
+                <div className="text-xs text-center text-green-600 bg-green-50 rounded py-1">
+                  Contract Rate: ${selectedCarrier.defaultRate}
+                  {selectedCarrier.defaultRateType === 'PER_MILE' && '/mi'}
+                  {selectedCarrier.defaultRateType === 'PERCENTAGE' && '%'}
+                </div>
+              )}
+              <Button
+                className="w-full h-11"
+                onClick={onAssign}
+                disabled={isAssigning}
+              >
+                {isAssigning && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                {assetType === 'driver' 
+                  ? 'Assign Driver' 
+                  : selectedCarrier?.hasDefaultRate 
+                    ? 'Assign Carrier' 
+                    : 'Set Rate & Assign'}
+              </Button>
+            </div>
           ) : selectedDriver && !driverHasTruck ? (
             <Button className="w-full h-11" disabled>
               Assign Driver

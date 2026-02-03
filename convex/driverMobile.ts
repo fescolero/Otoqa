@@ -200,40 +200,89 @@ export const getMyAssignedLoads = query({
     // Verify the driver is authenticated and matches
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
+      console.log('[getMyAssignedLoads] No identity');
       return [];
     }
 
     // Get driver to verify access and get organizationId
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted) {
+      console.log('[getMyAssignedLoads] Driver not found:', args.driverId);
       return [];
     }
 
+    console.log('[getMyAssignedLoads] Driver:', driver._id, driver.firstName, driver.lastName, 'org:', driver.organizationId);
+
     // Get today and tomorrow's date range
     const now = new Date();
-    const today = now.toISOString().split('T')[0];
-    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dayAfterTomorrow = new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    // Get loads where this driver is the primary driver
-    const loads = await ctx.db
+    // Set to track unique load IDs
+    const loadIdsSet = new Set<string>();
+    const driverLoads: Awaited<ReturnType<typeof ctx.db.get<'loadInformation'>>>[] = [];
+
+    // Method 1: Get loads where this driver is the primary driver (broker-assigned)
+    const brokerLoads = await ctx.db
       .query('loadInformation')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', driver.organizationId))
       .collect();
 
-    // Filter to loads assigned to this driver and within date range
-    const driverLoads = loads.filter((load) => {
-      if (load.primaryDriverId !== args.driverId) return false;
-      if (load.status === 'Canceled') return false;
+    console.log('[getMyAssignedLoads] Broker loads in org:', brokerLoads.length);
 
-      // Include if firstStopDate is today, tomorrow, or in the past (still active)
-      if (!load.firstStopDate) return true; // Include loads without dates
-      return load.firstStopDate <= dayAfterTomorrow;
-    });
+    for (const load of brokerLoads) {
+      if (load.primaryDriverId !== args.driverId) continue;
+      if (load.status === 'Canceled') continue;
+      if (load.firstStopDate && load.firstStopDate > dayAfterTomorrow) continue;
+      
+      loadIdsSet.add(load._id);
+      driverLoads.push(load);
+    }
+
+    console.log('[getMyAssignedLoads] Broker-assigned loads found:', driverLoads.length);
+
+    // Method 2: Get loads assigned via carrier assignments (carrier-assigned drivers)
+    // Find all carrier assignments where this driver is assigned (AWARDED status)
+    const awardedAssignments = await ctx.db
+      .query('loadCarrierAssignments')
+      .withIndex('by_assigned_driver', (q) => 
+        q.eq('assignedDriverId', args.driverId).eq('status', 'AWARDED')
+      )
+      .collect();
+
+    console.log('[getMyAssignedLoads] Awarded carrier assignments:', awardedAssignments.length);
+
+    // Also get IN_PROGRESS assignments
+    const inProgressAssignments = await ctx.db
+      .query('loadCarrierAssignments')
+      .withIndex('by_assigned_driver', (q) => 
+        q.eq('assignedDriverId', args.driverId).eq('status', 'IN_PROGRESS')
+      )
+      .collect();
+
+    console.log('[getMyAssignedLoads] In-progress carrier assignments:', inProgressAssignments.length);
+
+    const myAssignments = [...awardedAssignments, ...inProgressAssignments];
+    console.log('[getMyAssignedLoads] Total carrier assignments:', myAssignments.length);
+
+    // Get the loads for these assignments
+    for (const assignment of myAssignments) {
+      // Skip if we already have this load from broker assignments
+      if (loadIdsSet.has(assignment.loadId)) continue;
+      
+      const load = await ctx.db.get(assignment.loadId);
+      if (!load) continue;
+      if (load.status === 'Canceled') continue;
+      if (load.firstStopDate && load.firstStopDate > dayAfterTomorrow) continue;
+      
+      loadIdsSet.add(load._id);
+      driverLoads.push(load);
+    }
 
     // Get stops for each load
-    const result = await Promise.all(
+    const resultWithNulls = await Promise.all(
       driverLoads.map(async (load) => {
+        if (!load) return null;
+        
         const stops = await ctx.db
           .query('loadStops')
           .withIndex('by_load', (q) => q.eq('loadId', load._id))
@@ -281,6 +330,9 @@ export const getMyAssignedLoads = query({
         };
       })
     );
+
+    // Filter out nulls
+    const result = resultWithNulls.filter((r): r is NonNullable<typeof r> => r !== null);
 
     // Sort by firstStopDate
     result.sort((a, b) => {
@@ -370,7 +422,22 @@ export const getLoadWithStops = query({
     }
 
     // Verify this driver is assigned to the load
-    if (load.primaryDriverId !== args.driverId) {
+    // Check 1: Direct assignment via primaryDriverId (broker's own drivers)
+    let hasAccess = load.primaryDriverId === args.driverId;
+
+    // Check 2: Carrier assignment via loadCarrierAssignments
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .first();
+      
+      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+        hasAccess = true;
+      }
+    }
+
+    if (!hasAccess) {
       return null;
     }
 
@@ -481,7 +548,22 @@ export const checkInAtStop = mutation({
 
     // Get load to verify driver assignment
     const load = await ctx.db.get(stop.loadId);
-    if (!load || load.primaryDriverId !== args.driverId) {
+    if (!load) {
+      return { success: false, message: 'Load not found' };
+    }
+
+    // Check driver access - either via primaryDriverId or carrier assignment
+    let hasAccess = load.primaryDriverId === args.driverId;
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+        .first();
+      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+        hasAccess = true;
+      }
+    }
+    if (!hasAccess) {
       return { success: false, message: 'Not authorized for this load' };
     }
 
@@ -574,7 +656,22 @@ export const checkOutFromStop = mutation({
 
     // Get load to verify driver assignment
     const load = await ctx.db.get(stop.loadId);
-    if (!load || load.primaryDriverId !== args.driverId) {
+    if (!load) {
+      return { success: false, message: 'Load not found' };
+    }
+
+    // Check driver access - either via primaryDriverId or carrier assignment
+    let hasAccess = load.primaryDriverId === args.driverId;
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+        .first();
+      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+        hasAccess = true;
+      }
+    }
+    if (!hasAccess) {
       return { success: false, message: 'Not authorized for this load' };
     }
 
@@ -676,7 +773,22 @@ export const updateStopStatus = mutation({
 
     // Get load to verify driver assignment
     const load = await ctx.db.get(stop.loadId);
-    if (!load || load.primaryDriverId !== args.driverId) {
+    if (!load) {
+      return { success: false, message: 'Load not found' };
+    }
+
+    // Check driver access - either via primaryDriverId or carrier assignment
+    let hasAccess = load.primaryDriverId === args.driverId;
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+        .first();
+      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+        hasAccess = true;
+      }
+    }
+    if (!hasAccess) {
       return { success: false, message: 'Not authorized for this load' };
     }
 
@@ -739,7 +851,22 @@ export const recordPOD = mutation({
 
     // Get load to verify driver assignment
     const load = await ctx.db.get(stop.loadId);
-    if (!load || load.primaryDriverId !== args.driverId) {
+    if (!load) {
+      return { success: false, message: 'Load not found' };
+    }
+
+    // Check driver access - either via primaryDriverId or carrier assignment
+    let hasAccess = load.primaryDriverId === args.driverId;
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+        .first();
+      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+        hasAccess = true;
+      }
+    }
+    if (!hasAccess) {
       return { success: false, message: 'Not authorized for this load' };
     }
 

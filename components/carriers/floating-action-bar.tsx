@@ -7,7 +7,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Mail, Edit, FileDown, UserX, X } from 'lucide-react';
+import { Mail, Edit, FileDown, UserX, UserCheck, Trash2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface FloatingActionBarProps {
@@ -17,6 +17,9 @@ interface FloatingActionBarProps {
   onUpdateStatus?: (status: 'Active' | 'Inactive' | 'Vetting' | 'Suspended') => void;
   onExport?: () => void;
   onDeactivate?: () => void;
+  onReactivate?: () => void;
+  onPermanentDelete?: () => void;
+  isTerminatedView?: boolean;
   className?: string;
 }
 
@@ -27,6 +30,9 @@ export function FloatingActionBar({
   onUpdateStatus,
   onExport,
   onDeactivate,
+  onReactivate,
+  onPermanentDelete,
+  isTerminatedView,
   className,
 }: FloatingActionBarProps) {
   if (selectedCount === 0) return null;
@@ -117,7 +123,7 @@ export function FloatingActionBar({
           </>
           )}
 
-          {onDeactivate && (
+          {onDeactivate && !isTerminatedView && (
           <>
             <div className="w-[1px] h-4 bg-slate-200 mx-2" />
             <Button
@@ -128,6 +134,36 @@ export function FloatingActionBar({
             >
               <UserX className="w-4 h-4 mr-2" strokeWidth={2} />
               Deactivate
+            </Button>
+          </>
+        )}
+
+          {onReactivate && isTerminatedView && (
+          <>
+            <div className="w-[1px] h-4 bg-slate-200 mx-2" />
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onReactivate}
+              className="h-8 text-slate-700 hover:bg-slate-50 hover:text-green-600 transition-colors font-medium"
+            >
+              <UserCheck className="w-4 h-4 mr-2" strokeWidth={2} />
+              Reactivate
+            </Button>
+          </>
+        )}
+
+          {onPermanentDelete && isTerminatedView && (
+          <>
+            <div className="w-[1px] h-4 bg-slate-200 mx-2" />
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onPermanentDelete}
+              className="h-8 text-slate-700 hover:bg-slate-50 hover:text-red-600 transition-colors font-medium"
+            >
+              <Trash2 className="w-4 h-4 mr-2" strokeWidth={2} />
+              Delete Permanently
             </Button>
           </>
         )}

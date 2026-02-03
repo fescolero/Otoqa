@@ -61,13 +61,23 @@ interface DriverWithTruck {
   } | null;
 }
 
-interface Carrier {
-  _id: Id<'carriers'>;
-  companyName: string;
+// Carrier partnership type (from carrierPartnerships.getActiveForDispatch)
+interface CarrierPartnership {
+  _id: Id<'carrierPartnerships'>;
+  carrierOrgId?: string;
+  carrierName: string;
   mcNumber: string;
-  firstName: string;
-  lastName: string;
-  phoneNumber: string;
+  contactFirstName?: string;
+  contactLastName?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  city?: string;
+  state?: string;
+  hasDefaultRate: boolean;
+  defaultRate?: number;
+  defaultRateType?: 'FLAT' | 'PER_MILE' | 'PERCENTAGE';
+  defaultCurrency?: 'USD' | 'CAD' | 'MXN';
+  isOwnerOperator?: boolean;
 }
 
 interface DriverLeg {
@@ -86,7 +96,7 @@ interface DriverLeg {
 interface DecisionSupportViewProps {
   loadDetails: LoadWithRange;
   selectedDriver: DriverWithTruck | null;
-  selectedCarrier: Carrier | null;
+  selectedCarrier: CarrierPartnership | null;
   assetType: 'driver' | 'carrier';
   driverSchedule: DriverLeg[] | null;
   onAssign: () => void;

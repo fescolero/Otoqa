@@ -307,10 +307,25 @@ export const getLoad = query({
       ? await ctx.db.get(load.primaryDriverId) 
       : null;
 
-    // Get assigned carrier (from load's primaryCarrierId cache)
-    const primaryCarrier = load.primaryCarrierId 
-      ? await ctx.db.get(load.primaryCarrierId) 
+    // Get assigned carrier partnership
+    let primaryCarrierPartnership = load.primaryCarrierPartnershipId 
+      ? await ctx.db.get(load.primaryCarrierPartnershipId) 
       : null;
+
+    // If no direct partnership, check the marketplace assignment system
+    let carrierAssignment = null;
+    if (!primaryCarrierPartnership) {
+      carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .filter((q) =>
+          q.or(
+            q.eq(q.field('status'), 'AWARDED'),
+            q.eq(q.field('status'), 'IN_PROGRESS')
+          )
+        )
+        .first();
+    }
 
     // Get truck and trailer from first leg (primary equipment)
     const firstLeg = legs.length > 0 
@@ -336,12 +351,24 @@ export const getLoad = query({
             phone: primaryDriver.phone,
           } 
         : null,
-      assignedCarrier: primaryCarrier 
+      assignedCarrier: primaryCarrierPartnership 
         ? { 
-            _id: primaryCarrier._id,
-            companyName: primaryCarrier.companyName,
-            phone: primaryCarrier.phoneNumber,
+            _id: primaryCarrierPartnership._id,
+            companyName: primaryCarrierPartnership.carrierName,
+            phone: primaryCarrierPartnership.contactPhone,
+            mcNumber: primaryCarrierPartnership.mcNumber,
           } 
+        : carrierAssignment
+        ? {
+            _id: carrierAssignment._id,
+            companyName: carrierAssignment.carrierName,
+            phone: carrierAssignment.assignedDriverPhone,
+            mcNumber: carrierAssignment.carrierMcNumber,
+            carrierRate: carrierAssignment.carrierTotalAmount,
+            // Carrier's assigned driver for this load
+            driverName: carrierAssignment.assignedDriverName,
+            driverPhone: carrierAssignment.assignedDriverPhone,
+          }
         : null,
       assignedTruck: truck 
         ? { 
@@ -386,10 +413,25 @@ export const getByIdWithRange = query({
       ? await ctx.db.get(load.primaryDriverId) 
       : null;
 
-    // Get assigned carrier (from load's primaryCarrierId cache)
-    const primaryCarrier = load.primaryCarrierId 
-      ? await ctx.db.get(load.primaryCarrierId) 
+    // Get assigned carrier partnership
+    let primaryCarrierPartnership = load.primaryCarrierPartnershipId 
+      ? await ctx.db.get(load.primaryCarrierPartnershipId) 
       : null;
+
+    // If no direct partnership, check the marketplace assignment system
+    let carrierAssignment = null;
+    if (!primaryCarrierPartnership) {
+      carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .filter((q) => 
+          q.or(
+            q.eq(q.field('status'), 'AWARDED'),
+            q.eq(q.field('status'), 'IN_PROGRESS')
+          )
+        )
+        .first();
+    }
 
     // Get truck and trailer from first leg (primary equipment)
     const firstLeg = legs.length > 0 
@@ -470,12 +512,25 @@ export const getByIdWithRange = query({
             state: primaryDriver.state,
           } 
         : null,
-      assignedCarrier: primaryCarrier 
+      assignedCarrier: primaryCarrierPartnership 
         ? { 
-            _id: primaryCarrier._id,
-            companyName: primaryCarrier.companyName,
-            phone: primaryCarrier.phoneNumber,
+            _id: primaryCarrierPartnership._id,
+            companyName: primaryCarrierPartnership.carrierName,
+            phone: primaryCarrierPartnership.contactPhone,
+            mcNumber: primaryCarrierPartnership.mcNumber,
           } 
+        : carrierAssignment
+        ? {
+            _id: carrierAssignment._id,
+            companyName: carrierAssignment.carrierName,
+            phone: carrierAssignment.assignedDriverPhone,
+            // Extra fields from marketplace assignment
+            mcNumber: carrierAssignment.carrierMcNumber,
+            carrierRate: carrierAssignment.carrierTotalAmount,
+            // Carrier's assigned driver for this load
+            driverName: carrierAssignment.assignedDriverName,
+            driverPhone: carrierAssignment.assignedDriverPhone,
+          }
         : null,
       assignedTruck: truck 
         ? { 
@@ -740,7 +795,7 @@ export const updateLoadStatus = mutation({
     } else if (args.status === 'Open') {
       // UNASSIGN: Clear assignment data when reverting to Open
       updates.primaryDriverId = undefined;
-      updates.primaryCarrierId = undefined;
+      updates.primaryCarrierPartnershipId = undefined;
       updates.trackingStatus = 'Pending';
 
       // Cancel all PENDING dispatch legs for this load
@@ -756,7 +811,7 @@ export const updateLoadStatus = mutation({
             driverId: undefined,
             truckId: undefined,
             trailerId: undefined,
-            carrierId: undefined,
+            carrierPartnershipId: undefined,
             status: 'CANCELED',
             updatedAt: now,
           });
@@ -884,7 +939,7 @@ export const bulkUpdateLoadStatus = mutation({
           }
         } else if (args.status === 'Open') {
           updates.primaryDriverId = undefined;
-          updates.primaryCarrierId = undefined;
+          updates.primaryCarrierPartnershipId = undefined;
           updates.trackingStatus = 'Pending';
 
           const legs = await ctx.db
@@ -898,7 +953,7 @@ export const bulkUpdateLoadStatus = mutation({
                 driverId: undefined,
                 truckId: undefined,
                 trailerId: undefined,
-                carrierId: undefined,
+                carrierPartnershipId: undefined,
                 status: 'CANCELED',
                 updatedAt: now,
               });
@@ -1285,8 +1340,12 @@ export const updateLoadAttributes = mutation({
 
     await ctx.db.patch(loadId, updateData);
 
-    // Trigger pay recalculation for all legs
+    // Trigger pay recalculation for all legs (driver and carrier)
     await ctx.runMutation(internal.driverPayCalculation.recalculateForLoad, {
+      loadId,
+      userId,
+    });
+    await ctx.runMutation(internal.carrierPayCalculation.recalculateForLoad, {
       loadId,
       userId,
     });

@@ -201,3 +201,68 @@ export const fixPhotoUrls = internalMutation({
     }    return { updated, stops: updatedStops };
   },
 });
+
+/**
+ * Sync a single carrier owner to Clerk for mobile app sign-in
+ * Use this for existing carrier organizations whose owners need mobile access
+ */
+export const syncCarrierOwnerToClerk = internalMutation({
+  args: {
+    organizationId: v.id('organizations'),
+    phone: v.string(),
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+    email: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Verify org exists and is a carrier
+    const org = await ctx.db.get(args.organizationId);
+    if (!org) {
+      throw new Error('Organization not found');
+    }
+    if (org.orgType !== 'CARRIER' && org.orgType !== 'BROKER_CARRIER') {
+      throw new Error('Organization is not a carrier');
+    }
+
+    // Schedule the Clerk sync action
+    await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+      organizationId: args.organizationId,
+      phone: args.phone,
+      firstName: args.firstName,
+      lastName: args.lastName,
+      email: args.email,
+    });
+
+    return { 
+      scheduled: true, 
+      message: `Clerk sync scheduled for ${org.name}` 
+    };
+  },
+});
+
+/**
+ * Bulk sync all carrier owners to Clerk
+ * WARNING: This will attempt to create Clerk users for ALL carrier owners
+ */
+export const syncAllCarrierOwnersToClerk = internalAction({
+  args: {},
+  returns: v.object({
+    total: v.number(),
+    created: v.number(),
+    existing: v.number(),
+    skipped: v.number(),
+    failed: v.number(),
+    errors: v.array(v.string()),
+  }),
+  handler: async (ctx): Promise<{
+    total: number;
+    created: number;
+    existing: number;
+    skipped: number;
+    failed: number;
+    errors: string[];
+  }> => {
+    const result = await ctx.runAction(internal.clerkSync.syncExistingCarrierOwnersToClerk, {});
+    return result;
+  },
+});

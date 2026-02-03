@@ -5,7 +5,7 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Users, Building2, Truck, MapPin, CheckCircle2 } from 'lucide-react';
+import { Users, Building2, Truck, MapPin, CheckCircle2, DollarSign } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // Types for the data we receive
@@ -28,17 +28,26 @@ interface DriverWithTruck {
   } | null;
 }
 
-interface Carrier {
-  _id: Id<'carriers'>;
-  companyName: string;
+// Carrier partnership type (from carrierPartnerships.getActiveForDispatch)
+export interface CarrierPartnership {
+  _id: Id<'carrierPartnerships'>;
+  carrierOrgId?: string;
+  carrierName: string;
   mcNumber: string;
-  firstName: string;
-  lastName: string;
-  phoneNumber: string;
-  email: string;
+  contactFirstName?: string;
+  contactLastName?: string;
+  contactPhone?: string;
+  contactEmail?: string;
   city?: string;
   state?: string;
-  status: string;
+  hasDefaultRate: boolean;
+  defaultRate?: number;
+  defaultRateType?: 'FLAT' | 'PER_MILE' | 'PERCENTAGE';
+  defaultCurrency?: 'USD' | 'CAD' | 'MXN';
+  isOwnerOperator?: boolean;
+  ownerDriverFirstName?: string;
+  ownerDriverLastName?: string;
+  ownerDriverPhone?: string;
 }
 
 interface LoadWithRange {
@@ -59,13 +68,13 @@ interface AssetsTableProps {
   loadDetails: LoadWithRange | null;
   allDrivers: DriverWithTruck[]; // All active drivers (shown before trip selection)
   availableDrivers: DriverWithTruck[]; // Filtered by time window (shown when trip selected)
-  activeCarriers: Carrier[];
+  activeCarriers: CarrierPartnership[];
   assetType: 'driver' | 'carrier';
   onAssetTypeChange: (type: 'driver' | 'carrier') => void;
   selectedDriverId: Id<'drivers'> | null;
-  selectedCarrierId: Id<'carriers'> | null;
+  selectedCarrierId: Id<'carrierPartnerships'> | null;
   onSelectDriver: (id: Id<'drivers'> | null) => void;
-  onSelectCarrier: (id: Id<'carriers'> | null) => void;
+  onSelectCarrier: (id: Id<'carrierPartnerships'> | null) => void;
 }
 
 export function AssetsTable({
@@ -109,7 +118,7 @@ export function AssetsTable({
     }
   };
 
-  const handleCarrierClick = (carrierId: Id<'carriers'>) => {
+  const handleCarrierClick = (carrierId: Id<'carrierPartnerships'>) => {
     if (selectedCarrierId === carrierId) {
       onSelectCarrier(null);
     } else {
@@ -261,18 +270,19 @@ export function AssetsTable({
           ) : (
             <>
               {/* Carrier Table Header - Sticky */}
-              <div className="grid grid-cols-[1fr_100px_1fr_120px] gap-4 px-4 py-2 border-b bg-muted/50 text-sm font-medium text-muted-foreground sticky top-0 z-10">
+              <div className="grid grid-cols-[1fr_90px_1fr_100px_60px] gap-4 px-4 py-2 border-b bg-muted/50 text-sm font-medium text-muted-foreground sticky top-0 z-10">
                 <div>Company</div>
                 <div>MC#</div>
                 <div>Contact</div>
                 <div>Phone</div>
+                <div>Rate</div>
               </div>
 
               {/* Empty state */}
               {activeCarriers.length === 0 && (
                 <div className="p-8 text-center text-muted-foreground">
                   <Building2 className="h-12 w-12 mx-auto mb-3 opacity-50" />
-                  <p>No active carriers found</p>
+                  <p>No active carrier partnerships</p>
                 </div>
               )}
 
@@ -282,25 +292,45 @@ export function AssetsTable({
                   key={carrier._id}
                   onClick={() => handleCarrierClick(carrier._id)}
                   className={cn(
-                    'grid grid-cols-[1fr_100px_1fr_120px] gap-4 px-4 py-2 border-b cursor-pointer transition-colors',
+                    'grid grid-cols-[1fr_90px_1fr_100px_60px] gap-4 px-4 py-2 border-b cursor-pointer transition-colors',
                     'hover:bg-muted/50',
                     selectedCarrierId === carrier._id &&
                       'bg-primary/10 ring-2 ring-primary ring-inset'
                   )}
                 >
                   {/* Company */}
-                  <div className="font-medium text-sm truncate">{carrier.companyName}</div>
+                  <div>
+                    <div className="font-medium text-sm truncate">{carrier.carrierName}</div>
+                    {carrier.isOwnerOperator && (
+                      <span className="text-xs text-muted-foreground">Owner-Op</span>
+                    )}
+                  </div>
 
                   {/* MC# */}
                   <div className="text-sm text-muted-foreground">{carrier.mcNumber}</div>
 
                   {/* Contact */}
                   <div className="text-sm truncate">
-                    {carrier.firstName} {carrier.lastName}
+                    {carrier.contactFirstName} {carrier.contactLastName}
                   </div>
 
                   {/* Phone */}
-                  <div className="text-sm text-muted-foreground">{carrier.phoneNumber}</div>
+                  <div className="text-sm text-muted-foreground">{carrier.contactPhone || '—'}</div>
+
+                  {/* Rate Indicator */}
+                  <div>
+                    {carrier.hasDefaultRate ? (
+                      <Badge
+                        variant="outline"
+                        className="text-xs bg-green-50 text-green-700 border-green-200"
+                        title={`Contract rate: $${carrier.defaultRate} ${carrier.defaultRateType === 'PER_MILE' ? '/mi' : carrier.defaultRateType === 'PERCENTAGE' ? '%' : ''}`}
+                      >
+                        <DollarSign className="h-3 w-3" />
+                      </Badge>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">—</span>
+                    )}
+                  </div>
                 </div>
               ))}
             </>

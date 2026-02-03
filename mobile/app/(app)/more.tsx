@@ -5,6 +5,7 @@ import { useUser } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useDriver } from './_layout';
+import { useLanguage } from '../../lib/LanguageContext';
 
 // ============================================
 // DESIGN SYSTEM
@@ -50,28 +51,29 @@ export default function MoreScreen() {
   const { user } = useUser();
   const router = useRouter();
   const { driverName, truck } = useDriver();
+  const { t } = useLanguage();
 
   // Format truck info for display
-  const truckUnit = truck ? `Unit #${truck.unitId}` : 'No truck assigned';
+  const truckUnit = truck ? `Unit #${truck.unitId}` : t('more.noTruckAssigned');
   const truckModel = truck 
     ? [truck.make, truck.model].filter(Boolean).join(' ') || 'Unknown Model'
-    : 'Scan a QR code to assign a truck';
+    : t('more.scanQrToAssign');
   const hasTruck = !!truck;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>More</Text>
+        <Text style={styles.headerTitle}>{t('more.title')}</Text>
       </View>
 
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         {/* Vehicle Details Section */}
-        <Text style={styles.sectionTitle}>Vehicle Details</Text>
+        <Text style={styles.sectionTitle}>{t('more.vehicleDetails')}</Text>
         <View style={styles.vehicleCard}>
           <View style={styles.vehicleHeader}>
             <View style={styles.vehicleIconContainer}>
               <View style={styles.vehicleIcon}>
-                <MaterialCommunityIcons name="truck" size={24} color={colors.primary} />
+                <MaterialCommunityIcons name="truck" size={20} color={colors.primary} />
               </View>
               <View>
                 <Text style={styles.vehicleUnit}>{truckUnit}</Text>
@@ -80,7 +82,7 @@ export default function MoreScreen() {
             </View>
             {hasTruck && (
               <View style={styles.activeBadge}>
-                <Text style={styles.activeBadgeText}>ACTIVE</Text>
+                <Text style={styles.activeBadgeText}>{t('more.active')}</Text>
               </View>
             )}
           </View>
@@ -111,107 +113,109 @@ export default function MoreScreen() {
             onPress={() => router.push('/switch-truck')}
           >
             <Ionicons name="swap-horizontal" size={18} color={colors.primary} />
-            <Text style={styles.switchTruckText}>{hasTruck ? 'Switch Truck' : 'Assign Truck'}</Text>
+            <Text style={styles.switchTruckText}>{hasTruck ? t('more.switchTruck') : t('more.assignTruck')}</Text>
           </TouchableOpacity>
         </View>
 
         {/* Financials & History Section */}
-        <Text style={styles.sectionTitle}>Financials & History</Text>
-        <View style={styles.menuSection}>
-          <TouchableOpacity style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconGreen]}>
-              <Ionicons name="cash" size={20} color={colors.success} />
+        <View style={styles.sectionTitleRow}>
+          <Text style={styles.sectionTitle}>{t('more.financialsHistory')}</Text>
+          <View style={styles.comingSoonBadge}>
+            <Text style={styles.comingSoonText}>{t('common.comingSoon')}</Text>
+          </View>
+        </View>
+        <View style={[styles.menuSection, styles.menuSectionDisabled]}>
+          <View style={styles.menuRow}>
+            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
+              <Ionicons name="cash" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Current Payroll</Text>
+              <Text style={styles.menuLabelDisabled}>Current Payroll</Text>
               <Text style={styles.menuSubtitle}>Period: May 1 - May 15</Text>
             </View>
-            <Text style={styles.menuValueGreen}>$3,240.50</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+            <Text style={styles.menuValueMuted}>--</Text>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </View>
 
-          <TouchableOpacity style={styles.menuRow}>
+          <View style={styles.menuRow}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="receipt" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Past Payroll</Text>
+              <Text style={styles.menuLabelDisabled}>Past Payroll</Text>
             </View>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </View>
 
-          <TouchableOpacity style={[styles.menuRow, styles.menuRowLast]}>
-            <View style={[styles.menuIconContainer, styles.menuIconBlue]}>
-              <MaterialCommunityIcons name="truck-delivery" size={20} color="#3b82f6" />
+          <View style={[styles.menuRow, styles.menuRowLast]}>
+            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
+              <MaterialCommunityIcons name="truck-delivery" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Load History</Text>
+              <Text style={styles.menuLabelDisabled}>Load History</Text>
             </View>
-            <View style={styles.countBadge}>
-              <Text style={styles.countBadgeText}>128 Total</Text>
-            </View>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </View>
         </View>
 
         {/* Compliance & Documents Section */}
-        <Text style={styles.sectionTitle}>Compliance & Documents</Text>
-        <View style={styles.menuSection}>
-          <TouchableOpacity style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconRed]}>
-              <Ionicons name="alert-circle" size={20} color={colors.destructive} />
+        <View style={styles.sectionTitleRow}>
+          <Text style={styles.sectionTitle}>{t('more.complianceDocuments')}</Text>
+          <View style={styles.comingSoonBadge}>
+            <Text style={styles.comingSoonText}>{t('common.comingSoon')}</Text>
+          </View>
+        </View>
+        <View style={[styles.menuSection, styles.menuSectionDisabled]}>
+          <View style={styles.menuRow}>
+            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
+              <Ionicons name="alert-circle" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Compliance Status</Text>
+              <Text style={styles.menuLabelDisabled}>Compliance Status</Text>
             </View>
-            <View style={styles.alertBadge}>
-              <Text style={styles.alertBadgeText}>2 Items Due</Text>
-            </View>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </View>
 
-          <TouchableOpacity style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconBlue]}>
-              <Ionicons name="ribbon" size={20} color="#3b82f6" />
+          <View style={styles.menuRow}>
+            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
+              <Ionicons name="ribbon" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Required Certifications</Text>
+              <Text style={styles.menuLabelDisabled}>Required Certifications</Text>
             </View>
-            <Text style={styles.menuValueMuted}>Valid Until Dec{'\n'}2025</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </View>
 
-          <TouchableOpacity style={styles.menuRow}>
+          <View style={styles.menuRow}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="document-text" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Inspection Reports</Text>
+              <Text style={styles.menuLabelDisabled}>Inspection Reports</Text>
             </View>
-            <Text style={styles.menuValueMuted}>Last: 3 days ago</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </View>
 
-          <TouchableOpacity style={[styles.menuRow, styles.menuRowLast]}>
+          <View style={[styles.menuRow, styles.menuRowLast]}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="folder" size={20} color={colors.foregroundMuted} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Company Policies</Text>
+              <Text style={styles.menuLabelDisabled}>Company Policies</Text>
             </View>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+          </View>
         </View>
 
         {/* Safety & Support Section */}
-        <Text style={styles.sectionTitle}>Safety & Support</Text>
+        <Text style={styles.sectionTitle}>{t('more.safetySupport')}</Text>
         <View style={styles.menuSection}>
           <TouchableOpacity style={[styles.menuRow, styles.menuRowLast]}>
             <View style={[styles.menuIconContainer, styles.menuIconOrange]}>
               <Ionicons name="warning" size={20} color={colors.primary} />
             </View>
             <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>Report an Accident</Text>
+              <Text style={styles.menuLabel}>{t('more.reportAccident')}</Text>
             </View>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </TouchableOpacity>
@@ -233,7 +237,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.lg,
   },
   headerTitle: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: '700',
     color: colors.foreground,
   },
@@ -245,15 +249,33 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: colors.foreground,
-    marginTop: spacing.xl,
+    marginTop: spacing.sm,
     marginBottom: spacing.md,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: spacing.sm,
+    marginBottom: spacing.md,
+    gap: spacing.sm,
+  },
+  comingSoonBadge: {
+    backgroundColor: `${colors.primary}20`,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.md,
+  },
+  comingSoonText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.primary,
   },
 
   // Vehicle Card
   vehicleCard: {
     backgroundColor: colors.card,
     borderRadius: borderRadius['2xl'],
-    padding: spacing.lg,
+    padding: spacing.md,
     borderWidth: 1,
     borderColor: `${colors.border}50`,
   },
@@ -261,7 +283,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    marginBottom: spacing.lg,
+    marginBottom: spacing.md,
   },
   vehicleIconContainer: {
     flexDirection: 'row',
@@ -269,8 +291,8 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   vehicleIcon: {
-    width: 48,
-    height: 48,
+    width: 40,
+    height: 40,
     borderRadius: borderRadius.lg,
     backgroundColor: `${colors.primary}25`,
     alignItems: 'center',
@@ -301,9 +323,9 @@ const styles = StyleSheet.create({
   vehicleInfoGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: spacing.lg,
-    marginBottom: spacing.lg,
-    paddingTop: spacing.md,
+    gap: spacing.md,
+    marginBottom: spacing.md,
+    paddingTop: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: `${colors.border}30`,
   },
@@ -328,6 +350,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.sm,
     paddingVertical: spacing.md,
+    marginHorizontal: -spacing.md,
+    marginBottom: -spacing.md,
     borderTopWidth: 1,
     borderTopColor: `${colors.border}30`,
   },
@@ -345,11 +369,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: `${colors.border}50`,
   },
+  menuSectionDisabled: {
+    opacity: 0.6,
+  },
   menuRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.md + 2,
-    paddingHorizontal: spacing.lg,
+    padding: spacing.md,
     borderBottomWidth: 1,
     borderBottomColor: `${colors.border}30`,
     gap: spacing.md,
@@ -384,8 +410,13 @@ const styles = StyleSheet.create({
   },
   menuLabel: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '500',
     color: colors.foreground,
+  },
+  menuLabelDisabled: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: colors.foregroundMuted,
   },
   menuSubtitle: {
     fontSize: 13,

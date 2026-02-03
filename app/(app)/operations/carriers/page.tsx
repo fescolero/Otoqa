@@ -80,7 +80,7 @@ export default function CarriersPage() {
               </Button>
             </div>
           </div>
-          <CarrierList workosOrgId={workosOrgId} />
+          <CarrierList workosOrgId={workosOrgId} usePartnerships={true} />
         </div>
       </div>
     </>

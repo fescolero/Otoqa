@@ -110,6 +110,11 @@ export const recalculateAllOrgs = internalMutation({
     const orgs = await ctx.db.query("organizations").collect();
     
     for (const org of orgs) {
+      // Skip carrier orgs without workosOrgId (they use clerkOrgId)
+      if (!org.workosOrgId) {
+        continue;
+      }
+
       try {
         await ctx.runMutation(internal.stats.recalculateOrgStats, {
           workosOrgId: org.workosOrgId,

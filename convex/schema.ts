@@ -3,8 +3,20 @@ import { v } from 'convex/values';
 
 export default defineSchema({
   // Organization settings for multi-tenant configuration
+  // Unified for both Brokers and Carriers (distinguished by orgType)
   organizations: defineTable({
-    workosOrgId: v.string(),
+    // Auth provider linking
+    workosOrgId: v.optional(v.string()), // For web TMS access (brokers, upgraded carriers)
+    clerkOrgId: v.optional(v.string()), // For mobile access (carriers)
+
+    // Organization type - determines capabilities
+    // Optional for backward compatibility - defaults to BROKER for existing orgs with workosOrgId
+    orgType: v.optional(v.union(
+      v.literal('BROKER'), // Web TMS only (WorkOS)
+      v.literal('CARRIER'), // Mobile only (Clerk)
+      v.literal('BROKER_CARRIER') // Both (upgraded carrier)
+    )),
+
     name: v.string(),
     industry: v.optional(v.string()),
     domain: v.optional(v.string()),
@@ -32,9 +44,368 @@ export default defineSchema({
     // IANA format: "America/New_York", "America/Los_Angeles", etc.
     defaultTimezone: v.optional(v.string()),
 
+    // === CARRIER-SPECIFIC FIELDS ===
+    // Only populated when orgType = CARRIER or BROKER_CARRIER
+    mcNumber: v.optional(v.string()), // MC-123456
+    usdotNumber: v.optional(v.string()), // DOT number
+    operatingAuthorityActive: v.optional(v.boolean()),
+    safetyRating: v.optional(v.string()), // Satisfactory, Conditional, Unsatisfactory, Not Rated
+
+    // Insurance (non-sensitive - provider/expiration)
+    insuranceProvider: v.optional(v.string()),
+    insuranceCoverage: v.optional(v.boolean()),
+    insuranceExpiration: v.optional(v.string()), // YYYY-MM-DD format
+
+    // Upgrade tracking (CARRIER -> BROKER_CARRIER)
+    upgradedAt: v.optional(v.number()),
+    upgradedBy: v.optional(v.string()),
+
+    // === OWNER-OPERATOR FIELDS ===
+    // Only relevant when orgType = CARRIER or BROKER_CARRIER
+    // Distinguishes single-driver owner-operators from fleet carriers
+    isOwnerOperator: v.optional(v.boolean()), // True if owner is also the primary driver
+    ownerDriverId: v.optional(v.id('drivers')), // Link to the owner's driver record
+
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index('by_organization', ['workosOrgId']),
+
+    // === SOFT DELETE ===
+    // Allows graceful deactivation without losing historical data
+    isDeleted: v.optional(v.boolean()),
+    deletedAt: v.optional(v.number()),
+    deletedBy: v.optional(v.string()), // User ID who performed deletion
+    deletionReason: v.optional(v.string()), // Why org was deleted/deactivated
+  })
+    .index('by_organization', ['workosOrgId'])
+    .index('by_clerk_org', ['clerkOrgId'])
+    .index('by_mc', ['mcNumber'])
+    .index('by_type', ['orgType'])
+    .index('by_deleted', ['isDeleted']),
+
+  // Sensitive organization data (separate table for security)
+  // Following pattern of drivers_sensitive_info
+  organizations_sensitive: defineTable({
+    // Reference to organization
+    organizationId: v.id('organizations'),
+
+    // === TAX & LEGAL ===
+    ein: v.optional(v.string()), // Federal Tax ID
+    stateRegistrationNumber: v.optional(v.string()),
+
+    // === BANKING (for receiving payments) ===
+    bankName: v.optional(v.string()),
+    bankAccountType: v.optional(
+      v.union(v.literal('CHECKING'), v.literal('SAVINGS'))
+    ),
+    bankRoutingNumber: v.optional(v.string()), // Should be encrypted
+    bankAccountNumber: v.optional(v.string()), // Should be encrypted
+    bankAccountVerified: v.optional(v.boolean()),
+
+    // === INSURANCE DETAILS ===
+    insurancePolicyNumber: v.optional(v.string()),
+    insuranceCertificateStorageId: v.optional(v.id('_storage')),
+    cargoInsuranceAmount: v.optional(v.number()),
+    liabilityInsuranceAmount: v.optional(v.number()),
+    autoInsuranceAmount: v.optional(v.number()),
+
+    // === PLATFORM BILLING (Future - Otoqa billing) ===
+    stripeCustomerId: v.optional(v.string()), // For platform subscriptions
+    stripeSubscriptionId: v.optional(v.string()),
+    platformBillingEmail: v.optional(v.string()),
+
+    // === PAYMENT PREFERENCES ===
+    preferredPaymentMethod: v.optional(
+      v.union(
+        v.literal('ACH'),
+        v.literal('CHECK'),
+        v.literal('WIRE'),
+        v.literal('QUICKPAY')
+      )
+    ),
+    paymentTerms: v.optional(v.string()), // Net15, Net30, etc.
+    factoringCompany: v.optional(v.string()), // If they use factoring
+    factoringStatus: v.optional(v.boolean()),
+    remitToAddress: v.optional(v.string()), // Where to send checks
+
+    // Timestamps
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org', ['organizationId'])
+    .index('by_stripe', ['stripeCustomerId']),
+
+  // ==========================================
+  // CARRIER MARKETPLACE
+  // ==========================================
+
+  // Broker-Carrier partnerships
+  // Links broker organizations to carrier organizations
+  // carrierOrgId is OPTIONAL - allows storing carrier info without carrier having an account
+  carrierPartnerships: defineTable({
+    // The broker who added this carrier
+    brokerOrgId: v.string(), // Broker's org ID (workosOrgId)
+
+    // The carrier's organization (OPTIONAL)
+    // null = carrier has no Otoqa account (reference only)
+    // set = carrier has account, partnership is linked
+    carrierOrgId: v.optional(v.string()),
+
+    // === CARRIER IDENTIFICATION ===
+    mcNumber: v.string(), // Always required (primary identifier)
+    usdotNumber: v.optional(v.string()),
+
+    // === CARRIER INFO (used when carrierOrgId is null) ===
+    // When carrierOrgId is set, this is cached/synced from carrier's org
+    carrierName: v.string(), // Company name
+    carrierDba: v.optional(v.string()),
+    contactFirstName: v.optional(v.string()),
+    contactLastName: v.optional(v.string()),
+    contactEmail: v.optional(v.string()),
+    contactPhone: v.optional(v.string()),
+
+    // Insurance (broker's record - may differ from carrier's actual)
+    insuranceProvider: v.optional(v.string()),
+    insuranceExpiration: v.optional(v.string()),
+    insuranceCoverageVerified: v.optional(v.boolean()),
+
+    // Address
+    addressLine: v.optional(v.string()),
+    addressLine2: v.optional(v.string()),
+    city: v.optional(v.string()),
+    state: v.optional(v.string()),
+    zip: v.optional(v.string()),
+    country: v.optional(v.string()),
+
+    // === PARTNERSHIP STATUS ===
+    status: v.union(
+      v.literal('ACTIVE'), // Ready to assign loads
+      v.literal('INVITED'), // Invite sent, awaiting carrier signup
+      v.literal('PENDING'), // Carrier has account, awaiting acceptance
+      v.literal('SUSPENDED'), // Temporarily paused
+      v.literal('TERMINATED') // Ended
+    ),
+
+    // === BROKER'S PREFERENCES FOR THIS CARRIER ===
+    defaultPaymentTerms: v.optional(v.string()), // Net15, Net30, QuickPay
+    internalNotes: v.optional(v.string()), // Broker's private notes
+    preferredLanes: v.optional(v.array(v.string())), // Regions/lanes this carrier is good for
+    rating: v.optional(v.number()), // Broker's internal rating (1-5)
+
+    // === CONTRACT RATE DEFAULTS ===
+    // Pre-negotiated rates for direct assignment (skips offer/accept flow)
+    defaultRate: v.optional(v.number()), // Base rate amount
+    defaultRateType: v.optional(
+      v.union(v.literal('FLAT'), v.literal('PER_MILE'), v.literal('PERCENTAGE'))
+    ),
+    defaultCurrency: v.optional(
+      v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))
+    ),
+
+    // === OWNER-OPERATOR FIELDS ===
+    // Broker's categorization - this carrier is a single-driver owner-operator
+    isOwnerOperator: v.optional(v.boolean()),
+    
+    // Owner-operator driver details (for unlinked carriers or broker override)
+    ownerDriverFirstName: v.optional(v.string()),
+    ownerDriverLastName: v.optional(v.string()),
+    ownerDriverPhone: v.optional(v.string()),
+    ownerDriverEmail: v.optional(v.string()),
+    ownerDriverDOB: v.optional(v.string()), // YYYY-MM-DD
+    ownerDriverLicenseNumber: v.optional(v.string()),
+    ownerDriverLicenseState: v.optional(v.string()),
+    ownerDriverLicenseClass: v.optional(v.string()),
+    ownerDriverLicenseExpiration: v.optional(v.string()), // YYYY-MM-DD
+    // Legacy field - some documents may have this from old code (not used in new code)
+    ownerDriverId: v.optional(v.id('drivers')),
+
+    // Timestamps
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    createdBy: v.string(),
+    linkedAt: v.optional(v.number()), // When carrierOrgId was linked
+  })
+    .index('by_broker', ['brokerOrgId', 'status'])
+    .index('by_carrier', ['carrierOrgId'])
+    .index('by_broker_mc', ['brokerOrgId', 'mcNumber']) // Unique per broker
+    .index('by_mc', ['mcNumber']), // Find all partnerships for an MC#
+
+  // Load assignments to carriers
+  // Connects broker's loads to carriers with negotiated rates
+  loadCarrierAssignments: defineTable({
+    // Broker's load
+    loadId: v.id('loadInformation'),
+    brokerOrgId: v.string(),
+
+    // Assigned carrier (can be linked or reference-only)
+    carrierOrgId: v.optional(v.string()), // null if carrier has no account
+    partnershipId: v.optional(v.id('carrierPartnerships')), // null for one-off
+
+    // Carrier info (cached/manual when carrierOrgId is null)
+    carrierName: v.optional(v.string()),
+    carrierMcNumber: v.optional(v.string()),
+
+    // The negotiated rate (what carrier gets paid - NOT visible to carrier's customer)
+    // Optional when usePayProfile is true
+    carrierRate: v.optional(v.number()),
+    carrierRateType: v.optional(v.union(
+      v.literal('FLAT'),
+      v.literal('PER_MILE'),
+      v.literal('PERCENTAGE')
+    )),
+    currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+
+    // Accessorials for carrier
+    carrierFuelSurcharge: v.optional(v.number()),
+    carrierAccessorials: v.optional(v.number()),
+    carrierTotalAmount: v.optional(v.number()), // Calculated total (optional when using pay profile)
+
+    // If true, carrier pay will be auto-calculated using their pay profile
+    usePayProfile: v.optional(v.boolean()),
+
+    // Status (supports multi-carrier offers)
+    status: v.union(
+      v.literal('OFFERED'), // Sent to carrier (can have multiple)
+      v.literal('ACCEPTED'), // Carrier accepted (still pending broker choice)
+      v.literal('AWARDED'), // Broker selected this carrier (winner)
+      v.literal('DECLINED'), // Carrier declined
+      v.literal('WITHDRAWN'), // Broker withdrew offer (chose another carrier)
+      v.literal('IN_PROGRESS'), // Load is being executed
+      v.literal('COMPLETED'), // Delivered
+      v.literal('CANCELED') // Canceled after award
+    ),
+
+    // === DRIVER ASSIGNMENT ===
+    // When carrierOrgId is set: assignedDriverId references real driver record
+    // When carrierOrgId is null: just store name/phone as text
+    assignedDriverId: v.optional(v.id('drivers')), // Real reference if carrier has account
+    assignedDriverName: v.optional(v.string()), // Cached/manual for display
+    assignedDriverPhone: v.optional(v.string()), // Cached/manual for communication
+
+    // === PAYMENT TRACKING (payments happen outside platform) ===
+    paymentStatus: v.optional(
+      v.union(
+        v.literal('PENDING'), // Load completed, awaiting payment
+        v.literal('INVOICED'), // Carrier sent invoice
+        v.literal('SCHEDULED'), // Payment scheduled
+        v.literal('PAID'), // Payment sent
+        v.literal('DISPUTED') // Payment dispute
+      )
+    ),
+    paymentMethod: v.optional(
+      v.union(
+        v.literal('ACH'),
+        v.literal('CHECK'),
+        v.literal('WIRE'),
+        v.literal('QUICKPAY')
+      )
+    ),
+    paymentReference: v.optional(v.string()), // Check #, ACH ref, etc.
+    paymentDate: v.optional(v.number()), // When payment was made
+    paymentAmount: v.optional(v.number()), // Actual amount paid (may differ)
+    paymentNotes: v.optional(v.string()),
+
+    // === CANCELLATION TRACKING ===
+    canceledAt: v.optional(v.number()),
+    canceledBy: v.optional(v.string()), // User ID who canceled
+    canceledByParty: v.optional(
+      v.union(v.literal('BROKER'), v.literal('CARRIER'))
+    ),
+    cancellationReason: v.optional(
+      v.union(
+        v.literal('DRIVER_UNAVAILABLE'),
+        v.literal('EQUIPMENT_ISSUE'),
+        v.literal('RATE_DISPUTE'),
+        v.literal('LOAD_CANCELED_BY_CUSTOMER'),
+        v.literal('WEATHER'),
+        v.literal('OTHER')
+      )
+    ),
+    cancellationNotes: v.optional(v.string()),
+
+    // Timestamps
+    offeredAt: v.number(),
+    acceptedAt: v.optional(v.number()),
+    awardedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+
+    createdBy: v.string(),
+  })
+    .index('by_load', ['loadId'])
+    .index('by_broker', ['brokerOrgId', 'status'])
+    .index('by_carrier', ['carrierOrgId', 'status'])
+    .index('by_carrier_payment', ['carrierOrgId', 'paymentStatus'])
+    .index('by_assigned_driver', ['assignedDriverId', 'status']),
+
+  // User identity linking (Clerk <-> WorkOS)
+  // Links mobile auth (Clerk) to web auth (WorkOS) via immutable user IDs
+  userIdentityLinks: defineTable({
+    // PRIMARY LINK: Immutable user IDs (stable even if email/phone changes)
+    clerkUserId: v.string(), // Clerk user ID (immutable)
+    workosUserId: v.optional(v.string()), // WorkOS user ID (added on upgrade)
+    workosOrgId: v.optional(v.string()), // WorkOS org ID
+
+    // METADATA: Contact info (can change, stored for reference only)
+    phone: v.optional(v.string()), // Current phone (snapshot)
+    email: v.optional(v.string()), // Current email (snapshot)
+
+    // Organization
+    organizationId: v.id('organizations'),
+
+    // Role in org
+    role: v.union(v.literal('OWNER'), v.literal('ADMIN'), v.literal('MEMBER')),
+
+    // Upgrade tracking
+    upgradedAt: v.optional(v.number()), // When WorkOS was provisioned
+
+    // Timestamps
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_clerk', ['clerkUserId'])
+    .index('by_workos', ['workosUserId'])
+    .index('by_org', ['organizationId']),
+
+  // Notification preferences for organizations
+  notificationPreferences: defineTable({
+    organizationId: v.id('organizations'),
+    userId: v.optional(v.string()), // For future multi-user support
+
+    // Channel preferences
+    pushEnabled: v.boolean(),
+    smsEnabled: v.boolean(),
+    emailEnabled: v.boolean(),
+
+    // What to notify
+    newLoadOffers: v.boolean(),
+    loadStatusChanges: v.boolean(),
+    paymentUpdates: v.boolean(),
+
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index('by_org', ['organizationId']),
+
+  // Carrier documents per load assignment
+  // Separate from broker documents - each party has their own
+  loadCarrierDocuments: defineTable({
+    assignmentId: v.id('loadCarrierAssignments'),
+    carrierOrgId: v.string(),
+
+    documentType: v.union(
+      v.literal('RATE_CONFIRMATION'), // Carrier's rate con
+      v.literal('BOL'), // Bill of lading
+      v.literal('POD'), // Proof of delivery
+      v.literal('LUMPER_RECEIPT'), // Lumper fees
+      v.literal('SCALE_TICKET'), // Weight ticket
+      v.literal('OTHER')
+    ),
+
+    storageId: v.id('_storage'),
+    fileName: v.string(),
+    uploadedBy: v.string(),
+    uploadedAt: v.number(),
+  })
+    .index('by_assignment', ['assignmentId'])
+    .index('by_carrier', ['carrierOrgId']),
 
   // User preferences for individual UI/UX settings
   userPreferences: defineTable({
@@ -93,8 +464,10 @@ export default defineSchema({
     lastName: v.string(),
     email: v.string(),
     phone: v.string(),
+    dateOfBirth: v.optional(v.string()), // Date of birth (YYYY-MM-DD)
 
     // License Information (non-sensitive)
+    licenseNumber: v.optional(v.string()), // Driver's license number
     licenseState: v.string(),
     licenseExpiration: v.string(),
     licenseClass: v.string(), // Class A, B, C
@@ -284,83 +657,6 @@ export default defineSchema({
     .index('by_vin', ['vin'])
     .index('by_status', ['status'])
     .index('by_deleted', ['isDeleted']),
-
-  carriers: defineTable({
-    // Company Information
-    companyName: v.string(),
-    dba: v.optional(v.string()),
-
-    // Contact Information
-    firstName: v.string(),
-    lastName: v.string(),
-    email: v.string(),
-    phoneNumber: v.string(),
-
-    // Address
-    addressLine: v.string(),
-    addressLine2: v.optional(v.string()),
-    city: v.optional(v.string()),
-    state: v.optional(v.string()),
-    zip: v.optional(v.string()),
-    country: v.optional(v.string()),
-
-    // Operating Authority
-    mcNumber: v.string(),
-    usdotNumber: v.optional(v.string()),
-    dotRegistration: v.optional(v.boolean()),
-    operatingAuthorityActive: v.optional(v.boolean()),
-    safetyRating: v.optional(v.string()), // Satisfactory, Conditional, Unsatisfactory, Not Rated
-
-    // Insurance (non-sensitive)
-    insuranceProvider: v.string(),
-    insuranceCoverage: v.boolean(),
-    insuranceExpiration: v.string(), // YYYY-MM-DD format
-
-    // Status & Metadata
-    internalId: v.string(),
-    status: v.string(), // Active, Inactive, Vetting, Suspended
-    currency: v.optional(v.string()),
-
-    // WorkOS Integration
-    workosOrgId: v.string(),
-    createdBy: v.string(),
-
-    // Timestamps
-    createdAt: v.number(),
-    updatedAt: v.number(),
-
-    // Soft Delete
-    isDeleted: v.optional(v.boolean()),
-    deletedAt: v.optional(v.number()),
-    deletedBy: v.optional(v.string()),
-  })
-    .index('by_organization', ['workosOrgId'])
-    .index('by_mcNumber', ['mcNumber'])
-    .index('by_internalId', ['internalId'])
-    .index('by_status', ['status'])
-    .index('by_deleted', ['isDeleted']),
-
-  carriers_sensitive_info: defineTable({
-    // Reference to carrier
-    carrierInternalId: v.string(), // References carriers._id
-
-    // Sensitive Financial Information
-    ein: v.optional(v.string()),
-    insuranceCargoAmount: v.optional(v.number()),
-    insuranceLiabilityAmount: v.optional(v.number()),
-    paymentTerms: v.optional(v.string()), // Net15, Net30, QuickPay
-    factoringStatus: v.optional(v.boolean()),
-    remitToAddress: v.optional(v.string()),
-
-    // Multi-tenant Organization
-    workosOrgId: v.string(),
-
-    // Timestamps
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index('by_carrier', ['carrierInternalId'])
-    .index('by_organization', ['workosOrgId']),
 
   customers: defineTable({
     // Customer Information
@@ -643,7 +939,9 @@ export default defineSchema({
 
     // Driver Pay Engine
     primaryDriverId: v.optional(v.id('drivers')),  // Read-only cache, updated by dispatchLegs
-    primaryCarrierId: v.optional(v.id('carriers')), // Read-only cache, updated by dispatchLegs
+    primaryCarrierPartnershipId: v.optional(v.id('carrierPartnerships')), // Read-only cache, updated by dispatchLegs
+    // Legacy field - existing data may have this from old carriers table (deprecated)
+    primaryCarrierId: v.optional(v.string()),
     isHazmat: v.optional(v.boolean()),             // Triggers ATTR_HAZMAT pay rule
     requiresTarp: v.optional(v.boolean()),         // Triggers ATTR_TARP pay rule
 
@@ -978,11 +1276,11 @@ export default defineSchema({
 
   /**
    * Carrier Profile Assignments
-   * Links Carriers (owner-ops, external) to Profiles
+   * Links Carrier Partnerships to Rate Profiles for pay calculation
    * Distance-based selection uses minThreshold on the profile's BASE rule
    */
   carrierProfileAssignments: defineTable({
-    carrierId: v.id('carriers'),
+    carrierPartnershipId: v.id('carrierPartnerships'),
     profileId: v.id('rateProfiles'),
     workosOrgId: v.string(),
 
@@ -1000,7 +1298,7 @@ export default defineSchema({
     thresholdValue: v.optional(v.number()), // Miles threshold for DISTANCE_THRESHOLD
     effectiveDate: v.optional(v.string()),  // When this assignment becomes active
   })
-    .index('by_carrier', ['carrierId'])
+    .index('by_carrier_partnership', ['carrierPartnershipId'])
     .index('by_org', ['workosOrgId']),
 
   /**
@@ -1060,7 +1358,10 @@ export default defineSchema({
   dispatchLegs: defineTable({
     loadId: v.id('loadInformation'),
     driverId: v.optional(v.id('drivers')),
-    carrierId: v.optional(v.id('carriers')),
+    // Carrier assignment - references carrierPartnerships for external carriers
+    carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
+    // Legacy field - existing data may have this from old carriers table (deprecated)
+    carrierId: v.optional(v.string()),
     truckId: v.optional(v.id('trucks')),
     trailerId: v.optional(v.id('trailers')),
 
@@ -1087,7 +1388,7 @@ export default defineSchema({
   })
     .index('by_load', ['loadId'])
     .index('by_driver', ['driverId', 'status'])
-    .index('by_carrier', ['carrierId', 'status'])
+    .index('by_carrier_partnership', ['carrierPartnershipId', 'status'])
     .index('by_org', ['workosOrgId']),
 
   /**
@@ -1146,6 +1447,101 @@ export default defineSchema({
     .index('by_org', ['workosOrgId'])
     .index('by_settlement', ['settlementId'])
     .index('by_driver_unassigned', ['driverId', 'settlementId']), // For gathering unassigned payables
+
+  /**
+   * Load Carrier Payables - Calculated carrier pay line items
+   * SINGLE SOURCE OF TRUTH for all carrier payments
+   * Mirrors loadPayables structure but for carrier partnerships
+   */
+  loadCarrierPayables: defineTable({
+    loadId: v.optional(v.id('loadInformation')),  // Optional - allows standalone adjustments
+    legId: v.optional(v.id('dispatchLegs')),
+    carrierPartnershipId: v.id('carrierPartnerships'),
+
+    description: v.string(),             // e.g., "Base Line Haul", "Fuel Surcharge"
+
+    // The Math
+    quantity: v.float64(),               // Miles, Hours, or 1 (Flat)
+    rate: v.float64(),
+    totalAmount: v.float64(),
+
+    // Source of Truth flags
+    sourceType: v.union(
+      v.literal('SYSTEM'),               // Calculated by Rules
+      v.literal('MANUAL')                // Added/Edited by User
+    ),
+
+    // If TRUE, Rules Engine will NEVER delete/overwrite this row
+    isLocked: v.boolean(),
+
+    // Settlement Assignment
+    settlementId: v.optional(v.id('carrierSettlements')), // Which pay period this belongs to
+
+    // Traceability
+    ruleId: v.optional(v.id('rateRules')),
+    warningMessage: v.optional(v.string()), // e.g., "Missing stop times"
+
+    // Approval timestamp
+    approvedAt: v.optional(v.float64()),
+
+    workosOrgId: v.string(),
+    createdAt: v.float64(),
+    createdBy: v.string(),
+    updatedAt: v.optional(v.float64()),
+  })
+    .index('by_load', ['loadId'])
+    .index('by_carrier_partnership', ['carrierPartnershipId'])
+    .index('by_leg', ['legId'])
+    .index('by_org', ['workosOrgId'])
+    .index('by_settlement', ['settlementId'])
+    .index('by_carrier_unassigned', ['carrierPartnershipId', 'settlementId']),
+
+  /**
+   * Carrier Settlements - Pay Period Statements for Carriers
+   * Groups carrier payables into pay periods for approval workflow
+   */
+  carrierSettlements: defineTable({
+    carrierPartnershipId: v.id('carrierPartnerships'),
+    workosOrgId: v.string(),
+
+    // Pay Period
+    periodStart: v.float64(),           // Unix timestamp
+    periodEnd: v.float64(),
+
+    // Settlement Status
+    status: v.union(
+      v.literal('DRAFT'),               // Building statement
+      v.literal('PENDING'),             // Awaiting approval
+      v.literal('APPROVED'),            // Locked for payment processing
+      v.literal('PAID'),                // Payment completed
+      v.literal('DISPUTED')             // Carrier disputed
+    ),
+
+    // Totals (denormalized for quick display)
+    totalGross: v.float64(),            // Sum of all payables
+    totalDeductions: v.optional(v.float64()),
+    totalNet: v.float64(),
+
+    // Payment Info
+    paidAt: v.optional(v.float64()),
+    paidBy: v.optional(v.string()),
+    paymentMethod: v.optional(v.string()),     // Check, ACH, Wire
+    paymentReference: v.optional(v.string()),  // Check #, Transaction ID
+
+    // Carrier Info (denormalized for historical record)
+    carrierName: v.optional(v.string()),
+    carrierMcNumber: v.optional(v.string()),
+
+    createdAt: v.float64(),
+    createdBy: v.string(),
+    updatedAt: v.optional(v.float64()),
+    approvedAt: v.optional(v.float64()),
+    approvedBy: v.optional(v.string()),
+  })
+    .index('by_carrier_partnership', ['carrierPartnershipId'])
+    .index('by_org', ['workosOrgId'])
+    .index('by_status', ['status'])
+    .index('by_period', ['periodStart', 'periodEnd']),
 
   /**
    * Driver Settlements - Pay Period Statements

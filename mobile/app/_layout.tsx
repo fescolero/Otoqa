@@ -18,6 +18,7 @@ import { useMutation, useAction } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
 import { uploadPODPhoto } from '../lib/s3-upload';
+import { LanguageProvider } from '../lib/LanguageContext';
 
 // ============================================
 // ROOT LAYOUT
@@ -169,55 +170,57 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <PostHogProvider 
-        apiKey="phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X"
-        options={{
-          host: 'https://us.i.posthog.com',
-          enableSessionReplay: true,
-          sessionReplayConfig: {
-            maskAllTextInputs: true,
-            maskAllImages: true,
-            captureLog: true,
-            captureNetworkTelemetry: true,
-            throttleDelayMs: 1000,
-          },
-          // Force events to be sent immediately in debug
-          flushAt: 1,
-          flushInterval: 1000,
-        }}
-      >
-        <PostHogDebug />
-        <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
-          <ClerkLoaded>
-            <ConvexProvider client={convex}>
-              <ConvexAuthProvider>
-                <QueryClientProvider client={queryClient}>
-                  <ConvexInitializer>
-                    <Stack
-                      screenOptions={{
-                        headerStyle: {
-                          backgroundColor: '#1a1a2e',
-                        },
-                        headerTintColor: '#fff',
-                        headerTitleStyle: {
-                          fontWeight: 'bold',
-                        },
-                        contentStyle: {
-                          backgroundColor: '#16213e',
-                        },
-                      }}
-                    >
-                      <Stack.Screen name="(auth)" options={{ headerShown: false }} />
-                      <Stack.Screen name="(app)" options={{ headerShown: false }} />
-                    </Stack>
-                    <StatusBar style="light" />
-                  </ConvexInitializer>
-                </QueryClientProvider>
-              </ConvexAuthProvider>
-            </ConvexProvider>
-          </ClerkLoaded>
-        </ClerkProvider>
-      </PostHogProvider>
+      <LanguageProvider>
+        <PostHogProvider 
+          apiKey="phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X"
+          options={{
+            host: 'https://us.i.posthog.com',
+            enableSessionReplay: true,
+            sessionReplayConfig: {
+              maskAllTextInputs: true,
+              maskAllImages: true,
+              captureLog: true,
+              captureNetworkTelemetry: true,
+              throttleDelayMs: 1000,
+            },
+            // Force events to be sent immediately in debug
+            flushAt: 1,
+            flushInterval: 1000,
+          }}
+        >
+          <PostHogDebug />
+          <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
+            <ClerkLoaded>
+              <ConvexProvider client={convex}>
+                <ConvexAuthProvider>
+                  <QueryClientProvider client={queryClient}>
+                    <ConvexInitializer>
+                      <Stack
+                        screenOptions={{
+                          headerStyle: {
+                            backgroundColor: '#1a1a2e',
+                          },
+                          headerTintColor: '#fff',
+                          headerTitleStyle: {
+                            fontWeight: 'bold',
+                          },
+                          contentStyle: {
+                            backgroundColor: '#16213e',
+                          },
+                        }}
+                      >
+                        <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+                        <Stack.Screen name="(app)" options={{ headerShown: false }} />
+                      </Stack>
+                      <StatusBar style="light" />
+                    </ConvexInitializer>
+                  </QueryClientProvider>
+                </ConvexAuthProvider>
+              </ConvexProvider>
+            </ClerkLoaded>
+          </ClerkProvider>
+        </PostHogProvider>
+      </LanguageProvider>
     </SafeAreaProvider>
   );
 }

@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { internalQuery } from './_generated/server';
+import { internalQuery, internalMutation } from './_generated/server';
 
 /**
  * Helper queries for Clerk sync actions
@@ -60,6 +60,136 @@ export const getDriverById = internalQuery({
       firstName: driver.firstName,
       lastName: driver.lastName,
     };
+  },
+});
+
+// ==========================================
+// CARRIER OWNER HELPERS
+// ==========================================
+
+/**
+ * Get all carrier owners for syncing to Clerk
+ * Returns identity links for CARRIER orgs with OWNER/ADMIN role
+ */
+export const getCarrierOwnersForSync = internalQuery({
+  args: {},
+  returns: v.array(
+    v.object({
+      phone: v.optional(v.string()),
+      role: v.string(),
+      organizationId: v.string(),
+      organizationName: v.string(),
+    })
+  ),
+  handler: async (ctx) => {
+    // Get all carrier organizations
+    const carrierOrgs = await ctx.db
+      .query('organizations')
+      .collect();
+
+    const carriers = carrierOrgs.filter(
+      (org) => org.orgType === 'CARRIER' || org.orgType === 'BROKER_CARRIER'
+    );
+
+    const results: Array<{
+      phone: string | undefined;
+      role: string;
+      organizationId: string;
+      organizationName: string;
+    }> = [];
+
+    // Get identity links for each carrier org
+    for (const carrier of carriers) {
+      const identityLinks = await ctx.db
+        .query('userIdentityLinks')
+        .withIndex('by_org', (q) => q.eq('organizationId', carrier._id))
+        .collect();
+
+      // Only get OWNER and ADMIN roles
+      const owners = identityLinks.filter(
+        (link) => link.role === 'OWNER' || link.role === 'ADMIN'
+      );
+
+      for (const owner of owners) {
+        results.push({
+          phone: owner.phone,
+          role: owner.role,
+          organizationId: carrier._id,
+          organizationName: carrier.name,
+        });
+      }
+    }
+
+    return results;
+  },
+});
+
+/**
+ * Get organization by ID
+ */
+export const getOrganizationById = internalQuery({
+  args: {
+    organizationId: v.id('organizations'),
+  },
+  returns: v.union(
+    v.object({
+      _id: v.id('organizations'),
+      name: v.string(),
+      orgType: v.optional(v.string()),
+    }),
+    v.null()
+  ),
+  handler: async (ctx, args) => {
+    const org = await ctx.db.get(args.organizationId);
+    if (!org) return null;
+
+    return {
+      _id: org._id,
+      name: org.name,
+      orgType: org.orgType,
+    };
+  },
+});
+
+/**
+ * Update userIdentityLinks record with actual Clerk user ID
+ * Used after creating a Clerk user to replace the pending_ placeholder
+ */
+export const updateIdentityLinkClerkUserId = internalMutation({
+  args: {
+    organizationId: v.id('organizations'),
+    phone: v.string(),
+    clerkUserId: v.string(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    // Find the userIdentityLinks record by org and phone
+    const normalizedPhone = args.phone.replace(/\D/g, '');
+    
+    const links = await ctx.db
+      .query('userIdentityLinks')
+      .withIndex('by_org', (q) => q.eq('organizationId', args.organizationId))
+      .collect();
+    
+    // Find matching link by phone
+    const link = links.find((l) => {
+      const linkPhone = l.phone?.replace(/\D/g, '');
+      return linkPhone && (linkPhone === normalizedPhone || linkPhone.endsWith(normalizedPhone) || normalizedPhone.endsWith(linkPhone));
+    });
+    
+    if (!link) {
+      console.log(`No userIdentityLinks record found for org ${args.organizationId} with phone ${args.phone}`);
+      return false;
+    }
+    
+    // Update with actual Clerk user ID
+    await ctx.db.patch(link._id, {
+      clerkUserId: args.clerkUserId,
+      updatedAt: Date.now(),
+    });
+    
+    console.log(`Updated userIdentityLinks ${link._id} with clerkUserId ${args.clerkUserId}`);
+    return true;
   },
 });
 

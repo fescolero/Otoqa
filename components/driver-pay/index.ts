@@ -1,4 +1,5 @@
 export { DriverPaySection } from './DriverPaySection';
+export { CarrierPaySection } from './CarrierPaySection';
 export { PayLineItemsTable } from './PayLineItemsTable';
 export { AddManualRateModal } from './AddManualRateModal';
 export { PayProfileEditor } from './PayProfileEditor';

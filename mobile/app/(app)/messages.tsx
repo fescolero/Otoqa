@@ -3,6 +3,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, spacing } from '../../lib/theme';
+import { useLanguage } from '../../lib/LanguageContext';
 
 // ============================================
 // MESSAGES SCREEN
@@ -10,16 +11,18 @@ import { colors, typography, spacing } from '../../lib/theme';
 // ============================================
 
 export default function MessagesScreen() {
+  const { t } = useLanguage();
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Messages</Text>
+        <Text style={styles.headerTitle}>{t('messages.title')}</Text>
       </View>
       <View style={styles.content}>
         <Ionicons name="chatbubbles-outline" size={64} color={colors.foregroundMuted} />
-        <Text style={styles.title}>Coming Soon</Text>
+        <Text style={styles.title}>{t('messages.comingSoon')}</Text>
         <Text style={styles.description}>
-          Communicate with dispatch and receive important updates directly in the app.
+          {t('messages.comingSoonDesc')}
         </Text>
       </View>
     </SafeAreaView>
@@ -34,8 +37,6 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
   },
   headerTitle: {
     fontSize: typography['2xl'],

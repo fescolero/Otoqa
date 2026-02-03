@@ -89,8 +89,10 @@ export const updateOrgSettings = mutation({
 
     if (!existing) {
       // Create new organization record with defaults
+      // Web TMS users are BROKER type by default (WorkOS auth)
       const orgId = await ctx.db.insert('organizations', {
         workosOrgId: args.workosOrgId,
+        orgType: 'BROKER', // Default for web TMS (WorkOS) users
         name: args.updates.name ?? 'Unnamed Organization',
         industry: args.updates.industry,
         domain: args.updates.domain,

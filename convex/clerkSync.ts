@@ -398,3 +398,331 @@ export const deleteClerkUser = internalAction({
     }
   },
 });
+
+/**
+ * Delete a Clerk user by their Clerk user ID
+ * Used when permanently deleting carrier data
+ */
+export const deleteClerkUserById = internalAction({
+  args: {
+    clerkUserId: v.string(),
+    reason: v.optional(v.string()),
+  },
+  returns: v.union(
+    v.object({ success: v.literal(true) }),
+    v.object({ success: v.literal(false), error: v.string() })
+  ),
+  handler: async (ctx, args): Promise<DeleteResult> => {
+    const clerkSecretKey = process.env.CLERK_SECRET_KEY;
+    if (!clerkSecretKey) {
+      return { success: false, error: 'CLERK_SECRET_KEY not configured' };
+    }
+
+    try {
+      console.log(`Deleting Clerk user ${args.clerkUserId}. Reason: ${args.reason || 'Not specified'}`);
+      
+      // Delete the user directly by ID
+      const deleteResponse = await fetch(`https://api.clerk.com/v1/users/${args.clerkUserId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${clerkSecretKey}`,
+        },
+      });
+
+      if (!deleteResponse.ok) {
+        // If 404, user already doesn't exist
+        if (deleteResponse.status === 404) {
+          console.log(`Clerk user ${args.clerkUserId} already deleted or doesn't exist`);
+          return { success: true };
+        }
+        const errorData = await deleteResponse.json();
+        return { success: false, error: errorData.errors?.[0]?.message || 'Failed to delete user' };
+      }
+
+      console.log(`Successfully deleted Clerk user ${args.clerkUserId}`);
+      return { success: true };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { success: false, error: errorMessage };
+    }
+  },
+});
+
+// ==========================================
+// CARRIER OWNER SYNC
+// ==========================================
+
+// Type for carrier owner info
+type CarrierOwnerInfo = {
+  phone: string;
+  firstName: string;
+  lastName: string;
+  email?: string;
+  organizationName: string;
+};
+
+/**
+ * Look up a Clerk user by phone number
+ * Returns the user ID if found, null otherwise
+ */
+export const findClerkUserByPhone = internalAction({
+  args: {
+    phone: v.string(),
+  },
+  returns: v.union(v.string(), v.null()),
+  handler: async (_ctx, args): Promise<string | null> => {
+    const clerkSecretKey = process.env.CLERK_SECRET_KEY;
+    if (!clerkSecretKey) {
+      console.error('CLERK_SECRET_KEY not configured');
+      return null;
+    }
+
+    const e164Phone = normalizePhoneToE164(args.phone);
+    console.log(`Looking up Clerk user by phone: ${args.phone} -> ${e164Phone}`);
+
+    try {
+      // Search for user by phone number
+      const response = await fetch(`https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${clerkSecretKey}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        console.error(`Failed to search Clerk users: ${response.status}`);
+        return null;
+      }
+
+      const users = await response.json();
+      
+      if (users && users.length > 0) {
+        console.log(`Found Clerk user ${users[0].id} for phone ${e164Phone}`);
+        return users[0].id;
+      }
+
+      console.log(`No Clerk user found for phone ${e164Phone}`);
+      return null;
+    } catch (error) {
+      console.error(`Error searching Clerk users: ${error}`);
+      return null;
+    }
+  },
+});
+
+/**
+ * Create a Clerk user for a carrier owner
+ * Called when a carrier organization is created or owner is added
+ */
+export const createClerkUserForCarrierOwner = internalAction({
+  args: {
+    phone: v.string(),
+    firstName: v.string(),
+    lastName: v.string(),
+    email: v.optional(v.string()),
+  },
+  returns: v.union(
+    v.object({
+      success: v.literal(true),
+      clerkUserId: v.string(),
+    }),
+    v.object({
+      success: v.literal(false),
+      error: v.string(),
+    })
+  ),
+  handler: async (ctx, args): Promise<CreateResult> => {
+    const clerkSecretKey = process.env.CLERK_SECRET_KEY;
+    if (!clerkSecretKey) {
+      console.error('CLERK_SECRET_KEY not configured - carrier owner will not be able to sign in to mobile app');
+      return { success: false, error: 'CLERK_SECRET_KEY not configured' };
+    }
+
+    // Convert phone to E.164 format for Clerk
+    const e164Phone = normalizePhoneToE164(args.phone);
+    console.log(`Creating Clerk user for carrier owner: ${args.firstName} ${args.lastName}, phone: ${args.phone} -> ${e164Phone}`);
+
+    try {
+      // Note: Only include phone_number - email_address requires Clerk dashboard settings
+      // to be enabled, and carrier owners use phone-based auth anyway
+      const requestBody: Record<string, unknown> = {
+        phone_number: [e164Phone],
+        first_name: args.firstName,
+        last_name: args.lastName,
+        skip_password_requirement: true,
+      };
+
+      const response = await fetch('https://api.clerk.com/v1/users', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${clerkSecretKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      const responseData = await response.json();
+
+      if (!response.ok) {
+        // Check if user already exists (this is fine)
+        if (responseData.errors?.[0]?.code === 'form_identifier_exists') {
+          console.log(`Clerk user already exists for phone ${e164Phone}`);
+          return { success: true, clerkUserId: 'existing' };
+        }
+        
+        const errorMessage = responseData.errors?.[0]?.message || responseData.errors?.[0]?.long_message || 'Failed to create Clerk user';
+        console.error(`Failed to create Clerk user for carrier owner: ${errorMessage}`, responseData);
+        return { success: false, error: errorMessage };
+      }
+
+      console.log(`Successfully created Clerk user ${responseData.id} for carrier owner ${args.firstName} ${args.lastName}`);
+      return { success: true, clerkUserId: responseData.id };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`Error creating Clerk user for carrier owner: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  },
+});
+
+// Type for carrier owner sync results
+type CarrierOwnerSyncResults = {
+  total: number;
+  created: number;
+  existing: number;
+  skipped: number;
+  failed: number;
+  errors: string[];
+};
+
+/**
+ * Bulk create Clerk users for all existing carrier owners
+ * Use this to sync existing carrier organizations' owners to Clerk
+ */
+export const syncExistingCarrierOwnersToClerk = internalAction({
+  args: {},
+  returns: v.object({
+    total: v.number(),
+    created: v.number(),
+    existing: v.number(),
+    skipped: v.number(),
+    failed: v.number(),
+    errors: v.array(v.string()),
+  }),
+  handler: async (ctx): Promise<CarrierOwnerSyncResults> => {
+    // Get all carrier owner identity links with phone numbers
+    const identityLinks: Array<{
+      phone: string | undefined;
+      role: string;
+      organizationId: string;
+      organizationName: string;
+    }> = await ctx.runQuery(internal.clerkSyncHelpers.getCarrierOwnersForSync, {});
+
+    const results: CarrierOwnerSyncResults = {
+      total: identityLinks.length,
+      created: 0,
+      existing: 0,
+      skipped: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    for (const owner of identityLinks) {
+      // Skip if no phone number
+      if (!owner.phone) {
+        results.skipped++;
+        results.errors.push(`${owner.organizationName}: No phone number on file`);
+        continue;
+      }
+
+      const result: CreateResult = await ctx.runAction(internal.clerkSync.createClerkUserForCarrierOwner, {
+        phone: owner.phone,
+        firstName: owner.organizationName.split(' ')[0] || 'Owner', // Use org name as fallback
+        lastName: owner.organizationName.split(' ').slice(1).join(' ') || 'Admin',
+      });
+
+      if (result.success) {
+        if (result.clerkUserId === 'existing') {
+          results.existing++;
+        } else {
+          results.created++;
+        }
+      } else {
+        results.failed++;
+        results.errors.push(`${owner.organizationName} (${owner.phone}): ${result.error}`);
+      }
+    }
+
+    return results;
+  },
+});
+
+/**
+ * Create Clerk user for a single carrier owner by organization ID
+ */
+export const syncSingleCarrierOwnerToClerk = internalAction({
+  args: {
+    organizationId: v.id('organizations'),
+    phone: v.string(),
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+    email: v.optional(v.string()),
+  },
+  returns: v.union(
+    v.object({
+      success: v.literal(true),
+      clerkUserId: v.string(),
+    }),
+    v.object({
+      success: v.literal(false),
+      error: v.string(),
+    })
+  ),
+  handler: async (ctx, args): Promise<CreateResult> => {
+    // Get org info for name fallback
+    const org = await ctx.runQuery(internal.clerkSyncHelpers.getOrganizationById, {
+      organizationId: args.organizationId,
+    });
+
+    if (!org) {
+      return { success: false, error: 'Organization not found' };
+    }
+
+    const firstName = args.firstName || org.name.split(' ')[0] || 'Owner';
+    const lastName = args.lastName || org.name.split(' ').slice(1).join(' ') || 'Admin';
+
+    const result: CreateResult = await ctx.runAction(internal.clerkSync.createClerkUserForCarrierOwner, {
+      phone: args.phone,
+      firstName,
+      lastName,
+      email: args.email,
+    });
+    
+    // Update userIdentityLinks with actual Clerk user ID
+    if (result.success && result.clerkUserId) {
+      let clerkUserId = result.clerkUserId;
+      
+      // If user already exists, look up their actual ID
+      if (clerkUserId === 'existing') {
+        const existingUserId = await ctx.runAction(internal.clerkSync.findClerkUserByPhone, {
+          phone: args.phone,
+        });
+        if (existingUserId) {
+          clerkUserId = existingUserId;
+        }
+      }
+      
+      // Update the record if we have a real Clerk user ID
+      if (clerkUserId && clerkUserId !== 'existing') {
+        await ctx.runMutation(internal.clerkSyncHelpers.updateIdentityLinkClerkUserId, {
+          organizationId: args.organizationId,
+          phone: args.phone,
+          clerkUserId: clerkUserId,
+        });
+      }
+    }
+    
+    return result;
+  },
+});

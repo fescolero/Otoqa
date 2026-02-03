@@ -52,7 +52,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { Id } from '@/convex/_generated/dataModel';
-import { DriverPaySection } from '@/components/driver-pay';
+import { DriverPaySection, CarrierPaySection } from '@/components/driver-pay';
 import { LiveRouteMap } from '@/components/dispatch/live-route-map';
 import { formatTimeWindow } from '@/lib/format-date-timezone';
 import {
@@ -876,14 +876,21 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
           </Card>
 
           {/* ============================================================
-              DRIVER PAY SECTION
+              PAY SECTION - Shows Carrier Pay or Driver Pay based on assignment
               ============================================================ */}
           <div ref={paySectionRef}>
-            <DriverPaySection
-              loadId={loadId as Id<'loadInformation'>}
-              organizationId={organizationId}
-              userId={userId}
-            />
+            {loadData.assignedCarrier && !loadData.assignedDriver ? (
+              <CarrierPaySection
+                loadId={loadId as Id<'loadInformation'>}
+                organizationId={organizationId}
+              />
+            ) : (
+              <DriverPaySection
+                loadId={loadId as Id<'loadInformation'>}
+                organizationId={organizationId}
+                userId={userId}
+              />
+            )}
           </div>
         </div>
 
@@ -1070,12 +1077,22 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
                     </div>
                   )}
                   {loadData.assignedCarrier && (
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Carrier</span>
-                      <span className="font-medium truncate max-w-[140px]">
-                        {loadData.assignedCarrier.companyName}
-                      </span>
-                    </div>
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Carrier</span>
+                        <span className="font-medium truncate max-w-[140px]">
+                          {loadData.assignedCarrier.companyName}
+                        </span>
+                      </div>
+                      {(loadData.assignedCarrier as { driverName?: string }).driverName && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Carrier Driver</span>
+                          <span className="font-medium truncate max-w-[140px]">
+                            {(loadData.assignedCarrier as { driverName?: string }).driverName}
+                          </span>
+                        </div>
+                      )}
+                    </>
                   )}
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Truck</span>

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,20 +6,50 @@ import {
   StyleSheet,
   RefreshControl,
   TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
+import * as Location from 'expo-location';
 import { useMyLoads } from '../../lib/hooks/useMyLoads';
 import { useNetworkStatus } from '../../lib/hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../lib/hooks/useOfflineQueue';
 import { useDriver } from './_layout';
 import { colors, typography, spacing, borderRadius, shadows } from '../../lib/theme';
+import { useLanguage } from '../../lib/LanguageContext';
 
 // ============================================
 // HOME SCREEN - Dark Logistics Design
 // Professional Driver Dashboard
 // ============================================
+
+// Weather types
+interface WeatherData {
+  temperature: number;
+  description: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  iconColor: string;
+}
+
+// Weather code mapping to icons and descriptions
+const getWeatherInfo = (code: number): { description: string; icon: keyof typeof Ionicons.glyphMap; iconColor: string } => {
+  // WMO Weather interpretation codes
+  if (code === 0) return { description: 'Clear', icon: 'sunny', iconColor: '#FFB800' };
+  if (code === 1) return { description: 'Mostly Clear', icon: 'sunny', iconColor: '#FFB800' };
+  if (code === 2) return { description: 'Partly Cloudy', icon: 'partly-sunny', iconColor: '#FFB800' };
+  if (code === 3) return { description: 'Overcast', icon: 'cloudy', iconColor: '#9CA3AF' };
+  if (code >= 45 && code <= 48) return { description: 'Foggy', icon: 'cloud', iconColor: '#9CA3AF' };
+  if (code >= 51 && code <= 55) return { description: 'Drizzle', icon: 'rainy', iconColor: '#60A5FA' };
+  if (code >= 56 && code <= 57) return { description: 'Freezing Drizzle', icon: 'rainy', iconColor: '#60A5FA' };
+  if (code >= 61 && code <= 65) return { description: 'Rain', icon: 'rainy', iconColor: '#3B82F6' };
+  if (code >= 66 && code <= 67) return { description: 'Freezing Rain', icon: 'rainy', iconColor: '#3B82F6' };
+  if (code >= 71 && code <= 77) return { description: 'Snow', icon: 'snow', iconColor: '#E5E7EB' };
+  if (code >= 80 && code <= 82) return { description: 'Rain Showers', icon: 'rainy', iconColor: '#3B82F6' };
+  if (code >= 85 && code <= 86) return { description: 'Snow Showers', icon: 'snow', iconColor: '#E5E7EB' };
+  if (code >= 95 && code <= 99) return { description: 'Thunderstorm', icon: 'thunderstorm', iconColor: '#6366F1' };
+  return { description: 'Unknown', icon: 'cloud', iconColor: '#9CA3AF' };
+};
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -27,7 +57,69 @@ export default function HomeScreen() {
   const { loads, isLoading, refetch, isRefetching, lastSyncTime } = useMyLoads(driverId);
   const { isConnected } = useNetworkStatus();
   const { pendingCount } = useOfflineQueue();
+  const { t, locale } = useLanguage();
   const [showCompleted, setShowCompleted] = useState(false);
+
+  // Weather state
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(true);
+
+  // Fetch weather based on user location
+  const fetchWeather = useCallback(async () => {
+    try {
+      setWeatherLoading(true);
+      
+      // Request location permission
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        console.log('Location permission denied');
+        setWeatherLoading(false);
+        return;
+      }
+      
+      // Get current location
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      
+      const { latitude, longitude } = location.coords;
+      
+      // Fetch weather from Open-Meteo API (free, no API key required)
+      const response = await fetch(
+        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`
+      );
+      
+      if (!response.ok) {
+        throw new Error('Weather fetch failed');
+      }
+      
+      const data = await response.json();
+      
+      if (data.current) {
+        const weatherInfo = getWeatherInfo(data.current.weather_code);
+        setWeather({
+          temperature: Math.round(data.current.temperature_2m),
+          description: weatherInfo.description,
+          icon: weatherInfo.icon,
+          iconColor: weatherInfo.iconColor,
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching weather:', error);
+    } finally {
+      setWeatherLoading(false);
+    }
+  }, []);
+
+  // Fetch weather on mount
+  useEffect(() => {
+    fetchWeather();
+  }, [fetchWeather]);
+
+  // Enhanced refetch that includes weather
+  const handleRefresh = useCallback(async () => {
+    await Promise.all([refetch(), fetchWeather()]);
+  }, [refetch, fetchWeather]);
 
   // Separate active, upcoming, and completed loads
   const { activeLoad, scheduledLoads, completedLoads } = useMemo(() => {
@@ -65,7 +157,7 @@ export default function HomeScreen() {
   // Format date for header
   const formatHeaderDate = () => {
     const now = new Date();
-    return now.toLocaleDateString('en-US', { 
+    return now.toLocaleDateString(locale === 'es' ? 'es-ES' : 'en-US', { 
       month: 'long', 
       day: 'numeric', 
       year: 'numeric' 
@@ -188,7 +280,7 @@ export default function HomeScreen() {
       {isConnected === false && (
         <View style={styles.offlineBanner}>
           <Ionicons name="wifi-outline" size={16} color={colors.background} />
-          <Text style={styles.offlineBannerText}>Offline Mode — Showing cached data</Text>
+          <Text style={styles.offlineBannerText}>{locale === 'es' ? 'Modo sin conexión — Mostrando datos en caché' : 'Offline Mode — Showing cached data'}</Text>
         </View>
       )}
 
@@ -199,7 +291,7 @@ export default function HomeScreen() {
         refreshControl={
           <RefreshControl
             refreshing={isRefetching}
-            onRefresh={refetch}
+            onRefresh={handleRefresh}
             tintColor={colors.primary}
             colors={[colors.primary]}
           />
@@ -210,34 +302,48 @@ export default function HomeScreen() {
           <View style={styles.dateContainer}>
             <Ionicons name="calendar" size={36} color={colors.primary} />
             <View style={styles.dateTextContainer}>
-              <Text style={styles.todayLabel}>Today</Text>
+              <Text style={styles.todayLabel}>{locale === 'es' ? 'Hoy' : 'Today'}</Text>
               <Text style={styles.dateText}>{formatHeaderDate()}</Text>
             </View>
           </View>
           <View style={styles.headerDivider} />
           <View style={styles.weatherContainer}>
-            <Ionicons name="sunny" size={28} color={colors.secondary} />
-            <View>
-              <Text style={styles.weatherLabel}>Weather</Text>
-              <Text style={styles.weatherText}>72°F</Text>
-            </View>
+            {weatherLoading ? (
+              <ActivityIndicator size="small" color={colors.foregroundMuted} />
+            ) : weather ? (
+              <>
+                <Ionicons name={weather.icon} size={28} color={weather.iconColor} />
+                <View>
+                  <Text style={styles.weatherLabel}>{weather.description}</Text>
+                  <Text style={styles.weatherText}>{weather.temperature}°F</Text>
+                </View>
+              </>
+            ) : (
+              <>
+                <Ionicons name="cloud-offline" size={28} color={colors.foregroundMuted} />
+                <View>
+                  <Text style={styles.weatherLabel}>{locale === 'es' ? 'Clima' : 'Weather'}</Text>
+                  <Text style={styles.weatherText}>N/A</Text>
+                </View>
+              </>
+            )}
           </View>
         </View>
 
         {/* Section Header */}
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Scheduled Loads</Text>
+          <Text style={styles.sectionTitle}>{locale === 'es' ? 'Cargas Programadas' : 'Scheduled Loads'}</Text>
           <View style={styles.sectionActions}>
             <TouchableOpacity style={styles.actionButton}>
               <Feather name="filter" size={16} color={colors.foreground} />
-              <Text style={styles.actionText}>Sort</Text>
+              <Text style={styles.actionText}>{locale === 'es' ? 'Ordenar' : 'Sort'}</Text>
             </TouchableOpacity>
             <TouchableOpacity 
               style={styles.actionButton}
               onPress={() => setShowCompleted(!showCompleted)}
             >
               <Ionicons name="checkmark-circle" size={18} color={colors.foreground} />
-              <Text style={styles.actionText}>Completed</Text>
+              <Text style={styles.actionText}>{locale === 'es' ? 'Completadas' : 'Completed'}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -247,7 +353,9 @@ export default function HomeScreen() {
           <View style={styles.syncBanner}>
             <Ionicons name="cloud-upload-outline" size={16} color={colors.foregroundMuted} />
             <Text style={styles.syncText}>
-              {pendingCount} update{pendingCount > 1 ? 's' : ''} pending sync
+              {locale === 'es' 
+                ? `${pendingCount} actualización${pendingCount > 1 ? 'es' : ''} pendiente${pendingCount > 1 ? 's' : ''} de sincronizar`
+                : `${pendingCount} update${pendingCount > 1 ? 's' : ''} pending sync`}
             </Text>
           </View>
         )}
@@ -266,12 +374,12 @@ export default function HomeScreen() {
               <View style={styles.currentLoadLeft}>
                 <MaterialCommunityIcons name="truck-delivery" size={32} color={colors.primaryForeground} />
                 <View>
-                  <Text style={styles.currentLoadLabel}>Current Load</Text>
+                  <Text style={styles.currentLoadLabel}>{locale === 'es' ? 'Carga Actual' : 'Current Load'}</Text>
                   <Text style={styles.currentLoadId}>#{activeLoad.internalId}</Text>
                 </View>
               </View>
               <View style={styles.currentLoadRight}>
-                <Text style={styles.currentLoadExpectedLabel}>Expected</Text>
+                <Text style={styles.currentLoadExpectedLabel}>{locale === 'es' ? 'Esperado' : 'Expected'}</Text>
                 <Text style={styles.currentLoadTime}>
                   {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
                 </Text>
@@ -310,7 +418,7 @@ export default function HomeScreen() {
                   )}
                 </View>
                 <View style={styles.statusBadge}>
-                  <Text style={styles.statusBadgeText}>Scheduled</Text>
+                  <Text style={styles.statusBadgeText}>{locale === 'es' ? 'Programada' : 'Scheduled'}</Text>
                 </View>
               </View>
 
@@ -319,8 +427,8 @@ export default function HomeScreen() {
                 <View style={styles.multiDayBanner}>
                   <Ionicons name="calendar-outline" size={16} color={colors.chart3} />
                   <View>
-                    <Text style={styles.multiDayTitle}>Multi-Day Load</Text>
-                    <Text style={styles.multiDayText}>Continues into {multiDayDate}</Text>
+                    <Text style={styles.multiDayTitle}>{locale === 'es' ? 'Carga Multi-Día' : 'Multi-Day Load'}</Text>
+                    <Text style={styles.multiDayText}>{locale === 'es' ? `Continúa hasta ${multiDayDate}` : `Continues into ${multiDayDate}`}</Text>
                   </View>
                 </View>
               )}
@@ -328,13 +436,13 @@ export default function HomeScreen() {
               {/* Time and Packages */}
               <View style={styles.loadCardStats}>
                 <View style={styles.statLeft}>
-                  <Text style={styles.statLabel}>Pickup</Text>
+                  <Text style={styles.statLabel}>{t('driverHome.pickup')}</Text>
                   <Text style={styles.statValue}>
                     {formatDateTime(load.firstPickup?.windowBeginDate, load.firstPickup?.windowBeginTime) || 'TBD'}
                   </Text>
                 </View>
                 <View style={styles.statRight}>
-                  <Text style={styles.statLabel}>Stops</Text>
+                  <Text style={styles.statLabel}>{locale === 'es' ? 'Paradas' : 'Stops'}</Text>
                   <Text style={styles.statValueMono}>{load.stopCount || '—'}</Text>
                 </View>
               </View>
@@ -345,7 +453,7 @@ export default function HomeScreen() {
                 <View style={styles.addressRow}>
                   <Ionicons name="location" size={16} color={colors.chart4} style={{ marginTop: 2 }} />
                   <View style={styles.addressContent}>
-                    <Text style={styles.addressLabel}>Pickup</Text>
+                    <Text style={styles.addressLabel}>{t('driverHome.pickup')}</Text>
                     <Text style={styles.addressText}>{getPickupAddress(load)}</Text>
                   </View>
                 </View>
@@ -354,10 +462,10 @@ export default function HomeScreen() {
                 <View style={styles.addressRow}>
                   <Ionicons name="flag" size={16} color={colors.destructive} style={{ marginTop: 2 }} />
                   <View style={styles.addressContent}>
-                    <Text style={styles.addressLabel}>Last Delivery</Text>
+                    <Text style={styles.addressLabel}>{locale === 'es' ? 'Última Entrega' : 'Last Delivery'}</Text>
                     <Text style={styles.addressText}>{getDeliveryAddress(load)}</Text>
                     {expectedDelivery && (
-                      <Text style={styles.expectedText}>Expected: {expectedDelivery}</Text>
+                      <Text style={styles.expectedText}>{locale === 'es' ? 'Esperado' : 'Expected'}: {expectedDelivery}</Text>
                     )}
                   </View>
                 </View>
@@ -368,10 +476,14 @@ export default function HomeScreen() {
 
         {/* No Loads State */}
         {!isLoading && !activeLoad && scheduledLoads.length === 0 && (
-          <View style={styles.emptyState}>
-            <Ionicons name="clipboard-outline" size={64} color={colors.foregroundMuted} />
-            <Text style={styles.emptyTitle}>No Scheduled Loads</Text>
-            <Text style={styles.emptyText}>Pull down to refresh</Text>
+          <View style={styles.emptyStateCard}>
+            <View style={styles.emptyStateIconContainer}>
+              <Ionicons name="clipboard-outline" size={32} color={colors.foregroundMuted} />
+            </View>
+            <Text style={styles.emptyStateTitle}>{t('driverHome.noActiveLoads')}</Text>
+            <Text style={styles.emptyStateSubtitle}>
+              {t('driverHome.noActiveLoadsDesc')}
+            </Text>
           </View>
         )}
 
@@ -380,7 +492,7 @@ export default function HomeScreen() {
           <>
             <View style={styles.completedHeader}>
               <Text style={styles.completedHeaderText}>
-                Completed ({completedLoads.length})
+                {locale === 'es' ? 'Completadas' : 'Completed'} ({completedLoads.length})
               </Text>
             </View>
             {completedLoads.map((load) => (
@@ -611,7 +723,7 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   loadCardTitle: {
-    fontSize: typography.sm,
+    fontSize: typography.base,
     fontWeight: typography.semibold,
     color: colors.foreground,
   },
@@ -680,12 +792,12 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   statLabel: {
-    fontSize: typography.xs,
+    fontSize: typography.sm,
     color: colors.foregroundMuted,
     marginBottom: 2,
   },
   statValue: {
-    fontSize: typography.base,
+    fontSize: typography.lg,
     fontWeight: typography.semibold,
     color: colors.foreground,
   },
@@ -696,7 +808,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
   },
   statValueMono: {
-    fontSize: typography.base,
+    fontSize: typography.lg,
     fontWeight: typography.bold,
     color: colors.foreground,
     fontFamily: 'Courier',
@@ -718,12 +830,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   addressLabel: {
-    fontSize: typography.xs,
+    fontSize: typography.sm,
     color: colors.foregroundMuted,
     marginBottom: 2,
   },
   addressText: {
-    fontSize: typography.sm,
+    fontSize: typography.base,
     fontWeight: typography.medium,
     color: colors.foreground,
   },
@@ -734,22 +846,38 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
-  // Empty State
-  emptyState: {
+  // Empty State Card
+  emptyStateCard: {
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.xl,
+    padding: spacing.xl,
+    paddingVertical: spacing.xl * 2,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
+    ...shadows.md,
   },
-  emptyTitle: {
+  emptyStateIconContainer: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.muted,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.lg,
+  },
+  emptyStateTitle: {
     fontSize: typography.lg,
     fontWeight: typography.semibold,
     color: colors.foreground,
-    marginTop: 16,
-    marginBottom: 8,
+    marginBottom: spacing.sm,
+    textAlign: 'center',
   },
-  emptyText: {
-    fontSize: typography.base,
+  emptyStateSubtitle: {
+    fontSize: typography.sm,
     color: colors.foregroundMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+    paddingHorizontal: spacing.lg,
   },
 
   // Completed Section
