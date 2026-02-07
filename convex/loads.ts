@@ -555,6 +555,7 @@ export const createLoad = mutation({
   args: {
     workosOrgId: v.string(),
     createdBy: v.string(),
+    createdByName: v.optional(v.string()), // For auto-assignment audit
     internalId: v.string(),
     orderNumber: v.string(),
     poNumber: v.optional(v.string()),
@@ -575,6 +576,12 @@ export const createLoad = mutation({
     importedMiles: v.optional(v.number()),
     googleMiles: v.optional(v.number()),
     manualMiles: v.optional(v.number()),
+    // Route identification (manual entry)
+    parsedHcr: v.optional(v.string()),
+    parsedTripNumber: v.optional(v.string()),
+    // Direct assignment (create dispatch leg immediately)
+    assignDriverId: v.optional(v.id('drivers')),
+    assignCarrierId: v.optional(v.id('carrierPartnerships')),
     stops: v.array(
       v.object({
         sequenceNumber: v.number(),
@@ -623,6 +630,10 @@ export const createLoad = mutation({
       args.googleMiles
     );
 
+    // HCR/Trip for route identification
+    const parsedHcr = args.parsedHcr;
+    const parsedTripNumber = args.parsedTripNumber;
+
     const loadId = await ctx.db.insert('loadInformation', {
       workosOrgId: args.workosOrgId,
       createdBy: args.createdBy,
@@ -639,9 +650,9 @@ export const createLoad = mutation({
       externalLoadId: undefined,
       lastExternalUpdatedAt: undefined,
 
-      // Manual loads usually don't have HCR match
-      parsedHcr: undefined,
-      parsedTripNumber: undefined,
+      // Route identification (for auto-assignment)
+      parsedHcr,
+      parsedTripNumber,
 
       customerId: args.customerId,
       customerName: customer.name,
@@ -711,6 +722,54 @@ export const createLoad = mutation({
 
     // Sync firstStopDate after all stops are created
     await syncFirstStopDate(ctx, loadId as Id<'loadInformation'>);
+
+    // Handle direct assignment if driver or carrier was selected
+    if (args.assignDriverId || args.assignCarrierId) {
+      try {
+        if (args.assignDriverId) {
+          // Get driver info for the dispatch leg
+          const driver = await ctx.db.get(args.assignDriverId);
+          if (driver) {
+            await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
+              loadId: loadId as Id<'loadInformation'>,
+              driverId: args.assignDriverId,
+              truckId: driver.currentTruckId,
+              assignedBy: args.createdBy,
+              assignedByName: args.createdByName,
+            });
+          }
+        } else if (args.assignCarrierId) {
+          // Get carrier info for the dispatch leg
+          const carrier = await ctx.db.get(args.assignCarrierId);
+          if (carrier) {
+            await ctx.runMutation(internal.dispatchLegs.assignCarrierInternal, {
+              loadId: loadId as Id<'loadInformation'>,
+              carrierPartnershipId: args.assignCarrierId,
+              carrierRate: carrier.defaultRate,
+              assignedBy: args.createdBy,
+              assignedByName: args.createdByName,
+            });
+          }
+        }
+      } catch (error) {
+        // Log but don't fail load creation
+        console.error('Direct assignment failed:', error);
+      }
+    } else if (parsedHcr) {
+      // Only trigger auto-assignment based on route rules if no direct assignment was made
+      // and the load has an HCR for matching
+      try {
+        await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
+          loadId: loadId as Id<'loadInformation'>,
+          workosOrgId: args.workosOrgId,
+          userId: args.createdBy,
+          userName: args.createdByName,
+        });
+      } catch (error) {
+        // Log but don't fail load creation
+        console.error('Auto-assignment failed:', error);
+      }
+    }
 
     return loadId;
   },

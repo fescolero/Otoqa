@@ -27,7 +27,18 @@ interface TrailerListItemProps {
   onSelectionChange: (id: string, selected: boolean) => void;
 }
 
-const getDateStatus = (dateString?: string, label?: string) => {
+type ComplianceStatus = 'expired' | 'expiring' | 'valid';
+
+interface DateStatus {
+  status: ComplianceStatus;
+  days: number;
+  icon: typeof AlertTriangle | typeof CheckCircle2;
+  color: string;
+  label?: string;
+  date: string;
+}
+
+const getDateStatus = (dateString?: string, label?: string): DateStatus | null => {
   if (!dateString) return null;
 
   const date = new Date(dateString);

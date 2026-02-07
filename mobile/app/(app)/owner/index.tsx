@@ -69,7 +69,7 @@ export default function OwnerDashboard() {
   const insets = useSafeAreaInsets();
   const { carrierOrgId, carrierExternalOrgId, orgName } = useCarrierOwner();
   const router = useRouter();
-  const { t, locale } = useLanguage();
+  const { t } = useLanguage();
   const [refreshing, setRefreshing] = useState(false);
   
   // Weather state
@@ -220,7 +220,7 @@ export default function OwnerDashboard() {
           <View style={styles.todayLeft}>
             <View style={styles.todayBadge}>
               <Ionicons name="calendar" size={14} color={colors.primary} />
-              <Text style={styles.todayBadgeText}>{t('dispatcherHome.today')}</Text>
+              <Text style={styles.todayBadgeText} maxFontSizeMultiplier={1.2}>{t('dispatcherHome.today')}</Text>
             </View>
             <Text style={styles.todayDate}>{today.formatted}</Text>
             <Text style={styles.todayWeek}>{today.weekInfo}</Text>
@@ -288,7 +288,7 @@ export default function OwnerDashboard() {
                   <Text style={styles.loadId}>Load #{loadData.load?.internalId || 'N/A'}</Text>
                 </View>
                 <View style={[styles.yellowBadge, { backgroundColor: loadData.driver ? '#4CAF50' : '#F59E0B' }]}>
-                  <Text style={styles.yellowBadgeText}>
+                  <Text style={styles.yellowBadgeText} maxFontSizeMultiplier={1.2}>
                     {loadData.driver ? 'Assigned' : 'Unassigned'}
                   </Text>
                 </View>
@@ -298,12 +298,12 @@ export default function OwnerDashboard() {
               <View style={styles.badgeRow}>
                 {loadData.load?.hcr && (
                   <View style={styles.grayBadge}>
-                    <Text style={styles.grayBadgeText}>HCR {loadData.load.hcr}</Text>
+                    <Text style={styles.grayBadgeText} maxFontSizeMultiplier={1.2}>HCR {loadData.load.hcr}</Text>
                   </View>
                 )}
                 {loadData.load?.tripNumber && (
                   <View style={styles.blueBadge}>
-                    <Text style={styles.blueBadgeText}>Trip {loadData.load.tripNumber}</Text>
+                    <Text style={styles.blueBadgeText} maxFontSizeMultiplier={1.2}>Trip {loadData.load.tripNumber}</Text>
                   </View>
                 )}
               </View>

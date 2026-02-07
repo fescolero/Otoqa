@@ -7,6 +7,7 @@ import {
   Calculator,
   LayoutDashboard,
   Package,
+  Route,
   Truck,
 } from 'lucide-react';
 
@@ -82,6 +83,12 @@ const getNavData = (pathname: string) => ({
           url: '/dispatch/planner',
         },
       ],
+    },
+    {
+      title: 'Route Assignments',
+      url: '/route-assignments',
+      icon: Route,
+      isActive: pathname.startsWith('/route-assignments'),
     },
     {
       title: 'Accounting',

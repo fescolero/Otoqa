@@ -62,11 +62,11 @@ export function ConvexAuthProvider({ children }: { children: React.ReactNode }) 
         console.log('[ConvexAuth] Setting up auth...');
 
         // Set auth with token fetcher - Convex will call this when needed
-        convex.setAuth(async (forceRefresh) => {
+        convex.setAuth(async ({ forceRefreshToken }) => {
           try {
             const token = await getToken({
               template: 'convex',
-              skipCache: forceRefresh,
+              skipCache: forceRefreshToken,
             });
             return token;
           } catch (error) {

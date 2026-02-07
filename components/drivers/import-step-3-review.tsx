@@ -287,7 +287,7 @@ export function ImportStep3Review({
         const duplicate = existingDrivers.find(
           (d) =>
             d.email.toLowerCase() === mappedRow.email?.toLowerCase() ||
-            d.licenseNumber.toLowerCase() === mappedRow.licenseNumber?.toLowerCase(),
+            d.licenseNumber?.toLowerCase() === mappedRow.licenseNumber?.toLowerCase(),
         );
 
         if (duplicate) {
@@ -372,7 +372,7 @@ export function ImportStep3Review({
           createdBy: user.id,
         };
 
-        await bulkImport(normalizedRow);
+        await bulkImport(normalizedRow as Parameters<typeof bulkImport>[0]);
       }
 
       onImportComplete();

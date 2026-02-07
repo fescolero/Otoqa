@@ -17,26 +17,14 @@ import {
   Wallet,
   Download,
   Trash2,
-  AlertTriangle,
-  Calendar,
-  ChevronDown,
   Ban,
 } from 'lucide-react';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { VirtualizedSettlementTable } from './virtualized-settlement-table';
 import { SettlementWorksheetSheet } from './settlement-worksheet-sheet';
 import { SettlementFilterBar, SettlementFilterState } from './settlement-filter-bar';
 import { GenerateStatementsModal } from './generate-statements-modal';
 import { FloatingActionBar } from '@/app/(app)/invoices/_components/floating-action-bar';
 import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
 import { useDebounce } from '@/hooks/use-debounce';
 
 interface SettlementsDashboardProps {
@@ -194,76 +182,8 @@ export function SettlementsDashboard({ organizationId, userId }: SettlementsDash
   };
 
   // Generate statements mutations
-  const generateStatement = useMutation(api.driverSettlements.generateStatement);
-  const bulkGenerateByPlan = useMutation(api.driverSettlements.bulkGenerateByPlan);
   const updateSettlementStatus = useMutation(api.driverSettlements.updateSettlementStatus);
   const deleteSettlement = useMutation(api.driverSettlements.deleteSettlement);
-
-  // Handle generate statements for all drivers
-  const handleGenerateStatements = async () => {
-    if (!drivers || drivers.length === 0) {
-      toast.error('No drivers found in organization');
-      return;
-    }
-
-    try {
-      toast.info('Generating statements for all drivers...');
-      
-      const now = Date.now();
-      const oneWeekAgo = now - 7 * 24 * 60 * 60 * 1000;
-
-      // Generate statements for each driver
-      const results = await Promise.all(
-        drivers.map((driver) =>
-          generateStatement({
-            driverId: driver._id,
-            periodStart: oneWeekAgo,
-            periodEnd: now,
-            workosOrgId: organizationId,
-            userId: userId,
-          }).catch((err) => ({
-            error: true,
-            driverId: driver._id,
-            message: err.message,
-          }))
-        )
-      );
-
-      const successful = results.filter((r: any) => !r.error).length;
-      const failed = results.filter((r: any) => r.error).length;
-
-      if (successful > 0) {
-        toast.success(`Generated ${successful} statement${successful > 1 ? 's' : ''}`);
-      }
-      if (failed > 0) {
-        toast.error(`Failed to generate ${failed} statement${failed > 1 ? 's' : ''}`);
-      }
-    } catch (error: any) {
-      toast.error(`Error generating statements: ${error.message}`);
-    }
-  };
-
-  // Handle generate statements by Pay Plan (bulk)
-  const handleGenerateByPlan = async (planId: string, planName: string) => {
-    try {
-      toast.info(`Generating statements for "${planName}" plan...`);
-      
-      const result = await bulkGenerateByPlan({
-        planId: planId as any,
-        workosOrgId: organizationId,
-        userId,
-      });
-
-      if (result.success > 0) {
-        toast.success(`Generated ${result.success} statement${result.success > 1 ? 's' : ''} for "${planName}"`);
-      }
-      if (result.failed > 0) {
-        toast.error(`Failed to generate ${result.failed} statement${result.failed > 1 ? 's' : ''}`);
-      }
-    } catch (error: any) {
-      toast.error(`Error: ${error.message}`);
-    }
-  };
 
   // Bulk actions
   const handleBulkApprove = async () => {
@@ -282,7 +202,7 @@ export function SettlementsDashboard({ organizationId, userId }: SettlementsDash
           userId,
         });
         success++;
-      } catch (error) {
+      } catch {
         failed++;
       }
     }
@@ -321,7 +241,7 @@ export function SettlementsDashboard({ organizationId, userId }: SettlementsDash
           voidReason: 'Bulk void action',
         });
         success++;
-      } catch (error) {
+      } catch {
         failed++;
       }
     }
@@ -360,7 +280,7 @@ export function SettlementsDashboard({ organizationId, userId }: SettlementsDash
       try {
         await deleteSettlement({ settlementId });
         success++;
-      } catch (error) {
+      } catch {
         failed++;
       }
     }

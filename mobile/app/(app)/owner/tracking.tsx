@@ -122,7 +122,7 @@ export default function TrackingScreen() {
                     <Text style={styles.driverPhone}>{driverLoc.driver.phone}</Text>
                   </View>
                   <View style={styles.loadBadge}>
-                    <Text style={styles.loadBadgeText}>
+                    <Text style={styles.loadBadgeText} maxFontSizeMultiplier={1.2}>
                       {driverLoc.currentLoad?.internalId}
                     </Text>
                   </View>

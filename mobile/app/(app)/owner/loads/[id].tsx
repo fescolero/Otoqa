@@ -11,7 +11,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../../convex/_generated/api';
 import { useCarrierOwner } from '../../_layout';
 import { colors, typography, borderRadius, shadows, spacing } from '../../../../lib/theme';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
 import { Id } from '../../../../../convex/_generated/dataModel';
 
@@ -60,7 +60,7 @@ export default function LoadDetailScreen() {
         driverPhone: driver.phone,
       });
       setShowDriverPicker(false);
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Failed to assign driver');
     }
   };
@@ -72,7 +72,7 @@ export default function LoadDetailScreen() {
         assignmentId: id as Id<'loadCarrierAssignments'>,
         carrierOrgId,
       });
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Failed to start load');
     }
   };
@@ -93,7 +93,7 @@ export default function LoadDetailScreen() {
                 carrierOrgId,
               });
               router.back();
-            } catch (error) {
+            } catch {
               Alert.alert('Error', 'Failed to complete load');
             }
           },
@@ -120,7 +120,7 @@ export default function LoadDetailScreen() {
                 cancellationReason: 'OTHER',
               });
               router.back();
-            } catch (error) {
+            } catch {
               Alert.alert('Error', 'Failed to cancel load');
             }
           },

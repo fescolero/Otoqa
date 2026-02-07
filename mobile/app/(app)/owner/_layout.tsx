@@ -1,75 +1,98 @@
-import { Tabs, Stack } from 'expo-router';
-import { View, StyleSheet, TouchableOpacity, Text } from 'react-native';
-import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
-import { colors, typography, borderRadius, shadows } from '../../../lib/theme';
-import { useAppMode, useCarrierOwner } from '../_layout';
+import { Tabs } from 'expo-router';
+import { View, StyleSheet, Text } from 'react-native';
+import { Ionicons, Feather } from '@expo/vector-icons';
+import { colors, isIOS } from '../../../lib/theme';
 import { useLanguage } from '../../../lib/LanguageContext';
-
-const NAV_HORIZONTAL_MARGIN = 24;
 
 // ============================================
 // OWNER LAYOUT - Carrier Owner Navigation
 // Dashboard, Drivers, Profile, More
 // ============================================
 
+// Android floating pill style
+const androidTabBarStyle = {
+  position: 'absolute' as const,
+  bottom: 28,
+  left: 0,
+  right: 0,
+  marginHorizontal: 24,
+  backgroundColor: colors.card,
+  borderRadius: 35,
+  height: 70,
+  paddingTop: 10,
+  paddingBottom: 10,
+  borderTopWidth: 0,
+  borderWidth: 1,
+  borderColor: 'rgba(63, 69, 82, 0.5)',
+  elevation: 8,
+};
+
+// iOS style - dark background with floating pill illusion
+const iosTabBarStyle = {
+  backgroundColor: colors.background,
+  borderTopColor: colors.background,
+  height: 90,
+  paddingTop: 4,
+  paddingBottom: 26,
+  paddingHorizontal: 40,
+};
+
+// Decorative floating pill for iOS (rendered behind the transparent tab bar)
+function IOSTabBarBackground() {
+  return (
+    <View style={iosBackgroundStyles.container}>
+      <View style={iosBackgroundStyles.pill} />
+    </View>
+  );
+}
+
+const iosBackgroundStyles = StyleSheet.create({
+  container: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 90,
+    justifyContent: 'flex-start',
+    alignItems: 'center',
+    paddingTop: 0,
+    backgroundColor: colors.background,
+    borderTopWidth: 2,
+    borderTopColor: colors.background,
+  },
+  pill: {
+    backgroundColor: colors.card,
+    borderRadius: 30,
+    height: 60,
+    marginHorizontal: 20,
+    width: '100%',
+    maxWidth: 400,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+});
+
 export default function OwnerLayout() {
-  const { canSwitchModes, setMode } = useAppMode();
-  const { orgName } = useCarrierOwner();
   const { t } = useLanguage();
 
   return (
     <Tabs
       screenOptions={{
-        headerShown: true,
-        headerStyle: {
-          backgroundColor: colors.background,
-          elevation: 0,
-          shadowOpacity: 0,
-          borderBottomWidth: 1,
-          borderBottomColor: colors.border,
-        },
-        headerTintColor: colors.foreground,
-        headerTitleStyle: {
-          fontWeight: '600',
-          fontSize: typography.lg,
-        },
-        headerRight: () =>
-          canSwitchModes ? (
-            <TouchableOpacity
-              onPress={() => setMode('driver')}
-              style={styles.switchModeButton}
-            >
-              <Ionicons name="car" size={20} color={colors.primary} />
-              <Text style={styles.switchModeText}>Driver</Text>
-            </TouchableOpacity>
-          ) : null,
-        tabBarStyle: {
-          position: 'absolute',
-          bottom: 28,
-          left: 0,
-          right: 0,
-          marginHorizontal: NAV_HORIZONTAL_MARGIN,
-          backgroundColor: colors.card,
-          borderRadius: 35,
-          height: 70,
-          paddingTop: 10,
-          paddingBottom: 10,
-          borderTopWidth: 0,
-          borderWidth: 1,
-          borderColor: 'rgba(63, 69, 82, 0.5)',
-          ...shadows.lg,
-        },
+        headerShown: false,
+        tabBarStyle: isIOS ? iosTabBarStyle : androidTabBarStyle,
+        tabBarBackground: isIOS ? () => <IOSTabBarBackground /> : undefined,
+        tabBarActiveTintColor: colors.primary,
+        tabBarInactiveTintColor: colors.foregroundMuted,
         tabBarItemStyle: {
           height: 50,
           justifyContent: 'center',
           alignItems: 'center',
         },
-        tabBarActiveTintColor: colors.foreground,
-        tabBarInactiveTintColor: colors.foregroundMuted,
         tabBarLabelStyle: {
           fontSize: 10,
           fontWeight: '500',
-          marginTop: 2,
         },
       }}
     >
@@ -77,104 +100,66 @@ export default function OwnerLayout() {
         name="index"
         options={{
           headerShown: false,
-          tabBarLabel: t('nav.home'),
+          tabBarLabel: ({ focused }) => (
+            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+              {t('nav.home')}
+            </Text>
+          ),
           tabBarIcon: ({ focused }) => (
             <View style={styles.tabIconContainer}>
               <Ionicons
                 name={focused ? 'home' : 'home-outline'}
-                size={22}
-                color={focused ? colors.foreground : colors.foregroundMuted}
+                size={28}
+                color={focused ? colors.primary : colors.foregroundMuted}
               />
             </View>
           ),
         }}
       />
-      {/* Loads page - full screen without nav */}
-      <Tabs.Screen
-        name="loads"
-        options={{
-          href: null,
-          headerShown: false,
-          tabBarStyle: { display: 'none' },
-        }}
-      />
-      {/* Assign Driver page - hidden from tab bar */}
-      <Tabs.Screen
-        name="assign-driver"
-        options={{
-          href: null,
-          headerShown: false,
-          tabBarStyle: { display: 'none' },
-        }}
-      />
-      {/* Complete Driver Profile - onboarding for owner-operators */}
-      <Tabs.Screen
-        name="complete-driver-profile"
-        options={{
-          href: null,
-          headerShown: false,
-          tabBarStyle: { display: 'none' },
-        }}
-      />
-      {/* Feature Unavailable - full screen */}
-      <Tabs.Screen
-        name="feature-unavailable"
-        options={{
-          href: null,
-          headerShown: false,
-          tabBarStyle: { display: 'none' },
-        }}
-      />
-      {/* Notifications - full screen */}
-      <Tabs.Screen
-        name="notifications"
-        options={{
-          href: null,
-          headerShown: false,
-          tabBarStyle: { display: 'none' },
-        }}
-      />
+      {/* Hidden screens */}
+      <Tabs.Screen name="loads" options={{ href: null, headerShown: false, tabBarStyle: { display: 'none' } }} />
+      <Tabs.Screen name="assign-driver" options={{ href: null, headerShown: false, tabBarStyle: { display: 'none' } }} />
+      <Tabs.Screen name="complete-driver-profile" options={{ href: null, headerShown: false }} />
+      <Tabs.Screen name="feature-unavailable" options={{ href: null, headerShown: false }} />
+      <Tabs.Screen name="notifications" options={{ href: null, headerShown: false }} />
+      <Tabs.Screen name="tracking" options={{ href: null, tabBarStyle: { display: 'none' } }} />
+      <Tabs.Screen name="settlements" options={{ href: null }} />
+
       <Tabs.Screen
         name="drivers"
         options={{
           headerShown: false,
-          tabBarLabel: t('nav.drivers'),
+          tabBarLabel: ({ focused }) => (
+            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+              {t('nav.drivers')}
+            </Text>
+          ),
           tabBarIcon: ({ focused }) => (
             <View style={styles.tabIconContainer}>
               <Ionicons
                 name={focused ? 'people' : 'people-outline'}
-                size={22}
-                color={focused ? colors.foreground : colors.foregroundMuted}
+                size={28}
+                color={focused ? colors.primary : colors.foregroundMuted}
               />
             </View>
           ),
-        }}
-      />
-      {/* Tracking tab hidden - moved to More page */}
-      <Tabs.Screen
-        name="tracking"
-        options={{
-          href: null,
-        }}
-      />
-      {/* Settlements tab hidden - moved to More page */}
-      <Tabs.Screen
-        name="settlements"
-        options={{
-          href: null,
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
           headerShown: false,
-          tabBarLabel: t('nav.profile'),
+          tabBarLabel: ({ focused }) => (
+            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+              {t('nav.profile')}
+            </Text>
+          ),
           tabBarIcon: ({ focused }) => (
             <View style={styles.tabIconContainer}>
               <Ionicons
                 name={focused ? 'person' : 'person-outline'}
-                size={22}
-                color={focused ? colors.foreground : colors.foregroundMuted}
+                size={28}
+                color={focused ? colors.primary : colors.foregroundMuted}
               />
             </View>
           ),
@@ -184,13 +169,17 @@ export default function OwnerLayout() {
         name="more"
         options={{
           headerShown: false,
-          tabBarLabel: t('nav.more'),
+          tabBarLabel: ({ focused }) => (
+            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+              {t('nav.more')}
+            </Text>
+          ),
           tabBarIcon: ({ focused }) => (
             <View style={styles.tabIconContainer}>
               <Feather
                 name="more-horizontal"
-                size={22}
-                color={focused ? colors.foreground : colors.foregroundMuted}
+                size={28}
+                color={focused ? colors.primary : colors.foregroundMuted}
               />
             </View>
           ),
@@ -207,19 +196,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  switchModeButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginRight: 12,
-    backgroundColor: colors.muted,
-    borderRadius: borderRadius.full,
-    gap: 4,
-  },
-  switchModeText: {
-    fontSize: 12,
+  tabLabel: {
+    fontSize: 10,
     fontWeight: '500',
+    color: colors.foregroundMuted,
+  },
+  tabLabelFocused: {
     color: colors.primary,
   },
 });

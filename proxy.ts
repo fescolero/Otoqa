@@ -5,7 +5,6 @@ export default authkitMiddleware({
     enabled: true,
     unauthenticatedPaths: ['/sign-in', '/sign-up', '/callback'],
   },
-  signInUrl: '/sign-in',
 });
 
 export const config = {

@@ -304,7 +304,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
     } else {
       // For non-destructive actions (e.g., Open -> Assigned), proceed directly
       setPendingTargetStatus(status);
-      const dbStatus = status === 'Delivered' ? 'Completed' : status;
+      const dbStatus = status;
       try {
         const result = await bulkUpdateLoadStatus({
           loadIds: Array.from(selectedLoadIds),

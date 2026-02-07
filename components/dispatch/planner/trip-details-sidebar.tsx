@@ -72,8 +72,8 @@ interface LoadDetails {
     state?: string;
   } | null;
   assignedCarrier?: {
-    _id: Id<'carrierPartnerships'>;
-    companyName: string;
+    _id: string;
+    companyName?: string;
     phone?: string;
     mcNumber?: string;
     // From loadCarrierAssignments
@@ -237,7 +237,7 @@ export function TripDetailsSidebar({
     ? (isAssigned 
         ? (loadDetails.assignedDriver as { name: string })?.name 
         : `${selectedDriver?.firstName} ${selectedDriver?.lastName}`)
-    : (isAssigned ? activeCarrier?.companyName : selectedCarrier?.carrierName) || null;
+    : (isAssigned ? loadDetails.assignedCarrier?.companyName : selectedCarrier?.carrierName) || null;
   // Handle phone: assignedCarrier might have phone, selectedCarrier has contactPhone
   const resourcePhone = activeDriver?.phone 
     || (isAssigned ? loadDetails.assignedCarrier?.phone : selectedCarrier?.contactPhone);

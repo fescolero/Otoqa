@@ -297,7 +297,7 @@ export const getWithDetails = query({
 
     // Get the load details
     const load = await ctx.db.get(assignment.loadId);
-    if (!load) return { ...assignment, load: null, stops: [] };
+    if (!load) return { ...assignment, load: null, stops: [], pickup: null, delivery: null };
 
     // Get the stops for this load
     const stops = await ctx.db

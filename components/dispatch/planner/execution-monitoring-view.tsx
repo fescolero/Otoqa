@@ -38,9 +38,13 @@ interface EnrichedLoadDetails {
     state?: string;
   } | null;
   assignedCarrier: {
-    _id: Id<'carriers'>;
-    companyName: string;
+    _id: string;
+    companyName?: string;
     phone?: string;
+    mcNumber?: string;
+    carrierRate?: number;
+    driverName?: string;
+    driverPhone?: string;
   } | null;
   assignedTruck: {
     _id: Id<'trucks'>;

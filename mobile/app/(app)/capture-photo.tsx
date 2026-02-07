@@ -6,7 +6,6 @@ import {
   StyleSheet,
   Image,
   Alert,
-  Dimensions,
   ActivityIndicator,
 } from 'react-native';
 import { useRouter, useLocalSearchParams, Stack } from 'expo-router';
@@ -50,16 +49,13 @@ const borderRadius = {
   full: 9999,
 };
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
 // ============================================
 // CAPTURE PHOTO SCREEN
 // ============================================
 export default function CapturePhotoScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { stopId, loadId, locationName, stopSequence } = useLocalSearchParams<{
-    stopId?: string;
+  const { loadId, locationName, stopSequence } = useLocalSearchParams<{
     loadId?: string;
     locationName?: string;
     stopSequence?: string;

@@ -40,7 +40,7 @@ export function AddressAutocomplete({
   const [isLoading, setIsLoading] = React.useState(false);
   const [showDropdown, setShowDropdown] = React.useState(false);
   const [selectedIndex, setSelectedIndex] = React.useState(-1);
-  const debounceRef = React.useRef<NodeJS.Timeout>();
+  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const dropdownRef = React.useRef<HTMLDivElement>(null);
 

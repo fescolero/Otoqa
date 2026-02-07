@@ -6,9 +6,9 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Dimensions,
 } from 'react-native';
-import { colors, typography, borderRadius, spacing } from '../lib/theme';
+import { BlurView } from 'expo-blur';
+import { colors, typography, borderRadius, spacing, isIOS, blurIntensity } from '../lib/theme';
 
 const ITEM_HEIGHT = 44;
 const VISIBLE_ITEMS = 5;
@@ -43,9 +43,9 @@ export default function DatePickerModal({
   const [selectedDay, setSelectedDay] = useState(currentDate.getDate());
   const [selectedYear, setSelectedYear] = useState(currentDate.getFullYear());
 
-  const monthScrollRef = useRef<ScrollView>(null);
-  const dayScrollRef = useRef<ScrollView>(null);
-  const yearScrollRef = useRef<ScrollView>(null);
+  const monthScrollRef = useRef<ScrollView | null>(null);
+  const dayScrollRef = useRef<ScrollView | null>(null);
+  const yearScrollRef = useRef<ScrollView | null>(null);
 
   // Generate years array
   const minYear = minimumDate.getFullYear();
@@ -101,7 +101,7 @@ export default function DatePickerModal({
   const renderPicker = (
     items: (number | string)[],
     selectedValue: number | string,
-    scrollRef: React.RefObject<ScrollView>,
+    scrollRef: React.RefObject<ScrollView | null>,
     onScroll: (event: any) => void,
     formatItem?: (item: number | string) => string
   ) => (
@@ -134,59 +134,75 @@ export default function DatePickerModal({
     </View>
   );
 
+  const ModalContent = (
+    <>
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity onPress={onClose}>
+          <Text style={styles.cancelText}>Cancel</Text>
+        </TouchableOpacity>
+        <Text style={styles.title}>{title}</Text>
+        <TouchableOpacity onPress={handleDone}>
+          <Text style={styles.doneText}>Done</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Pickers */}
+      <View style={styles.pickersContainer}>
+        {/* Month Picker */}
+        {renderPicker(
+          months.map((_, i) => i),
+          selectedMonth,
+          monthScrollRef,
+          (e) => handleScroll(e, months.map((_, i) => i), setSelectedMonth),
+          (item) => months[item as number]
+        )}
+
+        {/* Day Picker */}
+        {renderPicker(
+          days,
+          selectedDay,
+          dayScrollRef,
+          (e) => handleScroll(e, days, setSelectedDay)
+        )}
+
+        {/* Year Picker */}
+        {renderPicker(
+          years,
+          selectedYear,
+          yearScrollRef,
+          (e) => handleScroll(e, years, setSelectedYear)
+        )}
+
+        {/* Selection Indicator */}
+        <View style={styles.selectionIndicator} pointerEvents="none" />
+      </View>
+
+      {/* Preview */}
+      <View style={styles.preview}>
+        <Text style={styles.previewText}>
+          {months[selectedMonth]} {selectedDay}, {selectedYear}
+        </Text>
+      </View>
+    </>
+  );
+
   return (
     <Modal visible={visible} transparent animationType="slide">
       <View style={styles.overlay}>
-        <View style={styles.container}>
-          {/* Header */}
-          <View style={styles.header}>
-            <TouchableOpacity onPress={onClose}>
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-            <Text style={styles.title}>{title}</Text>
-            <TouchableOpacity onPress={handleDone}>
-              <Text style={styles.doneText}>Done</Text>
-            </TouchableOpacity>
+        {isIOS ? (
+          <BlurView
+            intensity={blurIntensity.heavy}
+            tint="dark"
+            style={styles.container}
+          >
+            {ModalContent}
+          </BlurView>
+        ) : (
+          <View style={styles.container}>
+            {ModalContent}
           </View>
-
-          {/* Pickers */}
-          <View style={styles.pickersContainer}>
-            {/* Month Picker */}
-            {renderPicker(
-              months.map((_, i) => i),
-              selectedMonth,
-              monthScrollRef,
-              (e) => handleScroll(e, months.map((_, i) => i), setSelectedMonth),
-              (item) => months[item as number]
-            )}
-
-            {/* Day Picker */}
-            {renderPicker(
-              days,
-              selectedDay,
-              dayScrollRef,
-              (e) => handleScroll(e, days, setSelectedDay)
-            )}
-
-            {/* Year Picker */}
-            {renderPicker(
-              years,
-              selectedYear,
-              yearScrollRef,
-              (e) => handleScroll(e, years, setSelectedYear)
-            )}
-
-            {/* Selection Indicator */}
-            <View style={styles.selectionIndicator} pointerEvents="none" />
-          </View>
-
-          {/* Preview */}
-          <View style={styles.preview}>
-            <Text style={styles.previewText}>
-              {months[selectedMonth]} {selectedDay}, {selectedYear}
-            </Text>
-          </View>
-        </View>
+        )}
       </View>
     </Modal>
   );
@@ -196,13 +212,20 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: isIOS ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.5)',
   },
   container: {
-    backgroundColor: colors.card,
+    backgroundColor: isIOS ? 'rgba(34, 38, 43, 0.85)' : colors.card,
     borderTopLeftRadius: borderRadius.xl,
     borderTopRightRadius: borderRadius.xl,
     paddingBottom: spacing.xl,
+    overflow: 'hidden',
+    // iOS glass border
+    ...(isIOS && {
+      borderWidth: 1,
+      borderBottomWidth: 0,
+      borderColor: 'rgba(255, 255, 255, 0.1)',
+    }),
   },
   header: {
     flexDirection: 'row',
@@ -211,7 +234,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    borderBottomColor: isIOS ? 'rgba(255, 255, 255, 0.1)' : colors.border,
   },
   title: {
     fontSize: typography.md,
@@ -261,15 +284,15 @@ const styles = StyleSheet.create({
     height: ITEM_HEIGHT,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.muted + '30',
+    borderColor: isIOS ? 'rgba(255, 255, 255, 0.15)' : colors.border,
+    backgroundColor: isIOS ? 'rgba(255, 255, 255, 0.05)' : colors.muted + '30',
     borderRadius: borderRadius.md,
   },
   preview: {
     alignItems: 'center',
     paddingVertical: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: colors.border,
+    borderTopColor: isIOS ? 'rgba(255, 255, 255, 0.1)' : colors.border,
     marginTop: spacing.sm,
   },
   previewText: {

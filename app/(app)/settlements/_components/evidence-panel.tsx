@@ -1,19 +1,19 @@
 'use client';
 
+import { useRef, type ChangeEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
-import { Separator } from '@/components/ui/separator';
-import { FileText, Upload, MapPin, DollarSign, Truck, User, Package } from 'lucide-react';
+import { FileText, Upload, MapPin, Truck, User, Package } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface LoadStop {
   sequenceNumber: number;
   stopType: 'PICKUP' | 'DELIVERY';
-  city: string;
-  state: string;
-  windowBeginTime: string;
+  city?: string;
+  state?: string;
+  windowBeginTime?: string;
 }
 
 interface SelectedLoad {
@@ -34,17 +34,17 @@ interface SelectedLoad {
     _id: string;
     name: string;
     phone?: string;
-  };
+  } | null;
   assignedTruck?: {
     _id: string;
     unitId: string;
     bodyType?: string;
-  };
+  } | null;
   assignedTrailer?: {
     _id: string;
     unitId: string;
     trailerType?: string;
-  };
+  } | null;
   podStorageId?: string;
   podUrl?: string;
 }
@@ -52,11 +52,38 @@ interface SelectedLoad {
 interface EvidencePanelProps {
   selectedLoad?: SelectedLoad | null;
   onUploadPOD?: (loadId: string) => void;
-  onUploadReceipt?: (loadId: string) => void;
+  extraDocs?: Array<{
+    _id: string;
+    url: string;
+    fileName?: string;
+    uploadedAt: number;
+  }>;
+  onUploadExtraDocs?: (files: FileList) => void;
+  isUploadingExtraDocs?: boolean;
   isLocked?: boolean; // Hide upload buttons when PAID
 }
 
-export function EvidencePanel({ selectedLoad, onUploadPOD, onUploadReceipt, isLocked = false }: EvidencePanelProps) {
+export function EvidencePanel({
+  selectedLoad,
+  onUploadPOD,
+  extraDocs = [],
+  onUploadExtraDocs,
+  isUploadingExtraDocs = false,
+  isLocked = false,
+}: EvidencePanelProps) {
+  const extraDocsInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExtraDocsClick = () => {
+    extraDocsInputRef.current?.click();
+  };
+
+  const handleExtraDocsChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files && files.length > 0) {
+      onUploadExtraDocs?.(files);
+    }
+    event.target.value = '';
+  };
   const formatTime = (isoString: string) => {
     try {
       return new Date(isoString).toLocaleString('en-US', {
@@ -200,14 +227,14 @@ export function EvidencePanel({ selectedLoad, onUploadPOD, onUploadReceipt, isLo
                 <div className="flex items-center gap-1">
                   <MapPin className="w-2.5 h-2.5 text-muted-foreground shrink-0" />
                   <p className="text-[11px] font-medium truncate">
-                    {stop.city}, {stop.state}
+                    {[stop.city, stop.state].filter(Boolean).join(', ') || 'Location unavailable'}
                   </p>
                   <Badge variant="outline" className="text-[8px] px-1 py-0 h-3.5 ml-1">
                     {stop.stopType}
                   </Badge>
                 </div>
                 <p className="text-[9px] text-muted-foreground mt-0.5">
-                  {formatTime(stop.windowBeginTime)}
+                  {stop.windowBeginTime ? formatTime(stop.windowBeginTime) : 'Time TBD'}
                 </p>
               </div>
             </div>
@@ -242,6 +269,61 @@ export function EvidencePanel({ selectedLoad, onUploadPOD, onUploadReceipt, isLo
             >
               <Upload className="w-3.5 h-3.5 mr-1.5 text-blue-600" />
               Upload POD
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Extra Documentation */}
+      <div className="p-3 border-b shrink-0">
+        <Label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+          Extra Documentation
+        </Label>
+
+        {extraDocs.length > 0 ? (
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {extraDocs.map((doc) => (
+              <a
+                key={doc._id}
+                href={doc.url}
+                target="_blank"
+                rel="noreferrer"
+                className="block overflow-hidden rounded border bg-white"
+                title={doc.fileName || 'Extra documentation'}
+              >
+                <img
+                  src={doc.url}
+                  alt={doc.fileName || 'Extra documentation'}
+                  className="w-full h-24 object-cover"
+                />
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-2 p-3 bg-slate-50 rounded border border-dashed border-slate-200">
+            <p className="text-[10px] text-slate-400 text-center">No extra documentation</p>
+          </div>
+        )}
+
+        {!isLocked && onUploadExtraDocs && (
+          <div className="mt-2">
+            <input
+              ref={extraDocsInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={handleExtraDocsChange}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full h-7 text-[11px] text-blue-600 border-blue-300 hover:bg-blue-50 hover:text-blue-700 font-medium"
+              onClick={handleExtraDocsClick}
+              disabled={isUploadingExtraDocs}
+            >
+              <Upload className="w-3.5 h-3.5 mr-1.5 text-blue-600" />
+              {isUploadingExtraDocs ? 'Uploading...' : 'Upload Extra Documentation'}
             </Button>
           </div>
         )}
@@ -315,4 +397,3 @@ export function EvidencePanel({ selectedLoad, onUploadPOD, onUploadReceipt, isLo
     </div>
   );
 }
-

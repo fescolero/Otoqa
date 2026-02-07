@@ -1,10 +1,12 @@
 import React from 'react';
-import { View, StyleSheet, Animated } from 'react-native';
-import { colors, borderRadius, shadows, spacing } from '../lib/theme';
+import { View, StyleSheet } from 'react-native';
+import { colors, borderRadius, spacing, isIOS, glassCard } from '../lib/theme';
 
 // ============================================
 // SKELETON LOADER
-// Dark Theme Loading Placeholders
+// Platform-adaptive Loading Placeholders
+// iOS: Glass effect shimmer
+// Android: Material Design elevation
 // ============================================
 
 interface SkeletonProps {
@@ -85,16 +87,13 @@ export function SkeletonCurrentLoad() {
 
 const styles = StyleSheet.create({
   skeleton: {
-    backgroundColor: colors.muted,
+    backgroundColor: isIOS ? 'rgba(45, 50, 59, 0.8)' : colors.muted,
   },
   card: {
-    backgroundColor: colors.card,
+    ...glassCard,
     borderRadius: borderRadius.xl,
     padding: spacing.lg,
     marginBottom: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    ...shadows.md,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -106,12 +105,10 @@ const styles = StyleSheet.create({
     paddingTop: spacing.sm,
   },
   smallCard: {
-    backgroundColor: colors.card,
+    ...glassCard,
     borderRadius: borderRadius.xl,
     padding: spacing.base,
     marginBottom: spacing.base,
-    borderWidth: 1,
-    borderColor: colors.border,
   },
   row: {
     flexDirection: 'row',
@@ -119,10 +116,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   currentLoadSkeleton: {
-    backgroundColor: colors.primary + '30',
+    backgroundColor: isIOS ? 'rgba(255, 107, 0, 0.25)' : colors.primary + '30',
     borderRadius: borderRadius['2xl'],
     padding: spacing.lg,
     marginBottom: spacing.md,
+    borderWidth: isIOS ? 1 : 0,
+    borderColor: isIOS ? 'rgba(255, 107, 0, 0.3)' : 'transparent',
   },
   currentLoadLeft: {
     flexDirection: 'row',

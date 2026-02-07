@@ -84,7 +84,7 @@ export default function CreateTrailerPage() {
       setStatus('Active');
       
       if (decodedData.year) {
-        (document.getElementById('year') as HTMLInputElement).value = decodedData.year;
+        (document.getElementById('year') as HTMLInputElement).value = String(decodedData.year);
       }
       if (decodedData.make) {
         (document.getElementById('make') as HTMLInputElement).value = decodedData.make;

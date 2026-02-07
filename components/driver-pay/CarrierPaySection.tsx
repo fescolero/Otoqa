@@ -234,10 +234,10 @@ export function CarrierPaySection({
             <div>
               <p className="text-sm font-medium text-slate-700">Payment Status</p>
               <p className="text-xs text-slate-500">
-                {activeAssignment.paymentStatus === 'PAID' && activeAssignment.paidAt
-                  ? `Paid on ${formatDate(activeAssignment.paidAt)}`
-                  : activeAssignment.paymentStatus === 'INVOICED' && activeAssignment.invoicedAt
-                  ? `Invoiced on ${formatDate(activeAssignment.invoicedAt)}`
+                {activeAssignment.paymentStatus === 'PAID' && activeAssignment.paymentDate
+                  ? `Paid on ${formatDate(activeAssignment.paymentDate)}`
+                  : activeAssignment.paymentStatus === 'INVOICED'
+                  ? 'Invoice sent'
                   : 'Awaiting invoice'}
               </p>
             </div>

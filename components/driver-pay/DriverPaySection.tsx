@@ -116,6 +116,7 @@ export function DriverPaySection({
         truckId: primaryLeg?.truckId ?? undefined,
         trailerId: primaryLeg?.trailerId ?? undefined,
         userId,
+        workosOrgId: organizationId,
       });
     } catch (error) {
       console.error('Failed to assign driver:', error);

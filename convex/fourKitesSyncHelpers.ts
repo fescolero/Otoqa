@@ -129,6 +129,22 @@ export const createLoad = internalMutation({
     const { updateLoadCount } = await import("./stats_helpers");
     await updateLoadCount(ctx, args.data.workosOrgId, undefined, args.data.status);
     
+    // ✅ Trigger auto-assignment for FourKites loads
+    // FourKites loads come in with parsedHcr already set
+    if (args.data.parsedHcr) {
+      try {
+        await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
+          loadId: loadId as Id<"loadInformation">,
+          workosOrgId: args.data.workosOrgId,
+          userId: "fourkites-sync",
+          userName: "FourKites Sync",
+        });
+      } catch (error) {
+        // Log but don't fail load creation
+        console.error("Auto-assignment failed for FourKites load:", error);
+      }
+    }
+    
     return loadId;
   },
 });

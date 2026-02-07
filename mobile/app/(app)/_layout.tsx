@@ -1,11 +1,10 @@
-import { Redirect, Tabs, Stack, Slot, useRouter } from 'expo-router';
+import { Redirect, Tabs, Stack, useRouter } from 'expo-router';
 import { useAuth, useUser } from '@clerk/clerk-expo';
 import {
   View,
   ActivityIndicator,
   StyleSheet,
   Text,
-  Dimensions,
   TouchableOpacity,
 } from 'react-native';
 import { useQuery } from 'convex/react';
@@ -14,7 +13,7 @@ import { createContext, useContext, useState, useEffect, useRef, useCallback } f
 import { Id } from '../../../convex/_generated/dataModel';
 import { useConvexAuthState } from '../../lib/convex';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { colors, typography, borderRadius, shadows } from '../../lib/theme';
+import { colors, typography, borderRadius, isIOS } from '../../lib/theme';
 import { resumeTracking } from '../../lib/location-tracking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
@@ -22,8 +21,70 @@ import { useLanguage } from '../../lib/LanguageContext';
 
 const MODE_STORAGE_KEY = '@app_mode_selection';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const NAV_HORIZONTAL_MARGIN = 24;
+// iOS style - dark background with floating pill illusion
+const iosDriverTabBarStyle = {
+  backgroundColor: colors.background,
+  borderTopColor: colors.background,
+  height: 90,
+  paddingTop: 4,
+  paddingBottom: 26,
+  paddingHorizontal: 40,
+};
+
+// Android floating pill style
+const androidDriverTabBarStyle = {
+  position: 'absolute' as const,
+  bottom: 28,
+  left: 0,
+  right: 0,
+  marginHorizontal: 24,
+  backgroundColor: colors.card,
+  borderRadius: 35,
+  height: 70,
+  paddingTop: 10,
+  paddingBottom: 10,
+  borderTopWidth: 0,
+  borderWidth: 1,
+  borderColor: 'rgba(63, 69, 82, 0.5)',
+  elevation: 8,
+};
+
+// Decorative floating pill for iOS driver tabs
+function IOSDriverTabBarBackground() {
+  return (
+    <View style={iosDriverBgStyles.container}>
+      <View style={iosDriverBgStyles.pill} />
+    </View>
+  );
+}
+
+const iosDriverBgStyles = StyleSheet.create({
+  container: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 90,
+    justifyContent: 'flex-start',
+    alignItems: 'center',
+    paddingTop: 0,
+    backgroundColor: colors.background,
+    borderTopWidth: 2,
+    borderTopColor: colors.background,
+  },
+  pill: {
+    backgroundColor: colors.card,
+    borderRadius: 30,
+    height: 60,
+    marginHorizontal: 20,
+    width: '100%',
+    maxWidth: 400,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+});
 
 // ============================================
 // APP LAYOUT - Dark Theme Floating Nav
@@ -114,7 +175,6 @@ function DriverTabs({
 }: {
   profile: { _id: Id<'drivers'>; firstName: string; lastName: string; organizationId: string; truck?: TruckInfo };
 }) {
-  const [activeTab, setActiveTab] = useState('index');
   const { t } = useLanguage();
 
   return (
@@ -130,140 +190,105 @@ function DriverTabs({
       <Tabs
         screenOptions={{
           headerShown: false,
-          tabBarStyle: {
-            position: 'absolute',
-            bottom: 28,
-            left: 0,
-            right: 0,
-            marginHorizontal: NAV_HORIZONTAL_MARGIN,
-            backgroundColor: colors.card,
-            borderRadius: 35,
-            height: 70,
-            paddingTop: 10,
-            paddingBottom: 10,
-            borderTopWidth: 0,
-            borderWidth: 1,
-            borderColor: 'rgba(63, 69, 82, 0.5)',
-            ...shadows.lg,
-          },
+          tabBarActiveTintColor: colors.primary,
+          tabBarInactiveTintColor: colors.foregroundMuted,
+          tabBarStyle: isIOS ? iosDriverTabBarStyle : androidDriverTabBarStyle,
+          tabBarBackground: isIOS ? () => <IOSDriverTabBarBackground /> : undefined,
           tabBarItemStyle: {
             height: 50,
             justifyContent: 'center',
             alignItems: 'center',
           },
-          tabBarActiveTintColor: colors.foreground,
-          tabBarInactiveTintColor: colors.foregroundMuted,
           tabBarLabelStyle: {
             fontSize: 10,
             fontWeight: '500',
-            marginTop: 2,
-          },
-          tabBarIconStyle: {
-            marginBottom: 0,
           },
         }}
       >
         <Tabs.Screen
           name="index"
           options={{
-            tabBarLabel: t('nav.home'),
+            tabBarLabel: ({ focused }) => (
+              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+                {t('nav.home')}
+              </Text>
+            ),
             tabBarIcon: ({ focused }) => (
               <View style={styles.tabIconContainer}>
                 <Ionicons
                   name={focused ? 'home' : 'home-outline'}
-                  size={22}
-                  color={focused ? colors.foreground : colors.foregroundMuted}
+                  size={28}
+                  color={focused ? colors.primary : colors.foregroundMuted}
                 />
               </View>
             ),
-          }}
-          listeners={{
-            tabPress: () => setActiveTab('index'),
           }}
         />
         <Tabs.Screen
           name="messages"
           options={{
-            tabBarLabel: t('nav.messages'),
+            tabBarLabel: ({ focused }) => (
+              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+                {t('nav.messages')}
+              </Text>
+            ),
             tabBarIcon: ({ focused }) => (
               <View style={styles.tabIconContainer}>
                 <Ionicons
                   name={focused ? 'chatbubble' : 'chatbubble-outline'}
-                  size={22}
-                  color={focused ? colors.foreground : colors.foregroundMuted}
+                  size={28}
+                  color={focused ? colors.primary : colors.foregroundMuted}
                 />
               </View>
             ),
-          }}
-          listeners={{
-            tabPress: () => setActiveTab('messages'),
           }}
         />
         <Tabs.Screen
           name="settings"
           options={{
-            tabBarLabel: t('nav.profile'),
+            tabBarLabel: ({ focused }) => (
+              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+                {t('nav.profile')}
+              </Text>
+            ),
             tabBarIcon: ({ focused }) => (
               <View style={styles.tabIconContainer}>
                 <Ionicons
                   name={focused ? 'person' : 'person-outline'}
-                  size={22}
-                  color={focused ? colors.foreground : colors.foregroundMuted}
+                  size={28}
+                  color={focused ? colors.primary : colors.foregroundMuted}
                 />
               </View>
             ),
-          }}
-          listeners={{
-            tabPress: () => setActiveTab('settings'),
           }}
         />
         <Tabs.Screen
           name="more"
           options={{
-            tabBarLabel: t('nav.more'),
+            tabBarLabel: ({ focused }) => (
+              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
+                {t('nav.more')}
+              </Text>
+            ),
             tabBarIcon: ({ focused }) => (
               <View style={styles.tabIconContainer}>
                 <Feather
                   name="more-horizontal"
-                  size={22}
-                  color={focused ? colors.foreground : colors.foregroundMuted}
+                  size={28}
+                  color={focused ? colors.primary : colors.foregroundMuted}
                 />
               </View>
             ),
           }}
-          listeners={{
-            tabPress: () => setActiveTab('more'),
-          }}
         />
         {/* Hide non-tab screens */}
-        <Tabs.Screen
-          name="trip/[id]"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
-          name="capture-photo"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
-          name="switch-truck"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
-          name="permissions"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
-          name="notifications"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
-          name="language"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
-          name="driver"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
+        <Tabs.Screen name="trip/[id]" options={{ href: null, tabBarStyle: { display: 'none' } }} />
+        <Tabs.Screen name="capture-photo" options={{ href: null, tabBarStyle: { display: 'none' } }} />
+        <Tabs.Screen name="switch-truck" options={{ href: null }} />
+        <Tabs.Screen name="permissions" options={{ href: null }} />
+        <Tabs.Screen name="notifications" options={{ href: null }} />
+        <Tabs.Screen name="language" options={{ href: null }} />
+        <Tabs.Screen name="driver" options={{ href: null }} />
         {/* Hide owner screens from driver tabs */}
         <Tabs.Screen name="owner" options={{ href: null }} />
       </Tabs>
@@ -785,6 +810,14 @@ const styles = StyleSheet.create({
     height: 28,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  tabLabel: {
+    fontSize: 10,
+    fontWeight: '500',
+    color: colors.foregroundMuted,
+  },
+  tabLabelFocused: {
+    color: colors.primary,
   },
   // Switch Mode Button (for switching between driver/owner)
   switchModeButton: {

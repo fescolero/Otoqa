@@ -3,12 +3,21 @@
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Doc } from '@/convex/_generated/dataModel';
 import { Phone, Mail, Pencil, Eye, AlertTriangle, CheckCircle2, Clock, Building2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
 
-type Carrier = Doc<'carriers'>;
+type Carrier = {
+  _id: string;
+  companyName: string;
+  dba?: string;
+  status: string;
+  insuranceExpiration?: string;
+  insuranceProvider?: string;
+  mcNumber?: string;
+  usdotNumber?: string;
+  safetyRating?: string;
+};
 
 interface CarrierListItemProps {
   carrier: Carrier;

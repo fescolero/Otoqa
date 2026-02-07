@@ -12,8 +12,8 @@ import { useLocalSearchParams, router } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import { Id } from '../../../../convex/_generated/dataModel';
-import { colors, typography, borderRadius, shadows, spacing } from '../../../lib/theme';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { colors, typography, borderRadius, spacing } from '../../../lib/theme';
+import { Ionicons } from '@expo/vector-icons';
 
 // ============================================
 // DRIVER DETAIL PAGE

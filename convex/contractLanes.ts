@@ -3,6 +3,47 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 
+// List unique HCR/Trip combinations for route assignments
+export const listUniqueRoutes = query({
+  args: {
+    workosOrgId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const lanes = await ctx.db
+      .query('contractLanes')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .filter((q) => q.eq(q.field('isDeleted'), false))
+      .collect();
+
+    // Create a map of unique HCR -> Trip Numbers
+    const routeMap = new Map<string, Set<string>>();
+
+    for (const lane of lanes) {
+      // Only process lanes with non-empty HCR
+      if (lane.hcr && lane.hcr.trim() !== '') {
+        if (!routeMap.has(lane.hcr)) {
+          routeMap.set(lane.hcr, new Set());
+        }
+        // Only add non-empty trip numbers
+        if (lane.tripNumber && lane.tripNumber.trim() !== '') {
+          routeMap.get(lane.hcr)!.add(lane.tripNumber);
+        }
+      }
+    }
+
+    // Convert to array format for frontend
+    const routes: { hcr: string; tripNumbers: string[] }[] = [];
+    for (const [hcr, tripNumbers] of routeMap) {
+      routes.push({
+        hcr,
+        tripNumbers: Array.from(tripNumbers).sort(),
+      });
+    }
+
+    return routes.sort((a, b) => a.hcr.localeCompare(b.hcr));
+  },
+});
+
 // List all contract lanes for a customer
 export const listByCustomer = query({
   args: {

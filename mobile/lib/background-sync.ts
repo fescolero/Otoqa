@@ -68,7 +68,7 @@ export async function getBackgroundSyncStatus() {
   return {
     status,
     isRegistered,
-    statusLabel: getStatusLabel(status),
+    statusLabel: status === null ? 'Unknown' : getStatusLabel(status),
   };
 }
 
@@ -84,4 +84,3 @@ function getStatusLabel(status: BackgroundFetch.BackgroundFetchStatus): string {
       return 'Unknown';
   }
 }
-

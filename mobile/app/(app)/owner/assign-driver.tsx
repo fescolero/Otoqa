@@ -13,7 +13,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { useState } from 'react';
 import { api } from '../../../../convex/_generated/api';
 import { useCarrierOwner } from '../_layout';
-import { colors, typography, borderRadius, spacing, shadows } from '../../../lib/theme';
+import { colors, typography, borderRadius, spacing, shadows, isIOS } from '../../../lib/theme';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Id } from '../../../../convex/_generated/dataModel';
 
@@ -227,7 +227,7 @@ export default function AssignDriverScreen() {
               <Text style={styles.loadOverviewTitle}>Load Overview</Text>
             </View>
             <View style={styles.pendingBadge}>
-              <Text style={styles.pendingBadgeText}>PENDING ASSIGNMENT</Text>
+              <Text style={styles.pendingBadgeText} maxFontSizeMultiplier={1.2}>PENDING ASSIGNMENT</Text>
             </View>
           </View>
 
@@ -288,7 +288,7 @@ export default function AssignDriverScreen() {
                   <View style={styles.driverNameRow}>
                     <Text style={styles.driverName}>{driver.name}</Text>
                     <View style={styles.statusBadge}>
-                      <Text style={styles.statusBadgeText}>Available</Text>
+                      <Text style={styles.statusBadgeText} maxFontSizeMultiplier={1.2}>Available</Text>
                     </View>
                   </View>
                   {driver.truckId !== 'N/A' && (
@@ -425,12 +425,12 @@ const styles = StyleSheet.create({
   },
   pendingBadge: {
     backgroundColor: colors.primary,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingHorizontal: isIOS ? 6 : 10,
+    paddingVertical: isIOS ? 2 : 4,
     borderRadius: borderRadius.sm,
   },
   pendingBadgeText: {
-    fontSize: 10,
+    fontSize: isIOS ? 9 : 10,
     fontWeight: '700',
     color: colors.primaryForeground,
     letterSpacing: 0.5,
@@ -557,7 +557,7 @@ const styles = StyleSheet.create({
   // Empty State
   emptyState: {
     alignItems: 'center',
-    paddingVertical: spacing.xxl,
+    paddingVertical: spacing['2xl'],
   },
   emptyTitle: {
     fontSize: typography.lg,

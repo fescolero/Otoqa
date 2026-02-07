@@ -123,7 +123,7 @@ export default function VerifyScreen() {
 
       setResendTimer(30);
       Alert.alert('Code Sent', 'A new verification code has been sent.');
-    } catch (error: any) {
+    } catch {
       Alert.alert('Error', 'Failed to resend code. Please try again.');
     }
   };
@@ -172,7 +172,9 @@ export default function VerifyScreen() {
             {code.map((digit, index) => (
               <TextInput
                 key={index}
-                ref={(ref) => (inputRefs.current[index] = ref)}
+                ref={(ref) => {
+                  inputRefs.current[index] = ref;
+                }}
                 style={[
                   styles.codeInput,
                   digit && styles.codeInputFilled,

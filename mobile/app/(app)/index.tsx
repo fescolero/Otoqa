@@ -16,8 +16,10 @@ import { useMyLoads } from '../../lib/hooks/useMyLoads';
 import { useNetworkStatus } from '../../lib/hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../lib/hooks/useOfflineQueue';
 import { useDriver } from './_layout';
-import { colors, typography, spacing, borderRadius, shadows } from '../../lib/theme';
+import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../../lib/theme';
 import { useLanguage } from '../../lib/LanguageContext';
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
 
 // ============================================
 // HOME SCREEN - Dark Logistics Design
@@ -54,7 +56,7 @@ const getWeatherInfo = (code: number): { description: string; icon: keyof typeof
 export default function HomeScreen() {
   const router = useRouter();
   const { driverId } = useDriver();
-  const { loads, isLoading, refetch, isRefetching, lastSyncTime } = useMyLoads(driverId);
+  const { loads, isLoading, refetch, isRefetching } = useMyLoads(driverId);
   const { isConnected } = useNetworkStatus();
   const { pendingCount } = useOfflineQueue();
   const { t, locale } = useLanguage();
@@ -276,6 +278,15 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
+      {/* iOS Glass Background Gradient */}
+      {isIOS && (
+        <LinearGradient
+          colors={['#1A1D21', '#252A30', '#1F2328', '#1A1D21']}
+          locations={[0, 0.3, 0.7, 1]}
+          style={styles.backgroundGradient}
+        />
+      )}
+      
       {/* Offline Banner */}
       {isConnected === false && (
         <View style={styles.offlineBanner}>
@@ -363,33 +374,55 @@ export default function HomeScreen() {
         {/* Loading State */}
         {isLoading && <LoadingSkeleton />}
 
-        {/* Current Load Card */}
+        {/* Current Load Card - iOS Glass Effect */}
         {!isLoading && activeLoad && (
           <TouchableOpacity
-            style={styles.currentLoadCard}
+            style={styles.currentLoadCardWrapper}
             onPress={() => router.push(`/trip/${activeLoad._id}`)}
             activeOpacity={0.9}
           >
-            <View style={styles.currentLoadContent}>
-              <View style={styles.currentLoadLeft}>
-                <MaterialCommunityIcons name="truck-delivery" size={32} color={colors.primaryForeground} />
-                <View>
-                  <Text style={styles.currentLoadLabel}>{locale === 'es' ? 'Carga Actual' : 'Current Load'}</Text>
-                  <Text style={styles.currentLoadId}>#{activeLoad.internalId}</Text>
+            {isIOS ? (
+              <BlurView intensity={80} tint="systemChromeMaterialLight" style={styles.currentLoadCard}>
+                <View style={styles.currentLoadContent}>
+                  <View style={styles.currentLoadLeft}>
+                    <MaterialCommunityIcons name="truck-delivery" size={32} color={colors.primaryForeground} />
+                    <View>
+                      <Text style={styles.currentLoadLabel}>{locale === 'es' ? 'Carga Actual' : 'Current Load'}</Text>
+                      <Text style={styles.currentLoadId}>#{activeLoad.internalId}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.currentLoadRight}>
+                    <Text style={styles.currentLoadExpectedLabel}>{locale === 'es' ? 'Esperado' : 'Expected'}</Text>
+                    <Text style={styles.currentLoadTime}>
+                      {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
+                    </Text>
+                  </View>
+                </View>
+              </BlurView>
+            ) : (
+              <View style={styles.currentLoadCardAndroid}>
+                <View style={styles.currentLoadContent}>
+                  <View style={styles.currentLoadLeft}>
+                    <MaterialCommunityIcons name="truck-delivery" size={32} color={colors.primaryForeground} />
+                    <View>
+                      <Text style={styles.currentLoadLabel}>{locale === 'es' ? 'Carga Actual' : 'Current Load'}</Text>
+                      <Text style={styles.currentLoadId}>#{activeLoad.internalId}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.currentLoadRight}>
+                    <Text style={styles.currentLoadExpectedLabel}>{locale === 'es' ? 'Esperado' : 'Expected'}</Text>
+                    <Text style={styles.currentLoadTime}>
+                      {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
+                    </Text>
+                  </View>
                 </View>
               </View>
-              <View style={styles.currentLoadRight}>
-                <Text style={styles.currentLoadExpectedLabel}>{locale === 'es' ? 'Esperado' : 'Expected'}</Text>
-                <Text style={styles.currentLoadTime}>
-                  {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
-                </Text>
-              </View>
-            </View>
+            )}
           </TouchableOpacity>
         )}
 
         {/* Scheduled Load Cards */}
-        {!isLoading && scheduledLoads.map((load, index) => {
+        {!isLoading && scheduledLoads.map((load) => {
           const multiDay = isMultiDay(load);
           const multiDayDate = getMultiDayDate(load);
           const expectedDelivery = formatExpectedDelivery(load);
@@ -406,21 +439,27 @@ export default function HomeScreen() {
                 <View style={styles.loadCardHeaderLeft}>
                   <Feather name="package" size={14} color={colors.foregroundMuted} />
                   <Text style={styles.loadCardTitle}>Load #{load.internalId}</Text>
+                </View>
+                <View style={styles.statusBadge}>
+                  <Text style={styles.statusBadgeText} maxFontSizeMultiplier={1.2}>{locale === 'es' ? 'Programada' : 'Scheduled'}</Text>
+                </View>
+              </View>
+              
+              {/* Badge Row */}
+              {(load.parsedHcr || load.parsedTripNumber) && (
+                <View style={styles.badgeRow}>
                   {load.parsedHcr && (
                     <View style={styles.truckBadge}>
-                      <Text style={styles.truckBadgeText}>{load.parsedHcr}</Text>
+                      <Text style={styles.truckBadgeText} maxFontSizeMultiplier={1.2}>{load.parsedHcr}</Text>
                     </View>
                   )}
                   {load.parsedTripNumber && (
                     <View style={styles.tripBadge}>
-                      <Text style={styles.tripBadgeText}>Trip {load.parsedTripNumber}</Text>
+                      <Text style={styles.tripBadgeText} maxFontSizeMultiplier={1.2}>Trip {load.parsedTripNumber}</Text>
                     </View>
                   )}
                 </View>
-                <View style={styles.statusBadge}>
-                  <Text style={styles.statusBadgeText}>{locale === 'es' ? 'Programada' : 'Scheduled'}</Text>
-                </View>
-              </View>
+              )}
 
               {/* Multi-Day Indicator */}
               {multiDay && multiDayDate && (
@@ -532,6 +571,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  backgroundGradient: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+  },
   scrollView: {
     flex: 1,
   },
@@ -613,25 +659,29 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   sectionTitle: {
-    fontSize: typography.xl,
+    fontSize: isIOS ? typography.lg : typography.xl,
     fontWeight: typography.semibold,
     color: colors.foreground,
+    flexShrink: 1,
   },
   sectionActions: {
     flexDirection: 'row',
-    gap: 8,
+    gap: 6,
+    flexShrink: 0,
   },
   actionButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    backgroundColor: colors.muted,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    gap: 4,
+    backgroundColor: isIOS ? 'rgba(45, 50, 59, 0.7)' : colors.muted,
+    paddingHorizontal: isIOS ? 10 : 12,
+    paddingVertical: isIOS ? 6 : 8,
     borderRadius: borderRadius.lg,
+    borderWidth: isIOS ? 1 : 0,
+    borderColor: isIOS ? 'rgba(255, 255, 255, 0.1)' : 'transparent',
   },
   actionText: {
-    fontSize: typography.sm,
+    fontSize: isIOS ? typography.xs : typography.sm,
     fontWeight: typography.medium,
     color: colors.foreground,
   },
@@ -657,12 +707,27 @@ const styles = StyleSheet.create({
   },
 
   // Current Load Card
+  currentLoadCardWrapper: {
+    marginBottom: spacing.md,
+    borderRadius: borderRadius['2xl'],
+    overflow: 'hidden',
+    // iOS glass styling
+    ...(isIOS && {
+      backgroundColor: 'rgba(255, 107, 0, 0.85)',
+      borderWidth: 1,
+      borderColor: 'rgba(255, 255, 255, 0.2)',
+    }),
+    ...shadows.lg,
+  },
   currentLoadCard: {
+    borderRadius: borderRadius['2xl'],
+    padding: spacing.lg,
+    overflow: 'hidden',
+  },
+  currentLoadCardAndroid: {
     backgroundColor: colors.primary,
     borderRadius: borderRadius['2xl'],
     padding: spacing.lg,
-    marginBottom: spacing.md,
-    ...shadows.lg,
   },
   currentLoadContent: {
     flexDirection: 'row',
@@ -700,27 +765,32 @@ const styles = StyleSheet.create({
     color: colors.primaryForeground,
   },
 
-  // Load Card
+  // Load Card - iOS Glass Effect
   loadCard: {
-    backgroundColor: colors.card,
+    backgroundColor: isIOS ? 'rgba(34, 38, 43, 0.65)' : colors.card,
     borderRadius: borderRadius.xl,
     padding: spacing.base,
     marginBottom: spacing.base,
     borderWidth: 1,
-    borderColor: 'rgba(63, 69, 82, 0.5)',
+    borderColor: isIOS ? 'rgba(255, 255, 255, 0.1)' : 'rgba(63, 69, 82, 0.5)',
     ...shadows.md,
   },
   loadCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   loadCardHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    flexWrap: 'wrap',
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
   },
   loadCardTitle: {
     fontSize: typography.base,
@@ -750,10 +820,12 @@ const styles = StyleSheet.create({
     color: colors.chart3,
   },
   statusBadge: {
-    backgroundColor: 'rgba(234, 179, 8, 0.3)',
+    backgroundColor: isIOS ? 'rgba(234, 179, 8, 0.4)' : 'rgba(234, 179, 8, 0.3)',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: borderRadius.full,
+    borderWidth: isIOS ? 1 : 0,
+    borderColor: isIOS ? 'rgba(234, 179, 8, 0.6)' : 'transparent',
   },
   statusBadgeText: {
     fontSize: typography.xs,

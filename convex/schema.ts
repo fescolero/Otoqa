@@ -808,6 +808,133 @@ export default defineSchema({
     // ✅ Compound index for efficient HCR+Trip lane lookup (used in promotion)
     .index('by_org_hcr_trip', ['workosOrgId', 'hcr', 'tripNumber']),
 
+  // ==========================================
+  // AUTO-ASSIGNMENT SYSTEM
+  // Maps recurring routes (HCR+Trip) to drivers/carriers
+  // ==========================================
+  routeAssignments: defineTable({
+    workosOrgId: v.string(),
+
+    // Route Identifier (HCR + Trip combination)
+    hcr: v.string(),
+    tripNumber: v.optional(v.string()), // Optional for HCR-only matching
+
+    // Assignment Target (one of these must be set)
+    driverId: v.optional(v.id('drivers')),
+    carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
+
+    // Assignment Config
+    priority: v.number(), // For multiple matches, lower = higher priority
+    isActive: v.boolean(),
+
+    // Metadata
+    name: v.optional(v.string()), // Friendly name like "John's Amazon Route"
+    notes: v.optional(v.string()),
+
+    // Audit
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_organization', ['workosOrgId'])
+    .index('by_org_hcr', ['workosOrgId', 'hcr'])
+    .index('by_org_hcr_trip', ['workosOrgId', 'hcr', 'tripNumber'])
+    .index('by_driver', ['driverId'])
+    .index('by_carrier', ['carrierPartnershipId'])
+    .index('by_org_active', ['workosOrgId', 'isActive']),
+
+  // ==========================================
+  // RECURRING LOAD TEMPLATES
+  // Blueprints for automatically generating loads on a schedule
+  // ==========================================
+  recurringLoadTemplates: defineTable({
+    workosOrgId: v.string(),
+
+    // Link to route assignment (for auto-assign after generation)
+    routeAssignmentId: v.optional(v.id('routeAssignments')),
+
+    // Direct assignment (for loads created with explicit driver/carrier)
+    driverId: v.optional(v.id('drivers')),
+    carrierPartnershipId: v.optional(v.id('carrierPartnerships')),
+
+    // Template Source
+    sourceLoadId: v.id('loadInformation'), // Original load cloned from
+    name: v.string(), // "Amazon Daily Route"
+
+    // Template Data (snapshot of source load)
+    customerId: v.id('customers'),
+    hcr: v.optional(v.string()),
+    tripNumber: v.optional(v.string()),
+    stops: v.array(
+      v.object({
+        stopType: v.union(v.literal('PICKUP'), v.literal('DELIVERY')),
+        address: v.string(),
+        city: v.optional(v.string()),
+        state: v.optional(v.string()),
+        postalCode: v.optional(v.string()),
+        timeOfDay: v.string(), // "08:00" - fixed time (HH:MM)
+        loadingType: v.optional(v.string()),
+        commodityDescription: v.optional(v.string()),
+        commodityUnits: v.optional(v.string()),
+        pieces: v.optional(v.number()),
+        weight: v.optional(v.number()),
+        instructions: v.optional(v.string()),
+      })
+    ),
+    equipmentType: v.optional(v.string()),
+    weight: v.optional(v.number()),
+    weightUnit: v.optional(v.string()),
+    fleet: v.optional(v.string()),
+    generalInstructions: v.optional(v.string()),
+
+    // Recurrence Rules
+    activeDays: v.array(v.number()), // 0=Sun, 1=Mon, ... 6=Sat
+    excludeFederalHolidays: v.boolean(),
+    customExclusions: v.array(v.string()), // ["2026-12-25"]
+
+    // Generation Config
+    generationTime: v.string(), // "06:00" - when cron creates load (HH:MM)
+    advanceDays: v.number(), // Create load N days before pickup (0 = same day)
+
+    // Multi-day Load Support
+    deliveryDayOffset: v.number(), // 0 = same day, 1 = next day, 2 = day after, etc.
+
+    // Template Lifecycle
+    endDate: v.optional(v.string()), // "2026-12-31" - stop generating after this date
+
+    // Status
+    isActive: v.boolean(),
+    lastGeneratedAt: v.optional(v.number()),
+    lastGeneratedLoadId: v.optional(v.id('loadInformation')),
+
+    // Audit
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_organization', ['workosOrgId'])
+    .index('by_route_assignment', ['routeAssignmentId'])
+    .index('by_org_active', ['workosOrgId', 'isActive']),
+
+  // ==========================================
+  // AUTO-ASSIGNMENT SETTINGS (Organization-level)
+  // ==========================================
+  autoAssignmentSettings: defineTable({
+    workosOrgId: v.string(),
+
+    // Master toggle
+    enabled: v.boolean(),
+
+    // Trigger options
+    triggerOnCreate: v.boolean(), // Auto-assign when load is created
+    scheduledEnabled: v.boolean(), // Run on schedule
+    scheduleIntervalMinutes: v.optional(v.number()), // Minutes between scheduled runs
+
+    // Audit
+    updatedBy: v.string(),
+    updatedAt: v.number(),
+  }).index('by_organization', ['workosOrgId']),
+
   orgIntegrations: defineTable({
     // WorkOS Organization
     workosOrgId: v.string(),
@@ -1447,6 +1574,25 @@ export default defineSchema({
     .index('by_org', ['workosOrgId'])
     .index('by_settlement', ['settlementId'])
     .index('by_driver_unassigned', ['driverId', 'settlementId']), // For gathering unassigned payables
+
+  /**
+   * Load Documents - Attachments for loads (e.g., extra documentation images)
+   */
+  loadDocuments: defineTable({
+    loadId: v.id('loadInformation'),
+    type: v.union(
+      v.literal('EXTRA_DOC')
+    ),
+    storageId: v.id('_storage'),
+    fileName: v.optional(v.string()),
+    contentType: v.optional(v.string()),
+    uploadedAt: v.float64(),
+    uploadedBy: v.string(), // WorkOS user ID
+    workosOrgId: v.string(),
+  })
+    .index('by_load', ['loadId'])
+    .index('by_load_type', ['loadId', 'type'])
+    .index('by_org', ['workosOrgId']),
 
   /**
    * Load Carrier Payables - Calculated carrier pay line items

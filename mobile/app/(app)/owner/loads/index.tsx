@@ -8,7 +8,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery } from 'convex/react';
 import { api } from '../../../../../convex/_generated/api';
 import { useCarrierOwner } from '../../_layout';
 import { colors, typography, borderRadius, shadows, spacing } from '../../../../lib/theme';
@@ -50,35 +50,6 @@ function formatDate(dateStr?: string): string {
     });
   } catch {
     return dateStr;
-  }
-}
-
-function formatStatus(status: string): string {
-  const statusMap: Record<string, string> = {
-    OFFERED: 'Offered',
-    ACCEPTED: 'Assigned',
-    AWARDED: 'Assigned',
-    IN_PROGRESS: 'In Transit',
-    COMPLETED: 'Completed',
-    DECLINED: 'Declined',
-    CANCELED: 'Canceled',
-  };
-  return statusMap[status] || status;
-}
-
-function getStatusStyle(status: string) {
-  switch (status) {
-    case 'ACCEPTED':
-    case 'AWARDED':
-    case 'IN_PROGRESS':
-      return { backgroundColor: colors.muted, color: colors.foreground };
-    case 'COMPLETED':
-      return { backgroundColor: colors.success, color: '#FFFFFF' };
-    case 'CANCELED':
-    case 'DECLINED':
-      return { backgroundColor: colors.destructive, color: '#FFFFFF' };
-    default:
-      return { backgroundColor: colors.muted, color: colors.foreground };
   }
 }
 
@@ -146,25 +117,6 @@ export default function ManageLoadsScreen() {
     }
   };
 
-  const getCountForTab = (tab: TabType): number => {
-    switch (tab) {
-      case 'unassigned':
-        return (activeLoads || []).filter(
-          (load) => !load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED')
-        ).length;
-      case 'assigned':
-        return (activeLoads || []).filter(
-          (load) => load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED' || load.status === 'IN_PROGRESS')
-        ).length;
-      case 'completed':
-        return (completedLoads || []).filter((load) => load.status === 'COMPLETED').length;
-      case 'canceled':
-        return [...(activeLoads || []), ...(completedLoads || [])].filter(
-          (load) => load.status === 'CANCELED' || load.status === 'DECLINED'
-        ).length;
-    }
-  };
-
   const data = getDataForTab();
   const totalCount = data.length;
 
@@ -196,7 +148,7 @@ export default function ManageLoadsScreen() {
             <Text style={styles.loadId}>Load #{item.load?.internalId || 'N/A'}</Text>
           </View>
           <View style={[styles.assignmentBadge, { backgroundColor: driver ? colors.success : '#F59E0B' }]}>
-            <Text style={styles.assignmentBadgeText}>
+            <Text style={styles.assignmentBadgeText} maxFontSizeMultiplier={1.2}>
               {driver ? 'Assigned' : 'Unassigned'}
             </Text>
           </View>
@@ -206,12 +158,12 @@ export default function ManageLoadsScreen() {
         <View style={styles.badgeRow}>
           {item.load?.hcr && (
             <View style={styles.hcrBadge}>
-              <Text style={styles.hcrBadgeText}>HCR {item.load.hcr}</Text>
+              <Text style={styles.hcrBadgeText} maxFontSizeMultiplier={1.2}>HCR {item.load.hcr}</Text>
             </View>
           )}
           {item.load?.tripNumber && (
             <View style={styles.tripBadge}>
-              <Text style={styles.tripBadgeText}>Trip {item.load.tripNumber}</Text>
+              <Text style={styles.tripBadgeText} maxFontSizeMultiplier={1.2}>Trip {item.load.tripNumber}</Text>
             </View>
           )}
         </View>

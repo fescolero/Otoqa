@@ -1,19 +1,7 @@
 import type { Metadata } from 'next';
-import { Noto_Sans, Geist_Mono } from 'next/font/google';
 import './globals.css';
 import { ConvexClientProvider } from '@/components/ConvexClientProvider';
 import Script from 'next/script';
-
-const notoSans = Noto_Sans({
-  variable: '--font-noto-sans',
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
-});
-
-const geistMono = Geist_Mono({
-  variable: '--font-geist-mono',
-  subsets: ['latin'],
-});
 
 export const metadata: Metadata = {
   title: 'Create Next App',
@@ -39,7 +27,7 @@ export default function RootLayout({
           />
         )}
       </head>
-      <body className={`${notoSans.variable} ${geistMono.variable} antialiased`}>
+      <body className="antialiased">
         <ConvexClientProvider>{children}</ConvexClientProvider>
       </body>
     </html>

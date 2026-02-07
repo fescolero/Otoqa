@@ -40,4 +40,28 @@ crons.cron(
   {}
 );
 
+// ==========================================
+// AUTO-ASSIGNMENT & RECURRING LOADS
+// ==========================================
+
+// ✅ Recurring Load Generation
+// Runs daily at 5 AM UTC to generate loads for the day
+// Each template has its own generationTime and advanceDays settings
+crons.cron(
+  "recurring-load-generation",
+  "0 5 * * *", // Run daily at 5 AM UTC
+  internal.recurringLoadsCron.generateDailyLoads,
+  {}
+);
+
+// ✅ Scheduled Auto-Assignment (hourly)
+// Runs every hour to pick up any loads that need auto-assignment
+// Supplements the on-create trigger for any missed loads
+crons.interval(
+  "scheduled-auto-assignment",
+  { hours: 1 },
+  internal.autoAssignmentCron.runScheduledAutoAssignment,
+  {}
+);
+
 export default crons;

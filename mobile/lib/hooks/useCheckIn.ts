@@ -36,7 +36,7 @@ export function useCheckIn() {
   const checkInMutation = useMutation(api.driverMobile.checkInAtStop);
   const checkOutMutation = useMutation(api.driverMobile.checkOutFromStop);
   const getUploadUrl = useAction(api.s3Upload.getPODUploadUrl);
-  const { isOffline, isConnected } = useNetworkStatus();
+  const { isConnected } = useNetworkStatus();
   const posthog = usePostHog();
   
   // Be conservative: if network status is unknown (null), treat as offline
@@ -99,7 +99,7 @@ export function useCheckIn() {
       posthog.capture('checkin_failed', {
         stopId: options.stopId,
         error: errorMessage,
-        errorStack: error instanceof Error ? error.stack : undefined,
+        errorStack: error instanceof Error ? error.stack ?? null : null,
       });
       return {
         success: false,
@@ -161,16 +161,16 @@ export function useCheckIn() {
             podPhotoUrl = fileUrl;
             console.log('[CheckOut] Photo uploaded successfully:', podPhotoUrl);
             posthog.capture('photo_upload_success', {
-              loadId: options.loadId,
+              loadId: options.loadId ?? null,
               stopId: options.stopId,
               fileUrl,
             });
           } else {
             console.error('[CheckOut] Photo upload failed:', uploadResult.error);
             posthog.capture('photo_upload_failed', {
-              loadId: options.loadId,
+              loadId: options.loadId ?? null,
               stopId: options.stopId,
-              error: uploadResult.error,
+              error: uploadResult.error ?? null,
               photoUri: options.photoUri,
             });
             // Continue with check-out even if photo upload fails
@@ -179,10 +179,10 @@ export function useCheckIn() {
           const errorMessage = uploadError?.message || String(uploadError);
           console.error('[CheckOut] Photo upload error:', errorMessage);
           posthog.capture('photo_upload_exception', {
-            loadId: options.loadId,
+            loadId: options.loadId ?? null,
             stopId: options.stopId,
             error: errorMessage,
-            errorStack: uploadError?.stack,
+            errorStack: uploadError?.stack ?? null,
             photoUri: options.photoUri,
           });
           // Continue with check-out even if photo upload fails
@@ -215,7 +215,7 @@ export function useCheckIn() {
           });
           
           posthog.capture('location_tracking_started', {
-            loadId: options.loadId,
+            loadId: options.loadId ?? null,
             stopId: options.stopId,
             success: trackingResult.success,
             message: trackingResult.message,
@@ -231,7 +231,7 @@ export function useCheckIn() {
           const trackingResult = await stopLocationTracking();
           
           posthog.capture('location_tracking_stopped', {
-            loadId: options.loadId,
+            loadId: options.loadId ?? null,
             stopId: options.stopId,
             success: trackingResult.success,
           });
@@ -243,10 +243,10 @@ export function useCheckIn() {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Check-out failed';
       posthog.capture('checkout_failed', {
-        loadId: options.loadId,
+        loadId: options.loadId ?? null,
         stopId: options.stopId,
         error: errorMessage,
-        errorStack: error instanceof Error ? error.stack : undefined,
+        errorStack: error instanceof Error ? error.stack ?? null : null,
       });
       return {
         success: false,

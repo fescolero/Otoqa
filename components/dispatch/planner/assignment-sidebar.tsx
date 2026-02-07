@@ -63,7 +63,7 @@ interface DriverWithTruck {
 }
 
 interface Carrier {
-  _id: Id<'carriers'>;
+  _id: string;
   companyName: string;
   mcNumber: string;
   firstName: string;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,19 +10,17 @@ import {
   Modal,
   TextInput,
   ActivityIndicator,
-  Dimensions,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useLoadDetail } from '../../../lib/hooks/useLoadDetail';
 import { useCheckIn } from '../../../lib/hooks/useCheckIn';
 import { useDriver } from '../_layout';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
 import { Id } from '../../../../convex/_generated/dataModel';
-import * as ImagePicker from 'expo-image-picker';
 import { usePostHog } from 'posthog-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -157,35 +155,6 @@ export default function TripDetailScreen() {
     });
   };
 
-  // Legacy take photo for check-in modal (fallback to ImagePicker)
-  const takePhoto = async () => {
-    posthog?.capture('take_photo_started', { loadId: id, stopId: checkInModal.stopId });
-    
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) {
-      posthog?.capture('take_photo_permission_denied');
-      Alert.alert('Permission Required', 'Camera access is required for POD photos');
-      return;
-    }
-
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'],
-      quality: 0.8,
-      allowsEditing: false,
-    });
-
-    if (!result.canceled && result.assets[0]) {
-      setPhotoUri(result.assets[0].uri);
-      posthog?.capture('take_photo_success', { 
-        uri: result.assets[0].uri,
-        width: result.assets[0].width,
-        height: result.assets[0].height,
-      });
-    } else {
-      posthog?.capture('take_photo_cancelled');
-    }
-  };
-
   // Submit check-in/out
   const submitCheckIn = async () => {
     if (!checkInModal.stopId || !driverId) return;
@@ -260,22 +229,6 @@ export default function TripDetailScreen() {
     setCheckInModal({ visible: false, stopId: null, type: 'in' });
     setNotes('');
     setPhotoUri(null);
-  };
-
-  // Format time for display
-  const formatTime = (timeString?: string) => {
-    if (!timeString) return null;
-    try {
-      // Handle different time formats
-      if (timeString.includes('T')) {
-        const date = new Date(timeString);
-        return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-      }
-      // Already formatted time
-      return timeString;
-    } catch {
-      return timeString;
-    }
   };
 
   // Format date and time together
@@ -404,13 +357,10 @@ export default function TripDetailScreen() {
                   <Text style={styles.loadIdValue}>#{load.internalId}</Text>
                 </View>
               </View>
-              <View style={styles.statusContainer}>
-                <Text style={styles.statusLabel}>Status:</Text>
-                <View style={[styles.statusBadge, { backgroundColor: `${statusDisplay.color}20` }]}>
-                  <Text style={[styles.statusBadgeText, { color: statusDisplay.color }]}>
-                    {statusDisplay.text}
-                  </Text>
-                </View>
+              <View style={[styles.statusBadge, { backgroundColor: `${statusDisplay.color}20` }]}>
+                <Text style={[styles.statusBadgeText, { color: statusDisplay.color }]}>
+                  {statusDisplay.text}
+                </Text>
               </View>
             </View>
           </View>
@@ -476,14 +426,14 @@ export default function TripDetailScreen() {
                         <View style={styles.checkedBadgesRow}>
                           {stop.checkedInAt && (
                             <View style={styles.checkedBadge}>
-                              <Text style={styles.checkedBadgeText}>
+                              <Text style={styles.checkedBadgeText} maxFontSizeMultiplier={1.2}>
                                 Checked In: {formatCheckedTime(stop.checkedInAt)}
                               </Text>
                             </View>
                           )}
                           {stop.checkedOutAt && (
                             <View style={styles.checkedBadge}>
-                              <Text style={styles.checkedBadgeText}>
+                              <Text style={styles.checkedBadgeText} maxFontSizeMultiplier={1.2}>
                                 Checked Out: {formatCheckedTime(stop.checkedOutAt)}
                               </Text>
                             </View>
@@ -582,7 +532,7 @@ export default function TripDetailScreen() {
         </ScrollView>
 
         {/* Bottom Action Bar */}
-        <View style={[styles.bottomBar, { paddingBottom: insets.bottom + spacing.lg }]}>
+        <View style={[styles.bottomBar, { paddingBottom: insets.bottom + (Platform.OS === 'ios' ? spacing.sm : spacing.lg) }]}>
           <TouchableOpacity 
             style={styles.menuButton}
             onPress={() => setShowQuickActions(true)}
@@ -899,11 +849,11 @@ export default function TripDetailScreen() {
                   <View style={styles.detourGpsBadgesRow}>
                     <View style={styles.detourGpsBadge}>
                       <View style={[styles.detourGpsBadgeDot, styles.detourGpsBadgeDotGreen]} />
-                      <Text style={styles.detourGpsBadgeText}>Auto Check-in</Text>
+                      <Text style={styles.detourGpsBadgeText} maxFontSizeMultiplier={1.2}>Auto Check-in</Text>
                     </View>
                     <View style={styles.detourGpsBadge}>
                       <View style={[styles.detourGpsBadgeDot, styles.detourGpsBadgeDotBlue]} />
-                      <Text style={styles.detourGpsBadgeText}>Auto Check-out</Text>
+                      <Text style={styles.detourGpsBadgeText} maxFontSizeMultiplier={1.2}>Auto Check-out</Text>
                     </View>
                   </View>
                 </View>
@@ -1064,16 +1014,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: colors.foreground,
     fontWeight: '600',
-  },
-  statusContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  statusLabel: {
-    fontSize: 14,
-    color: colors.foregroundMuted,
-    fontWeight: '500',
   },
   statusBadge: {
     paddingHorizontal: spacing.md,
@@ -1532,7 +1472,7 @@ const styles = StyleSheet.create({
     marginRight: spacing.md,
   },
   modalTitle: {
-    fontSize: 24,
+    fontSize: Platform.OS === 'ios' ? 20 : 24,
     fontWeight: '700',
     color: colors.foreground,
     marginBottom: spacing.xs,

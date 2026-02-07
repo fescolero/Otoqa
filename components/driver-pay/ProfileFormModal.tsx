@@ -154,6 +154,7 @@ export function ProfileFormModal({
           workosOrgId: organizationId,
           name: name.trim(),
           description: description.trim() || undefined,
+          profileType: 'DRIVER',
           payBasis,
           isDefault,
           createdBy: userId,

@@ -11,9 +11,12 @@ if (typeof window === 'undefined') {
     addEventListener: (event: string, callback: () => void) => {
       // No-op in React Native - we use NetInfo instead
       console.log(`[Polyfill] window.addEventListener('${event}') called - ignored`);
+      void callback;
     },
     removeEventListener: (event: string, callback: () => void) => {
       // No-op
+      void event;
+      void callback;
     },
     // Navigator for online status
     navigator: {
@@ -36,14 +39,16 @@ if (typeof window === 'undefined') {
   if (typeof (window as any).addEventListener !== 'function') {
     (window as any).addEventListener = (event: string, callback: () => void) => {
       console.log(`[Polyfill] window.addEventListener('${event}') called - ignored`);
+      void callback;
     };
   }
   if (typeof (window as any).removeEventListener !== 'function') {
     (window as any).removeEventListener = (event: string, callback: () => void) => {
       // No-op
+      void event;
+      void callback;
     };
   }
 }
 
 export {};
-

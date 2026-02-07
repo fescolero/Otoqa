@@ -98,6 +98,11 @@ export default function EditContractLanePage() {
 
     try {
       const formData = new FormData(e.currentTarget);
+      const currencyValue = formData.get('currency');
+      const currency =
+        currencyValue === 'USD' || currencyValue === 'CAD' || currencyValue === 'MXN'
+          ? currencyValue
+          : undefined;
 
       await updateContractLane({
         id: laneId,
@@ -115,7 +120,7 @@ export default function EditContractLanePage() {
         equipmentSize: (formData.get('equipmentSize') as any) || undefined,
         rate: Number(formData.get('rate')),
         rateType: formData.get('rateType') as any,
-        currency: (formData.get('currency') as string) || undefined,
+        currency,
         minimumRate: formData.get('minimumRate') ? Number(formData.get('minimumRate')) : undefined,
         minimumQuantity: formData.get('minimumQuantity')
           ? Number(formData.get('minimumQuantity'))

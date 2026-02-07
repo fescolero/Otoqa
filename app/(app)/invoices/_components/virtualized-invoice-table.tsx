@@ -36,9 +36,12 @@ interface VirtualizedInvoiceTableProps {
   selectedIds: Set<Id<'loadInvoices'>>;
   focusedRowIndex: number | null;
   isAllSelected: boolean;
+  isSomeSelected: boolean;
   onSelectAll: (checked: boolean) => void;
   onSelectRow: (id: Id<'loadInvoices'>, checked: boolean) => void;
   onRowClick: (id: Id<'loadInvoices'>) => void;
+  onDownload?: (id: Id<'loadInvoices'>) => void;
+  onPrint?: (id: Id<'loadInvoices'>) => void;
   formatDate: (timestamp: number) => string;
   formatCurrency: (amount: number) => string;
   emptyMessage?: string;
@@ -49,14 +52,18 @@ export function VirtualizedInvoiceTable({
   selectedIds,
   focusedRowIndex,
   isAllSelected,
+  isSomeSelected,
   onSelectAll,
   onSelectRow,
   onRowClick,
+  onDownload,
+  onPrint,
   formatDate,
   formatCurrency,
   emptyMessage = 'No invoices found',
 }: VirtualizedInvoiceTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const headerChecked = isAllSelected ? true : isSomeSelected ? 'indeterminate' : false;
 
   const rowVirtualizer = useVirtualizer({
     count: invoices.length,
@@ -72,8 +79,8 @@ export function VirtualizedInvoiceTable({
           <TableRow className="h-10">
             <TableHead className="w-12">
               <Checkbox
-                checked={isAllSelected}
-                onCheckedChange={onSelectAll}
+                checked={headerChecked}
+                onCheckedChange={(checked) => onSelectAll(checked === true)}
                 aria-label="Select all"
               />
             </TableHead>
@@ -103,8 +110,8 @@ export function VirtualizedInvoiceTable({
         <div className="flex items-center h-10 w-full">
           <div className="px-2 w-12 flex items-center">
             <Checkbox
-              checked={isAllSelected}
-              onCheckedChange={onSelectAll}
+              checked={headerChecked}
+              onCheckedChange={(checked) => onSelectAll(checked === true)}
               aria-label="Select all"
             />
           </div>
@@ -168,28 +175,28 @@ export function VirtualizedInvoiceTable({
                 </div>
                 <div className="px-4 w-24">
                   <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 w-7 p-0 hover:bg-slate-50 transition-colors"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // TODO: Add download handler
-                      }}
-                    >
-                      <Download className="h-3.5 w-3.5" strokeWidth={2} />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 w-7 p-0 hover:bg-slate-50 transition-colors"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // TODO: Add print handler
-                      }}
-                    >
-                      <Printer className="h-3.5 w-3.5" strokeWidth={2} />
-                    </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 w-7 p-0 hover:bg-slate-50 transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDownload?.(invoice._id);
+                        }}
+                      >
+                        <Download className="h-3.5 w-3.5" strokeWidth={2} />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 w-7 p-0 hover:bg-slate-50 transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onPrint?.(invoice._id);
+                        }}
+                      >
+                        <Printer className="h-3.5 w-3.5" strokeWidth={2} />
+                      </Button>
                   </div>
                 </div>
               </div>

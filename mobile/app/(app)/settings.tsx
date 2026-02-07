@@ -4,8 +4,7 @@ import { useClerk } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useDriver, useAppMode } from './_layout';
-import { getBackgroundSyncStatus } from '../../lib/background-sync';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useLanguage } from '../../lib/LanguageContext';
 
 // ============================================
@@ -55,8 +54,7 @@ export default function SettingsScreen() {
   const { canSwitchModes, setMode } = useAppMode();
   const { currentLanguage, t } = useLanguage();
 
-  const [syncStatus, setSyncStatus] = useState<string>('Active');
-  const [lastSynced, setLastSynced] = useState<string>('2 minutes ago');
+  const [lastSynced] = useState<string>('2 minutes ago');
 
   // Get display name for current language
   const getLanguageDisplayName = () => {
@@ -71,18 +69,6 @@ export default function SettingsScreen() {
         return 'English';
     }
   };
-
-  // Update sync status periodically
-  useEffect(() => {
-    const updateStatus = async () => {
-      const bgStatus = await getBackgroundSyncStatus();
-      setSyncStatus(bgStatus.statusLabel);
-    };
-
-    updateStatus();
-    const interval = setInterval(updateStatus, 5000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Handle sign out
   const handleSignOut = () => {
@@ -220,7 +206,7 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.activeBadge}>
               <View style={styles.activeDot} />
-              <Text style={styles.activeBadgeText}>ACTIVE</Text>
+              <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>ACTIVE</Text>
             </View>
           </View>
         </View>
@@ -242,7 +228,7 @@ export default function SettingsScreen() {
             </View>
             <Text style={styles.menuLabel}>{t('profile.contactDispatch')}</Text>
             <View style={styles.availableBadge}>
-              <Text style={styles.availableBadgeText}>{t('profile.available')}</Text>
+              <Text style={styles.availableBadgeText} maxFontSizeMultiplier={1.2}>{t('profile.available')}</Text>
             </View>
           </TouchableOpacity>
         </View>

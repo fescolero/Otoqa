@@ -3,8 +3,8 @@
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
-import { InvoiceTemplate } from "@/app/invoices/_components/preview/invoice-template";
-import { InvoicePDFTemplate } from "@/app/invoices/_components/preview/invoice-pdf-template";
+import { InvoiceTemplate } from "@/app/(app)/invoices/_components/preview/invoice-template";
+import { InvoicePDFTemplate } from "@/app/(app)/invoices/_components/preview/invoice-pdf-template";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Printer, Download } from "lucide-react";

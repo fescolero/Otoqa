@@ -11,7 +11,7 @@ import {
   Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useLocalSearchParams, router } from 'expo-router';
+import { useLocalSearchParams } from 'expo-router';
 import { useMutation } from 'convex/react';
 import { useUser } from '@clerk/clerk-expo';
 import { api } from '../../../../convex/_generated/api';
@@ -49,7 +49,7 @@ function formatPhoneDisplay(phone: string): string {
 
 export default function CompleteDriverProfileScreen() {
   const insets = useSafeAreaInsets();
-  const { carrierOrgId, carrierExternalOrgId } = useCarrierOwner();
+  const { carrierOrgId } = useCarrierOwner();
   const { user } = useUser();
   const { firstName: paramFirstName, lastName: paramLastName } = useLocalSearchParams<{
     firstName?: string;
@@ -379,7 +379,7 @@ export default function CompleteDriverProfileScreen() {
           setDateOfBirth(date);
           setShowDobPicker(false);
         }}
-        initialDate={dateOfBirth || new Date(2000, 0, 1)}
+        value={dateOfBirth || new Date(2000, 0, 1)}
         title="Date of Birth"
         minimumDate={new Date(1940, 0, 1)}
         maximumDate={new Date(2010, 11, 31)}
@@ -393,7 +393,7 @@ export default function CompleteDriverProfileScreen() {
           setLicenseExpiration(date);
           setShowExpirationPicker(false);
         }}
-        initialDate={licenseExpiration || new Date(2030, 0, 1)}
+        value={licenseExpiration || new Date(2030, 0, 1)}
         title="License Expiration Date"
         minimumDate={new Date()}
         maximumDate={new Date(2040, 11, 31)}

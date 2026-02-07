@@ -1,7 +1,14 @@
 // ============================================
 // DARK LOGISTICS THEME
 // Premium dark mode design system
+// Platform-adaptive: iOS Glass / Android Material
 // ============================================
+
+import { Platform } from 'react-native';
+
+// Platform detection
+export const isIOS = Platform.OS === 'ios';
+export const isAndroid = Platform.OS === 'android';
 
 export const colors = {
   // Background Colors
@@ -50,6 +57,14 @@ export const colors = {
   
   // Ring/Focus
   ring: '#FF6B00',
+  
+  // Platform-specific glass effect colors (iOS only)
+  glass: {
+    background: isIOS ? 'rgba(34, 38, 43, 0.65)' : '#22262B',
+    backgroundLight: isIOS ? 'rgba(45, 50, 59, 0.7)' : '#2D323B',
+    border: isIOS ? 'rgba(255, 255, 255, 0.1)' : '#3F4552',
+    borderLight: isIOS ? 'rgba(255, 255, 255, 0.15)' : 'rgba(63, 69, 82, 0.5)',
+  },
 };
 
 export const typography = {
@@ -122,4 +137,58 @@ export const shadows = {
     shadowRadius: 16,
     elevation: 8,
   },
+};
+
+// ============================================
+// PLATFORM-SPECIFIC STYLING HELPERS
+// iOS: Glass/vibrancy effects with blur
+// Android: Material Design with elevation
+// ============================================
+
+// Blur intensity levels for iOS glass effect
+export const blurIntensity = {
+  light: 20,
+  medium: 40,
+  heavy: 60,
+} as const;
+
+// Glass card style configuration
+export const glassCard = {
+  // iOS gets translucent background, Android gets solid
+  backgroundColor: colors.glass.background,
+  borderColor: colors.glass.border,
+  borderWidth: 1,
+  // iOS uses subtle shadow, Android uses elevation
+  ...(isIOS
+    ? {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.15,
+        shadowRadius: 8,
+      }
+    : {
+        elevation: 4,
+      }),
+};
+
+// Glass card style for lighter variant
+export const glassCardLight = {
+  backgroundColor: colors.glass.backgroundLight,
+  borderColor: colors.glass.borderLight,
+  borderWidth: 1,
+  ...(isIOS
+    ? {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+      }
+    : {
+        elevation: 2,
+      }),
+};
+
+// Helper to get platform-specific card style
+export const getPlatformCardStyle = (variant: 'default' | 'light' = 'default') => {
+  return variant === 'light' ? glassCardLight : glassCard;
 };

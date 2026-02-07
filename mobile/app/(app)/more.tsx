@@ -1,7 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useUser } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useDriver } from './_layout';
@@ -48,9 +47,8 @@ const borderRadius = {
 // ============================================
 
 export default function MoreScreen() {
-  const { user } = useUser();
   const router = useRouter();
-  const { driverName, truck } = useDriver();
+  const { truck } = useDriver();
   const { t } = useLanguage();
 
   // Format truck info for display
@@ -82,7 +80,7 @@ export default function MoreScreen() {
             </View>
             {hasTruck && (
               <View style={styles.activeBadge}>
-                <Text style={styles.activeBadgeText}>{t('more.active')}</Text>
+                <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>{t('more.active')}</Text>
               </View>
             )}
           </View>

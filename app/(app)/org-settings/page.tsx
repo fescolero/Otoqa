@@ -91,10 +91,10 @@ export default function OrgSettingsPage() {
   const serializedUser = user
     ? {
         id: user.id,
-        firstName: user.firstName,
-        lastName: user.lastName,
+        firstName: user.firstName ?? undefined,
+        lastName: user.lastName ?? undefined,
         email: user.email,
-        profilePictureUrl: user.profilePictureUrl,
+        profilePictureUrl: user.profilePictureUrl ?? undefined,
       }
     : null;
 

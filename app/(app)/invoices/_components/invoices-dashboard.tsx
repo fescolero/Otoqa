@@ -1,22 +1,13 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { 
   AlertCircle, 
@@ -24,21 +15,16 @@ import {
   DollarSign, 
   CheckCircle2, 
   Ban,
-  Eye,
-  Download,
-  Printer,
   Info
 } from 'lucide-react';
 import { FixLaneModal } from './fix-lane-modal';
 import { InvoicePreviewSheet } from './invoice-preview-sheet';
-import { InvoiceStatusBadge } from './invoice-status-badge';
 import { FloatingActionBar } from './floating-action-bar';
 import { InvoiceFilterBar, FilterState } from './invoice-filter-bar';
 import { useKeyboardNavigation } from './use-keyboard-navigation';
 import { useBulkActions } from './use-bulk-actions';
 import { KeyboardShortcutsDialog } from './keyboard-shortcuts-dialog';
 import { VirtualizedInvoiceTable } from './virtualized-invoice-table';
-import { cn } from '@/lib/utils';
 import { useDebounce } from '@/hooks/use-debounce';
 
 interface InvoicesDashboardProps {
@@ -50,6 +36,8 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
   const [activeTab, setActiveTab] = useState<string>('attention');
   const [selectedGroup, setSelectedGroup] = useState<any>(null);
   const [previewInvoiceId, setPreviewInvoiceId] = useState<Id<"loadInvoices"> | null>(null);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [pendingPreviewAction, setPendingPreviewAction] = useState<'print' | 'download' | null>(null);
   
   // Multi-select state
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<Set<Id<"loadInvoices">>>(new Set());
@@ -266,17 +254,6 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
     setSelectedInvoiceIds(new Set());
   });
   
-  // Keyboard navigation hook
-  useKeyboardNavigation({
-    invoices: currentInvoices,
-    selectedIds: selectedInvoiceIds,
-    setSelectedIds: setSelectedInvoiceIds,
-    focusedRowIndex,
-    setFocusedRowIndex,
-    onOpenPreview: setPreviewInvoiceId,
-    isSheetOpen: !!previewInvoiceId,
-  });
-  
   // Selection handlers
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
@@ -299,6 +276,47 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
   const isAllSelected = currentInvoices.length > 0 && selectedInvoiceIds.size === currentInvoices.length;
   const isSomeSelected = selectedInvoiceIds.size > 0 && selectedInvoiceIds.size < currentInvoices.length;
 
+  const handleRowDownload = useCallback((invoiceId: Id<'loadInvoices'>) => {
+    setPreviewInvoiceId(invoiceId);
+    setIsPreviewOpen(false);
+    setPendingPreviewAction('download');
+  }, []);
+
+  const handleRowPrint = useCallback((invoiceId: Id<'loadInvoices'>) => {
+    setPreviewInvoiceId(invoiceId);
+    setIsPreviewOpen(false);
+    setPendingPreviewAction('print');
+  }, []);
+
+  const handlePreviewOpen = useCallback((invoiceId: Id<'loadInvoices'>) => {
+    setPreviewInvoiceId(invoiceId);
+    setIsPreviewOpen(true);
+    setPendingPreviewAction(null);
+  }, []);
+
+  const handlePreviewClose = useCallback(() => {
+    setIsPreviewOpen(false);
+    setPreviewInvoiceId(null);
+    setPendingPreviewAction(null);
+  }, []);
+
+  const handleAutoActionHandled = useCallback(() => {
+    setPendingPreviewAction(null);
+    if (!isPreviewOpen) {
+      setPreviewInvoiceId(null);
+    }
+  }, [isPreviewOpen]);
+
+  // Keyboard navigation hook
+  useKeyboardNavigation({
+    invoices: currentInvoices,
+    selectedIds: selectedInvoiceIds,
+    setSelectedIds: setSelectedInvoiceIds,
+    focusedRowIndex,
+    setFocusedRowIndex,
+    onOpenPreview: handlePreviewOpen,
+    isSheetOpen: isPreviewOpen,
+  });
   const formatDate = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -511,9 +529,12 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     selectedIds={selectedInvoiceIds}
                     focusedRowIndex={focusedRowIndex}
                     isAllSelected={isAllSelected}
+                    isSomeSelected={isSomeSelected}
                     onSelectAll={handleSelectAll}
                     onSelectRow={handleSelectRow}
-                    onRowClick={setPreviewInvoiceId}
+                    onRowClick={handlePreviewOpen}
+                    onDownload={handleRowDownload}
+                    onPrint={handleRowPrint}
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No draft invoices${filters.search ? ' matching your search' : ''}`}
@@ -553,9 +574,12 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     selectedIds={selectedInvoiceIds}
                     focusedRowIndex={focusedRowIndex}
                     isAllSelected={isAllSelected}
+                    isSomeSelected={isSomeSelected}
                     onSelectAll={handleSelectAll}
                     onSelectRow={handleSelectRow}
-                    onRowClick={setPreviewInvoiceId}
+                    onRowClick={handlePreviewOpen}
+                    onDownload={handleRowDownload}
+                    onPrint={handleRowPrint}
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No pending invoices${filters.search ? ' matching your search' : ''}`}
@@ -595,9 +619,12 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     selectedIds={selectedInvoiceIds}
                     focusedRowIndex={focusedRowIndex}
                     isAllSelected={isAllSelected}
+                    isSomeSelected={isSomeSelected}
                     onSelectAll={handleSelectAll}
                     onSelectRow={handleSelectRow}
-                    onRowClick={setPreviewInvoiceId}
+                    onRowClick={handlePreviewOpen}
+                    onDownload={handleRowDownload}
+                    onPrint={handleRowPrint}
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No paid invoices${filters.search ? ' matching your search' : ''}`}
@@ -637,9 +664,12 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     selectedIds={selectedInvoiceIds}
                     focusedRowIndex={focusedRowIndex}
                     isAllSelected={isAllSelected}
+                    isSomeSelected={isSomeSelected}
                     onSelectAll={handleSelectAll}
                     onSelectRow={handleSelectRow}
-                    onRowClick={setPreviewInvoiceId}
+                    onRowClick={handlePreviewOpen}
+                    onDownload={handleRowDownload}
+                    onPrint={handleRowPrint}
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No voided invoices${filters.search ? ' matching your search' : ''}`}
@@ -654,10 +684,12 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
       {/* Invoice Preview Sheet */}
       <InvoicePreviewSheet 
         invoiceId={previewInvoiceId}
-        isOpen={!!previewInvoiceId}
-        onClose={() => setPreviewInvoiceId(null)}
+        isOpen={isPreviewOpen}
+        onClose={handlePreviewClose}
         allInvoiceIds={currentInvoices.map(inv => inv._id)}
-        onNavigate={setPreviewInvoiceId}
+        onNavigate={handlePreviewOpen}
+        autoAction={pendingPreviewAction}
+        onAutoActionHandled={handleAutoActionHandled}
       />
 
       {/* Fix Lane Modal */}

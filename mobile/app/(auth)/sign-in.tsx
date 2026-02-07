@@ -28,8 +28,6 @@ export default function SignInScreen() {
 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [countryCode, setCountryCode] = useState('+1');
-
   // Format phone number as user types
   const formatPhoneNumber = (text: string) => {
     const cleaned = text.replace(/\D/g, '');

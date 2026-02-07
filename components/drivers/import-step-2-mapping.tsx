@@ -324,7 +324,9 @@ export function ImportStep2Mapping({
                         {mapping.sourceColumn}
                       </span>
                       {isAutoMatched && !isIgnored && (
-                        <Link2 className="h-4 w-4 text-green-600" title="Auto-matched" />
+                        <span title="Auto-matched">
+                          <Link2 className="h-4 w-4 text-green-600" />
+                        </span>
                       )}
                     </div>
                   </td>

@@ -439,6 +439,215 @@ export const assignDriver = mutation({
   },
 });
 
+// Internal version of assignDriver for system calls (auto-assignment, load creation)
+export const assignDriverInternal = internalMutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    driverId: v.id('drivers'),
+    truckId: v.optional(v.id('trucks')),
+    assignedBy: v.string(),
+    assignedByName: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR' | 'CONFLICT'; message?: string }> => {
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
+      return { status: 'ERROR', message: 'Driver is inactive or not found' };
+    }
+
+    const load = await ctx.db.get(args.loadId);
+    if (!load) {
+      return { status: 'ERROR', message: 'Load not found' };
+    }
+    if (load.status === 'Canceled') {
+      return { status: 'ERROR', message: 'Cannot assign driver to a canceled load' };
+    }
+
+    let legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+
+    const now = Date.now();
+
+    if (legs.length === 0) {
+      const stops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect();
+
+      if (stops.length < 2) {
+        return { status: 'ERROR', message: 'Load must have at least 2 stops' };
+      }
+
+      const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+      const firstStop = sortedStops[0];
+      const lastStop = sortedStops[sortedStops.length - 1];
+
+      const legId = await ctx.db.insert('dispatchLegs', {
+        loadId: args.loadId,
+        driverId: args.driverId,
+        truckId: args.truckId,
+        sequence: 1,
+        startStopId: firstStop._id,
+        endStopId: lastStop._id,
+        legLoadedMiles: load.effectiveMiles ?? 0,
+        legEmptyMiles: 0,
+        status: 'PENDING',
+        workosOrgId: load.workosOrgId,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const newLeg = await ctx.db.get(legId);
+      if (newLeg) legs = [newLeg];
+    }
+
+    // Update all PENDING/ACTIVE legs
+    for (const leg of legs) {
+      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+        await ctx.db.patch(leg._id, {
+          driverId: args.driverId,
+          truckId: args.truckId,
+          carrierPartnershipId: undefined,
+          updatedAt: now,
+        });
+      }
+    }
+
+    // Update load
+    await ctx.db.patch(args.loadId, {
+      primaryDriverId: args.driverId,
+      primaryCarrierPartnershipId: undefined,
+      status: 'Assigned',
+      updatedAt: now,
+    });
+
+    // Audit log
+    await ctx.runMutation(internal.auditLog.logAction, {
+      organizationId: load.workosOrgId,
+      entityType: 'LOAD',
+      entityId: args.loadId as string,
+      entityName: `Load ${load.internalId}`,
+      action: 'ASSIGN_DRIVER',
+      performedBy: args.assignedBy,
+      performedByName: args.assignedByName,
+      description: `Auto-assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber}`,
+    });
+
+    // Trigger pay recalculation
+    await ctx.runMutation(internal.driverPayCalculation.recalculateForLoad, {
+      loadId: args.loadId,
+      userId: args.assignedBy,
+    });
+
+    return { status: 'SUCCESS' };
+  },
+});
+
+// Internal version of assignCarrier for system calls
+export const assignCarrierInternal = internalMutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    carrierPartnershipId: v.id('carrierPartnerships'),
+    carrierRate: v.optional(v.number()),
+    assignedBy: v.string(),
+    assignedByName: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR'; message?: string }> => {
+    const carrier = await ctx.db.get(args.carrierPartnershipId);
+    if (!carrier || carrier.status !== 'ACTIVE') {
+      return { status: 'ERROR', message: 'Carrier is inactive or not found' };
+    }
+
+    const load = await ctx.db.get(args.loadId);
+    if (!load) {
+      return { status: 'ERROR', message: 'Load not found' };
+    }
+    if (load.status === 'Canceled') {
+      return { status: 'ERROR', message: 'Cannot assign carrier to a canceled load' };
+    }
+
+    let legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+
+    const now = Date.now();
+
+    if (legs.length === 0) {
+      const stops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect();
+
+      if (stops.length < 2) {
+        return { status: 'ERROR', message: 'Load must have at least 2 stops' };
+      }
+
+      const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+      const firstStop = sortedStops[0];
+      const lastStop = sortedStops[sortedStops.length - 1];
+
+      const legId = await ctx.db.insert('dispatchLegs', {
+        loadId: args.loadId,
+        carrierPartnershipId: args.carrierPartnershipId,
+        sequence: 1,
+        startStopId: firstStop._id,
+        endStopId: lastStop._id,
+        legLoadedMiles: load.effectiveMiles ?? 0,
+        legEmptyMiles: 0,
+        status: 'PENDING',
+        workosOrgId: load.workosOrgId,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const newLeg = await ctx.db.get(legId);
+      if (newLeg) legs = [newLeg];
+    }
+
+    // Update all PENDING/ACTIVE legs
+    for (const leg of legs) {
+      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+        await ctx.db.patch(leg._id, {
+          carrierPartnershipId: args.carrierPartnershipId,
+          driverId: undefined,
+          truckId: undefined,
+          updatedAt: now,
+        });
+      }
+    }
+
+    // Update load
+    await ctx.db.patch(args.loadId, {
+      primaryCarrierPartnershipId: args.carrierPartnershipId,
+      primaryDriverId: undefined,
+      status: 'Assigned',
+      updatedAt: now,
+    });
+
+    // Audit log
+    await ctx.runMutation(internal.auditLog.logAction, {
+      organizationId: load.workosOrgId,
+      entityType: 'LOAD',
+      entityId: args.loadId as string,
+      entityName: `Load ${load.internalId}`,
+      action: 'ASSIGN_CARRIER',
+      performedBy: args.assignedBy,
+      performedByName: args.assignedByName,
+      description: `Auto-assigned carrier ${carrier.carrierName} to load ${load.orderNumber}`,
+    });
+
+    // Trigger carrier pay calculation
+    await ctx.runMutation(internal.carrierPayCalculation.recalculateForLoad, {
+      loadId: args.loadId,
+      userId: args.assignedBy,
+    });
+
+    return { status: 'SUCCESS' };
+  },
+});
+
 // Assign carrier partnership to a load (for brokered/outsourced loads)
 // Supports "Power Only" scenarios where carrier provides truck but uses your trailer
 export const assignCarrier = mutation({

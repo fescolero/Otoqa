@@ -9,27 +9,27 @@
 /* Begin PBXBuildFile section */
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
-		6FC50C2147CF78EB3207B063 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165BE167F5BC23E1B40B669C /* ExpoModulesProvider.swift */; };
+		8946B02EDEE12F5F1ACD74A4 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37D8A41B725ACB6B1531CD7A /* ExpoModulesProvider.swift */; };
+		B2D41DBA26B48ED999FC8E8A /* libPods-OtoqaDriver.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F4CB154583ED1E9075CDDCDF /* libPods-OtoqaDriver.a */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
-		D095FEC24D5DF7330989D30B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 1785A33C0016A81AF22D9EE1 /* PrivacyInfo.xcprivacy */; };
+		EFC4DFE9FACC3C08FBBC0EA9 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 1D1F080E66131F97F552FD76 /* PrivacyInfo.xcprivacy */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
-		F5DA5C32ED7F9C056F6ADA17 /* libPods-OtoqaDriver.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F869E1C515A3F6E1B71CF085 /* libPods-OtoqaDriver.a */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		13B07F961A680F5B00A75B9A /* OtoqaDriver.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OtoqaDriver.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = OtoqaDriver/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = OtoqaDriver/Info.plist; sourceTree = "<group>"; };
-		165BE167F5BC23E1B40B669C /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-OtoqaDriver/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
-		1785A33C0016A81AF22D9EE1 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = OtoqaDriver/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
-		1CDBFA60FD76578C47A50968 /* Pods-OtoqaDriver.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-OtoqaDriver.debug.xcconfig"; path = "Target Support Files/Pods-OtoqaDriver/Pods-OtoqaDriver.debug.xcconfig"; sourceTree = "<group>"; };
-		A74836801DE26E4A90F110E4 /* Pods-OtoqaDriver.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-OtoqaDriver.release.xcconfig"; path = "Target Support Files/Pods-OtoqaDriver/Pods-OtoqaDriver.release.xcconfig"; sourceTree = "<group>"; };
+		1D1F080E66131F97F552FD76 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = OtoqaDriver/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		37D8A41B725ACB6B1531CD7A /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-OtoqaDriver/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = OtoqaDriver/SplashScreen.storyboard; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
+		D0B1E8CD9A2F72970E9D01AF /* Pods-OtoqaDriver.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-OtoqaDriver.debug.xcconfig"; path = "Target Support Files/Pods-OtoqaDriver/Pods-OtoqaDriver.debug.xcconfig"; sourceTree = "<group>"; };
+		E37FF3BA35AC3C73D91D2958 /* Pods-OtoqaDriver.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-OtoqaDriver.release.xcconfig"; path = "Target Support Files/Pods-OtoqaDriver/Pods-OtoqaDriver.release.xcconfig"; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = OtoqaDriver/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* OtoqaDriver-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "OtoqaDriver-Bridging-Header.h"; path = "OtoqaDriver/OtoqaDriver-Bridging-Header.h"; sourceTree = "<group>"; };
-		F869E1C515A3F6E1B71CF085 /* libPods-OtoqaDriver.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-OtoqaDriver.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		F4CB154583ED1E9075CDDCDF /* libPods-OtoqaDriver.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-OtoqaDriver.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -37,7 +37,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F5DA5C32ED7F9C056F6ADA17 /* libPods-OtoqaDriver.a in Frameworks */,
+				B2D41DBA26B48ED999FC8E8A /* libPods-OtoqaDriver.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -53,7 +53,7 @@
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */,
-				1785A33C0016A81AF22D9EE1 /* PrivacyInfo.xcprivacy */,
+				1D1F080E66131F97F552FD76 /* PrivacyInfo.xcprivacy */,
 			);
 			name = OtoqaDriver;
 			sourceTree = "<group>";
@@ -62,19 +62,17 @@
 			isa = PBXGroup;
 			children = (
 				ED297162215061F000B7C4FE /* JavaScriptCore.framework */,
-				F869E1C515A3F6E1B71CF085 /* libPods-OtoqaDriver.a */,
+				F4CB154583ED1E9075CDDCDF /* libPods-OtoqaDriver.a */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
-		42E2E9F40220E6ED30B07927 /* Pods */ = {
+		6C031FBB1695B1CA773A296F /* OtoqaDriver */ = {
 			isa = PBXGroup;
 			children = (
-				1CDBFA60FD76578C47A50968 /* Pods-OtoqaDriver.debug.xcconfig */,
-				A74836801DE26E4A90F110E4 /* Pods-OtoqaDriver.release.xcconfig */,
+				37D8A41B725ACB6B1531CD7A /* ExpoModulesProvider.swift */,
 			);
-			name = Pods;
-			path = Pods;
+			name = OtoqaDriver;
 			sourceTree = "<group>";
 		};
 		832341AE1AAA6A7D00B99B32 /* Libraries */ = {
@@ -91,8 +89,8 @@
 				832341AE1AAA6A7D00B99B32 /* Libraries */,
 				83CBBA001A601CBA00E9B192 /* Products */,
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
-				42E2E9F40220E6ED30B07927 /* Pods */,
-				CE8AB7562DBBFC60C7B255C3 /* ExpoModulesProviders */,
+				FBA434ED3123492627D2D441 /* Pods */,
+				8B266F4DD12848E2750674B5 /* ExpoModulesProviders */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -107,12 +105,12 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		9403FA0EDF9BFB065153A80F /* OtoqaDriver */ = {
+		8B266F4DD12848E2750674B5 /* ExpoModulesProviders */ = {
 			isa = PBXGroup;
 			children = (
-				165BE167F5BC23E1B40B669C /* ExpoModulesProvider.swift */,
+				6C031FBB1695B1CA773A296F /* OtoqaDriver */,
 			);
-			name = OtoqaDriver;
+			name = ExpoModulesProviders;
 			sourceTree = "<group>";
 		};
 		BB2F792B24A3F905000567C9 /* Supporting */ = {
@@ -124,12 +122,14 @@
 			path = OtoqaDriver/Supporting;
 			sourceTree = "<group>";
 		};
-		CE8AB7562DBBFC60C7B255C3 /* ExpoModulesProviders */ = {
+		FBA434ED3123492627D2D441 /* Pods */ = {
 			isa = PBXGroup;
 			children = (
-				9403FA0EDF9BFB065153A80F /* OtoqaDriver */,
+				D0B1E8CD9A2F72970E9D01AF /* Pods-OtoqaDriver.debug.xcconfig */,
+				E37FF3BA35AC3C73D91D2958 /* Pods-OtoqaDriver.release.xcconfig */,
 			);
-			name = ExpoModulesProviders;
+			name = Pods;
+			path = Pods;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -140,13 +140,13 @@
 			buildConfigurationList = 13B07F931A680F5B00A75B9A /* Build configuration list for PBXNativeTarget "OtoqaDriver" */;
 			buildPhases = (
 				08A4A3CD28434E44B6B9DE2E /* [CP] Check Pods Manifest.lock */,
-				B8468C9DB2EE4A7C558F6F83 /* [Expo] Configure project */,
+				94D230215889805F9A8F416A /* [Expo] Configure project */,
 				13B07F871A680F5B00A75B9A /* Sources */,
 				13B07F8C1A680F5B00A75B9A /* Frameworks */,
 				13B07F8E1A680F5B00A75B9A /* Resources */,
 				00DD1BFF1BD5951E006B06BC /* Bundle React Native code and images */,
 				800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */,
-				67F46D9AF199B66EF77C9E39 /* [CP] Embed Pods Frameworks */,
+				590BC8D9C3B9879F0330CB27 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -196,7 +196,7 @@
 				BB2F792D24A3F905000567C9 /* Expo.plist in Resources */,
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
-				D095FEC24D5DF7330989D30B /* PrivacyInfo.xcprivacy in Resources */,
+				EFC4DFE9FACC3C08FBBC0EA9 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -242,7 +242,7 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		67F46D9AF199B66EF77C9E39 /* [CP] Embed Pods Frameworks */ = {
+		590BC8D9C3B9879F0330CB27 /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -274,6 +274,7 @@
 				"${PODS_CONFIGURATION_BUILD_DIR}/EXApplication/ExpoApplication_privacy.bundle",
 				"${PODS_CONFIGURATION_BUILD_DIR}/EXConstants/EXConstants.bundle",
 				"${PODS_CONFIGURATION_BUILD_DIR}/EXConstants/ExpoConstants_privacy.bundle",
+				"${PODS_CONFIGURATION_BUILD_DIR}/EXNotifications/ExpoNotifications_privacy.bundle",
 				"${PODS_CONFIGURATION_BUILD_DIR}/EXTaskManager/ExpoTaskManager_privacy.bundle",
 				"${PODS_CONFIGURATION_BUILD_DIR}/ExpoDevice/ExpoDevice_privacy.bundle",
 				"${PODS_CONFIGURATION_BUILD_DIR}/ExpoFileSystem/ExpoFileSystem_privacy.bundle",
@@ -291,6 +292,7 @@
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ExpoApplication_privacy.bundle",
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/EXConstants.bundle",
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ExpoConstants_privacy.bundle",
+				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ExpoNotifications_privacy.bundle",
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ExpoTaskManager_privacy.bundle",
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ExpoDevice_privacy.bundle",
 				"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ExpoFileSystem_privacy.bundle",
@@ -308,7 +310,7 @@
 			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-OtoqaDriver/Pods-OtoqaDriver-resources.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
-		B8468C9DB2EE4A7C558F6F83 /* [Expo] Configure project */ = {
+		94D230215889805F9A8F416A /* [Expo] Configure project */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -340,7 +342,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */,
-				6FC50C2147CF78EB3207B063 /* ExpoModulesProvider.swift in Sources */,
+				8946B02EDEE12F5F1ACD74A4 /* ExpoModulesProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -349,7 +351,7 @@
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 1CDBFA60FD76578C47A50968 /* Pods-OtoqaDriver.debug.xcconfig */;
+			baseConfigurationReference = D0B1E8CD9A2F72970E9D01AF /* Pods-OtoqaDriver.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
@@ -385,7 +387,7 @@
 		};
 		13B07F951A680F5B00A75B9A /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = A74836801DE26E4A90F110E4 /* Pods-OtoqaDriver.release.xcconfig */;
+			baseConfigurationReference = E37FF3BA35AC3C73D91D2958 /* Pods-OtoqaDriver.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;

@@ -1,5 +1,5 @@
 import { Stack } from 'expo-router';
-import { colors, typography } from '../../../../lib/theme';
+import { colors } from '../../../../lib/theme';
 
 export default function LoadsLayout() {
   return (

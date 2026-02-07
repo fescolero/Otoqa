@@ -80,6 +80,23 @@ export function SettlementWorksheetSheet({
     selectedLoadId ? { loadId: selectedLoadId as Id<'loadInformation'> } : 'skip'
   );
 
+  // Fetch extra documentation for selected load
+  const extraDocs = useQuery(
+    api.loadDocuments.listForLoad,
+    selectedLoadId ? { loadId: selectedLoadId as Id<'loadInformation'>, type: 'EXTRA_DOC' } : 'skip'
+  );
+  const extraDocsWithUrl = useMemo(() => {
+    if (!extraDocs) return [];
+    return extraDocs
+      .filter((doc): doc is typeof extraDocs[number] & { url: string } => !!doc.url)
+      .map((doc) => ({
+        _id: doc._id,
+        url: doc.url,
+        fileName: doc.fileName,
+        uploadedAt: doc.uploadedAt,
+      }));
+  }, [extraDocs]);
+
   // Clear selected load when settlement changes or drawer closes
   useEffect(() => {
     setSelectedLoadId(null);
@@ -104,9 +121,12 @@ export function SettlementWorksheetSheet({
   const deletePayable = useMutation(api.driverSettlements.deleteManualPayable);
   const updatePayable = useMutation(api.driverSettlements.updateManualPayable);
   const refreshSettlement = useMutation(api.driverSettlements.refreshDraftSettlement);
+  const generateDocUploadUrl = useMutation(api.loadDocuments.generateUploadUrl);
+  const createLoadDocument = useMutation(api.loadDocuments.create);
 
   // Refresh state
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isUploadingExtraDocs, setIsUploadingExtraDocs] = useState(false);
 
   // Format helpers
   const formatCurrency = (amount: number) => {
@@ -126,6 +146,64 @@ export function SettlementWorksheetSheet({
 
   const formatNumber = (num: number) => {
     return new Intl.NumberFormat('en-US').format(num);
+  };
+
+  const handleUploadExtraDocs = async (files: FileList) => {
+    if (!selectedLoadId) {
+      toast.error('Select a load to upload documentation');
+      return;
+    }
+
+    const fileArray = Array.from(files);
+    if (fileArray.length === 0) return;
+
+    setIsUploadingExtraDocs(true);
+    let success = 0;
+    let failed = 0;
+
+    for (const file of fileArray) {
+      if (!file.type.startsWith('image/')) {
+        failed += 1;
+        continue;
+      }
+
+      try {
+        const uploadUrl = await generateDocUploadUrl();
+        const uploadResponse = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': file.type },
+          body: file,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error('Upload failed');
+        }
+
+        const { storageId } = await uploadResponse.json();
+
+        await createLoadDocument({
+          loadId: selectedLoadId as Id<'loadInformation'>,
+          storageId,
+          type: 'EXTRA_DOC',
+          fileName: file.name,
+          contentType: file.type,
+        });
+
+        success += 1;
+      } catch (error) {
+        console.error('[ExtraDocs] Upload failed', error);
+        failed += 1;
+      }
+    }
+
+    if (success > 0) {
+      toast.success(`Uploaded ${success} image${success > 1 ? 's' : ''}`);
+    }
+    if (failed > 0) {
+      toast.error(`Failed to upload ${failed} image${failed > 1 ? 's' : ''}`);
+    }
+
+    setIsUploadingExtraDocs(false);
   };
 
   // Handle approve
@@ -524,8 +602,10 @@ export function SettlementWorksheetSheet({
             <div className="w-80 flex flex-col overflow-hidden bg-slate-50/30">
               <EvidencePanel
                 selectedLoad={selectedLoad || null}
-                onUploadPOD={(loadId) => toast.info('POD upload coming soon')}
-                onUploadReceipt={(loadId) => toast.info('Receipt upload coming soon')}
+                onUploadPOD={() => toast.info('POD upload coming soon')}
+                extraDocs={extraDocsWithUrl}
+                onUploadExtraDocs={handleUploadExtraDocs}
+                isUploadingExtraDocs={isUploadingExtraDocs}
                 isLocked={settlement?.settlement.status === 'PAID'}
               />
             </div>
@@ -535,4 +615,3 @@ export function SettlementWorksheetSheet({
     </Sheet>
   );
 }
-

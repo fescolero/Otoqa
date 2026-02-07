@@ -1,10 +1,13 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { colors, typography, spacing, borderRadius, shadows } from '../lib/theme';
+import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../lib/theme';
+import { GlassCard, GlassBadge } from './GlassCard';
 
 // ============================================
 // LOAD CARDS
-// Dark Theme - Reusable Load Display Components
+// Platform-adaptive - Reusable Load Display Components
+// iOS: Glass/blur effects
+// Android: Material Design with elevation
 // ============================================
 
 interface LoadData {
@@ -56,25 +59,33 @@ export function CurrentLoadCard({ load, onPress }: CurrentLoadCardProps) {
 
   return (
     <TouchableOpacity
-      style={styles.currentLoadCard}
       onPress={onPress}
       activeOpacity={0.9}
+      style={styles.currentLoadTouchable}
     >
-      <View style={styles.currentLoadContent}>
-        <View style={styles.currentLoadLeft}>
-          <Text style={styles.currentLoadIcon}>🚛</Text>
-          <View>
-            <Text style={styles.currentLoadLabel}>Current Load</Text>
-            <Text style={styles.currentLoadId}>#{load.internalId}</Text>
+      <GlassCard
+        variant="primary"
+        intensity="medium"
+        borderRadiusSize="2xl"
+        padding="lg"
+        style={styles.currentLoadCard}
+      >
+        <View style={styles.currentLoadContent}>
+          <View style={styles.currentLoadLeft}>
+            <Text style={styles.currentLoadIcon}>🚛</Text>
+            <View>
+              <Text style={styles.currentLoadLabel}>Current Load</Text>
+              <Text style={styles.currentLoadId}>#{load.internalId}</Text>
+            </View>
+          </View>
+          <View style={styles.currentLoadRight}>
+            <Text style={styles.currentLoadExpectedLabel}>Expected</Text>
+            <Text style={styles.currentLoadTime}>
+              {formatTime(load.lastDelivery?.windowEndTime)}
+            </Text>
           </View>
         </View>
-        <View style={styles.currentLoadRight}>
-          <Text style={styles.currentLoadExpectedLabel}>Expected</Text>
-          <Text style={styles.currentLoadTime}>
-            {formatTime(load.lastDelivery?.windowEndTime)}
-          </Text>
-        </View>
-      </View>
+      </GlassCard>
     </TouchableOpacity>
   );
 }
@@ -148,82 +159,94 @@ export function ScheduledLoadCard({ load, tripNumber, onPress }: ScheduledLoadCa
 
   return (
     <TouchableOpacity
-      style={styles.loadCard}
       onPress={onPress}
       activeOpacity={0.8}
+      style={styles.loadCardTouchable}
     >
-      {/* Card Header */}
-      <View style={styles.loadCardHeader}>
-        <View style={styles.loadCardHeaderLeft}>
-          <Text style={styles.loadCardIcon}>📦</Text>
-          <Text style={styles.loadCardTitle}>Load #{load.internalId}</Text>
-          <View style={styles.tripBadge}>
-            <Text style={styles.tripBadgeText}>Trip {tripNumber}</Text>
+      <GlassCard
+        variant="default"
+        intensity="medium"
+        borderRadiusSize="xl"
+        padding="base"
+        style={styles.loadCard}
+      >
+        {/* Card Header */}
+        <View style={styles.loadCardHeader}>
+          <View style={styles.loadCardHeaderLeft}>
+            <Text style={styles.loadCardIcon}>📦</Text>
+            <Text style={styles.loadCardTitle}>Load #{load.internalId}</Text>
           </View>
+          <GlassBadge color={colors.secondary}>
+            <Text style={styles.statusBadgeText} maxFontSizeMultiplier={1.2}>Scheduled</Text>
+          </GlassBadge>
         </View>
-        <View style={styles.statusBadge}>
-          <Text style={styles.statusBadgeText}>Scheduled</Text>
+        
+        {/* Badge Row */}
+        <View style={styles.badgeRow}>
+          <GlassBadge color={colors.chart3} style={styles.tripBadge}>
+            <Text style={styles.tripBadgeText} maxFontSizeMultiplier={1.2}>Trip {tripNumber}</Text>
+          </GlassBadge>
         </View>
-      </View>
 
-      {/* Multi-Day Indicator */}
-      {multiDay && multiDayDate && (
-        <View style={styles.multiDayBanner}>
-          <Text style={styles.multiDayIcon}>📆</Text>
+        {/* Multi-Day Indicator */}
+        {multiDay && multiDayDate && (
+          <View style={styles.multiDayBanner}>
+            <Text style={styles.multiDayIcon}>📆</Text>
+            <View>
+              <Text style={styles.multiDayTitle}>Multi-Day Load</Text>
+              <Text style={styles.multiDayText}>Continues into {multiDayDate}</Text>
+            </View>
+          </View>
+        )}
+
+        {/* Time and Stats */}
+        <View style={styles.loadCardStats}>
           <View>
-            <Text style={styles.multiDayTitle}>Multi-Day Load</Text>
-            <Text style={styles.multiDayText}>Continues into {multiDayDate}</Text>
+            <Text style={styles.statLabel}>Pickup Time</Text>
+            <Text style={styles.statValue}>
+              {formatTime(load.firstPickup?.windowBeginTime)}
+            </Text>
           </View>
-        </View>
-      )}
-
-      {/* Time and Stats */}
-      <View style={styles.loadCardStats}>
-        <View>
-          <Text style={styles.statLabel}>Pickup Time</Text>
-          <Text style={styles.statValue}>
-            {formatTime(load.firstPickup?.windowBeginTime)}
-          </Text>
-        </View>
-        <View style={styles.statRight}>
-          <Text style={styles.statLabel}>Packages</Text>
-          <Text style={styles.statValueMono}>{load.stopCount || '—'}</Text>
-        </View>
-      </View>
-
-      {/* Addresses */}
-      <View style={styles.addressSection}>
-        <View style={styles.addressRow}>
-          <Text style={styles.pickupIcon}>📍</Text>
-          <View style={styles.addressContent}>
-            <Text style={styles.addressLabel}>Pickup</Text>
-            <Text style={styles.addressText}>{getAddress(load.firstPickup)}</Text>
+          <View style={styles.statRight}>
+            <Text style={styles.statLabel}>Packages</Text>
+            <Text style={styles.statValueMono}>{load.stopCount || '—'}</Text>
           </View>
         </View>
 
-        <View style={styles.addressRow}>
-          <Text style={styles.deliveryIcon}>🚩</Text>
-          <View style={styles.addressContent}>
-            <Text style={styles.addressLabel}>Last Delivery</Text>
-            <Text style={styles.addressText}>{getAddress(load.lastDelivery)}</Text>
-            {expectedDelivery && (
-              <Text style={styles.expectedText}>Expected: {expectedDelivery}</Text>
-            )}
+        {/* Addresses */}
+        <View style={styles.addressSection}>
+          <View style={styles.addressRow}>
+            <Text style={styles.pickupIcon}>📍</Text>
+            <View style={styles.addressContent}>
+              <Text style={styles.addressLabel}>Pickup</Text>
+              <Text style={styles.addressText}>{getAddress(load.firstPickup)}</Text>
+            </View>
+          </View>
+
+          <View style={styles.addressRow}>
+            <Text style={styles.deliveryIcon}>🚩</Text>
+            <View style={styles.addressContent}>
+              <Text style={styles.addressLabel}>Last Delivery</Text>
+              <Text style={styles.addressText}>{getAddress(load.lastDelivery)}</Text>
+              {expectedDelivery && (
+                <Text style={styles.expectedText}>Expected: {expectedDelivery}</Text>
+              )}
+            </View>
           </View>
         </View>
-      </View>
+      </GlassCard>
     </TouchableOpacity>
   );
 }
 
 const styles = StyleSheet.create({
   // Current Load Card
-  currentLoadCard: {
-    backgroundColor: colors.primary,
-    borderRadius: borderRadius['2xl'],
-    padding: spacing.lg,
+  currentLoadTouchable: {
     marginBottom: spacing.md,
-    ...shadows.lg,
+  },
+  currentLoadCard: {
+    // GlassCard handles the styling, just add shadow for iOS
+    ...(isIOS ? shadows.lg : {}),
   },
   currentLoadContent: {
     flexDirection: 'row',
@@ -265,25 +288,28 @@ const styles = StyleSheet.create({
   },
 
   // Scheduled Load Card
-  loadCard: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.xl,
-    padding: spacing.base,
+  loadCardTouchable: {
     marginBottom: spacing.base,
-    borderWidth: 1,
-    borderColor: 'rgba(63, 69, 82, 0.5)',
-    ...shadows.md,
+  },
+  loadCard: {
+    // GlassCard handles the styling
   },
   loadCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   loadCardHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
   },
   loadCardIcon: {
     fontSize: 14,
@@ -295,21 +321,12 @@ const styles = StyleSheet.create({
     color: colors.foreground,
   },
   tripBadge: {
-    backgroundColor: 'rgba(59, 130, 246, 0.3)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: borderRadius.md,
+    // GlassBadge handles the styling
   },
   tripBadgeText: {
     fontSize: typography.xs,
     fontWeight: typography.semibold,
     color: colors.chart3,
-  },
-  statusBadge: {
-    backgroundColor: 'rgba(234, 179, 8, 0.3)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: borderRadius.full,
   },
   statusBadgeText: {
     fontSize: typography.xs,

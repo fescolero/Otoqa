@@ -60,6 +60,8 @@ export function CarrierList({ workosOrgId, usePartnerships = false }: CarrierLis
     usePartnerships ? { brokerOrgId: workosOrgId } : "skip"
   );
   const counts = partnershipCounts;
+  const totalCount = usePartnerships ? counts?.total : (counts as any)?.all;
+  const insuranceExpiringCount = usePartnerships ? undefined : (counts as any)?.insuranceExpiring;
 
   // Fetch carrier partnerships
   const partnerships = useQuery(
@@ -68,7 +70,6 @@ export function CarrierList({ workosOrgId, usePartnerships = false }: CarrierLis
       ? {
           brokerOrgId: workosOrgId,
           status: activeTab === "all" ? undefined : activeTab.toUpperCase() as "ACTIVE" | "PENDING" | "INVITED" | "SUSPENDED" | "TERMINATED",
-          search: searchQuery || undefined,
         }
       : "skip"
   );
@@ -147,21 +148,8 @@ export function CarrierList({ workosOrgId, usePartnerships = false }: CarrierLis
           toast.success(`Successfully terminated ${result.succeeded} partnership${result.succeeded !== 1 ? "s" : ""}${assignmentMsg}${loadsMsg}`);
         }
       } else {
-        // Use legacy bulk deactivate
-        const results = await deactivateLegacyCarriers({
-          ids: carrierIds as Id<"carriers">[],
-          userId: "system", // In real app, get from auth context
-          userName: "System",
-        });
-        
-        const succeeded = results.filter((r) => r.success).length;
-        const failed = results.filter((r) => !r.success).length;
-        
-        if (failed > 0) {
-          toast.error(`Deactivated ${succeeded} carriers, ${failed} failed`);
-        } else {
-          toast.success(`Successfully deactivated ${succeeded} carrier${succeeded !== 1 ? "s" : ""}`);
-        }
+        toast.error("Legacy carriers are not supported in this view.");
+        return;
       }
       
       // Clear selection after deactivation
@@ -210,25 +198,8 @@ export function CarrierList({ workosOrgId, usePartnerships = false }: CarrierLis
           toast.success(`Successfully reactivated ${result.succeeded} partnership${result.succeeded !== 1 ? "s" : ""}${detailsMsg}`);
         }
       } else {
-        // Use legacy restore for each carrier
-        const results = await Promise.allSettled(
-          carrierIds.map((id) =>
-            restoreLegacyCarrier({
-              id: id as Id<"carriers">,
-              userId: "system",
-              userName: "System",
-            })
-          )
-        );
-        
-        const succeeded = results.filter((r) => r.status === "fulfilled").length;
-        const failed = results.filter((r) => r.status === "rejected").length;
-        
-        if (failed > 0) {
-          toast.error(`Restored ${succeeded} carriers, ${failed} failed`);
-        } else {
-          toast.success(`Successfully restored ${succeeded} carrier${succeeded !== 1 ? "s" : ""}`);
-        }
+        toast.error("Legacy carriers are not supported in this view.");
+        return;
       }
       
       // Clear selection after reactivation
@@ -303,9 +274,9 @@ export function CarrierList({ workosOrgId, usePartnerships = false }: CarrierLis
               <TabsTrigger value="all" className={tabClassName}>
                 <Building2 className="w-4 h-4 mr-2" />
                 {usePartnerships ? "All Partners" : "All Carriers"}
-                {counts?.all !== undefined && (
+                {totalCount !== undefined && (
                   <Badge variant="secondary" className="ml-2">
-                    {counts.all}
+                    {totalCount}
                   </Badge>
                 )}
               </TabsTrigger>
@@ -353,9 +324,9 @@ export function CarrierList({ workosOrgId, usePartnerships = false }: CarrierLis
               <TabsTrigger value="expiring" className={tabClassName}>
                 <AlertCircle className="w-4 h-4 mr-2" />
                 Insurance Expiring
-                {counts?.insuranceExpiring !== undefined && counts.insuranceExpiring > 0 && (
+                {insuranceExpiringCount !== undefined && insuranceExpiringCount > 0 && (
                   <Badge variant="warning" className="ml-2">
-                    {counts.insuranceExpiring}
+                    {insuranceExpiringCount}
                   </Badge>
                 )}
               </TabsTrigger>

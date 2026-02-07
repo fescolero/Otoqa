@@ -105,7 +105,12 @@ export const list = query({
 
     // If sensitive data is not requested, return only non-sensitive data
     if (!args.includeSensitive) {
-      return filteredDrivers;
+      return filteredDrivers.map((driver) => ({
+        ...driver,
+        ssn: undefined,
+        licenseNumber: undefined,
+        dateOfBirth: undefined,
+      }));
     }
 
     // Fetch all sensitive info for this organization
@@ -144,7 +149,12 @@ export const get = query({
 
     // If sensitive data is not requested, return only non-sensitive data
     if (!args.includeSensitive) {
-      return driver;
+      return {
+        ...driver,
+        ssn: undefined,
+        licenseNumber: undefined,
+        dateOfBirth: undefined,
+      };
     }
 
     // Fetch sensitive data

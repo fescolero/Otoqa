@@ -1,6 +1,7 @@
 "use client";
 
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -18,9 +19,19 @@ interface InvoicePreviewSheetProps {
   onClose: () => void;
   allInvoiceIds?: Id<"loadInvoices">[];
   onNavigate?: (invoiceId: Id<"loadInvoices">) => void;
+  autoAction?: 'print' | 'download' | null;
+  onAutoActionHandled?: () => void;
 }
 
-export function InvoicePreviewSheet({ invoiceId, isOpen, onClose, allInvoiceIds = [], onNavigate }: InvoicePreviewSheetProps) {
+export function InvoicePreviewSheet({
+  invoiceId,
+  isOpen,
+  onClose,
+  allInvoiceIds = [],
+  onNavigate,
+  autoAction = null,
+  onAutoActionHandled,
+}: InvoicePreviewSheetProps) {
   // Calculate current position and navigation availability
   const currentIndex = invoiceId ? allInvoiceIds.findIndex(id => id === invoiceId) : -1;
   const hasPrevious = currentIndex > 0;
@@ -81,25 +92,27 @@ export function InvoicePreviewSheet({ invoiceId, isOpen, onClose, allInvoiceIds 
   );
 
   // Build company details from org settings or use defaults
-  const companyDetails = orgSettings
-    ? {
-        name: orgSettings.name || "Company Name",
-        email: orgSettings.billingEmail || "billing@company.com",
-        phone: formatPhoneNumber(orgSettings.billingPhone || ""),
-        address: orgSettings.billingAddress
-          ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${orgSettings.billingAddress.country}`
-          : "Address not available",
-        logoUrl: orgSettings.logoUrl || undefined,
-      }
-    : {
-        name: "Company Name",
-        email: "billing@company.com",
-        phone: "",
-        address: "Address not available",
-        logoUrl: undefined,
-      };
+  const companyDetails = useMemo(() => {
+    return orgSettings
+      ? {
+          name: orgSettings.name || "Company Name",
+          email: orgSettings.billingEmail || "billing@company.com",
+          phone: formatPhoneNumber(orgSettings.billingPhone || ""),
+          address: orgSettings.billingAddress
+            ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${orgSettings.billingAddress.country}`
+            : "Address not available",
+          logoUrl: orgSettings.logoUrl || undefined,
+        }
+      : {
+          name: "Company Name",
+          email: "billing@company.com",
+          phone: "",
+          address: "Address not available",
+          logoUrl: undefined,
+        };
+  }, [orgSettings]);
 
-  const handlePrint = async () => {
+  const handlePrint = useCallback(async () => {
     if (!invoice || !customer || !lineItems) {
       toast.error("Invoice data not ready");
       return;
@@ -130,9 +143,9 @@ export function InvoicePreviewSheet({ invoiceId, isOpen, onClose, allInvoiceIds 
       toast.error("Failed to generate PDF");
       console.error('PDF generation error:', error);
     }
-  };
+  }, [companyDetails, customer, invoice, lineItems]);
 
-  const handleDownloadPDF = async () => {
+  const handleDownloadPDF = useCallback(async () => {
     if (!invoice || !customer || !lineItems) {
       toast.error("Invoice data not ready");
       return;
@@ -166,7 +179,38 @@ export function InvoicePreviewSheet({ invoiceId, isOpen, onClose, allInvoiceIds 
       toast.error("Failed to generate PDF");
       console.error('PDF generation error:', error);
     }
-  };
+  }, [companyDetails, customer, invoice, lineItems]);
+
+  const autoActionRef = useRef<{ invoiceId: Id<'loadInvoices'> | null; action: 'print' | 'download' | null }>({
+    invoiceId: null,
+    action: null,
+  });
+
+  useEffect(() => {
+    if (!autoAction || !invoiceId) return;
+    if (!invoice || !customer || !lineItems) return;
+
+    if (
+      autoActionRef.current.invoiceId === invoiceId &&
+      autoActionRef.current.action === autoAction
+    ) {
+      return;
+    }
+
+    autoActionRef.current = { invoiceId, action: autoAction };
+
+    const run = async () => {
+      if (autoAction === 'print') {
+        await handlePrint();
+      } else {
+        await handleDownloadPDF();
+      }
+      onAutoActionHandled?.();
+      autoActionRef.current = { invoiceId: null, action: null };
+    };
+
+    void run();
+  }, [autoAction, customer, handleDownloadPDF, handlePrint, invoice, invoiceId, lineItems, onAutoActionHandled]);
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>

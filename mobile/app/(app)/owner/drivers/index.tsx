@@ -22,7 +22,6 @@ import { useCarrierOwner } from '../../_layout';
 import { colors, typography, borderRadius, shadows, spacing } from '../../../../lib/theme';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useState, useCallback, useMemo } from 'react';
-import { Id } from '../../../../../convex/_generated/dataModel';
 import DatePickerModal from '../../../../components/DatePickerModal';
 
 // ============================================

@@ -5,13 +5,12 @@ import {
   ScrollView,
   RefreshControl,
   TouchableOpacity,
-  FlatList,
 } from 'react-native';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import { useCarrierOwner } from '../_layout';
 import { colors, typography, borderRadius, shadows, spacing } from '../../../lib/theme';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { useState, useCallback } from 'react';
 
 // ============================================
@@ -141,13 +140,13 @@ export default function SettlementsScreen() {
           </View>
         </View>
 
-        {earningsSummary?.disputedAmount > 0 && (
+        {(earningsSummary?.disputedAmount ?? 0) > 0 && (
           <View style={[styles.alertCard]}>
             <Ionicons name="alert-circle" size={20} color={colors.destructive} />
             <View style={styles.alertContent}>
               <Text style={styles.alertTitle}>Disputed</Text>
               <Text style={styles.alertAmount}>
-                ${earningsSummary.disputedAmount?.toLocaleString()}
+                ${(earningsSummary?.disputedAmount ?? 0).toLocaleString()}
               </Text>
             </View>
           </View>
@@ -396,7 +395,7 @@ const styles = StyleSheet.create({
   },
   emptyState: {
     alignItems: 'center',
-    paddingVertical: spacing.xxl,
+    paddingVertical: spacing['2xl'],
   },
   emptyText: {
     fontSize: typography.lg,

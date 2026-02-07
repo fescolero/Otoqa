@@ -467,7 +467,7 @@ export const initializeI18n = async (): Promise<string> => {
       i18n.locale = systemLocale;
       return 'system';
     }
-  } catch (error) {
+  } catch {
     const systemLocale = getSystemLocale();
     i18n.locale = systemLocale;
     return 'system';

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -117,50 +117,32 @@ export default function PermissionsScreen() {
     },
   ]);
 
-  // Check permission statuses on mount
-  useEffect(() => {
-    checkPermissions();
+  const checkPermissions = useCallback(async () => {
+    const locationStatus = await Location.getForegroundPermissionsAsync();
+    const cameraStatus = await Camera.getCameraPermissionsAsync();
+    const micStatus = await Camera.getMicrophonePermissionsAsync();
+    const photoStatus = await ImagePicker.getMediaLibraryPermissionsAsync();
+
+    const statusById: Record<string, boolean> = {
+      location: locationStatus.granted,
+      camera: cameraStatus.granted,
+      notifications: true,
+      microphone: micStatus.granted,
+      photos: photoStatus.granted,
+    };
+
+    setPermissions((current) =>
+      current.map((permission) => {
+        const enabled = statusById[permission.id];
+        return typeof enabled === 'boolean' ? { ...permission, enabled } : permission;
+      })
+    );
   }, []);
 
-  const checkPermissions = async () => {
-    const updatedPermissions = [...permissions];
-
-    // Check location
-    const locationStatus = await Location.getForegroundPermissionsAsync();
-    const locationIndex = updatedPermissions.findIndex(p => p.id === 'location');
-    if (locationIndex !== -1) {
-      updatedPermissions[locationIndex].enabled = locationStatus.granted;
-    }
-
-    // Check camera
-    const cameraStatus = await Camera.getCameraPermissionsAsync();
-    const cameraIndex = updatedPermissions.findIndex(p => p.id === 'camera');
-    if (cameraIndex !== -1) {
-      updatedPermissions[cameraIndex].enabled = cameraStatus.granted;
-    }
-
-    // Notifications - assume enabled (would need expo-notifications to check)
-    const notificationIndex = updatedPermissions.findIndex(p => p.id === 'notifications');
-    if (notificationIndex !== -1) {
-      updatedPermissions[notificationIndex].enabled = true;
-    }
-
-    // Check microphone
-    const micStatus = await Camera.getMicrophonePermissionsAsync();
-    const micIndex = updatedPermissions.findIndex(p => p.id === 'microphone');
-    if (micIndex !== -1) {
-      updatedPermissions[micIndex].enabled = micStatus.granted;
-    }
-
-    // Check photo library
-    const photoStatus = await ImagePicker.getMediaLibraryPermissionsAsync();
-    const photoIndex = updatedPermissions.findIndex(p => p.id === 'photos');
-    if (photoIndex !== -1) {
-      updatedPermissions[photoIndex].enabled = photoStatus.granted;
-    }
-
-    setPermissions(updatedPermissions);
-  };
+  // Check permission statuses on mount
+  useEffect(() => {
+    void checkPermissions();
+  }, [checkPermissions]);
 
   const requestPermission = async (id: string) => {
     switch (id) {

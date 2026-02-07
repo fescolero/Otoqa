@@ -347,7 +347,7 @@ export default function SwitchTruckScreen() {
           </View>
           {currentVehicle.isActive && (
             <View style={styles.activeBadge}>
-              <Text style={styles.activeBadgeText}>ACTIVE</Text>
+              <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>ACTIVE</Text>
             </View>
           )}
         </View>

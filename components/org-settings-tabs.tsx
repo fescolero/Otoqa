@@ -3,7 +3,8 @@
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Building2, Users, Plug, Truck } from 'lucide-react';
+import { Building2, Users, Plug, Truck, Route } from 'lucide-react';
+import { AutoAssignmentSettings } from '@/components/auto-assignment-settings';
 import { WidgetsProvider } from '@/components/widgets-provider';
 import { UsersManagement, WorkOsWidgets } from '@workos-inc/widgets';
 import { useEffect, useState } from 'react';
@@ -326,7 +327,7 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
 
   return (
     <Tabs defaultValue="overview" className="w-full">
-      <TabsList className="grid w-full md:w-[400px] grid-cols-3">
+      <TabsList className="grid w-full md:w-[500px] grid-cols-4">
         <TabsTrigger value="overview" className="flex items-center gap-2">
           <Building2 className="h-4 w-4" />
           <span className="hidden sm:inline">Overview</span>
@@ -334,6 +335,10 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
         <TabsTrigger value="users" className="flex items-center gap-2">
           <Users className="h-4 w-4" />
           <span className="hidden sm:inline">Users</span>
+        </TabsTrigger>
+        <TabsTrigger value="automation" className="flex items-center gap-2">
+          <Route className="h-4 w-4" />
+          <span className="hidden sm:inline">Automation</span>
         </TabsTrigger>
         <TabsTrigger value="integrations" className="flex items-center gap-2">
           <Plug className="h-4 w-4" />
@@ -652,6 +657,13 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
           <Card className="p-6">
             <div className="text-center text-muted-foreground">Loading users management...</div>
           </Card>
+        )}
+      </TabsContent>
+
+      {/* Automation Tab */}
+      <TabsContent value="automation" className="mt-6">
+        {organization?.id && (
+          <AutoAssignmentSettings organizationId={organization.id} userId={user.id} />
         )}
       </TabsContent>
 

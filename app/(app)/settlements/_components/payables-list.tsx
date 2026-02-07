@@ -281,7 +281,7 @@ export function PayablesList({
         </div>
 
         {/* Load Groups */}
-        {groupedPayables.map(([loadId, items], groupIndex) => {
+        {groupedPayables.map(([loadId, items]) => {
           const isStandalone = loadId === 'standalone';
           const firstItem = items[0];
           

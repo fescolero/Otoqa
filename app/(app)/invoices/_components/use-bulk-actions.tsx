@@ -72,7 +72,7 @@ export function useBulkActions(
 
       toast.success('Action undone');
       onSuccess?.();
-    } catch (error) {
+    } catch {
       toast.error('Failed to undo action');
     }
   };
@@ -126,7 +126,7 @@ export function useBulkActions(
 
       toast.success('Action undone');
       onSuccess?.();
-    } catch (error) {
+    } catch {
       toast.error('Failed to undo action');
     }
   };

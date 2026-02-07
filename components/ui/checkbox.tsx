@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import * as CheckboxPrimitive from "@radix-ui/react-checkbox"
-import { CheckIcon } from "lucide-react"
+import { CheckIcon, MinusIcon } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
@@ -21,9 +21,10 @@ function Checkbox({
     >
       <CheckboxPrimitive.Indicator
         data-slot="checkbox-indicator"
-        className="grid place-content-center text-current transition-none"
+        className="grid place-content-center text-current transition-none data-[state=indeterminate]:[&_.check]:hidden data-[state=indeterminate]:[&_.minus]:block"
       >
-        <CheckIcon className="size-3.5" />
+        <CheckIcon className="check size-3.5" />
+        <MinusIcon className="minus size-3.5 hidden" />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   )

@@ -29,9 +29,17 @@ export function CustomerList({ workosOrgId }: CustomerListProps) {
   const counts = useQuery(api.customers.countCustomersByStatus);
 
   // Fetch filtered customers
+  const status =
+    activeTab === "all" || activeTab === "deleted"
+      ? undefined
+      : activeTab === "active"
+        ? "Active"
+        : activeTab === "inactive"
+          ? "Inactive"
+          : "Prospect";
   const customers = useQuery(api.customers.list, {
     workosOrgId,
-    status: activeTab === "all" ? undefined : activeTab === "deleted" ? undefined : activeTab.charAt(0).toUpperCase() + activeTab.slice(1),
+    status,
     searchQuery: searchQuery || undefined,
     companyType: companyType === "all" ? undefined : (companyType as any),
     state: state === "all" ? undefined : state,

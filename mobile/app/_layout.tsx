@@ -9,6 +9,7 @@ import { ConvexProvider } from 'convex/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import * as SecureStore from 'expo-secure-store';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { PostHogProvider, usePostHog } from 'posthog-react-native';
 import { convex, ConvexAuthProvider } from '../lib/convex';
 import { queryClient, setupQueryPersistence } from '../lib/query-client';
@@ -169,8 +170,9 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <SafeAreaProvider>
-      <LanguageProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <LanguageProvider>
         <PostHogProvider 
           apiKey="phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X"
           options={{
@@ -220,8 +222,9 @@ export default function RootLayout() {
             </ClerkLoaded>
           </ClerkProvider>
         </PostHogProvider>
-      </LanguageProvider>
-    </SafeAreaProvider>
+        </LanguageProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
