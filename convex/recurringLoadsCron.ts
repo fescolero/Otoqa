@@ -33,9 +33,8 @@ export const generateDailyLoads = internalAction({
     totalSkipped: number;
     totalErrors: number;
   }> => {
-    // Get today's date in YYYY-MM-DD format
-    const today = new Date();
-    const targetDate = today.toISOString().split('T')[0];
+    // Get today's date in YYYY-MM-DD format (UTC)
+    const generationDate = new Date().toISOString().split('T')[0];
 
     // Get all orgs with active templates
     const orgIds = await ctx.runQuery(internal.recurringLoadsCron.getOrgsWithActiveTemplates, {});
@@ -49,7 +48,7 @@ export const generateDailyLoads = internalAction({
       try {
         const result = await ctx.runAction(internal.recurringLoads.processRecurringTemplates, {
           workosOrgId,
-          targetDate,
+          targetDate: generationDate,
         });
 
         totalGenerated += result.generated;

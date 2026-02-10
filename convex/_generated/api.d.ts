@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as _helpers_cronUtils from "../_helpers/cronUtils.js";
 import type * as _helpers_timeUtils from "../_helpers/timeUtils.js";
 import type * as analytics from "../analytics.js";
 import type * as auditLog from "../auditLog.js";
@@ -94,6 +95,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  "_helpers/cronUtils": typeof _helpers_cronUtils;
   "_helpers/timeUtils": typeof _helpers_timeUtils;
   analytics: typeof analytics;
   auditLog: typeof auditLog;

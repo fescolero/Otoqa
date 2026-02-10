@@ -2,6 +2,11 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation, internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import {
+  addDaysToUtcDateString,
+  getUtcDateStringFromMs,
+  isTimeOnOrAfterUtc,
+} from './_helpers/cronUtils';
 
 /**
  * Recurring Load Templates
@@ -467,14 +472,9 @@ export const processRecurringTemplates = internalAction({
       workosOrgId: args.workosOrgId,
     });
 
-    const targetDate = new Date(args.targetDate);
-    const dayOfWeek = targetDate.getDay(); // 0=Sun, 1=Mon, etc.
-    const dateString = args.targetDate;
-
-    // Check if target date is a federal holiday
-    const isFederalHoliday = await ctx.runQuery(internal.holidays.isFederalHoliday, {
-      date: dateString,
-    });
+    const now = Date.now();
+    const generationDate = args.targetDate;
+    const holidayCache = new Map<string, boolean>();
 
     let generated = 0;
     let skipped = 0;
@@ -482,8 +482,26 @@ export const processRecurringTemplates = internalAction({
 
     for (const template of templates) {
       try {
+        if (!isTimeOnOrAfterUtc(now, template.generationTime)) {
+          skipped++;
+          continue;
+        }
+
+        const lastGeneratedDate =
+          template.lastGeneratedAt != null
+            ? getUtcDateStringFromMs(template.lastGeneratedAt)
+            : null;
+
+        if (lastGeneratedDate === generationDate) {
+          skipped++;
+          continue;
+        }
+
+        const pickupDate = addDaysToUtcDateString(generationDate, template.advanceDays);
+        const dayOfWeek = new Date(`${pickupDate}T00:00:00.000Z`).getUTCDay();
+
         // Check if template has expired
-        if (template.endDate && template.endDate < dateString) {
+        if (template.endDate && template.endDate < pickupDate) {
           skipped++;
           continue;
         }
@@ -495,13 +513,23 @@ export const processRecurringTemplates = internalAction({
         }
 
         // Check federal holiday exclusion
-        if (template.excludeFederalHolidays && isFederalHoliday) {
-          skipped++;
-          continue;
+        if (template.excludeFederalHolidays) {
+          let isFederalHoliday = holidayCache.get(pickupDate);
+          if (isFederalHoliday === undefined) {
+            isFederalHoliday = await ctx.runQuery(internal.holidays.isFederalHoliday, {
+              date: pickupDate,
+            });
+            holidayCache.set(pickupDate, isFederalHoliday);
+          }
+
+          if (isFederalHoliday) {
+            skipped++;
+            continue;
+          }
         }
 
         // Check custom exclusions
-        if (template.customExclusions.includes(dateString)) {
+        if (template.customExclusions.includes(pickupDate)) {
           skipped++;
           continue;
         }
@@ -509,7 +537,7 @@ export const processRecurringTemplates = internalAction({
         // Generate the load
         const loadId = await ctx.runMutation(internal.recurringLoads.generateLoadFromTemplate, {
           templateId: template._id,
-          targetDate: dateString,
+          targetDate: pickupDate,
         });
 
         if (loadId) {
@@ -549,6 +577,9 @@ export const getActiveTemplates = internalQuery({
       excludeFederalHolidays: t.excludeFederalHolidays,
       customExclusions: t.customExclusions,
       endDate: t.endDate,
+      advanceDays: t.advanceDays,
+      generationTime: t.generationTime,
+      lastGeneratedAt: t.lastGeneratedAt,
     }));
   },
 });

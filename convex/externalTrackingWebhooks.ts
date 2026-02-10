@@ -9,6 +9,7 @@ import {
 } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import { filterLoadsBySource, shouldRunInterval } from './_helpers/cronUtils';
 
 // ============================================
 // WEBHOOK SUBSCRIPTION MANAGEMENT
@@ -222,9 +223,27 @@ export const processWebhookDeliveries = internalAction({
       encryptedSecret: string;
       lastDeliveredAt?: number;
       batchSize?: number;
+      intervalMinutes?: number;
+      loadSourceFilter?: string;
     }> = await ctx.runQuery(internal.externalTrackingWebhooks.getActiveSubscriptions, {});
 
+    const now = Date.now();
+
     for (const sub of subscriptions) {
+      const effectiveIntervalMinutes =
+        sub.intervalMinutes && sub.intervalMinutes > 0 ? sub.intervalMinutes : 5;
+
+      const shouldRun = shouldRunInterval({
+        nowMs: now,
+        lastRunAtMs: sub.lastDeliveredAt,
+        intervalMinutes: effectiveIntervalMinutes,
+        defaultIntervalMinutes: 5,
+      });
+
+      if (!shouldRun) {
+        continue;
+      }
+
       // Get all actively tracking loads for this org
       const result = await ctx.runQuery(internal.externalTracking.listTrackedLoads, {
         workosOrgId: sub.workosOrgId,
@@ -233,9 +252,11 @@ export const processWebhookDeliveries = internalAction({
         limit: 100,
       });
 
-      const since = sub.lastDeliveredAt ?? (Date.now() - 5 * 60 * 1000);
+      const loads = filterLoadsBySource(result.loads, sub.loadSourceFilter);
+      const since =
+        sub.lastDeliveredAt ?? (now - effectiveIntervalMinutes * 60 * 1000);
 
-      for (const load of result.loads) {
+      for (const load of loads) {
         if (sub.events.includes('position.update')) {
           // Enqueue position delivery
           await ctx.runMutation(internal.externalTrackingWebhooks.enqueueDelivery, {
@@ -272,6 +293,8 @@ export const getActiveSubscriptions = internalQuery({
     encryptedSecret: v.string(),
     lastDeliveredAt: v.optional(v.number()),
     batchSize: v.optional(v.number()),
+    intervalMinutes: v.optional(v.number()),
+    loadSourceFilter: v.optional(v.string()),
   })),
   handler: async (ctx) => {
     // Get all ACTIVE subscriptions across all orgs
@@ -290,6 +313,8 @@ export const getActiveSubscriptions = internalQuery({
         encryptedSecret: s.encryptedSecret,
         lastDeliveredAt: s.lastDeliveredAt,
         batchSize: s.batchSize,
+        intervalMinutes: s.intervalMinutes,
+        loadSourceFilter: s.loadSourceFilter,
       }));
   },
 });

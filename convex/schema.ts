@@ -929,6 +929,7 @@ export default defineSchema({
     triggerOnCreate: v.boolean(), // Auto-assign when load is created
     scheduledEnabled: v.boolean(), // Run on schedule
     scheduleIntervalMinutes: v.optional(v.number()), // Minutes between scheduled runs
+    lastScheduledRunAt: v.optional(v.number()), // Last scheduled run timestamp (ms)
 
     // Audit
     updatedBy: v.string(),

@@ -37,6 +37,10 @@
   ],
   "exclude": [
     "node_modules",
+    "mobile",
+    "**/__tests__/**",
+    "**/*.test.ts",
+    "**/*.test.tsx",
     "**/*-old.ts",
     "**/*-old.tsx"
   ]

@@ -45,11 +45,10 @@ crons.cron(
 // ==========================================
 
 // ✅ Recurring Load Generation
-// Runs daily at 5 AM UTC to generate loads for the day
-// Each template has its own generationTime and advanceDays settings
-crons.cron(
+// Runs hourly to honor per-template generationTime and advanceDays
+crons.interval(
   "recurring-load-generation",
-  "0 5 * * *", // Run daily at 5 AM UTC
+  { hours: 1 },
   internal.recurringLoadsCron.generateDailyLoads,
   {}
 );
