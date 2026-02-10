@@ -99,16 +99,16 @@ async function resolveProductionLoad(
   if (effectiveRefType === 'external') {
     load = await ctx.db
       .query('loadInformation')
-      .withIndex('by_external_id', (q: any) =>
-        q.eq('externalSource', 'FOURKITES').eq('externalLoadId', ref)
+      .withIndex('by_org_external_id', (q: any) =>
+        q.eq('workosOrgId', workosOrgId).eq('externalSource', 'FOURKITES').eq('externalLoadId', ref)
       )
       .first();
     // Also try without source filter if not found
     if (!load) {
       load = await ctx.db
         .query('loadInformation')
-        .withIndex('by_external_id', (q: any) =>
-          q.eq('externalSource', 'FourKites').eq('externalLoadId', ref)
+        .withIndex('by_org_external_id', (q: any) =>
+          q.eq('workosOrgId', workosOrgId).eq('externalSource', 'FourKites').eq('externalLoadId', ref)
         )
         .first();
     }

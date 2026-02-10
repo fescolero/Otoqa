@@ -1117,6 +1117,7 @@ export default defineSchema({
     .index('by_status', ['workosOrgId', 'status'])
     .index('by_load_type', ['workosOrgId', 'loadType'])
     .index('by_external_id', ['externalSource', 'externalLoadId'])
+    .index('by_org_external_id', ['workosOrgId', 'externalSource', 'externalLoadId'])
     .index('by_internal_id', ['workosOrgId', 'internalId'])
     .index('by_order_number', ['workosOrgId', 'orderNumber'])
     .index('by_hcr_trip', ['workosOrgId', 'parsedHcr', 'parsedTripNumber'])

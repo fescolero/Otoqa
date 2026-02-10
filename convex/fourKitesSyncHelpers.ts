@@ -93,13 +93,32 @@ export const createInvoiceLineItem = internalMutation({
 // Find existing load by external ID
 export const findLoadByExternalId = internalMutation({
   args: {
+    workosOrgId: v.string(),
     externalLoadId: v.string(),
   },
   handler: async (ctx, args) => {
+    const load = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_org_external_id", (q) =>
+        q
+          .eq("workosOrgId", args.workosOrgId)
+          .eq("externalSource", "FourKites")
+          .eq("externalLoadId", args.externalLoadId)
+      )
+      .first();
+
+    // Backward compatibility for historical data that used uppercase source key.
+    if (load) {
+      return load;
+    }
+
     return await ctx.db
       .query("loadInformation")
-      .withIndex("by_external_id", (q) =>
-        q.eq("externalSource", "FourKites").eq("externalLoadId", args.externalLoadId)
+      .withIndex("by_org_external_id", (q) =>
+        q
+          .eq("workosOrgId", args.workosOrgId)
+          .eq("externalSource", "FOURKITES")
+          .eq("externalLoadId", args.externalLoadId)
       )
       .first();
   },

@@ -41,8 +41,15 @@ export const processOrg = internalAction({
     try {
       const startTime = new Date(Date.now() - (lookbackHours * 60 * 60 * 1000)).toISOString();
 
+      const parsedCredentials =
+        typeof credentials === "string" ? JSON.parse(credentials) : credentials;
+      const apiKey = parsedCredentials?.apiKey;
+      if (!apiKey) {
+        throw new Error("FourKites credentials missing apiKey");
+      }
+
       // Fetch shipments from FourKites API (this can happen in an action)
-      const shipments = await fetchShipments(credentials.apiKey, startTime);
+      const shipments = await fetchShipments(apiKey, startTime);
 
       console.log(`FourKites: Fetched ${shipments.length} shipments for org ${orgId}`);
 
@@ -82,6 +89,7 @@ export const processOrg = internalAction({
           if (!laneMatch) {
             // Check if load already exists
             const existingLoad = await ctx.runMutation(internal.fourKitesSyncHelpers.findLoadByExternalId, {
+              workosOrgId: orgId,
               externalLoadId: shipment.id,
             });
 
@@ -104,6 +112,7 @@ export const processOrg = internalAction({
           // ✅ STEP 3.5: If lane NOW exists but load was UNMAPPED, promote it!
           // This handles the case where a lane is created AFTER the load was imported
           const unmappedLoad = await ctx.runMutation(internal.fourKitesSyncHelpers.findLoadByExternalId, {
+            workosOrgId: orgId,
             externalLoadId: shipment.id,
           });
           
@@ -120,6 +129,7 @@ export const processOrg = internalAction({
 
           // STEP 3: Find existing load
           const existingLoad = await ctx.runMutation(internal.fourKitesSyncHelpers.findLoadByExternalId, {
+            workosOrgId: orgId,
             externalLoadId: shipment.id,
           });
 
