@@ -19,11 +19,6 @@ import { format } from 'date-fns';
 // POLYLINE DECODERS
 // ============================================
 
-// Decode Google's polyline5 format (precision 1e5)
-function decodePolyline(encoded: string): Array<{ latitude: number; longitude: number }> {
-  return decodePolylineWithPrecision(encoded, 1e5);
-}
-
 // Decode Mapbox's polyline6 format (precision 1e6)
 function decodePolyline6(encoded: string): Array<{ latitude: number; longitude: number }> {
   return decodePolylineWithPrecision(encoded, 1e6);
@@ -306,7 +301,7 @@ function GpsBreadcrumbs({ points }: { points: LocationPoint[] }) {
     const markers: google.maps.Marker[] = [];
 
     // Create a small dot for each display point
-    displayPoints.forEach((point, index) => {
+    displayPoints.forEach((point) => {
       const marker = new google.maps.Marker({
         position: { lat: point.latitude, lng: point.longitude },
         map,
@@ -444,19 +439,20 @@ function MapBoundsFitter({
 // ============================================
 function LiveDriverMarker({
   location,
-  driverName,
   heading,
   speed,
   recordedAt,
+  now,
 }: {
   location: { latitude: number; longitude: number };
-  driverName?: string;
   heading?: number;
   speed?: number;
   recordedAt?: number;
+  now: number;
 }) {
-  const isStale = recordedAt ? Date.now() - recordedAt > 10 * 60 * 1000 : false;
-  const isRecent = recordedAt ? Date.now() - recordedAt < 5 * 60 * 1000 : false;
+  const timeSince = recordedAt !== undefined ? now - recordedAt : null;
+  const isStale = timeSince !== null && timeSince > 10 * 60 * 1000;
+  const isRecent = timeSince !== null && timeSince < 5 * 60 * 1000;
   const speedMph = speed ? Math.round(speed * 2.237) : 0;
 
   return (
@@ -787,7 +783,14 @@ export function LiveRouteMap({
   const [routePath, setRoutePath] = useState<Array<{ latitude: number; longitude: number }>>([]);
   const [isLoadingPath, setIsLoadingPath] = useState(false);
   const [matchConfidence, setMatchConfidence] = useState<number>(0);
+  const [isUsingFallback, setIsUsingFallback] = useState(false);
   const pathStateRef = useRef({ lastCount: 0, isLoading: false });
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Map matching action (uses Mapbox for accurate route reconstruction)
   const mapMatchRoute = useAction(api.googleRoads.mapMatchRoute);
@@ -818,6 +821,7 @@ export function LiveRouteMap({
     if (!routeHistory || currentCount < 2) {
       setRoutePath([]);
       setMatchConfidence(0);
+      setIsUsingFallback(false);
       pathStateRef.current.lastCount = currentCount;
       return;
     }
@@ -852,15 +856,18 @@ export function LiveRouteMap({
           console.log(`[LiveRouteMap] Mapbox matched ${result.matchedPoints} points → ${decoded.length} path points (${(result.confidence * 100).toFixed(1)}% confidence)`);
           setRoutePath(decoded);
           setMatchConfidence(result.confidence);
+          setIsUsingFallback(false);
         } else if (result.fallbackPoints && result.fallbackPoints.length > 0) {
           // Use fallback (raw GPS points)
           console.warn('[LiveRouteMap] Using fallback points (no Mapbox match)');
           setRoutePath(result.fallbackPoints);
           setMatchConfidence(0);
+          setIsUsingFallback(true);
         } else {
           console.warn('[LiveRouteMap] No route data available');
           setRoutePath([]);
           setMatchConfidence(0);
+          setIsUsingFallback(false);
         }
         
         pathStateRef.current.lastCount = currentCount;
@@ -1003,8 +1010,7 @@ export function LiveRouteMap({
           )}
 
           {/* GPS breadcrumb dots - shows actual data capture points */}
-          {/* Hidden by default - raw GPS has natural drift from roads */}
-          {/* Uncomment to show: {hasRouteData && <GpsBreadcrumbs points={routeHistory} />} */}
+          {hasRouteData && isUsingFallback && <GpsBreadcrumbs points={routeHistory} />}
 
           {/* Stop markers */}
           {stops?.map((stop) => (
@@ -1023,26 +1029,36 @@ export function LiveRouteMap({
                 latitude: driverLiveLocation.latitude,
                 longitude: driverLiveLocation.longitude,
               }}
-              driverName={driverLiveLocation.driverName}
               heading={driverLiveLocation.heading}
               speed={driverLiveLocation.speed}
               recordedAt={driverLiveLocation.recordedAt}
+              now={now}
             />
           )}
         </Map>
       </APIProvider>
 
-      {/* Snapping indicator */}
-      {isLoadingPath && (
-        <div className="absolute top-3 left-3 z-10">
+      <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
+        {/* Snapping indicator */}
+        {isLoadingPath && (
           <div className="bg-white/95 backdrop-blur border rounded-lg px-2.5 py-1.5 shadow-sm">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
               Loading route...
             </div>
           </div>
-        </div>
-      )}
+        )}
+
+        {/* Match confidence */}
+        {matchConfidence > 0 && routePath.length > 0 && (
+          <div className="bg-white/95 backdrop-blur border rounded-lg px-2.5 py-1.5 shadow-sm">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
+              <span>Matched {Math.round(matchConfidence * 100)}%</span>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Time range indicator */}
       <TimeRangeIndicator routePoints={routeHistory} isLive={isLiveTracking} />

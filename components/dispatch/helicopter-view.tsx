@@ -9,18 +9,13 @@ import {
   Map,
   AdvancedMarker,
   useMap,
-  InfoWindow,
 } from '@vis.gl/react-google-maps';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Truck,
-  RefreshCw,
   MapPin,
-  Clock,
-  Package,
   Navigation,
   Users,
   Signal,
@@ -59,10 +54,12 @@ interface DriverLocation {
 function DriverMarker({
   driver,
   isSelected,
+  now,
   onClick,
 }: {
   driver: DriverLocation;
   isSelected: boolean;
+  now: number;
   onClick: () => void;
 }) {
   const timeSinceUpdate = formatDistanceToNow(new Date(driver.recordedAt), {
@@ -70,7 +67,7 @@ function DriverMarker({
   });
 
   // Determine if location is stale (> 10 minutes old)
-  const isStale = Date.now() - driver.recordedAt > 10 * 60 * 1000;
+  const isStale = now - driver.recordedAt > 10 * 60 * 1000;
 
   return (
     <AdvancedMarker
@@ -169,9 +166,9 @@ function MapBoundsFitter({ locations }: { locations: DriverLocation[] }) {
 }
 
 // Stats panel component
-function StatsPanel({ locations }: { locations: DriverLocation[] }) {
+function StatsPanel({ locations, now }: { locations: DriverLocation[]; now: number }) {
   const activeCount = locations.filter(
-    (l) => Date.now() - l.recordedAt < 10 * 60 * 1000
+    (l) => now - l.recordedAt < 10 * 60 * 1000
   ).length;
   const staleCount = locations.length - activeCount;
 
@@ -214,12 +211,20 @@ export function HelicopterView({
 }: HelicopterViewProps) {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
   const [selectedDriverId, setSelectedDriverId] = useState<Id<'drivers'> | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [now, setNow] = useState(() => Date.now());
 
   // Convex reactive query - auto-updates when data changes
   const driverLocations = useQuery(api.driverLocations.getActiveDriverLocations, {
     organizationId,
   });
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setNow(Date.now());
+    }, 60_000);
+
+    return () => clearInterval(intervalId);
+  }, []);
 
   // Default center (US)
   const defaultCenter = useMemo(() => ({ lat: 39.8283, lng: -98.5795 }), []);
@@ -250,9 +255,10 @@ export function HelicopterView({
     return (
       <div className="rounded-lg border overflow-hidden" style={{ height }}>
         <div className="flex items-center justify-center h-full bg-muted/50">
-          <div className="flex flex-col items-center gap-3">
-            <RefreshCw className="w-8 h-8 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">Loading driver locations...</p>
+          <div className="flex flex-col items-center gap-3 w-64">
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-4 w-56" />
+            <Skeleton className="h-4 w-44" />
           </div>
         </div>
       </div>
@@ -318,6 +324,7 @@ export function HelicopterView({
               key={driver.driverId}
               driver={driver}
               isSelected={selectedDriverId === driver.driverId}
+              now={now}
               onClick={() => handleDriverClick(driver.driverId)}
             />
           ))}
@@ -325,7 +332,7 @@ export function HelicopterView({
       </APIProvider>
 
       {/* Stats overlay */}
-      {showStats && <StatsPanel locations={driverLocations} />}
+      {showStats && <StatsPanel locations={driverLocations} now={now} />}
 
       {/* Refresh indicator */}
       <div className="absolute bottom-4 right-4 z-10">

@@ -45,6 +45,10 @@ describe('Invoice Utilities', () => {
       expect(result).toContain('2024');
     });
 
+    it('handles Unix epoch (0) without returning empty string', () => {
+      expect(formatTimestamp(0)).not.toBe('');
+    });
+
     it('returns empty string for undefined', () => {
       expect(formatTimestamp(undefined)).toBe('');
     });

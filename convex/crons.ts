@@ -64,4 +64,45 @@ crons.interval(
   {}
 );
 
+// ==========================================
+// EXTERNAL TRACKING API
+// ==========================================
+
+// ✅ Webhook delivery processing (every 5 minutes)
+// Finds active webhook subscriptions, enqueues deliveries for tracked loads,
+// and processes the delivery queue with retry/dead-letter logic
+crons.interval(
+  "external-tracking-webhook-delivery",
+  { minutes: 5 },
+  internal.externalTrackingWebhooks.processWebhookDeliveries,
+  {}
+);
+
+// ✅ Audit log pruning (daily at 2 AM UTC)
+// Removes audit log entries older than 30 days
+crons.cron(
+  "external-tracking-audit-log-prune",
+  "0 2 * * *",
+  internal.externalTrackingAuth.pruneAuditLogs,
+  {}
+);
+
+// ✅ Webhook delivery queue cleanup (daily at 2:30 AM UTC)
+// Removes DELIVERED items > 7 days, DEAD_LETTER items > 30 days
+crons.cron(
+  "external-tracking-webhook-queue-cleanup",
+  "30 2 * * *",
+  internal.externalTrackingAuth.pruneWebhookDeliveryQueue,
+  {}
+);
+
+// ✅ Sandbox data refresh (daily at 4 AM UTC)
+// Regenerates synthetic GPS/load data for all orgs with sandbox API keys
+crons.cron(
+  "external-tracking-sandbox-refresh",
+  "0 4 * * *",
+  internal.sandboxData.refreshAllSandboxData,
+  {}
+);
+
 export default crons;

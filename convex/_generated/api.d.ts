@@ -33,8 +33,14 @@ import type * as driverPayCalculation from "../driverPayCalculation.js";
 import type * as driverProfileAssignments from "../driverProfileAssignments.js";
 import type * as driverSettlements from "../driverSettlements.js";
 import type * as drivers from "../drivers.js";
+import type * as externalTracking from "../externalTracking.js";
+import type * as externalTrackingAuth from "../externalTrackingAuth.js";
+import type * as externalTrackingAuthCrypto from "../externalTrackingAuthCrypto.js";
+import type * as externalTrackingPartnerKeys from "../externalTrackingPartnerKeys.js";
+import type * as externalTrackingWebhooks from "../externalTrackingWebhooks.js";
 import type * as forceResync from "../forceResync.js";
 import type * as fourKitesApiClient from "../fourKitesApiClient.js";
+import type * as fourKitesGpsPush from "../fourKitesGpsPush.js";
 import type * as fourKitesPullSyncAction from "../fourKitesPullSyncAction.js";
 import type * as fourKitesScheduledSync from "../fourKitesScheduledSync.js";
 import type * as fourKitesSyncHelpers from "../fourKitesSyncHelpers.js";
@@ -43,6 +49,7 @@ import type * as getContractLaneFull from "../getContractLaneFull.js";
 import type * as googleMaps from "../googleMaps.js";
 import type * as googleRoads from "../googleRoads.js";
 import type * as holidays from "../holidays.js";
+import type * as http from "../http.js";
 import type * as integrations from "../integrations.js";
 import type * as invoiceCalculations from "../invoiceCalculations.js";
 import type * as invoices from "../invoices.js";
@@ -72,6 +79,7 @@ import type * as recurringLoads from "../recurringLoads.js";
 import type * as recurringLoadsCron from "../recurringLoadsCron.js";
 import type * as routeAssignments from "../routeAssignments.js";
 import type * as s3Upload from "../s3Upload.js";
+import type * as sandboxData from "../sandboxData.js";
 import type * as settings from "../settings.js";
 import type * as stats from "../stats.js";
 import type * as stats_helpers from "../stats_helpers.js";
@@ -111,8 +119,14 @@ declare const fullApi: ApiFromModules<{
   driverProfileAssignments: typeof driverProfileAssignments;
   driverSettlements: typeof driverSettlements;
   drivers: typeof drivers;
+  externalTracking: typeof externalTracking;
+  externalTrackingAuth: typeof externalTrackingAuth;
+  externalTrackingAuthCrypto: typeof externalTrackingAuthCrypto;
+  externalTrackingPartnerKeys: typeof externalTrackingPartnerKeys;
+  externalTrackingWebhooks: typeof externalTrackingWebhooks;
   forceResync: typeof forceResync;
   fourKitesApiClient: typeof fourKitesApiClient;
+  fourKitesGpsPush: typeof fourKitesGpsPush;
   fourKitesPullSyncAction: typeof fourKitesPullSyncAction;
   fourKitesScheduledSync: typeof fourKitesScheduledSync;
   fourKitesSyncHelpers: typeof fourKitesSyncHelpers;
@@ -121,6 +135,7 @@ declare const fullApi: ApiFromModules<{
   googleMaps: typeof googleMaps;
   googleRoads: typeof googleRoads;
   holidays: typeof holidays;
+  http: typeof http;
   integrations: typeof integrations;
   invoiceCalculations: typeof invoiceCalculations;
   invoices: typeof invoices;
@@ -150,6 +165,7 @@ declare const fullApi: ApiFromModules<{
   recurringLoadsCron: typeof recurringLoadsCron;
   routeAssignments: typeof routeAssignments;
   s3Upload: typeof s3Upload;
+  sandboxData: typeof sandboxData;
   settings: typeof settings;
   stats: typeof stats;
   stats_helpers: typeof stats_helpers;
@@ -184,4 +200,139 @@ export declare const internal: FilterApi<
   FunctionReference<any, "internal">
 >;
 
-export declare const components: {};
+export declare const components: {
+  rateLimiter: {
+    lib: {
+      checkRateLimit: FunctionReference<
+        "query",
+        "internal",
+        {
+          config:
+            | {
+                capacity?: number;
+                kind: "token bucket";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: null;
+              }
+            | {
+                capacity?: number;
+                kind: "fixed window";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: number;
+              };
+          count?: number;
+          key?: string;
+          name: string;
+          reserve?: boolean;
+          throws?: boolean;
+        },
+        { ok: true; retryAfter?: number } | { ok: false; retryAfter: number }
+      >;
+      clearAll: FunctionReference<
+        "mutation",
+        "internal",
+        { before?: number },
+        null
+      >;
+      getServerTime: FunctionReference<"mutation", "internal", {}, number>;
+      getValue: FunctionReference<
+        "query",
+        "internal",
+        {
+          config:
+            | {
+                capacity?: number;
+                kind: "token bucket";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: null;
+              }
+            | {
+                capacity?: number;
+                kind: "fixed window";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: number;
+              };
+          key?: string;
+          name: string;
+          sampleShards?: number;
+        },
+        {
+          config:
+            | {
+                capacity?: number;
+                kind: "token bucket";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: null;
+              }
+            | {
+                capacity?: number;
+                kind: "fixed window";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: number;
+              };
+          shard: number;
+          ts: number;
+          value: number;
+        }
+      >;
+      rateLimit: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          config:
+            | {
+                capacity?: number;
+                kind: "token bucket";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: null;
+              }
+            | {
+                capacity?: number;
+                kind: "fixed window";
+                maxReserved?: number;
+                period: number;
+                rate: number;
+                shards?: number;
+                start?: number;
+              };
+          count?: number;
+          key?: string;
+          name: string;
+          reserve?: boolean;
+          throws?: boolean;
+        },
+        { ok: true; retryAfter?: number } | { ok: false; retryAfter: number }
+      >;
+      resetRateLimit: FunctionReference<
+        "mutation",
+        "internal",
+        { key?: string; name: string },
+        null
+      >;
+    };
+    time: {
+      getServerTime: FunctionReference<"mutation", "internal", {}, number>;
+    };
+  };
+};

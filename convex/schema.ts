@@ -1119,7 +1119,8 @@ export default defineSchema({
     .index('by_internal_id', ['workosOrgId', 'internalId'])
     .index('by_order_number', ['workosOrgId', 'orderNumber'])
     .index('by_hcr_trip', ['workosOrgId', 'parsedHcr', 'parsedTripNumber'])
-    .index('by_org_first_stop_date', ['workosOrgId', 'firstStopDate']),
+    .index('by_org_first_stop_date', ['workosOrgId', 'firstStopDate'])
+    .index('by_org_tracking_status', ['workosOrgId', 'trackingStatus']),
 
   loadStops: defineTable({
     // Load Reference
@@ -1808,4 +1809,190 @@ export default defineSchema({
     .index('by_org_time', ['organizationId', 'recordedAt'])
     .index('by_load', ['loadId', 'recordedAt'])
     .index('by_org_created', ['organizationId', 'createdAt']),
+
+  // ==========================================
+  // EXTERNAL TRACKING API
+  // Partner API keys, webhooks, audit logs
+  // ==========================================
+
+  partnerApiKeys: defineTable({
+    workosOrgId: v.string(),
+    partnerName: v.string(),
+
+    // Key material (never store raw keys - hash only)
+    keyPrefix: v.string(),             // First 12 chars for identification (e.g., "otq_live_a1b2")
+    keyHash: v.string(),               // SHA-256 hash of full key
+
+    // Scoping
+    permissions: v.array(v.string()),  // ["tracking:read", "tracking:subscribe", "tracking:events"]
+    allowedLoadSources: v.optional(v.array(v.string())), // Restrict to specific externalSource values
+    ipAllowlist: v.optional(v.array(v.string())),        // CIDR ranges
+
+    // Rate limiting (configurable per partner)
+    rateLimitTier: v.union(
+      v.literal('low'),     // 60/min
+      v.literal('medium'),  // 300/min
+      v.literal('high'),    // 1000/min
+      v.literal('custom')
+    ),
+    customRateLimit: v.optional(v.number()), // requests/min if tier = "custom"
+
+    // Environment
+    environment: v.union(v.literal('sandbox'), v.literal('production')),
+
+    // Lifecycle
+    status: v.union(v.literal('ACTIVE'), v.literal('REVOKED'), v.literal('EXPIRED')),
+    expiresAt: v.optional(v.number()),
+    lastUsedAt: v.optional(v.number()),   // Updated at most once per minute (debounced)
+
+    // Metadata
+    createdBy: v.string(),
+    createdAt: v.number(),
+    revokedAt: v.optional(v.number()),
+    revokedBy: v.optional(v.string()),
+  })
+    .index('by_org', ['workosOrgId', 'status'])
+    .index('by_key_prefix', ['keyPrefix'])
+    .index('by_key_hash', ['keyHash']),
+
+  webhookSubscriptions: defineTable({
+    workosOrgId: v.string(),
+    partnerKeyId: v.id('partnerApiKeys'),
+
+    // Webhook config
+    url: v.string(),                        // HTTPS only (validated on creation)
+    events: v.array(v.string()),            // ["position.update", "status.changed", "tracking.started", "tracking.ended"]
+    encryptedSecret: v.string(),            // AES-256-GCM encrypted signing secret
+
+    // Delivery settings
+    intervalMinutes: v.number(),            // Default 5
+    batchSize: v.optional(v.number()),      // Max positions per payload (default 100)
+
+    // Filter (optional)
+    loadSourceFilter: v.optional(v.string()), // Only deliver for specific externalSource
+
+    // Status
+    status: v.union(v.literal('ACTIVE'), v.literal('PAUSED'), v.literal('DISABLED')),
+    consecutiveFailures: v.number(),         // Auto-disable after 50
+    lastDeliveredAt: v.optional(v.number()),
+    lastFailureReason: v.optional(v.string()),
+
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org', ['workosOrgId', 'status'])
+    .index('by_partner_key', ['partnerKeyId']),
+
+  webhookDeliveryQueue: defineTable({
+    subscriptionId: v.id('webhookSubscriptions'),
+    workosOrgId: v.string(),
+
+    // Idempotency (partner uses this to deduplicate)
+    deliveryId: v.string(),              // Unique per delivery: "dlv_<ulid>"
+
+    // Payload reference
+    loadId: v.id('loadInformation'),
+    eventType: v.string(),               // "position.update" | "status.changed" | ...
+    positionsFrom: v.optional(v.number()), // recordedAt range start
+    positionsTo: v.optional(v.number()),   // recordedAt range end
+
+    // Delivery status
+    status: v.union(
+      v.literal('PENDING'),
+      v.literal('DELIVERING'),
+      v.literal('DELIVERED'),
+      v.literal('FAILED'),
+      v.literal('DEAD_LETTER')
+    ),
+    attempts: v.number(),
+    maxAttempts: v.number(),             // Default 5
+    nextAttemptAt: v.optional(v.number()), // Exponential backoff with jitter
+
+    // Response tracking
+    lastHttpStatus: v.optional(v.number()),
+    lastErrorMessage: v.optional(v.string()),
+    deliveredAt: v.optional(v.number()),
+
+    createdAt: v.number(),
+  })
+    .index('by_status_next', ['status', 'nextAttemptAt'])
+    .index('by_subscription', ['subscriptionId', 'status'])
+    .index('by_delivery_id', ['deliveryId']),
+
+  apiAuditLog: defineTable({
+    workosOrgId: v.string(),
+    partnerKeyId: v.id('partnerApiKeys'),
+
+    // Request identification
+    requestId: v.string(),               // "req_<random>" - propagated in X-Request-Id header
+
+    // Request info
+    endpoint: v.string(),
+    method: v.string(),
+    statusCode: v.number(),
+
+    // Context
+    ipAddress: v.optional(v.string()),
+    userAgent: v.optional(v.string()),
+
+    // Performance
+    responseTimeMs: v.optional(v.number()),
+
+    // Rate limit state at time of request
+    rateLimitRemaining: v.optional(v.number()),
+
+    timestamp: v.number(),
+  })
+    .index('by_org_time', ['workosOrgId', 'timestamp'])
+    .index('by_key_time', ['partnerKeyId', 'timestamp'])
+    .index('by_request_id', ['requestId']),
+
+  // ==========================================
+  // SANDBOX DATA (isolated from production)
+  // ==========================================
+
+  sandboxLoads: defineTable({
+    workosOrgId: v.string(),
+    internalId: v.string(),
+    orderNumber: v.string(),
+    externalLoadId: v.optional(v.string()),
+    trackingStatus: v.union(
+      v.literal('Pending'),
+      v.literal('In Transit'),
+      v.literal('Completed'),
+    ),
+    stopCount: v.number(),
+    firstStopDate: v.optional(v.string()),
+    // Simplified stop data for sandbox
+    stops: v.array(v.object({
+      sequenceNumber: v.number(),
+      stopType: v.union(v.literal('PICKUP'), v.literal('DELIVERY')),
+      city: v.string(),
+      state: v.string(),
+      latitude: v.number(),
+      longitude: v.number(),
+      status: v.union(v.literal('Pending'), v.literal('Completed')),
+      scheduledWindowBegin: v.string(),
+      scheduledWindowEnd: v.string(),
+      checkedInAt: v.optional(v.string()),
+      checkedOutAt: v.optional(v.string()),
+    })),
+    createdAt: v.number(),
+  })
+    .index('by_org', ['workosOrgId'])
+    .index('by_org_tracking_status', ['workosOrgId', 'trackingStatus'])
+    .index('by_internal_id', ['workosOrgId', 'internalId']),
+
+  sandboxPositions: defineTable({
+    sandboxLoadId: v.id('sandboxLoads'),
+    workosOrgId: v.string(),
+    latitude: v.float64(),
+    longitude: v.float64(),
+    speed: v.optional(v.float64()),
+    heading: v.optional(v.float64()),
+    accuracy: v.optional(v.float64()),
+    recordedAt: v.float64(),
+  })
+    .index('by_load', ['sandboxLoadId', 'recordedAt'])
+    .index('by_org', ['workosOrgId', 'recordedAt']),
 });

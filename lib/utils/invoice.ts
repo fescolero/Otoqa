@@ -26,7 +26,7 @@ export function formatDate(dateString?: string) {
  * Formats a Unix timestamp to a readable format
  */
 export function formatTimestamp(timestamp?: number) {
-  if (!timestamp) return '';
+  if (timestamp == null) return '';
   return new Date(timestamp).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',

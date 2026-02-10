@@ -3,8 +3,9 @@
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Building2, Users, Plug, Truck, Route } from 'lucide-react';
+import { Building2, Users, Plug, Truck, Route, Key } from 'lucide-react';
 import { AutoAssignmentSettings } from '@/components/auto-assignment-settings';
+import { PartnerApiSettings } from '@/components/partner-api-settings';
 import { WidgetsProvider } from '@/components/widgets-provider';
 import { UsersManagement, WorkOsWidgets } from '@workos-inc/widgets';
 import { useEffect, useState } from 'react';
@@ -327,7 +328,7 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
 
   return (
     <Tabs defaultValue="overview" className="w-full">
-      <TabsList className="grid w-full md:w-[500px] grid-cols-4">
+      <TabsList className="grid w-full md:w-[625px] grid-cols-5">
         <TabsTrigger value="overview" className="flex items-center gap-2">
           <Building2 className="h-4 w-4" />
           <span className="hidden sm:inline">Overview</span>
@@ -343,6 +344,10 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
         <TabsTrigger value="integrations" className="flex items-center gap-2">
           <Plug className="h-4 w-4" />
           <span className="hidden sm:inline">Integrations</span>
+        </TabsTrigger>
+        <TabsTrigger value="api-partners" className="flex items-center gap-2">
+          <Key className="h-4 w-4" />
+          <span className="hidden sm:inline">API Partners</span>
         </TabsTrigger>
       </TabsList>
 
@@ -826,6 +831,13 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+      </TabsContent>
+
+      {/* API Partners Tab */}
+      <TabsContent value="api-partners" className="mt-6">
+        {organization?.id && (
+          <PartnerApiSettings organizationId={organization.id} />
+        )}
       </TabsContent>
     </Tabs>
   );

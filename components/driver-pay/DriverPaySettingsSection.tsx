@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
-import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -233,116 +232,31 @@ export function DriverPaySettingsSection({
         </div>
       ) : (
         <div className="border rounded-lg overflow-hidden">
-          {/* Table Header - Pro ledger style */}
-          <div className="grid grid-cols-[28px_1fr_90px_110px_40px] gap-2 px-3 py-1.5 bg-slate-50 dark:bg-slate-900 border-b">
-            <div></div>
-            <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Profile</div>
-            <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Pay Basis</div>
-            <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">Base Rate</div>
-            <div></div>
-          </div>
-          
-          {/* Table Body - high-density ledger rows */}
-          <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            {assignments.map((assignment) => {
-              const isActive = isActiveProfile(assignment);
-              return (
-                <div 
-                  key={assignment._id} 
-                  className={`grid grid-cols-[28px_1fr_90px_110px_40px] gap-2 px-3 py-2 items-center group transition-colors ${
-                    isActive 
-                      ? 'bg-blue-50/40 dark:bg-blue-950/30 border-l-[3px] border-l-blue-500' 
-                      : 'hover:bg-slate-50/50 dark:hover:bg-slate-900/50 border-l-[3px] border-l-transparent'
-                  }`}
-                >
-                  {/* Star Toggle - vertically centered */}
-                  <div className="flex items-center justify-center">
-                    <button
-                      onClick={async () => {
-                        try {
-                          if (assignment.isDefault) {
-                            await unsetDefaultAssignment({
-                              assignmentId: assignment._id as Id<'driverProfileAssignments'>,
-                              userId,
-                            });
-                          } else {
-                            await setDefaultAssignment({
-                              assignmentId: assignment._id as Id<'driverProfileAssignments'>,
-                              userId,
-                            });
-                          }
-                        } catch (error) {
-                          console.error('Failed to toggle default:', error);
-                        }
-                      }}
-                      className={`flex items-center justify-center ${isActive 
-                        ? "text-blue-500 hover:text-blue-600 transition-colors" 
-                        : "text-slate-300 dark:text-slate-600 hover:text-blue-500 transition-colors"
-                      }`}
-                      title={isActive ? "Remove as Active" : "Set as Active"}
-                    >
-                      <Star className={`h-3.5 w-3.5 ${isActive ? 'fill-blue-500' : ''}`} />
-                    </button>
-                  </div>
-
-                  {/* Profile Name + Badges */}
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className={`p-1 rounded ${isActive ? 'bg-blue-100 dark:bg-blue-900' : 'bg-slate-100 dark:bg-slate-800'}`}>
-                      {getPayBasisIcon(assignment.profilePayBasis ?? 'MILEAGE')}
-                    </div>
-                    <span className="font-medium text-sm truncate">{assignment.profileName}</span>
-                    {assignment.profileId === orgDefaultProfile?._id && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-500 rounded">
-                        Org Default
-                      </span>
-                    )}
-                    {isActive && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-medium bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-400 rounded">
-                        Active
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Pay Basis */}
-                  <div className="text-xs text-muted-foreground">
-                    {getPayBasisLabel(assignment.profilePayBasis ?? 'MILEAGE')}
-                  </div>
-
-                  {/* Base Rate - right aligned, tabular-nums, monospace */}
-                  <div className="text-right font-mono">
-                    {assignment.baseRate !== undefined ? (
-                      <span className="font-medium text-sm tabular-nums" style={{ fontVariantNumeric: 'tabular-nums' }}>
-                        {assignment.profilePayBasis === 'PERCENTAGE'
-                          ? `${assignment.baseRate.toFixed(1)}%`
-                          : `$${assignment.baseRate.toFixed(2)}`}
-                        <span className="text-muted-foreground text-[10px] ml-0.5">
-                          {assignment.profilePayBasis === 'MILEAGE' && '/mi'}
-                          {assignment.profilePayBasis === 'HOURLY' && '/hr'}
-                        </span>
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground text-sm">—</span>
-                    )}
-                  </div>
-
-                  {/* Actions - muted ellipsis, vertically centered, hover reveal */}
-                  <div className="flex items-center justify-end">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button 
-                          variant="ghost" 
-                          size="icon" 
-                          className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-                        >
-                          <MoreHorizontal className="h-3.5 w-3.5 text-slate-400" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => setViewingProfileId(assignment.profileId)}>
-                          <Eye className="h-4 w-4 mr-2" />
-                          View Profile
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
+          <Table className="text-xs">
+            <TableHeader className="bg-slate-50 dark:bg-slate-900">
+              <TableRow>
+                <TableHead className="w-8"></TableHead>
+                <TableHead className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Profile</TableHead>
+                <TableHead className="w-24 text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Pay Basis</TableHead>
+                <TableHead className="w-28 text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-right">Base Rate</TableHead>
+                <TableHead className="w-10"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {assignments.map((assignment) => {
+                const isActive = isActiveProfile(assignment);
+                return (
+                  <TableRow
+                    key={assignment._id}
+                    className={`group transition-colors ${
+                      isActive
+                        ? 'bg-blue-50/40 dark:bg-blue-950/30'
+                        : 'hover:bg-slate-50/50 dark:hover:bg-slate-900/50'
+                    }`}
+                  >
+                    <TableCell className={`w-8 py-2 pl-2 pr-1 border-l-[3px] ${isActive ? 'border-l-blue-500' : 'border-l-transparent'}`}>
+                      <div className="flex items-center justify-center">
+                        <button
                           onClick={async () => {
                             try {
                               if (assignment.isDefault) {
@@ -360,24 +274,111 @@ export function DriverPaySettingsSection({
                               console.error('Failed to toggle default:', error);
                             }
                           }}
+                          className={`flex items-center justify-center ${isActive 
+                            ? "text-blue-500 hover:text-blue-600 transition-colors" 
+                            : "text-slate-300 dark:text-slate-600 hover:text-blue-500 transition-colors"
+                          }`}
+                          title={isActive ? "Remove as Active" : "Set as Active"}
                         >
-                          <Star className={`h-4 w-4 mr-2 ${isActive ? 'fill-blue-500 text-blue-500' : ''}`} />
-                          {isActive ? 'Remove as Active' : 'Set as Active'}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => setDeletingAssignment(assignment._id)}
-                          className="text-red-600"
-                        >
-                          <Trash2 className="h-4 w-4 mr-2" />
-                          Remove
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                          <Star className={`h-3.5 w-3.5 ${isActive ? 'fill-blue-500' : ''}`} />
+                        </button>
+                      </div>
+                    </TableCell>
+
+                    <TableCell className="py-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className={`p-1 rounded ${isActive ? 'bg-blue-100 dark:bg-blue-900' : 'bg-slate-100 dark:bg-slate-800'}`}>
+                          {getPayBasisIcon(assignment.profilePayBasis ?? 'MILEAGE')}
+                        </div>
+                        <span className="font-medium text-sm truncate">{assignment.profileName}</span>
+                        {assignment.profileId === orgDefaultProfile?._id && (
+                          <Badge variant="secondary" className="text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-500">
+                            Org Default
+                          </Badge>
+                        )}
+                        {isActive && (
+                          <Badge variant="secondary" className="text-[10px] bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-400">
+                            Active
+                          </Badge>
+                        )}
+                      </div>
+                    </TableCell>
+
+                    <TableCell className="w-24 py-2 text-muted-foreground">
+                      {getPayBasisLabel(assignment.profilePayBasis ?? 'MILEAGE')}
+                    </TableCell>
+
+                    <TableCell className="w-28 py-2 text-right font-mono">
+                      {assignment.baseRate !== undefined ? (
+                        <span className="font-medium text-sm tabular-nums" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                          {assignment.profilePayBasis === 'PERCENTAGE'
+                            ? `${assignment.baseRate.toFixed(1)}%`
+                            : `$${assignment.baseRate.toFixed(2)}`}
+                          <span className="text-muted-foreground text-[10px] ml-0.5">
+                            {assignment.profilePayBasis === 'MILEAGE' && '/mi'}
+                            {assignment.profilePayBasis === 'HOURLY' && '/hr'}
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground text-sm">—</span>
+                      )}
+                    </TableCell>
+
+                    <TableCell className="w-10 py-2">
+                      <div className="flex items-center justify-end">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button 
+                              variant="ghost" 
+                              size="icon" 
+                              className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                            >
+                              <MoreHorizontal className="h-3.5 w-3.5 text-slate-400" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => setViewingProfileId(assignment.profileId)}>
+                              <Eye className="h-4 w-4 mr-2" />
+                              View Profile
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={async () => {
+                                try {
+                                  if (assignment.isDefault) {
+                                    await unsetDefaultAssignment({
+                                      assignmentId: assignment._id as Id<'driverProfileAssignments'>,
+                                      userId,
+                                    });
+                                  } else {
+                                    await setDefaultAssignment({
+                                      assignmentId: assignment._id as Id<'driverProfileAssignments'>,
+                                      userId,
+                                    });
+                                  }
+                                } catch (error) {
+                                  console.error('Failed to toggle default:', error);
+                                }
+                              }}
+                            >
+                              <Star className={`h-4 w-4 mr-2 ${isActive ? 'fill-blue-500 text-blue-500' : ''}`} />
+                              {isActive ? 'Remove as Active' : 'Set as Active'}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => setDeletingAssignment(assignment._id)}
+                              className="text-red-600"
+                            >
+                              <Trash2 className="h-4 w-4 mr-2" />
+                              Remove
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
         </div>
       )}
 
@@ -468,7 +469,7 @@ export function DriverPaySettingsSection({
             <AlertDialogTitle>Remove Profile Assignment?</AlertDialogTitle>
             <AlertDialogDescription>
               This will remove the pay profile from this driver. They will no
-              longer be compensated according to this profile's rules.
+              longer be compensated according to this profile rules.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
