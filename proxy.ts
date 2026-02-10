@@ -1,6 +1,10 @@
 import { authkitMiddleware } from '@workos-inc/authkit-nextjs';
 
+const redirectUri =
+  process.env.WORKOS_REDIRECT_URI ?? process.env.NEXT_PUBLIC_WORKOS_REDIRECT_URI;
+
 export default authkitMiddleware({
+  redirectUri,
   middlewareAuth: {
     enabled: true,
     unauthenticatedPaths: ['/sign-in', '/sign-up', '/callback'],

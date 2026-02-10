@@ -9,11 +9,9 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { withAuth } from '@workos-inc/authkit-nextjs';
-import { WorkOS } from '@workos-inc/node';
 import { redirect } from 'next/navigation';
 import { DispatchPlannerClient } from '@/components/dispatch/planner/dispatch-planner-client';
-
-const workos = new WorkOS(process.env.WORKOS_API_KEY);
+import { requireWorkOS } from '@/lib/workos';
 
 export default async function DispatchPlannerPage() {
   const { user } = await withAuth();
@@ -21,6 +19,8 @@ export default async function DispatchPlannerPage() {
   if (!user) {
     redirect('/sign-in');
   }
+
+  const workos = requireWorkOS();
 
   // Fetch organization data
   let organizationId = '';

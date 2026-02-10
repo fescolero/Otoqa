@@ -1,11 +1,9 @@
 import { AppLayoutClient } from '@/components/app-layout-client';
 import { withAuth } from '@workos-inc/authkit-nextjs';
-import { WorkOS } from '@workos-inc/node';
 import { redirect } from 'next/navigation';
 import { fetchQuery } from 'convex/nextjs';
 import { api } from '@/convex/_generated/api';
-
-const workos = new WorkOS(process.env.WORKOS_API_KEY);
+import { requireWorkOS } from '@/lib/workos';
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const { user, accessToken } = await withAuth();
@@ -13,6 +11,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   if (!user) {
     redirect('/sign-in');
   }
+
+  const workos = requireWorkOS();
 
   // Get user's organization
   const memberships = await workos.userManagement.listOrganizationMemberships({

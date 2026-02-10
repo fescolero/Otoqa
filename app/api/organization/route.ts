@@ -1,11 +1,14 @@
 import { withAuth } from '@workos-inc/authkit-nextjs';
-import { WorkOS } from '@workos-inc/node';
 import { NextResponse } from 'next/server';
-
-const workos = new WorkOS(process.env.WORKOS_API_KEY);
+import { getWorkOS } from '@/lib/workos';
 
 export async function GET() {
   try {
+    const workos = getWorkOS();
+    if (!workos) {
+      return NextResponse.json({ error: 'WorkOS not configured' }, { status: 500 });
+    }
+
     const { user } = await withAuth();
 
     if (!user) {

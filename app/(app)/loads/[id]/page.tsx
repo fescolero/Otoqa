@@ -9,11 +9,9 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { withAuth } from '@workos-inc/authkit-nextjs';
-import { WorkOS } from '@workos-inc/node';
 import { redirect } from 'next/navigation';
 import { LoadDetail } from '@/components/load-detail';
-
-const workos = new WorkOS(process.env.WORKOS_API_KEY);
+import { requireWorkOS } from '@/lib/workos';
 
 export default async function LoadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { user } = await withAuth();
@@ -22,6 +20,8 @@ export default async function LoadDetailPage({ params }: { params: Promise<{ id:
   if (!user) {
     redirect('/sign-in');
   }
+
+  const workos = requireWorkOS();
 
   // Fetch organization data
   let organization = null;
