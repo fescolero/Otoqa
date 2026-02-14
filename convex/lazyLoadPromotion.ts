@@ -6,6 +6,7 @@
 import { mutation, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
+import { updateInvoiceCount } from "./stats_helpers";
 
 /**
  * Check a single load and promote if specific lane exists
@@ -61,7 +62,6 @@ export const checkAndPromoteLoad = mutation({
         });
 
         // ✅ Update organization stats (MISSING_DATA → DRAFT)
-        const { updateInvoiceCount } = await import("./stats_helpers");
         await updateInvoiceCount(ctx, load.workosOrgId, "MISSING_DATA", "DRAFT");
       }
       

@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation, internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import { updateLoadCount } from './stats_helpers';
 import {
   addDaysToUtcDateString,
   getUtcDateStringFromMs,
@@ -417,7 +418,6 @@ export const generateLoadFromTemplate = internalMutation({
     }
 
     // 5. Update organization stats
-    const { updateLoadCount } = await import('./stats_helpers');
     await updateLoadCount(ctx, template.workosOrgId, undefined, 'Open');
 
     // 6. Update template with last generated info

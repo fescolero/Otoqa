@@ -10,6 +10,7 @@ import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from "./invoiceCalculations";
 import { Doc } from "./_generated/dataModel";
+import { updateInvoiceCount } from "./stats_helpers";
 
 /**
  * Helper: Calculate invoice amounts dynamically
@@ -502,7 +503,6 @@ export const bulkUpdateStatus = mutation({
         });
 
         // ✅ Update organization stats (aggregate table pattern)
-        const { updateInvoiceCount } = await import("./stats_helpers");
         await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, args.newStatus);
 
         results.success++;
@@ -551,7 +551,6 @@ export const bulkVoidInvoices = mutation({
         });
 
         // ✅ Update organization stats (aggregate table pattern)
-        const { updateInvoiceCount } = await import("./stats_helpers");
         await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, "VOID");
 
         results.success++;

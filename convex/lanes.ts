@@ -5,6 +5,7 @@
 
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { updateInvoiceCount } from "./stats_helpers";
 
 /**
  * Preview Backfill Impact
@@ -267,7 +268,6 @@ export const createLaneAndBackfill = mutation({
         });
 
         // ✅ Update organization stats (MISSING_DATA → DRAFT)
-        const { updateInvoiceCount } = await import("./stats_helpers");
         await updateInvoiceCount(ctx, args.workosOrgId, oldInvoiceStatus, "DRAFT");
 
         // Delete existing line items (if any)

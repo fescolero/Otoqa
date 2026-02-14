@@ -7,6 +7,7 @@ import { internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
+import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
 
 // Find contract lane by HCR and trip
 export const findContractLane = internalMutation({
@@ -60,7 +61,6 @@ export const createInvoice = internalMutation({
     });
     
     // ✅ Update organization stats (aggregate table pattern)
-    const { updateInvoiceCount } = await import("./stats_helpers");
     await updateInvoiceCount(ctx, args.workosOrgId, undefined, args.status);
     
     return invoiceId;
@@ -126,7 +126,6 @@ export const createLoad = internalMutation({
     const loadId = await ctx.db.insert("loadInformation", args.data);
     
     // ✅ Update organization stats (aggregate table pattern)
-    const { updateLoadCount } = await import("./stats_helpers");
     await updateLoadCount(ctx, args.data.workosOrgId, undefined, args.data.status);
     
     // ✅ Trigger auto-assignment for FourKites loads
@@ -303,7 +302,6 @@ export const importLoadFromShipment = internalMutation({
     });
 
     // ✅ Update organization stats for load creation
-    const { updateLoadCount } = await import("./stats_helpers");
     await updateLoadCount(ctx, workosOrgId, undefined, "Assigned");
 
     // Create stops
@@ -364,7 +362,6 @@ export const importLoadFromShipment = internalMutation({
     });
 
     // ✅ Update organization stats for invoice creation
-    const { updateInvoiceCount } = await import("./stats_helpers");
     await updateInvoiceCount(ctx, workosOrgId, undefined, "DRAFT");
 
     // Note: Line items are no longer created during import
@@ -486,7 +483,6 @@ export const importUnmappedLoad = internalMutation({
     });
 
     // ✅ Update organization stats for unmapped load creation
-    const { updateLoadCount } = await import("./stats_helpers");
     await updateLoadCount(ctx, workosOrgId, undefined, "Assigned");
 
     // Create stops (same as CONTRACT/SPOT loads)
@@ -547,7 +543,6 @@ export const importUnmappedLoad = internalMutation({
     });
 
     // ✅ Update organization stats for unmapped invoice creation
-    const { updateInvoiceCount } = await import("./stats_helpers");
     await updateInvoiceCount(ctx, workosOrgId, undefined, "MISSING_DATA");
 
     return loadId;
@@ -639,7 +634,6 @@ export const promoteUnmappedLoad = internalMutation({
       });
 
       // ✅ Update organization stats (MISSING_DATA → DRAFT)
-      const { updateInvoiceCount } = await import("./stats_helpers");
       await updateInvoiceCount(ctx, load.workosOrgId, "MISSING_DATA", "DRAFT");
     }
 
