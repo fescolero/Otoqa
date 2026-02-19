@@ -3,7 +3,20 @@
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Building2, Users, Plug, Truck, Route, Key, Upload, Loader2, Globe, Copy } from 'lucide-react';
+import {
+  Building2,
+  Users,
+  Plug,
+  Truck,
+  Route,
+  Key,
+  Upload,
+  Loader2,
+  Globe,
+  Copy,
+  ChevronDown,
+  ChevronUp,
+} from 'lucide-react';
 import { AutoAssignmentSettings } from '@/components/auto-assignment-settings';
 import { PartnerApiSettings } from '@/components/partner-api-settings';
 import { WidgetsProvider } from '@/components/widgets-provider';
@@ -66,6 +79,8 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [savingBilling, setSavingBilling] = useState(false);
+  const [runningManualSync, setRunningManualSync] = useState(false);
+  const [isSyncIssueExpanded, setIsSyncIssueExpanded] = useState(false);
 
   // Billing form state
   const [billingEmail, setBillingEmail] = useState('');
@@ -100,6 +115,7 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
   const deleteIntegration = useMutation(api.integrations.deleteIntegration);
   const generateUploadUrl = useMutation(api.settings.generateUploadUrl);
   const updateOrgSettings = useMutation(api.settings.updateOrgSettings);
+  const triggerManualSync = useMutation(api.fourKitesTest.triggerManualSync);
 
   // Initialize organization with default settings
   const handleInitializeOrg = async () => {
@@ -193,6 +209,21 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
     }
   };
 
+  const handleRunManualSync = async () => {
+    if (!organization?.id) return;
+
+    setRunningManualSync(true);
+    try {
+      await triggerManualSync({ workosOrgId: organization.id });
+      toast.success('Manual sync queued. Check status in a few seconds.');
+    } catch (error) {
+      console.error('Failed to trigger manual sync:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to trigger manual sync');
+    } finally {
+      setRunningManualSync(false);
+    }
+  };
+
   const handleCopyDiagnostics = async (diagnostics: string) => {
     if (!diagnostics?.trim()) {
       toast.error('No diagnostics available to copy');
@@ -225,6 +256,11 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
       setDefaultTimezone(orgSettings.defaultTimezone || 'America/New_York');
     }
   }, [orgSettings]);
+
+  useEffect(() => {
+    // Keep diagnostics compact by default when new sync issues appear.
+    setIsSyncIssueExpanded(false);
+  }, [fourKitesIntegration?.lastSyncStats.errorMessage]);
 
   // Format phone number as user types: (123) 456-7890
   const formatPhoneNumber = (value: string): string => {
@@ -696,7 +732,7 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
               <div className="border rounded-lg p-4 space-y-4">
                 {/* Header Row */}
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
                     <div className="h-12 w-12 rounded-lg bg-blue-100 flex items-center justify-center">
                       <Truck className="h-6 w-6 text-blue-600" />
                     </div>
@@ -721,6 +757,21 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
                       onClick={() => setFourKitesConfigureOpen(true)}
                     >
                       Configure
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRunManualSync}
+                      disabled={runningManualSync}
+                    >
+                      {runningManualSync ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Testing...
+                        </>
+                      ) : (
+                        'Run test sync'
+                      )}
                     </Button>
                     <Button
                       variant="ghost"
@@ -768,22 +819,46 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
                   <div className="p-4 bg-red-50 text-red-900 rounded-md border border-red-200">
                     <div className="flex items-center justify-between gap-2">
                       <p className="font-semibold text-sm">Sync Issue Details</p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-xs border-red-200 text-red-900 bg-white/70 hover:bg-white"
-                        onClick={() =>
-                          handleCopyDiagnostics(fourKitesIntegration.lastSyncStats.errorMessage ?? '')
-                        }
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                        Copy diagnostics
-                      </Button>
+                      <div className="flex items-center justify-end gap-2 flex-wrap">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs border-red-200 text-red-900 bg-white/70 hover:bg-white"
+                          onClick={() => setIsSyncIssueExpanded((current) => !current)}
+                        >
+                          {isSyncIssueExpanded ? (
+                            <ChevronUp className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          )}
+                          {isSyncIssueExpanded ? 'Compact' : 'Expand'}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs border-red-200 text-red-900 bg-white/70 hover:bg-white"
+                          onClick={() =>
+                            handleCopyDiagnostics(fourKitesIntegration.lastSyncStats.errorMessage ?? '')
+                          }
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          Copy diagnostics
+                        </Button>
+                      </div>
                     </div>
-                    <p className="mt-2 whitespace-pre-line text-sm leading-6">
-                      {fourKitesIntegration.lastSyncStats.errorMessage}
-                    </p>
+                    {isSyncIssueExpanded ? (
+                      <div className="mt-2 max-h-56 overflow-y-auto rounded-md border border-red-200 bg-white/70 p-3">
+                        <p className="whitespace-pre-line text-sm leading-6">
+                          {fourKitesIntegration.lastSyncStats.errorMessage}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm leading-6 truncate">
+                        {fourKitesIntegration.lastSyncStats.errorMessage.split('\n')[0]}
+                      </p>
+                    )}
                     <p className="mt-3 text-xs text-red-800/80">
                       If this continues after updating credentials or lane mappings, contact support and include
                       these diagnostics.
