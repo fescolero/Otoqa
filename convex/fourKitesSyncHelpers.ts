@@ -647,9 +647,10 @@ export const promoteUnmappedLoad = internalMutation({
     }
 
     // Stamp the contract lane with import match metadata
-    const freshLane = await ctx.db.get(contractLane._id);
+    const laneId = contractLane._id as Id<"contractLanes">;
+    const freshLane = await ctx.db.get(laneId);
     if (freshLane) {
-      await ctx.db.patch(freshLane._id, {
+      await ctx.db.patch(laneId, {
         lastImportMatchAt: Date.now(),
         importMatchCount: (freshLane.importMatchCount ?? 0) + 1,
       });
