@@ -28,6 +28,7 @@ interface FourKitesConfigureModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   organizationId: string;
+  userId: string;
   currentSettings: SyncSettings;
 }
 
@@ -35,6 +36,7 @@ export function FourKitesConfigureModal({
   open,
   onOpenChange,
   organizationId,
+  userId,
   currentSettings,
 }: FourKitesConfigureModalProps) {
   const [isEnabled, setIsEnabled] = useState(currentSettings.isEnabled);
@@ -55,6 +57,7 @@ export function FourKitesConfigureModal({
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const updateSyncSettings = useMutation(api.integrations.updateSyncSettings);
+  const upsertIntegration = useMutation(api.integrations.upsertIntegration);
 
   // Reset form when currentSettings change
   useEffect(() => {
@@ -84,14 +87,25 @@ export function FourKitesConfigureModal({
         },
       };
 
-      await updateSyncSettings({
-        workosOrgId: organizationId,
-        provider: 'fourkites',
-        apiKey: apiKey.trim() ? apiKey.trim() : undefined,
-        syncSettings,
-      });
+      const trimmedApiKey = apiKey.trim();
+      if (trimmedApiKey) {
+        await upsertIntegration({
+          workosOrgId: organizationId,
+          provider: 'fourkites',
+          credentials: JSON.stringify({ apiKey: trimmedApiKey }),
+          syncSettings,
+          createdBy: userId,
+        });
+        toast.success('Configuration and credentials updated');
+      } else {
+        await updateSyncSettings({
+          workosOrgId: organizationId,
+          provider: 'fourkites',
+          syncSettings,
+        });
+        toast.success('Configuration updated');
+      }
 
-      toast.success(apiKey.trim() ? 'Configuration and credentials updated' : 'Configuration updated');
       onOpenChange(false);
     } catch (error) {
       console.error('Failed to update sync settings:', error);

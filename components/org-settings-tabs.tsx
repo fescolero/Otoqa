@@ -840,6 +840,7 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
             open={fourKitesConfigureOpen}
             onOpenChange={setFourKitesConfigureOpen}
             organizationId={organization.id}
+            userId={user.id}
             currentSettings={fourKitesIntegration.syncSettings}
           />
         )}
