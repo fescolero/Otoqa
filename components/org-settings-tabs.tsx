@@ -80,6 +80,7 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
   const [initializing, setInitializing] = useState(false);
   const [savingBilling, setSavingBilling] = useState(false);
   const [runningManualSync, setRunningManualSync] = useState(false);
+  const [manualSyncRequestedAt, setManualSyncRequestedAt] = useState<number | null>(null);
   const [isSyncIssueExpanded, setIsSyncIssueExpanded] = useState(false);
 
   // Billing form state
@@ -214,7 +215,9 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
 
     setRunningManualSync(true);
     try {
+      const requestedAt = Date.now();
       await triggerManualSync({ workosOrgId: organization.id });
+      setManualSyncRequestedAt(requestedAt);
       toast.success('Manual sync queued. Check status in a few seconds.');
     } catch (error) {
       console.error('Failed to trigger manual sync:', error);
@@ -261,6 +264,14 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
     // Keep diagnostics compact by default when new sync issues appear.
     setIsSyncIssueExpanded(false);
   }, [fourKitesIntegration?.lastSyncStats.errorMessage]);
+
+  useEffect(() => {
+    if (!manualSyncRequestedAt) return;
+    const lastSyncTime = fourKitesIntegration?.lastSyncStats.lastSyncTime ?? 0;
+    if (lastSyncTime >= manualSyncRequestedAt) {
+      setManualSyncRequestedAt(null);
+    }
+  }, [manualSyncRequestedAt, fourKitesIntegration?.lastSyncStats.lastSyncTime]);
 
   // Format phone number as user types: (123) 456-7890
   const formatPhoneNumber = (value: string): string => {
@@ -815,7 +826,46 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
                 </div>
 
                 {/* Error Message */}
-                {fourKitesIntegration.lastSyncStats.errorMessage && (
+                {(() => {
+                  const lastSyncStatus = fourKitesIntegration.lastSyncStats.lastSyncStatus;
+                  const lastSyncTime = fourKitesIntegration.lastSyncStats.lastSyncTime ?? 0;
+                  const isManualSyncPending =
+                    manualSyncRequestedAt !== null && (!lastSyncTime || lastSyncTime < manualSyncRequestedAt);
+                  const hasSyncError =
+                    !!fourKitesIntegration.lastSyncStats.errorMessage && lastSyncStatus !== 'success';
+                  const hasSyncSuccess = !hasSyncError && lastSyncStatus === 'success';
+                  const isErrorPotentiallyStale =
+                    hasSyncError && (fourKitesIntegration.updatedAt ?? 0) > lastSyncTime;
+
+                  if (isManualSyncPending) {
+                    return (
+                      <div className="p-4 bg-blue-50 text-blue-900 rounded-md border border-blue-200">
+                        <p className="font-semibold text-sm">Sync In Progress</p>
+                        <p className="mt-2 text-sm leading-6">
+                          Manual sync is queued and running. This panel will refresh when the run completes.
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  if (hasSyncSuccess) {
+                    return (
+                      <div className="p-4 bg-green-50 text-green-900 rounded-md border border-green-200">
+                        <p className="font-semibold text-sm">Sync Status</p>
+                        <p className="mt-2 text-sm leading-6">
+                          Last sync completed successfully.
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  if (!hasSyncError) {
+                    return null;
+                  }
+
+                  const errorMessage = fourKitesIntegration.lastSyncStats.errorMessage ?? '';
+
+                  return (
                   <div className="p-4 bg-red-50 text-red-900 rounded-md border border-red-200">
                     <div className="flex items-center justify-between gap-2">
                       <p className="font-semibold text-sm">Sync Issue Details</p>
@@ -839,9 +889,7 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
                           variant="outline"
                           size="sm"
                           className="h-7 px-2 text-xs border-red-200 text-red-900 bg-white/70 hover:bg-white"
-                          onClick={() =>
-                            handleCopyDiagnostics(fourKitesIntegration.lastSyncStats.errorMessage ?? '')
-                          }
+                          onClick={() => handleCopyDiagnostics(errorMessage)}
                         >
                           <Copy className="h-3.5 w-3.5" />
                           Copy diagnostics
@@ -851,12 +899,17 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
                     {isSyncIssueExpanded ? (
                       <div className="mt-2 max-h-56 overflow-y-auto rounded-md border border-red-200 bg-white/70 p-3">
                         <p className="whitespace-pre-line text-sm leading-6">
-                          {fourKitesIntegration.lastSyncStats.errorMessage}
+                          {errorMessage}
                         </p>
                       </div>
                     ) : (
                       <p className="mt-2 text-sm leading-6 truncate">
-                        {fourKitesIntegration.lastSyncStats.errorMessage.split('\n')[0]}
+                        {errorMessage.split('\n')[0]}
+                      </p>
+                    )}
+                    {isErrorPotentiallyStale && (
+                      <p className="mt-2 text-xs text-red-800/90">
+                        Integration settings were updated after this failed sync. Re-run test sync to refresh status.
                       </p>
                     )}
                     <p className="mt-3 text-xs text-red-800/80">
@@ -864,7 +917,8 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
                       these diagnostics.
                     </p>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             </div>
           </Card>
