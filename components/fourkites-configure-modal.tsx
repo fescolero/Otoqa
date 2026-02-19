@@ -6,8 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { Loader2 } from 'lucide-react';
-import { useMutation } from 'convex/react';
+import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { toast } from 'sonner';
 
@@ -32,6 +32,14 @@ interface FourKitesConfigureModalProps {
   currentSettings: SyncSettings;
 }
 
+type FourKitesCredentialValues = {
+  apiKey?: string;
+  username?: string;
+  password?: string;
+  clientSecret?: string;
+  accessToken?: string;
+};
+
 export function FourKitesConfigureModal({
   open,
   onOpenChange,
@@ -54,10 +62,21 @@ export function FourKitesConfigureModal({
     currentSettings.push?.driverAssignmentsEnabled ?? false,
   );
   const [apiKey, setApiKey] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [accessToken, setAccessToken] = useState('');
+  const [testingApiKey, setTestingApiKey] = useState(false);
+  const [apiKeyTestStatus, setApiKeyTestStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [apiKeyTestMessage, setApiKeyTestMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const updateSyncSettings = useMutation(api.integrations.updateSyncSettings);
   const upsertIntegration = useMutation(api.integrations.upsertIntegration);
+  const existingCredentialsRaw = useQuery(
+    api.integrations.getCredentials,
+    open ? { workosOrgId: organizationId, provider: 'fourkites' } : 'skip',
+  );
 
   // Reset form when currentSettings change
   useEffect(() => {
@@ -68,7 +87,83 @@ export function FourKitesConfigureModal({
     setGpsTrackingEnabled(currentSettings.push?.gpsTrackingEnabled ?? false);
     setDriverAssignmentsEnabled(currentSettings.push?.driverAssignmentsEnabled ?? false);
     setApiKey('');
+    setUsername('');
+    setPassword('');
+    setClientSecret('');
+    setAccessToken('');
+    setApiKeyTestStatus('idle');
+    setApiKeyTestMessage('');
   }, [currentSettings, open]);
+
+  const parseStoredCredentials = (): FourKitesCredentialValues => {
+    if (!existingCredentialsRaw || typeof existingCredentialsRaw !== 'string') {
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(existingCredentialsRaw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as FourKitesCredentialValues;
+      }
+    } catch {
+      return {};
+    }
+    return {};
+  };
+
+  const buildMergedCredentials = (): FourKitesCredentialValues => {
+    const merged = { ...parseStoredCredentials() };
+    if (apiKey.trim()) merged.apiKey = apiKey.trim();
+    if (username.trim()) merged.username = username.trim();
+    if (password.trim()) merged.password = password.trim();
+    if (clientSecret.trim()) merged.clientSecret = clientSecret.trim();
+    if (accessToken.trim()) merged.accessToken = accessToken.trim();
+    return merged;
+  };
+
+  const testCredentialsConnection = async (credentials: FourKitesCredentialValues): Promise<boolean> => {
+    if (
+      !credentials.apiKey?.trim() &&
+      !(credentials.username?.trim() && credentials.password?.trim()) &&
+      !(credentials.apiKey?.trim() && credentials.clientSecret?.trim()) &&
+      !credentials.accessToken?.trim()
+    ) {
+      setApiKeyTestStatus('error');
+      setApiKeyTestMessage('Enter credentials to test.');
+      return false;
+    }
+
+    setTestingApiKey(true);
+    setApiKeyTestStatus('idle');
+    setApiKeyTestMessage('');
+
+    try {
+      const response = await fetch('/api/integrations/fourkites/test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(credentials),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setApiKeyTestStatus('success');
+        setApiKeyTestMessage(data.message || 'Credentials are valid.');
+        return true;
+      }
+
+      setApiKeyTestStatus('error');
+      setApiKeyTestMessage(data.message || 'Credentials test failed.');
+      return false;
+    } catch (error) {
+      console.error('Failed to test FourKites credentials:', error);
+      setApiKeyTestStatus('error');
+      setApiKeyTestMessage('Unable to test credentials. Please try again.');
+      return false;
+    } finally {
+      setTestingApiKey(false);
+    }
+  };
 
   const handleSave = async () => {
     setIsSubmitting(true);
@@ -87,12 +182,25 @@ export function FourKitesConfigureModal({
         },
       };
 
-      const trimmedApiKey = apiKey.trim();
-      if (trimmedApiKey) {
+      const hasCredentialUpdate =
+        !!apiKey.trim() ||
+        !!username.trim() ||
+        !!password.trim() ||
+        !!clientSecret.trim() ||
+        !!accessToken.trim();
+
+      if (hasCredentialUpdate) {
+        const mergedCredentials = buildMergedCredentials();
+        const valid = await testCredentialsConnection(mergedCredentials);
+        if (!valid) {
+          toast.error('Credentials test failed. Update credentials and try again.');
+          return;
+        }
+
         await upsertIntegration({
           workosOrgId: organizationId,
           provider: 'fourkites',
-          credentials: JSON.stringify({ apiKey: trimmedApiKey }),
+          credentials: JSON.stringify(mergedCredentials),
           syncSettings,
           createdBy: userId,
         });
@@ -127,20 +235,124 @@ export function FourKitesConfigureModal({
           {/* Credentials Section */}
           <div className="space-y-3">
             <h3 className="text-sm font-semibold">Credentials</h3>
-            <div className="space-y-2">
-              <Label htmlFor="fourkitesApiKey">API Key / Password</Label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-2">
+              <Label htmlFor="fourkitesApiKey">API Key</Label>
               <Input
                 id="fourkitesApiKey"
                 type="password"
                 autoComplete="new-password"
                 value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="Leave blank to keep current credentials"
+                onChange={(e) => {
+                  setApiKey(e.target.value);
+                  setApiKeyTestStatus('idle');
+                  setApiKeyTestMessage('');
+                }}
+                placeholder="Optional: set/update API key"
                 disabled={isSubmitting}
               />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="fourkitesClientSecret">OAuth Client Secret</Label>
+                <Input
+                  id="fourkitesClientSecret"
+                  type="password"
+                  autoComplete="new-password"
+                  value={clientSecret}
+                  onChange={(e) => {
+                    setClientSecret(e.target.value);
+                    setApiKeyTestStatus('idle');
+                    setApiKeyTestMessage('');
+                  }}
+                  placeholder="Optional: for OAuth2 flow"
+                  disabled={isSubmitting}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="fourkitesUsername">Basic Auth Username</Label>
+                <Input
+                  id="fourkitesUsername"
+                  value={username}
+                  onChange={(e) => {
+                    setUsername(e.target.value);
+                    setApiKeyTestStatus('idle');
+                    setApiKeyTestMessage('');
+                  }}
+                  placeholder="Optional: for tracking-api endpoints"
+                  disabled={isSubmitting}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="fourkitesPassword">Basic Auth Password</Label>
+                <Input
+                  id="fourkitesPassword"
+                  type="password"
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    setApiKeyTestStatus('idle');
+                    setApiKeyTestMessage('');
+                  }}
+                  placeholder="Optional: for tracking-api endpoints"
+                  disabled={isSubmitting}
+                />
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <Label htmlFor="fourkitesAccessToken">OAuth Access Token</Label>
+                <Input
+                  id="fourkitesAccessToken"
+                  type="password"
+                  autoComplete="new-password"
+                  value={accessToken}
+                  onChange={(e) => {
+                    setAccessToken(e.target.value);
+                    setApiKeyTestStatus('idle');
+                    setApiKeyTestMessage('');
+                  }}
+                  placeholder="Optional: bearer token (short-lived)"
+                  disabled={isSubmitting}
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
               <p className="text-xs text-muted-foreground">
-                Enter a new value only when rotating FourKites credentials.
+                API key is used for `api.fourkites.com`. Some `tracking-api.fourkites.com` endpoints require
+                username/password. OAuth-enabled tenants may require client secret or access token.
               </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8"
+                disabled={testingApiKey || isSubmitting}
+                onClick={() => {
+                  void testCredentialsConnection(buildMergedCredentials());
+                }}
+              >
+                {testingApiKey ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Testing credentials...
+                  </>
+                ) : (
+                  'Test credentials'
+                )}
+              </Button>
+              {apiKeyTestMessage && (
+                <div
+                  className={`flex items-start gap-2 rounded-md p-3 text-sm ${
+                    apiKeyTestStatus === 'success' ? 'bg-green-50 text-green-900' : 'bg-red-50 text-red-900'
+                  }`}
+                >
+                  {apiKeyTestStatus === 'success' ? (
+                    <CheckCircle2 className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                  ) : (
+                    <XCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                  )}
+                  <span>{apiKeyTestMessage}</span>
+                </div>
+              )}
             </div>
           </div>
 

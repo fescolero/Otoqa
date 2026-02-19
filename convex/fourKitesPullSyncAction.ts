@@ -1,7 +1,7 @@
 import { internalAction } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { fetchShipments } from "./fourKitesApiClient";
+import { fetchShipments, type FourKitesAuthCredentials } from "./fourKitesApiClient";
 
 type FailureStage = "fetch" | "process";
 
@@ -37,44 +37,63 @@ function normalizeFailureKey(reason: string): string {
   return reason.replace(/\b\d{6,}\b/g, "<id>").slice(0, 160);
 }
 
-function resolveApiKey(credentials: unknown): string | null {
+function resolveAuthCredentials(credentials: unknown): FourKitesAuthCredentials | null {
   if (!credentials) {
     return null;
   }
 
+  let parsedCredentials: unknown = credentials;
   if (typeof credentials === "string") {
     try {
-      const parsed = JSON.parse(credentials);
-      if (parsed && typeof parsed === "object" && typeof (parsed as { apiKey?: unknown }).apiKey === "string") {
-        const apiKeyFromJson = (parsed as { apiKey: string }).apiKey.trim();
-        return apiKeyFromJson || null;
-      }
+      parsedCredentials = JSON.parse(credentials);
     } catch {
       const rawValue = credentials.trim();
-      return rawValue || null;
+      return rawValue ? { apiKey: rawValue } : null;
     }
+  }
+
+  if (!parsedCredentials || typeof parsedCredentials !== "object" || Array.isArray(parsedCredentials)) {
     return null;
   }
 
-  if (typeof credentials === "object" && typeof (credentials as { apiKey?: unknown }).apiKey === "string") {
-    const apiKey = (credentials as { apiKey: string }).apiKey.trim();
-    return apiKey || null;
+  const source = parsedCredentials as Record<string, unknown>;
+  const result: FourKitesAuthCredentials = {};
+
+  if (typeof source.apiKey === "string" && source.apiKey.trim()) {
+    result.apiKey = source.apiKey.trim();
+  }
+  if (typeof source.username === "string" && source.username.trim()) {
+    result.username = source.username.trim();
+  }
+  if (typeof source.password === "string" && source.password.trim()) {
+    result.password = source.password.trim();
+  }
+  if (typeof source.clientSecret === "string" && source.clientSecret.trim()) {
+    result.clientSecret = source.clientSecret.trim();
+  }
+  if (typeof source.accessToken === "string" && source.accessToken.trim()) {
+    result.accessToken = source.accessToken.trim();
   }
 
-  return null;
+  return Object.keys(result).length > 0 ? result : null;
 }
 
 function buildSuggestedActions(topReason: string | undefined): string[] {
   const actions = new Set<string>();
   const normalized = topReason?.toLowerCase() || "";
-
-  if (
+  const isAuthIssue =
     normalized.includes("unauthorized") ||
     normalized.includes("forbidden") ||
     normalized.includes("401") ||
-    normalized.includes("403")
-  ) {
-    actions.add("Verify your FourKites API key and account permissions in Configure.");
+    normalized.includes("403");
+
+  if (isAuthIssue) {
+    actions.add("Verify FourKites credentials in Configure (API key, username/password, or OAuth fields).");
+    actions.add("Confirm key/environment alignment (staging key with staging URL, prod key with prod URL).");
+    actions.add("Confirm the shipments endpoint is enabled for your FourKites subscription.");
+    actions.add("If OAuth2 is enabled for your tenant, configure client secret or a valid access token.");
+    actions.add("Retry sync after updating credentials.");
+    return Array.from(actions);
   }
 
   if (normalized.includes("timeout") || normalized.includes("timed out")) {
@@ -88,7 +107,7 @@ function buildSuggestedActions(topReason: string | undefined): string[] {
   actions.add("Review affected shipment IDs below and verify HCR/Trip lane mappings.");
   actions.add("Retry sync after updating configuration or mappings.");
 
-  return Array.from(actions).slice(0, 3);
+  return Array.from(actions).slice(0, 4);
 }
 
 function buildDetailedErrorMessage(params: {
@@ -142,7 +161,7 @@ export const processOrg = internalAction({
   },
   handler: async (ctx, args) => {
     const { orgId, credentials, lookbackHours } = args;
-    const apiKey = resolveApiKey(credentials);
+    const authCredentials = resolveAuthCredentials(credentials);
     
     let processed = 0;
     let errors = 0;
@@ -168,12 +187,12 @@ export const processOrg = internalAction({
     try {
       const startTime = new Date(Date.now() - (lookbackHours * 60 * 60 * 1000)).toISOString();
 
-      if (!apiKey) {
-        throw new Error("Missing FourKites API key in integration credentials");
+      if (!authCredentials) {
+        throw new Error("Missing FourKites credentials in integration settings");
       }
 
       // Fetch shipments from FourKites API (this can happen in an action)
-      const shipments = await fetchShipments(apiKey, startTime);
+      const shipments = await fetchShipments(authCredentials, startTime);
 
       console.log(`FourKites: Fetched ${shipments.length} shipments for org ${orgId}`);
 

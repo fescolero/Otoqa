@@ -5,6 +5,14 @@
 
 const FOURKITES_API_URL = process.env.FOURKITES_API_URL || 'https://api.fourkites.com/shipments';
 
+export interface FourKitesAuthCredentials {
+  apiKey?: string;
+  username?: string;
+  password?: string;
+  clientSecret?: string;
+  accessToken?: string;
+}
+
 interface FourKitesShipment {
   id: string;
   hcr?: string; // Extracted from referenceNumbers
@@ -44,11 +52,108 @@ interface FourKitesShipment {
   [key: string]: any; // Allow additional fields
 }
 
-interface FetchShipmentsOptions {
-  apiKey: string;
-  startTime: string; // ISO 8601 timestamp
-  limit?: number;
-  offset?: number;
+function buildBaseHeaders(): Record<string, string> {
+  return {
+    Accept: 'application/vnd.fourkites.v1+json',
+    'Content-Type': 'application/json',
+  };
+}
+
+function buildBasicAuthHeader(username: string, password: string): string {
+  const encoded = Buffer.from(`${username}:${password}`).toString('base64');
+  return `Basic ${encoded}`;
+}
+
+function getShipmentsUrl(): string {
+  const parsed = new URL(FOURKITES_API_URL);
+  parsed.search = '';
+  parsed.hash = '';
+  if (!parsed.pathname.endsWith('/shipments')) {
+    parsed.pathname = `${parsed.pathname.replace(/\/+$/, '')}/shipments`;
+  }
+  return parsed.toString();
+}
+
+function getOauthTokenUrl(): string {
+  const parsed = new URL(getShipmentsUrl());
+  parsed.search = '';
+  parsed.hash = '';
+  parsed.pathname = `${parsed.pathname.replace(/\/+$/, '')}/oauth2/token`;
+  return parsed.toString();
+}
+
+async function getOauthAccessToken(credentials: FourKitesAuthCredentials): Promise<string> {
+  const apiKey = credentials.apiKey?.trim();
+  const clientSecret = credentials.clientSecret?.trim();
+
+  if (!apiKey || !clientSecret) {
+    throw new Error('OAuth2 requires apiKey and clientSecret');
+  }
+
+  const tokenResponse = await fetch(getOauthTokenUrl(), {
+    method: 'POST',
+    headers: {
+      ...buildBaseHeaders(),
+      apikey: apiKey,
+    },
+    body: JSON.stringify({
+      grant_type: 'client_credentials',
+      client_id: apiKey,
+      client_secret: clientSecret,
+    }),
+  });
+
+  if (!tokenResponse.ok) {
+    const errorText = await tokenResponse.text();
+    throw new Error(
+      `FourKites OAuth Error (${tokenResponse.status}): ${tokenResponse.statusText} - ${errorText}`
+    );
+  }
+
+  const tokenData = await tokenResponse.json();
+  const accessToken = tokenData?.access_token;
+  if (!accessToken || typeof accessToken !== 'string') {
+    throw new Error('FourKites OAuth token response missing access_token');
+  }
+
+  return accessToken;
+}
+
+async function buildAuthHeaders(credentials: FourKitesAuthCredentials): Promise<Record<string, string>> {
+  const headers = buildBaseHeaders();
+  const apiKey = credentials.apiKey?.trim();
+  const username = credentials.username?.trim();
+  const password = credentials.password?.trim();
+  const clientSecret = credentials.clientSecret?.trim();
+  const providedAccessToken = credentials.accessToken?.trim();
+
+  if (apiKey) {
+    headers.apikey = apiKey;
+  }
+
+  if (providedAccessToken) {
+    headers.Authorization = `Bearer ${providedAccessToken}`;
+    return headers;
+  }
+
+  if (apiKey && clientSecret) {
+    const oauthAccessToken = await getOauthAccessToken(credentials);
+    headers.Authorization = `Bearer ${oauthAccessToken}`;
+    return headers;
+  }
+
+  if (username && password) {
+    headers.Authorization = buildBasicAuthHeader(username, password);
+    return headers;
+  }
+
+  if (apiKey) {
+    return headers;
+  }
+
+  throw new Error(
+    'Missing FourKites credentials. Provide apiKey, username/password, or apiKey + clientSecret.'
+  );
 }
 
 /**
@@ -111,7 +216,7 @@ function mapShipmentFields(rawShipment: any): FourKitesShipment {
  * @returns Array of shipments updated after startTime
  */
 export async function fetchShipments(
-  apiKey: string,
+  credentials: FourKitesAuthCredentials,
   startTime: string
 ): Promise<FourKitesShipment[]> {
   const allShipments: FourKitesShipment[] = [];
@@ -121,18 +226,16 @@ export async function fetchShipments(
   let totalPages = 0;
 
   try {
+    const authHeaders = await buildAuthHeaders(credentials);
+
     // First request to get totalCount
-    const firstUrl = new URL(FOURKITES_API_URL);
+    const firstUrl = new URL(getShipmentsUrl());
     firstUrl.searchParams.append('page', '1');
     firstUrl.searchParams.append('perPage', perPage.toString());
 
     const firstResponse = await fetch(firstUrl.toString(), {
       method: 'GET',
-      headers: {
-        'apikey': apiKey,
-        'Accept': 'application/vnd.fourkites.v1+json',
-        'Content-Type': 'application/json',
-      },
+      headers: authHeaders,
     });
 
     if (!firstResponse.ok) {
@@ -201,17 +304,13 @@ export async function fetchShipments(
 
     // Fetch remaining pages
     for (currentPage = 2; currentPage <= totalPages; currentPage++) {
-      const url = new URL(FOURKITES_API_URL);
+      const url = new URL(getShipmentsUrl());
       url.searchParams.append('page', currentPage.toString());
       url.searchParams.append('perPage', perPage.toString());
 
       const response = await fetch(url.toString(), {
         method: 'GET',
-        headers: {
-          'apikey': apiKey,
-          'Accept': 'application/vnd.fourkites.v1+json',
-          'Content-Type': 'application/json',
-        },
+        headers: authHeaders,
       });
 
       if (!response.ok) {
@@ -281,13 +380,14 @@ export async function fetchShipments(
  */
 export async function testConnection(apiKey: string): Promise<boolean> {
   try {
-    const response = await fetch(`${FOURKITES_API_URL}?page=1&perPage=1`, {
+    const headers = await buildAuthHeaders({ apiKey });
+    const testUrl = new URL(getShipmentsUrl());
+    testUrl.searchParams.append('page', '1');
+    testUrl.searchParams.append('perPage', '1');
+
+    const response = await fetch(testUrl.toString(), {
       method: 'GET',
-      headers: {
-        'apikey': apiKey,
-        'Accept': 'application/vnd.fourkites.v1+json',
-        'Content-Type': 'application/json',
-      },
+      headers,
     });
 
     return response.ok || response.status === 404; // 404 with valid auth is OK
