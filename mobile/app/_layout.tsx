@@ -1,7 +1,8 @@
 // IMPORTANT: Polyfills must be imported FIRST
 import '../lib/polyfills';
 
-import { useEffect } from 'react';
+import React, { useEffect } from 'react';
+import { View, Text, ScrollView, StyleSheet } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ClerkProvider, ClerkLoaded } from '@clerk/clerk-expo';
@@ -10,6 +11,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import * as SecureStore from 'expo-secure-store';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import * as Updates from 'expo-updates';
 import { PostHogProvider, usePostHog } from 'posthog-react-native';
 import { convex, ConvexAuthProvider } from '../lib/convex';
 import { queryClient, setupQueryPersistence } from '../lib/query-client';
@@ -20,6 +22,57 @@ import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
 import { uploadPODPhoto } from '../lib/s3-upload';
 import { LanguageProvider } from '../lib/LanguageContext';
+
+// ============================================
+// ERROR BOUNDARY
+// Catches JS crashes and displays them instead of white screen
+// ============================================
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  ErrorBoundaryState
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={errorStyles.container}>
+          <ScrollView contentContainerStyle={errorStyles.scroll}>
+            <Text style={errorStyles.title}>App Crashed</Text>
+            <Text style={errorStyles.message}>
+              {this.state.error?.message || 'Unknown error'}
+            </Text>
+            <Text style={errorStyles.stack}>
+              {this.state.error?.stack || ''}
+            </Text>
+          </ScrollView>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const errorStyles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#1a1a2e', padding: 20, paddingTop: 60 },
+  scroll: { paddingBottom: 40 },
+  title: { color: '#ff6b6b', fontSize: 24, fontWeight: 'bold', marginBottom: 12 },
+  message: { color: '#fff', fontSize: 16, marginBottom: 16 },
+  stack: { color: '#888', fontSize: 12, fontFamily: 'monospace' },
+});
 
 // ============================================
 // ROOT LAYOUT
@@ -169,62 +222,80 @@ export default function RootLayout() {
     };
   }, []);
 
+  useEffect(() => {
+    async function checkForOTAUpdate() {
+      if (__DEV__) return;
+      try {
+        if (!Updates.isEnabled) return;
+        const update = await Updates.checkForUpdateAsync();
+        if (update.isAvailable) {
+          await Updates.fetchUpdateAsync();
+          await Updates.reloadAsync();
+        }
+      } catch (e) {
+        console.log('OTA update check failed:', e);
+      }
+    }
+    checkForOTAUpdate();
+  }, []);
+
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <SafeAreaProvider>
-        <LanguageProvider>
-        <PostHogProvider 
-          apiKey="phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X"
-          options={{
-            host: 'https://us.i.posthog.com',
-            enableSessionReplay: true,
-            sessionReplayConfig: {
-              maskAllTextInputs: true,
-              maskAllImages: true,
-              captureLog: true,
-              captureNetworkTelemetry: true,
-              throttleDelayMs: 1000,
-            },
-            // Force events to be sent immediately in debug
-            flushAt: 1,
-            flushInterval: 1000,
-          }}
-        >
-          <PostHogDebug />
-          <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
-            <ClerkLoaded>
-              <ConvexProvider client={convex}>
-                <ConvexAuthProvider>
-                  <QueryClientProvider client={queryClient}>
-                    <ConvexInitializer>
-                      <Stack
-                        screenOptions={{
-                          headerStyle: {
-                            backgroundColor: '#1a1a2e',
-                          },
-                          headerTintColor: '#fff',
-                          headerTitleStyle: {
-                            fontWeight: 'bold',
-                          },
-                          contentStyle: {
-                            backgroundColor: '#16213e',
-                          },
-                        }}
-                      >
-                        <Stack.Screen name="(auth)" options={{ headerShown: false }} />
-                        <Stack.Screen name="(app)" options={{ headerShown: false }} />
-                      </Stack>
-                      <StatusBar style="light" />
-                    </ConvexInitializer>
-                  </QueryClientProvider>
-                </ConvexAuthProvider>
-              </ConvexProvider>
-            </ClerkLoaded>
-          </ClerkProvider>
-        </PostHogProvider>
-        </LanguageProvider>
-      </SafeAreaProvider>
-    </GestureHandlerRootView>
+    <ErrorBoundary>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <SafeAreaProvider>
+          <LanguageProvider>
+          <PostHogProvider 
+            apiKey="phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X"
+            options={{
+              host: 'https://us.i.posthog.com',
+              enableSessionReplay: true,
+              sessionReplayConfig: {
+                maskAllTextInputs: true,
+                maskAllImages: true,
+                captureLog: true,
+                captureNetworkTelemetry: true,
+                throttleDelayMs: 1000,
+              },
+              flushAt: 1,
+              flushInterval: 1000,
+            }}
+          >
+            <PostHogDebug />
+            <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
+              <ClerkLoaded>
+                <ConvexProvider client={convex}>
+                  <ConvexAuthProvider>
+                    <QueryClientProvider client={queryClient}>
+                      <ConvexInitializer>
+                        <Stack
+                          screenOptions={{
+                            headerStyle: {
+                              backgroundColor: '#1a1a2e',
+                            },
+                            headerTintColor: '#fff',
+                            headerTitleStyle: {
+                              fontWeight: 'bold',
+                            },
+                            contentStyle: {
+                              backgroundColor: '#16213e',
+                            },
+                          }}
+                        >
+                          <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+                          <Stack.Screen name="(app)" options={{ headerShown: false }} />
+                        </Stack>
+                        <StatusBar style="light" />
+                      </ConvexInitializer>
+                    </QueryClientProvider>
+                  </ConvexAuthProvider>
+                </ConvexProvider>
+              </ClerkLoaded>
+            </ClerkProvider>
+          </PostHogProvider>
+          </LanguageProvider>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
+    </ErrorBoundary>
   );
 }
 

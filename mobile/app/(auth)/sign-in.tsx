@@ -174,7 +174,7 @@ export default function SignInScreen() {
               {/* Country Code Selector */}
               <TouchableOpacity style={styles.countrySelector}>
                 <Text style={styles.flag}>🇺🇸</Text>
-                <Text style={styles.countryCode}>{countryCode}</Text>
+                <Text style={styles.countryCode}>+1</Text>
                 <Ionicons name="chevron-down" size={16} color={colors.foregroundMuted} />
               </TouchableOpacity>
               

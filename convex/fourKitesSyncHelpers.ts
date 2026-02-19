@@ -282,7 +282,7 @@ export const importLoadFromShipment = internalMutation({
       externalSource: "FourKites",
       parsedHcr: shipment.hcr,
       parsedTripNumber: shipment.trip,
-      status: "Assigned", // GPS starts immediately even for wildcard
+      status: "Open",
       ...loadData,
       internalId: `FK-${shipment.loadNumber || shipment.id}`,
       orderNumber: shipment.loadNumber || shipment.id,
@@ -302,7 +302,7 @@ export const importLoadFromShipment = internalMutation({
     });
 
     // ✅ Update organization stats for load creation
-    await updateLoadCount(ctx, workosOrgId, undefined, "Assigned");
+    await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
     // Create stops
     for (const stop of shipment.stops || []) {
@@ -452,7 +452,7 @@ export const importUnmappedLoad = internalMutation({
       // Basic Information
       internalId: `FK-${shipment.loadNumber || shipment.id}`,
       orderNumber: shipment.loadNumber || shipment.id,
-      status: "Assigned",           // ✅ GPS starts immediately
+      status: "Open",
       trackingStatus: mapTrackingStatus(shipment.status),
       
       // Parsed Data
@@ -483,7 +483,7 @@ export const importUnmappedLoad = internalMutation({
     });
 
     // ✅ Update organization stats for unmapped load creation
-    await updateLoadCount(ctx, workosOrgId, undefined, "Assigned");
+    await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
     // Create stops (same as CONTRACT/SPOT loads)
     for (const stop of shipment.stops || []) {
