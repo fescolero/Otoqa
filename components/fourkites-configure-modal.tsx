@@ -9,6 +9,7 @@ import { Switch } from '@/components/ui/switch';
 import { Loader2 } from 'lucide-react';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { toast } from 'sonner';
 
 interface SyncSettings {
   isEnabled: boolean;
@@ -50,6 +51,7 @@ export function FourKitesConfigureModal({
   const [driverAssignmentsEnabled, setDriverAssignmentsEnabled] = useState(
     currentSettings.push?.driverAssignmentsEnabled ?? false,
   );
+  const [apiKey, setApiKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const updateSyncSettings = useMutation(api.integrations.updateSyncSettings);
@@ -62,7 +64,8 @@ export function FourKitesConfigureModal({
     setLookbackWindowHours(currentSettings.pull?.lookbackWindowHours?.toString() ?? '24');
     setGpsTrackingEnabled(currentSettings.push?.gpsTrackingEnabled ?? false);
     setDriverAssignmentsEnabled(currentSettings.push?.driverAssignmentsEnabled ?? false);
-  }, [currentSettings]);
+    setApiKey('');
+  }, [currentSettings, open]);
 
   const handleSave = async () => {
     setIsSubmitting(true);
@@ -84,12 +87,15 @@ export function FourKitesConfigureModal({
       await updateSyncSettings({
         workosOrgId: organizationId,
         provider: 'fourkites',
+        apiKey: apiKey.trim() ? apiKey.trim() : undefined,
         syncSettings,
       });
 
+      toast.success(apiKey.trim() ? 'Configuration and credentials updated' : 'Configuration updated');
       onOpenChange(false);
     } catch (error) {
       console.error('Failed to update sync settings:', error);
+      toast.error('Failed to update FourKites settings');
     } finally {
       setIsSubmitting(false);
     }
@@ -104,8 +110,28 @@ export function FourKitesConfigureModal({
         </DialogHeader>
 
         <div className="space-y-6 py-4">
+          {/* Credentials Section */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold">Credentials</h3>
+            <div className="space-y-2">
+              <Label htmlFor="fourkitesApiKey">API Key / Password</Label>
+              <Input
+                id="fourkitesApiKey"
+                type="password"
+                autoComplete="new-password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="Leave blank to keep current credentials"
+                disabled={isSubmitting}
+              />
+              <p className="text-xs text-muted-foreground">
+                Enter a new value only when rotating FourKites credentials.
+              </p>
+            </div>
+          </div>
+
           {/* Master Switch */}
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between pt-4 border-t">
             <div className="space-y-0.5">
               <Label htmlFor="isEnabled" className="text-base">
                 Enable Integration

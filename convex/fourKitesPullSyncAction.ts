@@ -3,6 +3,8 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { fetchShipments } from "./fourKitesApiClient";
 
+type FailureStage = "fetch" | "process";
+
 // ------------------------------------------------------------------
 // HELPER: STATUS MAPPING
 // ------------------------------------------------------------------
@@ -19,6 +21,115 @@ function mapTrackingStatus(fkStatus: string): "Pending" | "In Transit" | "Comple
   return map[fkStatus] || "Pending";
 }
 
+function extractErrorReason(error: unknown): string {
+  if (error instanceof Error) {
+    const firstLine = error.message.trim().split("\n")[0];
+    return firstLine || error.name || "Unknown error";
+  }
+  if (typeof error === "string") {
+    return error.trim().split("\n")[0] || "Unknown error";
+  }
+  return "Unknown error";
+}
+
+function normalizeFailureKey(reason: string): string {
+  // Remove long numeric IDs to make bucketing more useful.
+  return reason.replace(/\b\d{6,}\b/g, "<id>").slice(0, 160);
+}
+
+function resolveApiKey(credentials: unknown): string | null {
+  if (!credentials) {
+    return null;
+  }
+
+  if (typeof credentials === "string") {
+    try {
+      const parsed = JSON.parse(credentials);
+      if (parsed && typeof parsed === "object" && typeof (parsed as { apiKey?: unknown }).apiKey === "string") {
+        const apiKeyFromJson = (parsed as { apiKey: string }).apiKey.trim();
+        return apiKeyFromJson || null;
+      }
+    } catch {
+      const rawValue = credentials.trim();
+      return rawValue || null;
+    }
+    return null;
+  }
+
+  if (typeof credentials === "object" && typeof (credentials as { apiKey?: unknown }).apiKey === "string") {
+    const apiKey = (credentials as { apiKey: string }).apiKey.trim();
+    return apiKey || null;
+  }
+
+  return null;
+}
+
+function buildSuggestedActions(topReason: string | undefined): string[] {
+  const actions = new Set<string>();
+  const normalized = topReason?.toLowerCase() || "";
+
+  if (
+    normalized.includes("unauthorized") ||
+    normalized.includes("forbidden") ||
+    normalized.includes("401") ||
+    normalized.includes("403")
+  ) {
+    actions.add("Verify your FourKites API key and account permissions in Configure.");
+  }
+
+  if (normalized.includes("timeout") || normalized.includes("timed out")) {
+    actions.add("Reduce lookback window (for example 24-72 hours) and retry the sync.");
+  }
+
+  if (normalized.includes("customer not found")) {
+    actions.add("Confirm all referenced customers exist and are active in your organization.");
+  }
+
+  actions.add("Review affected shipment IDs below and verify HCR/Trip lane mappings.");
+  actions.add("Retry sync after updating configuration or mappings.");
+
+  return Array.from(actions).slice(0, 3);
+}
+
+function buildDetailedErrorMessage(params: {
+  errors: number;
+  processed: number;
+  skipped: number;
+  quarantined: number;
+  promoted: number;
+  failureCounts: Map<string, number>;
+  failureSamples: Array<{ shipmentId?: string; stage: FailureStage; reason: string }>;
+}): string {
+  const { errors, processed, skipped, quarantined, promoted, failureCounts, failureSamples } = params;
+  const topReasons = [...failureCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+  const suggestedActions = buildSuggestedActions(topReasons[0]?.[0]);
+
+  const sections: string[] = [];
+  sections.push(`${errors} shipment${errors === 1 ? "" : "s"} failed to process.`);
+  sections.push(
+    `Processed: ${processed} | Skipped: ${skipped} | Quarantined: ${quarantined} | Promoted: ${promoted}`
+  );
+
+  if (topReasons.length > 0) {
+    sections.push(`Top failure reasons:\n${topReasons.map(([reason, count]) => `- ${reason} (${count})`).join("\n")}`);
+  }
+
+  if (failureSamples.length > 0) {
+    const lines = failureSamples.slice(0, 5).map((sample) => {
+      const stageLabel = sample.stage === "fetch" ? "API fetch" : "shipment processing";
+      const shipmentLabel = sample.shipmentId ? `Shipment ${sample.shipmentId}` : "Sync job";
+      return `- ${shipmentLabel} (${stageLabel}): ${sample.reason}`;
+    });
+    sections.push(`Sample failures:\n${lines.join("\n")}`);
+  }
+
+  if (suggestedActions.length > 0) {
+    sections.push(`Recommended actions:\n${suggestedActions.map((action, i) => `${i + 1}. ${action}`).join("\n")}`);
+  }
+
+  return sections.join("\n\n");
+}
+
 // ------------------------------------------------------------------
 // THE WORKER ACTION
 // ------------------------------------------------------------------
@@ -31,18 +142,38 @@ export const processOrg = internalAction({
   },
   handler: async (ctx, args) => {
     const { orgId, credentials, lookbackHours } = args;
+    const apiKey = resolveApiKey(credentials);
     
     let processed = 0;
     let errors = 0;
     let quarantined = 0;
     let skipped = 0;
     let promoted = 0; // ✅ Track UNMAPPED → CONTRACT promotions during sync
+    const failureCounts = new Map<string, number>();
+    const failureSamples: Array<{ shipmentId?: string; stage: FailureStage; reason: string }> = [];
+
+    const recordFailure = (stage: FailureStage, error: unknown, shipmentId?: string) => {
+      const reason = extractErrorReason(error);
+      const key = normalizeFailureKey(reason);
+      failureCounts.set(key, (failureCounts.get(key) ?? 0) + 1);
+      if (failureSamples.length < 5) {
+        failureSamples.push({
+          shipmentId,
+          stage,
+          reason: reason.slice(0, 240),
+        });
+      }
+    };
 
     try {
       const startTime = new Date(Date.now() - (lookbackHours * 60 * 60 * 1000)).toISOString();
 
+      if (!apiKey) {
+        throw new Error("Missing FourKites API key in integration credentials");
+      }
+
       // Fetch shipments from FourKites API (this can happen in an action)
-      const shipments = await fetchShipments(credentials.apiKey, startTime);
+      const shipments = await fetchShipments(apiKey, startTime);
 
       console.log(`FourKites: Fetched ${shipments.length} shipments for org ${orgId}`);
 
@@ -207,13 +338,28 @@ export const processOrg = internalAction({
           processed++;
         } catch (innerErr) {
           console.error(`Failed shipment ${shipment?.id}:`, innerErr);
+          recordFailure("process", innerErr, shipment?.id ? String(shipment.id) : undefined);
           errors++;
         }
       }
     } catch (err) {
       console.error("Sync Failure:", err);
+      recordFailure("fetch", err);
       errors++;
     }
+
+    const detailedErrorMessage =
+      errors > 0
+        ? buildDetailedErrorMessage({
+            errors,
+            processed,
+            skipped,
+            quarantined,
+            promoted,
+            failureCounts,
+            failureSamples,
+          })
+        : undefined;
 
     // STEP 7: Update stats
     await ctx.runMutation(internal.fourKitesSyncHelpers.updateIntegrationStats, {
@@ -222,7 +368,7 @@ export const processOrg = internalAction({
         lastSyncTime: Date.now(),
         lastSyncStatus: errors > 0 ? "partial" : "success",
         recordsProcessed: processed,
-        errorMessage: errors > 0 ? `${errors} shipments failed to process` : undefined,
+        errorMessage: detailedErrorMessage,
       },
     });
 

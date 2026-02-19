@@ -3,7 +3,7 @@
 import { Card } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Building2, Users, Plug, Truck, Route, Key } from 'lucide-react';
+import { Building2, Users, Plug, Truck, Route, Key, Upload, Loader2, Globe, Copy } from 'lucide-react';
 import { AutoAssignmentSettings } from '@/components/auto-assignment-settings';
 import { PartnerApiSettings } from '@/components/partner-api-settings';
 import { WidgetsProvider } from '@/components/widgets-provider';
@@ -18,7 +18,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { AddressAutocomplete } from '@/components/ui/address-autocomplete';
 import { toast } from 'sonner';
-import { Upload, Loader2, Globe } from 'lucide-react';
 import {
   Select,
   SelectContent,
@@ -191,6 +190,21 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
       setDisconnectDialogOpen(false);
     } catch (error) {
       console.error('Failed to disconnect integration:', error);
+    }
+  };
+
+  const handleCopyDiagnostics = async (diagnostics: string) => {
+    if (!diagnostics?.trim()) {
+      toast.error('No diagnostics available to copy');
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(diagnostics);
+      toast.success('Diagnostics copied to clipboard');
+    } catch (error) {
+      console.error('Failed to copy diagnostics:', error);
+      toast.error('Unable to copy diagnostics. Please copy manually.');
     }
   };
 
@@ -751,9 +765,29 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
 
                 {/* Error Message */}
                 {fourKitesIntegration.lastSyncStats.errorMessage && (
-                  <div className="p-3 bg-red-50 text-red-900 rounded-md text-sm">
-                    <p className="font-medium">Error:</p>
-                    <p>{fourKitesIntegration.lastSyncStats.errorMessage}</p>
+                  <div className="p-4 bg-red-50 text-red-900 rounded-md border border-red-200">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-semibold text-sm">Sync Issue Details</p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs border-red-200 text-red-900 bg-white/70 hover:bg-white"
+                        onClick={() =>
+                          handleCopyDiagnostics(fourKitesIntegration.lastSyncStats.errorMessage ?? '')
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy diagnostics
+                      </Button>
+                    </div>
+                    <p className="mt-2 whitespace-pre-line text-sm leading-6">
+                      {fourKitesIntegration.lastSyncStats.errorMessage}
+                    </p>
+                    <p className="mt-3 text-xs text-red-800/80">
+                      If this continues after updating credentials or lane mappings, contact support and include
+                      these diagnostics.
+                    </p>
                   </div>
                 )}
               </div>

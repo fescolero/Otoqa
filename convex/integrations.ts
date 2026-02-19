@@ -120,6 +120,7 @@ export const updateSyncSettings = mutation({
   args: {
     workosOrgId: v.string(),
     provider: v.string(),
+    apiKey: v.optional(v.string()),
     syncSettings: v.object({
       isEnabled: v.boolean(),
       pull: v.optional(
@@ -147,10 +148,38 @@ export const updateSyncSettings = mutation({
       throw new Error('Integration not found');
     }
 
-    await ctx.db.patch(integration._id, {
+    const patchData: {
+      syncSettings: typeof args.syncSettings;
+      updatedAt: number;
+      credentials?: string;
+    } = {
       syncSettings: args.syncSettings,
       updatedAt: Date.now(),
-    });
+    };
+
+    if (args.apiKey !== undefined) {
+      const trimmedApiKey = args.apiKey.trim();
+      if (!trimmedApiKey) {
+        throw new Error('API key cannot be empty');
+      }
+
+      let currentCredentials: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(integration.credentials);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          currentCredentials = parsed as Record<string, unknown>;
+        }
+      } catch {
+        currentCredentials = {};
+      }
+
+      patchData.credentials = JSON.stringify({
+        ...currentCredentials,
+        apiKey: trimmedApiKey,
+      });
+    }
+
+    await ctx.db.patch(integration._id, patchData);
   },
 });
 
