@@ -9,7 +9,7 @@ import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
 
-// Find contract lane by HCR and trip
+// Find contract lane by HCR and trip, stamping import match metadata
 export const findContractLane = internalMutation({
   args: {
     workosOrgId: v.string(),
@@ -17,7 +17,7 @@ export const findContractLane = internalMutation({
     tripNumber: v.string(),
   },
   handler: async (ctx, args) => {
-    return await ctx.db
+    const lane = await ctx.db
       .query("contractLanes")
       .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
       .filter((q) =>
@@ -27,6 +27,15 @@ export const findContractLane = internalMutation({
         )
       )
       .first();
+
+    if (lane) {
+      await ctx.db.patch(lane._id, {
+        lastImportMatchAt: Date.now(),
+        importMatchCount: (lane.importMatchCount ?? 0) + 1,
+      });
+    }
+
+    return lane;
   },
 });
 
@@ -635,6 +644,15 @@ export const promoteUnmappedLoad = internalMutation({
 
       // ✅ Update organization stats (MISSING_DATA → DRAFT)
       await updateInvoiceCount(ctx, load.workosOrgId, "MISSING_DATA", "DRAFT");
+    }
+
+    // Stamp the contract lane with import match metadata
+    const freshLane = await ctx.db.get(contractLane._id);
+    if (freshLane) {
+      await ctx.db.patch(freshLane._id, {
+        lastImportMatchAt: Date.now(),
+        importMatchCount: (freshLane.importMatchCount ?? 0) + 1,
+      });
     }
 
     console.log(`[promoteUnmappedLoad] Promoted load ${loadId} from UNMAPPED to ${isWildcard ? "SPOT" : "CONTRACT"}`);

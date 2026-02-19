@@ -1,10 +1,13 @@
 'use client';
 
+import * as React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Doc } from '@/convex/_generated/dataModel';
-import { Pencil, Eye, Trash2 } from 'lucide-react';
+import { Pencil, Eye, Trash2, ShieldCheck, Copy, Check } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { format, parseISO } from 'date-fns';
 
 type ContractLane = Doc<'contractLanes'>;
 
@@ -16,6 +19,14 @@ interface ContractLaneListItemProps {
   onDelete?: (id: string) => void;
 }
 
+function formatDate(dateStr: string): string {
+  try {
+    return format(parseISO(dateStr), 'MMM dd, yyyy');
+  } catch {
+    return dateStr;
+  }
+}
+
 export function ContractLaneListItem({
   lane,
   customerId,
@@ -24,21 +35,31 @@ export function ContractLaneListItem({
   onDelete,
 }: ContractLaneListItemProps) {
   const router = useRouter();
-
-  const formatDateRange = (start: string, end: string) => {
-    return `${start} - ${end}`;
-  };
+  const [copied, setCopied] = React.useState(false);
 
   const isActive = lane.isActive ?? true;
+  const hasImportMatch = !!lane.lastImportMatchAt;
+  const matchDate = lane.lastImportMatchAt
+    ? format(new Date(lane.lastImportMatchAt), 'MMM dd, yyyy h:mm a')
+    : null;
+
+  const handleCopyMatchDate = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!matchDate) return;
+    navigator.clipboard.writeText(matchDate).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
 
   return (
     <div
-      className={`group relative flex items-center gap-4 p-4 border rounded-lg hover:bg-accent/50 transition-colors cursor-pointer min-w-[1000px] ${
-        isSelected ? 'bg-blue-50 dark:bg-blue-950/20 border-blue-300 dark:border-blue-800' : ''
+      className={`group relative flex items-center gap-4 py-2.5 px-4 border-b last:border-b-0 hover:bg-accent/50 transition-colors cursor-pointer min-w-[1000px] ${
+        isSelected ? 'bg-blue-50 dark:bg-blue-950/20' : ''
       }`}
       onClick={() => router.push(`/operations/customers/${customerId}/contract-lanes/${lane._id}`)}
     >
-      {/* Checkbox Column */}
+      {/* Checkbox */}
       <div className="flex items-center w-10 flex-shrink-0">
         <input
           type="checkbox"
@@ -52,28 +73,66 @@ export function ContractLaneListItem({
         />
       </div>
 
-      {/* Column 1: HCR */}
+      {/* HCR + Verified Badge */}
       <div className="flex-1 min-w-[150px]">
-        <p className="font-semibold text-base truncate">{lane.hcr || 'N/A'}</p>
+        <div className="flex items-center gap-1.5">
+          <p className="font-semibold text-base truncate">{lane.hcr || 'N/A'}</p>
+          {hasImportMatch && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={handleCopyMatchDate}
+                  className="inline-flex items-center text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors"
+                >
+                  <ShieldCheck className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="flex items-center gap-2">
+                <span>Verified &mdash; {matchDate}</span>
+                {copied ? (
+                  <Check className="h-3 w-3 text-emerald-400" />
+                ) : (
+                  <Copy className="h-3 w-3 opacity-60" />
+                )}
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
         <p className="text-sm text-muted-foreground truncate">{lane.contractName}</p>
       </div>
 
-      {/* Column 2: Trip Number */}
+      {/* Trip Number (with wildcard tooltip) */}
       <div className="w-[150px] flex-shrink-0">
-        <p className="text-sm font-medium">{lane.tripNumber || 'N/A'}</p>
+        {lane.tripNumber === '*' ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex items-center text-sm font-medium bg-muted px-2 py-0.5 rounded">
+                *
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              Wildcard &mdash; matches any trip number for this HCR
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <p className="text-sm font-medium">{lane.tripNumber || 'N/A'}</p>
+        )}
       </div>
 
-      {/* Column 3: Rate Period */}
+      {/* Rate Period */}
       <div className="w-[220px] flex-shrink-0">
-        <p className="text-sm">{formatDateRange(lane.contractPeriodStart, lane.contractPeriodEnd)}</p>
+        <p className="text-sm">
+          {formatDate(lane.contractPeriodStart)} &ndash; {formatDate(lane.contractPeriodEnd)}
+        </p>
       </div>
 
-      {/* Column 4: Status */}
+      {/* Status */}
       <div className="w-[120px] flex-shrink-0">
         <Badge
           className={
             isActive
-              ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300'
               : 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200'
           }
         >
@@ -81,7 +140,7 @@ export function ContractLaneListItem({
         </Badge>
       </div>
 
-      {/* Column 5: Actions */}
+      {/* Actions */}
       <div className="flex items-center gap-1 w-[180px] flex-shrink-0 justify-end">
         <Button
           variant="ghost"

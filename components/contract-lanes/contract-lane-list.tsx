@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Plus, Search, Upload, Trash2 } from 'lucide-react';
 import { Doc, Id } from '@/convex/_generated/dataModel';
 import { ContractLaneListItem } from './contract-lane-list-item';
-import { ContractLaneListHeader } from './contract-lane-list-header';
+import { ContractLaneListHeader, type SortField, type SortDirection } from './contract-lane-list-header';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ImportCsvDialog } from './import-csv-dialog';
 
@@ -27,12 +27,21 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
   const [selectedLanes, setSelectedLanes] = React.useState<Set<string>>(new Set());
   const [importDialogOpen, setImportDialogOpen] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
+  const [sortField, setSortField] = React.useState<SortField | null>(null);
+  const [sortDirection, setSortDirection] = React.useState<SortDirection>('asc');
 
-  // Filter contract lanes based on search query and status
-  const filteredLanes = React.useMemo(() => {
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
+
+  const filteredAndSortedLanes = React.useMemo(() => {
     let filtered = data;
 
-    // Apply search filter (HCR, Trip Number, Contract Name)
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
       filtered = filtered.filter(
@@ -43,7 +52,6 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
       );
     }
 
-    // Apply status filter
     if (filterStatus === 'deleted') {
       filtered = filtered.filter((lane) => lane.isDeleted === true);
     } else if (filterStatus === 'active') {
@@ -54,10 +62,30 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
       filtered = filtered.filter((lane) => !lane.isDeleted);
     }
 
-    return filtered;
-  }, [data, searchQuery, filterStatus]);
+    if (sortField) {
+      const dir = sortDirection === 'asc' ? 1 : -1;
+      filtered = [...filtered].sort((a, b) => {
+        switch (sortField) {
+          case 'hcr':
+            return (a.hcr ?? '').localeCompare(b.hcr ?? '') * dir;
+          case 'tripNumber':
+            return (a.tripNumber ?? '').localeCompare(b.tripNumber ?? '') * dir;
+          case 'ratePeriod':
+            return a.contractPeriodStart.localeCompare(b.contractPeriodStart) * dir;
+          case 'status': {
+            const aActive = a.isActive ?? true;
+            const bActive = b.isActive ?? true;
+            return (aActive === bActive ? 0 : aActive ? -1 : 1) * dir;
+          }
+          default:
+            return 0;
+        }
+      });
+    }
 
-  // Handle selection
+    return filtered;
+  }, [data, searchQuery, filterStatus, sortField, sortDirection]);
+
   const handleSelectionChange = (laneId: string, selected: boolean) => {
     setSelectedLanes((prev) => {
       const newSet = new Set(prev);
@@ -70,23 +98,19 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
     });
   };
 
-  // Handle select all
   const handleSelectAll = () => {
-    if (selectedLanes.size === filteredLanes.length) {
-      // Deselect all
+    if (selectedLanes.size === filteredAndSortedLanes.length) {
       setSelectedLanes(new Set());
     } else {
-      // Select all
-      setSelectedLanes(new Set(filteredLanes.map((lane) => lane._id)));
+      setSelectedLanes(new Set(filteredAndSortedLanes.map((lane) => lane._id)));
     }
   };
 
-  // Handle bulk delete
   const handleBulkDelete = async () => {
     if (!onDelete || selectedLanes.size === 0) return;
 
     const confirmed = window.confirm(
-      `Are you sure you want to delete ${selectedLanes.size} contract lane${selectedLanes.size !== 1 ? 's' : ''}?`
+      `Are you sure you want to delete ${selectedLanes.size} contract lane${selectedLanes.size !== 1 ? 's' : ''}?`,
     );
 
     if (!confirmed) return;
@@ -129,15 +153,8 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
           </div>
           {selectedLanes.size > 0 && (
             <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">
-                {selectedLanes.size} selected
-              </span>
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={handleBulkDelete}
-                disabled={isDeleting}
-              >
+              <span className="text-sm text-muted-foreground">{selectedLanes.size} selected</span>
+              <Button size="sm" variant="destructive" onClick={handleBulkDelete} disabled={isDeleting}>
                 <Trash2 className="mr-2 h-4 w-4" />
                 {isDeleting ? 'Deleting...' : 'Delete Selected'}
               </Button>
@@ -156,44 +173,48 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
         </div>
       </div>
 
-      {/* Table Header with Select All */}
-      <ContractLaneListHeader 
-        showCheckbox={true}
-        allSelected={selectedLanes.size === filteredLanes.length && filteredLanes.length > 0}
-        onSelectAll={handleSelectAll}
-      />
+      {/* Scrollable table area with sticky header */}
+      <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-320px)] rounded-lg border">
+        <ContractLaneListHeader
+          showCheckbox={true}
+          allSelected={selectedLanes.size === filteredAndSortedLanes.length && filteredAndSortedLanes.length > 0}
+          onSelectAll={handleSelectAll}
+          sortField={sortField}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+        />
 
-      {/* Contract Lane List */}
-      <div className="space-y-2 overflow-x-auto">
-        {filteredLanes.length > 0 ? (
-          filteredLanes.map((lane) => (
-            <ContractLaneListItem
-              key={lane._id}
-              lane={lane}
-              customerId={customerId}
-              isSelected={selectedLanes.has(lane._id)}
-              onSelectionChange={handleSelectionChange}
-              onDelete={onDelete}
-            />
-          ))
-        ) : (
-          <div className="flex items-center justify-center h-64 border border-dashed rounded-lg">
-            <div className="text-center">
-              <p className="text-muted-foreground mb-2">No contract lanes found</p>
-              {searchQuery && (
-                <Button variant="link" onClick={() => setSearchQuery('')}>
-                  Clear search
-                </Button>
-              )}
+        <div className="space-y-0">
+          {filteredAndSortedLanes.length > 0 ? (
+            filteredAndSortedLanes.map((lane) => (
+              <ContractLaneListItem
+                key={lane._id}
+                lane={lane}
+                customerId={customerId}
+                isSelected={selectedLanes.has(lane._id)}
+                onSelectionChange={handleSelectionChange}
+                onDelete={onDelete}
+              />
+            ))
+          ) : (
+            <div className="flex items-center justify-center h-64">
+              <div className="text-center">
+                <p className="text-muted-foreground mb-2">No contract lanes found</p>
+                {searchQuery && (
+                  <Button variant="link" onClick={() => setSearchQuery('')}>
+                    Clear search
+                  </Button>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* Results Count */}
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <div>
-          Showing {filteredLanes.length} of {data.length} contract lane{data.length !== 1 ? 's' : ''}
+          Showing {filteredAndSortedLanes.length} of {data.length} contract lane{data.length !== 1 ? 's' : ''}
         </div>
       </div>
 

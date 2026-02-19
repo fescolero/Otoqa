@@ -787,6 +787,10 @@ export default defineSchema({
     subsidiary: v.optional(v.string()),
     isActive: v.optional(v.boolean()), // defaults to true
 
+    // Import Match Tracking (stamped by FourKites sync on successful HCR+Trip match)
+    lastImportMatchAt: v.optional(v.number()),
+    importMatchCount: v.optional(v.number()),
+
     // WorkOS Integration
     workosOrgId: v.string(),
     createdBy: v.string(),
