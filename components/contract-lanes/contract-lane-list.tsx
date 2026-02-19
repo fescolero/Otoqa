@@ -128,7 +128,7 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
   };
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4 flex-1 min-h-0">
       {/* Filter Tabs */}
       <Tabs value={filterStatus} onValueChange={setFilterStatus} className="w-full">
         <TabsList className="inline-flex h-9 items-center justify-start rounded-lg bg-muted p-1 text-muted-foreground">
@@ -174,7 +174,7 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
       </div>
 
       {/* Scrollable table area with sticky header */}
-      <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-320px)] rounded-lg border">
+      <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto rounded-lg border">
         <ContractLaneListHeader
           showCheckbox={true}
           allSelected={selectedLanes.size === filteredAndSortedLanes.length && filteredAndSortedLanes.length > 0}
@@ -212,7 +212,7 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
       </div>
 
       {/* Results Count */}
-      <div className="flex items-center justify-between text-sm text-muted-foreground">
+      <div className="flex shrink-0 items-center justify-between text-sm text-muted-foreground">
         <div>
           Showing {filteredAndSortedLanes.length} of {data.length} contract lane{data.length !== 1 ? 's' : ''}
         </div>
