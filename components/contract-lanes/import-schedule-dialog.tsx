@@ -21,7 +21,7 @@ import type {
 } from './schedule-import-types';
 import * as pdfjsLib from 'pdfjs-dist';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 interface ImportScheduleDialogProps {
   open: boolean;
@@ -86,7 +86,7 @@ export function ImportScheduleDialog({
 
   const renderPdfToImages = useCallback(async (file: File): Promise<string[]> => {
     const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
     const images: string[] = [];
     const scale = PDF_DPI / 72;
 
@@ -97,7 +97,8 @@ export function ImportScheduleDialog({
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       const ctx = canvas.getContext('2d')!;
-      await page.render({ canvasContext: ctx, viewport, canvas } as never).promise;
+      // pdfjs-dist v5 requires canvas as a top-level render param
+      await page.render({ canvasContext: ctx, viewport, canvas } as Parameters<typeof page.render>[0]).promise;
       images.push(canvas.toDataURL('image/png'));
     }
 
@@ -116,8 +117,9 @@ export function ImportScheduleDialog({
         const images = await renderPdfToImages(file);
         setPageImages(images);
         toast.success(`Loaded ${images.length} page(s)`);
-      } catch {
-        toast.error('Failed to read PDF file');
+      } catch (err) {
+        console.error('PDF rendering failed:', err);
+        toast.error('Failed to read PDF file. Check console for details.');
       }
     },
     [renderPdfToImages],
@@ -136,8 +138,9 @@ export function ImportScheduleDialog({
         const images = await renderPdfToImages(file);
         setPageImages(images);
         toast.success(`Loaded ${images.length} page(s)`);
-      } catch {
-        toast.error('Failed to read PDF file');
+      } catch (err) {
+        console.error('PDF rendering failed:', err);
+        toast.error('Failed to read PDF file. Check console for details.');
       }
     },
     [renderPdfToImages],
@@ -381,19 +384,19 @@ export function ImportScheduleDialog({
     >
       <DialogContent className="max-w-[95vw] w-[1400px] max-h-[90vh] h-[85vh] flex flex-col p-0 gap-0">
         {/* Step indicator */}
-        <div className="flex items-center border-b px-6 py-3 shrink-0">
+        <div className="flex items-center justify-center border-b px-4 py-3 shrink-0 overflow-x-auto">
           {STEP_ORDER.map((s, i) => {
             const isActive = s === step;
             const isComplete = i < currentStepIndex;
             return (
-              <div key={s} className="flex items-center">
+              <div key={s} className="flex items-center shrink-0">
                 {i > 0 && (
                   <div
-                    className={`h-px w-8 mx-2 ${isComplete ? 'bg-primary' : 'bg-border'}`}
+                    className={`h-px w-6 mx-1.5 ${isComplete ? 'bg-primary' : 'bg-border'}`}
                   />
                 )}
                 <div
-                  className={`flex items-center gap-1.5 text-sm px-2 py-1 rounded ${
+                  className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded whitespace-nowrap ${
                     isActive
                       ? 'bg-primary/10 text-primary font-medium'
                       : isComplete
@@ -402,7 +405,7 @@ export function ImportScheduleDialog({
                   }`}
                 >
                   {STEP_ICONS[s]}
-                  <span className="hidden sm:inline">{STEP_LABELS[s]}</span>
+                  <span>{STEP_LABELS[s]}</span>
                 </div>
               </div>
             );
