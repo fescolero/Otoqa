@@ -299,6 +299,207 @@ export const permanentDelete = mutation({
   },
 });
 
+const stopValidator = v.object({
+  address: v.string(),
+  city: v.string(),
+  state: v.string(),
+  zip: v.string(),
+  stopOrder: v.number(),
+  stopType: v.union(v.literal('Pickup'), v.literal('Delivery')),
+  type: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
+  arrivalTime: v.string(),
+});
+
+export const checkExistingLanes = query({
+  args: {
+    workosOrgId: v.string(),
+    pairs: v.array(
+      v.object({
+        hcr: v.string(),
+        tripNumber: v.string(),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const results: Record<
+      string,
+      {
+        _id: string;
+        isDeleted: boolean;
+        contractName: string;
+        contractPeriodStart: string;
+        contractPeriodEnd: string;
+        rate: number;
+        rateType: string;
+        miles?: number;
+        calculatedMiles?: number;
+        hcr?: string;
+        tripNumber?: string;
+      } | null
+    > = {};
+
+    for (const pair of args.pairs) {
+      const key = `${pair.hcr}:${pair.tripNumber}`;
+
+      const lane = await ctx.db
+        .query('contractLanes')
+        .withIndex('by_org_hcr_trip', (q) =>
+          q
+            .eq('workosOrgId', args.workosOrgId)
+            .eq('hcr', pair.hcr)
+            .eq('tripNumber', pair.tripNumber),
+        )
+        .first();
+
+      if (lane) {
+        results[key] = {
+          _id: lane._id,
+          isDeleted: lane.isDeleted,
+          contractName: lane.contractName,
+          contractPeriodStart: lane.contractPeriodStart,
+          contractPeriodEnd: lane.contractPeriodEnd,
+          rate: lane.rate,
+          rateType: lane.rateType,
+          miles: lane.miles,
+          calculatedMiles: lane.calculatedMiles,
+          hcr: lane.hcr,
+          tripNumber: lane.tripNumber,
+        };
+      } else {
+        results[key] = null;
+      }
+    }
+
+    return results;
+  },
+});
+
+export const bulkUpsert = mutation({
+  args: {
+    customerId: v.id('customers'),
+    workosOrgId: v.string(),
+    userId: v.string(),
+    newLanes: v.array(
+      v.object({
+        contractName: v.string(),
+        contractPeriodStart: v.string(),
+        contractPeriodEnd: v.string(),
+        hcr: v.optional(v.string()),
+        tripNumber: v.optional(v.string()),
+        lanePriority: v.optional(v.union(v.literal('Primary'), v.literal('Secondary'))),
+        stops: v.array(stopValidator),
+        miles: v.optional(v.number()),
+        calculatedMiles: v.optional(v.number()),
+        loadCommodity: v.optional(v.string()),
+        equipmentClass: v.optional(
+          v.union(
+            v.literal('Bobtail'),
+            v.literal('Dry Van'),
+            v.literal('Refrigerated'),
+            v.literal('Flatbed'),
+            v.literal('Tanker'),
+          ),
+        ),
+        equipmentSize: v.optional(v.union(v.literal('53ft'), v.literal('48ft'), v.literal('45ft'))),
+        rate: v.number(),
+        rateType: v.union(v.literal('Per Mile'), v.literal('Flat Rate'), v.literal('Per Stop')),
+        currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+        minimumRate: v.optional(v.number()),
+        minimumQuantity: v.optional(v.number()),
+        stopOffRate: v.optional(v.number()),
+        includedStops: v.optional(v.number()),
+        fuelSurchargeType: v.optional(
+          v.union(v.literal('PERCENTAGE'), v.literal('FLAT'), v.literal('DOE_INDEX')),
+        ),
+        fuelSurchargeValue: v.optional(v.number()),
+        subsidiary: v.optional(v.string()),
+      }),
+    ),
+    updateLanes: v.array(
+      v.object({
+        existingId: v.id('contractLanes'),
+        contractName: v.optional(v.string()),
+        contractPeriodStart: v.optional(v.string()),
+        contractPeriodEnd: v.optional(v.string()),
+        stops: v.optional(v.array(stopValidator)),
+        miles: v.optional(v.number()),
+        calculatedMiles: v.optional(v.number()),
+        loadCommodity: v.optional(v.string()),
+        equipmentClass: v.optional(
+          v.union(
+            v.literal('Bobtail'),
+            v.literal('Dry Van'),
+            v.literal('Refrigerated'),
+            v.literal('Flatbed'),
+            v.literal('Tanker'),
+          ),
+        ),
+        equipmentSize: v.optional(v.union(v.literal('53ft'), v.literal('48ft'), v.literal('45ft'))),
+        rate: v.optional(v.number()),
+        rateType: v.optional(v.union(v.literal('Per Mile'), v.literal('Flat Rate'), v.literal('Per Stop'))),
+        currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+        minimumRate: v.optional(v.number()),
+        minimumQuantity: v.optional(v.number()),
+        stopOffRate: v.optional(v.number()),
+        includedStops: v.optional(v.number()),
+        fuelSurchargeType: v.optional(
+          v.union(v.literal('PERCENTAGE'), v.literal('FLAT'), v.literal('DOE_INDEX')),
+        ),
+        fuelSurchargeValue: v.optional(v.number()),
+        subsidiary: v.optional(v.string()),
+      }),
+    ),
+    restoreLaneIds: v.array(v.id('contractLanes')),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    let created = 0;
+    let updated = 0;
+    let restored = 0;
+
+    for (const lane of args.newLanes) {
+      await ctx.db.insert('contractLanes', {
+        ...lane,
+        currency: lane.currency || ('USD' as const),
+        customerCompanyId: args.customerId,
+        isActive: true,
+        workosOrgId: args.workosOrgId,
+        createdBy: args.userId,
+        createdAt: now,
+        updatedAt: now,
+        isDeleted: false,
+      });
+      created++;
+    }
+
+    for (const lane of args.updateLanes) {
+      const { existingId, ...updates } = lane;
+      const cleanUpdates: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(updates)) {
+        if (value !== undefined) {
+          cleanUpdates[key] = value;
+        }
+      }
+      cleanUpdates.updatedAt = now;
+      await ctx.db.patch(existingId, cleanUpdates);
+      updated++;
+    }
+
+    for (const laneId of args.restoreLaneIds) {
+      await ctx.db.patch(laneId, {
+        isDeleted: false,
+        deletedAt: undefined,
+        deletedBy: undefined,
+        isActive: true,
+        updatedAt: now,
+      });
+      restored++;
+    }
+
+    return { created, updated, restored, skipped: 0 };
+  },
+});
+
 // Bulk import contract lanes from CSV
 export const bulkImport = mutation({
   args: {

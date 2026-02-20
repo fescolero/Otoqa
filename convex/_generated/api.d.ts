@@ -81,6 +81,7 @@ import type * as recurringLoadsCron from "../recurringLoadsCron.js";
 import type * as routeAssignments from "../routeAssignments.js";
 import type * as s3Upload from "../s3Upload.js";
 import type * as sandboxData from "../sandboxData.js";
+import type * as scheduleImport from "../scheduleImport.js";
 import type * as settings from "../settings.js";
 import type * as stats from "../stats.js";
 import type * as stats_helpers from "../stats_helpers.js";
@@ -168,6 +169,7 @@ declare const fullApi: ApiFromModules<{
   routeAssignments: typeof routeAssignments;
   s3Upload: typeof s3Upload;
   sandboxData: typeof sandboxData;
+  scheduleImport: typeof scheduleImport;
   settings: typeof settings;
   stats: typeof stats;
   stats_helpers: typeof stats_helpers;

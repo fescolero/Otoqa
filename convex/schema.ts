@@ -750,6 +750,7 @@ export default defineSchema({
       }),
     ),
     miles: v.optional(v.number()),
+    calculatedMiles: v.optional(v.number()),
     loadCommodity: v.optional(v.string()),
 
     // Equipment Requirements

@@ -18,6 +18,7 @@ import { resumeTracking } from '../../lib/location-tracking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import { useLanguage } from '../../lib/LanguageContext';
+import { useRequestPermissionsOnce } from '../../lib/request-permissions';
 
 const MODE_STORAGE_KEY = '@app_mode_selection';
 
@@ -305,6 +306,9 @@ export default function AppLayout() {
   const [mode, setModeState] = useState<'driver' | 'owner'>('driver');
   const [hasSelectedRole, setHasSelectedRole] = useState(false);
   const [isLoadingStoredMode, setIsLoadingStoredMode] = useState(true);
+
+  // Request all permissions (camera, location, notifications, etc.) once after sign-in
+  useRequestPermissionsOnce();
 
   // Wrap setMode to persist to AsyncStorage
   const setMode = useCallback(async (newMode: 'driver' | 'owner') => {

@@ -28,6 +28,7 @@
       "bundleIdentifier": "com.otoqa.driver",
       "infoPlist": {
         "NSCameraUsageDescription": "Camera is used to take proof of delivery photos",
+        "NSMicrophoneUsageDescription": "Microphone is used for voice-to-text messaging",
         "NSPhotoLibraryUsageDescription": "Photo library access is used to select delivery photos",
         "NSLocationWhenInUseUsageDescription": "Location is used for check-in verification at stops",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Location is used to track delivery progress",

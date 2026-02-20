@@ -3,12 +3,13 @@
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, Search, Upload, Trash2 } from 'lucide-react';
+import { Plus, Search, Upload, FileText, Trash2 } from 'lucide-react';
 import { Doc, Id } from '@/convex/_generated/dataModel';
 import { ContractLaneListItem } from './contract-lane-list-item';
 import { ContractLaneListHeader, type SortField, type SortDirection } from './contract-lane-list-header';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ImportCsvDialog } from './import-csv-dialog';
+import { ImportScheduleDialog } from './import-schedule-dialog';
 
 type ContractLane = Doc<'contractLanes'>;
 
@@ -26,6 +27,7 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
   const [filterStatus, setFilterStatus] = React.useState<string>('all');
   const [selectedLanes, setSelectedLanes] = React.useState<Set<string>>(new Set());
   const [importDialogOpen, setImportDialogOpen] = React.useState(false);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
   const [sortField, setSortField] = React.useState<SortField | null>(null);
   const [sortDirection, setSortDirection] = React.useState<SortDirection>('asc');
@@ -162,6 +164,10 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
           )}
         </div>
         <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => setScheduleDialogOpen(true)}>
+            <FileText className="mr-2 h-4 w-4" />
+            Import Schedule
+          </Button>
           <Button size="sm" variant="outline" onClick={() => setImportDialogOpen(true)}>
             <Upload className="mr-2 h-4 w-4" />
             Import CSV
@@ -222,6 +228,15 @@ export function ContractLaneList({ data, customerId, workosOrgId, userId, onCrea
       <ImportCsvDialog
         open={importDialogOpen}
         onOpenChange={setImportDialogOpen}
+        customerId={customerId}
+        workosOrgId={workosOrgId}
+        userId={userId}
+      />
+
+      {/* Import Schedule (OCR) Dialog */}
+      <ImportScheduleDialog
+        open={scheduleDialogOpen}
+        onOpenChange={setScheduleDialogOpen}
         customerId={customerId}
         workosOrgId={workosOrgId}
         userId={userId}
