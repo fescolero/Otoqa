@@ -512,17 +512,19 @@ export const applyChatCorrection = action({
 
 The user has a table of extracted contract lanes with these active columns: ${args.activeColumns.join(', ')}.
 
-The current table data is provided as JSON. The user will describe corrections in natural language.
-Your job is to interpret the correction and return the FULL updated lanes array with the changes applied.
+The current table data is provided as a JSON array of compact objects. Each object has plain field values (not wrapped in confidence objects).
+
+Your job is to interpret the user's correction and return the updated lanes array.
 
 RULES:
-- Return valid JSON with this structure: { "lanes": [...], "explanation": "what you changed", "changedCells": [{"rowIndex": N, "field": "fieldName"}, ...] }
-- Each lane field has { "value": ..., "confidence": "high" | "medium" | "low" }. When you change a value, set confidence to "high".
+- Return valid JSON: { "lanes": [...], "explanation": "brief description of what changed", "changedCells": [{"rowIndex": N, "field": "fieldName"}, ...] }
+- Each lane is a plain object like {"hcr": "925L0", "tripNumber": "210", "rate": 2.50, ...}. Return the same format.
 - Only modify fields the user asks to change. Keep everything else exactly as-is.
 - If the user refers to rows by number, use 0-based indexing matching the array order.
 - If the user refers to a specific HCR or trip number, find the matching row(s).
 - For bulk changes ("change all X to Y"), apply to every matching row.
 - If the correction is ambiguous, explain what you understood and what you changed.
+- Keep your response concise. Do NOT add commentary inside the JSON.
 ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.length} total rows are shown. If the user's correction should apply to all rows, indicate this in your explanation and apply it to the rows shown. The client will apply the pattern to remaining rows.` : ''}`;
 
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -533,7 +535,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
       })),
       {
         role: 'user',
-        content: `Current table data (JSON):\n${JSON.stringify(lanesForContext, null, 2)}\n\nUser correction: ${args.userMessage}`,
+        content: `Current table data (${lanesForContext.length} rows):\n${JSON.stringify(lanesForContext)}\n\nUser correction: ${args.userMessage}`,
       },
     ];
 

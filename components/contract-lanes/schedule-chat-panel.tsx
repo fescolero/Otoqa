@@ -28,6 +28,51 @@ function getActiveColumns(config: ExtractionConfig): string[] {
   return cols;
 }
 
+function compactLanesForChat(lanes: ExtractedLane[], activeColumns: string[]): Record<string, unknown>[] {
+  return lanes.map((lane) => {
+    const compact: Record<string, unknown> = {};
+    for (const col of activeColumns) {
+      if (col === 'stops' && lane.stops) {
+        compact.stops = lane.stops.map((s) => ({
+          city: s.city?.value,
+          state: s.state?.value,
+          stopType: s.stopType?.value,
+        }));
+        continue;
+      }
+      const field = lane[col as keyof ExtractedLane];
+      if (field && typeof field === 'object' && 'value' in (field as Record<string, unknown>)) {
+        compact[col] = (field as { value: unknown }).value;
+      }
+    }
+    return compact;
+  });
+}
+
+function applyChangesToLanes(
+  originalLanes: ExtractedLane[],
+  updatedCompact: Record<string, unknown>[],
+): ExtractedLane[] {
+  return originalLanes.map((lane, i) => {
+    const updates = updatedCompact[i];
+    if (!updates) return lane;
+
+    const updated = { ...lane };
+    for (const [key, newVal] of Object.entries(updates)) {
+      if (key === 'stops' || key.startsWith('_')) continue;
+      const existing = updated[key as keyof ExtractedLane];
+      if (existing && typeof existing === 'object' && 'value' in (existing as Record<string, unknown>)) {
+        (updated as Record<string, unknown>)[key] = {
+          ...(existing as Record<string, unknown>),
+          value: newVal,
+          confidence: 'high',
+        };
+      }
+    }
+    return updated;
+  });
+}
+
 export function ScheduleChatPanel({
   lanes,
   config,
@@ -59,11 +104,14 @@ export function ScheduleChatPanel({
     setIsLoading(true);
 
     try {
+      const activeColumns = getActiveColumns(config);
+      const compactLanes = compactLanesForChat(lanes, activeColumns);
+
       const result = await applyCorrection({
-        lanes,
+        lanes: compactLanes,
         userMessage: trimmed,
         conversationHistory: updatedMessages.slice(-10),
-        activeColumns: getActiveColumns(config),
+        activeColumns,
       });
 
       if (result.error) {
@@ -73,7 +121,11 @@ export function ScheduleChatPanel({
           { role: 'assistant', content: `Error: ${result.error}` },
         ]);
       } else {
-        onLanesChange(result.lanes as ExtractedLane[]);
+        const mergedLanes = applyChangesToLanes(
+          lanes,
+          result.lanes as Record<string, unknown>[],
+        );
+        onLanesChange(mergedLanes);
         const changeCount = result.changedCells?.length || 0;
         const response =
           result.explanation +
