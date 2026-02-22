@@ -70,148 +70,186 @@ type ExtractionConfig = {
   includeFuelSurcharge: boolean;
 };
 
-function buildExtractionPrompt(config: ExtractionConfig): string {
-  let prompt = `You are an expert logistics contract document OCR system. Your task is to carefully read the provided schedule document image(s) and extract structured lane/route data with high precision.
+function buildExtractionPrompt(_config: ExtractionConfig): string {
+  return `You are an expert data extraction and data-structuring assistant. Your task is to extract transportation contract data from the provided images and convert it into a highly structured, enriched JSON object.
 
-CRITICAL RULES:
-1. Read the document CAREFULLY. Zoom into each cell of the table mentally before transcribing.
-2. Return valid JSON matching the schema below. No markdown, no extra text.
-3. For every field, include a "confidence" rating: "high" (clearly legible), "medium" (partially legible or inferred from context), or "low" (guessing or unclear).
-4. If a value is not clearly visible, set value to null and confidence to "low". NEVER fabricate or guess.
-5. Each row in the document's table represents one contract lane/route.
+CRITICAL INSTRUCTIONS & DATA CLEANING:
+1. Ignore Watermarks: Completely ignore any large diagonal watermark (e.g. "LOGISTICS APPROVED").
+2. Cross-Reference & Merge Data:
+   - Facilities: Look at the NASS Code for each stop on the trip schedule. Find the matching NASS Code in the Facility Address table (usually on subsequent pages) and inject the full address, city, state, and zip directly into that stop's JSON object.
+   - Frequencies & Vehicles: Match the Frequency Code (e.g., L17) and Vehicle Code (e.g., 53FT) from the trip schedule to their respective definition tables and include the full description in the trip object.
+3. Data Type Casting & Cleaning:
+   - Times: Extract "Arrive Time" and "Depart Time" in standard HH:MM:SS format. Strip the "PT" abbreviation completely (e.g., "00:10:00 PT" becomes "00:10:00").
+   - Durations: For "Load/Unload", strip the word "min" and convert the value to a pure integer representing minutes (e.g., "10 min" becomes 10).
+4. Flexible Document Structures (Missing or Extra Data):
+   - Document layouts will vary. If a field like "As Of Date" or "Phone" is blank, output null.
+   - Some documents may include "Billing" information. If you see billing info, extract it into the billing_details object. If it is not in the document, return null for that object.
+5. Output Format: Return ONLY valid JSON. Do not include markdown formatting, and do not include any conversational text.
 
-COMMON OCR PITFALLS TO WATCH FOR:
-- Letter O vs digit 0 (e.g. "925L0" not "925LO") -- HCR codes usually end in digits
-- Letter l vs digit 1 (e.g. "210" not "2l0") -- trip numbers are numeric
-- Dollar amounts: "$2.50" not "$250" -- look for decimal points carefully
-- Zip codes are always 5 digits (US) -- "07054" not "7054"
-- State abbreviations are always 2 uppercase letters: "CA", "TX", "NJ"
-- Dates: verify month/day order -- US documents use MM/DD/YYYY
-- Numbers with commas: "1,250" is one thousand two hundred fifty miles, not two separate values
-
-DOCUMENT STRUCTURE:
-- The document is a logistics schedule/contract, typically formatted as a table
-- Column headers appear at the top (or may repeat on each page)
-- HCR is sometimes labeled "Contract", "Route", "HCR Code", "Contract Number", "Ctr", or "HCR"
-- Trip Number is sometimes labeled "Trip", "Trip #", "Trip No", "Schedule", "Run", or "Sched"
-- Look for column headers first, then extract values row by row
-
-OUTPUT SCHEMA:
+JSON SCHEMA:
 {
-  "lanes": [
+  "contract_header": {
+    "hcr_number": "String",
+    "as_of_date": "String or null",
+    "contract_origin": "String",
+    "contract_destination": "String",
+    "admin_official": "String or null"
+  },
+  "supplier_details": {
+    "supplier_name": "String or null",
+    "supplier_address": "String or null",
+    "supplier_phone": "String or null",
+    "supplier_email": "String or null"
+  },
+  "billing_details": null or {
+    "description": "String"
+  },
+  "trips": [
     {
-      "hcr": { "value": string | null, "confidence": "high" | "medium" | "low" },
-      "tripNumber": { "value": string | null, "confidence": "high" | "medium" | "low" },
-      "contractName": { "value": string | null, "confidence": "high" | "medium" | "low" },`;
-
-  if (config.extractDates) {
-    prompt += `
-      "contractPeriodStart": { "value": "YYYY-MM-DD" | null, "confidence": "high" | "medium" | "low" },
-      "contractPeriodEnd": { "value": "YYYY-MM-DD" | null, "confidence": "high" | "medium" | "low" },`;
-  }
-
-  if (config.includeFinancial) {
-    prompt += `
-      "rate": { "value": number | null, "confidence": "high" | "medium" | "low" },
-      "rateType": { "value": "Per Mile" | "Flat Rate" | "Per Stop" | null, "confidence": "high" | "medium" | "low" },
-      "currency": { "value": "USD" | "CAD" | "MXN" | null, "confidence": "high" | "medium" | "low" },
-      "minimumRate": { "value": number | null, "confidence": "high" | "medium" | "low" },
-      "minimumQuantity": { "value": number | null, "confidence": "high" | "medium" | "low" },
-      "stopOffRate": { "value": number | null, "confidence": "high" | "medium" | "low" },
-      "includedStops": { "value": number | null, "confidence": "high" | "medium" | "low" },`;
-  }
-
-  if (config.includeFuelSurcharge) {
-    prompt += `
-      "fuelSurchargeType": { "value": "PERCENTAGE" | "FLAT" | "DOE_INDEX" | null, "confidence": "high" | "medium" | "low" },
-      "fuelSurchargeValue": { "value": number | null, "confidence": "high" | "medium" | "low" },`;
-  }
-
-  if (config.stopDetailLevel !== 'none') {
-    prompt += `
+      "trip_id": "String",
+      "vehicle_code": "String",
+      "vehicle_description": "String (Matched from Vehicle Requirements table)",
+      "frequency_code": "String",
+      "frequency_days": "Number",
+      "frequency_description": "String (Matched from Frequency Description table)",
+      "effective_date": "String (MM/DD/YYYY)",
+      "expiration_date": "String (MM/DD/YYYY)",
+      "trip_summary": {
+        "trip_miles": "Number",
+        "trip_hrs": "Number or null",
+        "drive_time": "Number or null"
+      },
       "stops": [
         {
-          "address": { "value": string | null, "confidence": "high" | "medium" | "low" },
-          "city": { "value": string | null, "confidence": "high" | "medium" | "low" },
-          "state": { "value": string | null, "confidence": "high" | "medium" | "low" },
-          "zip": { "value": string | null, "confidence": "high" | "medium" | "low" },
-          "stopOrder": { "value": number, "confidence": "high" },
-          "stopType": { "value": "Pickup" | "Delivery", "confidence": "high" | "medium" | "low" }
+          "stop_number": "Integer",
+          "arrive_time": "String (HH:MM:SS)",
+          "depart_time": "String (HH:MM:SS)",
+          "load_unload_minutes": "Integer",
+          "facility": {
+            "nass_code": "String",
+            "facility_name": "String",
+            "address": "String (Merged from NASS table)",
+            "city": "String (Merged from NASS table)",
+            "state": "String (Merged from NASS table)",
+            "zip": "String (Merged from NASS table)",
+            "phone": "String or null"
+          }
         }
-      ],
-      "miles": { "value": number | null, "confidence": "high" | "medium" | "low" },
-      "loadCommodity": { "value": string | null, "confidence": "high" | "medium" | "low" },`;
-  }
-
-  if (config.includeEquipment) {
-    prompt += `
-      "equipmentClass": { "value": "Bobtail" | "Dry Van" | "Refrigerated" | "Flatbed" | "Tanker" | null, "confidence": "high" | "medium" | "low" },
-      "equipmentSize": { "value": "53ft" | "48ft" | "45ft" | null, "confidence": "high" | "medium" | "low" },`;
-  }
-
-  prompt += `
+      ]
     }
   ]
-}`;
+}
 
-  prompt += `
+IMPORTANT: All pages of the document belong to the same contract. The trip schedule is typically on the first pages, and the NASS/Facility lookup tables, Frequency tables, and Vehicle tables appear on subsequent pages. You MUST cross-reference these tables to build the complete trip objects.`;
+}
 
-FIELD-SPECIFIC GUIDANCE:`;
+type OcrTrip = {
+  trip_id: string;
+  vehicle_code?: string;
+  vehicle_description?: string;
+  frequency_code?: string;
+  frequency_days?: number;
+  frequency_description?: string;
+  effective_date?: string;
+  expiration_date?: string;
+  trip_summary?: { trip_miles?: number; trip_hrs?: number; drive_time?: number };
+  stops?: Array<{
+    stop_number?: number;
+    arrive_time?: string;
+    depart_time?: string;
+    load_unload_minutes?: number;
+    facility?: {
+      nass_code?: string;
+      facility_name?: string;
+      address?: string;
+      city?: string;
+      state?: string;
+      zip?: string;
+      phone?: string;
+    };
+  }>;
+};
 
-  if (config.extractDates) {
-    prompt += `
-- DATES: Look for "Effective Date", "Start Date", "Begin", "Period Start", "Valid From", or similar headers.
-  Expiration: "End Date", "Expiration", "Period End", "Valid Through", "Valid To".
-  Convert ALL date formats to YYYY-MM-DD. Example: "01/15/2026" becomes "2026-01-15".
-  If a single date range appears as a document header (not per-row), apply it to every lane.`;
-  }
+type OcrResult = {
+  contract_header?: {
+    hcr_number?: string;
+    as_of_date?: string;
+    contract_origin?: string;
+    contract_destination?: string;
+    admin_official?: string;
+  };
+  supplier_details?: {
+    supplier_name?: string;
+    supplier_address?: string;
+    supplier_phone?: string;
+    supplier_email?: string;
+  };
+  billing_details?: { description?: string } | null;
+  trips?: OcrTrip[];
+};
 
-  if (config.includeFinancial) {
-    prompt += `
-- RATES: Look for "Rate", "Price", "Cost", "Compensation", "Pay", or a dollar column.
-  Read decimal values carefully: "$2.50" vs "$250" -- context matters (per-mile rates are typically $1-$10).
-  Rate type: "/mi" or "per mile" = "Per Mile". Lump sum or "flat" = "Flat Rate". "/stop" = "Per Stop".
-  If no currency symbol or label is visible, set currency to null.`;
-  }
+function hi(val: unknown) {
+  return { value: val ?? null, confidence: 'high' as const };
+}
 
-  if (config.includeFuelSurcharge) {
-    prompt += `
-- FSC: Look for "FSC", "Fuel", "Fuel Surcharge", "F/S".
-  Percentage (e.g. "22%") = type "PERCENTAGE", value 22.
-  Flat dollar amount = type "FLAT". DOE index reference = type "DOE_INDEX".`;
-  }
+function convertOcrToExtractedLanes(ocr: OcrResult) {
+  const hcr = ocr.contract_header?.hcr_number || null;
+  const trips = ocr.trips || [];
 
-  if (config.stopDetailLevel === 'full') {
-    prompt += `
-- STOPS: Origin/destination pairs or sequential locations.
-  First stop is typically Pickup, last is Delivery. Intermediate stops could be either.
-  Extract all visible address components. Verify zip codes are 5 digits.
-  State codes must be standard 2-letter US state abbreviations.
-- MILES: Look for "Miles", "Distance", "Mi", or numeric values in a distance column.
-  Verify: typical US lane distances range from 50 to 3,000 miles.`;
-  } else if (config.stopDetailLevel === 'partial') {
-    prompt += `
-- STOPS: This document likely only has city/state, not full addresses. Set address and zip to null.
-  First stop is typically Pickup, last is Delivery.
-  State codes must be standard 2-letter US state abbreviations.
-- MILES: Look for "Miles", "Distance", "Mi". Typical range: 50 to 3,000 miles.`;
-  }
+  return trips.map((trip) => {
+    const stops = (trip.stops || []).map((s, idx) => ({
+      address: hi(s.facility?.address || null),
+      city: hi(s.facility?.city || null),
+      state: hi(s.facility?.state || null),
+      zip: hi(s.facility?.zip || null),
+      stopOrder: hi(idx + 1),
+      stopType: hi(idx === 0 ? 'Pickup' : 'Delivery'),
+    }));
 
-  if (config.includeEquipment) {
-    prompt += `
-- EQUIPMENT: "DV" = "Dry Van", "RF"/"Reefer" = "Refrigerated", "FB" = "Flatbed", "BT" = "Bobtail".
-  Size: "53'" or "53ft" = "53ft", "48'" = "48ft", "45'" = "45ft".`;
-  }
+    let effectiveDate: string | null = null;
+    if (trip.effective_date) {
+      const parts = trip.effective_date.split('/');
+      if (parts.length === 3) {
+        effectiveDate = `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+      }
+    }
 
-  prompt += `
+    let expirationDate: string | null = null;
+    if (trip.expiration_date) {
+      const parts = trip.expiration_date.split('/');
+      if (parts.length === 3) {
+        expirationDate = `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+      }
+    }
 
-FINAL CHECK: Before returning, verify:
-- All HCR values look like route codes (alphanumeric, e.g. "925L0", "917DK")
-- All trip numbers are strings (they may contain "*" for wildcards)
-- No rows were skipped or duplicated
-- Numbers are reasonable for their field type (rates, miles, etc.)`;
+    const equipDesc = (trip.vehicle_description || trip.vehicle_code || '').toUpperCase();
+    let equipmentSize: string | null = null;
+    if (equipDesc.includes('53')) equipmentSize = '53ft';
+    else if (equipDesc.includes('48')) equipmentSize = '48ft';
+    else if (equipDesc.includes('45')) equipmentSize = '45ft';
 
-  return prompt;
+    return {
+      hcr: hi(hcr),
+      tripNumber: hi(trip.trip_id),
+      contractName: hi(hcr ? `Lane: ${hcr}/${trip.trip_id}` : null),
+      contractPeriodStart: hi(effectiveDate),
+      contractPeriodEnd: hi(expirationDate),
+      stops,
+      miles: hi(trip.trip_summary?.trip_miles ?? null),
+      equipmentClass: hi(null),
+      equipmentSize: hi(equipmentSize),
+      _selected: true,
+      _tripMeta: {
+        vehicleCode: trip.vehicle_code,
+        vehicleDescription: trip.vehicle_description,
+        frequencyCode: trip.frequency_code,
+        frequencyDays: trip.frequency_days,
+        frequencyDescription: trip.frequency_description,
+        driveTime: trip.trip_summary?.drive_time,
+        tripHours: trip.trip_summary?.trip_hrs,
+      },
+    };
+  });
 }
 
 export const extractLanesFromSchedule = action({
@@ -254,12 +292,12 @@ export const extractLanesFromSchedule = action({
               ...imageContent,
               {
                 type: 'text',
-                text: 'Extract all contract lanes from the document image(s) above.',
+                text: 'Extract the complete contract data from all the document pages above. Cross-reference the NASS facility codes, frequency codes, and vehicle codes from the lookup tables into the trip data.',
               },
             ],
           },
         ],
-        max_tokens: 16000,
+        max_tokens: 32000,
         temperature: 0,
       });
 
@@ -269,21 +307,13 @@ export const extractLanesFromSchedule = action({
       }
 
       console.log(`[extractLanes] OpenAI responded, ${content.length} chars`);
-      const parsed = JSON.parse(content);
-      const lanes = parsed.lanes || [];
+      const parsed: OcrResult = JSON.parse(content);
 
-      for (const lane of lanes) {
-        if (!lane.contractName || lane.contractName.value === null) {
-          const hcr = lane.hcr?.value || 'Unknown';
-          const trip = lane.tripNumber?.value || 'Unknown';
-          lane.contractName = {
-            value: `Lane: ${hcr}/${trip}`,
-            confidence: 'high',
-          };
-        }
-      }
+      console.log(`[extractLanes] HCR: ${parsed.contract_header?.hcr_number}, Trips: ${parsed.trips?.length || 0}`);
 
-      console.log(`[extractLanes] Extracted ${lanes.length} lanes`);
+      const lanes = convertOcrToExtractedLanes(parsed);
+
+      console.log(`[extractLanes] Converted to ${lanes.length} lanes`);
       return { lanes };
     } catch (error) {
       const message =

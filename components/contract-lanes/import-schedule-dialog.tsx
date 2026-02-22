@@ -50,7 +50,7 @@ const STEP_ICONS: Record<WizardStep, React.ReactNode> = {
 };
 
 const PDF_DPI = 150;
-const PAGES_PER_BATCH = 1;
+const PAGES_PER_BATCH = 8;
 
 export function ImportScheduleDialog({
   open,
