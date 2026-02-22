@@ -70,7 +70,7 @@ export const createClerkUserForDriver = internalAction({
 
     // Convert phone to E.164 format for Clerk
     const e164Phone = normalizePhoneToE164(args.phone);
-    console.log(`Creating Clerk user for driver: ${args.firstName} ${args.lastName}, phone: ${args.phone} -> ${e164Phone}`);
+    console.log(`Creating Clerk user for driver: ${args.firstName} ${args.lastName}`);
 
     try {
       const response = await fetch('https://api.clerk.com/v1/users', {
@@ -92,12 +92,12 @@ export const createClerkUserForDriver = internalAction({
       if (!response.ok) {
         // Check if user already exists (this is fine)
         if (responseData.errors?.[0]?.code === 'form_identifier_exists') {
-          console.log(`Clerk user already exists for phone ${e164Phone}`);
+          console.log(`Clerk user already exists for this phone number`);
           return { success: true, clerkUserId: 'existing' };
         }
-        
+
         const errorMessage = responseData.errors?.[0]?.message || responseData.errors?.[0]?.long_message || 'Failed to create Clerk user';
-        console.error(`Failed to create Clerk user: ${errorMessage}`, responseData);
+        console.error(`Failed to create Clerk user: ${errorMessage}`);
         return { success: false, error: errorMessage };
       }
 
@@ -245,7 +245,7 @@ export const updateClerkUserPhone = internalAction({
     const oldE164 = normalizePhoneToE164(args.oldPhone);
     const newE164 = normalizePhoneToE164(args.newPhone);
 
-    console.log(`Updating Clerk user phone: ${oldE164} -> ${newE164}`);
+    console.log(`Updating Clerk user phone number`);
 
     try {
       // First, find the user by their old phone number
@@ -267,7 +267,7 @@ export const updateClerkUserPhone = internalAction({
 
       if (users.length === 0) {
         // User doesn't exist in Clerk - create them with the new phone
-        console.log(`No Clerk user found with old phone ${oldE164}, creating new user with ${newE164}`);
+        console.log(`No Clerk user found with old phone, creating new user`);
         const createResult: CreateResult = await ctx.runAction(internal.clerkSync.createClerkUserForDriver, {
           phone: args.newPhone,
           firstName: args.firstName,
@@ -320,7 +320,7 @@ export const updateClerkUserPhone = internalAction({
         });
       }
 
-      console.log(`Successfully updated Clerk user ${userId} phone from ${oldE164} to ${newE164}`);
+      console.log(`Successfully updated Clerk user phone number`);
       return { success: true, action: 'updated' };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -478,7 +478,7 @@ export const findClerkUserByPhone = internalAction({
     }
 
     const e164Phone = normalizePhoneToE164(args.phone);
-    console.log(`Looking up Clerk user by phone: ${args.phone} -> ${e164Phone}`);
+    console.log(`Looking up Clerk user by phone number`);
 
     try {
       // Search for user by phone number
@@ -498,11 +498,11 @@ export const findClerkUserByPhone = internalAction({
       const users = await response.json();
       
       if (users && users.length > 0) {
-        console.log(`Found Clerk user ${users[0].id} for phone ${e164Phone}`);
+        console.log(`Found existing Clerk user`);
         return users[0].id;
       }
 
-      console.log(`No Clerk user found for phone ${e164Phone}`);
+      console.log(`No Clerk user found for this phone number`);
       return null;
     } catch (error) {
       console.error(`Error searching Clerk users: ${error}`);
@@ -541,7 +541,7 @@ export const createClerkUserForCarrierOwner = internalAction({
 
     // Convert phone to E.164 format for Clerk
     const e164Phone = normalizePhoneToE164(args.phone);
-    console.log(`Creating Clerk user for carrier owner: ${args.firstName} ${args.lastName}, phone: ${args.phone} -> ${e164Phone}`);
+    console.log(`Creating Clerk user for carrier owner: ${args.firstName} ${args.lastName}`);
 
     try {
       // Note: Only include phone_number - email_address requires Clerk dashboard settings
@@ -567,12 +567,12 @@ export const createClerkUserForCarrierOwner = internalAction({
       if (!response.ok) {
         // Check if user already exists (this is fine)
         if (responseData.errors?.[0]?.code === 'form_identifier_exists') {
-          console.log(`Clerk user already exists for phone ${e164Phone}`);
+          console.log(`Clerk user already exists for this phone number`);
           return { success: true, clerkUserId: 'existing' };
         }
-        
+
         const errorMessage = responseData.errors?.[0]?.message || responseData.errors?.[0]?.long_message || 'Failed to create Clerk user';
-        console.error(`Failed to create Clerk user for carrier owner: ${errorMessage}`, responseData);
+        console.error(`Failed to create Clerk user for carrier owner: ${errorMessage}`);
         return { success: false, error: errorMessage };
       }
 

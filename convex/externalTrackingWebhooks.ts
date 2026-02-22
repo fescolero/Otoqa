@@ -43,21 +43,56 @@ export const createSubscription = action({
       throw new Error('Webhook URL must use HTTPS');
     }
 
-    // Validate URL is not a private IP
+    // Validate URL is not a private/reserved IP or internal hostname
     try {
       const urlObj = new URL(args.url);
-      const hostname = urlObj.hostname;
+      const hostname = urlObj.hostname.toLowerCase();
+
+      // Block loopback addresses
       if (
         hostname === 'localhost' ||
         hostname === '127.0.0.1' ||
+        hostname === '[::1]' ||
+        hostname === '0.0.0.0' ||
+        hostname.endsWith('.localhost')
+      ) {
+        throw new Error('Webhook URL must not point to a loopback address');
+      }
+
+      // Block private RFC 1918 ranges
+      if (
         hostname.startsWith('10.') ||
         hostname.startsWith('192.168.') ||
         hostname.match(/^172\.(1[6-9]|2\d|3[01])\./)
       ) {
         throw new Error('Webhook URL must not point to a private IP address');
       }
+
+      // Block link-local (169.254.x.x), cloud metadata endpoints
+      if (hostname.startsWith('169.254.') || hostname === 'metadata.google.internal') {
+        throw new Error('Webhook URL must not point to a link-local or metadata address');
+      }
+
+      // Block other reserved ranges
+      if (
+        hostname.startsWith('0.') ||
+        hostname.match(/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./) ||
+        hostname.match(/^198\.1[89]\./)
+      ) {
+        throw new Error('Webhook URL must not point to a reserved IP address');
+      }
+
+      // Block internal domain patterns
+      if (
+        hostname.endsWith('.local') ||
+        hostname.endsWith('.internal') ||
+        hostname.endsWith('.corp') ||
+        hostname.endsWith('.lan')
+      ) {
+        throw new Error('Webhook URL must not point to an internal domain');
+      }
     } catch (e: any) {
-      if (e.message.includes('private IP')) throw e;
+      if (e.message.includes('Webhook URL must not')) throw e;
       throw new Error('Invalid webhook URL');
     }
 

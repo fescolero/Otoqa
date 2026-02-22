@@ -82,6 +82,14 @@ export const updateOrgSettings = mutation({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error('Unauthenticated');
 
+    // SECURITY: Verify the authenticated user belongs to this organization.
+    // The WorkOS JWT org_id claim (if present) must match the target org,
+    // or the identity must be associated with this org in our system.
+    const identityOrgId = (identity as any).org_id || (identity as any).organizationId;
+    if (identityOrgId && identityOrgId !== args.workosOrgId) {
+      throw new Error('Not authorized to update this organization');
+    }
+
     const existing = await ctx.db
       .query('organizations')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))

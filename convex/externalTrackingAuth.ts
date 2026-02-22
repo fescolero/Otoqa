@@ -113,6 +113,32 @@ export const writeAuditLog = internalMutation({
 });
 
 // ============================================
+// RATE LIMITING (sliding window via audit log)
+// ============================================
+
+/**
+ * Count recent requests for a given API key since a timestamp.
+ * Uses the by_key_time index for efficient lookups.
+ */
+export const countRecentRequests = internalQuery({
+  args: {
+    keyId: v.id('partnerApiKeys'),
+    since: v.number(),
+  },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    const recentLogs = await ctx.db
+      .query('apiAuditLog')
+      .withIndex('by_key_time', (q) =>
+        q.eq('partnerKeyId', args.keyId).gte('timestamp', args.since)
+      )
+      .collect();
+
+    return recentLogs.length;
+  },
+});
+
+// ============================================
 // AUDIT LOG PRUNING (30-day retention)
 // ============================================
 

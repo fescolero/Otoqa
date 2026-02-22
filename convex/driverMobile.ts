@@ -115,10 +115,10 @@ export const getMyProfile = query({
       .withIndex('by_organization')
       .collect();
 
-    // Match by normalized phone
+    // Match by normalized phone (exact match only to prevent cross-org identity confusion)
     const driver = drivers.find((d) => {
       const driverPhone = d.phone.replace(/\D/g, '');
-      return driverPhone === normalizedPhone || driverPhone.endsWith(normalizedPhone) || normalizedPhone.endsWith(driverPhone);
+      return driverPhone === normalizedPhone;
     });
 
     if (!driver || driver.isDeleted) {
