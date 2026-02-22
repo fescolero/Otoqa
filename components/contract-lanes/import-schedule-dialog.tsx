@@ -176,7 +176,7 @@ export function ImportScheduleDialog({
         }
 
         for (const lane of result.lanes) {
-          const laneTyped = lane as ExtractedLane;
+          const laneTyped = lane as unknown as ExtractedLane;
           const isDuplicate = allLanes.some(
             (existing) =>
               existing.hcr?.value === laneTyped.hcr?.value &&
@@ -199,7 +199,7 @@ export function ImportScheduleDialog({
         setExtractionProgress('Verifying addresses with Google Maps...');
         try {
           const verified = await verifyStops({ lanes: allLanes });
-          setLanes(verified.lanes as ExtractedLane[]);
+          setLanes(verified.lanes as unknown as ExtractedLane[]);
           if (verified.error) {
             toast.warning(`Address verification: ${verified.error}`);
           }
