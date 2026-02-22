@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useAction, useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -71,16 +71,18 @@ export function ImportScheduleDialog({
 
   const extractLanes = useAction(api.scheduleImport.extractLanesFromSchedule);
   const verifyStops = useAction(api.scheduleImport.verifyAndEnrichStops);
-  const checkExisting = useQuery(api.contractLanes.checkExistingLanes, 
-    step === 'import' ? {
-      workosOrgId,
-      pairs: lanes
-        .filter((l) => l.hcr?.value && l.tripNumber?.value)
-        .map((l) => ({
-          hcr: l.hcr.value as string,
-          tripNumber: l.tripNumber.value as string,
-        })),
-    } : 'skip'
+  const dedupPairs = lanes
+    .filter((l) => l.hcr?.value && l.tripNumber?.value)
+    .map((l) => ({
+      hcr: l.hcr.value as string,
+      tripNumber: l.tripNumber.value as string,
+    }));
+
+  const checkExisting = useQuery(
+    api.contractLanes.checkExistingLanes,
+    dedupPairs.length > 0
+      ? { workosOrgId, pairs: dedupPairs }
+      : 'skip',
   );
   const bulkUpsert = useMutation(api.contractLanes.bulkUpsert);
 
@@ -219,64 +221,63 @@ export function ImportScheduleDialog({
     }
   }, [config, pageImages, extractLanes, verifyStops]);
 
-  const handleProceedToImport = useCallback(() => {
-    if (!checkExisting) {
-      setStep('import');
-      return;
-    }
+  const computeDedupResults = useCallback((): DedupResult[] => {
+    const selectedLanes = lanes.filter((l) => l._selected !== false);
+    const existingMap = checkExisting || {};
 
-    const results: DedupResult[] = lanes
-      .filter((l) => l._selected !== false)
-      .map((lane) => {
-        const key = `${lane.hcr?.value || ''}:${lane.tripNumber?.value || ''}`;
-        const existing = checkExisting[key];
+    return selectedLanes.map((lane) => {
+      const key = `${lane.hcr?.value || ''}:${lane.tripNumber?.value || ''}`;
+      const existing = existingMap[key];
 
-        if (!existing) {
-          return { lane, category: 'new' as const, selected: true };
-        }
+      if (!existing) {
+        return { lane, category: 'new' as const, selected: true };
+      }
 
-        if (existing.isDeleted) {
-          return {
-            lane,
-            category: 'restore' as const,
-            existingId: existing._id,
-            existingData: existing as unknown as Record<string, unknown>,
-            isDeleted: true,
-            selected: true,
-          };
-        }
-
-        const hasChanges =
-          (lane.rate?.value !== undefined && lane.rate.value !== existing.rate) ||
-          (lane.rateType?.value !== undefined && lane.rateType.value !== existing.rateType) ||
-          (lane.contractPeriodStart?.value !== undefined &&
-            lane.contractPeriodStart.value !== existing.contractPeriodStart) ||
-          (lane.contractPeriodEnd?.value !== undefined &&
-            lane.contractPeriodEnd.value !== existing.contractPeriodEnd) ||
-          (lane.miles?.value !== undefined && lane.miles.value !== existing.miles);
-
-        if (hasChanges) {
-          return {
-            lane,
-            category: 'update' as const,
-            existingId: existing._id,
-            existingData: existing as unknown as Record<string, unknown>,
-            selected: true,
-          };
-        }
-
+      if (existing.isDeleted) {
         return {
           lane,
-          category: 'unchanged' as const,
+          category: 'restore' as const,
           existingId: existing._id,
           existingData: existing as unknown as Record<string, unknown>,
-          selected: false,
+          isDeleted: true,
+          selected: true,
         };
-      });
+      }
 
+      const hasChanges =
+        (lane.rate?.value !== undefined && lane.rate.value !== existing.rate) ||
+        (lane.rateType?.value !== undefined && lane.rateType.value !== existing.rateType) ||
+        (lane.contractPeriodStart?.value !== undefined &&
+          lane.contractPeriodStart.value !== existing.contractPeriodStart) ||
+        (lane.contractPeriodEnd?.value !== undefined &&
+          lane.contractPeriodEnd.value !== existing.contractPeriodEnd) ||
+        (lane.miles?.value !== undefined && lane.miles.value !== existing.miles);
+
+      if (hasChanges) {
+        return {
+          lane,
+          category: 'update' as const,
+          existingId: existing._id,
+          existingData: existing as unknown as Record<string, unknown>,
+          selected: true,
+        };
+      }
+
+      return {
+        lane,
+        category: 'unchanged' as const,
+        existingId: existing._id,
+        existingData: existing as unknown as Record<string, unknown>,
+        selected: false,
+      };
+    });
+  }, [lanes, checkExisting]);
+
+  const handleProceedToImport = useCallback(() => {
+    const results = computeDedupResults();
     setDedupResults(results);
     setStep('import');
-  }, [lanes, checkExisting]);
+  }, [computeDedupResults]);
 
   const handleImport = useCallback(async () => {
     setIsProcessing(true);
