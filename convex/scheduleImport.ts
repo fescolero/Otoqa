@@ -71,18 +71,32 @@ type ExtractionConfig = {
 };
 
 function buildExtractionPrompt(config: ExtractionConfig): string {
-  let prompt = `You are a logistics contract document parser. Extract structured lane/route data from the provided schedule document image(s).
+  let prompt = `You are an expert logistics contract document OCR system. Your task is to carefully read the provided schedule document image(s) and extract structured lane/route data with high precision.
 
-RULES:
-- Return valid JSON matching the schema below. No markdown, no commentary.
-- For every field, include a "confidence" rating: "high", "medium", or "low".
-- If a value is not clearly visible or you are uncertain, set the value to null and confidence to "low". NEVER fabricate or guess values.
-- If a field is not present in the document at all, set it to null with confidence "low".
-- Each row in the document represents one contract lane/route.
-- HCR is sometimes labeled as "Contract", "Route", "HCR Code", "Contract Number", or "Ctr".
-- Trip Number is sometimes labeled as "Trip", "Trip #", "Trip No", "Schedule", or "Run".
+CRITICAL RULES:
+1. Read the document CAREFULLY. Zoom into each cell of the table mentally before transcribing.
+2. Return valid JSON matching the schema below. No markdown, no extra text.
+3. For every field, include a "confidence" rating: "high" (clearly legible), "medium" (partially legible or inferred from context), or "low" (guessing or unclear).
+4. If a value is not clearly visible, set value to null and confidence to "low". NEVER fabricate or guess.
+5. Each row in the document's table represents one contract lane/route.
 
-Return a JSON object with this structure:
+COMMON OCR PITFALLS TO WATCH FOR:
+- Letter O vs digit 0 (e.g. "925L0" not "925LO") -- HCR codes usually end in digits
+- Letter l vs digit 1 (e.g. "210" not "2l0") -- trip numbers are numeric
+- Dollar amounts: "$2.50" not "$250" -- look for decimal points carefully
+- Zip codes are always 5 digits (US) -- "07054" not "7054"
+- State abbreviations are always 2 uppercase letters: "CA", "TX", "NJ"
+- Dates: verify month/day order -- US documents use MM/DD/YYYY
+- Numbers with commas: "1,250" is one thousand two hundred fifty miles, not two separate values
+
+DOCUMENT STRUCTURE:
+- The document is a logistics schedule/contract, typically formatted as a table
+- Column headers appear at the top (or may repeat on each page)
+- HCR is sometimes labeled "Contract", "Route", "HCR Code", "Contract Number", "Ctr", or "HCR"
+- Trip Number is sometimes labeled "Trip", "Trip #", "Trip No", "Schedule", "Run", or "Sched"
+- Look for column headers first, then extract values row by row
+
+OUTPUT SCHEMA:
 {
   "lanes": [
     {
@@ -138,55 +152,64 @@ Return a JSON object with this structure:
   prompt += `
     }
   ]
-}
+}`;
 
-FIELD EXTRACTION HINTS:`;
+  prompt += `
+
+FIELD-SPECIFIC GUIDANCE:`;
 
   if (config.extractDates) {
     prompt += `
-- Effective/expiration dates may be labeled "Effective Date", "Start Date", "Begin", "Period Start", "Valid From" or similar.
-- Expiration dates may be labeled "End Date", "Expiration", "Period End", "Valid Through", "Valid To" or similar.
-- Dates may appear as a header applying to all lanes, or per-row. If a single date range applies to the whole document, use it for every lane.`;
+- DATES: Look for "Effective Date", "Start Date", "Begin", "Period Start", "Valid From", or similar headers.
+  Expiration: "End Date", "Expiration", "Period End", "Valid Through", "Valid To".
+  Convert ALL date formats to YYYY-MM-DD. Example: "01/15/2026" becomes "2026-01-15".
+  If a single date range appears as a document header (not per-row), apply it to every lane.`;
   }
 
   if (config.includeFinancial) {
     prompt += `
-- Rate may be labeled "Rate", "Price", "Cost", "Compensation", "Pay" or a dollar amount in a column.
-- Rate type: if the rate appears alongside a "/mi" or "per mile" label, it is "Per Mile". If it is a lump sum, it is "Flat Rate". If labeled "per stop" or "/stop", it is "Per Stop".
-- If no currency symbol or label is visible, set currency to null.
-- Minimum rate/quantity may not be present -- set to null if not found.`;
+- RATES: Look for "Rate", "Price", "Cost", "Compensation", "Pay", or a dollar column.
+  Read decimal values carefully: "$2.50" vs "$250" -- context matters (per-mile rates are typically $1-$10).
+  Rate type: "/mi" or "per mile" = "Per Mile". Lump sum or "flat" = "Flat Rate". "/stop" = "Per Stop".
+  If no currency symbol or label is visible, set currency to null.`;
   }
 
   if (config.includeFuelSurcharge) {
     prompt += `
-- Fuel surcharge may be labeled "FSC", "Fuel", "Fuel Surcharge", or "F/S".
-- If shown as a percentage (e.g. "22%"), type is "PERCENTAGE" and value is 22.
-- If shown as a flat dollar amount, type is "FLAT".
-- If referencing DOE index, type is "DOE_INDEX".`;
+- FSC: Look for "FSC", "Fuel", "Fuel Surcharge", "F/S".
+  Percentage (e.g. "22%") = type "PERCENTAGE", value 22.
+  Flat dollar amount = type "FLAT". DOE index reference = type "DOE_INDEX".`;
   }
 
   if (config.stopDetailLevel === 'full') {
     prompt += `
-- Stops are typically listed as origin/destination pairs or as a sequence of locations.
-- The first stop is usually a Pickup, the last is usually a Delivery. Intermediate stops could be either.
-- Addresses may be full (street, city, state, zip) or partial. Extract whatever components are visible.
-- Miles may be labeled "Miles", "Distance", "Mi", or appear as a number in a distance column.`;
+- STOPS: Origin/destination pairs or sequential locations.
+  First stop is typically Pickup, last is Delivery. Intermediate stops could be either.
+  Extract all visible address components. Verify zip codes are 5 digits.
+  State codes must be standard 2-letter US state abbreviations.
+- MILES: Look for "Miles", "Distance", "Mi", or numeric values in a distance column.
+  Verify: typical US lane distances range from 50 to 3,000 miles.`;
   } else if (config.stopDetailLevel === 'partial') {
     prompt += `
-- This document likely only contains city and state for stops, not full street addresses. Extract city and state. Set address and zip to null.
-- The first stop is usually a Pickup, the last is usually a Delivery.
-- Miles may be labeled "Miles", "Distance", "Mi", or appear as a number in a distance column.`;
+- STOPS: This document likely only has city/state, not full addresses. Set address and zip to null.
+  First stop is typically Pickup, last is Delivery.
+  State codes must be standard 2-letter US state abbreviations.
+- MILES: Look for "Miles", "Distance", "Mi". Typical range: 50 to 3,000 miles.`;
   }
 
   if (config.includeEquipment) {
     prompt += `
-- Equipment may be labeled "Equipment", "Trailer Type", "Type", or abbreviated as "DV" (Dry Van), "RF"/"Reefer" (Refrigerated), "FB" (Flatbed).
-- Size is often "53'" or "48'" -- normalize to "53ft" or "48ft".`;
+- EQUIPMENT: "DV" = "Dry Van", "RF"/"Reefer" = "Refrigerated", "FB" = "Flatbed", "BT" = "Bobtail".
+  Size: "53'" or "53ft" = "53ft", "48'" = "48ft", "45'" = "45ft".`;
   }
 
   prompt += `
 
-If the document contains multiple pages, combine all lanes from all pages into a single "lanes" array. Do not duplicate lanes that span page breaks.`;
+FINAL CHECK: Before returning, verify:
+- All HCR values look like route codes (alphanumeric, e.g. "925L0", "917DK")
+- All trip numbers are strings (they may contain "*" for wildcards)
+- No rows were skipped or duplicated
+- Numbers are reasonable for their field type (rates, miles, etc.)`;
 
   return prompt;
 }
@@ -201,6 +224,9 @@ export const extractLanesFromSchedule = action({
     error: v.optional(v.string()),
   }),
   handler: async (_ctx, args) => {
+    const totalChars = args.imageUrls.reduce((sum, u) => sum + u.length, 0);
+    console.log(`[extractLanes] ${args.imageUrls.length} images, ~${Math.round(totalChars / 1024)}KB total`);
+
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return { lanes: [], error: 'OPENAI_API_KEY environment variable is not set' };
@@ -212,10 +238,11 @@ export const extractLanesFromSchedule = action({
     const imageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] =
       args.imageUrls.map((url) => ({
         type: 'image_url' as const,
-        image_url: { url, detail: 'high' as const },
+        image_url: { url, detail: 'auto' as const },
       }));
 
     try {
+      console.log('[extractLanes] Calling OpenAI...');
       const response = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
@@ -241,6 +268,7 @@ export const extractLanesFromSchedule = action({
         return { lanes: [], error: 'No response content from OpenAI' };
       }
 
+      console.log(`[extractLanes] OpenAI responded, ${content.length} chars`);
       const parsed = JSON.parse(content);
       const lanes = parsed.lanes || [];
 
@@ -255,11 +283,12 @@ export const extractLanesFromSchedule = action({
         }
       }
 
+      console.log(`[extractLanes] Extracted ${lanes.length} lanes`);
       return { lanes };
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unknown error during extraction';
-      console.error('OCR extraction failed:', message);
+      console.error(`[extractLanes] Error: ${message}`);
       return { lanes: [], error: message };
     }
   },
@@ -487,6 +516,9 @@ export const applyChatCorrection = action({
     error: v.optional(v.string()),
   }),
   handler: async (_ctx, args) => {
+    const inputSize = JSON.stringify(args.lanes).length;
+    console.log(`[applyChatCorrection] ${args.lanes.length} lanes, ${inputSize} chars, message: "${args.userMessage}"`);
+
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return {
@@ -540,6 +572,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
     ];
 
     try {
+      console.log(`[applyChatCorrection] Calling OpenAI with ${messages.length} messages...`);
       const response = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
@@ -549,6 +582,8 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
       });
 
       const content = response.choices[0]?.message?.content;
+      console.log(`[applyChatCorrection] OpenAI responded, ${content?.length || 0} chars`);
+
       if (!content) {
         return {
           lanes: args.lanes,
@@ -568,6 +603,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
         ];
       }
 
+      console.log(`[applyChatCorrection] Success: ${parsed.changedCells?.length || 0} cells changed`);
       return {
         lanes: updatedLanes,
         explanation: parsed.explanation || 'Changes applied.',
@@ -576,6 +612,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unknown error';
+      console.error(`[applyChatCorrection] Error: ${message}`);
       return {
         lanes: args.lanes,
         explanation: '',

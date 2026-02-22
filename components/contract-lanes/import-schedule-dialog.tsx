@@ -50,7 +50,7 @@ const STEP_ICONS: Record<WizardStep, React.ReactNode> = {
 };
 
 const PDF_DPI = 150;
-const PAGES_PER_BATCH = 3;
+const PAGES_PER_BATCH = 1;
 
 export function ImportScheduleDialog({
   open,
@@ -99,7 +99,7 @@ export function ImportScheduleDialog({
       const ctx = canvas.getContext('2d')!;
       // pdfjs-dist v5 requires canvas as a top-level render param
       await page.render({ canvasContext: ctx, viewport, canvas } as Parameters<typeof page.render>[0]).promise;
-      images.push(canvas.toDataURL('image/png'));
+      images.push(canvas.toDataURL('image/jpeg', 0.85));
     }
 
     return images;
