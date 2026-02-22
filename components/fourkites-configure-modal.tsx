@@ -74,7 +74,7 @@ export function FourKitesConfigureModal({
   const updateSyncSettings = useMutation(api.integrations.updateSyncSettings);
   const upsertIntegration = useMutation(api.integrations.upsertIntegration);
   const existingCredentialsRaw = useQuery(
-    api.integrations.getCredentials,
+    api.integrations.getCredentialFields,
     open ? { workosOrgId: organizationId, provider: 'fourkites' } : 'skip',
   );
 

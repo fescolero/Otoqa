@@ -27,12 +27,8 @@ function createS3Client() {
     ? `https://${r2AccountId}.r2.cloudflarestorage.com`
     : undefined; // Use default AWS endpoint
 
-  console.log('[S3Upload] Creating client with:', {
-    bucket,
-    region,
-    endpoint: endpoint || 'AWS default',
-    hasCredentials: !!accessKeyId && !!secretAccessKey,
-  });
+  // Log config without sensitive details
+  console.log('[S3Upload] Creating client for region:', region);
 
   return {
     client: new S3Client({
@@ -133,7 +129,7 @@ export const getPODUploadUrl = action({
     const sanitizedFilename = args.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
     const key = `pod-photos/${args.loadId}/${args.stopId}/${timestamp}-${sanitizedFilename}`;
 
-    console.log('[S3Upload] Generating presigned URL for key:', key);
+    console.log('[S3Upload] Generating presigned URL for POD upload');
 
     const command = new PutObjectCommand({
       Bucket: bucket,
@@ -145,7 +141,7 @@ export const getPODUploadUrl = action({
       expiresIn: 300,
     });
 
-    console.log('[S3Upload] Generated presigned URL (first 100 chars):', uploadUrl.substring(0, 100));
+    // Presigned URL generated — not logging to avoid credential exposure
 
     // Construct the final file URL
     let fileUrl: string;

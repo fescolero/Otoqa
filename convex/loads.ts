@@ -19,6 +19,10 @@ export const countLoadsByStatus = query({
     Canceled: v.number(),
   }),
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     // Read from organizationStats aggregate table (1 read)
     const stats = await ctx.db
       .query('organizationStats')

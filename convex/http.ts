@@ -107,16 +107,41 @@ async function authenticateRequest(
   }
 
   // IP allowlist check
+  // WARNING: Not enforced — Convex httpAction does not expose client IP via
+  // forwarded headers. The ipAllowlist field is stored for future enforcement.
   if (keyData.ipAllowlist && keyData.ipAllowlist.length > 0) {
-    // In Convex httpAction, we can't reliably get client IP
-    // IP allowlisting will be checked when Convex supports forwarded headers
-    // For now, this is a no-op but the field is stored for future use
+    console.warn(
+      `[Security] IP allowlist configured for key ${keyData.keyId} but cannot be enforced in current runtime`
+    );
   }
 
   // Determine rate limit
   const rateLimitPerMin = keyData.rateLimitTier === 'custom'
     ? (keyData.customRateLimit ?? 300)
     : (RATE_LIMITS[keyData.rateLimitTier] ?? 300);
+
+  // Rate limit enforcement using sliding window via audit log count
+  // Check recent request count for this key within the last minute
+  const oneMinuteAgo = Date.now() - 60_000;
+  const recentRequestCount = await ctx.runQuery(
+    internal.externalTrackingAuth.countRecentRequests,
+    { keyId: keyData.keyId, since: oneMinuteAgo }
+  );
+
+  if (recentRequestCount >= rateLimitPerMin) {
+    const retryAfter = '60';
+    return errorResponse(
+      'RATE_LIMITED',
+      `Rate limit exceeded. Limit: ${rateLimitPerMin} requests/min`,
+      429,
+      requestId,
+      {
+        'Retry-After': retryAfter,
+        'X-RateLimit-Limit': rateLimitPerMin.toString(),
+        'X-RateLimit-Remaining': '0',
+      }
+    );
+  }
 
   // Touch lastUsedAt (debounced - fire and forget)
   ctx.runMutation(internal.externalTrackingAuth.touchKeyLastUsed, { keyId: keyData.keyId }).catch(() => {});
@@ -180,7 +205,15 @@ http.route({
 
     const url = new URL(request.url);
     const status = url.searchParams.get('status') || 'active';
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 100);
+    const validStatuses = ['active', 'completed', 'all'];
+    if (!validStatuses.includes(status)) {
+      return errorResponse('INVALID_PARAMETER', `Invalid status filter: '${status}'. Valid values: ${validStatuses.join(', ')}`, 400, requestId);
+    }
+    const parsedLimit = parseInt(url.searchParams.get('limit') || '50');
+    if (isNaN(parsedLimit) || parsedLimit < 1) {
+      return errorResponse('INVALID_PARAMETER', 'limit must be a positive integer', 400, requestId);
+    }
+    const limit = Math.min(parsedLimit, 100);
 
     const result = await ctx.runQuery(internal.externalTracking.listTrackedLoads, {
       workosOrgId: auth.workosOrgId,
@@ -241,7 +274,9 @@ http.route({
     });
 
     if (!load) {
-      const resp = errorResponse('LOAD_NOT_FOUND', `No load found with reference '${ref}'`, 404, requestId);
+      // Sanitize ref to prevent reflected content in error responses
+      const sanitizedRef = ref.replace(/[^\w\-.:]/g, '').substring(0, 100);
+      const resp = errorResponse('LOAD_NOT_FOUND', `No load found with reference '${sanitizedRef}'`, 404, requestId);
       ctx.runMutation(internal.externalTrackingAuth.writeAuditLog, {
         workosOrgId: auth.workosOrgId,
         partnerKeyId: auth.keyId as any,
@@ -270,12 +305,27 @@ http.route({
       const until = url.searchParams.get('until');
       const limit = url.searchParams.get('limit');
 
+      // Validate date parameters
+      const sinceTs = since ? new Date(since).getTime() : undefined;
+      const untilTs = until ? new Date(until).getTime() : undefined;
+      if (since && (sinceTs === undefined || isNaN(sinceTs))) {
+        return errorResponse('INVALID_PARAMETER', 'since must be a valid ISO date string', 400, requestId);
+      }
+      if (until && (untilTs === undefined || isNaN(untilTs))) {
+        return errorResponse('INVALID_PARAMETER', 'until must be a valid ISO date string', 400, requestId);
+      }
+      // Validate limit
+      const parsedPosLimit = limit ? parseInt(limit) : undefined;
+      if (limit && (parsedPosLimit === undefined || isNaN(parsedPosLimit) || parsedPosLimit < 1)) {
+        return errorResponse('INVALID_PARAMETER', 'limit must be a positive integer', 400, requestId);
+      }
+
       const result = await ctx.runQuery(internal.externalTracking.getPositions, {
         loadId: load.loadId,
         isSandbox: load.isSandbox,
-        since: since ? new Date(since).getTime() : undefined,
-        until: until ? new Date(until).getTime() : undefined,
-        limit: limit ? parseInt(limit) : undefined,
+        since: sinceTs,
+        until: untilTs,
+        limit: parsedPosLimit ? Math.min(parsedPosLimit, 1000) : undefined,
       });
 
       // ETag based on latest recordedAt

@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, internalQuery, internalMutation } from './_generated/server';
 
 // Get all integrations for an organization
 export const getIntegrations = query({
@@ -71,6 +71,10 @@ export const upsertIntegration = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     // Check if integration already exists
     const existing = await ctx.db
       .query('orgIntegrations')
@@ -139,6 +143,10 @@ export const updateSyncSettings = mutation({
     }),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const integration = await ctx.db
       .query('orgIntegrations')
       .withIndex('by_provider', (q) => q.eq('workosOrgId', args.workosOrgId).eq('provider', args.provider))
@@ -190,6 +198,10 @@ export const deleteIntegration = mutation({
     provider: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const integration = await ctx.db
       .query('orgIntegrations')
       .withIndex('by_provider', (q) => q.eq('workosOrgId', args.workosOrgId).eq('provider', args.provider))
@@ -203,8 +215,8 @@ export const deleteIntegration = mutation({
   },
 });
 
-// Update last sync stats
-export const updateSyncStats = mutation({
+// Update last sync stats (internal only — called by sync jobs)
+export const updateSyncStats = internalMutation({
   args: {
     workosOrgId: v.string(),
     provider: v.string(),
@@ -233,8 +245,8 @@ export const updateSyncStats = mutation({
 });
 
 // Get credentials for internal use (e.g., by sync jobs)
-// This should only be called from server-side code
-export const getCredentials = query({
+// SECURITY: internalQuery — not callable from client code
+export const getCredentials = internalQuery({
   args: {
     workosOrgId: v.string(),
     provider: v.string(),
@@ -250,5 +262,41 @@ export const getCredentials = query({
     }
 
     return integration.credentials;
+  },
+});
+
+// Get credential field info for the UI (masked — only shows which fields have values)
+export const getCredentialFields = query({
+  args: {
+    workosOrgId: v.string(),
+    provider: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
+    const integration = await ctx.db
+      .query('orgIntegrations')
+      .withIndex('by_provider', (q) => q.eq('workosOrgId', args.workosOrgId).eq('provider', args.provider))
+      .first();
+
+    if (!integration) {
+      return null;
+    }
+
+    // Return a masked version: only indicate which fields are set
+    try {
+      const creds = JSON.parse(integration.credentials);
+      if (creds && typeof creds === 'object' && !Array.isArray(creds)) {
+        const masked: Record<string, string> = {};
+        for (const key of Object.keys(creds)) {
+          masked[key] = creds[key] ? '***' : '';
+        }
+        return JSON.stringify(masked);
+      }
+    } catch {
+      // Ignore parse errors
+    }
+    return null;
   },
 });

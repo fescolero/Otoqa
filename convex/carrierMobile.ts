@@ -9,6 +9,44 @@ import { Id } from './_generated/dataModel';
  * Focused on owner dashboard, load management, and driver oversight
  */
 
+/**
+ * Helper to authenticate carrier mobile requests.
+ * Verifies the caller is authenticated and belongs to the claimed organization.
+ * Returns the identity or null if unauthorized.
+ */
+async function requireCarrierAuth(
+  ctx: { auth: { getUserIdentity: () => Promise<any> }; db: any },
+  carrierOrgId: string,
+  carrierConvexId?: string | null
+): Promise<{ identity: any } | null> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return null;
+
+  // Look up user's identity link by Clerk user ID
+  const identityLink = await ctx.db
+    .query('userIdentityLinks')
+    .withIndex('by_clerk', (q: any) => q.eq('clerkUserId', identity.subject))
+    .first();
+
+  if (!identityLink) return null;
+
+  // Verify the identity link's organization matches the requested org
+  const org = await ctx.db.get(identityLink.organizationId);
+  if (!org) return null;
+
+  const orgMatchesExternalId =
+    org.clerkOrgId === carrierOrgId ||
+    org.workosOrgId === carrierOrgId ||
+    org._id === carrierOrgId;
+
+  const orgMatchesConvexId =
+    !carrierConvexId || org._id === carrierConvexId;
+
+  if (!orgMatchesExternalId || !orgMatchesConvexId) return null;
+
+  return { identity };
+}
+
 // ==========================================
 // DASHBOARD QUERIES
 // ==========================================
@@ -51,21 +89,24 @@ export const getDashboard = query({
     carrierConvexId: v.optional(v.string()), // Convex document ID for drivers table
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId, args.carrierConvexId);
+    if (!auth) {
+      return {
+        activeLoads: 0, pendingStart: 0, newOffers: 0,
+        completedThisWeek: 0, totalDrivers: 0, driversOnDuty: 0,
+        weekRevenue: 0, pendingPaymentAmount: 0, pendingPaymentCount: 0,
+      };
+    }
+
     // Validate organization is not deleted
     if (args.carrierConvexId) {
       const validation = await validateOrgNotDeleted(ctx, args.carrierConvexId);
       if (!validation.valid) {
-        // Return empty dashboard for deleted orgs
         return {
-          activeLoads: 0,
-          pendingStart: 0,
-          newOffers: 0,
-          completedThisWeek: 0,
-          totalDrivers: 0,
-          driversOnDuty: 0,
-          weekRevenue: 0,
-          pendingPaymentAmount: 0,
-          pendingPaymentCount: 0,
+          activeLoads: 0, pendingStart: 0, newOffers: 0,
+          completedThisWeek: 0, totalDrivers: 0, driversOnDuty: 0,
+          weekRevenue: 0, pendingPaymentAmount: 0, pendingPaymentCount: 0,
           error: validation.error,
         };
       }
@@ -182,6 +223,10 @@ export const getOfferedLoads = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId, args.carrierConvexId);
+    if (!auth) return [];
+
     // Check if organization is deleted - return empty if so
     if (args.carrierConvexId) {
       const validation = await validateOrgNotDeleted(ctx, args.carrierConvexId);
@@ -189,7 +234,7 @@ export const getOfferedLoads = query({
         return [];
       }
     }
-    
+
     const assignments = await ctx.db
       .query('loadCarrierAssignments')
       .withIndex('by_carrier', (q) =>
@@ -245,6 +290,10 @@ export const getActiveLoads = query({
     carrierConvexId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId, args.carrierConvexId);
+    if (!auth) return [];
+
     // Check if organization is deleted - return empty if so
     if (args.carrierConvexId) {
       const validation = await validateOrgNotDeleted(ctx, args.carrierConvexId);
@@ -252,7 +301,7 @@ export const getActiveLoads = query({
         return [];
       }
     }
-    
+
     // Get both AWARDED and IN_PROGRESS
     const awarded = await ctx.db
       .query('loadCarrierAssignments')
@@ -336,6 +385,10 @@ export const getCompletedLoads = query({
     endDate: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) return [];
+
     const assignments = await ctx.db
       .query('loadCarrierAssignments')
       .withIndex('by_carrier', (q) =>
@@ -392,6 +445,10 @@ export const getDrivers = query({
     status: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) return [];
+
     const drivers = await ctx.db
       .query('drivers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.carrierOrgId))
@@ -453,6 +510,10 @@ export const getAvailableDrivers = query({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) return [];
+
     // Get all active drivers
     const drivers = await ctx.db
       .query('drivers')
@@ -505,6 +566,11 @@ export const getDriverLocations = query({
     carrierExternalOrgId: v.optional(v.string()), // External ID for loadCarrierAssignments (clerkOrgId/workosOrgId)
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const authOrgId = args.carrierExternalOrgId || args.carrierOrgId;
+    const auth = await requireCarrierAuth(ctx, authOrgId, args.carrierOrgId);
+    if (!auth) return [];
+
     const now = Date.now();
     const oneDayAgo = now - 24 * 60 * 60 * 1000;
     
@@ -579,6 +645,10 @@ export const getLoadRouteHistory = query({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) throw new Error('Not authenticated');
+
     // Verify this load belongs to this carrier
     const assignment = await ctx.db
       .query('loadCarrierAssignments')
@@ -613,6 +683,15 @@ export const getEarningsSummary = query({
     periodDays: v.optional(v.number()), // 7, 30, 90, etc.
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) {
+      return {
+        periodDays: args.periodDays || 30, totalLoads: 0, totalEarnings: 0,
+        paidAmount: 0, pendingAmount: 0, disputedAmount: 0, averagePerLoad: 0,
+      };
+    }
+
     const now = Date.now();
     const periodMs = (args.periodDays || 30) * 24 * 60 * 60 * 1000;
     const periodStart = now - periodMs;
@@ -671,6 +750,10 @@ export const getRecentPayments = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) return [];
+
     // Get completed assignments with payments
     const assignments = await ctx.db
       .query('loadCarrierAssignments')
@@ -719,6 +802,10 @@ export const getPendingPartnerships = query({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) return [];
+
     const partnerships = await ctx.db
       .query('carrierPartnerships')
       .withIndex('by_carrier', (q) => q.eq('carrierOrgId', args.carrierOrgId))
@@ -758,6 +845,10 @@ export const getActiveBrokers = query({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller belongs to this organization
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) return [];
+
     const partnerships = await ctx.db
       .query('carrierPartnerships')
       .withIndex('by_carrier', (q) => q.eq('carrierOrgId', args.carrierOrgId))
@@ -872,6 +963,7 @@ export const getUserRoles = query({
     }
 
     // Method 2: If not found by clerkUserId, try matching by phone number
+    // SECURITY: Use exact match only (after normalizing both sides to digits)
     if (!isCarrierOwner && orgStatus !== 'deleted' && normalizedUserPhone) {
       const allIdentityLinks = await ctx.db
         .query('userIdentityLinks')
@@ -881,9 +973,8 @@ export const getUserRoles = query({
         if (!link.phone) return false;
         if (link.role !== 'OWNER' && link.role !== 'ADMIN') return false;
         const linkPhone = link.phone.replace(/\D/g, '');
-        return linkPhone === normalizedUserPhone || 
-               linkPhone.endsWith(normalizedUserPhone) || 
-               normalizedUserPhone.endsWith(linkPhone);
+        // Exact match only — no endsWith to prevent cross-org identity confusion
+        return linkPhone === normalizedUserPhone;
       });
 
       if (matchingLink) {
@@ -968,6 +1059,7 @@ export const getUserRoles = query({
     }
 
     // Method 3: Fallback to phone number matching (for backward compatibility)
+    // SECURITY: Use exact match only (after normalizing both sides to digits)
     if (!isDriver && normalizedUserPhone) {
       // Search all drivers and match by phone number
       const allDrivers = await ctx.db
@@ -977,9 +1069,8 @@ export const getUserRoles = query({
       const matchingDriver = allDrivers.find((d) => {
         if (d.isDeleted || d.employmentStatus !== 'Active') return false;
         const driverPhone = d.phone.replace(/\D/g, '');
-        return driverPhone === normalizedUserPhone || 
-               driverPhone.endsWith(normalizedUserPhone) || 
-               normalizedUserPhone.endsWith(driverPhone);
+        // Exact match only — no endsWith to prevent cross-org identity confusion
+        return driverPhone === normalizedUserPhone;
       });
 
       if (matchingDriver) {
@@ -1037,8 +1128,12 @@ export const createDriver = mutation({
     notes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated and belongs to this organization
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const now = Date.now();
-    
+
     // Verify the organization exists and is a carrier
     const org = await ctx.db.get(args.carrierOrgId as Id<'organizations'>);
     if (!org) {
@@ -1133,6 +1228,10 @@ export const updateDriver = mutation({
     notes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const { driverId, carrierOrgId, ...updates } = args;
 
     // Verify organization is not deleted
@@ -1239,6 +1338,10 @@ export const deleteDriver = mutation({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const driver = await ctx.db.get(args.driverId);
     if (!driver) {
       throw new Error('Driver not found');
@@ -1273,6 +1376,10 @@ export const getDriverById = query({
     driverId: v.id('drivers'),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return null;
+
     const driver = await ctx.db.get(args.driverId);
     
     if (!driver || driver.isDeleted) {
@@ -1327,6 +1434,10 @@ export const createOwnerDriver = mutation({
     licenseExpiration: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const now = Date.now();
 
     // Verify the organization exists and is a carrier
@@ -1362,9 +1473,7 @@ export const createOwnerDriver = mutation({
     const existingDriver = existingDrivers.find((d) => {
       if (d.isDeleted) return false;
       const driverPhone = d.phone.replace(/\D/g, '');
-      return driverPhone === normalizedPhone ||
-        driverPhone.endsWith(normalizedPhone) ||
-        normalizedPhone.endsWith(driverPhone);
+      return driverPhone === normalizedPhone;
     });
 
     if (existingDriver) {
@@ -1435,6 +1544,10 @@ export const needsDriverProfile = query({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return { needsProfile: false, reason: 'Not authenticated' };
+
     const org = await ctx.db.get(args.carrierOrgId as Id<'organizations'>);
     if (!org) {
       return { needsProfile: false, reason: 'Organization not found' };

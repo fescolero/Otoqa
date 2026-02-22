@@ -28,6 +28,10 @@ export const countDriversByStatus = query({
     organizationId: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const allDrivers = await ctx.db
       .query('drivers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
@@ -93,6 +97,10 @@ export const list = query({
     includeSensitive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const drivers = await ctx.db
       .query('drivers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
@@ -144,6 +152,10 @@ export const get = query({
     includeSensitive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const driver = await ctx.db.get(args.id);
     if (!driver) return null;
 
@@ -217,6 +229,10 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    // Auth: verify caller is authenticated
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
     const now = Date.now();
 
     // Separate sensitive and non-sensitive data
