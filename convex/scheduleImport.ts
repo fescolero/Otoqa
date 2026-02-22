@@ -297,7 +297,7 @@ export const extractLanesFromSchedule = action({
             ],
           },
         ],
-        max_tokens: 32000,
+        max_tokens: 16384,
         temperature: 0,
       });
 
