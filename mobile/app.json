@@ -35,7 +35,8 @@
         "UIBackgroundModes": [
           "location",
           "fetch"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {

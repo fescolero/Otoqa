@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import Link from 'next/link';
 import { Id } from '@/convex/_generated/dataModel';
+import { trackError } from '@/lib/posthog';
 import { 
   Plus, 
   Package,
@@ -279,6 +280,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       setSkipQuery(true);
       setTimeout(() => setSkipQuery(false), 0);
     } catch (error) {
+      trackError('loads_bulk_status_update', error, { targetStatus: pendingTargetStatus, count: selectedLoadIds.size });
       console.error('Error updating status:', error);
       toast.error('Failed to update load status');
     } finally {
@@ -289,10 +291,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
 
   // Initiate bulk status update with validation
   const handleUpdateStatus = async (status: 'Open' | 'Assigned' | 'Delivered' | 'Canceled') => {
-    // Transitions that require validation:
-    // - Any -> Open (unassign protection)
-    // - Any -> Delivered (must have completed legs)
-    // - Assigned -> Canceled (requires reason code)
     const needsValidation = 
       status === 'Open' || 
       status === 'Delivered' || 
@@ -302,7 +300,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       setPendingTargetStatus(status);
       setIsValidating(true);
     } else {
-      // For non-destructive actions (e.g., Open -> Assigned), proceed directly
       setPendingTargetStatus(status);
       const dbStatus = status;
       try {
@@ -318,11 +315,11 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
         }
         setSelectedLoadIds(new Set());
         
-        // ✅ Force table refresh by skipping query briefly, then re-enabling
         setPaginationCursor(null);
         setSkipQuery(true);
         setTimeout(() => setSkipQuery(false), 0);
       } catch (error) {
+        trackError('loads_status_update', error, { targetStatus: status, count: selectedLoadIds.size });
         console.error('Error updating status:', error);
         toast.error('Failed to update load status');
       } finally {
@@ -354,6 +351,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       setSkipQuery(true);
       setTimeout(() => setSkipQuery(false), 0);
     } catch (error) {
+      trackError('loads_cancel', error, { count: cancellationLoads.length });
       console.error('Error canceling loads:', error);
       toast.error('Failed to cancel loads');
     } finally {
@@ -407,6 +405,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       toast.success(`Deleted ${selectedLoadIds.size} load${selectedLoadIds.size !== 1 ? 's' : ''}`);
       setSelectedLoadIds(new Set());
     } catch (error) {
+      trackError('loads_delete', error, { count: selectedLoadIds.size });
       console.error('Error deleting loads:', error);
       toast.error('Failed to delete loads');
     }

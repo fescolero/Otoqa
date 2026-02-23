@@ -60,7 +60,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <AppLayoutClient 
-      user={userData} 
+      user={userData}
+      workosUserId={user.id}
       organizationId={organizationId}
       orgSettings={orgSettings}
     >

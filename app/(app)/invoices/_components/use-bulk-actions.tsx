@@ -5,6 +5,7 @@ import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { toast } from 'sonner';
 import { useState } from 'react';
+import { trackError } from '@/lib/posthog';
 
 interface BulkActionState {
   invoiceIds: Id<'loadInvoices'>[];
@@ -56,6 +57,7 @@ export function useBulkActions(
         toast.error(`Failed to update ${result.failed} invoices`);
       }
     } catch (error) {
+      trackError('invoices_mark_paid', error, { count: invoiceIds.length });
       toast.error('Failed to update invoices');
       console.error(error);
     }
@@ -110,6 +112,7 @@ export function useBulkActions(
         toast.error(`Failed to void ${result.failed} invoices`);
       }
     } catch (error) {
+      trackError('invoices_void', error, { count: invoiceIds.length });
       toast.error('Failed to void invoices');
       console.error(error);
     }
@@ -158,6 +161,7 @@ export function useBulkActions(
         toast.error(`Failed to update ${result.failed} invoices`);
       }
     } catch (error) {
+      trackError('invoices_change_type', error, { count: invoiceIds.length, newType });
       toast.error('Failed to change invoice type');
       console.error(error);
     }

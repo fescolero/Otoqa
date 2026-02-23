@@ -19,6 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import { useLanguage } from '../../lib/LanguageContext';
 import { useRequestPermissionsOnce } from '../../lib/request-permissions';
+import { identifyUser, resetUser, trackRoleSelected } from '../../lib/analytics';
 
 const MODE_STORAGE_KEY = '@app_mode_selection';
 
@@ -395,18 +396,35 @@ export default function AppLayout() {
   // Auto-select role ONLY if user has just one role
   useEffect(() => {
     if (userRoles && !isRolesLoading && !hasSelectedRole) {
-      // If user is ONLY a driver (no carrier role), auto-select driver
       if (userRoles.isDriver && !userRoles.isCarrierOwner) {
         setMode('driver');
         setHasSelectedRole(true);
       }
-      // If user has carrier role (either only carrier or both), show role selection
-      // Don't auto-select - let them choose
     }
   }, [userRoles, isRolesLoading, hasSelectedRole]);
 
+  // Identify user in PostHog once roles are known and mode is selected
+  const hasIdentifiedRef = useRef(false);
+  useEffect(() => {
+    if (hasIdentifiedRef.current || !userId || !userRoles || !hasSelectedRole) return;
+    hasIdentifiedRef.current = true;
+
+    const role = userRoles.isDriver && userRoles.isCarrierOwner
+      ? 'both'
+      : userRoles.isDriver ? 'driver' : 'owner';
+
+    identifyUser({
+      id: userId,
+      phone: user?.primaryPhoneNumber?.phoneNumber,
+      name: user?.fullName ?? undefined,
+      organizationId: userRoles.carrierOrgId ?? clerkOrgId ?? undefined,
+      role,
+    });
+  }, [userId, userRoles, hasSelectedRole, user, clerkOrgId]);
+
   // Handle role selection
   const handleSelectRole = async (selectedRole: 'driver' | 'owner') => {
+    trackRoleSelected(selectedRole);
     setHasSelectedRole(true);
     await setMode(selectedRole);
   };
@@ -418,6 +436,7 @@ export default function AppLayout() {
     } catch (e) {
       console.warn('Failed to clear mode from storage:', e);
     }
+    resetUser();
     await signOut();
   };
 

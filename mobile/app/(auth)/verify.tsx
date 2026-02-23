@@ -15,6 +15,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
 import { LinearGradient } from 'expo-linear-gradient';
+import { trackVerificationStarted, trackVerificationSuccess, trackVerificationFailed, trackResendCode } from '../../lib/analytics';
 
 // ============================================
 // OTP VERIFICATION SCREEN
@@ -78,6 +79,7 @@ export default function VerifyScreen() {
     }
 
     setIsLoading(true);
+    trackVerificationStarted();
 
     try {
       const result = await signIn.attemptFirstFactor({
@@ -86,22 +88,27 @@ export default function VerifyScreen() {
       });
 
       if (result.status === 'complete') {
+        trackVerificationSuccess();
         await setActive({ session: result.createdSessionId });
         router.replace('/(app)');
       } else {
+        trackVerificationFailed('incomplete', 'Verification incomplete');
         Alert.alert('Error', 'Verification incomplete. Please try again.');
       }
     } catch (error: any) {
       console.error('Verification error:', error);
+      const errorCode = error.errors?.[0]?.code;
+      const errorMessage = error.errors?.[0]?.message;
+      trackVerificationFailed(errorCode, errorMessage);
       
-      if (error.errors?.[0]?.code === 'form_code_incorrect') {
+      if (errorCode === 'form_code_incorrect') {
         Alert.alert('Invalid Code', 'The code you entered is incorrect. Please try again.');
         setCode(['', '', '', '', '', '']);
         inputRefs.current[0]?.focus();
       } else {
         Alert.alert(
           'Error',
-          error.errors?.[0]?.message || 'Verification failed'
+          errorMessage || 'Verification failed'
         );
       }
     } finally {
@@ -121,9 +128,11 @@ export default function VerifyScreen() {
         )?.phoneNumberId as string,
       });
 
+      trackResendCode(true);
       setResendTimer(30);
       Alert.alert('Code Sent', 'A new verification code has been sent.');
     } catch {
+      trackResendCode(false);
       Alert.alert('Error', 'Failed to resend code. Please try again.');
     }
   };

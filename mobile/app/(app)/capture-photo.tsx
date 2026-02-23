@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { trackPhotoCapture, trackPhotoSaved, trackPhotoSaveFailed, trackScreen } from '../../lib/analytics';
 
 // Key for storing captured photo URI temporarily
 const CAPTURED_PHOTO_KEY = 'captured_photo_uri';
@@ -127,18 +128,17 @@ export default function CapturePhotoScreen() {
         base64: false,
       });
 
-      console.log('[CapturePhoto] Photo captured:', photo);
-
       if (photo?.uri) {
-        // Ensure URI has file:// prefix for Image component
         const uri = photo.uri.startsWith('file://') ? photo.uri : `file://${photo.uri}`;
         setCapturedPhoto(uri);
-        console.log('[CapturePhoto] Set photo URI:', uri);
+        trackPhotoCapture(true, loadId);
       } else {
-        console.error('[CapturePhoto] No URI in photo result');
+        trackPhotoCapture(false, loadId, 'No image data received');
         Alert.alert('Error', 'Failed to capture photo. No image data received.');
       }
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      trackPhotoCapture(false, loadId, msg);
       console.error('[CapturePhoto] Error capturing photo:', error);
       Alert.alert('Error', 'Failed to capture photo. Please try again.');
     } finally {
@@ -156,17 +156,17 @@ export default function CapturePhotoScreen() {
     if (!capturedPhoto) return;
     
     try {
-      // Store the photo URI in AsyncStorage so the trip screen can retrieve it
       await AsyncStorage.setItem(CAPTURED_PHOTO_KEY, capturedPhoto);
-      console.log('[CapturePhoto] Saved photo URI to storage:', capturedPhoto);
+      trackPhotoSaved(loadId);
       
-      // Navigate back to the trip screen
       if (loadId) {
         router.replace(`/trip/${loadId}`);
       } else {
         router.back();
       }
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      trackPhotoSaveFailed(loadId, msg);
       console.error('[CapturePhoto] Failed to save photo:', error);
       Alert.alert('Error', 'Failed to save photo. Please try again.');
     }

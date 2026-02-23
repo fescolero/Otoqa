@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { ConvexClientProvider } from '@/components/ConvexClientProvider';
+import { PostHogProvider } from '@/components/PostHogProvider';
 import Script from 'next/script';
 
 export const metadata: Metadata = {
@@ -28,7 +29,9 @@ export default function RootLayout({
         )}
       </head>
       <body className="antialiased">
-        <ConvexClientProvider>{children}</ConvexClientProvider>
+        <PostHogProvider>
+          <ConvexClientProvider>{children}</ConvexClientProvider>
+        </PostHogProvider>
       </body>
     </html>
   );

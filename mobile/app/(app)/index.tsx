@@ -20,6 +20,7 @@ import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../..
 import { useLanguage } from '../../lib/LanguageContext';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
+import { trackWeatherFetchFailed, trackScreen } from '../../lib/analytics';
 
 // ============================================
 // HOME SCREEN - Dark Logistics Design
@@ -107,14 +108,17 @@ export default function HomeScreen() {
         });
       }
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      trackWeatherFetchFailed(msg);
       console.error('Error fetching weather:', error);
     } finally {
       setWeatherLoading(false);
     }
   }, []);
 
-  // Fetch weather on mount
+  // Fetch weather and track screen on mount
   useEffect(() => {
+    trackScreen('Home');
     fetchWeather();
   }, [fetchWeather]);
 

@@ -16,6 +16,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
 import { LinearGradient } from 'expo-linear-gradient';
+import { trackSignInStarted, trackSignInCodeSent, trackSignInFailed, trackScreen } from '../../lib/analytics';
 
 // ============================================
 // SIGN IN SCREEN
@@ -46,15 +47,7 @@ export default function SignInScreen() {
   };
 
   const handleSendCode = async () => {
-    console.log('🔐 handleSendCode called, isLoaded:', isLoaded, 'signIn:', !!signIn);
-    
-    if (!isLoaded) {
-      console.log('❌ Clerk not loaded yet');
-      return;
-    }
-    
-    if (!signIn) {
-      console.log('❌ signIn object is null/undefined');
+    if (!isLoaded || !signIn) {
       Alert.alert('Error', 'Authentication not ready. Please restart the app.');
       return;
     }
@@ -68,24 +61,13 @@ export default function SignInScreen() {
 
     setIsLoading(true);
     
-    // Ensure E.164 format: +1 followed by 10 digits
     const fullPhoneNumber = `+1${rawPhone}`;
-    console.log('🔐 Attempting sign-in with:', fullPhoneNumber);
-    console.log('🔐 Current signIn state:', signIn.status);
+    trackSignInStarted(fullPhoneNumber);
 
     try {
-      // Clear any existing sign-in attempt first
-      if (signIn.status !== null) {
-        console.log('🔄 Clearing existing sign-in state...');
-      }
-      
       const result = await signIn.create({
         identifier: fullPhoneNumber,
       });
-      
-      console.log('✅ Sign-in created successfully!');
-      console.log('✅ Status:', result.status);
-      console.log('✅ Supported factors:', JSON.stringify(result.supportedFirstFactors));
 
       await signIn.prepareFirstFactor({
         strategy: 'phone_code',
@@ -94,16 +76,19 @@ export default function SignInScreen() {
         )?.phoneNumberId as string,
       });
 
+      trackSignInCodeSent(fullPhoneNumber);
+
       router.push({
         pathname: '/(auth)/verify',
         params: { phoneNumber: fullPhoneNumber },
       });
     } catch (error: any) {
       console.error('Sign in error:', error);
-      console.error('Full error details:', JSON.stringify(error, null, 2));
       
       const errorCode = error.errors?.[0]?.code;
       const errorMessage = error.errors?.[0]?.message || error.errors?.[0]?.longMessage;
+      
+      trackSignInFailed(fullPhoneNumber, errorCode, errorMessage);
       
       if (errorCode === 'form_identifier_not_found') {
         Alert.alert(

@@ -22,6 +22,7 @@ import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
 import { uploadPODPhoto } from '../lib/s3-upload';
 import { LanguageProvider } from '../lib/LanguageContext';
+import { setPostHogClient, trackErrorBoundary, trackOtaUpdateCheck } from '../lib/analytics';
 
 // ============================================
 // ERROR BOUNDARY
@@ -44,6 +45,13 @@ class ErrorBoundary extends React.Component<
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    trackErrorBoundary(
+      error.message || 'Unknown error',
+      errorInfo.componentStack ?? undefined,
+    );
   }
 
   render() {
@@ -104,25 +112,18 @@ const tokenCache = {
   },
 };
 
-// PostHog debug component
-function PostHogDebug() {
+// Registers the PostHog client with the analytics module so non-hook code can track events
+function PostHogInit() {
   const posthog = usePostHog();
   
   useEffect(() => {
     if (posthog) {
-      console.log('[PostHog] Client initialized:', !!posthog);
-      // Capture a test event on app start
+      setPostHogClient(posthog);
       posthog.capture('app_started', {
         timestamp: new Date().toISOString(),
         platform: 'react-native',
       });
-      console.log('[PostHog] Captured app_started event');
-      
-      // Force flush events
       posthog.flush();
-      console.log('[PostHog] Flushed events');
-    } else {
-      console.error('[PostHog] Client NOT initialized!');
     }
   }, [posthog]);
   
@@ -229,10 +230,15 @@ export default function RootLayout() {
         if (!Updates.isEnabled) return;
         const update = await Updates.checkForUpdateAsync();
         if (update.isAvailable) {
+          trackOtaUpdateCheck('available');
           await Updates.fetchUpdateAsync();
           await Updates.reloadAsync();
+        } else {
+          trackOtaUpdateCheck('none');
         }
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        trackOtaUpdateCheck('error', msg);
         console.log('OTA update check failed:', e);
       }
     }
@@ -245,9 +251,9 @@ export default function RootLayout() {
         <SafeAreaProvider>
           <LanguageProvider>
           <PostHogProvider 
-            apiKey="phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X"
+            apiKey={process.env.EXPO_PUBLIC_POSTHOG_KEY || 'phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X'}
             options={{
-              host: 'https://us.i.posthog.com',
+              host: process.env.EXPO_PUBLIC_POSTHOG_HOST || 'https://us.i.posthog.com',
               enableSessionReplay: true,
               sessionReplayConfig: {
                 maskAllTextInputs: true,
@@ -260,7 +266,7 @@ export default function RootLayout() {
               flushInterval: 1000,
             }}
           >
-            <PostHogDebug />
+            <PostHogInit />
             <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
               <ClerkLoaded>
                 <ConvexProvider client={convex}>
