@@ -21,7 +21,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { useMutation, useQuery } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Loader2, User, Building2 } from 'lucide-react';
@@ -66,7 +67,7 @@ export function EditRouteAssignmentModal({
   const [carrierId, setCarrierId] = React.useState<string>(assignment.carrierPartnershipId || '');
 
   // Queries for dropdowns
-  const routes = useQuery(api.contractLanes.listUniqueRoutes, { workosOrgId: organizationId });
+  const routes = useAuthQuery(api.contractLanes.listUniqueRoutes, { workosOrgId: organizationId });
   const availableTripNumbers = React.useMemo(() => {
     if (!hcr || !routes) return [];
     const route = routes.find((r) => r.hcr === hcr);
@@ -74,12 +75,12 @@ export function EditRouteAssignmentModal({
     return (route?.tripNumbers ?? []).filter((t) => t && t.trim() !== '');
   }, [hcr, routes]);
 
-  const drivers = useQuery(api.drivers.list, { organizationId });
+  const drivers = useAuthQuery(api.drivers.list, { organizationId });
   const activeDrivers = drivers?.filter(
     (d) => d.employmentStatus === 'Active' && !d.isDeleted
   );
 
-  const carriers = useQuery(api.carrierPartnerships.listForBroker, { brokerOrgId: organizationId });
+  const carriers = useAuthQuery(api.carrierPartnerships.listForBroker, { brokerOrgId: organizationId });
   const activeCarriers = carriers?.filter((c) => c.status === 'ACTIVE');
 
   const updateAssignment = useMutation(api.routeAssignments.update);

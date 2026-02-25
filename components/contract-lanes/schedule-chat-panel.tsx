@@ -6,7 +6,7 @@ import { api } from '@/convex/_generated/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Send, Loader2, MessageSquare, Bot, User } from 'lucide-react';
+import { Send, Loader2, Bot, User } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ExtractionConfig, ExtractedLane, ChatMessage } from './schedule-import-types';
 
@@ -152,12 +152,6 @@ export function ScheduleChatPanel({
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b shrink-0">
-        <MessageSquare className="h-4 w-4 text-primary" />
-        <span className="text-sm font-medium">Correction Assistant</span>
-      </div>
-
       {/* Messages */}
       <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
         <div className="p-4 space-y-4">

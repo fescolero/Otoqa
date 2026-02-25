@@ -37,22 +37,26 @@ function useAuthFromAuthKit() {
 
   const fetchAccessToken = useCallback(
     async ({ forceRefreshToken }: { forceRefreshToken?: boolean } = {}): Promise<string | null> => {
-      if (!user) {
-        return null;
-      }
+      if (!user) return null;
 
-      try {
-        if (forceRefreshToken) {
-          return (await refresh()) ?? null;
+      const MAX_RETRIES = 3;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const token = forceRefreshToken
+            ? ((await refresh()) ?? null)
+            : ((await getAccessToken()) ?? null);
+
+          if (token) return token;
+        } catch {
+          // Transient failure — fall through to retry
         }
 
-        return (await getAccessToken()) ?? null;
-      } catch (error) {
-        if (process.env.NODE_ENV === 'development') {
-          console.warn('Failed to get access token (will retry):', error);
+        if (attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
         }
-        return null;
       }
+
+      return null;
     },
     [user, refresh, getAccessToken],
   );

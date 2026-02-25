@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "convex/react";
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useRouter } from "next/navigation";
 import { api } from "@/convex/_generated/api";
 import { Card } from "@/components/ui/card";
@@ -26,7 +26,7 @@ export function CustomerList({ workosOrgId }: CustomerListProps) {
   const [selectedCustomers, setSelectedCustomers] = React.useState<Set<string>>(new Set());
 
   // Fetch counts
-  const counts = useQuery(api.customers.countCustomersByStatus);
+  const counts = useAuthQuery(api.customers.countCustomersByStatus, {});
 
   // Fetch filtered customers
   const status =
@@ -37,7 +37,7 @@ export function CustomerList({ workosOrgId }: CustomerListProps) {
         : activeTab === "inactive"
           ? "Inactive"
           : "Prospect";
-  const customers = useQuery(api.customers.list, {
+  const customers = useAuthQuery(api.customers.list, {
     workosOrgId,
     status,
     searchQuery: searchQuery || undefined,

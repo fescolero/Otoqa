@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useEffect, useState, useCallback } from 'react';
-import { useQuery } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import {
@@ -214,7 +214,7 @@ export function HelicopterView({
   const [now, setNow] = useState(() => Date.now());
 
   // Convex reactive query - auto-updates when data changes
-  const driverLocations = useQuery(api.driverLocations.getActiveDriverLocations, {
+  const driverLocations = useAuthQuery(api.driverLocations.getActiveDriverLocations, {
     organizationId,
   });
 

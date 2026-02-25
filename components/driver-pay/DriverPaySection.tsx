@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Card } from '@/components/ui/card';
@@ -43,15 +44,15 @@ export function DriverPaySection({
   const [isRecalculating, setIsRecalculating] = useState(false);
 
   // Fetch legs for this load
-  const legs = useQuery(api.dispatchLegs.getByLoad, { loadId });
+  const legs = useAuthQuery(api.dispatchLegs.getByLoad, { loadId });
 
   // Fetch payables for this load
-  const payablesData = useQuery(api.loadPayables.getByLoad, { loadId });
+  const payablesData = useAuthQuery(api.loadPayables.getByLoad, { loadId });
 
   // Fetch available drivers, trucks, and trailers
-  const drivers = useQuery(api.drivers.list, { organizationId });
-  const trucks = useQuery(api.trucks.list, { organizationId });
-  const trailers = useQuery(api.trailers.list, { organizationId });
+  const drivers = useAuthQuery(api.drivers.list, { organizationId });
+  const trucks = useAuthQuery(api.trucks.list, { organizationId });
+  const trailers = useAuthQuery(api.trailers.list, { organizationId });
 
   // Mutations
   const assignDriverMutation = useMutation(api.dispatchLegs.assignDriver);

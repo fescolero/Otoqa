@@ -45,19 +45,19 @@ function buildColumns(config: ExtractionConfig): ColumnDef[] {
     {
       key: 'hcr',
       label: 'HCR',
-      width: 'w-24',
+      width: 'min-w-[100px]',
       getValue: (l) => l.hcr,
     },
     {
       key: 'tripNumber',
       label: 'Trip #',
-      width: 'w-20',
+      width: 'min-w-[80px]',
       getValue: (l) => l.tripNumber,
     },
     {
       key: 'contractName',
       label: 'Contract Name',
-      width: 'w-40',
+      width: 'min-w-[180px]',
       getValue: (l) => l.contractName,
     },
   ];
@@ -67,55 +67,14 @@ function buildColumns(config: ExtractionConfig): ColumnDef[] {
       {
         key: 'contractPeriodStart',
         label: 'Start Date',
-        width: 'w-28',
+        width: 'min-w-[120px]',
         getValue: (l) => l.contractPeriodStart,
       },
       {
         key: 'contractPeriodEnd',
         label: 'End Date',
-        width: 'w-28',
+        width: 'min-w-[120px]',
         getValue: (l) => l.contractPeriodEnd,
-      },
-    );
-  }
-
-  if (config.includeFinancial) {
-    cols.push(
-      {
-        key: 'rateType',
-        label: 'Rate Type',
-        width: 'w-24',
-        getValue: (l) => l.rateType,
-      },
-      {
-        key: 'rate',
-        label: 'Rate',
-        width: 'w-20',
-        getValue: (l) => l.rate,
-        format: (v) => (v != null ? `$${Number(v).toFixed(2)}` : ''),
-      },
-      {
-        key: 'currency',
-        label: 'Currency',
-        width: 'w-20',
-        getValue: (l) => l.currency,
-      },
-    );
-  }
-
-  if (config.includeFuelSurcharge) {
-    cols.push(
-      {
-        key: 'fuelSurchargeType',
-        label: 'FSC Type',
-        width: 'w-24',
-        getValue: (l) => l.fuelSurchargeType,
-      },
-      {
-        key: 'fuelSurchargeValue',
-        label: 'FSC Value',
-        width: 'w-20',
-        getValue: (l) => l.fuelSurchargeValue,
       },
     );
   }
@@ -125,7 +84,7 @@ function buildColumns(config: ExtractionConfig): ColumnDef[] {
       {
         key: '_origin',
         label: 'Origin',
-        width: 'w-32',
+        width: 'min-w-[160px]',
         getValue: (l) => {
           const first = l.stops?.[0];
           if (!first) return undefined;
@@ -138,7 +97,7 @@ function buildColumns(config: ExtractionConfig): ColumnDef[] {
       {
         key: '_destination',
         label: 'Destination',
-        width: 'w-32',
+        width: 'min-w-[160px]',
         getValue: (l) => {
           const last = l.stops && l.stops.length > 1 ? l.stops[l.stops.length - 1] : undefined;
           if (!last) return undefined;
@@ -151,17 +110,58 @@ function buildColumns(config: ExtractionConfig): ColumnDef[] {
       {
         key: 'miles',
         label: 'Contract Mi',
-        width: 'w-24',
+        width: 'min-w-[100px]',
         getValue: (l) => l.miles,
       },
       {
         key: '_calculatedMiles',
         label: 'Calc Mi',
-        width: 'w-24',
+        width: 'min-w-[100px]',
         getValue: (l) =>
           l._calculatedMiles != null
             ? { value: l._calculatedMiles, confidence: 'high' as Confidence }
             : undefined,
+      },
+    );
+  }
+
+  if (config.includeFinancial) {
+    cols.push(
+      {
+        key: 'rateType',
+        label: 'Rate Type',
+        width: 'min-w-[110px]',
+        getValue: (l) => l.rateType,
+      },
+      {
+        key: 'rate',
+        label: 'Rate',
+        width: 'min-w-[90px]',
+        getValue: (l) => l.rate,
+        format: (v) => (v != null ? `$${Number(v).toFixed(2)}` : ''),
+      },
+      {
+        key: 'currency',
+        label: 'Currency',
+        width: 'min-w-[90px]',
+        getValue: (l) => l.currency,
+      },
+    );
+  }
+
+  if (config.includeFuelSurcharge) {
+    cols.push(
+      {
+        key: 'fuelSurchargeType',
+        label: 'FSC Type',
+        width: 'min-w-[110px]',
+        getValue: (l) => l.fuelSurchargeType,
+      },
+      {
+        key: 'fuelSurchargeValue',
+        label: 'FSC Value',
+        width: 'min-w-[90px]',
+        getValue: (l) => l.fuelSurchargeValue,
       },
     );
   }
@@ -171,13 +171,13 @@ function buildColumns(config: ExtractionConfig): ColumnDef[] {
       {
         key: 'equipmentClass',
         label: 'Equipment',
-        width: 'w-28',
+        width: 'min-w-[120px]',
         getValue: (l) => l.equipmentClass,
       },
       {
         key: 'equipmentSize',
         label: 'Size',
-        width: 'w-20',
+        width: 'min-w-[90px]',
         getValue: (l) => l.equipmentSize,
       },
     );
@@ -294,17 +294,17 @@ export function ScheduleReviewTable({
 
       {/* Table */}
       <div className="flex-1 overflow-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-max text-sm border-collapse">
           <thead className="sticky top-0 bg-background border-b z-10">
             <tr>
-              <th className="p-2 w-10">
+              <th className="px-3 py-2.5 w-10 sticky left-0 bg-background z-20">
                 <Checkbox
                   checked={lanes.length > 0 && lanes.every((l) => l._selected !== false)}
                   onCheckedChange={handleToggleAll}
                 />
               </th>
               {config.includeLogistics && config.stopDetailLevel !== 'none' && (
-                <th className="p-2 w-8 text-center">
+                <th className="px-2 py-2.5 w-10 text-center">
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
@@ -318,15 +318,15 @@ export function ScheduleReviewTable({
               {columns.map((col) => (
                 <th
                   key={col.key}
-                  className={`p-2 text-left font-medium text-muted-foreground ${col.width}`}
+                  className={`px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground ${col.width}`}
                 >
                   {col.label}
                 </th>
               ))}
-              <th className="p-2 w-10" />
+              <th className="px-2 py-2.5 w-10 sticky right-0 bg-background z-20" />
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y">
             {lanes.map((lane, rowIdx) => {
               const isSelected = lane._selected !== false;
               const originStop = lane.stops?.[0];
@@ -334,16 +334,16 @@ export function ScheduleReviewTable({
               return (
                 <tr
                   key={rowIdx}
-                  className={`border-b hover:bg-muted/20 ${!isSelected ? 'opacity-50' : ''}`}
+                  className={`hover:bg-muted/30 transition-colors ${!isSelected ? 'opacity-40' : ''}`}
                 >
-                  <td className="p-2">
+                  <td className="px-3 py-1.5 sticky left-0 bg-background z-10">
                     <Checkbox
                       checked={isSelected}
                       onCheckedChange={() => handleToggleRow(rowIdx)}
                     />
                   </td>
                   {config.includeLogistics && config.stopDetailLevel !== 'none' && (
-                    <td className="p-2 text-center">
+                    <td className="px-2 py-1.5 text-center">
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger>
@@ -409,13 +409,13 @@ export function ScheduleReviewTable({
                               if (e.key === 'Enter') commitEdit();
                               if (e.key === 'Escape') setEditingCell(null);
                             }}
-                            className="h-8 rounded-none border-0 border-primary ring-1 ring-primary text-sm"
+                            className="h-8 rounded-none border-0 ring-2 ring-primary text-sm"
                           />
                         ) : (
-                          <div className="px-2 py-1.5 truncate cursor-text min-h-[32px]">
+                          <div className="px-3 py-2 truncate cursor-text min-h-[36px] flex items-center text-sm">
                             {displayValue || (
-                              <span className="text-muted-foreground/50 italic">
-                                empty
+                              <span className="text-muted-foreground/40 italic text-xs">
+                                —
                               </span>
                             )}
                           </div>
@@ -423,14 +423,14 @@ export function ScheduleReviewTable({
                       </td>
                     );
                   })}
-                  <td className="p-1">
+                  <td className="px-1 py-1.5 sticky right-0 bg-background z-10">
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7"
+                      className="h-7 w-7 opacity-0 group-hover:opacity-100 hover:opacity-100 hover:text-destructive"
                       onClick={() => handleDeleteRow(rowIdx)}
                     >
-                      <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                      <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   </td>
                 </tr>

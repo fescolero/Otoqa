@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Card } from '@/components/ui/card';
@@ -47,18 +48,18 @@ export function SettlementsDashboard({ organizationId, userId }: SettlementsDash
   const debouncedSearch = useDebounce(filters.search, 300);
 
   // Fetch all settlements for the organization (with optional Pay Plan filter)
-  const allSettlements = useQuery(api.driverSettlements.listForOrganization, {
+  const allSettlements = useAuthQuery(api.driverSettlements.listForOrganization, {
     workosOrgId: organizationId,
     payPlanId: filters.payPlanId as Id<'payPlans'> | undefined,
   });
 
   // Fetch all drivers for the org
-  const drivers = useQuery(api.drivers.list, {
+  const drivers = useAuthQuery(api.drivers.list, {
     organizationId,
   });
 
   // Fetch all pay plans for the org
-  const payPlans = useQuery(api.payPlans.list, {
+  const payPlans = useAuthQuery(api.payPlans.list, {
     workosOrgId: organizationId,
   });
 

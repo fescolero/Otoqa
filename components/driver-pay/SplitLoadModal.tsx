@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Button } from '@/components/ui/button';
@@ -53,12 +54,12 @@ export function SplitLoadModal({
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Fetch load data
-  const loadData = useQuery(api.loads.getLoad, { loadId });
+  const loadData = useAuthQuery(api.loads.getLoad, { loadId });
 
   // Fetch available drivers, trucks, trailers
-  const drivers = useQuery(api.drivers.list, { organizationId });
-  const trucks = useQuery(api.trucks.list, { organizationId });
-  const trailers = useQuery(api.trailers.list, { organizationId });
+  const drivers = useAuthQuery(api.drivers.list, { organizationId });
+  const trucks = useAuthQuery(api.trucks.list, { organizationId });
+  const trailers = useAuthQuery(api.trailers.list, { organizationId });
 
   // Mutation
   const splitAtStop = useMutation(api.dispatchLegs.splitAtStop);

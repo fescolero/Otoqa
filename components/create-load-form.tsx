@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useMutation, useQuery, useAction } from 'convex/react';
+import { useMutation, useAction } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -62,16 +63,16 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
   const [googleMiles, setGoogleMiles] = useState<number | undefined>(undefined);
 
   // Fetch customers for dropdown
-  const customers = useQuery(api.customers.getCustomers, { workosOrgId: organizationId });
+  const customers = useAuthQuery(api.customers.getCustomers, { workosOrgId: organizationId });
 
   // Fetch drivers for assignment dropdown
-  const drivers = useQuery(api.drivers.list, { organizationId });
+  const drivers = useAuthQuery(api.drivers.list, { organizationId });
   const activeDrivers = drivers?.filter(
     (d) => d.employmentStatus === 'Active' && !d.isDeleted
   );
 
   // Fetch carriers for assignment dropdown
-  const carriers = useQuery(api.carrierPartnerships.listForBroker, { brokerOrgId: organizationId });
+  const carriers = useAuthQuery(api.carrierPartnerships.listForBroker, { brokerOrgId: organizationId });
   const activeCarriers = carriers?.filter((c) => c.status === 'ACTIVE');
 
   const createLoad = useMutation(api.loads.createLoad);

@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -48,8 +49,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   const [isValidating, setIsValidating] = useState(false);
   const [cancellationLoads, setCancellationLoads] = useState<{ id: string; orderNumber?: string }[]>([]);
 
-  // Fetch load counts for tab badges
-  const loadCounts = useQuery(api.loads.countLoadsByStatus, {
+  const loadCounts = useAuthQuery(api.loads.countLoadsByStatus, {
     workosOrgId: organizationId,
   });
 

@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Id } from '@/convex/_generated/dataModel';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -36,13 +36,11 @@ export function TripsTable({
   const [statusFilter, setStatusFilter] = useState<string>('Open');
   const [localSearch, setLocalSearch] = useState(filters.search);
 
-  // Fetch load counts for tab badges
-  const loadCounts = useQuery(api.loads.countLoadsByStatus, {
+  const loadCounts = useAuthQuery(api.loads.countLoadsByStatus, {
     workosOrgId: organizationId,
   });
 
-  // Fetch loads with status and advanced filters
-  const loadsData = useQuery(api.loads.getLoads, {
+  const loadsData = useAuthQuery(api.loads.getLoads, {
     workosOrgId: organizationId,
     status: statusFilter as 'Open' | 'Assigned' | 'Completed' | 'Canceled',
     search: filters.search || undefined,

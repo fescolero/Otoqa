@@ -9,7 +9,7 @@ import { Doc, Id } from '@/convex/_generated/dataModel';
 import { TrailerFilterBar } from './trailer-filter-bar';
 import { VirtualizedTrailersTable } from './virtualized-trailers-table';
 import { FloatingActionBar } from './floating-action-bar';
-import { useQuery } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { useRouter } from 'next/navigation';
 
@@ -35,7 +35,7 @@ export function TrailerList({ data, organizationId, onDeactivateTrailers }: Trai
   });
 
   // Fetch trailer counts
-  const trailerCounts = useQuery(api.trailers.countTrailersByStatus, {
+  const trailerCounts = useAuthQuery(api.trailers.countTrailersByStatus, {
     organizationId,
   });
 

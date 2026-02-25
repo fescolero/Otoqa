@@ -13,7 +13,8 @@ import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Button } from '@/components/ui/button';
 import { Plus, Download, Upload } from 'lucide-react';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { TruckList } from '@/components/trucks/truck-list';
 import { useRouter } from 'next/navigation';
@@ -25,7 +26,7 @@ export default function TrucksPage() {
   const organizationId = useOrganizationId();
 
   // Query trucks from Convex
-  const trucks = useQuery(api.trucks.list, { organizationId });
+  const trucks = useAuthQuery(api.trucks.list, { organizationId });
   const bulkDeactivateTrucks = useMutation(api.trucks.bulkDeactivate);
 
   // Get user initials for avatar fallback

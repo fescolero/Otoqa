@@ -13,7 +13,8 @@ import {
 } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Loader2, Info, Route, Calendar } from 'lucide-react';
 import { toast } from 'sonner';
@@ -34,12 +35,12 @@ export function AutoAssignmentSettings({ organizationId, userId }: AutoAssignmen
   const [isSaving, setIsSaving] = React.useState(false);
 
   // Query current settings
-  const settings = useQuery(api.routeAssignments.getSettings, { workosOrgId: organizationId });
-  const routeAssignments = useQuery(api.routeAssignments.list, {
+  const settings = useAuthQuery(api.routeAssignments.getSettings, { workosOrgId: organizationId });
+  const routeAssignments = useAuthQuery(api.routeAssignments.list, {
     workosOrgId: organizationId,
     isActive: true,
   });
-  const recurringTemplates = useQuery(api.recurringLoads.list, {
+  const recurringTemplates = useAuthQuery(api.recurringLoads.list, {
     workosOrgId: organizationId,
     isActive: true,
   });

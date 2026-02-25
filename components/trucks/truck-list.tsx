@@ -9,7 +9,7 @@ import { Doc, Id } from '@/convex/_generated/dataModel';
 import { TruckFilterBar } from './truck-filter-bar';
 import { VirtualizedTrucksTable } from './virtualized-trucks-table';
 import { FloatingActionBar } from './floating-action-bar';
-import { useQuery } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { useRouter } from 'next/navigation';
 
@@ -35,7 +35,7 @@ export function TruckList({ data, organizationId, onDeactivateTrucks }: TruckLis
   });
 
   // Fetch truck counts
-  const truckCounts = useQuery(api.trucks.countTrucksByStatus, {
+  const truckCounts = useAuthQuery(api.trucks.countTrucksByStatus, {
     organizationId,
   });
 

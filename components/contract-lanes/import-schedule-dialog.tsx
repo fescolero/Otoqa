@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { useAction, useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { Upload, Settings2, Loader2, TableProperties, Import, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Upload, Settings2, Loader2, TableProperties, Import, ChevronLeft, ChevronRight, MessageSquare, PanelRightClose, X } from 'lucide-react';
 import { ScheduleConfigureStep } from './schedule-configure-step';
 import { ScheduleReviewTable } from './schedule-review-table';
 import { ScheduleChatPanel } from './schedule-chat-panel';
@@ -68,6 +68,7 @@ export function ImportScheduleDialog({
   const [dedupResults, setDedupResults] = useState<DedupResult[]>([]);
   const [extractionProgress, setExtractionProgress] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   const extractLanes = useAction(api.scheduleImport.extractLanesFromSchedule);
   const verifyStops = useAction(api.scheduleImport.verifyAndEnrichStops);
@@ -371,6 +372,7 @@ export function ImportScheduleDialog({
     setDedupResults([]);
     setExtractionProgress('');
     setIsProcessing(false);
+    setChatOpen(false);
   };
 
   const currentStepIndex = STEP_ORDER.indexOf(step);
@@ -383,34 +385,50 @@ export function ImportScheduleDialog({
         onOpenChange(val);
       }}
     >
-      <DialogContent className="max-w-[95vw] w-[1400px] max-h-[90vh] h-[85vh] flex flex-col p-0 gap-0">
-        {/* Step indicator */}
-        <div className="flex items-center justify-center border-b px-4 py-3 shrink-0 overflow-x-auto">
-          {STEP_ORDER.map((s, i) => {
-            const isActive = s === step;
-            const isComplete = i < currentStepIndex;
-            return (
-              <div key={s} className="flex items-center shrink-0">
-                {i > 0 && (
+      <DialogContent
+        showCloseButton={false}
+        className="max-w-[95vw] sm:max-w-[95vw] w-[1400px] max-h-[92vh] h-[88vh] flex flex-col p-0 gap-0 overflow-hidden"
+      >
+        {/* Header with step indicator */}
+        <div className="flex items-center border-b px-4 py-3 shrink-0">
+          <div className="flex-1 flex items-center justify-center gap-1">
+            {STEP_ORDER.map((s, i) => {
+              const isActive = s === step;
+              const isComplete = i < currentStepIndex;
+              return (
+                <div key={s} className="flex items-center">
+                  {i > 0 && (
+                    <div
+                      className={`h-px w-8 mx-1 ${isComplete ? 'bg-primary' : 'bg-border'}`}
+                    />
+                  )}
                   <div
-                    className={`h-px w-6 mx-1.5 ${isComplete ? 'bg-primary' : 'bg-border'}`}
-                  />
-                )}
-                <div
-                  className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded whitespace-nowrap ${
-                    isActive
-                      ? 'bg-primary/10 text-primary font-medium'
-                      : isComplete
-                        ? 'text-primary'
-                        : 'text-muted-foreground'
-                  }`}
-                >
-                  {STEP_ICONS[s]}
-                  <span>{STEP_LABELS[s]}</span>
+                    className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md whitespace-nowrap transition-colors ${
+                      isActive
+                        ? 'bg-primary/10 text-primary font-medium'
+                        : isComplete
+                          ? 'text-primary'
+                          : 'text-muted-foreground'
+                    }`}
+                  >
+                    {STEP_ICONS[s]}
+                    <span>{STEP_LABELS[s]}</span>
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              onOpenChange(false);
+              resetState();
+            }}
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </div>
 
         {/* Step content */}
@@ -485,23 +503,41 @@ export function ImportScheduleDialog({
           )}
 
           {step === 'review' && (
-            <div className="flex h-full min-h-0">
-              <div className="flex-1 min-w-0 overflow-auto border-r">
+            <div className="flex h-full min-h-0 relative">
+              <div className="flex-1 min-w-0 overflow-auto">
                 <ScheduleReviewTable
                   lanes={lanes}
                   config={config!}
                   onLanesChange={setLanes}
                 />
               </div>
-              <div className="w-[360px] shrink-0">
-                <ScheduleChatPanel
-                  lanes={lanes}
-                  config={config!}
-                  messages={chatMessages}
-                  onMessagesChange={setChatMessages}
-                  onLanesChange={setLanes}
-                />
-              </div>
+              {chatOpen && (
+                <div className="w-[380px] shrink-0 border-l flex flex-col bg-background">
+                  <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
+                    <div className="flex items-center gap-2">
+                      <MessageSquare className="h-4 w-4 text-primary" />
+                      <span className="text-sm font-medium">Correction Assistant</span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setChatOpen(false)}
+                    >
+                      <PanelRightClose className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <div className="flex-1 min-h-0">
+                    <ScheduleChatPanel
+                      lanes={lanes}
+                      config={config!}
+                      messages={chatMessages}
+                      onMessagesChange={setChatMessages}
+                      onLanesChange={setLanes}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -568,13 +604,27 @@ export function ImportScheduleDialog({
             )}
 
             {step === 'review' && (
-              <Button
-                onClick={handleProceedToImport}
-                disabled={lanes.filter((l) => l._selected !== false).length === 0}
-              >
-                Continue to Import
-                <ChevronRight className="h-4 w-4 ml-1" />
-              </Button>
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => setChatOpen(!chatOpen)}
+                  className="gap-2"
+                >
+                  {chatOpen ? (
+                    <PanelRightClose className="h-4 w-4" />
+                  ) : (
+                    <MessageSquare className="h-4 w-4" />
+                  )}
+                  {chatOpen ? 'Hide Assistant' : 'Correction Assistant'}
+                </Button>
+                <Button
+                  onClick={handleProceedToImport}
+                  disabled={lanes.filter((l) => l._selected !== false).length === 0}
+                >
+                  Continue to Import
+                  <ChevronRight className="h-4 w-4 ml-1" />
+                </Button>
+              </>
             )}
 
             {step === 'import' && (

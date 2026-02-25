@@ -1,7 +1,8 @@
 'use client';
 
 import { useMemo, useEffect, useState, useCallback, useRef } from 'react';
-import { useQuery, useAction } from 'convex/react';
+import { useAction } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import {
@@ -796,12 +797,12 @@ export function LiveRouteMap({
   const mapMatchRoute = useAction(api.googleRoads.mapMatchRoute);
 
   // Fetch route history for this load
-  const routeHistory = useQuery(api.driverLocations.getRouteHistoryForLoad, {
+  const routeHistory = useAuthQuery(api.driverLocations.getRouteHistoryForLoad, {
     loadId,
   });
 
   // Fetch live driver location if we have a driver
-  const liveLocations = useQuery(api.driverLocations.getActiveDriverLocations, {
+  const liveLocations = useAuthQuery(api.driverLocations.getActiveDriverLocations, {
     organizationId,
   });
 

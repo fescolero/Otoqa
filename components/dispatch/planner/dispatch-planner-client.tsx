@@ -3,6 +3,7 @@
 import { useState, useMemo } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Id } from '@/convex/_generated/dataModel';
 import { toast } from 'sonner';
 
@@ -58,8 +59,7 @@ export function DispatchPlannerClient({
     selectedLoadId ? { loadId: selectedLoadId } : 'skip'
   );
 
-  // Get ALL drivers on mount (for default view before trip selection)
-  const allDrivers = useQuery(api.dispatchLegs.getAllActiveDrivers, {
+  const allDrivers = useAuthQuery(api.dispatchLegs.getAllActiveDrivers, {
     workosOrgId: organizationId,
   });
 
@@ -76,8 +76,7 @@ export function DispatchPlannerClient({
       : 'skip'
   );
 
-  // Get active carrier partnerships (replaces deprecated carriers query)
-  const activeCarriers = useQuery(api.carrierPartnerships.getActiveForDispatch, {
+  const activeCarriers = useAuthQuery(api.carrierPartnerships.getActiveForDispatch, {
     brokerOrgId: organizationId,
   });
 
@@ -86,8 +85,7 @@ export function DispatchPlannerClient({
     selectedDriverId ? { driverId: selectedDriverId } : 'skip'
   );
 
-  // Get load counts for KPIs in sidebar
-  const loadCounts = useQuery(api.loads.countLoadsByStatus, {
+  const loadCounts = useAuthQuery(api.loads.countLoadsByStatus, {
     workosOrgId: organizationId,
   });
 

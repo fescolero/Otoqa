@@ -2,7 +2,8 @@
 
 import { useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -253,9 +254,9 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const paySectionRef = useRef<HTMLDivElement>(null);
 
   // Fetch load data
-  const loadData = useQuery(api.loads.getLoad, { loadId: loadId as Id<'loadInformation'> });
-  const payablesData = useQuery(api.loadPayables.getByLoad, { loadId: loadId as Id<'loadInformation'> });
-  const invoiceData = useQuery(api.invoices.getInvoiceByLoad, { loadId: loadId as Id<'loadInformation'> });
+  const loadData = useAuthQuery(api.loads.getLoad, { loadId: loadId as Id<'loadInformation'> });
+  const payablesData = useAuthQuery(api.loadPayables.getByLoad, { loadId: loadId as Id<'loadInformation'> });
+  const invoiceData = useAuthQuery(api.invoices.getInvoiceByLoad, { loadId: loadId as Id<'loadInformation'> });
   
   const updateStatus = useMutation(api.loads.updateLoadStatus);
   const deleteLoad = useMutation(api.loads.deleteLoad);

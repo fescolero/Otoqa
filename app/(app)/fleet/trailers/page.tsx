@@ -13,7 +13,8 @@ import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Button } from '@/components/ui/button';
 import { Plus, Download, Upload } from 'lucide-react';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { TrailerList } from '@/components/trailers/trailer-list';
 import { useRouter } from 'next/navigation';
@@ -25,7 +26,7 @@ export default function TrailersPage() {
   const organizationId = useOrganizationId();
 
   // Query trailers from Convex
-  const trailers = useQuery(api.trailers.list, { organizationId });
+  const trailers = useAuthQuery(api.trailers.list, { organizationId });
   const bulkDeactivateTrailers = useMutation(api.trailers.bulkDeactivate);
 
   // Get user initials for avatar fallback

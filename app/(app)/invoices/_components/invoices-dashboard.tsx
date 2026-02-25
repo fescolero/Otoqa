@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useCallback } from 'react';
 import { useQuery } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Card } from '@/components/ui/card';
@@ -58,11 +59,11 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
   const debouncedAttentionSearch = useDebounce(attentionFilters.search, 300);
 
   // Fetch data
-  const invoiceCounts = useQuery(api.invoices.countInvoicesByStatus, {
+  const invoiceCounts = useAuthQuery(api.invoices.countInvoicesByStatus, {
     workosOrgId: organizationId,
   });
 
-  const allUnmappedGroups = useQuery(api.analytics.getUnmappedLoadGroups, {
+  const allUnmappedGroups = useAuthQuery(api.analytics.getUnmappedLoadGroups, {
     workosOrgId: organizationId,
   });
   

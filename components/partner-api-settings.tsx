@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useAction } from 'convex/react';
+import { useMutation, useAction } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { Card } from '@/components/ui/card';
@@ -65,7 +66,7 @@ interface PartnerApiSettingsProps {
 // ============================================
 
 function ApiKeysPanel({ organizationId }: { organizationId: string }) {
-  const keys = useQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
+  const keys = useAuthQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
   const createKey = useAction(api.externalTrackingPartnerKeys.createKey);
   const revokeKey = useMutation(api.externalTrackingPartnerKeys.revokeKey);
 
@@ -357,8 +358,8 @@ function ApiKeysPanel({ organizationId }: { organizationId: string }) {
 // ============================================
 
 function WebhooksPanel({ organizationId }: { organizationId: string }) {
-  const subscriptions = useQuery(api.externalTrackingWebhooks.listSubscriptions, { workosOrgId: organizationId });
-  const keys = useQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
+  const subscriptions = useAuthQuery(api.externalTrackingWebhooks.listSubscriptions, { workosOrgId: organizationId });
+  const keys = useAuthQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
   const createSubscription = useAction(api.externalTrackingWebhooks.createSubscription);
   const updateStatus = useMutation(api.externalTrackingWebhooks.updateSubscriptionStatus);
 
@@ -644,8 +645,8 @@ function WebhooksPanel({ organizationId }: { organizationId: string }) {
 // ============================================
 
 function AuditLogPanel({ organizationId }: { organizationId: string }) {
-  const logs = useQuery(api.externalTrackingPartnerKeys.getAuditLogs, { workosOrgId: organizationId, limit: 50 });
-  const keys = useQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
+  const logs = useAuthQuery(api.externalTrackingPartnerKeys.getAuditLogs, { workosOrgId: organizationId, limit: 50 });
+  const keys = useAuthQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
 
   return (
     <Card className="p-6">
@@ -727,9 +728,9 @@ function AuditLogPanel({ organizationId }: { organizationId: string }) {
 // ============================================
 
 function HealthDashboard({ organizationId }: { organizationId: string }) {
-  const keys = useQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
-  const subscriptions = useQuery(api.externalTrackingWebhooks.listSubscriptions, { workosOrgId: organizationId });
-  const logs = useQuery(api.externalTrackingPartnerKeys.getAuditLogs, { workosOrgId: organizationId, limit: 100 });
+  const keys = useAuthQuery(api.externalTrackingPartnerKeys.listKeys, { workosOrgId: organizationId });
+  const subscriptions = useAuthQuery(api.externalTrackingWebhooks.listSubscriptions, { workosOrgId: organizationId });
+  const logs = useAuthQuery(api.externalTrackingPartnerKeys.getAuditLogs, { workosOrgId: organizationId, limit: 100 });
 
   const activeKeys = keys?.filter((k) => k.status === 'ACTIVE').length ?? 0;
   const revokedKeys = keys?.filter((k) => k.status === 'REVOKED').length ?? 0;
