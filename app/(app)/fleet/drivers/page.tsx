@@ -11,7 +11,7 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { DriverList } from '@/components/drivers/driver-list';
 import { CSVImportWizard } from '@/components/drivers/csv-import-wizard';
@@ -23,12 +23,16 @@ import { Download, Upload, Plus } from 'lucide-react';
 
 export default function DriversPage() {
   const { user } = useAuth();
+  const { isAuthenticated } = useConvexAuth();
   const router = useRouter();
   const organizationId = useOrganizationId();
   const [showImportWizard, setShowImportWizard] = useState(false);
 
   // Query drivers from Convex (include deleted for the deleted tab)
-  const drivers = useQuery(api.drivers.list, { organizationId, includeDeleted: true });
+  const drivers = useQuery(
+    api.drivers.list,
+    isAuthenticated ? { organizationId, includeDeleted: true } : 'skip',
+  );
   const deactivateDriver = useMutation(api.drivers.deactivate);
 
   const handleCreateDriver = () => {

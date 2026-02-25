@@ -9,7 +9,7 @@ import { Doc } from '@/convex/_generated/dataModel';
 import { FloatingActionBar } from './floating-action-bar';
 import { DriverFilterBar, DriverFilterState } from './driver-filter-bar';
 import { VirtualizedDriversTable } from './virtualized-drivers-table';
-import { useQuery } from 'convex/react';
+import { useQuery, useConvexAuth } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 
 type Driver = Doc<'drivers'>;
@@ -40,6 +40,7 @@ const getDateStatus = (dateString?: string): 'expired' | 'expiring' | 'warning' 
 };
 
 export function DriverList({ data, organizationId, onDeactivateDrivers }: DriverListProps) {
+  const { isAuthenticated } = useConvexAuth();
   const [activeTab, setActiveTab] = React.useState<string>('all');
   const [selectedDrivers, setSelectedDrivers] = React.useState<Set<string>>(new Set());
   const [focusedRowIndex, setFocusedRowIndex] = React.useState<number | null>(null);
@@ -47,16 +48,15 @@ export function DriverList({ data, organizationId, onDeactivateDrivers }: Driver
     search: '',
   });
 
-  // Fetch driver counts and include sensitive info for age calculation
-  const driverCounts = useQuery(api.drivers.countDriversByStatus, {
-    organizationId,
-  });
+  const driverCounts = useQuery(
+    api.drivers.countDriversByStatus,
+    isAuthenticated ? { organizationId } : 'skip',
+  );
 
-  const driversWithSensitive = useQuery(api.drivers.list, {
-    organizationId,
-    includeDeleted: true,
-    includeSensitive: true,
-  });
+  const driversWithSensitive = useQuery(
+    api.drivers.list,
+    isAuthenticated ? { organizationId, includeDeleted: true, includeSensitive: true } : 'skip',
+  );
 
   // Use drivers with sensitive info if available, otherwise use passed data
   const drivers = driversWithSensitive || data;
