@@ -70,77 +70,80 @@ type ExtractionConfig = {
   includeFuelSurcharge: boolean;
 };
 
-function buildExtractionPrompt(_config: ExtractionConfig): string {
-  return `You are an expert data extraction and data-structuring assistant. Your task is to extract transportation contract data from the provided images and convert it into a highly structured, enriched JSON object.
+function buildExtractionPrompt(config: ExtractionConfig): string {
+  const includeStops = config.includeLogistics && config.stopDetailLevel !== 'none';
 
-CRITICAL INSTRUCTIONS & DATA CLEANING:
+  const baseInstructions = `You are an expert data extraction assistant. Extract ALL transportation contract trips from the provided images into structured JSON.
+
+CRITICAL RULES:
 1. Ignore Watermarks: Completely ignore any large diagonal watermark (e.g. "LOGISTICS APPROVED").
-2. Cross-Reference & Merge Data:
-   - Facilities: Look at the NASS Code for each stop on the trip schedule. Find the matching NASS Code in the Facility Address table (usually on subsequent pages) and inject the full address, city, state, and zip directly into that stop's JSON object.
-   - Frequencies & Vehicles: Match the Frequency Code (e.g., L17) and Vehicle Code (e.g., 53FT) from the trip schedule to their respective definition tables and include the full description in the trip object.
-3. Data Type Casting & Cleaning:
-   - Times: Extract "Arrive Time" and "Depart Time" in standard HH:MM:SS format. Strip the "PT" abbreviation completely (e.g., "00:10:00 PT" becomes "00:10:00").
-   - Durations: For "Load/Unload", strip the word "min" and convert the value to a pure integer representing minutes (e.g., "10 min" becomes 10).
-4. Flexible Document Structures (Missing or Extra Data):
-   - Document layouts will vary. If a field like "As Of Date" or "Phone" is blank, output null.
-   - Some documents may include "Billing" information. If you see billing info, extract it into the billing_details object. If it is not in the document, return null for that object.
-5. Output Format: Return ONLY valid JSON. Do not include markdown formatting, and do not include any conversational text.
+2. Extract EVERY trip: Documents may contain many trips (20+). You MUST extract ALL of them. Do not stop early.
+3. Cross-Reference lookup tables: Match Frequency Codes and Vehicle Codes from the trip schedule to their definition tables on subsequent pages.
+4. Data Cleaning:
+   - Times: HH:MM:SS format. Strip "PT" (e.g., "00:10:00 PT" → "00:10:00").
+   - Durations: Strip "min", return integer (e.g., "10 min" → 10).
+   - Dates: MM/DD/YYYY format.
+5. If a field is blank or not present, output null.
+6. Output ONLY valid JSON. No markdown formatting, no conversational text.`;
 
-JSON SCHEMA:
-{
-  "contract_header": {
-    "hcr_number": "String",
-    "as_of_date": "String or null",
-    "contract_origin": "String",
-    "contract_destination": "String",
-    "admin_official": "String or null"
-  },
-  "supplier_details": {
-    "supplier_name": "String or null",
-    "supplier_address": "String or null",
-    "supplier_phone": "String or null",
-    "supplier_email": "String or null"
-  },
-  "billing_details": null or {
-    "description": "String"
-  },
-  "trips": [
-    {
+  const facilityInstructions = includeStops
+    ? `\n7. Facilities: Cross-reference the NASS Code for each stop with the Facility Address table (usually on subsequent pages). Inject the full address, city, state, and zip into each stop.`
+    : '';
+
+  let tripSchema: string;
+
+  if (includeStops) {
+    tripSchema = `{
       "trip_id": "String",
       "vehicle_code": "String",
-      "vehicle_description": "String (Matched from Vehicle Requirements table)",
+      "vehicle_description": "String (from Vehicle Requirements table)",
       "frequency_code": "String",
       "frequency_days": "Number",
-      "frequency_description": "String (Matched from Frequency Description table)",
+      "frequency_description": "String (from Frequency Description table)",
       "effective_date": "String (MM/DD/YYYY)",
       "expiration_date": "String (MM/DD/YYYY)",
-      "trip_summary": {
-        "trip_miles": "Number",
-        "trip_hrs": "Number or null",
-        "drive_time": "Number or null"
-      },
+      "trip_miles": "Number",
       "stops": [
         {
           "stop_number": "Integer",
           "arrive_time": "String (HH:MM:SS)",
           "depart_time": "String (HH:MM:SS)",
           "load_unload_minutes": "Integer",
-          "facility": {
-            "nass_code": "String",
-            "facility_name": "String",
-            "address": "String (Merged from NASS table)",
-            "city": "String (Merged from NASS table)",
-            "state": "String (Merged from NASS table)",
-            "zip": "String (Merged from NASS table)",
-            "phone": "String or null"
-          }
+          "nass_code": "String",
+          "facility_name": "String",
+          "address": "String (from NASS table)",
+          "city": "String (from NASS table)",
+          "state": "String (from NASS table)",
+          "zip": "String (from NASS table)"
         }
       ]
-    }
+    }`;
+  } else {
+    tripSchema = `{
+      "trip_id": "String",
+      "vehicle_code": "String",
+      "vehicle_description": "String (from Vehicle Requirements table)",
+      "frequency_code": "String",
+      "frequency_days": "Number",
+      "frequency_description": "String (from Frequency Description table)",
+      "effective_date": "String (MM/DD/YYYY)",
+      "expiration_date": "String (MM/DD/YYYY)",
+      "trip_miles": "Number"
+    }`;
+  }
+
+  return `${baseInstructions}${facilityInstructions}
+
+JSON SCHEMA:
+{
+  "hcr_number": "String",
+  "total_trip_count": "Integer (the total number of trips you found in the document)",
+  "trips": [
+    ${tripSchema}
   ]
 }
 
-IMPORTANT: All pages of the document belong to the same contract. The trip schedule is typically on the first pages, and the NASS/Facility lookup tables, Frequency tables, and Vehicle tables appear on subsequent pages. You MUST cross-reference these tables to build the complete trip objects.`;
+IMPORTANT: All pages belong to the same contract. Extract EVERY trip row — do not summarize or skip any. The "total_trip_count" must equal the length of the "trips" array.`;
 }
 
 type OcrTrip = {
@@ -152,12 +155,19 @@ type OcrTrip = {
   frequency_description?: string;
   effective_date?: string;
   expiration_date?: string;
+  trip_miles?: number;
   trip_summary?: { trip_miles?: number; trip_hrs?: number; drive_time?: number };
   stops?: Array<{
     stop_number?: number;
     arrive_time?: string;
     depart_time?: string;
     load_unload_minutes?: number;
+    nass_code?: string;
+    facility_name?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
     facility?: {
       nass_code?: string;
       facility_name?: string;
@@ -171,56 +181,42 @@ type OcrTrip = {
 };
 
 type OcrResult = {
+  hcr_number?: string;
+  total_trip_count?: number;
+  trips?: OcrTrip[];
   contract_header?: {
     hcr_number?: string;
-    as_of_date?: string;
-    contract_origin?: string;
-    contract_destination?: string;
-    admin_official?: string;
   };
-  supplier_details?: {
-    supplier_name?: string;
-    supplier_address?: string;
-    supplier_phone?: string;
-    supplier_email?: string;
-  };
-  billing_details?: { description?: string } | null;
-  trips?: OcrTrip[];
 };
 
 function hi(val: unknown) {
   return { value: val ?? null, confidence: 'high' as const };
 }
 
+function parseDate(dateStr: string | undefined | null): string | null {
+  if (!dateStr) return null;
+  const parts = dateStr.split('/');
+  if (parts.length === 3) {
+    return `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+  }
+  return dateStr;
+}
+
 function convertOcrToExtractedLanes(ocr: OcrResult) {
-  const hcr = ocr.contract_header?.hcr_number || null;
+  const hcr = ocr.hcr_number || ocr.contract_header?.hcr_number || null;
   const trips = ocr.trips || [];
 
   return trips.map((trip) => {
     const stops = (trip.stops || []).map((s, idx) => ({
-      address: hi(s.facility?.address || null),
-      city: hi(s.facility?.city || null),
-      state: hi(s.facility?.state || null),
-      zip: hi(s.facility?.zip || null),
+      address: hi(s.address || s.facility?.address || null),
+      city: hi(s.city || s.facility?.city || null),
+      state: hi(s.state || s.facility?.state || null),
+      zip: hi(s.zip || s.facility?.zip || null),
       stopOrder: hi(idx + 1),
       stopType: hi(idx === 0 ? 'Pickup' : 'Delivery'),
     }));
 
-    let effectiveDate: string | null = null;
-    if (trip.effective_date) {
-      const parts = trip.effective_date.split('/');
-      if (parts.length === 3) {
-        effectiveDate = `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
-      }
-    }
-
-    let expirationDate: string | null = null;
-    if (trip.expiration_date) {
-      const parts = trip.expiration_date.split('/');
-      if (parts.length === 3) {
-        expirationDate = `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
-      }
-    }
+    const miles = trip.trip_miles ?? trip.trip_summary?.trip_miles ?? null;
 
     const equipDesc = (trip.vehicle_description || trip.vehicle_code || '').toUpperCase();
     let equipmentSize: string | null = null;
@@ -232,10 +228,10 @@ function convertOcrToExtractedLanes(ocr: OcrResult) {
       hcr: hi(hcr),
       tripNumber: hi(trip.trip_id),
       contractName: hi(hcr ? `Lane: ${hcr}/${trip.trip_id}` : null),
-      contractPeriodStart: hi(effectiveDate),
-      contractPeriodEnd: hi(expirationDate),
+      contractPeriodStart: hi(parseDate(trip.effective_date)),
+      contractPeriodEnd: hi(parseDate(trip.expiration_date)),
       stops,
-      miles: hi(trip.trip_summary?.trip_miles ?? null),
+      miles: hi(miles),
       equipmentClass: hi(null),
       equipmentSize: hi(equipmentSize),
       _selected: true,
@@ -250,6 +246,42 @@ function convertOcrToExtractedLanes(ocr: OcrResult) {
       },
     };
   });
+}
+
+function repairTruncatedJson(raw: string): OcrResult | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Response was cut off mid-JSON. Try to salvage the trips array.
+  }
+
+  try {
+    // Find the last complete object in the trips array
+    const tripsStart = raw.indexOf('"trips"');
+    if (tripsStart === -1) return null;
+
+    const arrayStart = raw.indexOf('[', tripsStart);
+    if (arrayStart === -1) return null;
+
+    // Walk backwards from end to find the last complete "}" for a trip object
+    let depth = 0;
+    let lastValidEnd = -1;
+    for (let i = arrayStart + 1; i < raw.length; i++) {
+      if (raw[i] === '{') depth++;
+      if (raw[i] === '}') {
+        depth--;
+        if (depth === 0) lastValidEnd = i;
+      }
+    }
+
+    if (lastValidEnd === -1) return null;
+
+    // Reconstruct valid JSON by closing the array and root object
+    const repaired = raw.substring(0, lastValidEnd + 1) + ']}';
+    return JSON.parse(repaired);
+  } catch {
+    return null;
+  }
 }
 
 export const extractLanesFromSchedule = action({
@@ -279,8 +311,14 @@ export const extractLanesFromSchedule = action({
         image_url: { url, detail: 'auto' as const },
       }));
 
+    const allTrips: OcrTrip[] = [];
+    let hcrNumber: string | null = null;
+    let expectedTripCount: number | null = null;
+    const MAX_CONTINUATION_ROUNDS = 4;
+
     try {
-      console.log('[extractLanes] Calling OpenAI...');
+      // Initial extraction request
+      console.log('[extractLanes] Calling OpenAI (initial)...');
       const response = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
@@ -292,7 +330,7 @@ export const extractLanesFromSchedule = action({
               ...imageContent,
               {
                 type: 'text',
-                text: 'Extract the complete contract data from all the document pages above. Cross-reference the NASS facility codes, frequency codes, and vehicle codes from the lookup tables into the trip data.',
+                text: 'Extract ALL trips from this contract document. Cross-reference frequency codes and vehicle codes from lookup tables.',
               },
             ],
           },
@@ -302,23 +340,125 @@ export const extractLanesFromSchedule = action({
       });
 
       const content = response.choices[0]?.message?.content;
+      const finishReason = response.choices[0]?.finish_reason;
+
       if (!content) {
         return { lanes: [], error: 'No response content from OpenAI' };
       }
 
-      console.log(`[extractLanes] OpenAI responded, ${content.length} chars`);
-      const parsed: OcrResult = JSON.parse(content);
+      console.log(`[extractLanes] Response: ${content.length} chars, finish_reason=${finishReason}`);
 
-      console.log(`[extractLanes] HCR: ${parsed.contract_header?.hcr_number}, Trips: ${parsed.trips?.length || 0}`);
+      let parsed: OcrResult | null;
+      if (finishReason === 'length') {
+        console.log('[extractLanes] Response truncated, attempting JSON repair...');
+        parsed = repairTruncatedJson(content);
+        if (!parsed) {
+          return { lanes: [], error: 'Response was truncated and could not be repaired. Try fewer pages.' };
+        }
+        console.log(`[extractLanes] Repaired JSON: ${parsed.trips?.length || 0} trips recovered`);
+      } else {
+        parsed = JSON.parse(content);
+      }
 
-      const lanes = convertOcrToExtractedLanes(parsed);
+      hcrNumber = parsed!.hcr_number || parsed!.contract_header?.hcr_number || null;
+      expectedTripCount = parsed!.total_trip_count || null;
+      const initialTrips = parsed!.trips || [];
+      allTrips.push(...initialTrips);
 
-      console.log(`[extractLanes] Converted to ${lanes.length} lanes`);
-      return { lanes };
+      console.log(`[extractLanes] HCR: ${hcrNumber}, Expected: ${expectedTripCount}, Got: ${initialTrips.length} trips`);
+
+      // Continuation: if we got truncated or expected more trips, request remaining
+      if (
+        expectedTripCount &&
+        allTrips.length < expectedTripCount &&
+        allTrips.length > 0
+      ) {
+        const extractedIds = allTrips.map((t) => t.trip_id).join(', ');
+
+        for (let round = 0; round < MAX_CONTINUATION_ROUNDS; round++) {
+          const remaining = expectedTripCount - allTrips.length;
+          if (remaining <= 0) break;
+
+          console.log(`[extractLanes] Continuation round ${round + 1}: need ${remaining} more trips`);
+
+          const contResponse = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: systemPrompt },
+              {
+                role: 'user',
+                content: [
+                  ...imageContent,
+                  {
+                    type: 'text',
+                    text: `You already extracted these trip IDs: ${extractedIds}. There are ${remaining} more trips in the document. Extract ONLY the remaining trips that are NOT in the list above. Return them in the same JSON schema with a "trips" array.`,
+                  },
+                ],
+              },
+            ],
+            max_tokens: 16384,
+            temperature: 0,
+          });
+
+          const contContent = contResponse.choices[0]?.message?.content;
+          const contFinish = contResponse.choices[0]?.finish_reason;
+
+          if (!contContent) break;
+
+          console.log(`[extractLanes] Continuation: ${contContent.length} chars, finish_reason=${contFinish}`);
+
+          let contParsed: OcrResult | null;
+          if (contFinish === 'length') {
+            contParsed = repairTruncatedJson(contContent);
+          } else {
+            try {
+              contParsed = JSON.parse(contContent);
+            } catch {
+              contParsed = repairTruncatedJson(contContent);
+            }
+          }
+
+          if (!contParsed?.trips?.length) break;
+
+          const existingIds = new Set(allTrips.map((t) => t.trip_id));
+          const newTrips = contParsed.trips.filter((t) => !existingIds.has(t.trip_id));
+
+          if (newTrips.length === 0) break;
+
+          allTrips.push(...newTrips);
+          console.log(`[extractLanes] +${newTrips.length} new trips, total: ${allTrips.length}`);
+        }
+      }
+
+      const fullResult: OcrResult = {
+        hcr_number: hcrNumber || undefined,
+        trips: allTrips,
+      };
+
+      const lanes = convertOcrToExtractedLanes(fullResult);
+      console.log(`[extractLanes] Final: ${lanes.length} lanes extracted`);
+
+      const warning =
+        expectedTripCount && lanes.length < expectedTripCount
+          ? `Extracted ${lanes.length} of ${expectedTripCount} expected trips. Some may have been missed.`
+          : undefined;
+
+      return { lanes, error: warning };
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unknown error during extraction';
       console.error(`[extractLanes] Error: ${message}`);
+
+      if (allTrips.length > 0) {
+        console.log(`[extractLanes] Returning ${allTrips.length} trips collected before error`);
+        const partial: OcrResult = { hcr_number: hcrNumber || undefined, trips: allTrips };
+        return {
+          lanes: convertOcrToExtractedLanes(partial),
+          error: `Partial extraction (${allTrips.length} trips): ${message}`,
+        };
+      }
+
       return { lanes: [], error: message };
     }
   },
