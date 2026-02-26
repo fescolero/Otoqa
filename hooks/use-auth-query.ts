@@ -18,5 +18,5 @@ export function useAuthQuery<Query extends FunctionReference<'query'>>(
   const { isAuthenticated } = useConvexAuth();
   const shouldSkip = !isAuthenticated || args === 'skip';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return useQuery(query, shouldSkip ? 'skip' : args) as any;
+  return useQuery(query, (shouldSkip ? 'skip' : args) as any);
 }
