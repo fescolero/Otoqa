@@ -236,6 +236,16 @@ export const updateClerkUserPhone = internalAction({
     })
   ),
   handler: async (ctx, args): Promise<UpdateResult> => {
+    const safeParseJson = async (response: Response): Promise<unknown> => {
+      const text = await response.text();
+      if (!text) return null;
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { raw: text };
+      }
+    };
+
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) {
       console.error('CLERK_SECRET_KEY not configured');
@@ -319,7 +329,11 @@ export const updateClerkUserPhone = internalAction({
       });
 
       if (!addPhoneResponse.ok) {
-        const errorData = await addPhoneResponse.json();
+        const errorData = await safeParseJson(addPhoneResponse) as { errors?: Array<{ code?: string; message?: string }>; raw?: string } | null;
+        console.log('[clerkSync.updateClerkUserPhone] add phone failed', {
+          status: addPhoneResponse.status,
+          error: errorData ?? null,
+        });
         
         // If the new phone already exists on another user, that's a problem
         if (errorData.errors?.[0]?.code === 'form_identifier_exists') {
@@ -329,19 +343,26 @@ export const updateClerkUserPhone = internalAction({
           return { success: false, error: 'New phone number is already in use by another account' };
         }
         
-        return { success: false, error: `Failed to add new phone: ${errorData.errors?.[0]?.message}` };
+        return { success: false, error: `Failed to add new phone: ${errorData?.errors?.[0]?.message || errorData?.raw || `HTTP ${addPhoneResponse.status}`}` };
       }
 
       // Delete the old phone number
       const phoneNumbers = users[0].phone_numbers || [];
       const oldPhoneRecord = phoneNumbers.find((p: { phone_number: string; id: string }) => p.phone_number === oldE164);
       if (oldPhoneRecord) {
-        await fetch(`https://api.clerk.com/v1/users/${userId}/phone_numbers/${oldPhoneRecord.id}`, {
+        const deleteResponse = await fetch(`https://api.clerk.com/v1/users/${userId}/phone_numbers/${oldPhoneRecord.id}`, {
           method: 'DELETE',
           headers: {
             'Authorization': `Bearer ${clerkSecretKey}`,
           },
         });
+        if (!deleteResponse.ok) {
+          const deleteError = await safeParseJson(deleteResponse) as { errors?: Array<{ message?: string }>; raw?: string } | null;
+          console.log('[clerkSync.updateClerkUserPhone] delete old phone failed', {
+            status: deleteResponse.status,
+            error: deleteError ?? null,
+          });
+        }
       }
 
       console.log(`Successfully updated Clerk user phone number`);
