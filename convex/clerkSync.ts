@@ -246,6 +246,28 @@ export const updateClerkUserPhone = internalAction({
         return { raw: text };
       }
     };
+    const updateUserPrimaryPhoneFallback = async (
+      userId: string
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const patchResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${clerkSecretKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          phone_number: [newE164],
+        }),
+      });
+      if (!patchResponse.ok) {
+        const patchError = await safeParseJson(patchResponse) as { errors?: Array<{ message?: string }>; raw?: string } | null;
+        return {
+          ok: false,
+          error: patchError?.errors?.[0]?.message || patchError?.raw || `HTTP ${patchResponse.status}`,
+        };
+      }
+      return { ok: true };
+    };
 
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) {
@@ -297,6 +319,17 @@ export const updateClerkUserPhone = internalAction({
               status: addPhoneResponse.status,
               errorData: errorData ?? null,
             });
+            if (addPhoneResponse.status === 404) {
+              const fallback = await updateUserPrimaryPhoneFallback(user.id);
+              console.log('[clerkSync.updateClerkUserPhone] target-user fallback patch result', {
+                ok: fallback.ok,
+                error: fallback.error ?? null,
+              });
+              if (fallback.ok) {
+                return { success: true, action: 'updated_target_user_patch' };
+              }
+              return { success: false, error: `Failed to update target user phone: ${fallback.error}` };
+            }
             if (errorData?.errors?.[0]?.code === 'form_identifier_exists') {
               return { success: false, error: 'New phone number is already in use by another account' };
             }
@@ -414,6 +447,17 @@ export const updateClerkUserPhone = internalAction({
           status: addPhoneResponse.status,
           errorData: errorData ?? null,
         });
+        if (addPhoneResponse.status === 404) {
+          const fallback = await updateUserPrimaryPhoneFallback(userId);
+          console.log('[clerkSync.updateClerkUserPhone] fallback patch result', {
+            ok: fallback.ok,
+            error: fallback.error ?? null,
+          });
+          if (fallback.ok) {
+            return { success: true, action: 'updated_patch' };
+          }
+          return { success: false, error: `Failed to update user phone: ${fallback.error}` };
+        }
         
         // If the new phone already exists on another user, that's a problem
         if (errorData?.errors?.[0]?.code === 'form_identifier_exists') {
