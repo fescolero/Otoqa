@@ -623,7 +623,7 @@ export const update = mutation({
       }
     }
     // === BROKER → DRIVER SYNC: Update linked driver when partnership fields change ===
-    else if (partnership.carrierOrgId) {
+    if (partnership.carrierOrgId) {
       const carrierOrgId = partnership.carrierOrgId as Id<'organizations'>;
       const carrierOrg = await ctx.db.get(carrierOrgId);
       const nextOwnerPhone = updates.ownerDriverPhone ?? updates.contactPhone ?? previousOwnerPhone;
