@@ -336,7 +336,7 @@ export const updateClerkUserPhone = internalAction({
         });
         
         // If the new phone already exists on another user, that's a problem
-        if (errorData.errors?.[0]?.code === 'form_identifier_exists') {
+        if (errorData?.errors?.[0]?.code === 'form_identifier_exists') {
           // #region agent log
           fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:307',message:'New phone already exists on another Clerk user',data:{newE164},timestamp:Date.now()})}).catch(()=>{});
           // #endregion
