@@ -315,11 +315,30 @@ export const extractLanesFromSchedule = action({
     let hcrNumber: string | null = null;
     let expectedTripCount: number | null = null;
     const MAX_CONTINUATION_ROUNDS = 4;
+    const RATE_LIMIT_RETRIES = 3;
+
+    async function callWithRetry(
+      createParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+    ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+      for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
+        try {
+          return await openai.chat.completions.create(createParams);
+        } catch (err: unknown) {
+          const isRateLimit =
+            err instanceof Error &&
+            (err.message.includes('429') || err.message.includes('Rate limit'));
+          if (!isRateLimit || attempt === RATE_LIMIT_RETRIES) throw err;
+          const delayMs = Math.min(2000 * Math.pow(2, attempt), 15000);
+          console.log(`[extractLanes] Rate limited, retrying in ${delayMs}ms (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})...`);
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+      }
+      throw new Error('Unreachable');
+    }
 
     try {
-      // Initial extraction request
       console.log('[extractLanes] Calling OpenAI (initial)...');
-      const response = await openai.chat.completions.create({
+      const response = await callWithRetry({
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
         messages: [
@@ -373,15 +392,19 @@ export const extractLanesFromSchedule = action({
         allTrips.length < expectedTripCount &&
         allTrips.length > 0
       ) {
-        const extractedIds = allTrips.map((t) => t.trip_id).join(', ');
-
         for (let round = 0; round < MAX_CONTINUATION_ROUNDS; round++) {
           const remaining = expectedTripCount - allTrips.length;
           if (remaining <= 0) break;
 
+          // Delay between requests to avoid rate limiting
+          const delayMs = 2000 + round * 1000;
+          console.log(`[extractLanes] Waiting ${delayMs}ms before continuation round ${round + 1}...`);
+          await new Promise((r) => setTimeout(r, delayMs));
+
+          const extractedIds = allTrips.map((t) => t.trip_id).join(', ');
           console.log(`[extractLanes] Continuation round ${round + 1}: need ${remaining} more trips`);
 
-          const contResponse = await openai.chat.completions.create({
+          const contResponse = await callWithRetry({
             model: 'gpt-4o-mini',
             response_format: { type: 'json_object' },
             messages: [

@@ -468,6 +468,7 @@ export const getSettings = query({
       triggerOnCreate: v.boolean(),
       scheduledEnabled: v.boolean(),
       scheduleIntervalMinutes: v.optional(v.number()),
+      lastScheduledRunAt: v.optional(v.number()),
       updatedBy: v.string(),
       updatedAt: v.number(),
     }),
