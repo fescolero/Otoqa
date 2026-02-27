@@ -239,6 +239,9 @@ export const updateClerkUserPhone = internalAction({
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) {
       console.error('CLERK_SECRET_KEY not configured');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:242',message:'updateClerkUserPhone aborted missing CLERK_SECRET_KEY',data:{oldPhone:args.oldPhone,newPhone:args.newPhone},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return { success: false, error: 'CLERK_SECRET_KEY not configured' };
     }
 
@@ -248,6 +251,9 @@ export const updateClerkUserPhone = internalAction({
     console.log(`Updating Clerk user phone number`);
 
     try {
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:252',message:'Started updateClerkUserPhone action',data:{oldE164,newE164,firstName:args.firstName,lastName:args.lastName},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       // First, find the user by their old phone number
       const searchResponse = await fetch(
         `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(oldE164)}`,
@@ -260,6 +266,9 @@ export const updateClerkUserPhone = internalAction({
 
       if (!searchResponse.ok) {
         const errorData = await searchResponse.json();
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:264',message:'Failed Clerk user search in updateClerkUserPhone',data:{status:searchResponse.status,error:errorData.errors?.[0]?.message||null},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         return { success: false, error: `Failed to search for user: ${errorData.errors?.[0]?.message}` };
       }
 
@@ -275,6 +284,9 @@ export const updateClerkUserPhone = internalAction({
         });
         
         if (createResult.success) {
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:280',message:'No old user found; created new Clerk user during phone update',data:{newE164},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           return { success: true, action: 'created_new' };
         } else {
           return { success: false, error: createResult.error };
@@ -302,6 +314,9 @@ export const updateClerkUserPhone = internalAction({
         
         // If the new phone already exists on another user, that's a problem
         if (errorData.errors?.[0]?.code === 'form_identifier_exists') {
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:307',message:'New phone already exists on another Clerk user',data:{newE164},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           return { success: false, error: 'New phone number is already in use by another account' };
         }
         
@@ -321,10 +336,16 @@ export const updateClerkUserPhone = internalAction({
       }
 
       console.log(`Successfully updated Clerk user phone number`);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:326',message:'Successfully completed updateClerkUserPhone',data:{oldE164,newE164,userId},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return { success: true, action: 'updated' };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`Error updating Clerk user phone: ${errorMessage}`);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:331',message:'Exception in updateClerkUserPhone',data:{error:errorMessage},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return { success: false, error: errorMessage };
     }
   },

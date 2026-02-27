@@ -367,6 +367,9 @@ export const update = mutation({
     // Get current driver data for audit log
     const driver = await ctx.db.get(id);
     if (!driver) throw new Error('Driver not found');
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H7',location:'drivers.ts:370',message:'Entered drivers.update',data:{driverId:id,oldPhone:driver.phone,incomingPhone:updates.phone??null,organizationId:driver.organizationId},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
 
     // Handle payPlanId separately (it's an Id type, not a string)
     if (payPlanId !== undefined) {
@@ -429,6 +432,9 @@ export const update = mutation({
         firstName: updates.firstName || driver.firstName,
         lastName: updates.lastName || driver.lastName,
       });
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H7',location:'drivers.ts:432',message:'Scheduled Clerk phone update from drivers.update',data:{driverId:id,oldPhone:driver.phone,newPhone:updates.phone},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
     }
 
     // === DRIVER → PARTNERSHIP SYNC: Update partnerships when owner-driver changes ===
