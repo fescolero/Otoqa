@@ -94,9 +94,6 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
     try {
       const formData = new FormData(e.currentTarget);
       const newStatus = formData.get('status') as string;
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H1',location:'carrier-edit-content.tsx:98',message:'Submitting carrier partnership update payload',data:{partnershipId,isOwnerOperator,carrierOrgId:partnership.carrierOrgId,contactPhone:formData.get('contactPhone')||null,ownerDriverPhone:formData.get('ownerDriverPhone')||null},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       // Update partnership details
       await updatePartnership({

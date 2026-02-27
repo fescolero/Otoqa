@@ -1250,9 +1250,6 @@ export const updateDriver = mutation({
     if (!driver) {
       throw new Error('Driver not found');
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H8',location:'carrierMobile.ts:1254',message:'Entered carrierMobile.updateDriver',data:{driverId,incomingPhone:updates.phone??null,oldPhone:driver.phone,carrierOrgId},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     
     if (driver.organizationId !== carrierOrgId) {
       throw new Error('Driver does not belong to this organization');
@@ -1276,9 +1273,6 @@ export const updateDriver = mutation({
         firstName: updates.firstName || driver.firstName,
         lastName: updates.lastName || driver.lastName,
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H8',location:'carrierMobile.ts:1276',message:'Scheduled Clerk phone update from carrierMobile.updateDriver',data:{driverId,oldPhone:driver.phone,newPhone:updates.phone},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     } else {
       // Phone didn't change - ensure Clerk user exists (for drivers created before sync was added)
       ctx.scheduler.runAfter(0, internal.clerkSync.createClerkUserForDriver, {
