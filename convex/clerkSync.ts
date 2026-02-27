@@ -224,6 +224,7 @@ export const updateClerkUserPhone = internalAction({
     newPhone: v.string(),
     firstName: v.string(),
     lastName: v.string(),
+    targetClerkUserId: v.optional(v.string()),
   },
   returns: v.union(
     v.object({
@@ -257,6 +258,70 @@ export const updateClerkUserPhone = internalAction({
 
     console.log(`Updating Clerk user phone number`);
     try {
+      // If we already know which Clerk user should be updated, prefer that over phone search.
+      if (args.targetClerkUserId) {
+        const userResponse = await fetch(`https://api.clerk.com/v1/users/${args.targetClerkUserId}`, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${clerkSecretKey}`,
+          },
+        });
+        if (userResponse.ok) {
+          const user = await userResponse.json() as { id: string; phone_numbers?: Array<{ id: string; phone_number: string }> };
+          const phoneNumbers = user.phone_numbers || [];
+          const alreadyHasNewPhone = phoneNumbers.some((p) => p.phone_number === newE164);
+          if (alreadyHasNewPhone) {
+            console.log('[clerkSync.updateClerkUserPhone] target user already has new phone', {
+              userId: user.id,
+              newE164,
+            });
+            return { success: true, action: 'already_current' };
+          }
+
+          const addPhoneResponse = await fetch(`https://api.clerk.com/v1/users/${user.id}/phone_numbers`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${clerkSecretKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              phone_number: newE164,
+              verified: true,
+              primary: true,
+            }),
+          });
+
+          if (!addPhoneResponse.ok) {
+            const errorData = await safeParseJson(addPhoneResponse) as { errors?: Array<{ code?: string; message?: string }>; raw?: string } | null;
+            console.log('[clerkSync.updateClerkUserPhone] target-user add phone failed', {
+              status: addPhoneResponse.status,
+              errorData: errorData ?? null,
+            });
+            if (errorData?.errors?.[0]?.code === 'form_identifier_exists') {
+              return { success: false, error: 'New phone number is already in use by another account' };
+            }
+            return { success: false, error: `Failed to add new phone: ${errorData?.errors?.[0]?.message || errorData?.raw || `HTTP ${addPhoneResponse.status}`}` };
+          }
+
+          const oldPhoneRecord = phoneNumbers.find((p) => p.phone_number === oldE164);
+          if (oldPhoneRecord) {
+            await fetch(`https://api.clerk.com/v1/users/${user.id}/phone_numbers/${oldPhoneRecord.id}`, {
+              method: 'DELETE',
+              headers: {
+                'Authorization': `Bearer ${clerkSecretKey}`,
+              },
+            });
+          }
+
+          console.log('[clerkSync.updateClerkUserPhone] updated target Clerk user by ID', {
+            userId: user.id,
+            oldE164,
+            newE164,
+          });
+          return { success: true, action: 'updated_target_user' };
+        }
+      }
+
       // First, find the user by their old phone number
       const searchResponse = await fetch(
         `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(oldE164)}`,
@@ -280,6 +345,29 @@ export const updateClerkUserPhone = internalAction({
       console.log('[clerkSync.updateClerkUserPhone] search result', {
         count: Array.isArray(users) ? users.length : -1,
       });
+
+      // Additional diagnostics: which Clerk account currently owns old/new phone.
+      const newPhoneLookupResponse = await fetch(
+        `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(newE164)}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${clerkSecretKey}`,
+          },
+        }
+      );
+      if (newPhoneLookupResponse.ok) {
+        const newPhoneUsers = await newPhoneLookupResponse.json();
+        console.log('[clerkSync.updateClerkUserPhone] old/new phone ownership snapshot', {
+          oldPhoneUserIds: Array.isArray(users) ? users.map((u: { id: string }) => u.id) : [],
+          newPhoneUserIds: Array.isArray(newPhoneUsers)
+            ? newPhoneUsers.map((u: { id: string }) => u.id)
+            : [],
+        });
+      } else {
+        console.log('[clerkSync.updateClerkUserPhone] new phone lookup failed', {
+          status: newPhoneLookupResponse.status,
+        });
+      }
 
       if (users.length === 0) {
         // User doesn't exist in Clerk - create them with the new phone

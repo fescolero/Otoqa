@@ -639,20 +639,27 @@ export const update = mutation({
             typeof ownerDriver.phone === 'string' &&
             nextOwnerPhone !== ownerDriver.phone
           ) {
+            const identityLinks = await ctx.db
+              .query('userIdentityLinks')
+              .withIndex('by_org', (q) => q.eq('organizationId', carrierOrgId))
+              .collect();
+            const targetIdentityLink = identityLinks.find(
+              (link) =>
+                (link.role === 'OWNER' || link.role === 'ADMIN') &&
+                !!link.clerkUserId &&
+                !link.clerkUserId.startsWith('pending_')
+            );
+
             await ctx.scheduler.runAfter(0, internal.clerkSync.updateClerkUserPhone, {
               oldPhone: ownerDriver.phone,
               newPhone: nextOwnerPhone,
               firstName: (updates.ownerDriverFirstName as string) || ownerDriver.firstName,
               lastName: (updates.ownerDriverLastName as string) || ownerDriver.lastName,
+              targetClerkUserId: targetIdentityLink?.clerkUserId,
             });
 
             // Keep OWNER/ADMIN identity links aligned for phone-based role lookup.
-            const links = await ctx.db
-              .query('userIdentityLinks')
-              .withIndex('by_org', (q) => q.eq('organizationId', carrierOrgId))
-              .collect();
-
-            for (const link of links) {
+            for (const link of identityLinks) {
               if (link.role === 'OWNER' || link.role === 'ADMIN') {
                 await ctx.db.patch(link._id, {
                   phone: nextOwnerPhone,
