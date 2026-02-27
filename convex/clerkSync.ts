@@ -249,6 +249,12 @@ export const updateClerkUserPhone = internalAction({
     const newE164 = normalizePhoneToE164(args.newPhone);
 
     console.log(`Updating Clerk user phone number`);
+    console.log('[clerkSync.updateClerkUserPhone] start', {
+      oldPhone: args.oldPhone,
+      newPhone: args.newPhone,
+      oldE164,
+      newE164,
+    });
 
     try {
       // #region agent log
@@ -273,6 +279,9 @@ export const updateClerkUserPhone = internalAction({
       }
 
       const users = await searchResponse.json();
+      console.log('[clerkSync.updateClerkUserPhone] search result count', {
+        count: Array.isArray(users) ? users.length : -1,
+      });
 
       if (users.length === 0) {
         // User doesn't exist in Clerk - create them with the new phone
@@ -336,6 +345,7 @@ export const updateClerkUserPhone = internalAction({
       }
 
       console.log(`Successfully updated Clerk user phone number`);
+      console.log('[clerkSync.updateClerkUserPhone] success', { userId, oldE164, newE164 });
       // #region agent log
       fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:326',message:'Successfully completed updateClerkUserPhone',data:{oldE164,newE164,userId},timestamp:Date.now()})}).catch(()=>{});
       // #endregion
@@ -343,6 +353,7 @@ export const updateClerkUserPhone = internalAction({
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`Error updating Clerk user phone: ${errorMessage}`);
+      console.log('[clerkSync.updateClerkUserPhone] exception', { error: errorMessage });
       // #region agent log
       fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'before-fix',hypothesisId:'H9',location:'clerkSync.ts:331',message:'Exception in updateClerkUserPhone',data:{error:errorMessage},timestamp:Date.now()})}).catch(()=>{});
       // #endregion

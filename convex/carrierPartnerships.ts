@@ -531,6 +531,14 @@ export const update = mutation({
 
     const now = Date.now();
     const previousOwnerPhone = partnership.ownerDriverPhone || partnership.contactPhone || null;
+    console.log('[carrierPartnerships.update] start', {
+      partnershipId,
+      carrierOrgId: partnership.carrierOrgId ?? null,
+      previousOwnerPhone,
+      incomingOwnerDriverPhone: updates.ownerDriverPhone ?? null,
+      incomingContactPhone: updates.contactPhone ?? null,
+      incomingIsOwnerOperator: updates.isOwnerOperator ?? null,
+    });
 
     // Remove undefined values
     const cleanUpdates: Record<string, unknown> = { updatedAt: now };
@@ -619,6 +627,12 @@ export const update = mutation({
       const carrierOrgId = partnership.carrierOrgId as Id<'organizations'>;
       const carrierOrg = await ctx.db.get(carrierOrgId);
       const nextOwnerPhone = updates.ownerDriverPhone ?? updates.contactPhone ?? previousOwnerPhone;
+      console.log('[carrierPartnerships.update] sync branch', {
+        partnershipId,
+        carrierOrgId: String(carrierOrgId),
+        hasOwnerDriverId: Boolean(carrierOrg?.ownerDriverId),
+        nextOwnerPhone,
+      });
       
       // If org has a linked owner-driver, sync the updated fields
       if (carrierOrg?.ownerDriverId) {
@@ -652,6 +666,12 @@ export const update = mutation({
             typeof ownerDriver.phone === 'string' &&
             nextOwnerPhone !== ownerDriver.phone
           ) {
+            console.log('[carrierPartnerships.update] scheduling Clerk phone sync', {
+              partnershipId,
+              carrierOrgId: String(carrierOrgId),
+              oldPhone: ownerDriver.phone,
+              newPhone: nextOwnerPhone,
+            });
             await ctx.scheduler.runAfter(0, internal.clerkSync.updateClerkUserPhone, {
               oldPhone: ownerDriver.phone,
               newPhone: nextOwnerPhone,
@@ -676,6 +696,12 @@ export const update = mutation({
             // #region agent log
             fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'post-fix',hypothesisId:'H6',location:'carrierPartnerships.ts:684',message:'Scheduled Clerk owner phone sync from carrier partnership update',data:{partnershipId,carrierOrgId:String(carrierOrgId),oldPhone:ownerDriver.phone,newPhone:nextOwnerPhone},timestamp:Date.now()})}).catch(()=>{});
             // #endregion
+          } else {
+            console.log('[carrierPartnerships.update] no Clerk sync condition met', {
+              partnershipId,
+              oldPhone: ownerDriver.phone,
+              nextOwnerPhone,
+            });
           }
         }
       }
