@@ -269,10 +269,17 @@ export const updateClerkUserPhone = internalAction({
 
       if (!searchResponse.ok) {
         const errorData = await searchResponse.json();
+        console.log('[clerkSync.updateClerkUserPhone] search failed', {
+          status: searchResponse.status,
+          error: errorData?.errors?.[0]?.message || null,
+        });
         return { success: false, error: `Failed to search for user: ${errorData.errors?.[0]?.message}` };
       }
 
       const users = await searchResponse.json();
+      console.log('[clerkSync.updateClerkUserPhone] search result', {
+        count: Array.isArray(users) ? users.length : -1,
+      });
 
       if (users.length === 0) {
         // User doesn't exist in Clerk - create them with the new phone
@@ -284,8 +291,15 @@ export const updateClerkUserPhone = internalAction({
         });
         
         if (createResult.success) {
+          console.log('[clerkSync.updateClerkUserPhone] created/found user via fallback', {
+            action: 'created_new',
+            createResult,
+          });
           return { success: true, action: 'created_new' };
         } else {
+          console.log('[clerkSync.updateClerkUserPhone] fallback create failed', {
+            error: createResult.error,
+          });
           return { success: false, error: createResult.error };
         }
       }
@@ -308,6 +322,10 @@ export const updateClerkUserPhone = internalAction({
 
       if (!addPhoneResponse.ok) {
         const errorData = await safeParseJson(addPhoneResponse) as { errors?: Array<{ code?: string; message?: string }>; raw?: string } | null;
+        console.log('[clerkSync.updateClerkUserPhone] add phone failed', {
+          status: addPhoneResponse.status,
+          errorData: errorData ?? null,
+        });
         
         // If the new phone already exists on another user, that's a problem
         if (errorData?.errors?.[0]?.code === 'form_identifier_exists') {
@@ -333,10 +351,12 @@ export const updateClerkUserPhone = internalAction({
       }
 
       console.log(`Successfully updated Clerk user phone number`);
+      console.log('[clerkSync.updateClerkUserPhone] returning updated');
       return { success: true, action: 'updated' };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`Error updating Clerk user phone: ${errorMessage}`);
+      console.log('[clerkSync.updateClerkUserPhone] returning error', { error: errorMessage });
       return { success: false, error: errorMessage };
     }
   },
