@@ -249,24 +249,59 @@ export const updateClerkUserPhone = internalAction({
     const updateUserPrimaryPhoneFallback = async (
       userId: string
     ): Promise<{ ok: boolean; error?: string }> => {
-      const patchResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${clerkSecretKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          phone_number: [newE164],
-        }),
-      });
-      if (!patchResponse.ok) {
-        const patchError = await safeParseJson(patchResponse) as { errors?: Array<{ message?: string }>; raw?: string } | null;
-        return {
-          ok: false,
-          error: patchError?.errors?.[0]?.message || patchError?.raw || `HTTP ${patchResponse.status}`,
-        };
-      }
-      return { ok: true };
+      const tryPatch = async (
+        payload: Record<string, unknown>
+      ): Promise<{ ok: boolean; error?: string }> => {
+        const patchResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${clerkSecretKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+        if (!patchResponse.ok) {
+          const patchError = await safeParseJson(patchResponse) as { errors?: Array<{ message?: string }>; raw?: string } | null;
+          return {
+            ok: false,
+            error: patchError?.errors?.[0]?.message || patchError?.raw || `HTTP ${patchResponse.status}`,
+          };
+        }
+
+        // Verify the phone was actually updated; some API variants return 200 but ignore payload.
+        const verifyResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${clerkSecretKey}`,
+          },
+        });
+        if (!verifyResponse.ok) {
+          return { ok: false, error: `Could not verify user after patch: HTTP ${verifyResponse.status}` };
+        }
+        const verifiedUser = await verifyResponse.json() as { phone_numbers?: Array<{ phone_number: string }> };
+        const verifiedPhones = (verifiedUser.phone_numbers || []).map((p) => p.phone_number);
+        console.log('[clerkSync.updateClerkUserPhone] fallback verify snapshot', {
+          userId,
+          payload,
+          verifiedPhones,
+          expectedPhone: newE164,
+        });
+        if (!verifiedPhones.includes(newE164)) {
+          return { ok: false, error: 'Patch call succeeded but phone was not updated on user record' };
+        }
+        return { ok: true };
+      };
+
+      const firstAttempt = await tryPatch({ phone_number: [newE164] });
+      if (firstAttempt.ok) return firstAttempt;
+
+      // Some Clerk API variants accept singular value form.
+      const secondAttempt = await tryPatch({ phone_number: newE164 });
+      if (secondAttempt.ok) return secondAttempt;
+
+      return secondAttempt.error
+        ? secondAttempt
+        : firstAttempt;
     };
 
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
