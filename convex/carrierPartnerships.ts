@@ -639,16 +639,30 @@ export const update = mutation({
             typeof ownerDriver.phone === 'string' &&
             nextOwnerPhone !== ownerDriver.phone
           ) {
+            const normalizePhone = (phone?: string) => phone?.replace(/\D/g, '') || '';
+            const oldOwnerPhoneNormalized = normalizePhone(ownerDriver.phone);
+            const newOwnerPhoneNormalized = normalizePhone(nextOwnerPhone);
             const identityLinks = await ctx.db
               .query('userIdentityLinks')
               .withIndex('by_org', (q) => q.eq('organizationId', carrierOrgId))
               .collect();
-            const targetIdentityLink = identityLinks.find(
+            const ownerAdminLinks = identityLinks.filter(
               (link) =>
                 (link.role === 'OWNER' || link.role === 'ADMIN') &&
                 !!link.clerkUserId &&
                 !link.clerkUserId.startsWith('pending_')
             );
+            const targetIdentityLink =
+              ownerAdminLinks.find((link) => normalizePhone(link.phone) === oldOwnerPhoneNormalized) ||
+              ownerAdminLinks.find((link) => normalizePhone(link.phone) === newOwnerPhoneNormalized);
+
+            console.log('[carrierPartnerships.update] owner identity selection', {
+              ownerAdminLinkCount: ownerAdminLinks.length,
+              selectedClerkUserId: targetIdentityLink?.clerkUserId ?? null,
+              selectedPhone: targetIdentityLink?.phone ?? null,
+              oldOwnerPhone: ownerDriver.phone,
+              newOwnerPhone: nextOwnerPhone,
+            });
 
             await ctx.scheduler.runAfter(0, internal.clerkSync.updateClerkUserPhone, {
               oldPhone: ownerDriver.phone,
@@ -656,16 +670,15 @@ export const update = mutation({
               firstName: (updates.ownerDriverFirstName as string) || ownerDriver.firstName,
               lastName: (updates.ownerDriverLastName as string) || ownerDriver.lastName,
               targetClerkUserId: targetIdentityLink?.clerkUserId,
+              organizationId: carrierOrgId,
             });
 
-            // Keep OWNER/ADMIN identity links aligned for phone-based role lookup.
-            for (const link of identityLinks) {
-              if (link.role === 'OWNER' || link.role === 'ADMIN') {
-                await ctx.db.patch(link._id, {
-                  phone: nextOwnerPhone,
-                  updatedAt: now,
-                });
-              }
+            // Keep only the selected owner/admin identity link aligned.
+            if (targetIdentityLink) {
+              await ctx.db.patch(targetIdentityLink._id, {
+                phone: nextOwnerPhone,
+                updatedAt: now,
+              });
             }
           }
         }

@@ -225,6 +225,7 @@ export const updateClerkUserPhone = internalAction({
     firstName: v.string(),
     lastName: v.string(),
     targetClerkUserId: v.optional(v.string()),
+    organizationId: v.optional(v.id('organizations')),
   },
   returns: v.union(
     v.object({
@@ -362,6 +363,62 @@ export const updateClerkUserPhone = internalAction({
               });
               if (fallback.ok) {
                 return { success: true, action: 'updated_target_user_patch' };
+              }
+              // Target user did not actually update. Resolve by current new-phone ownership.
+              const oldOwnershipResponse = await fetch(
+                `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(oldE164)}`,
+                {
+                  headers: {
+                    'Authorization': `Bearer ${clerkSecretKey}`,
+                  },
+                }
+              );
+              const ownershipResponse = await fetch(
+                `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(newE164)}`,
+                {
+                  headers: {
+                    'Authorization': `Bearer ${clerkSecretKey}`,
+                  },
+                }
+              );
+              if (oldOwnershipResponse.ok && ownershipResponse.ok) {
+                const oldOwners = await oldOwnershipResponse.json() as Array<{ id: string }>;
+                const owners = await ownershipResponse.json() as Array<{ id: string }>;
+                const uniqueOldOwner = oldOwners.length === 1 ? oldOwners[0] : null;
+                const uniqueNewOwner = owners.length === 1 ? owners[0] : null;
+                const uniqueOwner =
+                  (uniqueOldOwner && uniqueOldOwner.id !== user.id) ? uniqueOldOwner :
+                  (uniqueNewOwner && uniqueNewOwner.id !== user.id) ? uniqueNewOwner :
+                  null;
+                console.log('[clerkSync.updateClerkUserPhone] target-user mismatch ownership check', {
+                  targetClerkUserId: user.id,
+                  oldOwnerIds: oldOwners.map((o) => o.id),
+                  ownerIds: owners.map((o) => o.id),
+                });
+                if (uniqueOwner && uniqueOwner.id !== user.id) {
+                  if (args.organizationId) {
+                    await ctx.runMutation(internal.clerkSyncHelpers.updateIdentityLinkClerkUserId, {
+                      organizationId: args.organizationId,
+                      phone: args.oldPhone,
+                      clerkUserId: uniqueOwner.id,
+                    });
+                    console.log('[clerkSync.updateClerkUserPhone] repaired identity link to ownership user', {
+                      organizationId: args.organizationId,
+                      repairedClerkUserId: uniqueOwner.id,
+                    });
+                  }
+                  const retryResult: UpdateResult = await ctx.runAction(internal.clerkSync.updateClerkUserPhone, {
+                    oldPhone: args.oldPhone,
+                    newPhone: args.newPhone,
+                    firstName: args.firstName,
+                    lastName: args.lastName,
+                    targetClerkUserId: uniqueOwner.id,
+                  });
+                  if (retryResult.success) {
+                    return { success: true, action: 'resolved_to_phone_owner_and_retried' };
+                  }
+                  return { success: false, error: retryResult.error };
+                }
               }
               return { success: false, error: `Failed to update target user phone: ${fallback.error}` };
             }
