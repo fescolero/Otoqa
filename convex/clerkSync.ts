@@ -443,6 +443,59 @@ export const updateClerkUserPhone = internalAction({
                   }
                   return { success: false, error: retryResult.error };
                 }
+                // Last-resort fallback for owner-operator flows: if this tenant does not support
+                // server-side phone mutation, create/find Clerk user for new phone and relink owner.
+                if (args.organizationId && owners.length === 0) {
+                  const createOrFindResult: CreateResult = await ctx.runAction(
+                    internal.clerkSync.createClerkUserForCarrierOwner,
+                    {
+                      phone: args.newPhone,
+                      firstName: args.firstName,
+                      lastName: args.lastName,
+                    }
+                  );
+                  if (!createOrFindResult.success) {
+                    return {
+                      success: false,
+                      error: `Failed to create Clerk user for new phone fallback: ${createOrFindResult.error}`,
+                    };
+                  }
+
+                  let fallbackClerkUserId = createOrFindResult.clerkUserId;
+                  if (fallbackClerkUserId === 'existing') {
+                    const existingUserId = await ctx.runAction(internal.clerkSync.findClerkUserByPhone, {
+                      phone: args.newPhone,
+                    });
+                    if (!existingUserId) {
+                      return {
+                        success: false,
+                        error: 'Failed to resolve existing Clerk user for new phone fallback',
+                      };
+                    }
+                    fallbackClerkUserId = existingUserId;
+                  }
+
+                  const relinkApplied = await ctx.runMutation(
+                    internal.clerkSyncHelpers.updateIdentityLinkClerkUserIdForOrgOwner,
+                    {
+                      organizationId: args.organizationId,
+                      clerkUserId: fallbackClerkUserId,
+                      currentClerkUserId: user.id,
+                    }
+                  );
+                  if (!relinkApplied) {
+                    return {
+                      success: false,
+                      error: 'Failed to relink owner identity to fallback Clerk user',
+                    };
+                  }
+                  console.log('[clerkSync.updateClerkUserPhone] fallback created/reused user and relinked owner', {
+                    organizationId: args.organizationId,
+                    oldClerkUserId: user.id,
+                    newClerkUserId: fallbackClerkUserId,
+                  });
+                  return { success: true, action: 'created_or_reused_user_and_relinked_owner' };
+                }
               }
               return { success: false, error: `Failed to update target user phone: ${fallback.error}` };
             }
