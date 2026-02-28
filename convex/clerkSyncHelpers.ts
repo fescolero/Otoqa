@@ -225,6 +225,9 @@ export const updateIdentityLinkClerkUserIdForOrgOwner = internalMutation({
       clerkUserId: args.clerkUserId,
       updatedAt: Date.now(),
     });
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'rerun-1',hypothesisId:'H2',location:'convex/clerkSyncHelpers.ts:updateIdentityLinkClerkUserIdForOrgOwner:patched',message:'owner link patched',data:{organizationId:args.organizationId,ownerLinksCount:ownerLinks.length,patchedLinkId:linkToUpdate._id,matchedCurrentClerkUserId:Boolean(args.currentClerkUserId && linkToUpdate.clerkUserId===args.currentClerkUserId)},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
 
     console.log(
       `Updated owner identity link ${linkToUpdate._id} clerkUserId to ${args.clerkUserId}`

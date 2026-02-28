@@ -268,6 +268,13 @@ export const updateClerkUserPhone = internalAction({
             error: patchError?.errors?.[0]?.message || patchError?.raw || `HTTP ${patchResponse.status}`,
           };
         }
+        const patchResult = await safeParseJson(patchResponse.clone()) as {
+          id?: string;
+          phone_numbers?: Array<{ phone_number: string }>;
+        } | null;
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'rerun-1',hypothesisId:'H4',location:'convex/clerkSync.ts:updateUserPrimaryPhoneFallback:patch-response',message:'patch response snapshot',data:{userId,responseHasUserId:Boolean(patchResult?.id),responsePhoneCount:Array.isArray(patchResult?.phone_numbers)?patchResult.phone_numbers.length:null,payloadShape:Array.isArray((payload as { phone_number?: unknown }).phone_number)?'array':'scalar'},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
 
         // Verify the phone was actually updated; some API variants return 200 but ignore payload.
         const verifyResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
@@ -288,6 +295,9 @@ export const updateClerkUserPhone = internalAction({
           expectedPhone: newE164,
         });
         if (!verifiedPhones.includes(newE164)) {
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'rerun-1',hypothesisId:'H4',location:'convex/clerkSync.ts:updateUserPrimaryPhoneFallback:verify-miss',message:'verification miss after patch',data:{userId,verifiedPhoneCount:verifiedPhones.length,containsExpected:false},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           return { ok: false, error: 'Patch call succeeded but phone was not updated on user record' };
         }
         return { ok: true };
@@ -315,6 +325,9 @@ export const updateClerkUserPhone = internalAction({
     const newE164 = normalizePhoneToE164(args.newPhone);
 
     console.log(`Updating Clerk user phone number`);
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'rerun-1',hypothesisId:'H1',location:'convex/clerkSync.ts:updateClerkUserPhone:entry',message:'update flow entry',data:{hasTargetClerkUserId:Boolean(args.targetClerkUserId),hasOrganizationId:Boolean(args.organizationId),oldEqualsNew:oldE164===newE164},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     try {
       // If we already know which Clerk user should be updated, prefer that over phone search.
       if (args.targetClerkUserId) {
@@ -328,6 +341,9 @@ export const updateClerkUserPhone = internalAction({
           const user = await userResponse.json() as { id: string; phone_numbers?: Array<{ id: string; phone_number: string }> };
           const phoneNumbers = user.phone_numbers || [];
           const alreadyHasNewPhone = phoneNumbers.some((p) => p.phone_number === newE164);
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'rerun-1',hypothesisId:'H3',location:'convex/clerkSync.ts:updateClerkUserPhone:target-user-snapshot',message:'target user phone snapshot',data:{targetUserId:user.id,phoneNumbersCount:phoneNumbers.length,alreadyHasNewPhone},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           if (alreadyHasNewPhone) {
             console.log('[clerkSync.updateClerkUserPhone] target user already has new phone', {
               userId: user.id,
@@ -410,6 +426,9 @@ export const updateClerkUserPhone = internalAction({
                       repairedClerkUserId: uniqueOwner.id,
                       applied: repairApplied,
                     });
+                    // #region agent log
+                    fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'rerun-1',hypothesisId:'H2',location:'convex/clerkSync.ts:updateClerkUserPhone:repair-result',message:'identity link repair result',data:{organizationId:args.organizationId,fromClerkUserId:user.id,toClerkUserId:uniqueOwner.id,applied:repairApplied},timestamp:Date.now()})}).catch(()=>{});
+                    // #endregion
                   }
                   const retryResult: UpdateResult = await ctx.runAction(internal.clerkSync.updateClerkUserPhone, {
                     oldPhone: args.oldPhone,
@@ -417,6 +436,7 @@ export const updateClerkUserPhone = internalAction({
                     firstName: args.firstName,
                     lastName: args.lastName,
                     targetClerkUserId: uniqueOwner.id,
+                    organizationId: args.organizationId,
                   });
                   if (retryResult.success) {
                     return { success: true, action: 'resolved_to_phone_owner_and_retried' };
