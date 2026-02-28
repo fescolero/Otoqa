@@ -397,14 +397,18 @@ export const updateClerkUserPhone = internalAction({
                 });
                 if (uniqueOwner && uniqueOwner.id !== user.id) {
                   if (args.organizationId) {
-                    await ctx.runMutation(internal.clerkSyncHelpers.updateIdentityLinkClerkUserId, {
-                      organizationId: args.organizationId,
-                      phone: args.oldPhone,
-                      clerkUserId: uniqueOwner.id,
-                    });
+                    const repairApplied = await ctx.runMutation(
+                      internal.clerkSyncHelpers.updateIdentityLinkClerkUserIdForOrgOwner,
+                      {
+                        organizationId: args.organizationId,
+                        clerkUserId: uniqueOwner.id,
+                        currentClerkUserId: user.id,
+                      }
+                    );
                     console.log('[clerkSync.updateClerkUserPhone] repaired identity link to ownership user', {
                       organizationId: args.organizationId,
                       repairedClerkUserId: uniqueOwner.id,
+                      applied: repairApplied,
                     });
                   }
                   const retryResult: UpdateResult = await ctx.runAction(internal.clerkSync.updateClerkUserPhone, {

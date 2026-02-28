@@ -193,3 +193,43 @@ export const updateIdentityLinkClerkUserId = internalMutation({
   },
 });
 
+/**
+ * Update OWNER/ADMIN identity link clerkUserId for an organization.
+ * This is used to repair stale links when phone-based ownership differs.
+ */
+export const updateIdentityLinkClerkUserIdForOrgOwner = internalMutation({
+  args: {
+    organizationId: v.id('organizations'),
+    clerkUserId: v.string(),
+    currentClerkUserId: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const links = await ctx.db
+      .query('userIdentityLinks')
+      .withIndex('by_org', (q) => q.eq('organizationId', args.organizationId))
+      .collect();
+
+    const ownerLinks = links.filter((l) => l.role === 'OWNER' || l.role === 'ADMIN');
+    if (ownerLinks.length === 0) {
+      console.log(`No OWNER/ADMIN identity links found for org ${args.organizationId}`);
+      return false;
+    }
+
+    const linkToUpdate =
+      (args.currentClerkUserId
+        ? ownerLinks.find((l) => l.clerkUserId === args.currentClerkUserId)
+        : undefined) ?? ownerLinks[0];
+
+    await ctx.db.patch(linkToUpdate._id, {
+      clerkUserId: args.clerkUserId,
+      updatedAt: Date.now(),
+    });
+
+    console.log(
+      `Updated owner identity link ${linkToUpdate._id} clerkUserId to ${args.clerkUserId}`
+    );
+    return true;
+  },
+});
+
