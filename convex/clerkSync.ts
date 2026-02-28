@@ -494,6 +494,27 @@ export const updateClerkUserPhone = internalAction({
                     oldClerkUserId: user.id,
                     newClerkUserId: fallbackClerkUserId,
                   });
+                  const oldUserLinkCount = await ctx.runQuery(
+                    internal.clerkSyncHelpers.countIdentityLinksByClerkUserId,
+                    { clerkUserId: user.id }
+                  );
+                  // #region agent log
+                  fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'rerun-2',hypothesisId:'H5',location:'convex/clerkSync.ts:updateClerkUserPhone:old-user-link-count',message:'post-relink old user link count',data:{oldClerkUserId:user.id,oldUserLinkCount},timestamp:Date.now()})}).catch(()=>{});
+                  // #endregion
+                  if (oldUserLinkCount === 0) {
+                    const deleteOldUserResult = await ctx.runAction(
+                      internal.clerkSync.deleteClerkUserById,
+                      {
+                        clerkUserId: user.id,
+                        reason: 'owner phone changed and identity relinked to new Clerk user',
+                      }
+                    );
+                    console.log('[clerkSync.updateClerkUserPhone] old user cleanup result', {
+                      oldClerkUserId: user.id,
+                      deleted: deleteOldUserResult.success,
+                      error: deleteOldUserResult.success ? null : deleteOldUserResult.error,
+                    });
+                  }
                   return { success: true, action: 'created_or_reused_user_and_relinked_owner' };
                 }
               }

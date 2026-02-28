@@ -363,7 +363,12 @@ export const autoAssignPendingLoads = internalAction({
   },
 });
 
-// Internal query to get open loads with HCR
+// Internal query to get open loads with HCR.
+// Capped to stay under Convex's 8,192-element return limit and keep
+// per-run action execution time reasonable. Remaining loads are picked
+// up by the next scheduled run.
+const AUTO_ASSIGN_BATCH_SIZE = 4000;
+
 export const getOpenLoadsWithHcr = internalQuery({
   args: {
     workosOrgId: v.string(),
@@ -374,9 +379,9 @@ export const getOpenLoadsWithHcr = internalQuery({
       .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open'))
       .collect();
 
-    // Filter to only loads with HCR
     return loads
       .filter((load) => load.parsedHcr)
+      .slice(0, AUTO_ASSIGN_BATCH_SIZE)
       .map((load) => ({
         _id: load._id,
         parsedHcr: load.parsedHcr!,

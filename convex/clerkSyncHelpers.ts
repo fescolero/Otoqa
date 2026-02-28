@@ -236,3 +236,21 @@ export const updateIdentityLinkClerkUserIdForOrgOwner = internalMutation({
   },
 });
 
+/**
+ * Count how many identity links still reference a Clerk user ID.
+ * Used to determine if an old Clerk user is now orphaned and safe to delete.
+ */
+export const countIdentityLinksByClerkUserId = internalQuery({
+  args: {
+    clerkUserId: v.string(),
+  },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    const links = await ctx.db
+      .query('userIdentityLinks')
+      .withIndex('by_clerk', (q) => q.eq('clerkUserId', args.clerkUserId))
+      .collect();
+    return links.length;
+  },
+});
+
