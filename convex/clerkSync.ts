@@ -352,18 +352,22 @@ export const updateClerkUserPhone = internalAction({
             return { success: true, action: 'already_current' };
           }
 
-          const addPhoneResponse = await fetch(`https://api.clerk.com/v1/users/${user.id}/phone_numbers`, {
+          const addPhoneResponse = await fetch(`https://api.clerk.com/v1/phone_numbers`, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${clerkSecretKey}`,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
+              user_id: user.id,
               phone_number: newE164,
               verified: true,
               primary: true,
             }),
           });
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'sdk-stable-1',hypothesisId:'H6',location:'convex/clerkSync.ts:updateClerkUserPhone:target-create-phone-number',message:'target user phone_numbers create call',data:{targetUserId:user.id,status:addPhoneResponse.status},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
 
           if (!addPhoneResponse.ok) {
             const errorData = await safeParseJson(addPhoneResponse) as { errors?: Array<{ code?: string; message?: string }>; raw?: string } | null;
@@ -528,7 +532,7 @@ export const updateClerkUserPhone = internalAction({
 
           const oldPhoneRecord = phoneNumbers.find((p) => p.phone_number === oldE164);
           if (oldPhoneRecord) {
-            await fetch(`https://api.clerk.com/v1/users/${user.id}/phone_numbers/${oldPhoneRecord.id}`, {
+            await fetch(`https://api.clerk.com/v1/phone_numbers/${oldPhoneRecord.id}`, {
               method: 'DELETE',
               headers: {
                 'Authorization': `Bearer ${clerkSecretKey}`,
@@ -618,18 +622,22 @@ export const updateClerkUserPhone = internalAction({
       const userId = users[0].id;
 
       // Add the new phone number to the user
-      const addPhoneResponse = await fetch(`https://api.clerk.com/v1/users/${userId}/phone_numbers`, {
+      const addPhoneResponse = await fetch(`https://api.clerk.com/v1/phone_numbers`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${clerkSecretKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          user_id: userId,
           phone_number: newE164,
           verified: true, // Auto-verify since admin is changing it
           primary: true,
         }),
       });
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/57f2ad76-4843-4014-b036-7c154391397b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bb9bfb'},body:JSON.stringify({sessionId:'bb9bfb',runId:'sdk-stable-1',hypothesisId:'H6',location:'convex/clerkSync.ts:updateClerkUserPhone:search-create-phone-number',message:'search user phone_numbers create call',data:{targetUserId:userId,status:addPhoneResponse.status},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       if (!addPhoneResponse.ok) {
         const errorData = await safeParseJson(addPhoneResponse) as { errors?: Array<{ code?: string; message?: string }>; raw?: string } | null;
@@ -661,7 +669,7 @@ export const updateClerkUserPhone = internalAction({
       const phoneNumbers = users[0].phone_numbers || [];
       const oldPhoneRecord = phoneNumbers.find((p: { phone_number: string; id: string }) => p.phone_number === oldE164);
       if (oldPhoneRecord) {
-        const deleteResponse = await fetch(`https://api.clerk.com/v1/users/${userId}/phone_numbers/${oldPhoneRecord.id}`, {
+        const deleteResponse = await fetch(`https://api.clerk.com/v1/phone_numbers/${oldPhoneRecord.id}`, {
           method: 'DELETE',
           headers: {
             'Authorization': `Bearer ${clerkSecretKey}`,
