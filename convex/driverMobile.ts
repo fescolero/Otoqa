@@ -18,6 +18,18 @@ const MAX_CHECKIN_DISTANCE_METERS = 500; // ~0.3 miles
 const CLERK_ISSUER_PREFIX = 'https://clerk.';
 
 /**
+ * Normalize a phone number to its 10-digit US form for comparison.
+ * Handles +17607553340, 17607553340, 7607553340, +1760-755-3340, (760) 755-3340, etc.
+ */
+function normalizePhoneForMatch(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+  return digits;
+}
+
+/**
  * Helper to extract phone number from Clerk JWT
  * Clerk stores phone in the token claims
  */
@@ -28,7 +40,6 @@ function extractPhoneFromIdentity(identity: {
   phoneNumber?: string;
   phone_number?: string;
 }): string | null {
-  // Clerk may store phone in different claim names
   return identity.phoneNumber || identity.phone_number || null;
 }
 
@@ -70,7 +81,9 @@ function calculateDistanceMeters(
  * This is the main entry point for driver authentication
  */
 export const getMyProfile = query({
-  args: {},
+  args: {
+    driverId: v.optional(v.id('drivers')),
+  },
   returns: v.union(
     v.object({
       _id: v.id('drivers'),
@@ -93,33 +106,39 @@ export const getMyProfile = query({
     }),
     v.null()
   ),
-  handler: async (ctx) => {
+  handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
       return null;
     }
 
-    // Extract phone from Clerk token
-    const phone = extractPhoneFromIdentity(identity as any);
-    if (!phone) {
-      console.error('No phone number in identity token');
-      return null;
+    let driver = null;
+
+    // If driverId is provided (e.g. owner-operator with known driver record), look up directly
+    if (args.driverId) {
+      driver = await ctx.db.get(args.driverId);
     }
 
-    // Normalize phone number (remove spaces, dashes, etc.)
-    const normalizedPhone = phone.replace(/\D/g, '');
+    // Fallback: find driver by phone number match
+    if (!driver || driver.isDeleted) {
+      const phone = extractPhoneFromIdentity(identity as any);
+      if (!phone) {
+        console.error('No phone number in identity token');
+        return null;
+      }
 
-    // Find driver by phone number
-    const drivers = await ctx.db
-      .query('drivers')
-      .withIndex('by_organization')
-      .collect();
+      const normalizedPhone = normalizePhoneForMatch(phone);
 
-    // Match by normalized phone (exact match only to prevent cross-org identity confusion)
-    const driver = drivers.find((d) => {
-      const driverPhone = d.phone.replace(/\D/g, '');
-      return driverPhone === normalizedPhone;
-    });
+      const drivers = await ctx.db
+        .query('drivers')
+        .withIndex('by_organization')
+        .collect();
+
+      driver = drivers.find((d) => {
+        const driverPhone = normalizePhoneForMatch(d.phone);
+        return driverPhone === normalizedPhone;
+      }) ?? null;
+    }
 
     if (!driver || driver.isDeleted) {
       return null;

@@ -359,9 +359,13 @@ export default function AppLayout() {
   );
 
   // Query driver profile if user can be a driver (needed for mode switching)
+  // Pass driverId from getUserRoles so owner-operators can be found by direct lookup
+  // instead of relying solely on phone number matching
   const profile = useQuery(
     api.driverMobile.getMyProfile,
-    convexAuth.isAuthenticated && hasSelectedRole && (userRoles?.isDriver || mode === 'driver') ? {} : 'skip'
+    convexAuth.isAuthenticated && hasSelectedRole && (userRoles?.isDriver || mode === 'driver')
+      ? { driverId: (userRoles?.driverId ?? undefined) as Id<'drivers'> | undefined }
+      : 'skip'
   );
 
   // Carrier org info is now returned directly from userRoles
@@ -392,6 +396,7 @@ export default function AppLayout() {
   const canBeDriver = userRoles?.isDriver ?? false;
   const canBeOwner = userRoles?.isCarrierOwner ?? false;
   const canSwitchModes = canBeDriver && canBeOwner;
+
 
   // Auto-select role ONLY if user has just one role
   useEffect(() => {

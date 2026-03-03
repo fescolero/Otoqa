@@ -10,6 +10,18 @@ import { Id } from './_generated/dataModel';
  */
 
 /**
+ * Normalize a phone number to its 10-digit US form for comparison.
+ * Handles +17607553340, 17607553340, 7607553340, +1760-755-3340, (760) 755-3340, etc.
+ */
+function normalizePhoneForMatch(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+  return digits;
+}
+
+/**
  * Helper to authenticate carrier mobile requests.
  * Verifies the caller is authenticated and belongs to the claimed organization.
  * Returns the identity or null if unauthorized.
@@ -920,7 +932,7 @@ export const getUserRoles = query({
     // Get user identity to extract phone number
     const identity = await ctx.auth.getUserIdentity();
     const userPhone = (identity as any)?.phoneNumber || (identity as any)?.phone_number;
-    const normalizedUserPhone = userPhone ? userPhone.replace(/\D/g, '') : null;
+    const normalizedUserPhone = userPhone ? normalizePhoneForMatch(userPhone) : null;
     
     let isCarrierOwner = false;
     let carrierOrgId: string | null = null;
@@ -972,8 +984,7 @@ export const getUserRoles = query({
       const matchingLink = allIdentityLinks.find((link) => {
         if (!link.phone) return false;
         if (link.role !== 'OWNER' && link.role !== 'ADMIN') return false;
-        const linkPhone = link.phone.replace(/\D/g, '');
-        // Exact match only — no endsWith to prevent cross-org identity confusion
+        const linkPhone = normalizePhoneForMatch(link.phone);
         return linkPhone === normalizedUserPhone;
       });
 
@@ -1068,8 +1079,7 @@ export const getUserRoles = query({
 
       const matchingDriver = allDrivers.find((d) => {
         if (d.isDeleted || d.employmentStatus !== 'Active') return false;
-        const driverPhone = d.phone.replace(/\D/g, '');
-        // Exact match only — no endsWith to prevent cross-org identity confusion
+        const driverPhone = normalizePhoneForMatch(d.phone);
         return driverPhone === normalizedUserPhone;
       });
 
@@ -1155,10 +1165,10 @@ export const createDriver = mutation({
       .withIndex('by_organization', (q) => q.eq('organizationId', args.carrierOrgId))
       .collect();
     
-    const normalizedPhone = args.phone.replace(/\D/g, '');
+    const normalizedPhone = normalizePhoneForMatch(args.phone);
     const existingDriver = existingDrivers.find(d => {
       if (d.isDeleted) return false;
-      const driverPhone = d.phone.replace(/\D/g, '');
+      const driverPhone = normalizePhoneForMatch(d.phone);
       return driverPhone === normalizedPhone;
     });
 
@@ -1469,10 +1479,10 @@ export const createOwnerDriver = mutation({
       .withIndex('by_organization', (q) => q.eq('organizationId', args.carrierOrgId))
       .collect();
 
-    const normalizedPhone = args.phone.replace(/\D/g, '');
+    const normalizedPhone = normalizePhoneForMatch(args.phone);
     const existingDriver = existingDrivers.find((d) => {
       if (d.isDeleted) return false;
-      const driverPhone = d.phone.replace(/\D/g, '');
+      const driverPhone = normalizePhoneForMatch(d.phone);
       return driverPhone === normalizedPhone;
     });
 

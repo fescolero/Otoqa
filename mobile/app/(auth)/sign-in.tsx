@@ -29,21 +29,26 @@ export default function SignInScreen() {
 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  // Format phone number as user types
-  const formatPhoneNumber = (text: string) => {
-    const cleaned = text.replace(/\D/g, '');
-    
-    if (cleaned.length <= 3) {
-      return cleaned;
-    } else if (cleaned.length <= 6) {
-      return `(${cleaned.slice(0, 3)}) ${cleaned.slice(3)}`;
+  const normalizeToDigits = (text: string): string => {
+    let cleaned = text.trim();
+    // Strip leading +1 or +1- country code prefix (autocomplete/paste formats)
+    cleaned = cleaned.replace(/^\+1[-.\s]?/, '');
+    return cleaned.replace(/\D/g, '').slice(0, 10);
+  };
+
+  const formatPhoneNumber = (digits: string) => {
+    if (digits.length <= 3) {
+      return digits;
+    } else if (digits.length <= 6) {
+      return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
     } else {
-      return `(${cleaned.slice(0, 3)}) ${cleaned.slice(3, 6)}-${cleaned.slice(6, 10)}`;
+      return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
     }
   };
 
   const handlePhoneChange = (text: string) => {
-    setPhoneNumber(formatPhoneNumber(text));
+    const digits = normalizeToDigits(text);
+    setPhoneNumber(formatPhoneNumber(digits));
   };
 
   const handleSendCode = async () => {
@@ -52,7 +57,7 @@ export default function SignInScreen() {
       return;
     }
 
-    const rawPhone = phoneNumber.replace(/\D/g, '');
+    const rawPhone = normalizeToDigits(phoneNumber);
     
     if (rawPhone.length < 10) {
       Alert.alert('Invalid Phone', 'Please enter a valid 10-digit phone number');
@@ -116,7 +121,7 @@ export default function SignInScreen() {
     }
   };
 
-  const isButtonDisabled = isLoading || phoneNumber.replace(/\D/g, '').length < 10;
+  const isButtonDisabled = isLoading || normalizeToDigits(phoneNumber).length < 10;
 
   return (
     <View style={styles.container}>
@@ -171,6 +176,7 @@ export default function SignInScreen() {
                 placeholder="(555) 000-0000"
                 placeholderTextColor={colors.foregroundSubtle}
                 keyboardType="phone-pad"
+                textContentType="telephoneNumber"
                 autoComplete="tel"
                 maxLength={14}
               />

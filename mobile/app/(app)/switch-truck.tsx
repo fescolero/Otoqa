@@ -17,6 +17,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import { Id } from '../../../convex/_generated/dataModel';
+import { useAppMode } from './_layout';
 
 // ============================================
 // DESIGN SYSTEM
@@ -114,7 +115,8 @@ export default function SwitchTruckScreen() {
   const [isSwitching, setIsSwitching] = useState(false);
 
   // Get driver profile from Convex
-  const profile = useQuery(api.driverMobile.getMyProfile);
+  const { roles } = useAppMode();
+  const profile = useQuery(api.driverMobile.getMyProfile, { driverId: (roles?.driverId ?? undefined) as Id<'drivers'> | undefined });
   
   // Switch truck mutation
   const switchTruck = useMutation(api.driverMobile.switchTruck);

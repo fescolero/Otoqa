@@ -9,6 +9,7 @@ import {
   Platform,
   Alert,
   ScrollView,
+  Pressable,
 } from 'react-native';
 import { useSignIn } from '@clerk/clerk-expo';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -27,11 +28,12 @@ export default function VerifyScreen() {
   const router = useRouter();
   const { phoneNumber } = useLocalSearchParams<{ phoneNumber: string }>();
 
-  const [code, setCode] = useState(['', '', '', '', '', '']);
+  const [code, setCode] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [resendTimer, setResendTimer] = useState(30);
+  const [focusedIndex, setFocusedIndex] = useState(0);
 
-  const inputRefs = useRef<(TextInput | null)[]>([]);
+  const hiddenInputRef = useRef<TextInput | null>(null);
 
   // Countdown timer for resend
   useEffect(() => {
@@ -41,37 +43,27 @@ export default function VerifyScreen() {
     }
   }, [resendTimer]);
 
-  // Handle code input
-  const handleCodeChange = (text: string, index: number) => {
-    const digit = text.replace(/\D/g, '').slice(-1);
-    
-    const newCode = [...code];
-    newCode[index] = digit;
-    setCode(newCode);
+  const codeDigits = code.split('').concat(Array(6).fill('')).slice(0, 6);
 
-    // Auto-advance to next input
-    if (digit && index < 5) {
-      inputRefs.current[index + 1]?.focus();
-    }
+  const handleCodeChange = (text: string) => {
+    const digits = text.replace(/\D/g, '').slice(0, 6);
+    setCode(digits);
+    setFocusedIndex(Math.min(digits.length, 5));
 
-    // Auto-submit when complete
-    if (digit && index === 5) {
-      handleVerify(newCode.join(''));
+    if (digits.length === 6) {
+      handleVerify(digits);
     }
   };
 
-  // Handle backspace
-  const handleKeyPress = (e: any, index: number) => {
-    if (e.nativeEvent.key === 'Backspace' && !code[index] && index > 0) {
-      inputRefs.current[index - 1]?.focus();
-    }
+  const focusHiddenInput = () => {
+    hiddenInputRef.current?.focus();
   };
 
   // Verify the code
   const handleVerify = async (fullCode?: string) => {
     if (!isLoaded) return;
 
-    const codeToVerify = fullCode || code.join('');
+    const codeToVerify = fullCode || code;
     
     if (codeToVerify.length !== 6) {
       Alert.alert('Invalid Code', 'Please enter the 6-digit code');
@@ -103,8 +95,9 @@ export default function VerifyScreen() {
       
       if (errorCode === 'form_code_incorrect') {
         Alert.alert('Invalid Code', 'The code you entered is incorrect. Please try again.');
-        setCode(['', '', '', '', '', '']);
-        inputRefs.current[0]?.focus();
+        setCode('');
+        setFocusedIndex(0);
+        hiddenInputRef.current?.focus();
       } else {
         Alert.alert(
           'Error',
@@ -176,34 +169,41 @@ export default function VerifyScreen() {
             <Text style={styles.phoneText}>{formattedPhone}</Text>
           </Text>
 
-          {/* Code Input */}
-          <View style={styles.codeContainer}>
-            {code.map((digit, index) => (
-              <TextInput
-                key={index}
-                ref={(ref) => {
-                  inputRefs.current[index] = ref;
-                }}
-                style={[
-                  styles.codeInput,
-                  digit && styles.codeInputFilled,
-                ]}
-                value={digit}
-                onChangeText={(text) => handleCodeChange(text, index)}
-                onKeyPress={(e) => handleKeyPress(e, index)}
-                keyboardType="number-pad"
-                maxLength={1}
-                selectTextOnFocus
-                autoFocus={index === 0}
-              />
-            ))}
-          </View>
+          {/* Code Input — hidden real input + visual digit boxes */}
+          <Pressable onPress={focusHiddenInput}>
+            <View style={styles.codeContainer}>
+              {codeDigits.map((digit, index) => (
+                <View
+                  key={index}
+                  style={[
+                    styles.codeInput,
+                    digit ? styles.codeInputFilled : null,
+                    index === focusedIndex && !digit ? styles.codeInputFocused : null,
+                  ]}
+                >
+                  <Text style={styles.codeDigitText}>{digit}</Text>
+                </View>
+              ))}
+            </View>
+          </Pressable>
+          <TextInput
+            ref={hiddenInputRef}
+            value={code}
+            onChangeText={handleCodeChange}
+            keyboardType="number-pad"
+            textContentType="oneTimeCode"
+            autoComplete="sms-otp"
+            maxLength={6}
+            autoFocus
+            caretHidden
+            style={styles.hiddenInput}
+          />
 
           {/* Verify Button */}
           <TouchableOpacity
             style={[styles.button, isLoading && styles.buttonDisabled]}
             onPress={() => handleVerify()}
-            disabled={isLoading || code.join('').length !== 6}
+            disabled={isLoading || code.length !== 6}
             activeOpacity={0.8}
           >
             <Text style={styles.buttonText}>
@@ -292,14 +292,27 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.lg,
     borderWidth: 2,
     borderColor: colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  codeInputFilled: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '10',
+  },
+  codeInputFocused: {
+    borderColor: colors.primary,
+  },
+  codeDigitText: {
     fontSize: typography['2xl'],
     fontWeight: typography.bold,
     color: colors.foreground,
     textAlign: 'center',
   },
-  codeInputFilled: {
-    borderColor: colors.primary,
-    backgroundColor: colors.primary + '10',
+  hiddenInput: {
+    position: 'absolute',
+    opacity: 0,
+    height: 1,
+    width: 1,
   },
   button: {
     flexDirection: 'row',
