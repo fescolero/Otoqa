@@ -218,6 +218,9 @@ export default defineSchema({
     // Legacy field - some documents may have this from old code (not used in new code)
     ownerDriverId: v.optional(v.id('drivers')),
 
+    // === FUEL TRACKING ===
+    trackFuelConsumption: v.optional(v.boolean()),
+
     // Timestamps
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -2001,4 +2004,112 @@ export default defineSchema({
   })
     .index('by_load', ['sandboxLoadId', 'recordedAt'])
     .index('by_org', ['workosOrgId', 'recordedAt']),
+
+  // =============================================
+  // DIESEL / FUEL TRACKING
+  // =============================================
+
+  fuelVendors: defineTable({
+    organizationId: v.string(),
+    name: v.string(),
+    code: v.optional(v.string()),
+    accountNumber: v.optional(v.string()),
+    discountProgram: v.optional(v.string()),
+    contactName: v.optional(v.string()),
+    contactEmail: v.optional(v.string()),
+    contactPhone: v.optional(v.string()),
+    addressLine: v.optional(v.string()),
+    city: v.optional(v.string()),
+    state: v.optional(v.string()),
+    zip: v.optional(v.string()),
+    country: v.optional(v.string()),
+    notes: v.optional(v.string()),
+    isActive: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    createdBy: v.string(),
+  })
+    .index('by_organization', ['organizationId'])
+    .index('by_organization_and_name', ['organizationId', 'name'])
+    .index('by_organization_and_active', ['organizationId', 'isActive']),
+
+  fuelEntries: defineTable({
+    organizationId: v.string(),
+    entryDate: v.number(),
+    driverId: v.optional(v.id('drivers')),
+    carrierId: v.optional(v.id('carrierPartnerships')),
+    truckId: v.optional(v.id('trucks')),
+    vendorId: v.id('fuelVendors'),
+    gallons: v.number(),
+    pricePerGallon: v.number(),
+    totalCost: v.number(),
+    odometerReading: v.optional(v.number()),
+    location: v.optional(v.object({
+      city: v.string(),
+      state: v.string(),
+    })),
+    fuelCardNumber: v.optional(v.string()),
+    receiptNumber: v.optional(v.string()),
+    loadId: v.optional(v.id('loadInformation')),
+    paymentMethod: v.optional(v.union(
+      v.literal('FUEL_CARD'),
+      v.literal('CASH'),
+      v.literal('CHECK'),
+      v.literal('CREDIT_CARD'),
+      v.literal('EFS'),
+      v.literal('COMDATA'),
+    )),
+    notes: v.optional(v.string()),
+    receiptStorageId: v.optional(v.id('_storage')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    createdBy: v.string(),
+  })
+    .index('by_organization', ['organizationId'])
+    .index('by_organization_and_date', ['organizationId', 'entryDate'])
+    .index('by_driver', ['driverId'])
+    .index('by_carrier', ['carrierId'])
+    .index('by_truck', ['truckId'])
+    .index('by_vendor', ['vendorId'])
+    .index('by_load', ['loadId']),
+
+  defEntries: defineTable({
+    organizationId: v.string(),
+    entryDate: v.number(),
+    driverId: v.optional(v.id('drivers')),
+    carrierId: v.optional(v.id('carrierPartnerships')),
+    truckId: v.optional(v.id('trucks')),
+    vendorId: v.id('fuelVendors'),
+    gallons: v.number(),
+    pricePerGallon: v.number(),
+    totalCost: v.number(),
+    odometerReading: v.optional(v.number()),
+    location: v.optional(v.object({
+      city: v.string(),
+      state: v.string(),
+    })),
+    fuelCardNumber: v.optional(v.string()),
+    receiptNumber: v.optional(v.string()),
+    loadId: v.optional(v.id('loadInformation')),
+    paymentMethod: v.optional(v.union(
+      v.literal('FUEL_CARD'),
+      v.literal('CASH'),
+      v.literal('CHECK'),
+      v.literal('CREDIT_CARD'),
+      v.literal('EFS'),
+      v.literal('COMDATA'),
+    )),
+    notes: v.optional(v.string()),
+    receiptStorageId: v.optional(v.id('_storage')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    createdBy: v.string(),
+  })
+    .index('by_organization', ['organizationId'])
+    .index('by_organization_and_date', ['organizationId', 'entryDate'])
+    .index('by_driver', ['driverId'])
+    .index('by_carrier', ['carrierId'])
+    .index('by_truck', ['truckId'])
+    .index('by_vendor', ['vendorId'])
+    .index('by_load', ['loadId']),
 });

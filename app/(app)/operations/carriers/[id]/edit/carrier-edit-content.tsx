@@ -45,6 +45,7 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
   const [zip, setZip] = useState('');
   const [country, setCountry] = useState('');
   const [isOwnerOperator, setIsOwnerOperator] = useState(false);
+  const [trackFuelConsumption, setTrackFuelConsumption] = useState(false);
 
   // Fetch partnership data
   const partnership = useQuery(api.carrierPartnerships.get, { partnershipId });
@@ -59,6 +60,7 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
       setZip(partnership.zip || '');
       setCountry(partnership.country || '');
       setIsOwnerOperator(partnership.isOwnerOperator || false);
+      setTrackFuelConsumption(partnership.trackFuelConsumption || false);
     }
   }, [partnership]);
 
@@ -123,6 +125,7 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
         // Broker preferences
         defaultPaymentTerms: (formData.get('defaultPaymentTerms') as string) || undefined,
         internalNotes: (formData.get('internalNotes') as string) || undefined,
+        trackFuelConsumption,
         rating: formData.get('rating') ? parseInt(formData.get('rating') as string) : undefined,
         // Owner-operator fields
         isOwnerOperator,
@@ -504,6 +507,21 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
                 <p className="text-xs text-muted-foreground">
                   Single-driver carrier who owns and operates their own truck
                 </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="trackFuelConsumption">Fuel Tracking</Label>
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="trackFuelConsumption"
+                    checked={trackFuelConsumption}
+                    onChange={(e) => setTrackFuelConsumption(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  <Label htmlFor="trackFuelConsumption" className="font-normal text-sm">
+                    Track fuel consumption on company fuel card
+                  </Label>
+                </div>
               </div>
               <div className="space-y-2 md:col-span-3">
                 <Label htmlFor="internalNotes">Internal Notes</Label>

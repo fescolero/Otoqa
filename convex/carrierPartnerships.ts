@@ -341,6 +341,7 @@ export const create = mutation({
     country: v.optional(v.string()),
     defaultPaymentTerms: v.optional(v.string()),
     internalNotes: v.optional(v.string()),
+    trackFuelConsumption: v.optional(v.boolean()),
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
@@ -457,6 +458,7 @@ export const create = mutation({
       status,
       defaultPaymentTerms: args.defaultPaymentTerms,
       internalNotes: args.internalNotes,
+      trackFuelConsumption: args.trackFuelConsumption,
       createdAt: now,
       updatedAt: now,
       createdBy: args.createdBy,
@@ -506,6 +508,8 @@ export const update = mutation({
     internalNotes: v.optional(v.string()),
     preferredLanes: v.optional(v.array(v.string())),
     rating: v.optional(v.number()),
+    // Fuel tracking
+    trackFuelConsumption: v.optional(v.boolean()),
     // Owner-operator fields
     isOwnerOperator: v.optional(v.boolean()),
     ownerDriverFirstName: v.optional(v.string()),

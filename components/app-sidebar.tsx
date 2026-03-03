@@ -66,6 +66,14 @@ const getNavData = (pathname: string) => ({
           title: 'Diesel',
           url: '/operations/diesel',
         },
+        {
+          title: 'Fuel Vendors',
+          url: '/operations/diesel/vendors',
+        },
+        {
+          title: 'Fuel Reports',
+          url: '/operations/diesel/reports',
+        },
       ],
     },
     {
