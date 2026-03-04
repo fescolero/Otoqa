@@ -569,8 +569,7 @@ export const directAssign = mutation({
     );
 
     if (activeAssignments.length > 0) {
-      // If the load is actually in an assigned/dispatched state, block reassignment
-      if (load.status === 'Assigned' || load.status === 'Dispatched' || load.status === 'In Transit') {
+      if (load.status === 'Assigned') {
         throw new Error('Load already has an active carrier assignment. Please cancel the existing assignment first.');
       }
       // Load is Open/other status but has stale assignment records - clean them up
