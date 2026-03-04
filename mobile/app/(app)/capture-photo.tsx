@@ -2,13 +2,14 @@ import { useState, useRef } from 'react';
 import {
   View,
   Text,
-  TouchableOpacity,
+  Pressable,
   StyleSheet,
   Image,
   Alert,
   ActivityIndicator,
 } from 'react-native';
 import { useRouter, useLocalSearchParams, Stack } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
@@ -62,6 +63,7 @@ export default function CapturePhotoScreen() {
     stopSequence?: string;
   }>();
 
+  const isFocused = useIsFocused();
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('back');
@@ -87,11 +89,11 @@ export default function CapturePhotoScreen() {
         <Text style={styles.permissionText}>
           We need camera access to capture proof of delivery photos.
         </Text>
-        <TouchableOpacity style={styles.permissionButton} onPress={requestPermission}>
+        <Pressable style={({ pressed }) => [styles.permissionButton, pressed && { opacity: 0.7 }]} onPress={requestPermission}>
           <Text style={styles.permissionButtonText}>Grant Permission</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={styles.backButtonAlt} 
+        </Pressable>
+        <Pressable 
+          style={({ pressed }) => [styles.backButtonAlt, pressed && { opacity: 0.7 }]}
           onPress={() => {
             if (loadId) {
               router.replace(`/trip/${loadId}`);
@@ -101,7 +103,7 @@ export default function CapturePhotoScreen() {
           }}
         >
           <Text style={styles.backButtonAltText}>Go Back</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -177,18 +179,18 @@ export default function CapturePhotoScreen() {
     return (
       <>
         <Stack.Screen options={{ headerShown: false }} />
-        <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={[styles.container, { paddingTop: insets.top, paddingBottom: Math.max(insets.bottom, spacing.lg) }]}>
           {/* Header */}
           <View style={styles.header}>
-            <TouchableOpacity style={styles.headerBackButton} onPress={retakePhoto}>
+            <Pressable style={({ pressed }) => [styles.headerBackButton, pressed && { opacity: 0.7 }]} onPress={retakePhoto}>
               <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-            </TouchableOpacity>
+            </Pressable>
             <Text style={styles.headerTitle}>Review Photo</Text>
             <View style={styles.headerSpacer} />
           </View>
 
-          {/* Photo Preview */}
-          <View style={styles.previewContainer}>
+          {/* Photo Preview — flex:1 fills space between header and buttons */}
+          <View style={styles.previewContainer} pointerEvents="none">
             <Image 
               source={{ uri: capturedPhoto }} 
               style={styles.previewImage}
@@ -198,16 +200,21 @@ export default function CapturePhotoScreen() {
             />
           </View>
 
-          {/* Action Buttons */}
-          <View style={[styles.previewActions, { paddingBottom: insets.bottom + spacing.lg }]}>
-            <TouchableOpacity style={styles.retakeButton} onPress={retakePhoto}>
+          <View style={styles.previewActions}>
+            <Pressable
+              style={({ pressed }) => [styles.retakeButton, pressed && { opacity: 0.7 }]}
+              onPress={retakePhoto}
+            >
               <Ionicons name="refresh" size={24} color={colors.foreground} />
               <Text style={styles.retakeButtonText}>Retake</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.usePhotoButton} onPress={usePhoto}>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.usePhotoButton, pressed && { opacity: 0.7 }]}
+              onPress={usePhoto}
+            >
               <Ionicons name="checkmark" size={24} color={colors.primaryForeground} />
               <Text style={styles.usePhotoButtonText}>Use Photo</Text>
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </View>
       </>
@@ -217,101 +224,98 @@ export default function CapturePhotoScreen() {
   return (
     <>
       <Stack.Screen options={{ headerShown: false }} />
-      <View style={[styles.container, { paddingTop: insets.top }]}>
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity 
-            style={styles.headerBackButton} 
-            onPress={() => {
-              if (loadId) {
-                router.replace(`/trip/${loadId}`);
-              } else {
-                router.back();
-              }
-            }}
-          >
-            <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Take Photo</Text>
-          <View style={styles.headerSpacer} />
-        </View>
-
-        {/* Info Card */}
-        <View style={styles.infoCard}>
-          <View style={styles.infoIconContainer}>
-            <Ionicons name="camera" size={22} color={colors.primary} />
-          </View>
-          <View style={styles.infoTextContainer}>
-            <Text style={styles.infoLabel}>Capture Proof for</Text>
-            <Text style={styles.infoValue}>
-              {stopSequence ? `Stop ${stopSequence} • ` : ''}{locationName || `Load #${loadId?.slice(-8) || 'Unknown'}`}
-            </Text>
-          </View>
-        </View>
-
-        {/* Camera View */}
-        <View style={styles.cameraContainer}>
+      <View style={styles.container}>
+        {/* Camera fills the entire screen behind everything.
+            Only rendered when screen is focused so the session stops on navigate-away. */}
+        {isFocused && (
           <CameraView
             ref={cameraRef}
-            style={styles.camera}
+            style={StyleSheet.absoluteFill}
             facing={facing}
             flash={flashMode}
-          >
-            {/* Camera Overlay */}
-            <View style={styles.cameraOverlay}>
-              {/* Top controls */}
-              <View style={styles.cameraTopControls}>
-                <TouchableOpacity style={styles.cameraControlButton} onPress={toggleFlash}>
-                  <Ionicons 
-                    name={flashMode === 'on' ? 'flash' : 'flash-off'} 
-                    size={22} 
-                    color={colors.foreground} 
-                  />
-                </TouchableOpacity>
-              </View>
+          />
+        )}
 
-              {/* Focus Frame */}
-              <View style={styles.focusFrame}>
-                <View style={[styles.focusCorner, styles.focusCornerTL]} />
-                <View style={[styles.focusCorner, styles.focusCornerTR]} />
-                <View style={[styles.focusCorner, styles.focusCornerBL]} />
-                <View style={[styles.focusCorner, styles.focusCornerBR]} />
-              </View>
+        {/* All controls in a normal flex column — no absolute positioning.
+            This avoids overflow:hidden clipping from the Tabs navigator. */}
+        <View style={[styles.controlsColumn, { paddingTop: insets.top }]}>
+          {/* Header */}
+          <View style={styles.header}>
+            <Pressable 
+              style={({ pressed }) => [styles.headerBackButton, pressed && { opacity: 0.7 }]}
+              onPress={() => {
+                if (loadId) {
+                  router.replace(`/trip/${loadId}`);
+                } else {
+                  router.back();
+                }
+              }}
+            >
+              <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+            </Pressable>
+            <Text style={styles.headerTitle}>Take Photo</Text>
+            <Pressable style={({ pressed }) => [styles.cameraControlButton, pressed && { opacity: 0.7 }]} onPress={toggleFlash}>
+              <Ionicons 
+                name={flashMode === 'on' ? 'flash' : 'flash-off'} 
+                size={22} 
+                color={colors.foreground} 
+              />
+            </Pressable>
+          </View>
+
+          {/* Info Card */}
+          <View style={styles.infoCard}>
+            <View style={styles.infoIconContainer}>
+              <Ionicons name="camera" size={22} color={colors.primary} />
             </View>
-          </CameraView>
+            <View style={styles.infoTextContainer}>
+              <Text style={styles.infoLabel}>Capture Proof for</Text>
+              <Text style={styles.infoValue}>
+                {stopSequence ? `Stop ${stopSequence} • ` : ''}{locationName || `Load #${loadId?.slice(-8) || 'Unknown'}`}
+              </Text>
+            </View>
+          </View>
+
+          {/* Focus Frame — fills remaining space, centered */}
+          <View style={styles.focusFrameArea}>
+            <View style={styles.focusFrame}>
+              <View style={[styles.focusCorner, styles.focusCornerTL]} />
+              <View style={[styles.focusCorner, styles.focusCornerTR]} />
+              <View style={[styles.focusCorner, styles.focusCornerBL]} />
+              <View style={[styles.focusCorner, styles.focusCornerBR]} />
+            </View>
+          </View>
+
+          {/* Bottom Controls */}
+          <View style={[styles.bottomControls, { paddingBottom: insets.bottom + spacing.md }]}>
+            <View style={styles.controlSpacer} />
+
+            <Pressable 
+              style={({ pressed }) => [styles.captureButton, pressed && { opacity: 0.7 }]}
+              onPress={capturePhoto}
+              disabled={isCapturing}
+            >
+              <View style={styles.captureButtonOuter}>
+                <View style={styles.captureButtonInner}>
+                  {isCapturing ? (
+                    <ActivityIndicator size="small" color={colors.primaryForeground} />
+                  ) : (
+                    <Ionicons name="camera" size={28} color={colors.primaryForeground} />
+                  )}
+                </View>
+              </View>
+            </Pressable>
+
+            <Pressable 
+              style={({ pressed }) => [styles.switchCameraButton, pressed && { opacity: 0.7 }]}
+              onPress={toggleCameraFacing}
+            >
+              <View style={styles.switchCameraInner}>
+                <Ionicons name="sync" size={22} color={colors.foreground} />
+              </View>
+            </Pressable>
+          </View>
         </View>
-
-        {/* Bottom Controls */}
-        <View style={[styles.bottomControls, { paddingBottom: insets.bottom + spacing.md }]}>
-          {/* Spacer for centering */}
-          <View style={styles.controlSpacer} />
-
-          {/* Capture Button */}
-          <TouchableOpacity 
-            style={styles.captureButton} 
-            onPress={capturePhoto}
-            disabled={isCapturing}
-            activeOpacity={0.8}
-          >
-            <View style={styles.captureButtonOuter}>
-              <View style={styles.captureButtonInner}>
-                {isCapturing ? (
-                  <ActivityIndicator size="small" color={colors.primaryForeground} />
-                ) : (
-                  <Ionicons name="camera" size={28} color={colors.primaryForeground} />
-                )}
-              </View>
-            </View>
-          </TouchableOpacity>
-
-          {/* Switch Camera */}
-          <TouchableOpacity style={styles.switchCameraButton} onPress={toggleCameraFacing}>
-            <View style={styles.switchCameraInner}>
-              <Ionicons name="sync" size={22} color={colors.foreground} />
-            </View>
-          </TouchableOpacity>
-        </View>
-
       </View>
     </>
   );
@@ -362,7 +366,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
 
-  // Header
+  // Controls column — flex layout on top of camera (no absolute positioning)
+  controlsColumn: {
+    flex: 1,
+    justifyContent: 'space-between',
+  },
+
+  // Header (overlaid on camera)
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -374,7 +384,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: borderRadius.full,
-    backgroundColor: `${colors.muted}80`,
+    backgroundColor: 'rgba(0,0,0,0.4)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -382,23 +392,22 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '600',
     color: colors.foreground,
-  },
-  headerSpacer: {
-    width: 44,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
 
-  // Info Card
+  // Info Card (overlaid on camera)
   infoCard: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
     marginHorizontal: spacing.xl,
-    marginBottom: spacing.lg,
-    backgroundColor: colors.card,
+    backgroundColor: 'rgba(0,0,0,0.5)',
     padding: spacing.lg,
     borderRadius: borderRadius['2xl'],
     borderWidth: 1,
-    borderColor: `${colors.border}50`,
+    borderColor: 'rgba(255,255,255,0.1)',
   },
   infoIconContainer: {
     width: 44,
@@ -413,7 +422,7 @@ const styles = StyleSheet.create({
   },
   infoLabel: {
     fontSize: 13,
-    color: colors.foregroundMuted,
+    color: 'rgba(255,255,255,0.7)',
     marginBottom: 2,
   },
   infoValue: {
@@ -422,42 +431,24 @@ const styles = StyleSheet.create({
     color: colors.foreground,
   },
 
-  // Camera
-  cameraContainer: {
-    flex: 1,
-    marginHorizontal: spacing.xl,
-    borderRadius: borderRadius['2xl'],
-    overflow: 'hidden',
-    backgroundColor: colors.card,
-  },
-  camera: {
-    flex: 1,
-  },
-  cameraOverlay: {
-    flex: 1,
-    justifyContent: 'space-between',
-  },
-  cameraTopControls: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    padding: spacing.lg,
-  },
   cameraControlButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(0,0,0,0.4)',
     alignItems: 'center',
     justifyContent: 'center',
   },
+
+  // Focus frame
+  focusFrameArea: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   focusFrame: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
     width: 200,
     height: 200,
-    marginLeft: -100,
-    marginTop: -100,
   },
   focusCorner: {
     position: 'absolute',
@@ -494,7 +485,7 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 8,
   },
 
-  // Bottom Controls
+  // Bottom Controls (overlaid on camera)
   bottomControls: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -502,6 +493,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xl,
     paddingHorizontal: spacing.xl,
     gap: spacing['2xl'],
+    backgroundColor: 'rgba(0,0,0,0.4)',
   },
   controlSpacer: {
     width: 56,
@@ -548,7 +540,8 @@ const styles = StyleSheet.create({
   previewContainer: {
     flex: 1,
     marginHorizontal: spacing.xl,
-    marginVertical: spacing.lg,
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
     borderRadius: borderRadius['2xl'],
     overflow: 'hidden',
     backgroundColor: colors.card,
@@ -556,13 +549,13 @@ const styles = StyleSheet.create({
   previewImage: {
     flex: 1,
     width: '100%',
-    height: '100%',
   },
   previewActions: {
     flexDirection: 'row',
     gap: spacing.md,
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.lg,
+    backgroundColor: colors.background,
   },
   retakeButton: {
     flex: 1,
@@ -572,6 +565,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     backgroundColor: colors.muted,
     paddingVertical: spacing.lg,
+    minHeight: 52,
     borderRadius: borderRadius.xl,
   },
   retakeButtonText: {
@@ -587,6 +581,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     backgroundColor: colors.primary,
     paddingVertical: spacing.lg,
+    minHeight: 52,
     borderRadius: borderRadius.xl,
   },
   usePhotoButtonText: {

@@ -102,6 +102,10 @@ interface BufferedLocation {
 // Must be at module scope for background execution
 // ============================================
 
+const BACKGROUND_FLUSH_THRESHOLD = 3;
+const BACKGROUND_FLUSH_INTERVAL_MS = 2 * 60 * 1000;
+const LAST_BACKGROUND_FLUSH_KEY = 'location_last_bg_flush';
+
 TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error) {
     console.error('[LocationTracking] Task error:', error);
@@ -180,6 +184,48 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     // Save updated buffer
     await storage.set(LOCATION_BUFFER_KEY, JSON.stringify(buffer));
     console.log(`[LocationTracking] Added ${addedCount}/${locations.length} locations (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance) (total: ${buffer.length})`);
+
+    // Flush buffer to Convex from background task
+    // The JS execution window during background location delivery is brief but
+    // sufficient for a single network call. We flush when we have enough points
+    // OR enough time has passed since the last background flush.
+    const now = Date.now();
+    const lastFlushStr = await storage.getString(LAST_BACKGROUND_FLUSH_KEY);
+    const lastFlushTime = lastFlushStr ? parseInt(lastFlushStr, 10) : 0;
+    const timeSinceFlush = now - lastFlushTime;
+
+    const shouldFlush =
+      buffer.length >= BACKGROUND_FLUSH_THRESHOLD ||
+      (buffer.length > 0 && timeSinceFlush >= BACKGROUND_FLUSH_INTERVAL_MS);
+
+    if (shouldFlush) {
+      try {
+        console.log(`[LocationTracking] Background flush: ${buffer.length} locations`);
+        const flushLocations = buffer.map((loc) => ({
+          driverId: loc.driverId as Id<'drivers'>,
+          loadId: loc.loadId as Id<'loadInformation'>,
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+          accuracy: loc.accuracy ?? undefined,
+          speed: loc.speed ?? undefined,
+          heading: loc.heading ?? undefined,
+          trackingType: 'LOAD_ROUTE' as const,
+          recordedAt: loc.recordedAt,
+        }));
+
+        const result = await convex.mutation(api.driverLocations.batchInsertLocations, {
+          locations: flushLocations,
+          organizationId: state.organizationId,
+        });
+
+        await storage.set(LOCATION_BUFFER_KEY, JSON.stringify([]));
+        await storage.set(LAST_BACKGROUND_FLUSH_KEY, now.toString());
+        console.log(`[LocationTracking] Background flush success: ${result.inserted} synced`);
+      } catch (flushError) {
+        // Non-fatal: buffer is preserved in AsyncStorage for next attempt or foreground flush
+        console.warn('[LocationTracking] Background flush failed (will retry):', flushError);
+      }
+    }
   } catch (err) {
     console.error('[LocationTracking] Error processing locations:', err);
   }

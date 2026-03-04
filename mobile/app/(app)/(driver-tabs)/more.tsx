@@ -1,10 +1,10 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, Pressable, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useDriver } from './_layout';
-import { useLanguage } from '../../lib/LanguageContext';
+import { useDriver } from '../_layout';
+import { useLanguage } from '../../../lib/LanguageContext';
 
 // ============================================
 // DESIGN SYSTEM
@@ -106,13 +106,13 @@ export default function MoreScreen() {
             </View>
           )}
 
-          <TouchableOpacity 
+          <Pressable 
             style={styles.switchTruckButton}
             onPress={() => router.push('/switch-truck')}
           >
             <Ionicons name="swap-horizontal" size={18} color={colors.primary} />
             <Text style={styles.switchTruckText}>{hasTruck ? t('more.switchTruck') : t('more.assignTruck')}</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {/* Financials & History Section */}
@@ -208,7 +208,7 @@ export default function MoreScreen() {
         {/* Safety & Support Section */}
         <Text style={styles.sectionTitle}>{t('more.safetySupport')}</Text>
         <View style={styles.menuSection}>
-          <TouchableOpacity style={[styles.menuRow, styles.menuRowLast]}>
+          <Pressable style={[styles.menuRow, styles.menuRowLast]}>
             <View style={[styles.menuIconContainer, styles.menuIconOrange]}>
               <Ionicons name="warning" size={20} color={colors.primary} />
             </View>
@@ -216,7 +216,7 @@ export default function MoreScreen() {
               <Text style={styles.menuLabel}>{t('more.reportAccident')}</Text>
             </View>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         <View style={{ height: 120 }} />

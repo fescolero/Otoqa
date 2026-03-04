@@ -3,16 +3,16 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   Switch,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { colors, typography, borderRadius, spacing, shadows } from '../../../lib/theme';
-import { useAppMode, useCarrierOwner } from '../_layout';
+import { colors, typography, borderRadius, spacing, shadows } from '../../../../lib/theme';
+import { useAppMode, useCarrierOwner } from '../../_layout';
 import { useClerk } from '@clerk/clerk-expo';
-import { useLanguage } from '../../../lib/LanguageContext';
+import { useLanguage } from '../../../../lib/LanguageContext';
 
 // ============================================
 // DISPATCHER PROFILE PAGE
@@ -76,7 +76,7 @@ export default function ProfileScreen() {
         <>
           <Text style={styles.sectionTitle}>{t('profile.role')}</Text>
           <View style={styles.card}>
-            <TouchableOpacity style={styles.menuItem} onPress={handleSwitchToDriver}>
+            <Pressable style={styles.menuItem} onPress={handleSwitchToDriver}>
               <View style={[styles.iconContainer, { backgroundColor: colors.primary + '20' }]}>
                 <Ionicons name="car" size={20} color={colors.primary} />
               </View>
@@ -85,7 +85,7 @@ export default function ProfileScreen() {
                 <Text style={styles.menuItemSubtitle}>{t('profile.viewAsDriver')}</Text>
               </View>
               <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </>
       )}
@@ -144,7 +144,7 @@ export default function ProfileScreen() {
       {/* Settings Section */}
       <Text style={styles.sectionTitle}>{t('profile.settings')}</Text>
       <View style={styles.card}>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.menuItem}
           onPress={() => router.push('/(app)/language')}
         >
@@ -158,14 +158,14 @@ export default function ProfileScreen() {
             <Text style={styles.menuItemValue}>{getLanguageDisplayName()}</Text>
             <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
           </View>
-        </TouchableOpacity>
+        </Pressable>
       </View>
 
       {/* Sign Out Button */}
-      <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
+      <Pressable style={styles.signOutButton} onPress={handleSignOut}>
         <Ionicons name="log-out-outline" size={20} color={colors.destructive} />
         <Text style={styles.signOutText}>{t('profile.signOut')}</Text>
-      </TouchableOpacity>
+      </Pressable>
 
     </ScrollView>
   );

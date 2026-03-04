@@ -1,92 +1,89 @@
-import { Redirect, Tabs, Stack, useRouter } from 'expo-router';
+import { Redirect, Stack, useRouter } from 'expo-router';
 import { useAuth, useUser } from '@clerk/clerk-expo';
 import {
   View,
   ActivityIndicator,
   StyleSheet,
   Text,
-  TouchableOpacity,
+  Pressable,
+  AppState,
 } from 'react-native';
 import { useQuery } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { Id } from '../../../convex/_generated/dataModel';
 import { useConvexAuthState } from '../../lib/convex';
-import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { colors, typography, borderRadius, isIOS } from '../../lib/theme';
-import { resumeTracking } from '../../lib/location-tracking';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { colors, typography, borderRadius } from '../../lib/theme';
+import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush } from '../../lib/location-tracking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
-import { useLanguage } from '../../lib/LanguageContext';
 import { useRequestPermissionsOnce } from '../../lib/request-permissions';
-import { identifyUser, resetUser, trackRoleSelected } from '../../lib/analytics';
+import {
+  identifyUser,
+  resetUser,
+  trackRoleSelected,
+  trackLoadingGateTimeout,
+  trackLoadingGateResolved,
+  trackLoadingGateRetry,
+  trackAppSessionHealth,
+  type LoadingGate,
+} from '../../lib/analytics';
 
 const MODE_STORAGE_KEY = '@app_mode_selection';
+const GATE_TIMEOUT_MS = 12_000;
 
-// iOS style - dark background with floating pill illusion
-const iosDriverTabBarStyle = {
-  backgroundColor: colors.background,
-  borderTopColor: colors.background,
-  height: 90,
-  paddingTop: 4,
-  paddingBottom: 26,
-  paddingHorizontal: 40,
-};
+function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<string, unknown>) {
+  const startRef = useRef<number | null>(null);
+  const timedOutRef = useRef(false);
+  const resolvedRef = useRef(false);
+  const [isTimedOut, setIsTimedOut] = useState(false);
+  const retryCountRef = useRef(0);
 
-// Android floating pill style
-const androidDriverTabBarStyle = {
-  position: 'absolute' as const,
-  bottom: 28,
-  left: 0,
-  right: 0,
-  marginHorizontal: 24,
-  backgroundColor: colors.card,
-  borderRadius: 35,
-  height: 70,
-  paddingTop: 10,
-  paddingBottom: 10,
-  borderTopWidth: 0,
-  borderWidth: 1,
-  borderColor: 'rgba(63, 69, 82, 0.5)',
-  elevation: 8,
-};
+  useEffect(() => {
+    if (isWaiting) {
+      if (startRef.current === null) {
+        startRef.current = Date.now();
+        timedOutRef.current = false;
+        resolvedRef.current = false;
+      }
 
-// Decorative floating pill for iOS driver tabs
-function IOSDriverTabBarBackground() {
-  return (
-    <View style={iosDriverBgStyles.container}>
-      <View style={iosDriverBgStyles.pill} />
-    </View>
-  );
+      const timer = setTimeout(() => {
+        if (!resolvedRef.current) {
+          timedOutRef.current = true;
+          setIsTimedOut(true);
+          trackLoadingGateTimeout(gate, Date.now() - (startRef.current ?? Date.now()), deps);
+        }
+      }, GATE_TIMEOUT_MS);
+
+      return () => clearTimeout(timer);
+    } else if (startRef.current !== null && !resolvedRef.current) {
+      resolvedRef.current = true;
+      const elapsed = Date.now() - startRef.current;
+      trackLoadingGateResolved(gate, elapsed, { was_stuck: timedOutRef.current, ...deps });
+      trackAppSessionHealth({
+        gate_reached: gate,
+        total_elapsed_ms: elapsed,
+        was_stuck: timedOutRef.current,
+        recovered: timedOutRef.current,
+      });
+      startRef.current = null;
+      timedOutRef.current = false;
+      setIsTimedOut(false);
+    }
+  }, [isWaiting]);
+
+  const retry = useCallback(() => {
+    retryCountRef.current += 1;
+    trackLoadingGateRetry(gate, retryCountRef.current, deps);
+    startRef.current = Date.now();
+    timedOutRef.current = false;
+    resolvedRef.current = false;
+    setIsTimedOut(false);
+  }, [gate]);
+
+  return { isTimedOut, retry, retryCount: retryCountRef.current };
 }
-
-const iosDriverBgStyles = StyleSheet.create({
-  container: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 90,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    paddingTop: 0,
-    backgroundColor: colors.background,
-    borderTopWidth: 2,
-    borderTopColor: colors.background,
-  },
-  pill: {
-    backgroundColor: colors.card,
-    borderRadius: 30,
-    height: 60,
-    marginHorizontal: 20,
-    width: '100%',
-    maxWidth: 400,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-});
 
 // ============================================
 // APP LAYOUT - Dark Theme Floating Nav
@@ -171,134 +168,6 @@ export function useCarrierOwner() {
   return useContext(CarrierOwnerContext);
 }
 
-// Driver mode tabs navigation
-function DriverTabs({
-  profile,
-}: {
-  profile: { _id: Id<'drivers'>; firstName: string; lastName: string; organizationId: string; truck?: TruckInfo };
-}) {
-  const { t } = useLanguage();
-
-  return (
-    <DriverContext.Provider
-      value={{
-        driverId: profile._id,
-        driverName: `${profile.firstName} ${profile.lastName}`,
-        organizationId: profile.organizationId,
-        truck: profile.truck ?? null,
-        isLoading: false,
-      }}
-    >
-      <Tabs
-        screenOptions={{
-          headerShown: false,
-          tabBarActiveTintColor: colors.primary,
-          tabBarInactiveTintColor: colors.foregroundMuted,
-          tabBarStyle: isIOS ? iosDriverTabBarStyle : androidDriverTabBarStyle,
-          tabBarBackground: isIOS ? () => <IOSDriverTabBarBackground /> : undefined,
-          tabBarItemStyle: {
-            height: 50,
-            justifyContent: 'center',
-            alignItems: 'center',
-          },
-          tabBarLabelStyle: {
-            fontSize: 10,
-            fontWeight: '500',
-          },
-        }}
-      >
-        <Tabs.Screen
-          name="index"
-          options={{
-            tabBarLabel: ({ focused }) => (
-              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-                {t('nav.home')}
-              </Text>
-            ),
-            tabBarIcon: ({ focused }) => (
-              <View style={styles.tabIconContainer}>
-                <Ionicons
-                  name={focused ? 'home' : 'home-outline'}
-                  size={28}
-                  color={focused ? colors.primary : colors.foregroundMuted}
-                />
-              </View>
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="messages"
-          options={{
-            tabBarLabel: ({ focused }) => (
-              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-                {t('nav.messages')}
-              </Text>
-            ),
-            tabBarIcon: ({ focused }) => (
-              <View style={styles.tabIconContainer}>
-                <Ionicons
-                  name={focused ? 'chatbubble' : 'chatbubble-outline'}
-                  size={28}
-                  color={focused ? colors.primary : colors.foregroundMuted}
-                />
-              </View>
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="settings"
-          options={{
-            tabBarLabel: ({ focused }) => (
-              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-                {t('nav.profile')}
-              </Text>
-            ),
-            tabBarIcon: ({ focused }) => (
-              <View style={styles.tabIconContainer}>
-                <Ionicons
-                  name={focused ? 'person' : 'person-outline'}
-                  size={28}
-                  color={focused ? colors.primary : colors.foregroundMuted}
-                />
-              </View>
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="more"
-          options={{
-            tabBarLabel: ({ focused }) => (
-              <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-                {t('nav.more')}
-              </Text>
-            ),
-            tabBarIcon: ({ focused }) => (
-              <View style={styles.tabIconContainer}>
-                <Feather
-                  name="more-horizontal"
-                  size={28}
-                  color={focused ? colors.primary : colors.foregroundMuted}
-                />
-              </View>
-            ),
-          }}
-        />
-        {/* Hide non-tab screens */}
-        <Tabs.Screen name="trip/[id]" options={{ href: null, tabBarStyle: { display: 'none' } }} />
-        <Tabs.Screen name="capture-photo" options={{ href: null, tabBarStyle: { display: 'none' } }} />
-        <Tabs.Screen name="switch-truck" options={{ href: null }} />
-        <Tabs.Screen name="permissions" options={{ href: null }} />
-        <Tabs.Screen name="notifications" options={{ href: null }} />
-        <Tabs.Screen name="language" options={{ href: null }} />
-        <Tabs.Screen name="driver" options={{ href: null }} />
-        {/* Hide owner screens from driver tabs */}
-        <Tabs.Screen name="owner" options={{ href: null }} />
-      </Tabs>
-    </DriverContext.Provider>
-  );
-}
-
-
 export default function AppLayout() {
   const { isSignedIn, isLoaded: clerkLoaded, userId, signOut } = useAuth();
   const { user } = useUser();
@@ -324,26 +193,25 @@ export default function AppLayout() {
   // Load persisted mode on mount - but DON'T auto-select role
   // Carriers should always see the role selection screen on sign-in
   useEffect(() => {
+    let cancelled = false;
     const loadStoredMode = async () => {
       try {
-        // We still load the stored mode preference for mid-session switching,
-        // but we don't restore hasSelectedRole - carrier must always choose on sign-in
         const stored = await AsyncStorage.getItem(MODE_STORAGE_KEY);
+        if (cancelled) return;
         if (stored) {
           const { mode: storedMode } = JSON.parse(stored);
           if (storedMode) {
-            // Store the preference but don't mark as selected
-            // This allows the mode to be remembered for switching during the session
             setModeState(storedMode);
           }
         }
       } catch (e) {
         console.warn('Failed to load mode from storage:', e);
       } finally {
-        setIsLoadingStoredMode(false);
+        if (!cancelled) setIsLoadingStoredMode(false);
       }
     };
     loadStoredMode();
+    return () => { cancelled = true; };
   }, []);
 
   // Get user's organization ID from Clerk (for legacy support)
@@ -351,22 +219,37 @@ export default function AppLayout() {
 
   // Query user roles to determine if driver, owner, or both
   // This now also returns carrier org info directly
-  const userRoles = useQuery(
+  const userRolesLive = useQuery(
     api.carrierMobile.getUserRoles,
     convexAuth.isAuthenticated && userId
       ? { clerkUserId: userId, clerkOrgId: clerkOrgId }
       : 'skip'
   );
 
+  // Cache the last known roles so transient undefined states (token refresh,
+  // reactive re-subscription) don't flash the "Checking permissions..." screen.
+  const cachedRolesRef = useRef(userRolesLive);
+  if (userRolesLive !== undefined) {
+    cachedRolesRef.current = userRolesLive;
+  }
+  const userRoles = userRolesLive ?? cachedRolesRef.current;
+
   // Query driver profile if user can be a driver (needed for mode switching)
   // Pass driverId from getUserRoles so owner-operators can be found by direct lookup
   // instead of relying solely on phone number matching
-  const profile = useQuery(
+  const profileLive = useQuery(
     api.driverMobile.getMyProfile,
     convexAuth.isAuthenticated && hasSelectedRole && (userRoles?.isDriver || mode === 'driver')
       ? { driverId: (userRoles?.driverId ?? undefined) as Id<'drivers'> | undefined }
       : 'skip'
   );
+
+  // Cache last known profile to avoid flashing loading screen during re-subscriptions
+  const cachedProfileRef = useRef(profileLive);
+  if (profileLive !== undefined) {
+    cachedProfileRef.current = profileLive;
+  }
+  const profile = profileLive ?? cachedProfileRef.current;
 
   // Carrier org info is now returned directly from userRoles
   // No need for separate query - use carrierOrgConvexId and carrierOrgName from userRoles
@@ -391,6 +274,12 @@ export default function AppLayout() {
   const isProfileLoading = mode === 'driver' && hasSelectedRole && userRoles?.isDriver && profile === undefined;
   const isCarrierOrgLoading = mode === 'owner' && hasSelectedRole && userRoles === undefined;
   const isRolesLoading = userRoles === undefined;
+
+  // Loading gate monitors — track how long each gate takes and fire PostHog events on timeout
+  const convexAuthGate = useLoadingGate('convex_auth', convexAuth.isLoading && !!isSignedIn);
+  const rolesGate = useLoadingGate('user_roles', isRolesLoading && convexAuth.isAuthenticated);
+  const profileGate = useLoadingGate('driver_profile', !!isProfileLoading);
+  const carrierOrgGate = useLoadingGate('carrier_org', !!isCarrierOrgLoading);
 
   // Determine which modes are available
   const canBeDriver = userRoles?.isDriver ?? false;
@@ -449,33 +338,52 @@ export default function AppLayout() {
   const router = useRouter();
   const lastNavigatedModeRef = useRef<'driver' | 'owner' | null>(null);
 
-  // Only navigate when entering owner mode
-  // Driver mode doesn't need navigation - the layout just re-renders with DriverTabs
+  // Navigate to the correct initial screen based on mode
   useEffect(() => {
     if (!hasSelectedRole) return;
     
-    // Only navigate TO owner mode (and only if we haven't already)
     if (mode === 'owner' && carrierOrg?._id && lastNavigatedModeRef.current !== 'owner') {
       lastNavigatedModeRef.current = 'owner';
       router.navigate('/(app)/owner');
-    } else if (mode === 'driver') {
-      // Just update the ref - no navigation needed
-      // The layout will re-render and display DriverTabs
+    } else if (mode === 'driver' && lastNavigatedModeRef.current !== 'driver') {
       lastNavigatedModeRef.current = 'driver';
+      router.navigate('/(app)/(driver-tabs)');
     }
   }, [mode, hasSelectedRole, carrierOrg?._id]);
 
   // Resume location tracking on app start if it was active
   useEffect(() => {
+    let cancelled = false;
     if (!hasResumedRef.current && profile?._id) {
       hasResumedRef.current = true;
       resumeTracking().then((result) => {
-        if (result.resumed) {
+        if (!cancelled && result.resumed) {
           console.log('[App] Location tracking resumed:', result.message);
         }
       });
     }
+    return () => { cancelled = true; };
   }, [profile?._id]);
+
+  // Flush buffered locations when app returns to foreground
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', async (nextState) => {
+      if (nextState === 'active') {
+        try {
+          const state = await getTrackingState();
+          if (!state?.isActive) return;
+          const count = await getBufferedLocationCount();
+          if (count > 0) {
+            console.log(`[App] Foreground: flushing ${count} buffered locations`);
+            await forceFlush();
+          }
+        } catch (err) {
+          console.warn('[App] Foreground flush failed:', err);
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
   // Auto-switch modes when profile/org is not found
   useEffect(() => {
@@ -509,8 +417,25 @@ export default function AppLayout() {
   if (convexAuth.isLoading) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Connecting to server...</Text>
+        {convexAuthGate.isTimedOut ? (
+          <>
+            <Ionicons name="cloud-offline-outline" size={48} color={colors.warning} />
+            <Text style={styles.loadingTitle}>Connection Slow</Text>
+            <Text style={styles.loadingSubtext}>Having trouble connecting to the server.</Text>
+            <Pressable style={styles.retryButton} onPress={() => { convexAuthGate.retry(); }}>
+              <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </Pressable>
+            <Pressable style={styles.signOutLink} onPress={handleSignOut}>
+              <Text style={styles.signOutLinkText}>Sign out</Text>
+            </Pressable>
+          </>
+        ) : (
+          <>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.loadingText}>Connecting to server...</Text>
+          </>
+        )}
       </View>
     );
   }
@@ -519,8 +444,25 @@ export default function AppLayout() {
   if (isRolesLoading) {
     return (
       <View style={styles.loading}>
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Checking permissions...</Text>
+        {rolesGate.isTimedOut ? (
+          <>
+            <Ionicons name="shield-outline" size={48} color={colors.warning} />
+            <Text style={styles.loadingTitle}>Taking Longer Than Expected</Text>
+            <Text style={styles.loadingSubtext}>Still checking your permissions. You can retry or sign out and try again.</Text>
+            <Pressable style={styles.retryButton} onPress={() => { rolesGate.retry(); }}>
+              <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </Pressable>
+            <Pressable style={styles.signOutLink} onPress={handleSignOut}>
+              <Text style={styles.signOutLinkText}>Sign out</Text>
+            </Pressable>
+          </>
+        ) : (
+          <>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.loadingText}>Checking permissions...</Text>
+          </>
+        )}
       </View>
     );
   }
@@ -547,10 +489,9 @@ export default function AppLayout() {
         <View style={styles.roleOptionsContainer}>
           {/* Driver Option */}
           {canBeDriver && (
-            <TouchableOpacity
-              style={styles.roleCard}
+            <Pressable
+              style={({ pressed }) => [styles.roleCard, pressed && { opacity: 0.7 }]}
               onPress={() => handleSelectRole('driver')}
-              activeOpacity={0.7}
             >
               <View style={[styles.roleIconBox, { backgroundColor: colors.primary + '20' }]}>
                 <Ionicons name="person" size={24} color={colors.primary} />
@@ -562,14 +503,13 @@ export default function AppLayout() {
                 </Text>
               </View>
               <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-            </TouchableOpacity>
+            </Pressable>
           )}
 
           {/* Dispatcher/Owner Option */}
-          <TouchableOpacity
-            style={styles.roleCard}
+          <Pressable
+            style={({ pressed }) => [styles.roleCard, pressed && { opacity: 0.7 }]}
             onPress={() => handleSelectRole('owner')}
-            activeOpacity={0.7}
           >
             <View style={[styles.roleIconBox, { backgroundColor: colors.warning + '20' }]}>
               <MaterialCommunityIcons name="monitor-dashboard" size={24} color={colors.warning} />
@@ -581,7 +521,7 @@ export default function AppLayout() {
               </Text>
             </View>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {/* Active Account Display */}
@@ -597,12 +537,12 @@ export default function AppLayout() {
               {user?.fullName || userRoles?.carrierOrgName || 'User'}
             </Text>
           </View>
-          <TouchableOpacity 
+          <Pressable 
             style={styles.switchButton}
             onPress={handleSignOut}
           >
             <Text style={styles.switchButtonText}>Switch</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {/* Help Link */}
@@ -616,10 +556,29 @@ export default function AppLayout() {
 
   // Show loading while fetching profile/org
   if (isProfileLoading || isCarrierOrgLoading) {
+    const activeGate = isProfileLoading ? profileGate : carrierOrgGate;
+    const isStuck = activeGate.isTimedOut;
     return (
       <View style={styles.loading}>
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Loading profile...</Text>
+        {isStuck ? (
+          <>
+            <Ionicons name="person-outline" size={48} color={colors.warning} />
+            <Text style={styles.loadingTitle}>Profile Load Slow</Text>
+            <Text style={styles.loadingSubtext}>Having trouble loading your profile data.</Text>
+            <Pressable style={styles.retryButton} onPress={() => { activeGate.retry(); }}>
+              <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </Pressable>
+            <Pressable style={styles.signOutLink} onPress={handleSignOut}>
+              <Text style={styles.signOutLinkText}>Sign out</Text>
+            </Pressable>
+          </>
+        ) : (
+          <>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.loadingText}>Loading profile...</Text>
+          </>
+        )}
       </View>
     );
   }
@@ -647,13 +606,13 @@ export default function AppLayout() {
           If you believe this is an error, please contact support at support@otoqa.com
           or call 1-800-XXX-XXXX for assistance.
         </Text>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.errorButton}
           onPress={handleSignOut}
         >
           <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
           <Text style={styles.errorButtonText}>Back to Sign In</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -668,13 +627,13 @@ export default function AppLayout() {
           Your phone number is not registered as a driver or carrier owner in the system.
           Please contact your dispatcher or company administrator.
         </Text>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.errorButton}
           onPress={handleSignOut}
         >
           <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
           <Text style={styles.errorButtonText}>Back to Sign In</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -689,13 +648,13 @@ export default function AppLayout() {
           Your phone number is not registered as a driver in the system.
           Please contact your dispatcher.
         </Text>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.errorButton}
           onPress={handleSignOut}
         >
           <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
           <Text style={styles.errorButtonText}>Back to Sign In</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -710,13 +669,13 @@ export default function AppLayout() {
           Your carrier organization is not set up yet.
           Please contact support to complete registration.
         </Text>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.errorButton}
           onPress={handleSignOut}
         >
           <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
           <Text style={styles.errorButtonText}>Back to Sign In</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -733,6 +692,30 @@ export default function AppLayout() {
   };
 
 
+  const driverContextValue = profile ? {
+    driverId: profile._id,
+    driverName: `${profile.firstName} ${profile.lastName}`,
+    organizationId: profile.organizationId,
+    truck: profile.truck ?? null,
+    isLoading: false,
+  } : {
+    driverId: null,
+    driverName: '',
+    organizationId: null,
+    truck: null,
+    isLoading: true,
+  };
+
+  if (mode === 'owner' && carrierOrg?._id && needsDriverProfileOnboarding) {
+    return (
+      <AppModeContext.Provider value={{ mode, setMode, roles: userRoles, canSwitchModes }}>
+        <CarrierOwnerContext.Provider value={carrierOwnerContextValue}>
+          <CompleteDriverProfileScreen />
+        </CarrierOwnerContext.Provider>
+      </AppModeContext.Provider>
+    );
+  }
+
   return (
     <AppModeContext.Provider
       value={{
@@ -743,36 +726,30 @@ export default function AppLayout() {
       }}
     >
       <CarrierOwnerContext.Provider value={carrierOwnerContextValue}>
-        {mode === 'driver' ? (
-          profile ? (
-            <DriverTabs profile={profile} />
-          ) : (
-            <View style={styles.loading}>
-              <ActivityIndicator size="large" color={colors.primary} />
-              <Text style={styles.loadingText}>Loading driver profile...</Text>
-            </View>
-          )
-        ) : mode === 'owner' && carrierOrg?._id ? (
-          // Check if owner-operator needs to complete driver profile
-          needsDriverProfileOnboarding ? (
-            <CompleteDriverProfileScreen />
-          ) : (
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="owner" />
-              <Stack.Screen 
-                name="driver" 
-                options={{ 
-                  presentation: 'fullScreenModal',
-                  animation: 'slide_from_bottom',
-                }} 
-              />
-            </Stack>
-          )
-        ) : (
-          <View style={styles.loading}>
-            <ActivityIndicator size="large" color={colors.primary} />
-          </View>
-        )}
+        <DriverContext.Provider value={driverContextValue}>
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: colors.background },
+            }}
+          >
+            <Stack.Screen name="(driver-tabs)" />
+            <Stack.Screen name="trip/[id]" />
+            <Stack.Screen name="capture-photo" />
+            <Stack.Screen name="switch-truck" />
+            <Stack.Screen name="permissions" />
+            <Stack.Screen name="notifications" />
+            <Stack.Screen name="language" />
+            <Stack.Screen name="owner" />
+            <Stack.Screen
+              name="driver"
+              options={{
+                presentation: 'fullScreenModal',
+                animation: 'slide_from_bottom',
+              }}
+            />
+          </Stack>
+        </DriverContext.Provider>
       </CarrierOwnerContext.Provider>
     </AppModeContext.Provider>
   );
@@ -789,6 +766,45 @@ const styles = StyleSheet.create({
     color: colors.foregroundMuted,
     marginTop: 16,
     fontSize: typography.base,
+  },
+  loadingTitle: {
+    fontSize: typography.lg,
+    fontWeight: typography.semibold as '600',
+    color: colors.foreground,
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  loadingSubtext: {
+    fontSize: typography.sm,
+    color: colors.foregroundMuted,
+    textAlign: 'center' as const,
+    lineHeight: 20,
+    paddingHorizontal: 32,
+    marginBottom: 20,
+  },
+  retryButton: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    backgroundColor: colors.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: borderRadius.md,
+    gap: 8,
+    marginBottom: 12,
+  },
+  retryButtonText: {
+    color: colors.primaryForeground,
+    fontSize: typography.base,
+    fontWeight: typography.semibold as '600',
+  },
+  signOutLink: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  signOutLinkText: {
+    color: colors.foregroundMuted,
+    fontSize: typography.sm,
+    textDecorationLine: 'underline' as const,
   },
   error: {
     flex: 1,
@@ -832,20 +848,6 @@ const styles = StyleSheet.create({
     color: colors.primaryForeground,
     fontSize: typography.base,
     fontWeight: typography.semibold,
-  },
-  tabIconContainer: {
-    width: 28,
-    height: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tabLabel: {
-    fontSize: 10,
-    fontWeight: '500',
-    color: colors.foregroundMuted,
-  },
-  tabLabelFocused: {
-    color: colors.primary,
   },
   // Switch Mode Button (for switching between driver/owner)
   switchModeButton: {

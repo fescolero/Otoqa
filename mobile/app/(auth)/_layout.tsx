@@ -19,7 +19,6 @@ export default function AuthLayout() {
     );
   }
 
-  // If signed in, redirect to main app (role selection is handled there)
   if (isSignedIn) {
     return <Redirect href="/(app)" />;
   }

@@ -2,8 +2,8 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, typography, spacing } from '../../lib/theme';
-import { useLanguage } from '../../lib/LanguageContext';
+import { colors, typography, spacing } from '../../../lib/theme';
+import { useLanguage } from '../../../lib/LanguageContext';
 
 // ============================================
 // MESSAGES SCREEN

@@ -3,12 +3,24 @@ import type { PostHogEventProperties } from '@posthog/core';
 
 let posthogClient: PostHog | null = null;
 
+// Buffer events that fire before PostHog is initialized (e.g. auth setup
+// events that race with the PostHogProvider useEffect).
+let eventBuffer: Array<{ event: string; properties?: PostHogEventProperties }> = [];
+
 export function setPostHogClient(client: PostHog) {
   posthogClient = client;
+  for (const { event, properties } of eventBuffer) {
+    client.capture(event, properties);
+  }
+  eventBuffer = [];
 }
 
 function capture(event: string, properties?: PostHogEventProperties) {
-  posthogClient?.capture(event, properties);
+  if (posthogClient) {
+    posthogClient.capture(event, properties);
+  } else {
+    eventBuffer.push({ event, properties });
+  }
 }
 
 export function identifyUser(user: {
@@ -110,6 +122,66 @@ export function trackPermissionRequest(
   granted: boolean,
 ) {
   capture('permission_request', { permission, granted });
+}
+
+// ============================================
+// PERFORMANCE & RELIABILITY TRACKING
+// ============================================
+
+export type LoadingGate =
+  | 'clerk_load'
+  | 'convex_auth'
+  | 'user_roles'
+  | 'driver_profile'
+  | 'carrier_org'
+  | 'sign_in_request'
+  | 'verification_request';
+
+export function trackLoadingGateTimeout(gate: LoadingGate, elapsedMs: number, context?: Record<string, unknown>) {
+  capture('loading_gate_timeout', {
+    gate,
+    elapsed_ms: elapsedMs,
+    ...context,
+  });
+}
+
+export function trackLoadingGateResolved(gate: LoadingGate, elapsedMs: number, context?: Record<string, unknown>) {
+  capture('loading_gate_resolved', {
+    gate,
+    elapsed_ms: elapsedMs,
+    ...context,
+  });
+}
+
+export function trackLoadingGateRetry(gate: LoadingGate, attemptNumber: number, context?: Record<string, unknown>) {
+  capture('loading_gate_retry', {
+    gate,
+    attempt: attemptNumber,
+    ...context,
+  });
+}
+
+export function trackConvexAuthEvent(
+  event: 'setup_started' | 'setup_complete' | 'token_fetch_failed' | 'auth_timeout' | 'debouncing_false' | 'auth_false_propagated' | 'foreground_return',
+  context?: Record<string, unknown>,
+) {
+  capture(`convex_auth_${event}`, context);
+}
+
+export function trackAppSessionHealth(context: {
+  gate_reached: LoadingGate;
+  total_elapsed_ms: number;
+  was_stuck: boolean;
+  recovered: boolean;
+}) {
+  capture('app_session_health', context);
+}
+
+export function trackQueryAuthFailure(query: string, context?: Record<string, unknown>) {
+  capture('query_auth_failure', {
+    query,
+    ...context,
+  });
 }
 
 function maskPhone(phone: string): string {

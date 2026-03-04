@@ -55,7 +55,7 @@ interface FuelEntryFormProps {
     receiptUrl?: string;
   };
   drivers: Array<{ _id: string; firstName: string; lastName: string }>;
-  carriers: Array<{ _id: string; carrierName: string }>;
+  carriers: Array<{ _id: string; carrierName: string; trackFuelConsumption?: boolean }>;
   trucks: Array<{
     _id: string;
     unitId: string;
@@ -322,13 +322,25 @@ export function FuelEntryForm({
                 <SelectValue placeholder="Select a carrier..." />
               </SelectTrigger>
               <SelectContent>
-                {carriers.map((c) => (
-                  <SelectItem key={c._id} value={c._id}>
-                    {c.carrierName}
-                  </SelectItem>
-                ))}
+                {[...carriers]
+                  .sort((a, b) => {
+                    if (a.trackFuelConsumption && !b.trackFuelConsumption) return -1;
+                    if (!a.trackFuelConsumption && b.trackFuelConsumption) return 1;
+                    return a.carrierName.localeCompare(b.carrierName);
+                  })
+                  .map((c) => (
+                    <SelectItem key={c._id} value={c._id}>
+                      {c.carrierName}
+                      {c.trackFuelConsumption ? ' ✓' : ''}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
+            {carriers.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                No carriers available. Add carriers in Operations &gt; Carriers.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

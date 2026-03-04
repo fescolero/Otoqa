@@ -3,7 +3,7 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   TextInput,
   KeyboardAvoidingView,
   Platform,
@@ -225,13 +225,13 @@ export default function EditDriverScreen() {
       >
         {/* Header */}
         <View style={[styles.header, { paddingTop: insets.top + spacing.md }]}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <Pressable onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-          </TouchableOpacity>
+          </Pressable>
           <Text style={styles.headerTitle}>Edit Driver</Text>
-          <TouchableOpacity onPress={resetForm}>
+          <Pressable onPress={resetForm}>
             <Text style={styles.resetText}>Reset</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         <ScrollView 
@@ -243,7 +243,7 @@ export default function EditDriverScreen() {
           <Text style={styles.fieldLabel}>Employment Status</Text>
           <View style={styles.statusSelector}>
             {(['Active', 'Suspended', 'Terminated'] as EmploymentStatus[]).map((status) => (
-              <TouchableOpacity
+              <Pressable
                 key={status}
                 style={[
                   styles.statusOption,
@@ -261,7 +261,7 @@ export default function EditDriverScreen() {
                 ]}>
                   {status}
                 </Text>
-              </TouchableOpacity>
+              </Pressable>
             ))}
           </View>
 
@@ -308,7 +308,7 @@ export default function EditDriverScreen() {
           </View>
 
           <Text style={styles.fieldLabel}>Date of Birth</Text>
-          <TouchableOpacity 
+          <Pressable 
             style={styles.inputContainer}
             onPress={() => setShowDatePicker(true)}
           >
@@ -320,7 +320,7 @@ export default function EditDriverScreen() {
               {dateOfBirth ? formatDateDisplay(dateOfBirth) : 'Select date of birth'}
             </Text>
             <Ionicons name="chevron-down" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
 
           {/* License Information Section */}
           <View style={styles.sectionHeader}>
@@ -343,7 +343,7 @@ export default function EditDriverScreen() {
           <View style={styles.rowInputs}>
             <View style={styles.halfInput}>
               <Text style={styles.fieldLabel}>License Class</Text>
-              <TouchableOpacity 
+              <Pressable 
                 style={styles.inputContainer}
                 onPress={() => setShowLicenseClassPicker(true)}
               >
@@ -355,7 +355,7 @@ export default function EditDriverScreen() {
                   {formData.licenseClass || 'Select'}
                 </Text>
                 <Ionicons name="chevron-down" size={20} color={colors.foregroundMuted} />
-              </TouchableOpacity>
+              </Pressable>
             </View>
             <View style={styles.halfInput}>
               <Text style={styles.fieldLabel}>License State</Text>
@@ -375,7 +375,7 @@ export default function EditDriverScreen() {
           </View>
 
           <Text style={styles.fieldLabel}>License Expiration</Text>
-          <TouchableOpacity 
+          <Pressable 
             style={styles.inputContainer}
             onPress={() => setShowLicenseExpirationPicker(true)}
           >
@@ -387,7 +387,7 @@ export default function EditDriverScreen() {
               {licenseExpirationDate ? formatDateDisplay(licenseExpirationDate) : 'Select expiration date'}
             </Text>
             <Ionicons name="chevron-down" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
 
           {/* Contact Details Section */}
           <View style={styles.sectionHeader}>
@@ -442,7 +442,7 @@ export default function EditDriverScreen() {
           </View>
 
           {/* Buttons */}
-          <TouchableOpacity
+          <Pressable
             style={[styles.updateButton, isUpdating && styles.updateButtonDisabled]}
             onPress={handleUpdate}
             disabled={isUpdating}
@@ -452,15 +452,15 @@ export default function EditDriverScreen() {
             ) : (
               <Text style={styles.updateButtonText}>Save Changes</Text>
             )}
-          </TouchableOpacity>
+          </Pressable>
 
-          <TouchableOpacity
+          <Pressable
             style={styles.cancelButton}
             onPress={() => router.back()}
             disabled={isUpdating}
           >
             <Text style={styles.cancelButtonText}>Cancel</Text>
-          </TouchableOpacity>
+          </Pressable>
         </ScrollView>
 
         {/* Date Picker Modal for DOB */}
@@ -504,15 +504,14 @@ export default function EditDriverScreen() {
           animationType="fade"
           onRequestClose={() => setShowLicenseClassPicker(false)}
         >
-          <TouchableOpacity 
+          <Pressable 
             style={styles.modalOverlay}
-            activeOpacity={1}
             onPress={() => setShowLicenseClassPicker(false)}
           >
             <View style={styles.pickerModal}>
               <Text style={styles.pickerTitle}>Select License Class</Text>
               {LICENSE_CLASSES.map((licenseClass) => (
-                <TouchableOpacity
+                <Pressable
                   key={licenseClass}
                   style={[
                     styles.pickerOption,
@@ -532,10 +531,10 @@ export default function EditDriverScreen() {
                   {formData.licenseClass === licenseClass && (
                     <Ionicons name="checkmark" size={20} color={colors.primary} />
                   )}
-                </TouchableOpacity>
+                </Pressable>
               ))}
             </View>
-          </TouchableOpacity>
+          </Pressable>
         </Modal>
       </KeyboardAvoidingView>
     </View>

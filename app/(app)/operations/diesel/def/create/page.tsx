@@ -34,9 +34,11 @@ export default function CreateDefEntryPage() {
   const vendors = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId, activeOnly: true } : 'skip');
   const carriersRaw = useAuthQuery(api.carrierPartnerships.listForBroker, organizationId ? { brokerOrgId: organizationId } : 'skip');
 
-  const carriers = (carriersRaw ?? []).filter(
-    (c) => c.trackFuelConsumption === true
-  );
+  const carriers = (carriersRaw ?? []).map((c) => ({
+    _id: c._id,
+    carrierName: c.carrierName,
+    trackFuelConsumption: c.trackFuelConsumption ?? false,
+  }));
 
   const handleSubmit = async (data: FuelEntryFormData) => {
     if (!organizationId || !user) return;

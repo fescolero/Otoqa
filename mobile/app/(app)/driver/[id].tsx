@@ -3,7 +3,7 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   Linking,
   ActivityIndicator,
 } from 'react-native';
@@ -145,9 +145,9 @@ export default function DriverDetailScreen() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+          <Pressable style={styles.backButton} onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-          </TouchableOpacity>
+          </Pressable>
           <Text style={styles.headerTitle}>Driver Profile</Text>
           <View style={styles.headerSpacer} />
         </View>
@@ -258,12 +258,12 @@ export default function DriverDetailScreen() {
               <Text style={styles.infoValue}>{driver.phone || 'Not provided'}</Text>
             </View>
             {driver.phone && (
-              <TouchableOpacity
+              <Pressable
                 style={styles.actionButton}
                 onPress={() => handleCall(driver.phone)}
               >
                 <Ionicons name="call" size={20} color={colors.primary} />
-              </TouchableOpacity>
+              </Pressable>
             )}
           </View>
 
@@ -276,12 +276,12 @@ export default function DriverDetailScreen() {
               <Text style={styles.infoValue}>{driver.email || 'Not provided'}</Text>
             </View>
             {driver.email && (
-              <TouchableOpacity
+              <Pressable
                 style={styles.actionButton}
                 onPress={() => handleEmail(driver.email)}
               >
                 <Ionicons name="mail" size={20} color={colors.primary} />
-              </TouchableOpacity>
+              </Pressable>
             )}
           </View>
         </View>
@@ -289,10 +289,10 @@ export default function DriverDetailScreen() {
 
       {/* Edit Button */}
       <View style={[styles.bottomBar, { paddingBottom: insets.bottom + spacing.md }]}>
-        <TouchableOpacity style={styles.editButton} onPress={handleEdit}>
+        <Pressable style={styles.editButton} onPress={handleEdit}>
           <Ionicons name="pencil" size={20} color={colors.primaryForeground} />
           <Text style={styles.editButtonText}>Edit Driver</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     </View>
   );

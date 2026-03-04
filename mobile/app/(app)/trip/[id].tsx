@@ -1,9 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import {
   View,
   Text,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   StyleSheet,
   Alert,
   Linking,
@@ -12,20 +12,20 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  Image,
+  Keyboard,
+  TouchableWithoutFeedback,
 } from 'react-native';
-import { useLocalSearchParams, useRouter, Stack, useFocusEffect } from 'expo-router';
+import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { useLoadDetail } from '../../../lib/hooks/useLoadDetail';
 import { useCheckIn } from '../../../lib/hooks/useCheckIn';
 import { useDriver } from '../_layout';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
 import { Id } from '../../../../convex/_generated/dataModel';
 import { usePostHog } from 'posthog-react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// Key for retrieving captured photo URI
-const CAPTURED_PHOTO_KEY = 'captured_photo_uri';
 
 // ============================================
 // DESIGN SYSTEM
@@ -93,32 +93,6 @@ export default function TripDetailScreen() {
   const [showDetourModal, setShowDetourModal] = useState(false);
   const [detourStops, setDetourStops] = useState(1);
 
-  // Check for captured photo when screen comes into focus
-  useFocusEffect(
-    useCallback(() => {
-      const checkForCapturedPhoto = async () => {
-        try {
-          const capturedUri = await AsyncStorage.getItem(CAPTURED_PHOTO_KEY);
-          if (capturedUri) {
-            console.log('[TripDetail] Retrieved captured photo:', capturedUri);
-            setPhotoUri(capturedUri);
-            // Clear the stored URI so it's not reused
-            await AsyncStorage.removeItem(CAPTURED_PHOTO_KEY);
-            
-            // Show the check-in modal if it was closed
-            if (!checkInModal.visible && checkInModal.stopId) {
-              setCheckInModal(prev => ({ ...prev, visible: true }));
-            }
-          }
-        } catch (error) {
-          console.error('[TripDetail] Failed to retrieve captured photo:', error);
-        }
-      };
-      
-      checkForCapturedPhoto();
-    }, [checkInModal.stopId, checkInModal.visible])
-  );
-
   // Open maps for navigation
   const openMaps = (address: string, city?: string, state?: string) => {
     const query = encodeURIComponent(`${address}, ${city || ''} ${state || ''}`);
@@ -136,23 +110,26 @@ export default function TripDetailScreen() {
     setCheckInModal({ visible: true, stopId, type: 'out' });
   };
 
-  // Navigate to capture photo screen
-  const navigateToCapturePhoto = (stopIdParam?: Id<'loadStops'>) => {
-    const currentStop = stops[currentStopIndex];
-    const locationName = currentStop?.locationName || 
-      (currentStop ? `${currentStop.city}, ${currentStop.state}` : undefined);
-    
-    posthog?.capture('capture_photo_screen_opened', { loadId: id, stopId: stopIdParam || null });
-    
-    router.push({
-      pathname: '/capture-photo',
-      params: {
-        loadId: id,
-        stopId: stopIdParam || checkInModal.stopId || undefined,
-        locationName: locationName || `Load #${load?.internalId}`,
-        stopSequence: currentStop?.sequenceNumber?.toString() || undefined,
-      },
+  // Launch native system camera — no custom screen, no touch issues
+  const launchCamera = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Camera access is needed to capture proof of delivery photos.');
+      return;
+    }
+
+    posthog?.capture('capture_photo_opened', { loadId: id, stopId: checkInModal.stopId || null });
+
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 0.8,
+      allowsEditing: false,
     });
+
+    if (!result.canceled && result.assets?.[0]?.uri) {
+      setPhotoUri(result.assets[0].uri);
+      posthog?.capture('capture_photo_taken', { loadId: id, success: true });
+    }
   };
 
   // Submit check-in/out
@@ -307,9 +284,9 @@ export default function TripDetailScreen() {
       <View style={[styles.error, { paddingTop: insets.top }]}>
         <Ionicons name="alert-circle" size={64} color={colors.destructive} />
         <Text style={styles.errorText}>Load not found</Text>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <Pressable style={styles.backButton} onPress={() => router.back()}>
           <Text style={styles.backButtonText}>Go Back</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -324,19 +301,19 @@ export default function TripDetailScreen() {
       <View style={[styles.container, { paddingTop: insets.top }]}>
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity 
+          <Pressable 
             style={styles.headerBackButton} 
             onPress={() => router.back()}
           >
             <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-          </TouchableOpacity>
+          </Pressable>
           <Text style={styles.headerTitle}>Load Details</Text>
           <View style={styles.headerSpacer} />
         </View>
 
         <ScrollView 
           style={styles.scrollView}
-          contentContainerStyle={[styles.scrollContent, { paddingBottom: 100 + insets.bottom }]}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: spacing.md }]}
           showsVerticalScrollIndicator={false}
         >
           {/* Offline Banner */}
@@ -463,26 +440,26 @@ export default function TripDetailScreen() {
 
                       {/* Check In button for current stop */}
                       {isCurrent && !isCheckedIn && (
-                        <TouchableOpacity
-                          style={styles.checkInButton}
+                        <Pressable
+                          style={({ pressed }) => [styles.checkInButton, pressed && { opacity: 0.8 }]}
                           onPress={() => handleCheckIn(stop._id)}
-                          activeOpacity={0.8}
                         >
                           <Ionicons name="log-in" size={20} color={colors.primaryForeground} />
                           <Text style={styles.checkInButtonText}>Check In</Text>
-                        </TouchableOpacity>
+                        </Pressable>
                       )}
 
                       {/* Check Out button for checked-in stop */}
                       {isCheckedIn && (
-                        <TouchableOpacity
-                          style={styles.checkOutButton}
-                          onPress={() => handleCheckOut(stop._id)}
-                          activeOpacity={0.8}
+                        <Pressable
+                          style={({ pressed }) => [styles.checkOutButton, pressed && { opacity: 0.8 }]}
+                          onPress={() => {
+                            handleCheckOut(stop._id);
+                          }}
                         >
                           <Ionicons name="log-out" size={20} color={colors.foreground} />
                           <Text style={styles.checkOutButtonText}>Check Out</Text>
-                        </TouchableOpacity>
+                        </Pressable>
                       )}
                     </View>
                   </View>
@@ -506,12 +483,12 @@ export default function TripDetailScreen() {
                   </Text>
                 </View>
                 {load.contactPersonPhone && (
-                  <TouchableOpacity
+                  <Pressable
                     style={styles.callButton}
                     onPress={() => Linking.openURL(`tel:${load.contactPersonPhone}`)}
                   >
                     <Ionicons name="call" size={24} color={colors.primary} />
-                  </TouchableOpacity>
+                  </Pressable>
                 )}
               </View>
             </View>
@@ -529,20 +506,21 @@ export default function TripDetailScreen() {
               </View>
             </View>
           )}
+
         </ScrollView>
 
-        {/* Bottom Action Bar */}
+        {/* Bottom Action Bar — fixed at bottom, outside ScrollView */}
         <View style={[styles.bottomBar, { paddingBottom: insets.bottom + (Platform.OS === 'ios' ? spacing.sm : spacing.lg) }]}>
-          <TouchableOpacity 
-            style={styles.menuButton}
+          <Pressable
+            style={({ pressed }) => [styles.menuButton, pressed && { opacity: 0.8 }]}
             onPress={() => setShowQuickActions(true)}
           >
             <Ionicons name="ellipsis-horizontal" size={24} color={colors.foreground} />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.completeButton} activeOpacity={0.8}>
+          </Pressable>
+          <Pressable style={({ pressed }) => [styles.completeButton, pressed && { opacity: 0.8 }]}>
             <Ionicons name="checkmark-circle" size={24} color={colors.foreground} />
             <Text style={styles.completeButtonText}>Complete Load</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {/* Quick Actions Modal */}
@@ -553,9 +531,8 @@ export default function TripDetailScreen() {
           onRequestClose={() => setShowQuickActions(false)}
         >
           <View style={styles.quickActionsOverlay}>
-            <TouchableOpacity 
+            <Pressable 
               style={styles.quickActionsBackdrop}
-              activeOpacity={1}
               onPress={() => setShowQuickActions(false)}
             />
             <View style={styles.quickActionsSheet}>
@@ -567,17 +544,17 @@ export default function TripDetailScreen() {
                   <Text style={styles.quickActionsTitle}>Quick Actions</Text>
                   <Text style={styles.quickActionsSubtitle}>Available tasks for this load</Text>
                 </View>
-                <TouchableOpacity 
+                <Pressable 
                   style={styles.quickActionsCloseBtn}
                   onPress={() => setShowQuickActions(false)}
                 >
                   <Ionicons name="close" size={18} color={colors.foregroundMuted} />
-                </TouchableOpacity>
+                </Pressable>
               </View>
 
               {/* Action Grid */}
               <View style={styles.quickActionsGrid}>
-                <TouchableOpacity 
+                <Pressable 
                   style={styles.quickActionItem}
                   onPress={() => {
                     setShowQuickActions(false);
@@ -591,9 +568,9 @@ export default function TripDetailScreen() {
                     <Ionicons name="navigate" size={26} color={colors.primary} />
                   </View>
                   <Text style={styles.quickActionLabel}>Navigate</Text>
-                </TouchableOpacity>
+                </Pressable>
 
-                <TouchableOpacity 
+                <Pressable 
                   style={[styles.quickActionItem, styles.quickActionItemDisabled]}
                   disabled={true}
                 >
@@ -601,16 +578,16 @@ export default function TripDetailScreen() {
                     <Ionicons name="call" size={26} color={colors.foregroundMuted} />
                   </View>
                   <Text style={[styles.quickActionLabel, styles.quickActionLabelDisabled]}>Call Site</Text>
-                </TouchableOpacity>
+                </Pressable>
 
-                <TouchableOpacity style={styles.quickActionItem}>
+                <Pressable style={styles.quickActionItem}>
                   <View style={styles.quickActionIconContainer}>
                     <Ionicons name="document-text" size={26} color={colors.primary} />
                   </View>
                   <Text style={styles.quickActionLabel}>Documents</Text>
-                </TouchableOpacity>
+                </Pressable>
 
-                <TouchableOpacity 
+                <Pressable 
                   style={styles.quickActionItem}
                   onPress={() => {
                     setShowQuickActions(false);
@@ -621,12 +598,12 @@ export default function TripDetailScreen() {
                     <Ionicons name="git-branch" size={26} color={colors.primary} />
                   </View>
                   <Text style={styles.quickActionLabel}>Add Detour</Text>
-                </TouchableOpacity>
+                </Pressable>
               </View>
 
               {/* Bottom Actions */}
               <View style={styles.quickActionsBottomSection}>
-                <TouchableOpacity style={styles.quickActionRowItem}>
+                <Pressable style={styles.quickActionRowItem}>
                   <View style={styles.quickActionRowLeft}>
                     <View style={[styles.quickActionRowIcon, styles.quickActionRowIconRed]}>
                       <Ionicons name="alert-circle" size={20} color={colors.destructive} />
@@ -636,9 +613,9 @@ export default function TripDetailScreen() {
                     </Text>
                   </View>
                   <Ionicons name="arrow-forward" size={20} color={colors.destructive} />
-                </TouchableOpacity>
+                </Pressable>
 
-                <TouchableOpacity style={styles.quickActionRowItem}>
+                <Pressable style={styles.quickActionRowItem}>
                   <View style={styles.quickActionRowLeft}>
                     <View style={[styles.quickActionRowIcon, styles.quickActionRowIconOrange]}>
                       <Ionicons name="share-social" size={20} color={colors.primary} />
@@ -648,7 +625,7 @@ export default function TripDetailScreen() {
                     </Text>
                   </View>
                   <Ionicons name="arrow-forward" size={20} color={colors.primary} />
-                </TouchableOpacity>
+                </Pressable>
               </View>
             </View>
           </View>
@@ -666,11 +643,11 @@ export default function TripDetailScreen() {
             behavior="padding"
             keyboardVerticalOffset={Platform.OS === 'ios' ? -150 : -160}
           >
-            <TouchableOpacity 
-              style={styles.modalBackdrop} 
-              activeOpacity={1} 
-              onPress={closeModal}
+            <Pressable 
+              style={styles.modalBackdrop}
+              onPress={() => { Keyboard.dismiss(); closeModal(); }}
             />
+            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={styles.modalContent}>
               <View style={styles.sheetHandle} />
               
@@ -684,30 +661,46 @@ export default function TripDetailScreen() {
                     Stop {stops[currentStopIndex]?.sequenceNumber}: {stops[currentStopIndex]?.locationName || `${stops[currentStopIndex]?.city}, ${stops[currentStopIndex]?.state}`}
                   </Text>
                 </View>
-                <TouchableOpacity style={styles.modalCancelButton} onPress={closeModal}>
+                <Pressable style={styles.modalCancelButton} onPress={closeModal}>
                   <Text style={styles.modalCancelButtonText}>Cancel</Text>
-                </TouchableOpacity>
+                </Pressable>
               </View>
 
-              {/* Take a Photo Row */}
-              <TouchableOpacity 
-                style={styles.modalPhotoRow}
-                onPress={() => {
-                  closeModal();
-                  navigateToCapturePhoto(checkInModal.stopId || undefined);
-                }}
-              >
-                <View style={styles.modalPhotoIconContainer}>
-                  <Ionicons name="camera" size={24} color={colors.primary} />
+              {/* Photo Row — shows camera prompt or attached photo */}
+              {photoUri ? (
+                <View style={[styles.modalPhotoRow, { borderColor: `${colors.success}40` }]}>
+                  <Image source={{ uri: photoUri }} style={styles.modalPhotoThumbnail} />
+                  <View style={styles.modalPhotoTextContainer}>
+                    <View style={styles.modalPhotoAttachedRow}>
+                      <Ionicons name="checkmark-circle" size={18} color={colors.success} />
+                      <Text style={[styles.modalPhotoTitle, { color: colors.success }]}>Photo Attached</Text>
+                    </View>
+                    <Text style={styles.modalPhotoSubtitle}>Ready to upload with {checkInModal.type === 'in' ? 'check-in' : 'check-out'}</Text>
+                  </View>
+                  <Pressable
+                    style={({ pressed }) => [styles.modalPhotoRemoveButton, pressed && { opacity: 0.7 }]}
+                    onPress={() => setPhotoUri(null)}
+                  >
+                    <Ionicons name="close-circle" size={22} color={colors.foregroundMuted} />
+                  </Pressable>
                 </View>
-                <View style={styles.modalPhotoTextContainer}>
-                  <Text style={styles.modalPhotoTitle}>Take a Photo</Text>
-                  <Text style={styles.modalPhotoSubtitle}>
-                    {checkInModal.type === 'in' ? 'Proof of arrival or cargo status' : 'Proof of delivery'}
-                  </Text>
-                </View>
-                <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-              </TouchableOpacity>
+              ) : (
+                <Pressable 
+                  style={styles.modalPhotoRow}
+                  onPress={launchCamera}
+                >
+                  <View style={styles.modalPhotoIconContainer}>
+                    <Ionicons name="camera" size={24} color={colors.primary} />
+                  </View>
+                  <View style={styles.modalPhotoTextContainer}>
+                    <Text style={styles.modalPhotoTitle}>Take a Photo</Text>
+                    <Text style={styles.modalPhotoSubtitle}>
+                      {checkInModal.type === 'in' ? 'Proof of arrival or cargo status' : 'Proof of delivery'}
+                    </Text>
+                  </View>
+                  <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
+                </Pressable>
+              )}
 
               {/* Add Note Section */}
               <View style={styles.modalNoteSection}>
@@ -725,28 +718,32 @@ export default function TripDetailScreen() {
                     multiline
                     numberOfLines={4}
                     textAlignVertical="top"
+                    blurOnSubmit
+                    returnKeyType="done"
+                    onSubmitEditing={() => Keyboard.dismiss()}
                   />
-                  <TouchableOpacity 
-                    style={[
+                  <Pressable 
+                    style={({ pressed }) => [
                       styles.modalNoteActionButton,
-                      notes.trim() ? styles.modalNoteSendButton : styles.modalNoteVoiceButton
+                      notes.trim() ? styles.modalNoteSendButton : styles.modalNoteVoiceButton,
+                      pressed && { opacity: 0.7 },
                     ]}
+                    onPress={() => Keyboard.dismiss()}
                   >
                     <Ionicons 
                       name={notes.trim() ? "send" : "mic"} 
                       size={20} 
                       color={notes.trim() ? colors.foreground : colors.secondary} 
                     />
-                  </TouchableOpacity>
+                  </Pressable>
                 </View>
               </View>
 
               {/* Complete Button */}
-              <TouchableOpacity
-                style={[styles.modalCompleteButton, isSubmitting && styles.modalCompleteButtonDisabled]}
+              <Pressable
+                style={({ pressed }) => [styles.modalCompleteButton, isSubmitting && styles.modalCompleteButtonDisabled, pressed && { opacity: 0.8 }]}
                 onPress={submitCheckIn}
                 disabled={isSubmitting}
-                activeOpacity={0.8}
               >
                 {isSubmitting ? (
                   <ActivityIndicator color={colors.primaryForeground} size="small" />
@@ -758,7 +755,7 @@ export default function TripDetailScreen() {
                     </Text>
                   </>
                 )}
-              </TouchableOpacity>
+              </Pressable>
 
               {/* GPS Notice */}
               <View style={styles.modalGpsNotice}>
@@ -766,6 +763,7 @@ export default function TripDetailScreen() {
                 <Text style={styles.modalGpsNoticeText}>Location verified via GPS</Text>
               </View>
             </View>
+            </TouchableWithoutFeedback>
           </KeyboardAvoidingView>
         </Modal>
 
@@ -777,9 +775,8 @@ export default function TripDetailScreen() {
           onRequestClose={() => setShowDetourModal(false)}
         >
           <View style={styles.detourModalOverlay}>
-            <TouchableOpacity 
+            <Pressable 
               style={styles.detourModalBackdrop}
-              activeOpacity={1}
               onPress={() => setShowDetourModal(false)}
             />
             <View style={styles.detourModalSheet}>
@@ -791,19 +788,19 @@ export default function TripDetailScreen() {
                   <Text style={styles.detourModalTitle}>Add Detour Stops</Text>
                   <Text style={styles.detourModalSubtitle}>Plan additional stops on your current route</Text>
                 </View>
-                <TouchableOpacity 
+                <Pressable 
                   style={styles.detourModalCloseBtn}
                   onPress={() => setShowDetourModal(false)}
                 >
                   <Ionicons name="close" size={16} color={colors.foreground} />
-                </TouchableOpacity>
+                </Pressable>
               </View>
 
               {/* Number of Stops Selector */}
               <View style={styles.detourStopsCard}>
                 <Text style={styles.detourStopsLabel}>NUMBER OF STOPS</Text>
                 <View style={styles.detourStopsRow}>
-                  <TouchableOpacity 
+                  <Pressable 
                     style={[
                       styles.detourStopsButton,
                       detourStops <= 1 && styles.detourStopsButtonDisabled
@@ -816,7 +813,7 @@ export default function TripDetailScreen() {
                       size={24} 
                       color={detourStops <= 1 ? colors.foregroundMuted : colors.foreground} 
                     />
-                  </TouchableOpacity>
+                  </Pressable>
                   
                   <View style={styles.detourStopsCountContainer}>
                     <Text style={styles.detourStopsCount}>
@@ -825,12 +822,12 @@ export default function TripDetailScreen() {
                     <Text style={styles.detourStopsTotalLabel}>STOPS TOTAL</Text>
                   </View>
                   
-                  <TouchableOpacity 
+                  <Pressable 
                     style={styles.detourStopsButton}
                     onPress={() => setDetourStops(detourStops + 1)}
                   >
                     <Ionicons name="add" size={24} color={colors.primaryForeground} />
-                  </TouchableOpacity>
+                  </Pressable>
                 </View>
               </View>
 
@@ -860,8 +857,8 @@ export default function TripDetailScreen() {
               </View>
 
               {/* Confirm Button */}
-              <TouchableOpacity
-                style={styles.detourConfirmButton}
+              <Pressable
+                style={({ pressed }) => [styles.detourConfirmButton, pressed && { opacity: 0.8 }]}
                 onPress={() => {
                   posthog?.capture('detour_confirmed', { 
                     loadId: id, 
@@ -875,14 +872,13 @@ export default function TripDetailScreen() {
                   );
                   setDetourStops(1);
                 }}
-                activeOpacity={0.8}
               >
                 <Ionicons name="navigate" size={22} color={colors.primaryForeground} />
                 <Text style={styles.detourConfirmButtonText}>Confirm Detour</Text>
-              </TouchableOpacity>
+              </Pressable>
 
               {/* Cancel Button */}
-              <TouchableOpacity
+              <Pressable
                 style={styles.detourCancelButton}
                 onPress={() => {
                   setShowDetourModal(false);
@@ -890,7 +886,7 @@ export default function TripDetailScreen() {
                 }}
               >
                 <Text style={styles.detourCancelButtonText}>Cancel</Text>
-              </TouchableOpacity>
+              </Pressable>
             </View>
           </View>
         </Modal>
@@ -1268,18 +1264,14 @@ const styles = StyleSheet.create({
     lineHeight: 24,
   },
 
-  // Bottom bar
+  // Bottom bar — fixed at bottom, outside ScrollView
   bottomBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.xl,
-    backgroundColor: `${colors.background}F5`,
+    paddingTop: spacing.md,
+    paddingHorizontal: spacing.lg,
+    backgroundColor: colors.background,
     borderTopWidth: 1,
     borderTopColor: `${colors.border}50`,
   },
@@ -1523,6 +1515,22 @@ const styles = StyleSheet.create({
   modalPhotoSubtitle: {
     fontSize: 14,
     color: colors.foregroundMuted,
+  },
+  modalPhotoThumbnail: {
+    width: 48,
+    height: 48,
+    borderRadius: borderRadius.lg,
+    marginRight: spacing.md,
+    backgroundColor: colors.muted,
+  },
+  modalPhotoAttachedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: 2,
+  },
+  modalPhotoRemoveButton: {
+    padding: spacing.xs,
   },
   modalNoteSection: {
     backgroundColor: colors.background,

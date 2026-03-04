@@ -4,7 +4,7 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   Switch,
   Linking,
   Platform,
@@ -154,9 +154,9 @@ export default function NotificationsScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-        </TouchableOpacity>
+        </Pressable>
         <Text style={styles.headerTitle}>Notification Preferences</Text>
         <View style={styles.headerSpacer} />
       </View>
@@ -192,7 +192,7 @@ export default function NotificationsScreen() {
           </Text>
 
           {permissionStatus !== 'granted' && permissionStatus !== 'unavailable' && (
-            <TouchableOpacity 
+            <Pressable 
               style={styles.enableButton}
               onPress={permissionStatus === 'denied' ? openSettings : requestPermissions}
             >
@@ -204,7 +204,7 @@ export default function NotificationsScreen() {
               <Text style={styles.enableButtonText}>
                 {permissionStatus === 'denied' ? 'Open Settings' : 'Enable Notifications'}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
           )}
         </View>
 

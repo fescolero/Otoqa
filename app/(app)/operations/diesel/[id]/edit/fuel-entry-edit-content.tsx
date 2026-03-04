@@ -47,9 +47,11 @@ export function FuelEntryEditContent({ id }: { id: string }) {
   const vendors = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId, activeOnly: true } : 'skip');
   const carriersRaw = useAuthQuery(api.carrierPartnerships.listForBroker, organizationId ? { brokerOrgId: organizationId } : 'skip');
 
-  const carriers = (carriersRaw ?? []).filter(
-    (c) => c.trackFuelConsumption === true
-  );
+  const carriers = (carriersRaw ?? []).map((c) => ({
+    _id: c._id,
+    carrierName: c.carrierName,
+    trackFuelConsumption: c.trackFuelConsumption ?? false,
+  }));
 
   const updateFuelEntry = useMutation(api.fuelEntries.update);
   const updateDefEntry = useMutation(api.defEntries.update);

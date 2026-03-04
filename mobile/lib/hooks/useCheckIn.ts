@@ -173,7 +173,6 @@ export function useCheckIn() {
               error: uploadResult.error ?? null,
               photoUri: options.photoUri,
             });
-            // Continue with check-out even if photo upload fails
           }
         } catch (uploadError: any) {
           const errorMessage = uploadError?.message || String(uploadError);
@@ -185,7 +184,6 @@ export function useCheckIn() {
             errorStack: uploadError?.stack ?? null,
             photoUri: options.photoUri,
           });
-          // Continue with check-out even if photo upload fails
         }
       }
 

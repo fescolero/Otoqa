@@ -11,20 +11,16 @@ import {
   ScrollView,
   Pressable,
 } from 'react-native';
-import { useSignIn } from '@clerk/clerk-expo';
+import { useSignIn, useAuth } from '@clerk/clerk-expo';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
 import { LinearGradient } from 'expo-linear-gradient';
 import { trackVerificationStarted, trackVerificationSuccess, trackVerificationFailed, trackResendCode } from '../../lib/analytics';
 
-// ============================================
-// OTP VERIFICATION SCREEN
-// 6-digit code verification
-// ============================================
-
 export default function VerifyScreen() {
   const { signIn, setActive, isLoaded } = useSignIn();
+  const { isSignedIn } = useAuth();
   const router = useRouter();
   const { phoneNumber } = useLocalSearchParams<{ phoneNumber: string }>();
 
@@ -32,8 +28,23 @@ export default function VerifyScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [resendTimer, setResendTimer] = useState(30);
   const [focusedIndex, setFocusedIndex] = useState(0);
+  const [verificationComplete, setVerificationComplete] = useState(false);
 
   const hiddenInputRef = useRef<TextInput | null>(null);
+
+  // Navigate to app once Clerk confirms sign-in is active
+  useEffect(() => {
+    if (verificationComplete && isSignedIn) {
+      router.replace('/(app)');
+    }
+  }, [verificationComplete, isSignedIn]);
+
+  // Safety net: if isSignedIn becomes true, navigate away
+  useEffect(() => {
+    if (isSignedIn && isLoaded) {
+      router.replace('/(app)');
+    }
+  }, [isSignedIn, isLoaded]);
 
   // Countdown timer for resend
   useEffect(() => {
@@ -59,8 +70,9 @@ export default function VerifyScreen() {
     hiddenInputRef.current?.focus();
   };
 
-  // Verify the code
   const handleVerify = async (fullCode?: string) => {
+    hiddenInputRef.current?.blur();
+
     if (!isLoaded) return;
 
     const codeToVerify = fullCode || code;
@@ -81,8 +93,17 @@ export default function VerifyScreen() {
 
       if (result.status === 'complete') {
         trackVerificationSuccess();
-        await setActive({ session: result.createdSessionId });
-        router.replace('/(app)');
+        try {
+          await setActive({ session: result.createdSessionId });
+        } catch (activateError: any) {
+          console.error('[Verify] setActive failed:', activateError);
+          Alert.alert(
+            'Session Error',
+            'Verification succeeded but we couldn\'t activate your session. Please close and reopen the app.',
+          );
+          return;
+        }
+        setVerificationComplete(true);
       } else {
         trackVerificationFailed('incomplete', 'Verification incomplete');
         Alert.alert('Error', 'Verification incomplete. Please try again.');
@@ -109,7 +130,6 @@ export default function VerifyScreen() {
     }
   };
 
-  // Resend code
   const handleResend = async () => {
     if (!isLoaded || resendTimer > 0) return;
 
@@ -130,14 +150,12 @@ export default function VerifyScreen() {
     }
   };
 
-  // Format phone for display
   const formattedPhone = phoneNumber
     ? phoneNumber.replace(/(\+1)(\d{3})(\d{3})(\d{4})/, '$1 ($2) $3-$4')
     : '';
 
   return (
     <View style={styles.container}>
-      {/* Background gradient effect */}
       <LinearGradient
         colors={['rgba(255, 107, 0, 0.15)', 'transparent']}
         style={styles.gradientTop}
@@ -151,7 +169,8 @@ export default function VerifyScreen() {
       >
         <ScrollView
           contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
+          keyboardShouldPersistTaps="always"
+          keyboardDismissMode="on-drag"
           showsVerticalScrollIndicator={false}
         >
           {/* Back Button */}
@@ -162,14 +181,13 @@ export default function VerifyScreen() {
             <Ionicons name="arrow-back" size={24} color={colors.foreground} />
           </TouchableOpacity>
 
-          {/* Header */}
           <Text style={styles.title}>Enter verification code</Text>
           <Text style={styles.subtitle}>
             We sent a 6-digit code to{'\n'}
             <Text style={styles.phoneText}>{formattedPhone}</Text>
           </Text>
 
-          {/* Code Input — hidden real input + visual digit boxes */}
+          {/* Code Input */}
           <Pressable onPress={focusHiddenInput}>
             <View style={styles.codeContainer}>
               {codeDigits.map((digit, index) => (

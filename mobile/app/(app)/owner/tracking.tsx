@@ -1,4 +1,6 @@
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, RefreshControl, Linking, Platform } from 'react-native';
+import { View, Text, StyleSheet, Pressable, ScrollView, RefreshControl, Linking, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import { useCarrierOwner } from '../_layout';
@@ -13,6 +15,8 @@ import { useState, useCallback } from 'react';
 // ============================================
 
 export default function TrackingScreen() {
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
   const { carrierOrgId } = useCarrierOwner();
   const [refreshing, setRefreshing] = useState(false);
   const [selectedDriver, setSelectedDriver] = useState<string | null>(null);
@@ -56,7 +60,16 @@ export default function TrackingScreen() {
   const availableDrivers = driverLocations?.filter(d => !d.currentLoad) || [];
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+        </Pressable>
+        <Text style={styles.headerTitle}>Driver Tracking</Text>
+        <View style={{ width: 40 }} />
+      </View>
+
       {/* Header Stats */}
       <View style={styles.statsRow}>
         <View style={styles.statCard}>
@@ -100,7 +113,7 @@ export default function TrackingScreen() {
               <Ionicons name="car" size={16} color={colors.warning} /> On Load
             </Text>
             {activeDrivers.map((driverLoc) => (
-              <TouchableOpacity
+              <Pressable
                 key={driverLoc.driver._id}
                 style={[
                   styles.driverCard,
@@ -111,7 +124,7 @@ export default function TrackingScreen() {
                     selectedDriver === driverLoc.driver._id ? null : driverLoc.driver._id
                   )
                 }
-                activeOpacity={0.7}
+
               >
                 <View style={styles.driverRow}>
                   <View style={[styles.statusDot, styles.activeDot]} />
@@ -150,14 +163,14 @@ export default function TrackingScreen() {
 
                 {selectedDriver === driverLoc.driver._id && (
                   <View style={styles.actionRow}>
-                    <TouchableOpacity
+                    <Pressable
                       style={styles.actionButton}
                       onPress={() => handleCall(driverLoc.driver.phone)}
                     >
                       <Ionicons name="call" size={18} color={colors.primary} />
                       <Text style={styles.actionText}>Call</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
+                    </Pressable>
+                    <Pressable
                       style={styles.actionButton}
                       onPress={() =>
                         handleDirections(
@@ -168,10 +181,10 @@ export default function TrackingScreen() {
                     >
                       <Ionicons name="navigate" size={18} color={colors.primary} />
                       <Text style={styles.actionText}>Directions</Text>
-                    </TouchableOpacity>
+                    </Pressable>
                   </View>
                 )}
-              </TouchableOpacity>
+              </Pressable>
             ))}
           </View>
         )}
@@ -183,7 +196,7 @@ export default function TrackingScreen() {
               <Ionicons name="checkmark-circle" size={16} color={colors.success} /> Available
             </Text>
             {availableDrivers.map((driverLoc) => (
-              <TouchableOpacity
+              <Pressable
                 key={driverLoc.driver._id}
                 style={[
                   styles.driverCard,
@@ -194,7 +207,7 @@ export default function TrackingScreen() {
                     selectedDriver === driverLoc.driver._id ? null : driverLoc.driver._id
                   )
                 }
-                activeOpacity={0.7}
+
               >
                 <View style={styles.driverRow}>
                   <View style={[styles.statusDot, styles.availableDot]} />
@@ -220,14 +233,14 @@ export default function TrackingScreen() {
 
                 {selectedDriver === driverLoc.driver._id && (
                   <View style={styles.actionRow}>
-                    <TouchableOpacity
+                    <Pressable
                       style={styles.actionButton}
                       onPress={() => handleCall(driverLoc.driver.phone)}
                     >
                       <Ionicons name="call" size={18} color={colors.primary} />
                       <Text style={styles.actionText}>Call</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
+                    </Pressable>
+                    <Pressable
                       style={styles.actionButton}
                       onPress={() =>
                         handleDirections(
@@ -238,10 +251,10 @@ export default function TrackingScreen() {
                     >
                       <Ionicons name="navigate" size={18} color={colors.primary} />
                       <Text style={styles.actionText}>Directions</Text>
-                    </TouchableOpacity>
+                    </Pressable>
                   </View>
                 )}
-              </TouchableOpacity>
+              </Pressable>
             ))}
           </View>
         )}
@@ -265,6 +278,25 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  backButton: {
+    padding: spacing.xs,
+    width: 40,
+  },
+  headerTitle: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: typography.lg,
+    fontWeight: '600',
+    color: colors.foreground,
   },
   statsRow: {
     flexDirection: 'row',

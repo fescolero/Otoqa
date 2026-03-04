@@ -3,7 +3,7 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   ActivityIndicator,
   Alert,
 } from 'react-native';
@@ -185,7 +185,7 @@ export default function AssignDriverScreen() {
       Alert.alert(
         'Success',
         `${selectedDriver.name} has been assigned to this load.`,
-        [{ text: 'OK', onPress: () => router.back() }]
+        [{ text: 'OK', onPress: () => router.replace('/(app)/owner') }]
       );
     } catch (error) {
       console.error('[AssignDriver] Failed to assign driver:', error);
@@ -202,9 +202,9 @@ export default function AssignDriverScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-        </TouchableOpacity>
+        </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Assign Driver</Text>
           <Text style={styles.headerSubtitle}>LOAD #{loadData.internalId}</Text>
@@ -214,7 +214,7 @@ export default function AssignDriverScreen() {
 
       <ScrollView 
         style={styles.content}
-        contentContainerStyle={{ paddingBottom: insets.bottom + 120 }}
+        contentContainerStyle={{ paddingBottom: spacing.md }}
         showsVerticalScrollIndicator={false}
       >
         {/* Load Overview Card */}
@@ -274,16 +274,14 @@ export default function AssignDriverScreen() {
 
           {availableDrivers.length > 0 ? (
             availableDrivers.map((driver) => (
-              <TouchableOpacity
+              <Pressable
                 key={driver._id}
                 style={[
                   styles.driverCard,
                   selectedDriverId === driver._id && styles.driverCardSelected,
                 ]}
                 onPress={() => setSelectedDriverId(driver._id)}
-                activeOpacity={0.7}
               >
-                {/* Driver Info */}
                 <View style={styles.driverInfo}>
                   <View style={styles.driverNameRow}>
                     <Text style={styles.driverName}>{driver.name}</Text>
@@ -297,13 +295,12 @@ export default function AssignDriverScreen() {
                   <Text style={styles.driverPhone}>{formatPhoneNumber(driver.phone)}</Text>
                 </View>
 
-                {/* Selection Indicator */}
                 {selectedDriverId === driver._id && (
                   <View style={styles.checkIcon}>
                     <Ionicons name="checkmark-circle" size={24} color={colors.primary} />
                   </View>
                 )}
-              </TouchableOpacity>
+              </Pressable>
             ))
           ) : (
             <View style={styles.emptyState}>
@@ -315,25 +312,26 @@ export default function AssignDriverScreen() {
         </View>
       </ScrollView>
 
-      {/* Bottom Action Bar */}
-      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + spacing.md }]}>
-        <View style={styles.selectedInfo}>
-          <Text style={styles.selectedLabel}>SELECTED DRIVER</Text>
-          <Text style={styles.selectedValue}>
-            {selectedDriver ? selectedDriver.name : 'None'}
-          </Text>
+      {/* Fixed bottom bar — safe as a sibling since this is a Stack screen, not inside Tabs */}
+      <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
+        <View style={styles.bottomBarInfo}>
+          <View style={styles.selectedInfo}>
+            <Text style={styles.selectedLabel}>SELECTED DRIVER</Text>
+            <Text style={styles.selectedValue}>
+              {selectedDriver ? selectedDriver.name : 'None'}
+            </Text>
+          </View>
+          <View style={styles.payoutInfo}>
+            <Text style={styles.payoutLabelDisabled}>EST. PAYOUT</Text>
+            <Text style={styles.payoutValueDisabled}>--</Text>
+          </View>
         </View>
-        <View style={styles.payoutInfo}>
-          <Text style={styles.payoutLabelDisabled}>EST. PAYOUT</Text>
-          <Text style={styles.payoutValueDisabled}>--</Text>
-        </View>
-      </View>
 
-      <View style={[styles.confirmButtonContainer, { paddingBottom: insets.bottom + spacing.lg }]}>
-        <TouchableOpacity
-          style={[
+        <Pressable
+          style={({ pressed }) => [
             styles.confirmButton,
             !selectedDriverId && styles.confirmButtonDisabled,
+            pressed && { opacity: 0.8 },
           ]}
           onPress={handleConfirmAssignment}
           disabled={!selectedDriverId || isAssigning}
@@ -346,7 +344,7 @@ export default function AssignDriverScreen() {
               <Text style={styles.confirmButtonText}>Confirm Assignment</Text>
             </>
           )}
-        </TouchableOpacity>
+        </Pressable>
       </View>
     </View>
   );
@@ -572,15 +570,17 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Bottom Bar
   bottomBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.md,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     backgroundColor: colors.background,
+    gap: spacing.md,
+  },
+  bottomBarInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
   },
   selectedInfo: {},
   selectedLabel: {
@@ -612,10 +612,6 @@ const styles = StyleSheet.create({
   },
 
   // Confirm Button
-  confirmButtonContainer: {
-    paddingHorizontal: spacing.lg,
-    backgroundColor: colors.background,
-  },
   confirmButton: {
     flexDirection: 'row',
     alignItems: 'center',

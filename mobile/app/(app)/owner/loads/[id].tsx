@@ -3,9 +3,10 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   Alert,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../../convex/_generated/api';
@@ -21,6 +22,7 @@ import { Id } from '../../../../../convex/_generated/dataModel';
 // ============================================
 
 export default function LoadDetailScreen() {
+  const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { carrierOrgId } = useCarrierOwner();
   const router = useRouter();
@@ -130,7 +132,17 @@ export default function LoadDetailScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <View style={[styles.screen, { paddingTop: insets.top }]}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+        </Pressable>
+        <Text style={styles.headerTitle}>Load Details</Text>
+        <View style={{ width: 40 }} />
+      </View>
+
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Rate Card */}
       <View style={styles.rateCard}>
         <Text style={styles.rateLabel}>Your Rate</Text>
@@ -170,23 +182,23 @@ export default function LoadDetailScreen() {
               )}
             </View>
             {(assignment.status === 'AWARDED' || assignment.status === 'ACCEPTED') && (
-              <TouchableOpacity
+              <Pressable
                 style={styles.changeButton}
                 onPress={() => setShowDriverPicker(true)}
               >
                 <Text style={styles.changeButtonText}>Change</Text>
-              </TouchableOpacity>
+              </Pressable>
             )}
           </View>
         ) : (
-          <TouchableOpacity
+          <Pressable
             style={styles.assignDriverButton}
             onPress={() => setShowDriverPicker(true)}
             disabled={assignment.status !== 'AWARDED' && assignment.status !== 'ACCEPTED'}
           >
             <Ionicons name="person-add" size={24} color={colors.primary} />
             <Text style={styles.assignDriverText}>Assign Driver</Text>
-          </TouchableOpacity>
+          </Pressable>
         )}
       </View>
 
@@ -195,12 +207,12 @@ export default function LoadDetailScreen() {
         <View style={styles.driverPicker}>
           <View style={styles.pickerHeader}>
             <Text style={styles.pickerTitle}>Select Driver</Text>
-            <TouchableOpacity onPress={() => setShowDriverPicker(false)}>
+            <Pressable onPress={() => setShowDriverPicker(false)}>
               <Ionicons name="close" size={24} color={colors.foreground} />
-            </TouchableOpacity>
+            </Pressable>
           </View>
           {availableDrivers?.map((driver) => (
-            <TouchableOpacity
+            <Pressable
               key={driver._id}
               style={styles.driverOption}
               onPress={() => handleAssignDriver(driver)}
@@ -209,7 +221,7 @@ export default function LoadDetailScreen() {
               <Text style={styles.driverOptionText}>
                 {driver.firstName} {driver.lastName}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
           ))}
           {availableDrivers?.length === 0 && (
             <Text style={styles.noDriversText}>No available drivers</Text>
@@ -241,29 +253,30 @@ export default function LoadDetailScreen() {
       {/* Action Buttons */}
       <View style={styles.actions}>
         {assignment.status === 'AWARDED' && assignment.assignedDriverId && (
-          <TouchableOpacity style={styles.primaryButton} onPress={handleStartLoad}>
+          <Pressable style={styles.primaryButton} onPress={handleStartLoad}>
             <Ionicons name="play" size={20} color={colors.foreground} />
             <Text style={styles.primaryButtonText}>Start Load</Text>
-          </TouchableOpacity>
+          </Pressable>
         )}
 
         {assignment.status === 'IN_PROGRESS' && (
-          <TouchableOpacity style={styles.successButton} onPress={handleCompleteLoad}>
+          <Pressable style={styles.successButton} onPress={handleCompleteLoad}>
             <Ionicons name="checkmark-circle" size={20} color={colors.foreground} />
             <Text style={styles.successButtonText}>Mark Delivered</Text>
-          </TouchableOpacity>
+          </Pressable>
         )}
 
         {(assignment.status === 'AWARDED' || assignment.status === 'IN_PROGRESS') && (
-          <TouchableOpacity style={styles.cancelButton} onPress={handleCancel}>
+          <Pressable style={styles.cancelButton} onPress={handleCancel}>
             <Text style={styles.cancelButtonText}>Cancel Load</Text>
-          </TouchableOpacity>
+          </Pressable>
         )}
       </View>
 
       {/* Bottom Padding */}
       <View style={{ height: 120 }} />
     </ScrollView>
+    </View>
   );
 }
 
@@ -294,6 +307,29 @@ function getStatusStyle(status: string) {
 }
 
 const styles = StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  backButton: {
+    padding: spacing.xs,
+    width: 40,
+  },
+  headerTitle: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: typography.lg,
+    fontWeight: '600',
+    color: colors.foreground,
+  },
   container: {
     flex: 1,
     backgroundColor: colors.background,

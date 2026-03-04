@@ -653,9 +653,6 @@ export const assignCarrierInternal = internalMutation({
         awardedAt: now,
         createdBy: args.assignedBy,
       });
-      // #region agent log
-      console.log('[DEBUG-ec49a3] assignCarrierInternal: created loadCarrierAssignment', JSON.stringify({loadId:args.loadId,carrierOrgId:carrier.carrierOrgId,carrierName:carrier.carrierName}));
-      // #endregion
     }
 
     // Audit log
@@ -799,9 +796,6 @@ export const assignCarrier = mutation({
         awardedAt: now,
         createdBy: args.userId,
       });
-      // #region agent log
-      console.log('[DEBUG-ec49a3] assignCarrier: created loadCarrierAssignment', JSON.stringify({loadId:args.loadId,carrierOrgId:partnership.carrierOrgId,carrierName:partnership.carrierName}));
-      // #endregion
     }
 
     // 7. Audit log

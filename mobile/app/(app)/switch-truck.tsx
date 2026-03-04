@@ -3,7 +3,7 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
+  Pressable,
   Modal,
   TextInput,
   Alert,
@@ -222,9 +222,9 @@ export default function SwitchTruckScreen() {
         <Ionicons name="alert-circle-outline" size={64} color={colors.destructive} />
         <Text style={styles.errorTitle}>Not Authenticated</Text>
         <Text style={styles.errorText}>Please sign in to switch trucks.</Text>
-        <TouchableOpacity style={styles.errorButton} onPress={() => router.back()}>
+        <Pressable style={styles.errorButton} onPress={() => router.back()}>
           <Text style={styles.errorButtonText}>Go Back</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -246,15 +246,15 @@ export default function SwitchTruckScreen() {
           <Text style={styles.permissionText}>
             We need camera access to scan the QR code on your vehicle.
           </Text>
-          <TouchableOpacity style={styles.permissionButton} onPress={requestPermission}>
+          <Pressable style={styles.permissionButton} onPress={requestPermission}>
             <Text style={styles.permissionButtonText}>Grant Permission</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
+          </Pressable>
+          <Pressable 
             style={styles.manualEntryLink} 
             onPress={() => setShowManualEntry(true)}
           >
             <Text style={styles.manualEntryLinkText}>Or enter ID manually</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
       </View>
     );
@@ -264,9 +264,9 @@ export default function SwitchTruckScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <Pressable style={styles.backButton} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-        </TouchableOpacity>
+        </Pressable>
         <Text style={styles.headerTitle}>Switch Truck</Text>
         <View style={styles.headerSpacer} />
       </View>
@@ -312,15 +312,15 @@ export default function SwitchTruckScreen() {
             <View style={styles.scannedOverlay}>
               <Ionicons name="close-circle" size={80} color={colors.destructive} />
               <Text style={styles.scannedErrorText}>Invalid QR Code</Text>
-              <TouchableOpacity style={styles.rescanButton} onPress={resetScan}>
+              <Pressable style={styles.rescanButton} onPress={resetScan}>
                 <Text style={styles.rescanButtonText}>Tap to Scan Again</Text>
-              </TouchableOpacity>
+              </Pressable>
             </View>
           )}
         </View>
 
         {/* Flash toggle */}
-        <TouchableOpacity
+        <Pressable
           style={[styles.flashButton, flashOn && styles.flashButtonActive]}
           onPress={() => setFlashOn(!flashOn)}
         >
@@ -329,7 +329,7 @@ export default function SwitchTruckScreen() {
             size={24}
             color={flashOn ? colors.primaryForeground : colors.foregroundMuted}
           />
-        </TouchableOpacity>
+        </Pressable>
         <Text style={styles.flashLabel}>
           {flashOn ? 'Flashlight On' : 'Tap for Flashlight'}
         </Text>
@@ -355,13 +355,13 @@ export default function SwitchTruckScreen() {
         </View>
 
         {/* Action Buttons */}
-        <TouchableOpacity
-          style={[
+        <Pressable
+          style={({ pressed }) => [
             styles.confirmButton, 
-            (!scannedData?.valid || isSwitching) && styles.confirmButtonDisabled
+            (!scannedData?.valid || isSwitching) && styles.confirmButtonDisabled,
+            pressed && { opacity: 0.8 },
           ]}
           onPress={scannedData?.valid ? handleConfirmScan : resetScan}
-          activeOpacity={0.8}
           disabled={isSwitching}
         >
           {isSwitching ? (
@@ -376,16 +376,15 @@ export default function SwitchTruckScreen() {
                 ? `Switch to ${scannedData.data?.unitId}` 
                 : 'Scan QR Code'}
           </Text>
-        </TouchableOpacity>
+        </Pressable>
 
-        <TouchableOpacity
-          style={styles.manualButton}
+        <Pressable
+          style={({ pressed }) => [styles.manualButton, pressed && { opacity: 0.8 }]}
           onPress={() => setShowManualEntry(true)}
-          activeOpacity={0.8}
         >
           <Ionicons name="keypad" size={18} color={colors.foreground} />
           <Text style={styles.manualButtonText}>Enter ID Manually</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
 
       {/* Manual Entry Modal */}
@@ -396,9 +395,8 @@ export default function SwitchTruckScreen() {
         onRequestClose={() => setShowManualEntry(false)}
       >
         <View style={styles.modalOverlay}>
-          <TouchableOpacity
+          <Pressable
             style={styles.modalBackdrop}
-            activeOpacity={1}
             onPress={() => setShowManualEntry(false)}
           />
           <View style={styles.modalContent}>
@@ -419,20 +417,19 @@ export default function SwitchTruckScreen() {
               autoCorrect={false}
             />
 
-            <TouchableOpacity
-              style={styles.modalConfirmButton}
+            <Pressable
+              style={({ pressed }) => [styles.modalConfirmButton, pressed && { opacity: 0.8 }]}
               onPress={handleManualEntry}
-              activeOpacity={0.8}
             >
               <Text style={styles.modalConfirmButtonText}>Assign Vehicle</Text>
-            </TouchableOpacity>
+            </Pressable>
 
-            <TouchableOpacity
+            <Pressable
               style={styles.modalCancelButton}
               onPress={() => setShowManualEntry(false)}
             >
               <Text style={styles.modalCancelButtonText}>Cancel</Text>
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </View>
       </Modal>

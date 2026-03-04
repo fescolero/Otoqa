@@ -5,7 +5,7 @@ import {
   StyleSheet,
   ScrollView,
   TextInput,
-  TouchableOpacity,
+  Pressable,
   Alert,
   ActivityIndicator,
   Modal,
@@ -234,7 +234,7 @@ export default function CompleteDriverProfileScreen() {
           {/* Date of Birth */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Date of Birth</Text>
-            <TouchableOpacity
+            <Pressable
               style={styles.inputContainer}
               onPress={() => setShowDobPicker(true)}
             >
@@ -243,7 +243,7 @@ export default function CompleteDriverProfileScreen() {
                 {dateOfBirth ? formatDate(dateOfBirth) : 'mm/dd/yyyy'}
               </Text>
               <Ionicons name="calendar-outline" size={20} color={colors.foregroundMuted} />
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </View>
 
@@ -275,7 +275,7 @@ export default function CompleteDriverProfileScreen() {
             {/* State */}
             <View style={[styles.inputGroup, { flex: 1, marginRight: spacing.md }]}>
               <Text style={styles.inputLabel}>State</Text>
-              <TouchableOpacity
+              <Pressable
                 style={styles.inputContainer}
                 onPress={() => setShowStatePicker(true)}
               >
@@ -283,13 +283,13 @@ export default function CompleteDriverProfileScreen() {
                 <Text style={[styles.inputText, !licenseState && styles.placeholder]}>
                   {licenseState || 'Select state'}
                 </Text>
-              </TouchableOpacity>
+              </Pressable>
             </View>
 
             {/* Class */}
             <View style={[styles.inputGroup, { flex: 1 }]}>
               <Text style={styles.inputLabel}>Class</Text>
-              <TouchableOpacity
+              <Pressable
                 style={styles.inputContainer}
                 onPress={() => setShowClassPicker(true)}
               >
@@ -298,14 +298,14 @@ export default function CompleteDriverProfileScreen() {
                   {licenseClass || 'Select class'}
                 </Text>
                 <Ionicons name="chevron-down" size={16} color={colors.foregroundMuted} />
-              </TouchableOpacity>
+              </Pressable>
             </View>
           </View>
 
           {/* Expiration Date */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Expiration Date</Text>
-            <TouchableOpacity
+            <Pressable
               style={styles.inputContainer}
               onPress={() => setShowExpirationPicker(true)}
             >
@@ -314,7 +314,7 @@ export default function CompleteDriverProfileScreen() {
                 {licenseExpiration ? formatDate(licenseExpiration) : 'mm/dd/yyyy'}
               </Text>
               <Ionicons name="calendar-outline" size={20} color={colors.foregroundMuted} />
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </View>
 
@@ -355,7 +355,7 @@ export default function CompleteDriverProfileScreen() {
 
       {/* Bottom Button */}
       <View style={[styles.bottomContainer, { paddingBottom: insets.bottom + spacing.lg }]}>
-        <TouchableOpacity
+        <Pressable
           style={[styles.submitButton, isSubmitting && styles.submitButtonDisabled]}
           onPress={handleSubmit}
           disabled={isSubmitting}
@@ -365,7 +365,7 @@ export default function CompleteDriverProfileScreen() {
           ) : (
             <Text style={styles.submitButtonText}>Complete Registration</Text>
           )}
-        </TouchableOpacity>
+        </Pressable>
         <Text style={styles.termsText}>
           By continuing, you agree to our Terms of Service and Privacy Policy for professional drivers.
         </Text>
@@ -407,21 +407,21 @@ export default function CompleteDriverProfileScreen() {
         onRequestClose={() => setShowStatePicker(false)}
       >
         <View style={styles.pickerOverlay}>
-          <TouchableOpacity
+          <Pressable
             style={styles.pickerBackdrop}
-            activeOpacity={1}
+
             onPress={() => setShowStatePicker(false)}
           />
           <View style={styles.pickerSheet}>
             <View style={styles.pickerHeader}>
               <Text style={styles.pickerTitle}>Select State</Text>
-              <TouchableOpacity onPress={() => setShowStatePicker(false)}>
+              <Pressable onPress={() => setShowStatePicker(false)}>
                 <Ionicons name="close" size={24} color={colors.foreground} />
-              </TouchableOpacity>
+              </Pressable>
             </View>
             <ScrollView style={styles.pickerList}>
               {US_STATES.map((state) => (
-                <TouchableOpacity
+                <Pressable
                   key={state}
                   style={[
                     styles.pickerOption,
@@ -443,7 +443,7 @@ export default function CompleteDriverProfileScreen() {
                   {licenseState === state && (
                     <Ionicons name="checkmark" size={20} color={colors.primary} />
                   )}
-                </TouchableOpacity>
+                </Pressable>
               ))}
             </ScrollView>
           </View>
@@ -458,21 +458,21 @@ export default function CompleteDriverProfileScreen() {
         onRequestClose={() => setShowClassPicker(false)}
       >
         <View style={styles.pickerOverlay}>
-          <TouchableOpacity
+          <Pressable
             style={styles.pickerBackdrop}
-            activeOpacity={1}
+
             onPress={() => setShowClassPicker(false)}
           />
           <View style={styles.pickerSheet}>
             <View style={styles.pickerHeader}>
               <Text style={styles.pickerTitle}>Select License Class</Text>
-              <TouchableOpacity onPress={() => setShowClassPicker(false)}>
+              <Pressable onPress={() => setShowClassPicker(false)}>
                 <Ionicons name="close" size={24} color={colors.foreground} />
-              </TouchableOpacity>
+              </Pressable>
             </View>
             <View style={styles.pickerList}>
               {LICENSE_CLASSES.map((cls) => (
-                <TouchableOpacity
+                <Pressable
                   key={cls}
                   style={[
                     styles.pickerOption,
@@ -494,7 +494,7 @@ export default function CompleteDriverProfileScreen() {
                   {licenseClass === cls && (
                     <Ionicons name="checkmark" size={20} color={colors.primary} />
                   )}
-                </TouchableOpacity>
+                </Pressable>
               ))}
             </View>
           </View>

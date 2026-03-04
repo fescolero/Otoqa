@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -16,12 +16,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
 import { LinearGradient } from 'expo-linear-gradient';
-import { trackSignInStarted, trackSignInCodeSent, trackSignInFailed, trackScreen } from '../../lib/analytics';
-
-// ============================================
-// SIGN IN SCREEN
-// Phone number input with invite-only access
-// ============================================
+import { trackSignInStarted, trackSignInCodeSent, trackSignInFailed, trackScreen, trackLoadingGateTimeout } from '../../lib/analytics';
 
 export default function SignInScreen() {
   const { signIn, isLoaded } = useSignIn();
@@ -29,9 +24,11 @@ export default function SignInScreen() {
 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [navigateTo, setNavigateTo] = useState<string | null>(null);
+  const phoneInputRef = useRef<TextInput>(null);
+
   const normalizeToDigits = (text: string): string => {
     let cleaned = text.trim();
-    // Strip leading +1 or +1- country code prefix (autocomplete/paste formats)
     cleaned = cleaned.replace(/^\+1[-.\s]?/, '');
     return cleaned.replace(/\D/g, '').slice(0, 10);
   };
@@ -51,7 +48,21 @@ export default function SignInScreen() {
     setPhoneNumber(formatPhoneNumber(digits));
   };
 
+  // State-driven navigation: when navigateTo is set, navigate in a useEffect
+  // so React has a full render cycle to process the state change.
+  useEffect(() => {
+    if (navigateTo) {
+      router.push({
+        pathname: '/(auth)/verify',
+        params: { phoneNumber: navigateTo },
+      });
+      setNavigateTo(null);
+    }
+  }, [navigateTo]);
+
   const handleSendCode = async () => {
+    phoneInputRef.current?.blur();
+
     if (!isLoaded || !signIn) {
       Alert.alert('Error', 'Authentication not ready. Please restart the app.');
       return;
@@ -67,7 +78,13 @@ export default function SignInScreen() {
     setIsLoading(true);
     
     const fullPhoneNumber = `+1${rawPhone}`;
+    const startTime = Date.now();
     trackSignInStarted(fullPhoneNumber);
+
+    const SIGN_IN_TIMEOUT_MS = 15_000;
+    const timeoutId = setTimeout(() => {
+      trackLoadingGateTimeout('sign_in_request', SIGN_IN_TIMEOUT_MS, { phone_masked: fullPhoneNumber.slice(-4) });
+    }, SIGN_IN_TIMEOUT_MS);
 
     try {
       const result = await signIn.create({
@@ -81,21 +98,22 @@ export default function SignInScreen() {
         )?.phoneNumberId as string,
       });
 
+      clearTimeout(timeoutId);
       trackSignInCodeSent(fullPhoneNumber);
 
-      router.push({
-        pathname: '/(auth)/verify',
-        params: { phoneNumber: fullPhoneNumber },
-      });
+      // Trigger navigation via state change so it happens in a fresh render cycle
+      setNavigateTo(fullPhoneNumber);
     } catch (error: any) {
-      console.error('Sign in error:', error);
-      
+      clearTimeout(timeoutId);
+      const elapsed = Date.now() - startTime;
       const errorCode = error.errors?.[0]?.code;
       const errorMessage = error.errors?.[0]?.message || error.errors?.[0]?.longMessage;
       
       trackSignInFailed(fullPhoneNumber, errorCode, errorMessage);
       
-      if (errorCode === 'form_identifier_not_found') {
+      if (elapsed >= SIGN_IN_TIMEOUT_MS) {
+        Alert.alert('Request Timed Out', 'The sign-in request took too long. Please check your connection and try again.');
+      } else if (errorCode === 'form_identifier_not_found') {
         Alert.alert(
           'Not Registered',
           `This phone number (${fullPhoneNumber}) is not registered. This app is invite-only. Please contact your company administrator.`
@@ -125,7 +143,6 @@ export default function SignInScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Background gradient effect */}
       <LinearGradient
         colors={['rgba(255, 107, 0, 0.15)', 'transparent']}
         style={styles.gradientTop}
@@ -133,7 +150,6 @@ export default function SignInScreen() {
         end={{ x: 0.5, y: 1 }}
       />
       
-      {/* Dot pattern overlay - decorative */}
       <View style={styles.dotPattern} />
 
       <KeyboardAvoidingView
@@ -142,7 +158,8 @@ export default function SignInScreen() {
       >
         <ScrollView
           contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
+          keyboardShouldPersistTaps="always"
+          keyboardDismissMode="on-drag"
           showsVerticalScrollIndicator={false}
         >
           {/* Invite Only Badge */}
@@ -161,15 +178,14 @@ export default function SignInScreen() {
           <View style={styles.inputSection}>
             <Text style={styles.label}>Mobile Number</Text>
             <View style={styles.phoneInputContainer}>
-              {/* Country Code Selector */}
               <TouchableOpacity style={styles.countrySelector}>
                 <Text style={styles.flag}>🇺🇸</Text>
                 <Text style={styles.countryCode}>+1</Text>
                 <Ionicons name="chevron-down" size={16} color={colors.foregroundMuted} />
               </TouchableOpacity>
               
-              {/* Phone Number Input */}
               <TextInput
+                ref={phoneInputRef}
                 style={styles.phoneInput}
                 value={phoneNumber}
                 onChangeText={handlePhoneChange}
@@ -182,7 +198,6 @@ export default function SignInScreen() {
               />
             </View>
 
-            {/* Helper text */}
             <View style={styles.helperRow}>
               <Ionicons name="shield-checkmark-outline" size={14} color={colors.foregroundMuted} />
               <Text style={styles.helperText}>We'll send you a verification code</Text>
@@ -200,7 +215,7 @@ export default function SignInScreen() {
             activeOpacity={0.8}
           >
             <Text style={styles.buttonText}>
-              {isLoading ? 'Sending...' : 'Continue'}
+              {isLoading ? 'Sending code...' : 'Continue'}
             </Text>
             {!isLoading && (
               <Ionicons name="arrow-forward" size={20} color={colors.primaryForeground} />

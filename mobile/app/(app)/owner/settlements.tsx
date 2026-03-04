@@ -4,8 +4,10 @@ import {
   StyleSheet,
   ScrollView,
   RefreshControl,
-  TouchableOpacity,
+  Pressable,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import { useCarrierOwner } from '../_layout';
@@ -21,6 +23,8 @@ import { useState, useCallback } from 'react';
 type PeriodType = 7 | 30 | 90;
 
 export default function SettlementsScreen() {
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
   const { carrierOrgId } = useCarrierOwner();
   const [refreshing, setRefreshing] = useState(false);
   const [period, setPeriod] = useState<PeriodType>(30);
@@ -88,6 +92,16 @@ export default function SettlementsScreen() {
   };
 
   return (
+    <View style={[styles.screen, { paddingTop: insets.top }]}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+        </Pressable>
+        <Text style={styles.headerTitle}>Settlements</Text>
+        <View style={{ width: 40 }} />
+      </View>
+
     <ScrollView
       style={styles.container}
       contentContainerStyle={styles.content}
@@ -98,7 +112,7 @@ export default function SettlementsScreen() {
       {/* Period Selector */}
       <View style={styles.periodSelector}>
         {([7, 30, 90] as PeriodType[]).map((p) => (
-          <TouchableOpacity
+          <Pressable
             key={p}
             style={[styles.periodButton, period === p && styles.activePeriodButton]}
             onPress={() => setPeriod(p)}
@@ -106,7 +120,7 @@ export default function SettlementsScreen() {
             <Text style={[styles.periodText, period === p && styles.activePeriodText]}>
               {p === 7 ? '7 Days' : p === 30 ? '30 Days' : '90 Days'}
             </Text>
-          </TouchableOpacity>
+          </Pressable>
         ))}
       </View>
 
@@ -192,10 +206,34 @@ export default function SettlementsScreen() {
       {/* Bottom Padding */}
       <View style={{ height: 120 }} />
     </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  backButton: {
+    padding: spacing.xs,
+    width: 40,
+  },
+  headerTitle: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: typography.lg,
+    fontWeight: '600',
+    color: colors.foreground,
+  },
   container: {
     flex: 1,
     backgroundColor: colors.background,

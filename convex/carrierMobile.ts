@@ -32,19 +32,26 @@ async function requireCarrierAuth(
   carrierConvexId?: string | null
 ): Promise<{ identity: any } | null> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) return null;
+  if (!identity) {
+    console.log('[carrierAuth] DENIED: no identity (token missing or expired)');
+    return null;
+  }
 
-  // Look up user's identity link by Clerk user ID
   const identityLink = await ctx.db
     .query('userIdentityLinks')
     .withIndex('by_clerk', (q: any) => q.eq('clerkUserId', identity.subject))
     .first();
 
-  if (!identityLink) return null;
+  if (!identityLink) {
+    console.log('[carrierAuth] DENIED: no identityLink for clerkUserId', identity.subject);
+    return null;
+  }
 
-  // Verify the identity link's organization matches the requested org
   const org = await ctx.db.get(identityLink.organizationId);
-  if (!org) return null;
+  if (!org) {
+    console.log('[carrierAuth] DENIED: org not found for', identityLink.organizationId);
+    return null;
+  }
 
   const orgMatchesExternalId =
     org.clerkOrgId === carrierOrgId ||
@@ -54,7 +61,18 @@ async function requireCarrierAuth(
   const orgMatchesConvexId =
     !carrierConvexId || org._id === carrierConvexId;
 
-  if (!orgMatchesExternalId || !orgMatchesConvexId) return null;
+  if (!orgMatchesExternalId || !orgMatchesConvexId) {
+    console.log('[carrierAuth] DENIED: org mismatch', {
+      requested: carrierOrgId,
+      requestedConvex: carrierConvexId,
+      orgClerkId: org.clerkOrgId,
+      orgWorkosId: org.workosOrgId,
+      orgConvexId: org._id,
+      externalMatch: orgMatchesExternalId,
+      convexMatch: orgMatchesConvexId,
+    });
+    return null;
+  }
 
   return { identity };
 }
@@ -314,10 +332,6 @@ export const getActiveLoads = query({
       }
     }
 
-    // #region agent log
-    console.log('[DEBUG-ec49a3] getActiveLoads called', JSON.stringify({queriedCarrierOrgId:args.carrierOrgId,carrierConvexId:args.carrierConvexId}));
-    // #endregion
-
     // Get both AWARDED and IN_PROGRESS
     const awarded = await ctx.db
       .query('loadCarrierAssignments')
@@ -335,17 +349,6 @@ export const getActiveLoads = query({
 
     const assignments = [...awarded, ...inProgress];
 
-    // #region agent log
-    console.log('[DEBUG-ec49a3] getActiveLoads results', JSON.stringify({awardedCount:awarded.length,inProgressCount:inProgress.length,totalAssignments:assignments.length,assignmentCarrierOrgIds:assignments.map(a=>a.carrierOrgId)}));
-    // If no results, check if there are assignments with the Convex ID instead
-    if (assignments.length === 0 && args.carrierConvexId) {
-      const byConvexAwarded = await ctx.db.query('loadCarrierAssignments').withIndex('by_carrier',(q)=>q.eq('carrierOrgId',args.carrierConvexId!).eq('status','AWARDED')).collect();
-      const byConvexInProgress = await ctx.db.query('loadCarrierAssignments').withIndex('by_carrier',(q)=>q.eq('carrierOrgId',args.carrierConvexId!).eq('status','IN_PROGRESS')).collect();
-      if (byConvexAwarded.length > 0 || byConvexInProgress.length > 0) {
-        console.log('[DEBUG-ec49a3] MISMATCH: Found assignments by ConvexId!', JSON.stringify({convexId:args.carrierConvexId,byConvexAwarded:byConvexAwarded.length,byConvexInProgress:byConvexInProgress.length,sampleCarrierOrgIds:byConvexAwarded.slice(0,3).map(a=>a.carrierOrgId)}));
-      }
-    }
-    // #endregion
 
     // Enrich with load and driver details
     return Promise.all(
@@ -991,18 +994,26 @@ export const getUserRoles = query({
     }
 
     // Method 2: If not found by clerkUserId, try matching by phone number
-    // SECURITY: Use exact match only (after normalizing both sides to digits)
+    // Uses by_phone index to avoid full table scan (which causes reactive invalidation storms)
     if (!isCarrierOwner && orgStatus !== 'deleted' && normalizedUserPhone) {
-      const allIdentityLinks = await ctx.db
-        .query('userIdentityLinks')
-        .collect();
+      // Try common phone formats against the index
+      const phoneVariants = [
+        normalizedUserPhone,                    // 7607553340
+        `+1${normalizedUserPhone}`,             // +17607553340
+        `1${normalizedUserPhone}`,              // 17607553340
+      ];
 
-      const matchingLink = allIdentityLinks.find((link) => {
-        if (!link.phone) return false;
-        if (link.role !== 'OWNER' && link.role !== 'ADMIN') return false;
-        const linkPhone = normalizePhoneForMatch(link.phone);
-        return linkPhone === normalizedUserPhone;
-      });
+      let matchingLink = null;
+      for (const variant of phoneVariants) {
+        const link = await ctx.db
+          .query('userIdentityLinks')
+          .withIndex('by_phone', (q) => q.eq('phone', variant))
+          .first();
+        if (link && (link.role === 'OWNER' || link.role === 'ADMIN')) {
+          matchingLink = link;
+          break;
+        }
+      }
 
       if (matchingLink) {
         const org = await ctx.db.get(matchingLink.organizationId);
@@ -1086,29 +1097,28 @@ export const getUserRoles = query({
     }
 
     // Method 3: Fallback to phone number matching (for backward compatibility)
-    // SECURITY: Use exact match only (after normalizing both sides to digits)
+    // Uses by_phone index to avoid full table scan (which causes reactive invalidation storms)
     if (!isDriver && normalizedUserPhone) {
-      // Search all drivers and match by phone number
-      const allDrivers = await ctx.db
-        .query('drivers')
-        .collect();
+      const phoneVariants = [
+        normalizedUserPhone,
+        `+1${normalizedUserPhone}`,
+        `1${normalizedUserPhone}`,
+      ];
 
-      const matchingDriver = allDrivers.find((d) => {
-        if (d.isDeleted || d.employmentStatus !== 'Active') return false;
-        const driverPhone = normalizePhoneForMatch(d.phone);
-        return driverPhone === normalizedUserPhone;
-      });
+      for (const variant of phoneVariants) {
+        const matchingDriver = await ctx.db
+          .query('drivers')
+          .withIndex('by_phone', (q) => q.eq('phone', variant))
+          .first();
 
-      if (matchingDriver) {
-        isDriver = true;
-        driverOrgId = matchingDriver.organizationId;
-        driverId = matchingDriver._id;
+        if (matchingDriver && !matchingDriver.isDeleted && matchingDriver.employmentStatus === 'Active') {
+          isDriver = true;
+          driverOrgId = matchingDriver.organizationId;
+          driverId = matchingDriver._id;
+          break;
+        }
       }
     }
-
-    // #region agent log
-    console.log('[DEBUG-ec49a3] getUserRoles IDs', JSON.stringify({carrierOrgId,carrierOrgConvexId,orgClerkId:carrierOrg?.clerkOrgId,orgWorkosId:carrierOrg?.workosOrgId,isCarrierOwner,isOwnerOperator}));
-    // #endregion
 
     return {
       isDriver,

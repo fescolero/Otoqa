@@ -3,15 +3,15 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
-import { colors, typography, borderRadius, spacing, shadows } from '../../../lib/theme';
+import { colors, typography, borderRadius, spacing, shadows } from '../../../../lib/theme';
 import { useQuery } from 'convex/react';
-import { api } from '../../../../convex/_generated/api';
-import { useCarrierOwner } from '../_layout';
+import { api } from '../../../../../convex/_generated/api';
+import { useCarrierOwner } from '../../_layout';
 
 // ============================================
 // MORE PAGE - Additional dispatcher features
@@ -41,7 +41,7 @@ export default function MoreScreen() {
       {/* Dispatcher Console */}
       <Text style={styles.sectionTitle}>Dispatcher Console</Text>
       <View style={styles.card}>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.menuItem}
           onPress={() => router.push('/(app)/owner/drivers')}
         >
@@ -53,7 +53,7 @@ export default function MoreScreen() {
             <Text style={styles.menuItemSubtitle}>{activeDriverCount} Active Drivers</Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
-        </TouchableOpacity>
+        </Pressable>
 
         <View style={styles.divider} />
 
@@ -74,7 +74,7 @@ export default function MoreScreen() {
       {/* Operational Settings */}
       <Text style={styles.sectionTitle}>Operational Settings</Text>
       <View style={styles.card}>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.menuItem}
           onPress={() => router.push('/(app)/owner/notifications')}
         >
@@ -85,11 +85,11 @@ export default function MoreScreen() {
             <Text style={styles.menuItemTitle}>Notification Preferences</Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
-        </TouchableOpacity>
+        </Pressable>
 
         <View style={styles.divider} />
 
-        <TouchableOpacity style={styles.menuItem}>
+        <Pressable style={styles.menuItem}>
           <View style={[styles.iconContainer, { backgroundColor: colors.muted }]}>
             <Ionicons name="lock-closed" size={20} color={colors.foreground} />
           </View>
@@ -97,11 +97,11 @@ export default function MoreScreen() {
             <Text style={styles.menuItemTitle}>Privacy & Security</Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
-        </TouchableOpacity>
+        </Pressable>
 
         <View style={styles.divider} />
 
-        <TouchableOpacity style={styles.menuItem}>
+        <Pressable style={styles.menuItem}>
           <View style={[styles.iconContainer, { backgroundColor: colors.muted }]}>
             <Feather name="grid" size={20} color={colors.foreground} />
           </View>
@@ -112,13 +112,13 @@ export default function MoreScreen() {
             <Text style={styles.menuItemValue}>System Default</Text>
             <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
           </View>
-        </TouchableOpacity>
+        </Pressable>
       </View>
 
       {/* Support */}
       <Text style={styles.sectionTitle}>Support</Text>
       <View style={styles.card}>
-        <TouchableOpacity style={styles.menuItem}>
+        <Pressable style={styles.menuItem}>
           <View style={[styles.iconContainer, { backgroundColor: colors.muted }]}>
             <Ionicons name="help-circle" size={20} color={colors.foreground} />
           </View>
@@ -126,11 +126,11 @@ export default function MoreScreen() {
             <Text style={styles.menuItemTitle}>Help Center</Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
-        </TouchableOpacity>
+        </Pressable>
 
         <View style={styles.divider} />
 
-        <TouchableOpacity style={styles.menuItem}>
+        <Pressable style={styles.menuItem}>
           <View style={[styles.iconContainer, { backgroundColor: colors.muted }]}>
             <Ionicons name="information-circle" size={20} color={colors.foreground} />
           </View>
@@ -141,7 +141,7 @@ export default function MoreScreen() {
             <Text style={styles.menuItemValue}>v2.4.1</Text>
             <Ionicons name="chevron-forward" size={20} color={colors.foregroundMuted} />
           </View>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     </ScrollView>
   );

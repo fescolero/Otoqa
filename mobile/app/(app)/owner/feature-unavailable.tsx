@@ -2,7 +2,7 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
+  Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -35,10 +35,10 @@ export default function FeatureUnavailableScreen() {
           {featureName} is not available at the moment. We're working hard to bring this feature to you soon.
         </Text>
 
-        <TouchableOpacity style={styles.backButtonLarge} onPress={() => router.back()}>
+        <Pressable style={styles.backButtonLarge} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={20} color={colors.primaryForeground} />
           <Text style={styles.backButtonText}>Go Back</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     </View>
   );

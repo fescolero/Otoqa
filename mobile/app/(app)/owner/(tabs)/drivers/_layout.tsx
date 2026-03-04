@@ -1,5 +1,5 @@
 import { Stack } from 'expo-router';
-import { colors } from '../../../../lib/theme';
+import { colors } from '../../../../../lib/theme';
 
 export default function DriversLayout() {
   return (

@@ -366,7 +366,8 @@ export default defineSchema({
   })
     .index('by_clerk', ['clerkUserId'])
     .index('by_workos', ['workosUserId'])
-    .index('by_org', ['organizationId']),
+    .index('by_org', ['organizationId'])
+    .index('by_phone', ['phone']),
 
   // Notification preferences for organizations
   notificationPreferences: defineTable({
@@ -523,6 +524,7 @@ export default defineSchema({
   })
     .index('by_organization', ['organizationId'])
     .index('by_email', ['email'])
+    .index('by_phone', ['phone'])
     .index('by_status', ['employmentStatus'])
     .index('by_deleted', ['isDeleted']),
 
@@ -1129,7 +1131,8 @@ export default defineSchema({
     .index('by_order_number', ['workosOrgId', 'orderNumber'])
     .index('by_hcr_trip', ['workosOrgId', 'parsedHcr', 'parsedTripNumber'])
     .index('by_org_first_stop_date', ['workosOrgId', 'firstStopDate'])
-    .index('by_org_tracking_status', ['workosOrgId', 'trackingStatus']),
+    .index('by_org_tracking_status', ['workosOrgId', 'trackingStatus'])
+    .index('by_primary_driver_status', ['primaryDriverId', 'status']),
 
   loadStops: defineTable({
     // Load Reference

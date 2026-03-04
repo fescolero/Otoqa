@@ -98,12 +98,10 @@ export default function DieselPage() {
 
   const fuelCarriers = useMemo(() => {
     if (!carriersData) return [];
-    return carriersData
-      .filter((c: Record<string, unknown>) => c.trackFuelConsumption)
-      .map((c: Record<string, unknown>) => ({
-        _id: c._id as string,
-        name: (c.carrierName as string) ?? 'Unknown',
-      }));
+    return carriersData.map((c: Record<string, unknown>) => ({
+      _id: c._id as string,
+      name: (c.carrierName as string) ?? 'Unknown',
+    }));
   }, [carriersData]);
 
   const fuelEntries: Array<EnrichedEntry> = useMemo(() => {

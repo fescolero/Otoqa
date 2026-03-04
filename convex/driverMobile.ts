@@ -120,6 +120,7 @@ export const getMyProfile = query({
     }
 
     // Fallback: find driver by phone number match
+    // Uses by_phone index to avoid full table scan (which causes reactive invalidation storms)
     if (!driver || driver.isDeleted) {
       const phone = extractPhoneFromIdentity(identity as any);
       if (!phone) {
@@ -128,16 +129,22 @@ export const getMyProfile = query({
       }
 
       const normalizedPhone = normalizePhoneForMatch(phone);
+      const phoneVariants = [
+        normalizedPhone,
+        `+1${normalizedPhone}`,
+        `1${normalizedPhone}`,
+      ];
 
-      const drivers = await ctx.db
-        .query('drivers')
-        .withIndex('by_organization')
-        .collect();
-
-      driver = drivers.find((d) => {
-        const driverPhone = normalizePhoneForMatch(d.phone);
-        return driverPhone === normalizedPhone;
-      }) ?? null;
+      for (const variant of phoneVariants) {
+        const match = await ctx.db
+          .query('drivers')
+          .withIndex('by_phone', (q) => q.eq('phone', variant))
+          .first();
+        if (match && !match.isDeleted) {
+          driver = match;
+          break;
+        }
+      }
     }
 
     if (!driver || driver.isDeleted) {
@@ -179,6 +186,7 @@ export const getMyProfile = query({
 export const getMyAssignedLoads = query({
   args: {
     driverId: v.id('drivers'),
+    nowMs: v.optional(v.number()),
   },
   returns: v.array(
     v.object({
@@ -219,7 +227,6 @@ export const getMyAssignedLoads = query({
     // Verify the driver is authenticated and matches
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
-      console.log('[getMyAssignedLoads] No identity');
       return [];
     }
 
@@ -230,69 +237,95 @@ export const getMyAssignedLoads = query({
       return [];
     }
 
-    console.log('[getMyAssignedLoads] Driver:', driver._id, driver.firstName, driver.lastName, 'org:', driver.organizationId);
+    // Date boundaries for filtering (nowMs provided by client to keep query deterministic)
+    // Falls back to Date.now() for old clients that don't pass nowMs yet
+    const now = args.nowMs ?? Date.now();
+    const dayAfterTomorrow = new Date(now + 48 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const twoDaysAgoMs = now - 2 * 24 * 60 * 60 * 1000;
+    const twoDaysAgoDate = new Date(twoDaysAgoMs).toISOString().split('T')[0];
 
-    // Get today and tomorrow's date range
-    const now = new Date();
-    const dayAfterTomorrow = new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-    // Set to track unique load IDs
     const loadIdsSet = new Set<string>();
     const driverLoads: Awaited<ReturnType<typeof ctx.db.get<'loadInformation'>>>[] = [];
 
     // Method 1: Get loads where this driver is the primary driver (broker-assigned)
-    const brokerLoads = await ctx.db
-      .query('loadInformation')
-      .withIndex('by_organization', (q) => q.eq('workosOrgId', driver.organizationId))
-      .collect();
+    const [openLoads, assignedLoads, completedLoads] = await Promise.all([
+      ctx.db
+        .query('loadInformation')
+        .withIndex('by_primary_driver_status', (q) =>
+          q.eq('primaryDriverId', args.driverId).eq('status', 'Open')
+        )
+        .collect(),
+      ctx.db
+        .query('loadInformation')
+        .withIndex('by_primary_driver_status', (q) =>
+          q.eq('primaryDriverId', args.driverId).eq('status', 'Assigned')
+        )
+        .collect(),
+      ctx.db
+        .query('loadInformation')
+        .withIndex('by_primary_driver_status', (q) =>
+          q.eq('primaryDriverId', args.driverId).eq('status', 'Completed')
+        )
+        .collect(),
+    ]);
 
-    console.log('[getMyAssignedLoads] Broker loads in org:', brokerLoads.length);
-
-    for (const load of brokerLoads) {
-      if (load.primaryDriverId !== args.driverId) continue;
-      if (load.status === 'Canceled') continue;
+    for (const load of [...openLoads, ...assignedLoads]) {
       if (load.firstStopDate && load.firstStopDate > dayAfterTomorrow) continue;
-      
+      if (load.firstStopDate && load.firstStopDate < twoDaysAgoDate) continue;
       loadIdsSet.add(load._id);
       driverLoads.push(load);
     }
 
-    console.log('[getMyAssignedLoads] Broker-assigned loads found:', driverLoads.length);
+    // Completed broker loads: only include if firstStopDate is within the last 2 days
+    for (const load of completedLoads) {
+      const stopDate = load.firstStopDate;
+      if (!stopDate || stopDate < twoDaysAgoDate) continue;
+      loadIdsSet.add(load._id);
+      driverLoads.push(load);
+    }
 
     // Method 2: Get loads assigned via carrier assignments (carrier-assigned drivers)
-    // Find all carrier assignments where this driver is assigned (AWARDED status)
-    const awardedAssignments = await ctx.db
-      .query('loadCarrierAssignments')
-      .withIndex('by_assigned_driver', (q) => 
-        q.eq('assignedDriverId', args.driverId).eq('status', 'AWARDED')
-      )
-      .collect();
+    const [awardedAssignments, inProgressAssignments, completedAssignments] = await Promise.all([
+      ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_assigned_driver', (q) => 
+          q.eq('assignedDriverId', args.driverId).eq('status', 'AWARDED')
+        )
+        .collect(),
+      ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_assigned_driver', (q) => 
+          q.eq('assignedDriverId', args.driverId).eq('status', 'IN_PROGRESS')
+        )
+        .collect(),
+      ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_assigned_driver', (q) => 
+          q.eq('assignedDriverId', args.driverId).eq('status', 'COMPLETED')
+        )
+        .collect(),
+    ]);
 
-    console.log('[getMyAssignedLoads] Awarded carrier assignments:', awardedAssignments.length);
-
-    // Also get IN_PROGRESS assignments
-    const inProgressAssignments = await ctx.db
-      .query('loadCarrierAssignments')
-      .withIndex('by_assigned_driver', (q) => 
-        q.eq('assignedDriverId', args.driverId).eq('status', 'IN_PROGRESS')
-      )
-      .collect();
-
-    console.log('[getMyAssignedLoads] In-progress carrier assignments:', inProgressAssignments.length);
-
-    const myAssignments = [...awardedAssignments, ...inProgressAssignments];
-    console.log('[getMyAssignedLoads] Total carrier assignments:', myAssignments.length);
-
-    // Get the loads for these assignments
-    for (const assignment of myAssignments) {
-      // Skip if we already have this load from broker assignments
+    // Active carrier assignments
+    for (const assignment of [...awardedAssignments, ...inProgressAssignments]) {
       if (loadIdsSet.has(assignment.loadId)) continue;
-      
       const load = await ctx.db.get(assignment.loadId);
       if (!load) continue;
       if (load.status === 'Canceled') continue;
       if (load.firstStopDate && load.firstStopDate > dayAfterTomorrow) continue;
-      
+      if (load.firstStopDate && load.firstStopDate < twoDaysAgoDate) continue;
+      loadIdsSet.add(load._id);
+      driverLoads.push(load);
+    }
+
+    // Completed carrier assignments: only include if completed within the last 2 days
+    for (const assignment of completedAssignments) {
+      if (loadIdsSet.has(assignment.loadId)) continue;
+      // Use completedAt timestamp; fall back to _creationTime for older records
+      const completedTime = assignment.completedAt ?? assignment._creationTime;
+      if (completedTime < twoDaysAgoMs) continue;
+      const load = await ctx.db.get(assignment.loadId);
+      if (!load) continue;
       loadIdsSet.add(load._id);
       driverLoads.push(load);
     }
@@ -712,6 +745,17 @@ export const checkOutFromStop = mutation({
       driverNotes: args.notes || stop.driverNotes,
       updatedAt: Date.now(), // Server timestamp for audit
     });
+
+    // #region agent log
+    console.log('[DEBUG-ec49a3] checkOutFromStop POD:', JSON.stringify({
+      hasPodPhotoUrl: !!args.podPhotoUrl,
+      podPhotoUrlPrefix: args.podPhotoUrl?.substring(0, 80),
+      stopType: stop.stopType,
+      willStore: !!(args.podPhotoUrl && stop.stopType === 'DELIVERY'),
+      stopId: args.stopId,
+      loadId: stop.loadId,
+    }));
+    // #endregion
 
     // If POD photo provided, store it
     if (args.podPhotoUrl && stop.stopType === 'DELIVERY') {

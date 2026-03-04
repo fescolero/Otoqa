@@ -224,25 +224,30 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     async function checkForOTAUpdate() {
       if (__DEV__) return;
       try {
         if (!Updates.isEnabled) return;
         const update = await Updates.checkForUpdateAsync();
+        if (cancelled) return;
         if (update.isAvailable) {
           trackOtaUpdateCheck('available');
           await Updates.fetchUpdateAsync();
+          if (cancelled) return;
           await Updates.reloadAsync();
         } else {
           trackOtaUpdateCheck('none');
         }
       } catch (e) {
+        if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
         trackOtaUpdateCheck('error', msg);
         console.log('OTA update check failed:', e);
       }
     }
     checkForOTAUpdate();
+    return () => { cancelled = true; };
   }, []);
 
   return (

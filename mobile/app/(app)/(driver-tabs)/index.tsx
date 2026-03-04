@@ -5,22 +5,22 @@ import {
   ScrollView,
   StyleSheet,
   RefreshControl,
-  TouchableOpacity,
+  Pressable,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { useMyLoads } from '../../lib/hooks/useMyLoads';
-import { useNetworkStatus } from '../../lib/hooks/useNetworkStatus';
-import { useOfflineQueue } from '../../lib/hooks/useOfflineQueue';
-import { useDriver } from './_layout';
-import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../../lib/theme';
-import { useLanguage } from '../../lib/LanguageContext';
+import { useMyLoads } from '../../../lib/hooks/useMyLoads';
+import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
+import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
+import { useDriver } from '../_layout';
+import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../../../lib/theme';
+import { useLanguage } from '../../../lib/LanguageContext';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { trackWeatherFetchFailed, trackScreen } from '../../lib/analytics';
+import { trackWeatherFetchFailed, trackScreen } from '../../../lib/analytics';
 
 // ============================================
 // HOME SCREEN - Dark Logistics Design
@@ -61,42 +61,41 @@ export default function HomeScreen() {
   const { isConnected } = useNetworkStatus();
   const { pendingCount } = useOfflineQueue();
   const { t, locale } = useLanguage();
-  const [showCompleted, setShowCompleted] = useState(false);
 
   // Weather state
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherLoading, setWeatherLoading] = useState(true);
 
   // Fetch weather based on user location
-  const fetchWeather = useCallback(async () => {
+  const fetchWeather = useCallback(async (signal?: { cancelled: boolean }) => {
     try {
       setWeatherLoading(true);
       
-      // Request location permission
       const { status } = await Location.requestForegroundPermissionsAsync();
+      if (signal?.cancelled) return;
       if (status !== 'granted') {
-        console.log('Location permission denied');
         setWeatherLoading(false);
         return;
       }
       
-      // Get current location
       const location = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
+      if (signal?.cancelled) return;
       
       const { latitude, longitude } = location.coords;
       
-      // Fetch weather from Open-Meteo API (free, no API key required)
       const response = await fetch(
         `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`
       );
+      if (signal?.cancelled) return;
       
       if (!response.ok) {
         throw new Error('Weather fetch failed');
       }
       
       const data = await response.json();
+      if (signal?.cancelled) return;
       
       if (data.current) {
         const weatherInfo = getWeatherInfo(data.current.weather_code);
@@ -108,18 +107,21 @@ export default function HomeScreen() {
         });
       }
     } catch (error) {
+      if (signal?.cancelled) return;
       const msg = error instanceof Error ? error.message : String(error);
       trackWeatherFetchFailed(msg);
       console.error('Error fetching weather:', error);
     } finally {
-      setWeatherLoading(false);
+      if (!signal?.cancelled) setWeatherLoading(false);
     }
   }, []);
 
   // Fetch weather and track screen on mount
   useEffect(() => {
+    const signal = { cancelled: false };
     trackScreen('Home');
-    fetchWeather();
+    fetchWeather(signal);
+    return () => { signal.cancelled = true; };
   }, [fetchWeather]);
 
   // Enhanced refetch that includes weather
@@ -349,17 +351,10 @@ export default function HomeScreen() {
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>{locale === 'es' ? 'Cargas Programadas' : 'Scheduled Loads'}</Text>
           <View style={styles.sectionActions}>
-            <TouchableOpacity style={styles.actionButton}>
+            <Pressable style={styles.actionButton}>
               <Feather name="filter" size={16} color={colors.foreground} />
               <Text style={styles.actionText}>{locale === 'es' ? 'Ordenar' : 'Sort'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              style={styles.actionButton}
-              onPress={() => setShowCompleted(!showCompleted)}
-            >
-              <Ionicons name="checkmark-circle" size={18} color={colors.foreground} />
-              <Text style={styles.actionText}>{locale === 'es' ? 'Completadas' : 'Completed'}</Text>
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </View>
 
@@ -380,10 +375,9 @@ export default function HomeScreen() {
 
         {/* Current Load Card - iOS Glass Effect */}
         {!isLoading && activeLoad && (
-          <TouchableOpacity
-            style={styles.currentLoadCardWrapper}
+          <Pressable
+            style={({ pressed }) => [styles.currentLoadCardWrapper, pressed && { opacity: 0.9 }]}
             onPress={() => router.push(`/trip/${activeLoad._id}`)}
-            activeOpacity={0.9}
           >
             {isIOS ? (
               <BlurView intensity={80} tint="systemChromeMaterialLight" style={styles.currentLoadCard}>
@@ -422,7 +416,7 @@ export default function HomeScreen() {
                 </View>
               </View>
             )}
-          </TouchableOpacity>
+          </Pressable>
         )}
 
         {/* Scheduled Load Cards */}
@@ -432,11 +426,10 @@ export default function HomeScreen() {
           const expectedDelivery = formatExpectedDelivery(load);
           
           return (
-            <TouchableOpacity
+            <Pressable
               key={load._id}
-              style={styles.loadCard}
+              style={({ pressed }) => [styles.loadCard, pressed && { opacity: 0.8 }]}
               onPress={() => router.push(`/trip/${load._id}`)}
-              activeOpacity={0.8}
             >
               {/* Card Header */}
               <View style={styles.loadCardHeader}>
@@ -513,7 +506,7 @@ export default function HomeScreen() {
                   </View>
                 </View>
               </View>
-            </TouchableOpacity>
+            </Pressable>
           );
         })}
 
@@ -530,31 +523,41 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Completed Loads */}
-        {showCompleted && completedLoads.length > 0 && (
+        {/* Completed Loads (last 2 days) */}
+        {completedLoads.length > 0 && (
           <>
             <View style={styles.completedHeader}>
               <Text style={styles.completedHeaderText}>
-                {locale === 'es' ? 'Completadas' : 'Completed'} ({completedLoads.length})
+                {locale === 'es' ? 'Completadas Recientes' : 'Recently Completed'} ({completedLoads.length})
               </Text>
             </View>
             {completedLoads.map((load) => (
-              <TouchableOpacity
+              <Pressable
                 key={load._id}
-                style={styles.completedCard}
+                style={({ pressed }) => [styles.completedCard, pressed && { opacity: 0.7 }]}
                 onPress={() => router.push(`/trip/${load._id}`)}
-                activeOpacity={0.7}
               >
                 <View style={styles.completedContent}>
                   <Ionicons name="checkmark-circle" size={20} color={colors.success} />
-                  <View>
+                  <View style={{ flex: 1 }}>
                     <Text style={styles.completedTitle}>Load #{load.internalId}</Text>
                     <Text style={styles.completedSubtitle}>
-                      {load.lastDelivery?.city || 'Completed'}
+                      {[load.firstPickup?.city, load.lastDelivery?.city].filter(Boolean).join(' → ') || 'Completed'}
                     </Text>
                   </View>
+                  {load.firstStopDate && (
+                    <Text style={styles.completedDate}>
+                      {(() => {
+                        try {
+                          const [y, m, d] = load.firstStopDate.split('-');
+                          const date = new Date(Number(y), Number(m) - 1, Number(d));
+                          return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                        } catch { return ''; }
+                      })()}
+                    </Text>
+                  )}
                 </View>
-              </TouchableOpacity>
+              </Pressable>
             ))}
           </>
         )}
@@ -986,6 +989,11 @@ const styles = StyleSheet.create({
   completedSubtitle: {
     fontSize: typography.xs,
     color: colors.foregroundMuted,
+  },
+  completedDate: {
+    fontSize: typography.xs,
+    color: colors.foregroundMuted,
+    fontWeight: typography.medium,
   },
 
   // Skeleton

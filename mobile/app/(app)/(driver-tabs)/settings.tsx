@@ -1,11 +1,11 @@
-import { View, Text, TouchableOpacity, StyleSheet, Alert, ScrollView } from 'react-native';
+import { View, Text, Pressable, StyleSheet, Alert, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useClerk } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useDriver, useAppMode } from './_layout';
+import { useDriver, useAppMode } from '../_layout';
 import { useState } from 'react';
-import { useLanguage } from '../../lib/LanguageContext';
+import { useLanguage } from '../../../lib/LanguageContext';
 
 // ============================================
 // DESIGN SYSTEM
@@ -127,7 +127,7 @@ export default function SettingsScreen() {
           <>
             <Text style={styles.sectionTitle}>{t('profile.role')}</Text>
             <View style={styles.menuSection}>
-              <TouchableOpacity 
+              <Pressable 
                 style={[styles.menuRow, styles.menuRowLast]}
                 onPress={() => setMode('owner')}
               >
@@ -139,7 +139,7 @@ export default function SettingsScreen() {
                   <Text style={styles.menuSubtitle}>{t('profile.manageLoadsDriversFleet')}</Text>
                 </View>
                 <Ionicons name="swap-horizontal" size={20} color={colors.primary} />
-              </TouchableOpacity>
+              </Pressable>
             </View>
           </>
         )}
@@ -147,7 +147,7 @@ export default function SettingsScreen() {
         {/* Settings Section */}
         <Text style={styles.sectionTitle}>{t('profile.settings')}</Text>
         <View style={styles.menuSection}>
-          <TouchableOpacity 
+          <Pressable 
             style={styles.menuRow}
             onPress={() => router.push('/notifications')}
           >
@@ -156,9 +156,9 @@ export default function SettingsScreen() {
             </View>
             <Text style={styles.menuLabel}>{t('profile.notifications')}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
 
-          <TouchableOpacity 
+          <Pressable 
             style={styles.menuRow}
             onPress={() => router.push('/language')}
           >
@@ -168,9 +168,9 @@ export default function SettingsScreen() {
             <Text style={styles.menuLabel}>{t('profile.language')}</Text>
             <Text style={styles.menuValue}>{getLanguageDisplayName()}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
 
-          <TouchableOpacity 
+          <Pressable 
             style={[styles.menuRow, styles.menuRowLast]}
             onPress={() => router.push('/permissions')}
           >
@@ -179,7 +179,7 @@ export default function SettingsScreen() {
             </View>
             <Text style={styles.menuLabel}>{t('profile.permissions')}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {/* App Information Section */}
@@ -214,15 +214,15 @@ export default function SettingsScreen() {
         {/* Support Section */}
         <Text style={styles.sectionTitle}>{t('profile.support')}</Text>
         <View style={styles.menuSection}>
-          <TouchableOpacity style={styles.menuRow}>
+          <Pressable style={styles.menuRow}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="chatbubble-ellipses" size={20} color={colors.foregroundMuted} />
             </View>
             <Text style={styles.menuLabel}>{t('profile.helpCenter')}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
 
-          <TouchableOpacity style={[styles.menuRow, styles.menuRowLast]}>
+          <Pressable style={[styles.menuRow, styles.menuRowLast]}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="call" size={20} color={colors.foregroundMuted} />
             </View>
@@ -230,14 +230,14 @@ export default function SettingsScreen() {
             <View style={styles.availableBadge}>
               <Text style={styles.availableBadgeText} maxFontSizeMultiplier={1.2}>{t('profile.available')}</Text>
             </View>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {/* Sign Out Button */}
-        <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
+        <Pressable style={styles.signOutButton} onPress={handleSignOut}>
           <Ionicons name="log-out-outline" size={20} color={colors.destructive} />
           <Text style={styles.signOutText}>{t('profile.signOut')}</Text>
-        </TouchableOpacity>
+        </Pressable>
 
         {/* Bottom spacing for nav */}
         <View style={{ height: 120 }} />

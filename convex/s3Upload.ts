@@ -129,7 +129,9 @@ export const getPODUploadUrl = action({
     const sanitizedFilename = args.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
     const key = `pod-photos/${args.loadId}/${args.stopId}/${timestamp}-${sanitizedFilename}`;
 
-    console.log('[S3Upload] Generating presigned URL for POD upload');
+    // #region agent log
+    console.log('[DEBUG-ec49a3] getPODUploadUrl called:', JSON.stringify({ loadId: args.loadId, stopId: args.stopId, filename: args.filename }));
+    // #endregion
 
     const command = new PutObjectCommand({
       Bucket: bucket,

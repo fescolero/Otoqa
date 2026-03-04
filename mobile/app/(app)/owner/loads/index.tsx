@@ -4,8 +4,9 @@ import {
   StyleSheet,
   FlatList,
   RefreshControl,
-  TouchableOpacity,
+  Pressable,
   ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery } from 'convex/react';
@@ -13,8 +14,9 @@ import { api } from '../../../../../convex/_generated/api';
 import { useCarrierOwner } from '../../_layout';
 import { colors, typography, borderRadius, shadows, spacing } from '../../../../lib/theme';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { useRouter } from 'expo-router';
+import { useQueryHealth } from '../../../../lib/hooks/useQueryHealth';
 
 // ============================================
 // MANAGE LOADS SCREEN
@@ -37,20 +39,34 @@ function getAvatarColor(str: string): string {
   return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 }
 
-function formatDate(dateStr?: string): string {
-  if (!dateStr) return '';
-  try {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { 
-      month: 'short', 
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true,
-    });
-  } catch {
-    return dateStr;
+function formatStopDateTime(dateStr?: string, timeStr?: string): string {
+  if (!dateStr && !timeStr) return '';
+
+  const parts: string[] = [];
+
+  if (dateStr) {
+    try {
+      // windowBeginDate is an ISO date string (e.g. "2026-03-05" or "2026-03-05T00:00:00Z")
+      // Parse date parts directly to avoid UTC-to-local timezone shift
+      const [yearStr, monthStr, dayStr] = dateStr.split('T')[0].split('-');
+      const localDate = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr));
+      if (!isNaN(localDate.getTime())) {
+        parts.push(localDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+      }
+    } catch { /* skip */ }
   }
+
+  if (timeStr) {
+    try {
+      // windowBeginTime is an ISO string with timezone offset (e.g. "2026-03-05T08:00:00-05:00")
+      const time = new Date(timeStr);
+      if (!isNaN(time.getTime())) {
+        parts.push(time.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }));
+      }
+    } catch { /* skip */ }
+  }
+
+  return parts.join(', ');
 }
 
 function getRelativeTime(dateStr?: string): string {
@@ -81,16 +97,36 @@ export default function ManageLoadsScreen() {
   const loadQueryOrgId = carrierExternalOrgId || carrierOrgId;
 
   // Get active/assigned loads
-  const activeLoads = useQuery(
+  const activeLoadsLive = useQuery(
     api.carrierMobile.getActiveLoads,
     loadQueryOrgId ? { carrierOrgId: loadQueryOrgId, carrierConvexId: carrierOrgId || undefined } : 'skip'
   );
 
   // Get completed loads
-  const completedLoads = useQuery(
+  const completedLoadsLive = useQuery(
     api.carrierMobile.getCompletedLoads,
     loadQueryOrgId ? { carrierOrgId: loadQueryOrgId, limit: 50 } : 'skip'
   );
+
+  // Cache last known data so transient auth failures (token refresh)
+  // don't flash "No loads available" when loads actually exist
+  const cachedActiveRef = useRef(activeLoadsLive);
+  const cachedCompletedRef = useRef(completedLoadsLive);
+  if (activeLoadsLive !== undefined && activeLoadsLive.length > 0) {
+    cachedActiveRef.current = activeLoadsLive;
+  } else if (activeLoadsLive !== undefined) {
+    cachedActiveRef.current = activeLoadsLive;
+  }
+  if (completedLoadsLive !== undefined) {
+    cachedCompletedRef.current = completedLoadsLive;
+  }
+
+  const activeLoads = activeLoadsLive ?? cachedActiveRef.current;
+  const completedLoads = completedLoadsLive ?? cachedCompletedRef.current;
+  const isLoading = activeLoads === undefined;
+
+  useQueryHealth('getActiveLoads', activeLoadsLive, (d) => d.length === 0);
+  useQueryHealth('getCompletedLoads', completedLoadsLive, (d) => d.length === 0);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -117,7 +153,7 @@ export default function ManageLoadsScreen() {
     }
   };
 
-  const data = getDataForTab();
+  const data = isLoading ? [] : getDataForTab();
   const totalCount = data.length;
 
   const renderLoadCard = ({ item }: { item: any }) => {
@@ -130,7 +166,7 @@ export default function ManageLoadsScreen() {
     const driverAvatarColor = driver ? getAvatarColor(driver._id || driver.firstName || '') : colors.muted;
 
     return (
-      <TouchableOpacity
+      <Pressable
         style={styles.loadCard}
         onPress={() => router.push({
           pathname: '/(app)/owner/assign-driver',
@@ -139,7 +175,7 @@ export default function ManageLoadsScreen() {
             loadInternalId: item.load?.internalId || 'N/A',
           },
         })}
-        activeOpacity={0.8}
+
       >
         {/* Header Row */}
         <View style={styles.loadHeader}>
@@ -174,7 +210,7 @@ export default function ManageLoadsScreen() {
           <View style={styles.stopInfo}>
             <Text style={styles.stopLabel}>Pickup</Text>
             <Text style={styles.stopLocation}>
-              {firstStop?.city || 'Unknown'}, {firstStop?.state || ''} • {formatDate(firstStop?.windowBeginDate)}
+              {firstStop?.city || 'Unknown'}, {firstStop?.state || ''} • {formatStopDateTime(firstStop?.windowBeginDate, firstStop?.windowBeginTime)}
             </Text>
           </View>
         </View>
@@ -185,7 +221,7 @@ export default function ManageLoadsScreen() {
           <View style={styles.stopInfo}>
             <Text style={styles.stopLabel}>Delivery</Text>
             <Text style={styles.stopLocation}>
-              {lastStop?.city || 'Unknown'}, {lastStop?.state || ''} • {formatDate(lastStop?.windowBeginDate)}
+              {lastStop?.city || 'Unknown'}, {lastStop?.state || ''} • {formatStopDateTime(lastStop?.windowBeginDate, lastStop?.windowBeginTime)}
             </Text>
           </View>
         </View>
@@ -214,12 +250,12 @@ export default function ManageLoadsScreen() {
               <Text style={styles.completedText}>Delivered {getRelativeTime(item.completedAt)}</Text>
             </View>
           ) : (
-            <TouchableOpacity style={styles.detailsButton}>
+            <Pressable style={styles.detailsButton}>
               <Text style={styles.detailsButtonText}>Details</Text>
-            </TouchableOpacity>
+            </Pressable>
           )}
         </View>
-      </TouchableOpacity>
+      </Pressable>
     );
   };
 
@@ -244,9 +280,9 @@ export default function ManageLoadsScreen() {
           <Text style={styles.alertsTitle}>Load Alerts</Text>
           <Text style={styles.alertsSubtitle}>Notify me when new loads are posted</Text>
         </View>
-        <TouchableOpacity style={styles.enableButton}>
+        <Pressable style={styles.enableButton}>
           <Text style={styles.enableButtonText}>Enable</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     </View>
   );
@@ -255,9 +291,9 @@ export default function ManageLoadsScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-        </TouchableOpacity>
+        </Pressable>
         <Text style={styles.headerTitle}>Manage Loads</Text>
         <View style={{ width: 40 }} />
       </View>
@@ -270,7 +306,7 @@ export default function ManageLoadsScreen() {
           contentContainerStyle={styles.tabBar}
         >
           {(['unassigned', 'assigned', 'completed', 'canceled'] as TabType[]).map((tab) => (
-            <TouchableOpacity
+            <Pressable
               key={tab}
               style={[styles.tab, activeTab === tab && styles.activeTab]}
               onPress={() => setActiveTab(tab)}
@@ -278,7 +314,7 @@ export default function ManageLoadsScreen() {
               <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>
                 {tab.charAt(0).toUpperCase() + tab.slice(1)}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
           ))}
         </ScrollView>
       </View>
@@ -298,7 +334,12 @@ export default function ManageLoadsScreen() {
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
         }
-        ListEmptyComponent={renderEmptyState}
+        ListEmptyComponent={isLoading ? () => (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.loadingText}>Loading loads...</Text>
+          </View>
+        ) : renderEmptyState}
         showsVerticalScrollIndicator={false}
       />
     </View>
@@ -628,5 +669,15 @@ const styles = StyleSheet.create({
     fontSize: typography.sm,
     fontWeight: '600',
     color: colors.foreground,
+  },
+  loadingContainer: {
+    paddingTop: 80,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  loadingText: {
+    color: colors.foregroundMuted,
+    marginTop: 16,
+    fontSize: typography.base,
   },
 });

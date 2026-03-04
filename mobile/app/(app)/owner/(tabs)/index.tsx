@@ -1,14 +1,15 @@
-import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, RefreshControl, Pressable, ActivityIndicator } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery } from 'convex/react';
-import { api } from '../../../../convex/_generated/api';
-import { useCarrierOwner } from '../_layout';
-import { colors, typography, borderRadius, shadows, spacing } from '../../../lib/theme';
+import { api } from '../../../../../convex/_generated/api';
+import { useCarrierOwner } from '../../_layout';
+import { colors, typography, borderRadius, shadows, spacing } from '../../../../lib/theme';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
-import { useLanguage } from '../../../lib/LanguageContext';
+import { useLanguage } from '../../../../lib/LanguageContext';
+import { useQueryHealth } from '../../../../lib/hooks/useQueryHealth';
 
 // ============================================
 // OWNER DASHBOARD - Dispatcher View
@@ -81,45 +82,45 @@ export default function OwnerDashboard() {
   const loadOrgId = carrierExternalOrgId || carrierOrgId;
   
   // Fetch weather based on user location
-  const fetchWeather = useCallback(async () => {
+  const fetchWeather = useCallback(async (signal?: { cancelled: boolean }) => {
     try {
       setWeatherLoading(true);
       
-      // Request location permission
       const { status } = await Location.requestForegroundPermissionsAsync();
+      if (signal?.cancelled) return;
       if (status !== 'granted') {
-        console.log('Location permission denied');
         setWeatherLoading(false);
         return;
       }
       
-      // Get current location
       const location = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
+      if (signal?.cancelled) return;
       
       const { latitude, longitude } = location.coords;
       
-      // Reverse geocode to get city name
       try {
         const [address] = await Location.reverseGeocodeAsync({ latitude, longitude });
-        if (address?.city) {
+        if (!signal?.cancelled && address?.city) {
           setLocationName(address.city);
         }
       } catch (geoError) {
         console.log('Reverse geocode error:', geoError);
       }
+      if (signal?.cancelled) return;
       
-      // Fetch weather from Open-Meteo API (free, no API key required)
       const response = await fetch(
         `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`
       );
+      if (signal?.cancelled) return;
       
       if (!response.ok) {
         throw new Error('Weather fetch failed');
       }
       
       const data = await response.json();
+      if (signal?.cancelled) return;
       
       if (data.current) {
         const weatherInfo = getWeatherInfo(data.current.weather_code);
@@ -131,28 +132,43 @@ export default function OwnerDashboard() {
         });
       }
     } catch (error) {
+      if (signal?.cancelled) return;
       console.error('Error fetching weather:', error);
     } finally {
-      setWeatherLoading(false);
+      if (!signal?.cancelled) setWeatherLoading(false);
     }
   }, []);
   
   // Fetch weather on mount
   useEffect(() => {
-    fetchWeather();
+    const signal = { cancelled: false };
+    fetchWeather(signal);
+    return () => { signal.cancelled = true; };
   }, [fetchWeather]);
 
   // Get dashboard data
-  const dashboard = useQuery(
+  const dashboardLive = useQuery(
     api.carrierMobile.getDashboard,
     loadOrgId ? { carrierOrgId: loadOrgId, carrierConvexId: carrierOrgId || undefined } : 'skip'
   );
 
   // Get active loads
-  const activeLoads = useQuery(
+  const activeLoadsLive = useQuery(
     api.carrierMobile.getActiveLoads,
     loadOrgId ? { carrierOrgId: loadOrgId, carrierConvexId: carrierOrgId || undefined } : 'skip'
   );
+
+  // Cache last known data so transient auth failures don't flash empty states
+  const cachedDashboardRef = useRef(dashboardLive);
+  const cachedActiveLoadsRef = useRef(activeLoadsLive);
+  if (dashboardLive !== undefined) cachedDashboardRef.current = dashboardLive;
+  if (activeLoadsLive !== undefined) cachedActiveLoadsRef.current = activeLoadsLive;
+
+  const dashboard = dashboardLive ?? cachedDashboardRef.current;
+  const activeLoads = activeLoadsLive ?? cachedActiveLoadsRef.current;
+
+  useQueryHealth('getDashboard', dashboardLive, (d) => d.activeLoads === 0 && d.totalDrivers === 0);
+  useQueryHealth('getActiveLoads:dashboard', activeLoadsLive, (d) => d.length === 0);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -257,22 +273,22 @@ export default function OwnerDashboard() {
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>{t('dispatcherHome.availableForAssignment')}</Text>
-          <TouchableOpacity 
+          <Pressable 
             style={styles.viewAllGroupButton}
             onPress={() => router.push('/(app)/owner/loads')}
           >
             <Text style={styles.viewAllGroupText}>{t('dispatcherHome.viewAll')}</Text>
             <View style={styles.viewAllDivider} />
             <Text style={styles.viewAllGroupCount}>{unassignedCount}</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {availableLoads.length > 0 ? (
           availableLoads.map((loadData, index) => (
-            <TouchableOpacity 
+            <Pressable 
               key={loadData._id || index}
               style={styles.loadCard}
-              activeOpacity={0.7}
+
               onPress={() => router.push({
                 pathname: '/(app)/owner/assign-driver',
                 params: { 
@@ -316,7 +332,7 @@ export default function OwnerDashboard() {
               <Text style={styles.routeText}>
                 {loadData.stops?.[0]?.city || 'Unknown'}, {loadData.stops?.[0]?.state || ''} → {loadData.stops?.[loadData.stops.length - 1]?.city || 'Unknown'}, {loadData.stops?.[loadData.stops.length - 1]?.state || ''}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
           ))
         ) : (
           // Empty state when no loads available for assignment

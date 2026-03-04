@@ -4,7 +4,7 @@ import {
   StyleSheet,
   FlatList,
   RefreshControl,
-  TouchableOpacity,
+  Pressable,
   TextInput,
   Modal,
   ScrollView,
@@ -17,12 +17,12 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation } from 'convex/react';
 import { router } from 'expo-router';
-import { api } from '../../../../../convex/_generated/api';
-import { useCarrierOwner } from '../../_layout';
-import { colors, typography, borderRadius, shadows, spacing } from '../../../../lib/theme';
+import { api } from '../../../../../../convex/_generated/api';
+import { useCarrierOwner } from '../../../_layout';
+import { colors, typography, borderRadius, shadows, spacing } from '../../../../../lib/theme';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useState, useCallback, useMemo } from 'react';
-import DatePickerModal from '../../../../components/DatePickerModal';
+import DatePickerModal from '../../../../../components/DatePickerModal';
 
 // ============================================
 // DRIVER MANAGEMENT SCREEN
@@ -254,10 +254,10 @@ export default function DriversScreen() {
     const extras = getDriverExtras(driver);
 
     return (
-      <TouchableOpacity 
+      <Pressable 
         style={styles.driverCard}
         onPress={() => handleDriverPress(driver._id)}
-        activeOpacity={0.7}
+
       >
         <View style={styles.cardContent}>
           {/* Left - Name and Load */}
@@ -274,7 +274,7 @@ export default function DriversScreen() {
           
           {/* Right - Action Buttons */}
           <View style={styles.actionButtons}>
-            <TouchableOpacity 
+            <Pressable 
               style={[styles.actionButton, styles.callButton]}
               onPress={(e) => {
                 e.stopPropagation();
@@ -282,8 +282,8 @@ export default function DriversScreen() {
               }}
             >
               <Ionicons name="call" size={18} color={colors.primary} />
-            </TouchableOpacity>
-            <TouchableOpacity 
+            </Pressable>
+            <Pressable 
               style={[styles.actionButton, styles.messageButton]}
               onPress={(e) => {
                 e.stopPropagation();
@@ -291,22 +291,22 @@ export default function DriversScreen() {
               }}
             >
               <Ionicons name="chatbubble" size={18} color="#4CAF50" />
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </View>
-      </TouchableOpacity>
+      </Pressable>
     );
   };
 
   const FilterTab = ({ type, label }: { type: FilterType; label: string }) => (
-    <TouchableOpacity
+    <Pressable
       style={[styles.filterTab, filter === type && styles.activeFilterTab]}
       onPress={() => setFilter(type)}
     >
       <Text style={[styles.filterText, filter === type && styles.activeFilterText]}>
         {label} ({statusCounts[type]})
       </Text>
-    </TouchableOpacity>
+    </Pressable>
   );
 
   return (
@@ -316,13 +316,13 @@ export default function DriversScreen() {
         <View style={styles.headerLeft}>
           <Text style={styles.headerTitle}>Manage Drivers</Text>
         </View>
-        <TouchableOpacity 
+        <Pressable 
           style={styles.addButton}
           onPress={() => setShowAddModal(true)}
         >
           <Ionicons name="add" size={20} color={colors.primaryForeground} />
           <Text style={styles.addButtonText}>Add Driver</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
 
       {/* Search Bar */}
@@ -336,9 +336,9 @@ export default function DriversScreen() {
           onChangeText={setSearchQuery}
         />
         {searchQuery.length > 0 && (
-          <TouchableOpacity onPress={() => setSearchQuery('')}>
+          <Pressable onPress={() => setSearchQuery('')}>
             <Ionicons name="close-circle" size={20} color={colors.foregroundMuted} />
-          </TouchableOpacity>
+          </Pressable>
         )}
       </View>
 
@@ -387,13 +387,13 @@ export default function DriversScreen() {
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
           <View style={[styles.modalHeader, { paddingTop: insets.top + spacing.md }]}>
-            <TouchableOpacity onPress={() => setShowAddModal(false)}>
+            <Pressable onPress={() => setShowAddModal(false)}>
               <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-            </TouchableOpacity>
+            </Pressable>
             <Text style={styles.modalTitle}>Add New Driver</Text>
-            <TouchableOpacity onPress={resetForm}>
+            <Pressable onPress={resetForm}>
               <Text style={styles.resetText}>Reset</Text>
-            </TouchableOpacity>
+            </Pressable>
           </View>
 
           <ScrollView style={styles.modalContent} showsVerticalScrollIndicator={false}>
@@ -401,7 +401,7 @@ export default function DriversScreen() {
             <Text style={styles.fieldLabel}>Employment Status</Text>
             <View style={styles.statusSelector}>
               {(['Active', 'Suspended', 'Terminated'] as EmploymentStatus[]).map((status) => (
-                <TouchableOpacity
+                <Pressable
                   key={status}
                   style={[
                     styles.statusOption,
@@ -419,7 +419,7 @@ export default function DriversScreen() {
                   ]}>
                     {status}
                   </Text>
-                </TouchableOpacity>
+                </Pressable>
               ))}
             </View>
 
@@ -466,7 +466,7 @@ export default function DriversScreen() {
             </View>
 
             <Text style={styles.fieldLabel}>Date of Birth</Text>
-            <TouchableOpacity 
+            <Pressable 
               style={styles.inputContainer}
               onPress={() => setShowDobPicker(true)}
             >
@@ -478,7 +478,7 @@ export default function DriversScreen() {
                 {dateOfBirth ? formatDateDisplay(dateOfBirth) : 'Select date of birth'}
               </Text>
               <Ionicons name="chevron-down" size={20} color={colors.foregroundMuted} />
-            </TouchableOpacity>
+            </Pressable>
 
             {/* License Information Section */}
             <View style={styles.sectionHeader}>
@@ -501,7 +501,7 @@ export default function DriversScreen() {
             <View style={styles.rowInputs}>
               <View style={styles.halfInput}>
                 <Text style={styles.fieldLabel}>License Class</Text>
-                <TouchableOpacity 
+                <Pressable 
                   style={styles.inputContainer}
                   onPress={() => setShowLicenseClassPicker(true)}
                 >
@@ -513,7 +513,7 @@ export default function DriversScreen() {
                     {newDriver.licenseClass || 'Select'}
                   </Text>
                   <Ionicons name="chevron-down" size={20} color={colors.foregroundMuted} />
-                </TouchableOpacity>
+                </Pressable>
               </View>
               <View style={styles.halfInput}>
                 <Text style={styles.fieldLabel}>License State</Text>
@@ -533,7 +533,7 @@ export default function DriversScreen() {
             </View>
 
             <Text style={styles.fieldLabel}>License Expiration</Text>
-            <TouchableOpacity 
+            <Pressable 
               style={styles.inputContainer}
               onPress={() => setShowLicenseExpirationPicker(true)}
             >
@@ -545,7 +545,7 @@ export default function DriversScreen() {
                 {licenseExpirationDate ? formatDateDisplay(licenseExpirationDate) : 'Select expiration date'}
               </Text>
               <Ionicons name="chevron-down" size={20} color={colors.foregroundMuted} />
-            </TouchableOpacity>
+            </Pressable>
 
             {/* Contact Details Section */}
             <View style={styles.sectionHeader}>
@@ -600,7 +600,7 @@ export default function DriversScreen() {
             </View>
 
             {/* Buttons */}
-            <TouchableOpacity 
+            <Pressable 
               style={[styles.createButton, isCreating && styles.createButtonDisabled]} 
               onPress={handleCreateDriver}
               disabled={isCreating}
@@ -610,15 +610,15 @@ export default function DriversScreen() {
               ) : (
                 <Text style={styles.createButtonText}>Create Driver Profile</Text>
               )}
-            </TouchableOpacity>
+            </Pressable>
 
-            <TouchableOpacity 
+            <Pressable 
               style={styles.cancelButton} 
               onPress={() => setShowAddModal(false)}
               disabled={isCreating}
             >
               <Text style={styles.cancelButtonText}>Cancel & Exit</Text>
-            </TouchableOpacity>
+            </Pressable>
 
             <View style={{ height: 40 }} />
           </ScrollView>
@@ -664,15 +664,15 @@ export default function DriversScreen() {
             animationType="fade"
             onRequestClose={() => setShowLicenseClassPicker(false)}
           >
-            <TouchableOpacity 
+            <Pressable 
               style={styles.licenseClassOverlay}
-              activeOpacity={1}
+
               onPress={() => setShowLicenseClassPicker(false)}
             >
               <View style={styles.licenseClassModal}>
                 <Text style={styles.licenseClassTitle}>Select License Class</Text>
                 {LICENSE_CLASSES.map((licenseClass) => (
-                  <TouchableOpacity
+                  <Pressable
                     key={licenseClass}
                     style={[
                       styles.licenseClassOption,
@@ -692,10 +692,10 @@ export default function DriversScreen() {
                     {newDriver.licenseClass === licenseClass && (
                       <Ionicons name="checkmark" size={20} color={colors.primary} />
                     )}
-                  </TouchableOpacity>
+                  </Pressable>
                 ))}
               </View>
-            </TouchableOpacity>
+            </Pressable>
           </Modal>
         </KeyboardAvoidingView>
       </Modal>

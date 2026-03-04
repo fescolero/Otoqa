@@ -3,7 +3,7 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
+  Pressable,
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -84,12 +84,12 @@ export default function LanguageScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity
+        <Pressable
           style={styles.backButton}
           onPress={() => router.back()}
         >
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-        </TouchableOpacity>
+        </Pressable>
         <Text style={styles.headerTitle}>{t('languages.title')}</Text>
         <View style={styles.headerSpacer} />
       </View>
@@ -107,7 +107,7 @@ export default function LanguageScreen() {
             const isLast = index === availableLanguages.length - 1;
 
             return (
-              <TouchableOpacity
+              <Pressable
                 key={lang.code}
                 style={[
                   styles.languageItem,
@@ -132,7 +132,7 @@ export default function LanguageScreen() {
                     color={colors.primary}
                   />
                 )}
-              </TouchableOpacity>
+              </Pressable>
             );
           })}
         </View>

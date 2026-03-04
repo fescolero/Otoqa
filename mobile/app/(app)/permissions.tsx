@@ -3,7 +3,7 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
+  Pressable,
   ScrollView,
   Linking,
   Platform,
@@ -206,13 +206,13 @@ export default function PermissionsScreen() {
       </View>
       <Text style={styles.permissionDescription}>{permission.description}</Text>
       {!permission.enabled && (
-        <TouchableOpacity 
+        <Pressable 
           style={styles.grantButton}
           onPress={() => requestPermission(permission.id)}
         >
           <Text style={styles.grantButtonText}>Grant Permission</Text>
           <Ionicons name="arrow-forward" size={16} color={colors.primary} />
-        </TouchableOpacity>
+        </Pressable>
       )}
     </View>
   );
@@ -221,9 +221,9 @@ export default function PermissionsScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+        <Pressable style={styles.backButton} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-        </TouchableOpacity>
+        </Pressable>
         <Text style={styles.headerTitle}>App Permissions</Text>
         <View style={styles.headerSpacer} />
       </View>
@@ -251,10 +251,10 @@ export default function PermissionsScreen() {
         </View>
 
         {/* Open Settings Button */}
-        <TouchableOpacity style={styles.settingsButton} onPress={openSettings}>
+        <Pressable style={styles.settingsButton} onPress={openSettings}>
           <Ionicons name="settings-outline" size={20} color={colors.foreground} />
           <Text style={styles.settingsButtonText}>Open Device Settings</Text>
-        </TouchableOpacity>
+        </Pressable>
       </ScrollView>
     </View>
   );
