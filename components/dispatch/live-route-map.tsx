@@ -780,6 +780,12 @@ export function LiveRouteMap({
 }: LiveRouteMapProps) {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
+  // #region agent log
+  useEffect(() => {
+    console.log('[DEBUG-1355cc] LiveRouteMap apiKey:', { exists: !!apiKey, length: apiKey?.length ?? 0, prefix: apiKey?.substring(0, 8) ?? 'EMPTY', nodeEnv: process.env.NODE_ENV });
+  }, []);
+  // #endregion
+
   // Route path state (road-following path from Map Matching API)
   const [routePath, setRoutePath] = useState<Array<{ latitude: number; longitude: number }>>([]);
   const [isLoadingPath, setIsLoadingPath] = useState(false);
@@ -934,6 +940,9 @@ export function LiveRouteMap({
           <div className="flex flex-col items-center gap-2">
             <MapPin className="w-8 h-8 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">Maps API not configured</p>
+            {/* #region agent log */}
+            <p className="text-[10px] text-muted-foreground/50">debug-1355cc: key={typeof apiKey}/{String(apiKey?.length ?? 'nil')}</p>
+            {/* #endregion */}
           </div>
         </div>
       </div>
