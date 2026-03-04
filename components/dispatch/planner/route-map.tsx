@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useEffect, useState } from 'react';
+import { useMemo, useEffect, useState, useRef, useCallback } from 'react';
 import {
   APIProvider,
   Map,
@@ -24,63 +24,68 @@ interface RouteMapProps {
   height?: string;
 }
 
-// Inner component that has access to the map instance
 function RouteRenderer({ stops }: { stops: Stop[] }) {
   const map = useMap();
   const routesLibrary = useMapsLibrary('routes');
-  const [directionsRenderer, setDirectionsRenderer] =
-    useState<google.maps.DirectionsRenderer | null>(null);
+  const polylinesRef = useRef<google.maps.Polyline[]>([]);
 
-  // Initialize DirectionsRenderer
+  const clearPolylines = useCallback(() => {
+    polylinesRef.current.forEach((p) => p.setMap(null));
+    polylinesRef.current = [];
+  }, []);
+
   useEffect(() => {
-    if (!routesLibrary || !map) return;
+    return () => clearPolylines();
+  }, [clearPolylines]);
 
-    const renderer = new routesLibrary.DirectionsRenderer({
-      map,
-      suppressMarkers: true, // We'll use custom markers
-      polylineOptions: {
-        strokeColor: '#3b82f6', // Blue route line
-        strokeWeight: 4,
-        strokeOpacity: 0.8,
-      },
-    });
-
-    setDirectionsRenderer(renderer);
-
-    return () => {
-      renderer.setMap(null);
-    };
-  }, [routesLibrary, map]);
-
-  // Calculate and render route when stops change
   useEffect(() => {
-    if (!directionsRenderer || !routesLibrary || stops.length < 2) return;
+    if (!routesLibrary || !map || stops.length < 2) return;
 
-    const directionsService = new routesLibrary.DirectionsService();
+    clearPolylines();
 
-    // Build waypoints from intermediate stops
-    const waypoints = stops.slice(1, -1).map((stop) => ({
+    const Route = (routesLibrary as any).Route;
+    if (!Route?.computeRoutes) return;
+
+    const intermediates = stops.slice(1, -1).map((stop) => ({
       location: { lat: stop.lat, lng: stop.lng },
-      stopover: true,
     }));
 
-    directionsService.route(
-      {
-        origin: { lat: stops[0].lat, lng: stops[0].lng },
-        destination: { lat: stops[stops.length - 1].lat, lng: stops[stops.length - 1].lng },
-        waypoints,
-        travelMode: google.maps.TravelMode.DRIVING,
-        optimizeWaypoints: false, // Keep original sequence
-      },
-      (result, status) => {
-        if (status === google.maps.DirectionsStatus.OK && result) {
-          directionsRenderer.setDirections(result);
-        }
-      }
-    );
-  }, [directionsRenderer, routesLibrary, stops]);
+    const request: Record<string, unknown> = {
+      origin: { lat: stops[0].lat, lng: stops[0].lng },
+      destination: { lat: stops[stops.length - 1].lat, lng: stops[stops.length - 1].lng },
+      travelMode: 'DRIVE',
+      fields: ['path'],
+      ...(intermediates.length > 0 && { intermediates }),
+    };
 
-  // Fit bounds to show all stops - simple, no animation tricks
+    let cancelled = false;
+
+    Route.computeRoutes(request)
+      .then((response: { routes?: Array<{ createPolylines?: () => google.maps.Polyline[] }> }) => {
+        if (cancelled) return;
+        const route = response?.routes?.[0];
+        if (!route?.createPolylines) return;
+
+        const polylines = route.createPolylines();
+        polylines.forEach((polyline) => {
+          polyline.setOptions({
+            strokeColor: '#3b82f6',
+            strokeWeight: 4,
+            strokeOpacity: 0.8,
+          });
+          polyline.setMap(map);
+        });
+        polylinesRef.current = polylines;
+      })
+      .catch(() => {
+        // Silently handle route computation failures
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [routesLibrary, map, stops, clearPolylines]);
+
   useEffect(() => {
     if (!map || stops.length === 0) return;
 
@@ -89,14 +94,12 @@ function RouteRenderer({ stops }: { stops: Stop[] }) {
       bounds.extend({ lat: stop.lat, lng: stop.lng });
     });
 
-    // Use smaller padding to naturally zoom in more
     map.fitBounds(bounds, { top: 25, right: 25, bottom: 25, left: 25 });
   }, [map, stops]);
 
   return null;
 }
 
-// Custom marker component with sequence number
 function StopMarker({ stop }: { stop: Stop }) {
   const isPickup = stop.type === 'pickup';
 
@@ -118,16 +121,13 @@ function StopMarker({ stop }: { stop: Stop }) {
 export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
   const apiKey = useGoogleMapsKey();
 
-  // Filter valid stops (with coordinates)
   const validStops = useMemo(
     () => stops.filter((s) => s.lat && s.lng && !isNaN(s.lat) && !isNaN(s.lng)),
     [stops]
   );
 
-  // Calculate center point
   const center = useMemo(() => {
     if (validStops.length === 0) {
-      // Default to US center
       return { lat: 39.8283, lng: -98.5795 };
     }
     const sumLat = validStops.reduce((sum, s) => sum + s.lat, 0);
@@ -138,7 +138,6 @@ export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
     };
   }, [validStops]);
 
-  // Show placeholder if no API key
   if (!apiKey) {
     return (
       <div
@@ -150,7 +149,6 @@ export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
     );
   }
 
-  // Show placeholder if no valid stops
   if (validStops.length === 0) {
     return (
       <div
@@ -174,10 +172,8 @@ export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
           clickableIcons={false}
           className="w-full h-full [&_.gm-style-cc]:!hidden [&_.gmnoprint]:!hidden [&_a[href*='google']]:!hidden"
         >
-          {/* Render route line if 2+ stops */}
           {validStops.length >= 2 && <RouteRenderer stops={validStops} />}
 
-          {/* Render stop markers */}
           {validStops.map((stop, index) => (
             <StopMarker key={`${stop.lat}-${stop.lng}-${index}`} stop={stop} />
           ))}
