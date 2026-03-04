@@ -58,12 +58,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     ),
   };
 
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY;
+
   return (
     <AppLayoutClient 
       user={userData}
       workosUserId={user.id}
       organizationId={organizationId}
       orgSettings={orgSettings}
+      googleMapsApiKey={googleMapsApiKey}
     >
       {children}
     </AppLayoutClient>

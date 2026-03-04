@@ -4,8 +4,18 @@ let geocoder: google.maps.Geocoder | null = null;
 let isLoaded = false;
 let loadPromise: Promise<void> | null = null;
 
+// Stored API key (set via setGoogleMapsApiKey from context)
+let storedApiKey: string | undefined;
+
 // Cache for timezone lookups to avoid redundant API calls
 const timezoneCache: Map<string, string> = new Map();
+
+/**
+ * Set the Google Maps API key (called from React context on mount)
+ */
+export function setGoogleMapsApiKey(key: string | undefined) {
+  storedApiKey = key;
+}
 
 /**
  * Initialize Google Maps API by loading the script tag
@@ -15,13 +25,10 @@ async function loadGoogleMaps(): Promise<void> {
   if (loadPromise) return loadPromise;
   if (isLoaded) return Promise.resolve();
 
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-  
-  console.log('🗺️ Google Maps API - Initializing...');
-  console.log('🔑 API Key present:', apiKey ? `Yes (${apiKey.substring(0, 10)}...)` : 'No');
+  const apiKey = storedApiKey;
   
   if (!apiKey) {
-    const error = 'Google Maps API key not configured. Please set NEXT_PUBLIC_GOOGLE_MAPS_API_KEY in .env.local';
+    const error = 'Google Maps API key not configured. Ensure GOOGLE_MAPS_API_KEY is set in environment variables.';
     console.error('❌', error);
     throw new Error(error);
   }
@@ -299,7 +306,7 @@ export async function getTimezoneFromCoordinates(
     return timezoneCache.get(cacheKey)!;
   }
 
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const apiKey = storedApiKey;
   if (!apiKey) {
     console.warn('⚠️ Google Maps API key not configured for timezone lookup');
     return null;

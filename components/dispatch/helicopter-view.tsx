@@ -10,6 +10,7 @@ import {
   AdvancedMarker,
   useMap,
 } from '@vis.gl/react-google-maps';
+import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -209,7 +210,7 @@ export function HelicopterView({
   showStats = true,
   onDriverSelect,
 }: HelicopterViewProps) {
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const apiKey = useGoogleMapsKey();
   const [selectedDriverId, setSelectedDriverId] = useState<Id<'drivers'> | null>(null);
   const [now, setNow] = useState(() => Date.now());
 

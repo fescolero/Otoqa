@@ -314,6 +314,10 @@ export const getActiveLoads = query({
       }
     }
 
+    // #region agent log
+    console.log('[DEBUG-ec49a3] getActiveLoads called', JSON.stringify({queriedCarrierOrgId:args.carrierOrgId,carrierConvexId:args.carrierConvexId}));
+    // #endregion
+
     // Get both AWARDED and IN_PROGRESS
     const awarded = await ctx.db
       .query('loadCarrierAssignments')
@@ -330,6 +334,18 @@ export const getActiveLoads = query({
       .collect();
 
     const assignments = [...awarded, ...inProgress];
+
+    // #region agent log
+    console.log('[DEBUG-ec49a3] getActiveLoads results', JSON.stringify({awardedCount:awarded.length,inProgressCount:inProgress.length,totalAssignments:assignments.length,assignmentCarrierOrgIds:assignments.map(a=>a.carrierOrgId)}));
+    // If no results, check if there are assignments with the Convex ID instead
+    if (assignments.length === 0 && args.carrierConvexId) {
+      const byConvexAwarded = await ctx.db.query('loadCarrierAssignments').withIndex('by_carrier',(q)=>q.eq('carrierOrgId',args.carrierConvexId!).eq('status','AWARDED')).collect();
+      const byConvexInProgress = await ctx.db.query('loadCarrierAssignments').withIndex('by_carrier',(q)=>q.eq('carrierOrgId',args.carrierConvexId!).eq('status','IN_PROGRESS')).collect();
+      if (byConvexAwarded.length > 0 || byConvexInProgress.length > 0) {
+        console.log('[DEBUG-ec49a3] MISMATCH: Found assignments by ConvexId!', JSON.stringify({convexId:args.carrierConvexId,byConvexAwarded:byConvexAwarded.length,byConvexInProgress:byConvexInProgress.length,sampleCarrierOrgIds:byConvexAwarded.slice(0,3).map(a=>a.carrierOrgId)}));
+      }
+    }
+    // #endregion
 
     // Enrich with load and driver details
     return Promise.all(
@@ -1089,6 +1105,10 @@ export const getUserRoles = query({
         driverId = matchingDriver._id;
       }
     }
+
+    // #region agent log
+    console.log('[DEBUG-ec49a3] getUserRoles IDs', JSON.stringify({carrierOrgId,carrierOrgConvexId,orgClerkId:carrierOrg?.clerkOrgId,orgWorkosId:carrierOrg?.workosOrgId,isCarrierOwner,isOwnerOperator}));
+    // #endregion
 
     return {
       isDriver,

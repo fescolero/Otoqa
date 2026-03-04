@@ -8,6 +8,7 @@ import {
   useMap,
   useMapsLibrary,
 } from '@vis.gl/react-google-maps';
+import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 
 interface Stop {
   lat: number;
@@ -115,7 +116,7 @@ function StopMarker({ stop }: { stop: Stop }) {
 }
 
 export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const apiKey = useGoogleMapsKey();
 
   // Filter valid stops (with coordinates)
   const validStops = useMemo(

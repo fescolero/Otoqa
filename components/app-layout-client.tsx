@@ -4,6 +4,7 @@ import * as React from 'react';
 import { AppSidebar } from '@/components/app-sidebar';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
 import { OrganizationProvider } from '@/contexts/organization-context';
+import { GoogleMapsProvider } from '@/contexts/google-maps-context';
 import { identifyUser } from '@/lib/posthog';
 
 interface OrgSettings {
@@ -22,10 +23,11 @@ interface AppLayoutClientProps {
   workosUserId: string;
   organizationId: string;
   orgSettings: OrgSettings | null;
+  googleMapsApiKey?: string;
   children: React.ReactNode;
 }
 
-export function AppLayoutClient({ user, workosUserId, organizationId, orgSettings, children }: AppLayoutClientProps) {
+export function AppLayoutClient({ user, workosUserId, organizationId, orgSettings, googleMapsApiKey, children }: AppLayoutClientProps) {
   const identifiedRef = React.useRef(false);
 
   React.useEffect(() => {
@@ -43,14 +45,16 @@ export function AppLayoutClient({ user, workosUserId, organizationId, orgSetting
 
   return (
     <OrganizationProvider organizationId={organizationId}>
-      <SidebarProvider>
-        <AppSidebar 
-          user={user} 
-          organizationId={organizationId}
-          orgSettings={orgSettings}
-        />
-        <SidebarInset>{children}</SidebarInset>
-      </SidebarProvider>
+      <GoogleMapsProvider apiKey={googleMapsApiKey}>
+        <SidebarProvider>
+          <AppSidebar 
+            user={user} 
+            organizationId={organizationId}
+            orgSettings={orgSettings}
+          />
+          <SidebarInset>{children}</SidebarInset>
+        </SidebarProvider>
+      </GoogleMapsProvider>
     </OrganizationProvider>
   );
 }

@@ -14,6 +14,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 import { MapPin, Clock, Route, Truck, Flag } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 
@@ -223,7 +224,7 @@ export function RouteHistoryMap({
   showTimestamps = true,
   stops,
 }: RouteHistoryMapProps) {
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const apiKey = useGoogleMapsKey();
 
   // Fetch route history from Convex
   const routeHistory = useQuery(api.driverLocations.getRouteHistoryForLoad, {

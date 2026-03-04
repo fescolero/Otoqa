@@ -13,6 +13,7 @@ import {
   AdvancedMarker,
 } from '@vis.gl/react-google-maps';
 import { cn } from '@/lib/utils';
+import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 import { MapPin, Clock, Route, Navigation, CheckCircle2 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -778,17 +779,12 @@ export function LiveRouteMap({
   selectedStopId,
   onStopSelect,
 }: LiveRouteMapProps) {
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  const apiKey = useGoogleMapsKey();
 
   // #region agent log
   useEffect(() => {
-    console.log('[DEBUG-1355cc] LiveRouteMap env check:', {
-      googleMapsKey: { exists: !!apiKey, length: apiKey?.length ?? 0, prefix: apiKey?.substring(0, 8) ?? 'EMPTY' },
-      convexUrl: { exists: !!process.env.NEXT_PUBLIC_CONVEX_URL, prefix: process.env.NEXT_PUBLIC_CONVEX_URL?.substring(0, 20) ?? 'EMPTY' },
-      posthogKey: { exists: !!process.env.NEXT_PUBLIC_POSTHOG_KEY },
-      nodeEnv: process.env.NODE_ENV,
-    });
-  }, []);
+    console.log('[DEBUG-1355cc] LiveRouteMap apiKey via context:', { exists: !!apiKey, length: apiKey?.length ?? 0 });
+  }, [apiKey]);
   // #endregion
 
   // Route path state (road-following path from Map Matching API)
@@ -945,9 +941,6 @@ export function LiveRouteMap({
           <div className="flex flex-col items-center gap-2">
             <MapPin className="w-8 h-8 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">Maps API not configured</p>
-            {/* #region agent log */}
-            <p className="text-[10px] text-muted-foreground/50">debug-1355cc: key={typeof apiKey}/{String(apiKey?.length ?? 'nil')}</p>
-            {/* #endregion */}
           </div>
         </div>
       </div>

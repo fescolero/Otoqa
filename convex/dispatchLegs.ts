@@ -626,6 +626,38 @@ export const assignCarrierInternal = internalMutation({
       updatedAt: now,
     });
 
+    // Create loadCarrierAssignment so the carrier can see this load on mobile
+    const existingAssignments = await ctx.db
+      .query('loadCarrierAssignments')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    const hasActiveAssignment = existingAssignments.some(
+      (a) => a.status === 'AWARDED' || a.status === 'IN_PROGRESS'
+    );
+    if (!hasActiveAssignment) {
+      await ctx.db.insert('loadCarrierAssignments', {
+        loadId: args.loadId,
+        brokerOrgId: load.workosOrgId,
+        carrierOrgId: carrier.carrierOrgId,
+        partnershipId: args.carrierPartnershipId,
+        carrierName: carrier.carrierName,
+        carrierMcNumber: carrier.mcNumber,
+        carrierRate: args.carrierRate,
+        carrierRateType: 'FLAT',
+        currency: 'USD',
+        carrierTotalAmount: args.carrierRate,
+        usePayProfile: args.carrierRate === undefined,
+        status: 'AWARDED',
+        offeredAt: now,
+        acceptedAt: now,
+        awardedAt: now,
+        createdBy: args.assignedBy,
+      });
+      // #region agent log
+      console.log('[DEBUG-ec49a3] assignCarrierInternal: created loadCarrierAssignment', JSON.stringify({loadId:args.loadId,carrierOrgId:carrier.carrierOrgId,carrierName:carrier.carrierName}));
+      // #endregion
+    }
+
     // Audit log
     await ctx.runMutation(internal.auditLog.logAction, {
       organizationId: load.workosOrgId,
@@ -743,6 +775,34 @@ export const assignCarrier = mutation({
       status: nextStatus,
       updatedAt: now,
     });
+
+    // 6b. Create loadCarrierAssignment so the carrier can see this load on mobile
+    const existingLCA = await ctx.db
+      .query('loadCarrierAssignments')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    const hasActiveLCA = existingLCA.some(
+      (a) => a.status === 'AWARDED' || a.status === 'IN_PROGRESS'
+    );
+    if (!hasActiveLCA) {
+      await ctx.db.insert('loadCarrierAssignments', {
+        loadId: args.loadId,
+        brokerOrgId: args.workosOrgId,
+        carrierOrgId: partnership.carrierOrgId,
+        partnershipId: args.carrierPartnershipId,
+        carrierName: partnership.carrierName,
+        carrierMcNumber: partnership.mcNumber,
+        status: 'AWARDED',
+        usePayProfile: true,
+        offeredAt: now,
+        acceptedAt: now,
+        awardedAt: now,
+        createdBy: args.userId,
+      });
+      // #region agent log
+      console.log('[DEBUG-ec49a3] assignCarrier: created loadCarrierAssignment', JSON.stringify({loadId:args.loadId,carrierOrgId:partnership.carrierOrgId,carrierName:partnership.carrierName}));
+      // #endregion
+    }
 
     // 7. Audit log
     await ctx.runMutation(internal.auditLog.logAction, {
