@@ -562,14 +562,28 @@ export const directAssign = mutation({
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .collect();
 
-    const hasActiveAssignment = existingAssignments.some(
+    const activeAssignments = existingAssignments.filter(
       (a) =>
         a.status === 'AWARDED' ||
         a.status === 'IN_PROGRESS'
     );
 
-    if (hasActiveAssignment) {
-      throw new Error('Load already has an active carrier assignment');
+    if (activeAssignments.length > 0) {
+      // If the load is actually in an assigned/dispatched state, block reassignment
+      if (load.status === 'Assigned' || load.status === 'Dispatched' || load.status === 'In Transit') {
+        throw new Error('Load already has an active carrier assignment. Please cancel the existing assignment first.');
+      }
+      // Load is Open/other status but has stale assignment records - clean them up
+      for (const stale of activeAssignments) {
+        await ctx.db.patch(stale._id, {
+          status: 'CANCELED',
+          canceledAt: now,
+          canceledBy: args.createdBy,
+          canceledByParty: 'BROKER',
+          cancellationReason: 'OTHER',
+          cancellationNotes: 'Auto-canceled: stale assignment on open load during reassignment',
+        });
+      }
     }
 
     // Withdraw any pending offers for this load
