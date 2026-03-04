@@ -782,7 +782,12 @@ export function LiveRouteMap({
 
   // #region agent log
   useEffect(() => {
-    console.log('[DEBUG-1355cc] LiveRouteMap apiKey:', { exists: !!apiKey, length: apiKey?.length ?? 0, prefix: apiKey?.substring(0, 8) ?? 'EMPTY', nodeEnv: process.env.NODE_ENV });
+    console.log('[DEBUG-1355cc] LiveRouteMap env check:', {
+      googleMapsKey: { exists: !!apiKey, length: apiKey?.length ?? 0, prefix: apiKey?.substring(0, 8) ?? 'EMPTY' },
+      convexUrl: { exists: !!process.env.NEXT_PUBLIC_CONVEX_URL, prefix: process.env.NEXT_PUBLIC_CONVEX_URL?.substring(0, 20) ?? 'EMPTY' },
+      posthogKey: { exists: !!process.env.NEXT_PUBLIC_POSTHOG_KEY },
+      nodeEnv: process.env.NODE_ENV,
+    });
   }, []);
   // #endregion
 
