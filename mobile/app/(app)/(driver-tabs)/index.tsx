@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
+import { Ionicons, Feather } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { useMyLoads } from '../../../lib/hooks/useMyLoads';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
@@ -18,7 +18,6 @@ import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
 import { useDriver } from '../_layout';
 import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../../../lib/theme';
 import { useLanguage } from '../../../lib/LanguageContext';
-import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { trackWeatherFetchFailed, trackScreen } from '../../../lib/analytics';
 
@@ -54,6 +53,28 @@ const getWeatherInfo = (code: number): { description: string; icon: keyof typeof
   return { description: 'Unknown', icon: 'cloud', iconColor: '#9CA3AF' };
 };
 
+type DayTab = 'yesterday' | 'today' | 'tomorrow';
+
+function getDateStringForDay(day: DayTab): string {
+  const now = new Date();
+  const target = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (day === 'yesterday') target.setDate(target.getDate() - 1);
+  if (day === 'tomorrow') target.setDate(target.getDate() + 1);
+  return `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
+}
+
+function getLoadPickupDate(load: any): string | null {
+  const dateStr = load?.firstPickup?.windowBeginDate || load?.firstStopDate;
+  if (!dateStr) return null;
+  return dateStr.split('T')[0];
+}
+
+const DAY_TABS: { key: DayTab; labelEn: string; labelEs: string }[] = [
+  { key: 'yesterday', labelEn: 'Yesterday', labelEs: 'Ayer' },
+  { key: 'today', labelEn: 'Today', labelEs: 'Hoy' },
+  { key: 'tomorrow', labelEn: 'Tomorrow', labelEs: 'Mañana' },
+];
+
 export default function HomeScreen() {
   const router = useRouter();
   const { driverId } = useDriver();
@@ -61,6 +82,8 @@ export default function HomeScreen() {
   const { isConnected } = useNetworkStatus();
   const { pendingCount } = useOfflineQueue();
   const { t, locale } = useLanguage();
+
+  const [selectedDay, setSelectedDay] = useState<DayTab>('today');
 
   // Weather state
   const [weather, setWeather] = useState<WeatherData | null>(null);
@@ -129,7 +152,9 @@ export default function HomeScreen() {
     await Promise.all([refetch(), fetchWeather()]);
   }, [refetch, fetchWeather]);
 
-  // Separate active, upcoming, and completed loads
+  const selectedDateStr = useMemo(() => getDateStringForDay(selectedDay), [selectedDay]);
+
+  // Separate active, upcoming, and completed loads -- then filter by selected day
   const { activeLoad, scheduledLoads, completedLoads } = useMemo(() => {
     if (!loads || loads.length === 0) {
       return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
@@ -138,7 +163,6 @@ export default function HomeScreen() {
     const completed = loads.filter((l) => l.status === 'Completed' || l.trackingStatus === 'Completed');
     const active = loads.filter((l) => l.status !== 'Completed' && l.trackingStatus !== 'Completed');
     
-    // Only show as "Current Load" if actually in transit/in progress
     const inProgress = active.find(
       (l) => l.trackingStatus === 'In Transit' || 
              l.trackingStatus === 'At Pickup' || 
@@ -146,21 +170,23 @@ export default function HomeScreen() {
              l.status === 'In Progress'
     );
     
-    // All non-completed loads that aren't the current one go to scheduled
     const scheduled = active
       .filter((l) => l._id !== inProgress?._id)
+      .filter((l) => getLoadPickupDate(l) === selectedDateStr)
       .sort((a, b) => {
         const timeA = a.firstPickup?.windowBeginDate || '';
         const timeB = b.firstPickup?.windowBeginDate || '';
         return timeA.localeCompare(timeB);
       });
 
+    const filteredCompleted = completed.filter((l) => getLoadPickupDate(l) === selectedDateStr);
+
     return { 
       activeLoad: inProgress, 
       scheduledLoads: scheduled,
-      completedLoads: completed 
+      completedLoads: filteredCompleted 
     };
-  }, [loads]);
+  }, [loads, selectedDateStr]);
 
   // Format date for header
   const formatHeaderDate = () => {
@@ -347,15 +373,28 @@ export default function HomeScreen() {
           </View>
         </View>
 
+        {/* Day Switcher */}
+        <View style={styles.daySwitcher}>
+          {DAY_TABS.map(({ key, labelEn, labelEs }) => (
+            <Pressable
+              key={key}
+              style={[styles.dayTab, selectedDay === key && styles.dayTabActive]}
+              onPress={() => setSelectedDay(key)}
+            >
+              <Text style={[styles.dayTabText, selectedDay === key && styles.dayTabTextActive]}>
+                {locale === 'es' ? labelEs : labelEn}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
         {/* Section Header */}
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>{locale === 'es' ? 'Cargas Programadas' : 'Scheduled Loads'}</Text>
-          <View style={styles.sectionActions}>
-            <Pressable style={styles.actionButton}>
-              <Feather name="filter" size={16} color={colors.foreground} />
-              <Text style={styles.actionText}>{locale === 'es' ? 'Ordenar' : 'Sort'}</Text>
-            </Pressable>
-          </View>
+          <Text style={styles.sectionTitle}>
+            {locale === 'es'
+              ? selectedDay === 'today' ? 'Próximas Hoy' : selectedDay === 'yesterday' ? 'Ayer' : 'Mañana'
+              : selectedDay === 'today' ? 'Upcoming Today' : selectedDay === 'yesterday' ? 'Yesterday' : 'Tomorrow'}
+          </Text>
         </View>
 
         {/* Pending Sync */}
@@ -373,50 +412,33 @@ export default function HomeScreen() {
         {/* Loading State */}
         {isLoading && <LoadingSkeleton />}
 
-        {/* Current Load Card - iOS Glass Effect */}
+        {/* In Progress Card */}
         {!isLoading && activeLoad && (
-          <Pressable
-            style={({ pressed }) => [styles.currentLoadCardWrapper, pressed && { opacity: 0.9 }]}
-            onPress={() => router.push(`/trip/${activeLoad._id}`)}
-          >
-            {isIOS ? (
-              <BlurView intensity={80} tint="systemChromeMaterialLight" style={styles.currentLoadCard}>
-                <View style={styles.currentLoadContent}>
-                  <View style={styles.currentLoadLeft}>
-                    <MaterialCommunityIcons name="truck-delivery" size={32} color={colors.primaryForeground} />
-                    <View>
-                      <Text style={styles.currentLoadLabel}>{locale === 'es' ? 'Carga Actual' : 'Current Load'}</Text>
-                      <Text style={styles.currentLoadId}>#{activeLoad.internalId}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.currentLoadRight}>
-                    <Text style={styles.currentLoadExpectedLabel}>{locale === 'es' ? 'Esperado' : 'Expected'}</Text>
-                    <Text style={styles.currentLoadTime}>
-                      {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
-                    </Text>
-                  </View>
-                </View>
-              </BlurView>
-            ) : (
-              <View style={styles.currentLoadCardAndroid}>
-                <View style={styles.currentLoadContent}>
-                  <View style={styles.currentLoadLeft}>
-                    <MaterialCommunityIcons name="truck-delivery" size={32} color={colors.primaryForeground} />
-                    <View>
-                      <Text style={styles.currentLoadLabel}>{locale === 'es' ? 'Carga Actual' : 'Current Load'}</Text>
-                      <Text style={styles.currentLoadId}>#{activeLoad.internalId}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.currentLoadRight}>
-                    <Text style={styles.currentLoadExpectedLabel}>{locale === 'es' ? 'Esperado' : 'Expected'}</Text>
-                    <Text style={styles.currentLoadTime}>
-                      {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
-                    </Text>
-                  </View>
-                </View>
+          <>
+            <View style={styles.inProgressLabel}>
+              <Text style={styles.inProgressLabelText}>{locale === 'es' ? 'EN PROGRESO' : 'IN PROGRESS'}</Text>
+            </View>
+            <Pressable
+              style={({ pressed }) => [styles.inProgressCard, pressed && { opacity: 0.9 }]}
+              onPress={() => router.push(`/trip/${activeLoad._id}`)}
+            >
+              <View style={styles.inProgressLeft}>
+                <Text style={styles.inProgressId}>#{activeLoad.internalId}</Text>
+                <Text style={styles.inProgressSub}>
+                  {[activeLoad.parsedHcr, activeLoad.trackingStatus === 'In Transit' ? 'On Route' : activeLoad.trackingStatus].filter(Boolean).join(' • ')}
+                </Text>
               </View>
-            )}
-          </Pressable>
+              <View style={styles.inProgressRight}>
+                <Text style={styles.inProgressEtaTime}>
+                  {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
+                </Text>
+                <Text style={styles.inProgressEtaLabel}>ETA</Text>
+              </View>
+              <View style={styles.inProgressArrow}>
+                <Ionicons name="arrow-forward" size={20} color={colors.primaryForeground} />
+              </View>
+            </Pressable>
+          </>
         )}
 
         {/* Scheduled Load Cards */}
@@ -511,7 +533,7 @@ export default function HomeScreen() {
         })}
 
         {/* No Loads State */}
-        {!isLoading && !activeLoad && scheduledLoads.length === 0 && (
+        {!isLoading && scheduledLoads.length === 0 && completedLoads.length === 0 && (
           <View style={styles.emptyStateCard}>
             <View style={styles.emptyStateIconContainer}>
               <Ionicons name="clipboard-outline" size={32} color={colors.foregroundMuted} />
@@ -658,39 +680,44 @@ const styles = StyleSheet.create({
     color: colors.foreground,
   },
 
+  // Day Switcher
+  daySwitcher: {
+    flexDirection: 'row',
+    backgroundColor: colors.muted,
+    borderRadius: borderRadius.xl,
+    padding: 3,
+    marginBottom: spacing.md,
+  },
+  dayTab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderRadius: borderRadius.lg,
+  },
+  dayTabActive: {
+    backgroundColor: colors.card,
+  },
+  dayTabText: {
+    fontSize: typography.sm,
+    fontWeight: typography.semibold,
+    color: colors.foregroundMuted,
+  },
+  dayTabTextActive: {
+    color: colors.foreground,
+  },
+
   // Section Header
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
   },
   sectionTitle: {
     fontSize: isIOS ? typography.lg : typography.xl,
     fontWeight: typography.semibold,
     color: colors.foreground,
     flexShrink: 1,
-  },
-  sectionActions: {
-    flexDirection: 'row',
-    gap: 6,
-    flexShrink: 0,
-  },
-  actionButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: isIOS ? 'rgba(45, 50, 59, 0.7)' : colors.muted,
-    paddingHorizontal: isIOS ? 10 : 12,
-    paddingVertical: isIOS ? 6 : 8,
-    borderRadius: borderRadius.lg,
-    borderWidth: isIOS ? 1 : 0,
-    borderColor: isIOS ? 'rgba(255, 255, 255, 0.1)' : 'transparent',
-  },
-  actionText: {
-    fontSize: isIOS ? typography.xs : typography.sm,
-    fontWeight: typography.medium,
-    color: colors.foreground,
   },
 
   // Sync Banner
@@ -713,63 +740,60 @@ const styles = StyleSheet.create({
     fontWeight: typography.medium,
   },
 
-  // Current Load Card
-  currentLoadCardWrapper: {
-    marginBottom: spacing.md,
-    borderRadius: borderRadius['2xl'],
-    overflow: 'hidden',
-    // iOS glass styling
-    ...(isIOS && {
-      backgroundColor: 'rgba(255, 107, 0, 0.85)',
-      borderWidth: 1,
-      borderColor: 'rgba(255, 255, 255, 0.2)',
-    }),
-    ...shadows.lg,
+  // In Progress Card
+  inProgressLabel: {
+    marginBottom: spacing.xs,
   },
-  currentLoadCard: {
-    borderRadius: borderRadius['2xl'],
-    padding: spacing.lg,
-    overflow: 'hidden',
+  inProgressLabelText: {
+    fontSize: typography.xs,
+    fontWeight: typography.semibold,
+    color: colors.foregroundMuted,
+    letterSpacing: 1,
   },
-  currentLoadCardAndroid: {
+  inProgressCard: {
     backgroundColor: colors.primary,
-    borderRadius: borderRadius['2xl'],
-    padding: spacing.lg,
-  },
-  currentLoadContent: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  currentLoadLeft: {
+    borderRadius: borderRadius.xl,
+    paddingVertical: spacing.base,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
   },
-  currentLoadLabel: {
-    fontSize: typography.sm,
-    fontWeight: typography.medium,
-    color: 'rgba(26, 29, 33, 0.8)',
+  inProgressLeft: {
+    flex: 1,
   },
-  currentLoadId: {
-    fontSize: typography['2xl'],
+  inProgressId: {
+    fontSize: typography.xl,
     fontWeight: typography.bold,
     color: colors.primaryForeground,
-    fontFamily: 'Courier',
-    letterSpacing: -1,
   },
-  currentLoadRight: {
-    alignItems: 'flex-end',
-  },
-  currentLoadExpectedLabel: {
-    fontSize: typography.sm,
+  inProgressSub: {
+    fontSize: typography.xs,
     fontWeight: typography.medium,
-    color: 'rgba(26, 29, 33, 0.8)',
+    color: 'rgba(26, 29, 33, 0.7)',
+    marginTop: 2,
   },
-  currentLoadTime: {
-    fontSize: typography['2xl'],
-    fontWeight: typography.semibold,
+  inProgressRight: {
+    alignItems: 'flex-end',
+    marginRight: spacing.base,
+  },
+  inProgressEtaTime: {
+    fontSize: typography.xl,
+    fontWeight: typography.bold,
     color: colors.primaryForeground,
+  },
+  inProgressEtaLabel: {
+    fontSize: typography.xs,
+    fontWeight: typography.medium,
+    color: 'rgba(26, 29, 33, 0.7)',
+  },
+  inProgressArrow: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(26, 29, 33, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // Load Card - iOS Glass Effect

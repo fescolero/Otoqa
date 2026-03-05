@@ -2,28 +2,22 @@ import {
   View,
   Text,
   StyleSheet,
-  FlatList,
+  SectionList,
   RefreshControl,
   Pressable,
-  ScrollView,
   ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../../convex/_generated/api';
 import { useCarrierOwner } from '../../_layout';
-import { colors, typography, borderRadius, shadows, spacing } from '../../../../lib/theme';
+import { colors, typography, borderRadius, spacing } from '../../../../lib/theme';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'expo-router';
 import { useQueryHealth } from '../../../../lib/hooks/useQueryHealth';
 
-// ============================================
-// MANAGE LOADS SCREEN
-// View and manage all carrier loads
-// ============================================
-
-type TabType = 'unassigned' | 'assigned' | 'completed' | 'canceled';
+type TabType = 'needsDriver' | 'active' | 'completed';
 
 // Avatar color palette
 const AVATAR_COLORS = [
@@ -87,11 +81,91 @@ function getRelativeTime(dateStr?: string): string {
   }
 }
 
+function getPickupDateKey(load: any): string {
+  const firstStop = load.stops?.[0];
+  if (!firstStop?.windowBeginDate) return 'no-date';
+  return firstStop.windowBeginDate.split('T')[0];
+}
+
+function formatSectionTitle(dateKey: string): string {
+  if (dateKey === 'no-date') return 'No Date';
+  try {
+    const [yearStr, monthStr, dayStr] = dateKey.split('-');
+    const date = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr));
+    if (isNaN(date.getTime())) return 'No Date';
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const endOfWeek = new Date(today);
+    endOfWeek.setDate(endOfWeek.getDate() + 6);
+
+    const dateOnly = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+    if (dateOnly.getTime() === today.getTime()) {
+      return `Today, ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+    }
+    if (dateOnly.getTime() === tomorrow.getTime()) {
+      return `Tomorrow, ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+    }
+    if (dateOnly > today && dateOnly <= endOfWeek) {
+      return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    }
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  } catch {
+    return 'No Date';
+  }
+}
+
+function isDateKeyToday(dateKey: string): boolean {
+  if (dateKey === 'no-date') return false;
+  try {
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    return dateKey === todayStr;
+  } catch {
+    return false;
+  }
+}
+
+function groupByPickupDate(loads: any[]): { title: string; isToday: boolean; data: any[] }[] {
+  const groups = new Map<string, any[]>();
+
+  for (const load of loads) {
+    const key = getPickupDateKey(load);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(load);
+    } else {
+      groups.set(key, [load]);
+    }
+  }
+
+  const sortedKeys = Array.from(groups.keys()).sort((a, b) => {
+    if (a === 'no-date') return 1;
+    if (b === 'no-date') return -1;
+    return b.localeCompare(a);
+  });
+
+  return sortedKeys.map((key) => ({
+    title: formatSectionTitle(key),
+    isToday: isDateKeyToday(key),
+    data: groups.get(key)!,
+  }));
+}
+
+const TAB_CONFIG: { key: TabType; label: string }[] = [
+  { key: 'needsDriver', label: 'Needs Driver' },
+  { key: 'active', label: 'Active' },
+  { key: 'completed', label: 'Completed' },
+];
+
 export default function ManageLoadsScreen() {
   const insets = useSafeAreaInsets();
   const { carrierOrgId, carrierExternalOrgId } = useCarrierOwner();
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<TabType>('unassigned');
+  const [activeTab, setActiveTab] = useState<TabType>('needsDriver');
   const [refreshing, setRefreshing] = useState(false);
 
   const loadQueryOrgId = carrierExternalOrgId || carrierOrgId;
@@ -133,28 +207,45 @@ export default function ManageLoadsScreen() {
     setTimeout(() => setRefreshing(false), 1000);
   }, []);
 
-  // Filter loads based on tab
-  const getDataForTab = () => {
+  const needsDriverLoads = useMemo(
+    () => (activeLoads || []).filter(
+      (load) => !load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED')
+    ),
+    [activeLoads]
+  );
+
+  const activeTabLoads = useMemo(
+    () => (activeLoads || []).filter(
+      (load) => load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED' || load.status === 'IN_PROGRESS')
+    ),
+    [activeLoads]
+  );
+
+  const completedTabLoads = useMemo(() => {
+    const done = (completedLoads || []).filter((load) => load.status === 'COMPLETED');
+    const canceledDeclined = (activeLoads || []).filter(
+      (load) => load.status === 'CANCELED' || load.status === 'DECLINED'
+    );
+    return [...done, ...canceledDeclined];
+  }, [activeLoads, completedLoads]);
+
+  const tabCounts: Record<TabType, number> = {
+    needsDriver: needsDriverLoads.length,
+    active: activeTabLoads.length,
+    completed: completedTabLoads.length,
+  };
+
+  const getDataForTab = (): any[] => {
     switch (activeTab) {
-      case 'unassigned':
-        return (activeLoads || []).filter(
-          (load) => !load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED')
-        );
-      case 'assigned':
-        return (activeLoads || []).filter(
-          (load) => load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED' || load.status === 'IN_PROGRESS')
-        );
-      case 'completed':
-        return (completedLoads || []).filter((load) => load.status === 'COMPLETED');
-      case 'canceled':
-        return [...(activeLoads || []), ...(completedLoads || [])].filter(
-          (load) => load.status === 'CANCELED' || load.status === 'DECLINED'
-        );
+      case 'needsDriver': return needsDriverLoads;
+      case 'active': return activeTabLoads;
+      case 'completed': return completedTabLoads;
     }
   };
 
-  const data = isLoading ? [] : getDataForTab();
-  const totalCount = data.length;
+  const flatData = isLoading ? [] : getDataForTab();
+  const sections = useMemo(() => groupByPickupDate(flatData), [flatData]);
+  const totalCount = flatData.length;
 
   const renderLoadCard = ({ item }: { item: any }) => {
     const firstStop = item.stops?.[0];
@@ -300,37 +391,53 @@ export default function ManageLoadsScreen() {
 
       {/* Tab Bar */}
       <View style={styles.tabBarContainer}>
-        <ScrollView 
-          horizontal 
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.tabBar}
-        >
-          {(['unassigned', 'assigned', 'completed', 'canceled'] as TabType[]).map((tab) => (
+        <View style={styles.tabBar}>
+          {TAB_CONFIG.map(({ key, label }) => (
             <Pressable
-              key={tab}
-              style={[styles.tab, activeTab === tab && styles.activeTab]}
-              onPress={() => setActiveTab(tab)}
+              key={key}
+              style={[styles.tab, activeTab === key && styles.activeTab]}
+              onPress={() => setActiveTab(key)}
             >
-              <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>
-                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              <Text style={[styles.tabText, activeTab === key && styles.activeTabText]}>
+                {label} ({tabCounts[key]})
               </Text>
             </Pressable>
           ))}
-        </ScrollView>
+        </View>
       </View>
 
       {/* Section Header */}
       <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>ACTIVE & RECENT</Text>
-        <Text style={styles.sectionCount}>Showing {totalCount} loads</Text>
+        <Text style={styles.sectionTitle}>
+          {activeTab === 'needsDriver' ? 'NEEDS DRIVER' : activeTab === 'active' ? 'ACTIVE LOADS' : 'HISTORY'}
+        </Text>
+        <Text style={styles.sectionCount}>{totalCount} load{totalCount !== 1 ? 's' : ''}</Text>
       </View>
 
       {/* Load List */}
-      <FlatList
-        data={data}
+      <SectionList
+        sections={sections}
         renderItem={renderLoadCard}
+        renderSectionHeader={({ section }) => {
+          const { title, isToday } = section as { title: string; isToday: boolean; data: any[] };
+          return (
+            <View style={[styles.dateSectionHeader, isToday && styles.dateSectionHeaderToday]}>
+              <View style={styles.dateSectionDivider} />
+              <View style={[styles.dateSectionLabelWrap, isToday && styles.dateSectionLabelWrapToday]}>
+                {isToday && (
+                  <Ionicons name="radio-button-on" size={10} color={colors.primary} style={{ marginRight: 6 }} />
+                )}
+                <Text style={[styles.dateSectionTitle, isToday && styles.dateSectionTitleToday]}>
+                  {title}
+                </Text>
+              </View>
+              <View style={styles.dateSectionDivider} />
+            </View>
+          );
+        }}
         keyExtractor={(item) => item._id}
         contentContainerStyle={styles.listContent}
+        stickySectionHeadersEnabled
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
         }
@@ -355,8 +462,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
   },
   backButton: {
     width: 40,
@@ -374,21 +482,23 @@ const styles = StyleSheet.create({
 
   // Tab Bar
   tabBarContainer: {
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
   },
   tabBar: {
     flexDirection: 'row',
-    paddingHorizontal: spacing.lg,
-    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    gap: spacing.xs,
     alignItems: 'center',
   },
   tab: {
+    flex: 1,
     paddingVertical: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: 6,
     borderRadius: 20,
     backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.border,
+    alignItems: 'center',
   },
   activeTab: {
     backgroundColor: colors.primary,
@@ -403,13 +513,49 @@ const styles = StyleSheet.create({
     color: colors.primaryForeground,
   },
 
+  // Date Section Headers
+  dateSectionHeader: {
+    backgroundColor: colors.background,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    gap: spacing.sm,
+  },
+  dateSectionHeaderToday: {},
+  dateSectionDivider: {
+    flex: 1,
+    height: 1,
+    backgroundColor: colors.border,
+  },
+  dateSectionLabelWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.md,
+  },
+  dateSectionLabelWrapToday: {
+    backgroundColor: colors.primary + '18',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 4,
+    borderRadius: 20,
+  },
+  dateSectionTitle: {
+    fontSize: typography.base,
+    fontWeight: '700',
+    color: colors.foregroundMuted,
+  },
+  dateSectionTitleToday: {
+    color: colors.primary,
+  },
+
   // Section Header
   sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: spacing.lg,
-    marginBottom: spacing.md,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.xs,
   },
   sectionTitle: {
     fontSize: typography.sm,
@@ -424,23 +570,22 @@ const styles = StyleSheet.create({
 
   // List
   listContent: {
-    paddingHorizontal: spacing.lg,
-    paddingBottom: 120,
+    paddingHorizontal: spacing.md,
+    paddingBottom: 100,
   },
 
   // Load Card
   loadCard: {
     backgroundColor: colors.card,
     borderRadius: borderRadius.xl,
-    padding: spacing.lg,
-    marginBottom: spacing.md,
-    ...shadows.md,
+    padding: spacing.base,
+    marginBottom: spacing.sm,
   },
   loadHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
   },
   loadIdRow: {
     flexDirection: 'row',
@@ -456,7 +601,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: spacing.xs,
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
   },
   hcrBadge: {
     backgroundColor: colors.muted,
@@ -504,7 +649,7 @@ const styles = StyleSheet.create({
   stopRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    marginBottom: spacing.sm,
+    marginBottom: spacing.xs,
     paddingLeft: spacing.xs,
   },
   stopDot: {
@@ -537,8 +682,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: spacing.md,
-    paddingTop: spacing.md,
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: colors.border,
   },
@@ -602,7 +747,6 @@ const styles = StyleSheet.create({
     padding: spacing.xl,
     paddingVertical: spacing.xl * 2,
     alignItems: 'center',
-    ...shadows.md,
   },
   emptyStateIconContainer: {
     width: 72,
@@ -636,7 +780,6 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.xl,
     padding: spacing.lg,
     marginTop: spacing.md,
-    ...shadows.sm,
   },
   alertsIconContainer: {
     width: 40,

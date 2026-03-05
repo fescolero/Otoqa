@@ -142,10 +142,129 @@ export const getLoads = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
-    // Choose query strategy based on whether date filtering is active.
-    // Date filtering uses by_org_first_stop_date index (sorted by pickup date).
-    // Without date filter, use by_organization index which includes ALL loads
-    // (by_org_first_stop_date excludes loads with undefined firstStopDate).
+    // ── SEARCH PATH: bypass pagination, use index lookups ──
+    // When searching, we do direct index lookups first (instant), then a
+    // broader scan with a cap. This guarantees the load is found regardless
+    // of which page it would normally be on.
+    if (args.search) {
+      const searchLower = args.search.toLowerCase().trim();
+      const seenIds = new Set<string>();
+      const matchedLoads: any[] = [];
+      const MAX_SEARCH_RESULTS = 50;
+
+      const matchesFilters = (load: any) => {
+        if (args.status && load.status !== args.status) return false;
+        if (args.trackingStatus && load.trackingStatus !== args.trackingStatus) return false;
+        if (args.customerId && load.customerId !== args.customerId) return false;
+        if (args.hcr && load.parsedHcr !== args.hcr) return false;
+        if (args.tripNumber && load.parsedTripNumber !== args.tripNumber) return false;
+        if (args.requiresManualReview !== undefined && load.requiresManualReview !== args.requiresManualReview) return false;
+        if (args.loadType && load.loadType !== args.loadType) return false;
+        return true;
+      };
+
+      const addIfMatch = (load: any) => {
+        if (!load || seenIds.has(load._id) || load.workosOrgId !== args.workosOrgId) return;
+        seenIds.add(load._id);
+        if (!matchesFilters(load)) return;
+        matchedLoads.push(load);
+      };
+
+      // 1. Exact index lookups (O(1) reads — fastest path)
+      const [byOrder, byInternal] = await Promise.all([
+        ctx.db
+          .query('loadInformation')
+          .withIndex('by_order_number', (q) =>
+            q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', args.search!)
+          )
+          .first(),
+        ctx.db
+          .query('loadInformation')
+          .withIndex('by_internal_id', (q) =>
+            q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${args.search!}`)
+          )
+          .first(),
+      ]);
+
+      addIfMatch(byOrder);
+      addIfMatch(byInternal);
+
+      // 2. If we don't have enough results, do a broader scan
+      if (matchedLoads.length < MAX_SEARCH_RESULTS) {
+        let scanQuery;
+        if (args.status) {
+          scanQuery = ctx.db
+            .query('loadInformation')
+            .withIndex('by_status', (q) =>
+              q.eq('workosOrgId', args.workosOrgId).eq('status', args.status! as any)
+            );
+        } else {
+          scanQuery = ctx.db
+            .query('loadInformation')
+            .withIndex('by_organization', (q) =>
+              q.eq('workosOrgId', args.workosOrgId)
+            );
+        }
+
+        // Scan up to 2000 documents for partial matches (avoids reading all 13K+).
+        // Exact matches are already found via index lookups above.
+        const SCAN_LIMIT = 2000;
+        const scanResults = await scanQuery.order('desc').take(SCAN_LIMIT);
+        for (const load of scanResults) {
+          if (matchedLoads.length >= MAX_SEARCH_RESULTS) break;
+          if (seenIds.has(load._id)) continue;
+
+          const matchesSearch =
+            load.orderNumber?.toLowerCase().includes(searchLower) ||
+            load.customerName?.toLowerCase().includes(searchLower) ||
+            load.internalId?.toLowerCase().includes(searchLower) ||
+            load.parsedHcr?.toLowerCase().includes(searchLower) ||
+            load.parsedTripNumber?.toLowerCase().includes(searchLower);
+
+          if (!matchesSearch) continue;
+          seenIds.add(load._id);
+          if (!matchesFilters(load)) continue;
+          matchedLoads.push(load);
+        }
+      }
+
+      // Enrich with stops
+      const enriched = await Promise.all(
+        matchedLoads.map(async (load) => {
+          const stops = await ctx.db
+            .query('loadStops')
+            .withIndex('by_load', (q) => q.eq('loadId', load._id))
+            .collect();
+          stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+          const firstPickup = stops.find((s) => s.stopType === 'PICKUP');
+          const lastDelivery = stops.filter((s) => s.stopType === 'DELIVERY').pop();
+          const firstStop = stops[0];
+          return {
+            ...load,
+            origin: firstPickup
+              ? { city: firstPickup.city, state: firstPickup.state, address: firstPickup.address }
+              : null,
+            destination: lastDelivery
+              ? { city: lastDelivery.city, state: lastDelivery.state, address: lastDelivery.address }
+              : null,
+            stopsCount: stops.length,
+            firstStopDate: firstStop?.windowBeginDate,
+          };
+        }),
+      );
+
+      return {
+        page: enriched,
+        isDone: true,
+        continueCursor: '',
+      };
+    }
+
+    // ── NORMAL PATH: paginated query (no search) ──
+    // Index strategy:
+    // 1. Date filter active → by_org_first_stop_date (narrows by date range)
+    // 2. Status filter, no date → by_status (narrows by status, avoids scanning all loads)
+    // 3. No filters → by_organization (includes all loads)
     let loadsQuery;
     
     if (args.startDate && args.endDate) {
@@ -170,6 +289,12 @@ export const getLoads = query({
           q.eq('workosOrgId', args.workosOrgId)
             .lte('firstStopDate', args.endDate!)
         );
+    } else if (args.status) {
+      loadsQuery = ctx.db
+        .query('loadInformation')
+        .withIndex('by_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', args.status! as any)
+        );
     } else {
       loadsQuery = ctx.db
         .query('loadInformation')
@@ -178,8 +303,8 @@ export const getLoads = query({
         );
     }
 
-    // Apply additional filters (these work with both index strategies)
-    if (args.status) {
+    // Apply remaining filters as post-index filters
+    if (args.status && (args.startDate || args.endDate)) {
       loadsQuery = loadsQuery.filter((q) => q.eq(q.field('status'), args.status));
     }
     if (args.trackingStatus) {
@@ -201,39 +326,18 @@ export const getLoads = query({
       loadsQuery = loadsQuery.filter((q) => q.eq(q.field('loadType'), args.loadType));
     }
 
-    // Paginate with appropriate ordering
-    // Date-filtered queries are sorted by firstStopDate (desc), others by _creationTime (desc)
     const paginatedResult = await loadsQuery.order('desc').paginate(args.paginationOpts);
 
-    let filteredLoads = paginatedResult.page;
-
-    // Client-side search filtering (after pagination)
-    if (args.search) {
-      const searchLower = args.search.toLowerCase();
-      filteredLoads = filteredLoads.filter((load) => {
-        return (
-          load.orderNumber?.toLowerCase().includes(searchLower) ||
-          load.customerName?.toLowerCase().includes(searchLower) ||
-          load.internalId?.toLowerCase().includes(searchLower) ||
-          load.parsedHcr?.toLowerCase().includes(searchLower) ||
-          load.parsedTripNumber?.toLowerCase().includes(searchLower)
-        );
-      });
-    }
-
     const loadsWithStops = await Promise.all(
-      filteredLoads.map(async (load) => {
+      paginatedResult.page.map(async (load) => {
         const stops = await ctx.db
           .query('loadStops')
           .withIndex('by_load', (q) => q.eq('loadId', load._id))
           .collect();
-
         stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-
         const firstPickup = stops.find((s) => s.stopType === 'PICKUP');
         const lastDelivery = stops.filter((s) => s.stopType === 'DELIVERY').pop();
-        const firstStop = stops[0]; // Get the first stop (earliest in sequence)
-
+        const firstStop = stops[0];
         return {
           ...load,
           origin: firstPickup
@@ -243,7 +347,7 @@ export const getLoads = query({
             ? { city: lastDelivery.city, state: lastDelivery.state, address: lastDelivery.address }
             : null,
           stopsCount: stops.length,
-          firstStopDate: firstStop?.windowBeginDate, // ISO 8601 date string
+          firstStopDate: firstStop?.windowBeginDate,
         };
       }),
     );
@@ -254,24 +358,15 @@ export const getLoads = query({
       finalLoads = finalLoads.filter((load) => {
         const miles = load.effectiveMiles;
         if (!miles) return false;
-
         switch (args.mileRange) {
-          case '0-100':
-            return miles >= 0 && miles <= 100;
-          case '100-250':
-            return miles > 100 && miles <= 250;
-          case '250-500':
-            return miles > 250 && miles <= 500;
-          case '500+':
-            return miles > 500;
-          default:
-            return true;
+          case '0-100': return miles >= 0 && miles <= 100;
+          case '100-250': return miles > 100 && miles <= 250;
+          case '250-500': return miles > 250 && miles <= 500;
+          case '500+': return miles > 500;
+          default: return true;
         }
       });
     }
-
-    // Note: Date range filtering is done early (before enrichment) when hasDateFilter is true.
-    // This section is skipped for date filtering since it was already applied.
 
     return {
       ...paginatedResult,
@@ -1466,6 +1561,43 @@ async function enrichLoadFromLeg(
   };
 }
 
+/**
+ * Enrich a load document directly (without a dispatch leg).
+ * Used by fallback paths when the load is found via primaryDriverId or carrier assignments.
+ */
+async function enrichLoadDirectly(ctx: { db: any }, load: any) {
+  const stops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q: any) => q.eq('loadId', load._id))
+    .collect();
+
+  stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
+
+  const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
+  const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
+
+  return {
+    _id: load._id as Id<'loadInformation'>,
+    orderNumber: load.orderNumber as string,
+    customerName: load.customerName as string | undefined,
+    status: load.status as string,
+    trackingStatus: load.trackingStatus as string,
+    stopsCount: stops.length,
+    origin: firstPickup
+      ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
+      : null,
+    destination: lastDelivery
+      ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
+      : null,
+    firstStopDate: load.firstStopDate as string | undefined,
+    parsedHcr: load.parsedHcr as string | undefined,
+    parsedTripNumber: load.parsedTripNumber as string | undefined,
+    legStatus: 'PENDING',
+    legLoadedMiles: load.effectiveMiles ?? 0,
+    createdAt: load._creationTime as number,
+  };
+}
+
 function mapLoadStatusToDispatchStatus(status: 'Assigned' | 'Completed' | 'Canceled'): 'COMPLETED' | 'CANCELED' | undefined {
   switch (status) {
     case 'Assigned': return undefined;
@@ -1531,9 +1663,7 @@ export const getByDriver = query({
       enrichedLoads.push(enriched);
     }
 
-    // --- Fallback: loads where primaryDriverId matches but no dispatch leg found ---
-    // This catches loads assigned via auto-assignment or direct assignment where
-    // the dispatch leg wasn't properly linked to this driver.
+    // --- Fallback 1: loads where primaryDriverId matches but no dispatch leg found ---
     const statusToMatch = args.status === 'Completed' ? 'Completed'
       : args.status === 'Canceled' ? 'Canceled'
       : 'Assigned';
@@ -1549,35 +1679,42 @@ export const getByDriver = query({
       if (seenLoadIds.has(load._id)) continue;
       seenLoadIds.add(load._id);
 
-      const stops = await ctx.db
-        .query('loadStops')
-        .withIndex('by_load', (q: any) => q.eq('loadId', load._id))
+      const enrichedFallback = await enrichLoadDirectly(ctx, load);
+      if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+    }
+
+    // --- Fallback 2: carrier assignments where this driver is the assignedDriverId ---
+    // Mirrors the mobile app's Method 2 for finding carrier-assigned loads.
+    const assignmentStatuses = args.status === 'Assigned'
+      ? (['AWARDED', 'IN_PROGRESS'] as const)
+      : args.status === 'Completed'
+        ? (['COMPLETED'] as const)
+        : (['CANCELED'] as const);
+
+    for (const aStatus of assignmentStatuses) {
+      const assignments = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_assigned_driver', (q) =>
+          q.eq('assignedDriverId', args.driverId).eq('status', aStatus)
+        )
         .collect();
-      stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
 
-      const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
-      const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
+      for (const assignment of assignments) {
+        if (seenLoadIds.has(assignment.loadId)) continue;
+        seenLoadIds.add(assignment.loadId);
 
-      enrichedLoads.push({
-        _id: load._id as Id<'loadInformation'>,
-        orderNumber: load.orderNumber as string,
-        customerName: load.customerName as string | undefined,
-        status: load.status as string,
-        trackingStatus: load.trackingStatus as string,
-        stopsCount: stops.length,
-        origin: firstPickup
-          ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
-          : null,
-        destination: lastDelivery
-          ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
-          : null,
-        firstStopDate: load.firstStopDate as string | undefined,
-        parsedHcr: load.parsedHcr as string | undefined,
-        parsedTripNumber: load.parsedTripNumber as string | undefined,
-        legStatus: 'PENDING',
-        legLoadedMiles: load.effectiveMiles ?? 0,
-        createdAt: load._creationTime as number,
-      });
+        const load = await ctx.db.get(assignment.loadId);
+        if (!load) continue;
+
+        const loadStatusMatchesFilter =
+          (args.status === 'Assigned' && load.status === 'Assigned') ||
+          (args.status === 'Completed' && load.status === 'Completed') ||
+          (args.status === 'Canceled' && load.status === 'Canceled');
+        if (!loadStatusMatchesFilter) continue;
+
+        const enrichedFallback = await enrichLoadDirectly(ctx, load);
+        if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+      }
     }
 
     return enrichedLoads;

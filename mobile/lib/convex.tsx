@@ -43,6 +43,7 @@ export function useConvexAuthState() {
 // telling the UI that auth is gone.
 const AUTH_FALSE_DEBOUNCE_MS = 3_000;
 const AUTH_TIMEOUT_MS = 10_000;
+const MAX_REAUTH_ATTEMPTS = 3;
 
 // Provider component - use this ONCE in root layout
 export function ConvexAuthProvider({ children }: { children: ReactNode }) {
@@ -58,6 +59,8 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
   const falseDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track whether setAuth has been called to avoid calling it again on foreground
   const hasSetAuthRef = useRef(false);
+  const reauthAttemptsRef = useRef(0);
+  const [reauthTrigger, setReauthTrigger] = useState(0);
 
   const clearAuthTimeout = () => {
     if (authTimeoutRef.current) {
@@ -80,10 +83,10 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { getTokenRef.current = getToken; }, [getToken]);
   useEffect(() => { isSignedInRef.current = isSignedIn; }, [isSignedIn]);
 
-  // Initial auth setup — called ONCE when user signs in.
-  // CRITICAL: Do NOT call convex.setAuth more than once per session.
-  // Each call resets the internal AuthenticationManager (pauses WS, clears
-  // auth state), causing all active queries to momentarily lose their identity.
+  // Auth setup — called when user signs in, and re-called on reauth attempts.
+  // Each call to convex.setAuth resets the internal AuthenticationManager
+  // (pauses WS, clears auth state), so we limit it to once per session plus
+  // recovery retries when the token becomes unavailable.
   useEffect(() => {
     if (!isLoaded) return;
 
@@ -105,8 +108,8 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
 
     const setupId = ++authSetupCount.current;
     const startTime = Date.now();
-    const reason = 'initial';
-    trackConvexAuthEvent('setup_started', { reason, setup_id: setupId });
+    const reason = reauthAttemptsRef.current > 0 ? 'reauth' : 'initial';
+    trackConvexAuthEvent('setup_started', { reason, setup_id: setupId, attempt: reauthAttemptsRef.current });
 
     clearAuthTimeout();
     authTimeoutRef.current = setTimeout(() => {
@@ -133,7 +136,8 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
             return token;
           }
           // Token was null — Clerk session may not be ready yet (common right
-          // after sign-in). Wait briefly and retry with skipCache.
+          // after sign-in or after returning from background). Wait briefly
+          // and retry with skipCache.
           if (tokenRetryCount < MAX_TOKEN_RETRIES) {
             tokenRetryCount++;
             await new Promise((r) => setTimeout(r, TOKEN_RETRY_DELAY_MS));
@@ -164,6 +168,7 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
 
         if (isAuthenticated) {
           wasAuthenticatedRef.current = true;
+          reauthAttemptsRef.current = 0;
           trackConvexAuthEvent('setup_complete', { reason, setup_id: setupId, is_authenticated: true, elapsed_ms: elapsed });
           setAuthState({ isLoading: false, isAuthenticated: true });
           return;
@@ -179,10 +184,26 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
           });
           // Keep isLoading true so the UI shows a spinner instead of an error.
           // Convex's AuthenticationManager will retry internally. If it still
-          // fails after the debounce, we propagate the failure.
+          // fails after the debounce, we either attempt re-auth or propagate
+          // the failure.
           setAuthState({ isLoading: true, isAuthenticated: false });
           falseDebounceRef.current = setTimeout(() => {
             trackConvexAuthEvent('auth_false_propagated', { reason, setup_id: setupId, elapsed_ms: Date.now() - startTime });
+
+            // Clerk still signed in — try a fresh setAuth cycle instead of
+            // permanently losing auth. This handles the case where the JWT
+            // expired while backgrounded and Clerk's session needs a moment
+            // to refresh before it can issue new tokens.
+            if (isSignedInRef.current && reauthAttemptsRef.current < MAX_REAUTH_ATTEMPTS) {
+              reauthAttemptsRef.current++;
+              trackConvexAuthEvent('setup_started', { reason: 'reauth', setup_id: setupId, attempt: reauthAttemptsRef.current });
+              hasSetAuthRef.current = false;
+              wasAuthenticatedRef.current = false;
+              setAuthState({ isLoading: true, isAuthenticated: false });
+              setReauthTrigger(c => c + 1);
+              return;
+            }
+
             wasAuthenticatedRef.current = false;
             setAuthState({ isLoading: false, isAuthenticated: false });
           }, AUTH_FALSE_DEBOUNCE_MS);
@@ -194,12 +215,12 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
         setAuthState({ isLoading: false, isAuthenticated: false });
       }
     );
-  }, [isLoaded, isSignedIn]);
+  }, [isLoaded, isSignedIn, reauthTrigger]);
 
-  // When app returns to foreground, DON'T call setAuth again.
-  // Convex's WebSocket reconnects automatically and the existing
-  // fetchToken callback will be invoked by the AuthenticationManager
-  // when it needs a fresh token.
+  // When app returns to foreground, check if auth was lost and attempt
+  // recovery. Convex's WebSocket reconnects automatically, but if auth
+  // was permanently lost (debounce exhausted retries while backgrounded),
+  // we need to start a fresh setAuth cycle.
   useEffect(() => {
     const handleAppStateChange = (nextState: AppStateStatus) => {
       const prevState = appStateRef.current;
@@ -208,7 +229,14 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
       if (prevState.match(/inactive|background/) && nextState === 'active') {
         console.log('[ConvexAuth] App returned to foreground');
         trackConvexAuthEvent('foreground_return', { has_set_auth: hasSetAuthRef.current });
-        // No need to call setupAuth — Convex handles reconnection internally
+
+        // Auth was lost while backgrounded — trigger fresh auth cycle
+        if (isSignedInRef.current && !wasAuthenticatedRef.current && hasSetAuthRef.current) {
+          reauthAttemptsRef.current = 0;
+          hasSetAuthRef.current = false;
+          setAuthState({ isLoading: true, isAuthenticated: false });
+          setReauthTrigger(c => c + 1);
+        }
       }
     };
 
