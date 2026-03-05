@@ -424,7 +424,7 @@ export const assignDriver = mutation({
       action: 'ASSIGN_DRIVER',
       performedBy: args.userId,
       performedByName: args.userName,
-      description: `Assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber} (${updatedLegCount} leg${updatedLegCount !== 1 ? 's' : ''} updated)`,
+      description: `Assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber} (${legs.length} leg${legs.length !== 1 ? 's' : ''} updated)`,
     });
 
     // 9. Trigger pay recalculation
@@ -802,17 +802,15 @@ export const assignCarrier = mutation({
       action: 'ASSIGN_CARRIER',
       performedBy: args.userId,
       performedByName: args.userName,
-      description: `Assigned carrier ${partnership.carrierName} to load ${load.orderNumber}${args.trailerId ? ' (Power Only)' : ''} (${updatedLegCount} leg${updatedLegCount !== 1 ? 's' : ''} updated)`,
+      description: `Assigned carrier ${partnership.carrierName} to load ${load.orderNumber}${args.trailerId ? ' (Power Only)' : ''} (${assignableLegs.length} leg${assignableLegs.length !== 1 ? 's' : ''} updated)`,
     });
 
-    // 8. Calculate carrier pay for each leg
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
-          legId: leg._id,
-          userId: args.userId,
-        });
-      }
+    // 8. Calculate carrier pay for each assignable leg
+    for (const leg of assignableLegs) {
+      await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
+        legId: leg._id,
+        userId: args.userId,
+      });
     }
 
     // 9. Return success
