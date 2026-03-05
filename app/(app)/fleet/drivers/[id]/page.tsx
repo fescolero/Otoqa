@@ -118,7 +118,8 @@ export default function DriverViewPage() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isAssigningPayPlan, setIsAssigningPayPlan] = useState(false);
 
-  // Assigned Loads state
+  // Tab & Assigned Loads state
+  const [activeTab, setActiveTab] = useState('overview');
   const [loadStatusFilter, setLoadStatusFilter] = useState<AssignedLoadStatus>('Assigned');
 
   const driverLoadsData = useQuery(
@@ -346,7 +347,7 @@ export default function DriverViewPage() {
         </div>
 
         {/* Tabs with full-width line */}
-        <Tabs defaultValue="overview" className="space-y-4">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
           <TabsListLine className="w-full">
             <TabsTriggerLine value="overview">Overview</TabsTriggerLine>
             <TabsTriggerLine value="payroll">
@@ -359,8 +360,8 @@ export default function DriverViewPage() {
             </TabsTriggerLine>
           </TabsListLine>
 
-          {/* Master-Detail Layout: 70/30 split */}
-          <div className="flex gap-6">
+          {/* Master-Detail Layout: 70/30 split (hidden on Loads tab) */}
+          <div className={`flex gap-6 ${activeTab === 'loads' ? 'hidden' : ''}`}>
             {/* Main Content Area (70%) */}
             <div className="flex-1 min-w-0">
               {/* Overview Tab */}
