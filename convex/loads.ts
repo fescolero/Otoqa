@@ -1416,3 +1416,181 @@ export const updateLoadAttributes = mutation({
     return loadId;
   },
 });
+
+// ==========================================
+// ASSIGNED LOADS QUERIES (for carrier/driver detail pages)
+// ==========================================
+
+const assignedLoadStatusValidator = v.union(
+  v.literal('Assigned'),
+  v.literal('Completed'),
+  v.literal('Canceled'),
+);
+
+async function enrichLoadFromLeg(
+  ctx: { db: any },
+  leg: { loadId: Id<'loadInformation'>; status: string; legLoadedMiles: number },
+) {
+  const load = await ctx.db.get(leg.loadId);
+  if (!load) return null;
+
+  const stops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q: any) => q.eq('loadId', leg.loadId))
+    .collect();
+
+  stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
+
+  const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
+  const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
+
+  return {
+    _id: load._id as Id<'loadInformation'>,
+    orderNumber: load.orderNumber as string,
+    customerName: load.customerName as string | undefined,
+    status: load.status as string,
+    trackingStatus: load.trackingStatus as string,
+    stopsCount: stops.length,
+    origin: firstPickup
+      ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
+      : null,
+    destination: lastDelivery
+      ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
+      : null,
+    firstStopDate: load.firstStopDate as string | undefined,
+    legStatus: leg.status,
+    legLoadedMiles: leg.legLoadedMiles,
+    createdAt: load._creationTime as number,
+  };
+}
+
+function mapLoadStatusToDispatchStatus(status: 'Assigned' | 'Completed' | 'Canceled'): 'COMPLETED' | 'CANCELED' | undefined {
+  switch (status) {
+    case 'Assigned': return undefined;
+    case 'Completed': return 'COMPLETED';
+    case 'Canceled': return 'CANCELED';
+  }
+}
+
+/**
+ * Get loads assigned to a specific driver via dispatchLegs.
+ * Paginated, with status filtering mapped from load-level statuses.
+ */
+export const getByDriver = query({
+  args: {
+    driverId: v.id('drivers'),
+    status: assignedLoadStatusValidator,
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
+    const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);
+
+    let legsQuery;
+    if (dispatchStatus) {
+      legsQuery = ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) =>
+          q.eq('driverId', args.driverId).eq('status', dispatchStatus)
+        );
+    } else {
+      legsQuery = ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) => q.eq('driverId', args.driverId));
+    }
+
+    const paginatedResult = await legsQuery.order('desc').paginate(args.paginationOpts);
+
+    const seenLoadIds = new Set<string>();
+    const enrichedLoads: Array<Record<string, any>> = [];
+
+    for (const leg of paginatedResult.page) {
+      if (seenLoadIds.has(leg.loadId)) continue;
+      seenLoadIds.add(leg.loadId);
+
+      const enriched = await enrichLoadFromLeg(ctx, leg);
+      if (!enriched) continue;
+
+      if (args.status === 'Assigned') {
+        if (leg.status === 'COMPLETED' || leg.status === 'CANCELED') continue;
+      }
+
+      enrichedLoads.push(enriched);
+    }
+
+    return {
+      ...paginatedResult,
+      page: enrichedLoads,
+    };
+  },
+});
+
+/**
+ * Get loads assigned to a specific carrier partnership via dispatchLegs.
+ * Paginated, with status filtering and carrier rate enrichment.
+ */
+export const getByCarrierPartnership = query({
+  args: {
+    partnershipId: v.id('carrierPartnerships'),
+    status: assignedLoadStatusValidator,
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
+    const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);
+
+    let legsQuery;
+    if (dispatchStatus) {
+      legsQuery = ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_carrier_partnership', (q) =>
+          q.eq('carrierPartnershipId', args.partnershipId).eq('status', dispatchStatus)
+        );
+    } else {
+      legsQuery = ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_carrier_partnership', (q) =>
+          q.eq('carrierPartnershipId', args.partnershipId)
+        );
+    }
+
+    const paginatedResult = await legsQuery.order('desc').paginate(args.paginationOpts);
+
+    const seenLoadIds = new Set<string>();
+    const enrichedLoads: Array<Record<string, any>> = [];
+
+    for (const leg of paginatedResult.page) {
+      if (seenLoadIds.has(leg.loadId)) continue;
+      seenLoadIds.add(leg.loadId);
+
+      const enriched = await enrichLoadFromLeg(ctx, leg);
+      if (!enriched) continue;
+
+      if (args.status === 'Assigned') {
+        if (leg.status === 'COMPLETED' || leg.status === 'CANCELED') continue;
+      }
+
+      const assignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', leg.loadId))
+        .filter((q) =>
+          q.eq(q.field('partnershipId'), args.partnershipId)
+        )
+        .first();
+
+      enrichedLoads.push({
+        ...enriched,
+        carrierRate: assignment?.carrierTotalAmount ?? assignment?.carrierRate,
+      });
+    }
+
+    return {
+      ...paginatedResult,
+      page: enrichedLoads,
+    };
+  },
+});

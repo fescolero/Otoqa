@@ -42,8 +42,9 @@ import {
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
 import { DriverPaySettingsSection } from '@/components/driver-pay';
+import { AssignedLoadsTable, type AssignedLoadStatus, type AssignedLoad } from '@/components/loads/assigned-loads-table';
 import { useOrganizationId } from '@/contexts/organization-context';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Select,
   SelectContent,
@@ -51,7 +52,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Calendar, Loader2 } from 'lucide-react';
+import { Calendar, Loader2, Truck } from 'lucide-react';
 import { toast } from 'sonner';
 
 const formatDate = (dateString?: string) => {
@@ -116,6 +117,25 @@ export default function DriverViewPage() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isAssigningPayPlan, setIsAssigningPayPlan] = useState(false);
+
+  // Assigned Loads state
+  const [loadStatusFilter, setLoadStatusFilter] = useState<AssignedLoadStatus>('Assigned');
+  const [loadPaginationCursor, setLoadPaginationCursor] = useState<string | null>(null);
+
+  const driverLoadsData = useQuery(
+    api.loads.getByDriver,
+    driverId
+      ? {
+          driverId,
+          status: loadStatusFilter,
+          paginationOpts: { numItems: 25, cursor: loadPaginationCursor },
+        }
+      : 'skip'
+  );
+
+  useEffect(() => {
+    setLoadPaginationCursor(null);
+  }, [loadStatusFilter]);
 
   const getUserInitials = (name?: string, email?: string) => {
     if (name) {
@@ -338,6 +358,10 @@ export default function DriverViewPage() {
             <TabsTriggerLine value="payroll">
               <DollarSign className="h-4 w-4 mr-1" />
               Payroll
+            </TabsTriggerLine>
+            <TabsTriggerLine value="loads">
+              <Truck className="h-4 w-4 mr-1" />
+              Loads
             </TabsTriggerLine>
           </TabsListLine>
 
@@ -688,6 +712,22 @@ export default function DriverViewPage() {
             </div>
           </div>
         </div>
+
+          {/* Loads Tab - full width, outside the 70/30 split */}
+          <TabsContent value="loads" className="mt-0">
+            <AssignedLoadsTable
+              loads={(driverLoadsData?.page ?? []) as AssignedLoad[]}
+              isLoading={driverLoadsData === undefined}
+              statusFilter={loadStatusFilter}
+              onStatusFilterChange={setLoadStatusFilter}
+              hasMore={driverLoadsData ? !driverLoadsData.isDone : false}
+              onLoadMore={() => {
+                if (driverLoadsData?.continueCursor) {
+                  setLoadPaginationCursor(driverLoadsData.continueCursor);
+                }
+              }}
+            />
+          </TabsContent>
         </Tabs>
       </div>
 
