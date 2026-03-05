@@ -279,9 +279,9 @@ export function AssignedLoadsTable({
   };
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 flex-1 min-h-0">
       {/* Filter Bar */}
-      <div className="flex items-center justify-between flex-wrap gap-4">
+      <div className="flex items-center justify-between flex-wrap gap-4 flex-shrink-0">
         <div className="flex items-center gap-4 flex-wrap">
           {/* Status Pills */}
           <div className="flex items-center gap-1 rounded-lg bg-muted p-1">
@@ -350,7 +350,7 @@ export function AssignedLoadsTable({
       </div>
 
       {/* Table */}
-      <div className="border rounded-lg flex flex-col min-h-0" style={{ height: '500px' }}>
+      <div className="border rounded-lg flex flex-col flex-1 min-h-0">
         {/* Header */}
         <div className="flex-shrink-0 border-b bg-background">
           <div className="flex items-center h-10 w-full">
