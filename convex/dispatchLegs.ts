@@ -291,15 +291,19 @@ export const assignDriver = mutation({
     }
 
     // 3. Get or create legs
-    let legs = await ctx.db
+    const allLegsForLoad = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .collect();
 
     const now = Date.now();
 
+    let legs = allLegsForLoad.filter(
+      (leg) => leg.status === 'PENDING' || leg.status === 'ACTIVE'
+    );
+
     if (legs.length === 0) {
-      // Create default leg from first to last stop
+      // No assignable legs — create a new one
       const stops = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -309,7 +313,6 @@ export const assignDriver = mutation({
         return { status: 'ERROR' as const, message: 'Load must have at least 2 stops to assign a driver' };
       }
 
-      // Sort stops by sequenceNumber (Convex doesn't guarantee order)
       const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
@@ -319,7 +322,7 @@ export const assignDriver = mutation({
         driverId: args.driverId,
         truckId: args.truckId,
         trailerId: args.trailerId,
-        sequence: 1,
+        sequence: allLegsForLoad.length + 1,
         startStopId: firstStop._id,
         endStopId: lastStop._id,
         legLoadedMiles: load.effectiveMiles ?? 0,
@@ -392,19 +395,15 @@ export const assignDriver = mutation({
       }
     }
 
-    // 6. Update all PENDING/ACTIVE legs
-    let updatedLegCount = 0;
+    // 6. Update all assignable legs (already filtered to PENDING/ACTIVE)
     for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        await ctx.db.patch(leg._id, {
-          driverId: args.driverId,
-          truckId: args.truckId,
-          trailerId: args.trailerId,
-          carrierPartnershipId: undefined, // Clear carrier (exclusive assignment)
-          updatedAt: now,
-        });
-        updatedLegCount++;
-      }
+      await ctx.db.patch(leg._id, {
+        driverId: args.driverId,
+        truckId: args.truckId,
+        trailerId: args.trailerId,
+        carrierPartnershipId: undefined,
+        updatedAt: now,
+      });
     }
 
     // 7. Update load
@@ -462,14 +461,28 @@ export const assignDriverInternal = internalMutation({
       return { status: 'ERROR', message: 'Cannot assign driver to a canceled load' };
     }
 
-    let legs = await ctx.db
+    const allLegsForLoad = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .collect();
 
     const now = Date.now();
 
-    if (legs.length === 0) {
+    const assignableLegs = allLegsForLoad.filter(
+      (leg) => leg.status === 'PENDING' || leg.status === 'ACTIVE'
+    );
+
+    if (assignableLegs.length > 0) {
+      for (const leg of assignableLegs) {
+        await ctx.db.patch(leg._id, {
+          driverId: args.driverId,
+          truckId: args.truckId,
+          carrierPartnershipId: undefined,
+          updatedAt: now,
+        });
+      }
+    } else {
+      // No assignable legs — create a new one
       const stops = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -483,11 +496,11 @@ export const assignDriverInternal = internalMutation({
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
 
-      const legId = await ctx.db.insert('dispatchLegs', {
+      await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
         driverId: args.driverId,
         truckId: args.truckId,
-        sequence: 1,
+        sequence: allLegsForLoad.length + 1,
         startStopId: firstStop._id,
         endStopId: lastStop._id,
         legLoadedMiles: load.effectiveMiles ?? 0,
@@ -497,21 +510,6 @@ export const assignDriverInternal = internalMutation({
         createdAt: now,
         updatedAt: now,
       });
-
-      const newLeg = await ctx.db.get(legId);
-      if (newLeg) legs = [newLeg];
-    }
-
-    // Update all PENDING/ACTIVE legs
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        await ctx.db.patch(leg._id, {
-          driverId: args.driverId,
-          truckId: args.truckId,
-          carrierPartnershipId: undefined,
-          updatedAt: now,
-        });
-      }
     }
 
     // Update load
@@ -567,14 +565,29 @@ export const assignCarrierInternal = internalMutation({
       return { status: 'ERROR', message: 'Cannot assign carrier to a canceled load' };
     }
 
-    let legs = await ctx.db
+    const allLegs = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .collect();
 
     const now = Date.now();
 
-    if (legs.length === 0) {
+    const assignableLegs = allLegs.filter(
+      (leg) => leg.status === 'PENDING' || leg.status === 'ACTIVE'
+    );
+
+    if (assignableLegs.length > 0) {
+      // Update existing PENDING/ACTIVE legs
+      for (const leg of assignableLegs) {
+        await ctx.db.patch(leg._id, {
+          carrierPartnershipId: args.carrierPartnershipId,
+          driverId: undefined,
+          truckId: undefined,
+          updatedAt: now,
+        });
+      }
+    } else {
+      // No assignable legs — create a new one
       const stops = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -588,10 +601,10 @@ export const assignCarrierInternal = internalMutation({
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
 
-      const legId = await ctx.db.insert('dispatchLegs', {
+      await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
         carrierPartnershipId: args.carrierPartnershipId,
-        sequence: 1,
+        sequence: allLegs.length + 1,
         startStopId: firstStop._id,
         endStopId: lastStop._id,
         legLoadedMiles: load.effectiveMiles ?? 0,
@@ -601,21 +614,6 @@ export const assignCarrierInternal = internalMutation({
         createdAt: now,
         updatedAt: now,
       });
-
-      const newLeg = await ctx.db.get(legId);
-      if (newLeg) legs = [newLeg];
-    }
-
-    // Update all PENDING/ACTIVE legs
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        await ctx.db.patch(leg._id, {
-          carrierPartnershipId: args.carrierPartnershipId,
-          driverId: undefined,
-          truckId: undefined,
-          updatedAt: now,
-        });
-      }
     }
 
     // Update load
@@ -706,15 +704,32 @@ export const assignCarrier = mutation({
     }
 
     // 3. Get or create legs
-    let legs = await ctx.db
+    const allLegs = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .collect();
 
     const now = Date.now();
 
-    if (legs.length === 0) {
-      // Create default leg from first to last stop
+    const assignableLegs = allLegs.filter(
+      (leg) => leg.status === 'PENDING' || leg.status === 'ACTIVE'
+    );
+
+    // 4. NO conflict detection for carriers (they can be double-booked)
+
+    if (assignableLegs.length > 0) {
+      // 5. Update existing PENDING/ACTIVE legs
+      for (const leg of assignableLegs) {
+        await ctx.db.patch(leg._id, {
+          carrierPartnershipId: args.carrierPartnershipId,
+          driverId: undefined,
+          truckId: undefined,
+          trailerId: args.trailerId,
+          updatedAt: now,
+        });
+      }
+    } else {
+      // No assignable legs — create a new one
       const stops = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -724,16 +739,15 @@ export const assignCarrier = mutation({
         return { status: 'ERROR' as const, message: 'Load must have at least 2 stops to assign a carrier' };
       }
 
-      // Sort stops by sequenceNumber (Convex doesn't guarantee order)
       const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
 
-      const legId = await ctx.db.insert('dispatchLegs', {
+      await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
         carrierPartnershipId: args.carrierPartnershipId,
-        trailerId: args.trailerId, // May be undefined for full carrier service
-        sequence: 1,
+        trailerId: args.trailerId,
+        sequence: allLegs.length + 1,
         startStopId: firstStop._id,
         endStopId: lastStop._id,
         legLoadedMiles: load.effectiveMiles ?? 0,
@@ -743,32 +757,13 @@ export const assignCarrier = mutation({
         createdAt: now,
         updatedAt: now,
       });
-
-      const newLeg = await ctx.db.get(legId);
-      if (newLeg) legs = [newLeg];
-    }
-
-    // 4. NO conflict detection for carriers (they can be double-booked)
-
-    // 5. Update all PENDING/ACTIVE legs
-    let updatedLegCount = 0;
-    for (const leg of legs) {
-      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-        await ctx.db.patch(leg._id, {
-          carrierPartnershipId: args.carrierPartnershipId,
-          driverId: undefined, // Clear driver (exclusive assignment)
-          truckId: undefined, // Clear truck (carrier provides power unit)
-          trailerId: args.trailerId, // Keep if provided (Power Only), clear if not
-          updatedAt: now,
-        });
-        updatedLegCount++;
-      }
     }
 
     // 6. Update load - use partnership ID as carrier reference
     const nextStatus = load.status === 'Open' ? 'Assigned' : load.status;
     await ctx.db.patch(args.loadId, {
-      primaryDriverId: undefined, // Clear driver
+      primaryCarrierPartnershipId: args.carrierPartnershipId,
+      primaryDriverId: undefined,
       status: nextStatus,
       updatedAt: now,
     });

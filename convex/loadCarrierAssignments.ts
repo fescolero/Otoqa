@@ -633,8 +633,28 @@ export const directAssign = mutation({
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .collect();
 
-    if (existingLegs.length === 0) {
-      // Create default leg from first to last stop
+    const assignableLegs = existingLegs.filter(
+      (leg) => leg.status === 'PENDING' || leg.status === 'ACTIVE'
+    );
+
+    if (assignableLegs.length > 0) {
+      // Update existing PENDING/ACTIVE legs with carrier assignment
+      for (const leg of assignableLegs) {
+        await ctx.db.patch(leg._id, {
+          carrierPartnershipId: args.partnershipId,
+          driverId: undefined,
+          truckId: undefined,
+          updatedAt: now,
+        });
+
+        await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
+          legId: leg._id,
+          userId: args.createdBy,
+        });
+      }
+    } else {
+      // No assignable legs — either no legs exist or all are COMPLETED/CANCELED.
+      // Create a new PENDING leg for the carrier.
       const stops = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -648,7 +668,7 @@ export const directAssign = mutation({
         const legId = await ctx.db.insert('dispatchLegs', {
           loadId: args.loadId,
           carrierPartnershipId: args.partnershipId,
-          sequence: 1,
+          sequence: existingLegs.length + 1,
           startStopId: firstStop._id,
           endStopId: lastStop._id,
           legLoadedMiles: load.effectiveMiles ?? 0,
@@ -659,29 +679,10 @@ export const directAssign = mutation({
           updatedAt: now,
         });
 
-        // Trigger carrier pay calculation for the new leg
         await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
           legId,
           userId: args.createdBy,
         });
-      }
-    } else {
-      // Update existing legs with carrier assignment
-      for (const leg of existingLegs) {
-        if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-          await ctx.db.patch(leg._id, {
-            carrierPartnershipId: args.partnershipId,
-            driverId: undefined, // Clear driver (exclusive assignment)
-            truckId: undefined,
-            updatedAt: now,
-          });
-
-          // Trigger carrier pay calculation
-          await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
-            legId: leg._id,
-            userId: args.createdBy,
-          });
-        }
       }
     }
 

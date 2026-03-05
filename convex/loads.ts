@@ -1543,9 +1543,10 @@ export const getByDriver = query({
 });
 
 /**
- * Get loads assigned to a specific carrier partnership via dispatchLegs.
- * Collects all legs, deduplicates, and enriches with carrier rate.
- * Verifies the load is still assigned to this carrier before including it.
+ * Get loads assigned to a specific carrier partnership.
+ * Primary source: dispatchLegs with carrierPartnershipId.
+ * Fallback: loadCarrierAssignments for loads where the dispatch leg
+ * wasn't properly linked (e.g., all legs were terminal when carrier was assigned).
  */
 export const getByCarrierPartnership = query({
   args: {
@@ -1557,7 +1558,10 @@ export const getByCarrierPartnership = query({
     if (!identity) throw new Error('Not authenticated');
 
     const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);
+    const seenLoadIds = new Set<string>();
+    const enrichedLoads: Array<Record<string, any>> = [];
 
+    // --- Primary: dispatch legs indexed by carrier partnership ---
     let legsQuery;
     if (dispatchStatus) {
       legsQuery = ctx.db
@@ -1575,9 +1579,6 @@ export const getByCarrierPartnership = query({
 
     const allLegs = await legsQuery.order('desc').collect();
 
-    const seenLoadIds = new Set<string>();
-    const enrichedLoads: Array<Record<string, any>> = [];
-
     for (const leg of allLegs) {
       if (seenLoadIds.has(leg.loadId)) continue;
       seenLoadIds.add(leg.loadId);
@@ -1586,13 +1587,11 @@ export const getByCarrierPartnership = query({
         if (leg.status === 'COMPLETED' || leg.status === 'CANCELED') continue;
       }
 
-      // Verify the leg still belongs to this carrier
       if (leg.carrierPartnershipId !== args.partnershipId) continue;
 
       const enriched = await enrichLoadFromLeg(ctx, leg);
       if (!enriched) continue;
 
-      // Verify the load's status matches the requested filter
       const loadStatusMatchesFilter =
         (args.status === 'Assigned' && enriched.status === 'Assigned') ||
         (args.status === 'Completed' && enriched.status === 'Completed') ||
@@ -1610,6 +1609,86 @@ export const getByCarrierPartnership = query({
       enrichedLoads.push({
         ...enriched,
         carrierRate: assignment?.carrierTotalAmount ?? assignment?.carrierRate,
+      });
+    }
+
+    // --- Fallback: loadCarrierAssignments for loads not found via dispatch legs ---
+    // This catches loads where the carrier was assigned but no dispatch leg
+    // has this carrier's ID (e.g., all legs were COMPLETED/CANCELED at assignment time).
+    const partnership = await ctx.db.get(args.partnershipId);
+    if (!partnership) return enrichedLoads;
+
+    const carrierAssignments = partnership.carrierOrgId
+      ? await ctx.db
+          .query('loadCarrierAssignments')
+          .withIndex('by_carrier', (q) =>
+            q.eq('carrierOrgId', partnership.carrierOrgId!)
+          )
+          .filter((q) =>
+            q.eq(q.field('partnershipId'), args.partnershipId)
+          )
+          .collect()
+      : await ctx.db
+          .query('loadCarrierAssignments')
+          .withIndex('by_broker', (q) =>
+            q.eq('brokerOrgId', partnership.brokerOrgId)
+          )
+          .filter((q) =>
+            q.eq(q.field('partnershipId'), args.partnershipId)
+          )
+          .collect();
+
+    for (const assignment of carrierAssignments) {
+      if (seenLoadIds.has(assignment.loadId)) continue;
+      seenLoadIds.add(assignment.loadId);
+
+      // Only include active assignments for the "Assigned" filter
+      if (args.status === 'Assigned') {
+        if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') continue;
+      } else if (args.status === 'Canceled') {
+        if (assignment.status !== 'CANCELED') continue;
+      } else if (args.status === 'Completed') {
+        if (assignment.status !== 'COMPLETED') continue;
+      }
+
+      const load = await ctx.db.get(assignment.loadId);
+      if (!load) continue;
+
+      const loadStatusMatchesFilter =
+        (args.status === 'Assigned' && load.status === 'Assigned') ||
+        (args.status === 'Completed' && load.status === 'Completed') ||
+        (args.status === 'Canceled' && load.status === 'Canceled');
+      if (!loadStatusMatchesFilter) continue;
+
+      const stops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q: any) => q.eq('loadId', assignment.loadId))
+        .collect();
+      stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
+
+      const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
+      const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
+
+      enrichedLoads.push({
+        _id: load._id as Id<'loadInformation'>,
+        orderNumber: load.orderNumber as string,
+        customerName: load.customerName as string | undefined,
+        status: load.status as string,
+        trackingStatus: load.trackingStatus as string,
+        stopsCount: stops.length,
+        origin: firstPickup
+          ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
+          : null,
+        destination: lastDelivery
+          ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
+          : null,
+        firstStopDate: load.firstStopDate as string | undefined,
+        parsedHcr: load.parsedHcr as string | undefined,
+        parsedTripNumber: load.parsedTripNumber as string | undefined,
+        legStatus: 'PENDING',
+        legLoadedMiles: load.effectiveMiles ?? 0,
+        createdAt: load._creationTime as number,
+        carrierRate: assignment.carrierTotalAmount ?? assignment.carrierRate,
       });
     }
 
