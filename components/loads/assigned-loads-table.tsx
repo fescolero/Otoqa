@@ -1,11 +1,19 @@
 'use client';
 
-import { useRef, useState, useMemo } from 'react';
+import { useRef, useState, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Id } from '@/convex/_generated/dataModel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { ArrowRight, Loader2, Package } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { ArrowRight, Loader2, Package, SlidersHorizontal } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
 import { formatDateOnly } from '@/lib/format-date-timezone';
@@ -32,6 +40,8 @@ export interface AssignedLoad {
   origin?: { city?: string; state?: string } | null;
   destination?: { city?: string; state?: string } | null;
   firstStopDate?: string;
+  parsedHcr?: string;
+  parsedTripNumber?: string;
   legStatus: string;
   legLoadedMiles: number;
   carrierRate?: number;
@@ -48,6 +58,31 @@ interface AssignedLoadsTableProps {
   hasMore?: boolean;
   isLoadingMore?: boolean;
 }
+
+type ColumnKey = 'orderNumber' | 'customer' | 'hcr' | 'trip' | 'route' | 'stops' | 'status' | 'tracking' | 'loadDate' | 'carrierRate';
+
+interface ColumnDef {
+  key: ColumnKey;
+  label: string;
+  flex: string;
+  align?: 'center' | 'right';
+  alwaysVisible?: boolean;
+  defaultVisible: boolean;
+  requiresCarrierRate?: boolean;
+}
+
+const ALL_COLUMNS: ColumnDef[] = [
+  { key: 'orderNumber', label: 'Order #', flex: 'flex-[1.2]', alwaysVisible: true, defaultVisible: true },
+  { key: 'customer', label: 'Customer', flex: 'flex-[1.5]', defaultVisible: true },
+  { key: 'hcr', label: 'HCR', flex: 'flex-[0.8]', defaultVisible: true },
+  { key: 'trip', label: 'Trip #', flex: 'flex-[0.8]', defaultVisible: true },
+  { key: 'route', label: 'Route', flex: 'flex-[2.5]', defaultVisible: true },
+  { key: 'stops', label: 'Stops', flex: 'flex-[0.7]', align: 'center', defaultVisible: true },
+  { key: 'status', label: 'Status', flex: 'flex-1', defaultVisible: true },
+  { key: 'tracking', label: 'Tracking', flex: 'flex-1', defaultVisible: true },
+  { key: 'loadDate', label: 'Load Date', flex: 'flex-[1.2]', defaultVisible: true },
+  { key: 'carrierRate', label: 'Rate', flex: 'flex-1', align: 'right', defaultVisible: true, requiresCarrierRate: true },
+];
 
 function getStatusColor(status: string) {
   const displayStatus = status === 'Completed' ? 'Delivered' : status;
@@ -109,6 +144,15 @@ function isWithinHorizon(firstStopDate: string | undefined, horizon: TimeHorizon
   return stopDate >= now && stopDate <= cutoff;
 }
 
+function getDefaultVisibility(showCarrierRate: boolean): Record<ColumnKey, boolean> {
+  const vis: Record<string, boolean> = {};
+  for (const col of ALL_COLUMNS) {
+    if (col.requiresCarrierRate && !showCarrierRate) continue;
+    vis[col.key] = col.defaultVisible;
+  }
+  return vis as Record<ColumnKey, boolean>;
+}
+
 export function AssignedLoadsTable({
   loads,
   isLoading,
@@ -121,6 +165,28 @@ export function AssignedLoadsTable({
 }: AssignedLoadsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [timeHorizon, setTimeHorizon] = useState<TimeHorizon>('all');
+  const [columnVisibility, setColumnVisibility] = useState<Record<ColumnKey, boolean>>(
+    () => getDefaultVisibility(showCarrierRate)
+  );
+
+  const toggleColumn = useCallback((key: ColumnKey) => {
+    setColumnVisibility(prev => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  const visibleColumns = useMemo(() => {
+    return ALL_COLUMNS.filter(col => {
+      if (col.requiresCarrierRate && !showCarrierRate) return false;
+      return columnVisibility[col.key] !== false;
+    });
+  }, [columnVisibility, showCarrierRate]);
+
+  const toggleableColumns = useMemo(() => {
+    return ALL_COLUMNS.filter(col => {
+      if (col.alwaysVisible) return false;
+      if (col.requiresCarrierRate && !showCarrierRate) return false;
+      return true;
+    });
+  }, [showCarrierRate]);
 
   const filteredLoads = useMemo(() => {
     if (statusFilter !== 'Assigned' || timeHorizon === 'all') return loads;
@@ -134,41 +200,101 @@ export function AssignedLoadsTable({
     overscan: 10,
   });
 
+  const renderCell = (col: ColumnDef, load: AssignedLoad) => {
+    switch (col.key) {
+      case 'orderNumber':
+        return (
+          <Link
+            href={`/loads/${load._id}`}
+            className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800"
+          >
+            {load.orderNumber}
+          </Link>
+        );
+      case 'customer':
+        return (
+          <div className="text-sm font-medium min-w-0">
+            <div className="truncate">{load.customerName || 'Unknown'}</div>
+          </div>
+        );
+      case 'hcr':
+        return (
+          <span className="text-sm font-medium">{load.parsedHcr || '—'}</span>
+        );
+      case 'trip':
+        return (
+          <span className="text-sm font-medium">{load.parsedTripNumber || '—'}</span>
+        );
+      case 'route':
+        return load.origin && load.destination ? (
+          <div className="flex items-center gap-2 text-sm overflow-hidden">
+            <span className="font-medium whitespace-nowrap truncate">
+              {toTitleCase(load.origin.city)}, {load.origin.state}
+            </span>
+            <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+            <span className="font-medium whitespace-nowrap truncate">
+              {toTitleCase(load.destination.city)}, {load.destination.state}
+            </span>
+          </div>
+        ) : (
+          <span className="text-muted-foreground text-sm">N/A</span>
+        );
+      case 'stops':
+        return (
+          <Badge variant="outline" className="font-mono">
+            {load.stopsCount}
+          </Badge>
+        );
+      case 'status':
+        return (
+          <Badge variant="outline" className={getStatusColor(load.status)}>
+            {getDisplayStatus(load.status)}
+          </Badge>
+        );
+      case 'tracking':
+        return (
+          <Badge variant="secondary" className={getTrackingColor(load.trackingStatus)}>
+            {load.trackingStatus}
+          </Badge>
+        );
+      case 'loadDate':
+        return (
+          <span className="text-sm text-muted-foreground">
+            {load.firstStopDate
+              ? formatDateOnly(load.firstStopDate).display
+              : formatDateOnly(new Date(load.createdAt).toISOString()).display}
+          </span>
+        );
+      case 'carrierRate':
+        return (
+          <span className="text-sm font-medium">
+            {load.carrierRate != null
+              ? `$${load.carrierRate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : '—'}
+          </span>
+        );
+      default:
+        return null;
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
       {/* Filter Bar */}
-      <div className="flex items-center gap-4 flex-wrap">
-        {/* Status Pills */}
-        <div className="flex items-center gap-1 rounded-lg bg-muted p-1">
-          {STATUS_OPTIONS.map(opt => (
-            <button
-              key={opt.value}
-              onClick={() => {
-                onStatusFilterChange(opt.value);
-                if (opt.value !== 'Assigned') setTimeHorizon('all');
-              }}
-              className={cn(
-                'px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
-                statusFilter === opt.value
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground'
-              )}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
-        {/* Time Horizon Pills - only for Assigned */}
-        {statusFilter === 'Assigned' && (
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
+          {/* Status Pills */}
           <div className="flex items-center gap-1 rounded-lg bg-muted p-1">
-            {TIME_OPTIONS.map(opt => (
+            {STATUS_OPTIONS.map(opt => (
               <button
                 key={opt.value}
-                onClick={() => setTimeHorizon(opt.value)}
+                onClick={() => {
+                  onStatusFilterChange(opt.value);
+                  if (opt.value !== 'Assigned') setTimeHorizon('all');
+                }}
                 className={cn(
                   'px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
-                  timeHorizon === opt.value
+                  statusFilter === opt.value
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
                 )}
@@ -177,7 +303,50 @@ export function AssignedLoadsTable({
               </button>
             ))}
           </div>
-        )}
+
+          {/* Time Horizon Pills - only for Assigned */}
+          {statusFilter === 'Assigned' && (
+            <div className="flex items-center gap-1 rounded-lg bg-muted p-1">
+              {TIME_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  onClick={() => setTimeHorizon(opt.value)}
+                  className={cn(
+                    'px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
+                    timeHorizon === opt.value
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Column Visibility Toggle */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" className="h-8 gap-1.5">
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              Columns
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {toggleableColumns.map(col => (
+              <DropdownMenuCheckboxItem
+                key={col.key}
+                checked={columnVisibility[col.key] !== false}
+                onCheckedChange={() => toggleColumn(col.key)}
+              >
+                {col.label}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/* Table */}
@@ -185,16 +354,19 @@ export function AssignedLoadsTable({
         {/* Header */}
         <div className="flex-shrink-0 border-b bg-background">
           <div className="flex items-center h-10 w-full">
-            <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Order #</div>
-            <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Customer</div>
-            <div className="px-4 flex-[2.5] font-medium text-muted-foreground text-sm">Route</div>
-            <div className="px-4 flex-[0.7] font-medium text-muted-foreground text-sm text-center">Stops</div>
-            <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
-            <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Tracking</div>
-            <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Load Date</div>
-            {showCarrierRate && (
-              <div className="px-4 flex-1 font-medium text-muted-foreground text-sm text-right">Rate</div>
-            )}
+            {visibleColumns.map(col => (
+              <div
+                key={col.key}
+                className={cn(
+                  'px-4 font-medium text-muted-foreground text-sm',
+                  col.flex,
+                  col.align === 'center' && 'text-center',
+                  col.align === 'right' && 'text-right',
+                )}
+              >
+                {col.label}
+              </div>
+            ))}
           </div>
         </div>
 
@@ -234,59 +406,19 @@ export function AssignedLoadsTable({
                     className="absolute top-0 left-0 w-full h-[48px] hover:bg-slate-50/80 transition-colors border-b flex items-center"
                     style={{ transform: `translateY(${virtualRow.start}px)` }}
                   >
-                    <div className="px-4 flex-[1.2]">
-                      <Link
-                        href={`/loads/${load._id}`}
-                        className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800"
+                    {visibleColumns.map(col => (
+                      <div
+                        key={col.key}
+                        className={cn(
+                          'px-4 min-w-0',
+                          col.flex,
+                          col.align === 'center' && 'text-center',
+                          col.align === 'right' && 'text-right',
+                        )}
                       >
-                        {load.orderNumber}
-                      </Link>
-                    </div>
-                    <div className="px-4 flex-[1.5] text-sm font-medium min-w-0">
-                      <div className="truncate">{load.customerName || 'Unknown'}</div>
-                    </div>
-                    <div className="px-4 flex-[2.5] min-w-0">
-                      {load.origin && load.destination ? (
-                        <div className="flex items-center gap-2 text-sm overflow-hidden">
-                          <span className="font-medium whitespace-nowrap truncate">
-                            {toTitleCase(load.origin.city)}, {load.origin.state}
-                          </span>
-                          <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                          <span className="font-medium whitespace-nowrap truncate">
-                            {toTitleCase(load.destination.city)}, {load.destination.state}
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground text-sm">N/A</span>
-                      )}
-                    </div>
-                    <div className="px-4 flex-[0.7] text-center">
-                      <Badge variant="outline" className="font-mono">
-                        {load.stopsCount}
-                      </Badge>
-                    </div>
-                    <div className="px-4 flex-1">
-                      <Badge variant="outline" className={getStatusColor(load.status)}>
-                        {getDisplayStatus(load.status)}
-                      </Badge>
-                    </div>
-                    <div className="px-4 flex-1">
-                      <Badge variant="secondary" className={getTrackingColor(load.trackingStatus)}>
-                        {load.trackingStatus}
-                      </Badge>
-                    </div>
-                    <div className="px-4 flex-[1.2] text-sm text-muted-foreground">
-                      {load.firstStopDate
-                        ? formatDateOnly(load.firstStopDate).display
-                        : formatDateOnly(new Date(load.createdAt).toISOString()).display}
-                    </div>
-                    {showCarrierRate && (
-                      <div className="px-4 flex-1 text-sm font-medium text-right">
-                        {load.carrierRate != null
-                          ? `$${load.carrierRate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                          : '—'}
+                        {renderCell(col, load)}
                       </div>
-                    )}
+                    ))}
                   </div>
                 );
               })}

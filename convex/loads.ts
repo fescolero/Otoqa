@@ -1458,6 +1458,8 @@ async function enrichLoadFromLeg(
       ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
       : null,
     firstStopDate: load.firstStopDate as string | undefined,
+    parsedHcr: load.parsedHcr as string | undefined,
+    parsedTripNumber: load.parsedTripNumber as string | undefined,
     legStatus: leg.status,
     legLoadedMiles: leg.legLoadedMiles,
     createdAt: load._creationTime as number,
