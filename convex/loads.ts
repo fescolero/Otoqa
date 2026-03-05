@@ -142,25 +142,21 @@ export const getLoads = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
-    const hasDateFilter = args.startDate || args.endDate;
-    
-    // Choose query strategy based on whether date filtering is active
-    // Date filtering uses the optimized by_org_first_stop_date index
+    // Choose query strategy based on whether date filtering is active.
+    // Date filtering uses by_org_first_stop_date index (sorted by pickup date).
+    // Without date filter, use by_organization index which includes ALL loads
+    // (by_org_first_stop_date excludes loads with undefined firstStopDate).
     let loadsQuery;
     
-    // Always use by_org_first_stop_date index to sort by pickup date (newest first)
-    // This ensures consistent ordering whether or not a date filter is applied
     if (args.startDate && args.endDate) {
-      // Both bounds: inclusive range [startDate, endDate]
       loadsQuery = ctx.db
-      .query('loadInformation')
+        .query('loadInformation')
         .withIndex('by_org_first_stop_date', (q) =>
           q.eq('workosOrgId', args.workosOrgId)
             .gte('firstStopDate', args.startDate!)
             .lte('firstStopDate', args.endDate!)
         );
     } else if (args.startDate) {
-      // Only start date: from startDate onwards
       loadsQuery = ctx.db
         .query('loadInformation')
         .withIndex('by_org_first_stop_date', (q) =>
@@ -168,7 +164,6 @@ export const getLoads = query({
             .gte('firstStopDate', args.startDate!)
         );
     } else if (args.endDate) {
-      // Only end date: up to endDate (inclusive)
       loadsQuery = ctx.db
         .query('loadInformation')
         .withIndex('by_org_first_stop_date', (q) =>
@@ -176,10 +171,9 @@ export const getLoads = query({
             .lte('firstStopDate', args.endDate!)
         );
     } else {
-      // No date filter - still use firstStopDate index for consistent sorting
       loadsQuery = ctx.db
         .query('loadInformation')
-        .withIndex('by_org_first_stop_date', (q) =>
+        .withIndex('by_organization', (q) =>
           q.eq('workosOrgId', args.workosOrgId)
         );
     }
@@ -1481,9 +1475,10 @@ function mapLoadStatusToDispatchStatus(status: 'Assigned' | 'Completed' | 'Cance
 }
 
 /**
- * Get loads assigned to a specific driver via dispatchLegs.
- * Collects all legs for the driver, deduplicates by load, and enriches.
- * Verifies the load is still assigned to this driver before including it.
+ * Get loads assigned to a specific driver.
+ * Primary source: dispatchLegs with driverId.
+ * Fallback: loadInformation.primaryDriverId for loads where the dispatch leg
+ * wasn't properly linked (e.g., all legs were terminal when driver was assigned).
  */
 export const getByDriver = query({
   args: {
@@ -1495,7 +1490,10 @@ export const getByDriver = query({
     if (!identity) throw new Error('Not authenticated');
 
     const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);
+    const seenLoadIds = new Set<string>();
+    const enrichedLoads: Array<Record<string, any>> = [];
 
+    // --- Primary: dispatch legs indexed by driver ---
     let legsQuery;
     if (dispatchStatus) {
       legsQuery = ctx.db
@@ -1511,9 +1509,6 @@ export const getByDriver = query({
 
     const allLegs = await legsQuery.order('desc').collect();
 
-    const seenLoadIds = new Set<string>();
-    const enrichedLoads: Array<Record<string, any>> = [];
-
     for (const leg of allLegs) {
       if (seenLoadIds.has(leg.loadId)) continue;
       seenLoadIds.add(leg.loadId);
@@ -1522,13 +1517,11 @@ export const getByDriver = query({
         if (leg.status === 'COMPLETED' || leg.status === 'CANCELED') continue;
       }
 
-      // Verify the leg still belongs to this driver
       if (leg.driverId !== args.driverId) continue;
 
       const enriched = await enrichLoadFromLeg(ctx, leg);
       if (!enriched) continue;
 
-      // Verify the load's status matches the requested filter
       const loadStatusMatchesFilter =
         (args.status === 'Assigned' && enriched.status === 'Assigned') ||
         (args.status === 'Completed' && enriched.status === 'Completed') ||
@@ -1536,6 +1529,55 @@ export const getByDriver = query({
       if (!loadStatusMatchesFilter) continue;
 
       enrichedLoads.push(enriched);
+    }
+
+    // --- Fallback: loads where primaryDriverId matches but no dispatch leg found ---
+    // This catches loads assigned via auto-assignment or direct assignment where
+    // the dispatch leg wasn't properly linked to this driver.
+    const statusToMatch = args.status === 'Completed' ? 'Completed'
+      : args.status === 'Canceled' ? 'Canceled'
+      : 'Assigned';
+
+    const fallbackLoads = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_primary_driver_status', (q) =>
+        q.eq('primaryDriverId', args.driverId).eq('status', statusToMatch)
+      )
+      .collect();
+
+    for (const load of fallbackLoads) {
+      if (seenLoadIds.has(load._id)) continue;
+      seenLoadIds.add(load._id);
+
+      const stops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q: any) => q.eq('loadId', load._id))
+        .collect();
+      stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
+
+      const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
+      const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
+
+      enrichedLoads.push({
+        _id: load._id as Id<'loadInformation'>,
+        orderNumber: load.orderNumber as string,
+        customerName: load.customerName as string | undefined,
+        status: load.status as string,
+        trackingStatus: load.trackingStatus as string,
+        stopsCount: stops.length,
+        origin: firstPickup
+          ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
+          : null,
+        destination: lastDelivery
+          ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
+          : null,
+        firstStopDate: load.firstStopDate as string | undefined,
+        parsedHcr: load.parsedHcr as string | undefined,
+        parsedTripNumber: load.parsedTripNumber as string | undefined,
+        legStatus: 'PENDING',
+        legLoadedMiles: load.effectiveMiles ?? 0,
+        createdAt: load._creationTime as number,
+      });
     }
 
     return enrichedLoads;
