@@ -44,7 +44,7 @@ import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmati
 import { DriverPaySettingsSection } from '@/components/driver-pay';
 import { AssignedLoadsTable, type AssignedLoadStatus, type AssignedLoad } from '@/components/loads/assigned-loads-table';
 import { useOrganizationId } from '@/contexts/organization-context';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   Select,
   SelectContent,
@@ -120,7 +120,6 @@ export default function DriverViewPage() {
 
   // Assigned Loads state
   const [loadStatusFilter, setLoadStatusFilter] = useState<AssignedLoadStatus>('Assigned');
-  const [loadPaginationCursor, setLoadPaginationCursor] = useState<string | null>(null);
 
   const driverLoadsData = useQuery(
     api.loads.getByDriver,
@@ -128,14 +127,9 @@ export default function DriverViewPage() {
       ? {
           driverId,
           status: loadStatusFilter,
-          paginationOpts: { numItems: 25, cursor: loadPaginationCursor },
         }
       : 'skip'
   );
-
-  useEffect(() => {
-    setLoadPaginationCursor(null);
-  }, [loadStatusFilter]);
 
   const getUserInitials = (name?: string, email?: string) => {
     if (name) {
@@ -716,16 +710,10 @@ export default function DriverViewPage() {
           {/* Loads Tab - full width, outside the 70/30 split */}
           <TabsContent value="loads" className="mt-0">
             <AssignedLoadsTable
-              loads={(driverLoadsData?.page ?? []) as AssignedLoad[]}
+              loads={(driverLoadsData ?? []) as AssignedLoad[]}
               isLoading={driverLoadsData === undefined}
               statusFilter={loadStatusFilter}
               onStatusFilterChange={setLoadStatusFilter}
-              hasMore={driverLoadsData ? !driverLoadsData.isDone : false}
-              onLoadMore={() => {
-                if (driverLoadsData?.continueCursor) {
-                  setLoadPaginationCursor(driverLoadsData.continueCursor);
-                }
-              }}
             />
           </TabsContent>
         </Tabs>

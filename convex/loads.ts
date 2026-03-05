@@ -1429,7 +1429,13 @@ const assignedLoadStatusValidator = v.union(
 
 async function enrichLoadFromLeg(
   ctx: { db: any },
-  leg: { loadId: Id<'loadInformation'>; status: string; legLoadedMiles: number },
+  leg: {
+    loadId: Id<'loadInformation'>;
+    status: string;
+    legLoadedMiles: number;
+    driverId?: Id<'drivers'>;
+    carrierPartnershipId?: Id<'carrierPartnerships'>;
+  },
 ) {
   const load = await ctx.db.get(leg.loadId);
   if (!load) return null;
@@ -1476,13 +1482,13 @@ function mapLoadStatusToDispatchStatus(status: 'Assigned' | 'Completed' | 'Cance
 
 /**
  * Get loads assigned to a specific driver via dispatchLegs.
- * Paginated, with status filtering mapped from load-level statuses.
+ * Collects all legs for the driver, deduplicates by load, and enriches.
+ * Verifies the load is still assigned to this driver before including it.
  */
 export const getByDriver = query({
   args: {
     driverId: v.id('drivers'),
     status: assignedLoadStatusValidator,
-    paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -1503,41 +1509,48 @@ export const getByDriver = query({
         .withIndex('by_driver', (q) => q.eq('driverId', args.driverId));
     }
 
-    const paginatedResult = await legsQuery.order('desc').paginate(args.paginationOpts);
+    const allLegs = await legsQuery.order('desc').collect();
 
     const seenLoadIds = new Set<string>();
     const enrichedLoads: Array<Record<string, any>> = [];
 
-    for (const leg of paginatedResult.page) {
+    for (const leg of allLegs) {
       if (seenLoadIds.has(leg.loadId)) continue;
       seenLoadIds.add(leg.loadId);
-
-      const enriched = await enrichLoadFromLeg(ctx, leg);
-      if (!enriched) continue;
 
       if (args.status === 'Assigned') {
         if (leg.status === 'COMPLETED' || leg.status === 'CANCELED') continue;
       }
 
+      // Verify the leg still belongs to this driver
+      if (leg.driverId !== args.driverId) continue;
+
+      const enriched = await enrichLoadFromLeg(ctx, leg);
+      if (!enriched) continue;
+
+      // Verify the load's status matches the requested filter
+      const loadStatusMatchesFilter =
+        (args.status === 'Assigned' && enriched.status === 'Assigned') ||
+        (args.status === 'Completed' && enriched.status === 'Completed') ||
+        (args.status === 'Canceled' && enriched.status === 'Canceled');
+      if (!loadStatusMatchesFilter) continue;
+
       enrichedLoads.push(enriched);
     }
 
-    return {
-      ...paginatedResult,
-      page: enrichedLoads,
-    };
+    return enrichedLoads;
   },
 });
 
 /**
  * Get loads assigned to a specific carrier partnership via dispatchLegs.
- * Paginated, with status filtering and carrier rate enrichment.
+ * Collects all legs, deduplicates, and enriches with carrier rate.
+ * Verifies the load is still assigned to this carrier before including it.
  */
 export const getByCarrierPartnership = query({
   args: {
     partnershipId: v.id('carrierPartnerships'),
     status: assignedLoadStatusValidator,
-    paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -1560,21 +1573,31 @@ export const getByCarrierPartnership = query({
         );
     }
 
-    const paginatedResult = await legsQuery.order('desc').paginate(args.paginationOpts);
+    const allLegs = await legsQuery.order('desc').collect();
 
     const seenLoadIds = new Set<string>();
     const enrichedLoads: Array<Record<string, any>> = [];
 
-    for (const leg of paginatedResult.page) {
+    for (const leg of allLegs) {
       if (seenLoadIds.has(leg.loadId)) continue;
       seenLoadIds.add(leg.loadId);
-
-      const enriched = await enrichLoadFromLeg(ctx, leg);
-      if (!enriched) continue;
 
       if (args.status === 'Assigned') {
         if (leg.status === 'COMPLETED' || leg.status === 'CANCELED') continue;
       }
+
+      // Verify the leg still belongs to this carrier
+      if (leg.carrierPartnershipId !== args.partnershipId) continue;
+
+      const enriched = await enrichLoadFromLeg(ctx, leg);
+      if (!enriched) continue;
+
+      // Verify the load's status matches the requested filter
+      const loadStatusMatchesFilter =
+        (args.status === 'Assigned' && enriched.status === 'Assigned') ||
+        (args.status === 'Completed' && enriched.status === 'Completed') ||
+        (args.status === 'Canceled' && enriched.status === 'Canceled');
+      if (!loadStatusMatchesFilter) continue;
 
       const assignment = await ctx.db
         .query('loadCarrierAssignments')
@@ -1590,9 +1613,6 @@ export const getByCarrierPartnership = query({
       });
     }
 
-    return {
-      ...paginatedResult,
-      page: enrichedLoads,
-    };
+    return enrichedLoads;
   },
 });

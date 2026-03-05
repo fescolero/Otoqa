@@ -23,7 +23,7 @@ import { CarrierPaySettingsSection } from '@/components/carrier-pay';
 import { AssignedLoadsTable, type AssignedLoadStatus, type AssignedLoad } from '@/components/loads/assigned-loads-table';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useOrganizationId } from '@/contexts/organization-context';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
   const router = useRouter();
@@ -36,7 +36,6 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
 
   // Assigned Loads state
   const [loadStatusFilter, setLoadStatusFilter] = useState<AssignedLoadStatus>('Assigned');
-  const [loadPaginationCursor, setLoadPaginationCursor] = useState<string | null>(null);
 
   const carrierLoadsData = useQuery(
     api.loads.getByCarrierPartnership,
@@ -44,14 +43,9 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
       ? {
           partnershipId,
           status: loadStatusFilter,
-          paginationOpts: { numItems: 25, cursor: loadPaginationCursor },
         }
       : 'skip'
   );
-
-  useEffect(() => {
-    setLoadPaginationCursor(null);
-  }, [loadStatusFilter]);
 
   if (!partnership) {
     return (
@@ -476,17 +470,11 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
           {/* Loads Tab */}
           <TabsContent value="loads" className="mt-0">
             <AssignedLoadsTable
-              loads={(carrierLoadsData?.page ?? []) as AssignedLoad[]}
+              loads={(carrierLoadsData ?? []) as AssignedLoad[]}
               isLoading={carrierLoadsData === undefined}
               statusFilter={loadStatusFilter}
               onStatusFilterChange={setLoadStatusFilter}
               showCarrierRate
-              hasMore={carrierLoadsData ? !carrierLoadsData.isDone : false}
-              onLoadMore={() => {
-                if (carrierLoadsData?.continueCursor) {
-                  setLoadPaginationCursor(carrierLoadsData.continueCursor);
-                }
-              }}
             />
           </TabsContent>
         </Tabs>

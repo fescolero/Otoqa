@@ -54,9 +54,6 @@ interface AssignedLoadsTableProps {
   statusFilter: AssignedLoadStatus;
   onStatusFilterChange: (status: AssignedLoadStatus) => void;
   showCarrierRate?: boolean;
-  onLoadMore?: () => void;
-  hasMore?: boolean;
-  isLoadingMore?: boolean;
 }
 
 type ColumnKey = 'orderNumber' | 'customer' | 'hcr' | 'trip' | 'route' | 'stops' | 'status' | 'tracking' | 'loadDate' | 'carrierRate';
@@ -159,9 +156,6 @@ export function AssignedLoadsTable({
   statusFilter,
   onStatusFilterChange,
   showCarrierRate = false,
-  onLoadMore,
-  hasMore = false,
-  isLoadingMore = false,
 }: AssignedLoadsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [timeHorizon, setTimeHorizon] = useState<TimeHorizon>('all');
@@ -279,7 +273,7 @@ export function AssignedLoadsTable({
   };
 
   return (
-    <div className="flex flex-col gap-4 flex-1 min-h-0">
+    <div className="flex flex-col gap-4">
       {/* Filter Bar */}
       <div className="flex items-center justify-between flex-wrap gap-4 flex-shrink-0">
         <div className="flex items-center gap-4 flex-wrap">
@@ -350,7 +344,7 @@ export function AssignedLoadsTable({
       </div>
 
       {/* Table */}
-      <div className="border rounded-lg flex flex-col flex-1 min-h-0">
+      <div className="border rounded-lg flex flex-col" style={{ height: 'calc(100vh - 280px)', minHeight: '300px' }}>
         {/* Header */}
         <div className="flex-shrink-0 border-b bg-background">
           <div className="flex items-center h-10 w-full">
@@ -424,26 +418,6 @@ export function AssignedLoadsTable({
               })}
             </div>
 
-            {/* Load More */}
-            {hasMore && (
-              <div className="flex justify-center py-3 border-t">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={onLoadMore}
-                  disabled={isLoadingMore}
-                >
-                  {isLoadingMore ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Loading...
-                    </>
-                  ) : (
-                    'Load More'
-                  )}
-                </Button>
-              </div>
-            )}
           </div>
         )}
       </div>
