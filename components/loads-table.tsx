@@ -18,9 +18,18 @@ import {
   Truck,
   CheckCircle2,
   Ban,
+  Columns3,
 } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { LoadFilterBar, LoadFilterState } from './loads/load-filter-bar';
-import { VirtualizedLoadsTable } from './loads/virtualized-loads-table';
+import { VirtualizedLoadsTable, ColumnVisibility } from './loads/virtualized-loads-table';
 import { FloatingActionBar } from './loads/floating-action-bar';
 import { BulkActionResolutionModal } from './loads/bulk-action-resolution-modal';
 import { CancellationReasonModal, CancellationReasonCode } from './loads/cancellation-reason-modal';
@@ -39,6 +48,10 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   const [focusedRowIndex, setFocusedRowIndex] = useState<number | null>(null);
   const [filters, setFilters] = useState<LoadFilterState>({
     search: '',
+  });
+  const [columnVisibility, setColumnVisibility] = useState<ColumnVisibility>({
+    hcr: false,
+    tripNumber: false,
   });
 
   // Bulk action modal state
@@ -425,12 +438,42 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
           <h1 className="text-2xl font-bold tracking-tight">Loads</h1>
           <p className="text-sm text-muted-foreground">Track and manage freight shipments</p>
         </div>
-        <Link href="/loads/new">
-          <Button size="sm">
-            <Plus className="mr-2 h-4 w-4" />
-            Create Load
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm">
+                <Columns3 className="mr-2 h-4 w-4" />
+                Columns
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuCheckboxItem
+                checked={columnVisibility.hcr}
+                onCheckedChange={(checked) =>
+                  setColumnVisibility((prev) => ({ ...prev, hcr: !!checked }))
+                }
+              >
+                HCR
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                checked={columnVisibility.tripNumber}
+                onCheckedChange={(checked) =>
+                  setColumnVisibility((prev) => ({ ...prev, tripNumber: !!checked }))
+                }
+              >
+                Trip #
+              </DropdownMenuCheckboxItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Link href="/loads/new">
+            <Button size="sm">
+              <Plus className="mr-2 h-4 w-4" />
+              Create Load
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -535,6 +578,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                   formatDate={formatDate}
                   getStatusColor={getStatusColor}
                   getTrackingColor={getTrackingColor}
+                  columnVisibility={columnVisibility}
                   emptyMessage={`No ${activeTab === 'all' ? '' : activeTab.toLowerCase() + ' '}loads${filters.search ? ' matching your search' : ''}`}
                 />
               </div>

@@ -38,6 +38,13 @@ interface Load {
   } | null;
   firstStopDate?: string; // ISO 8601 date string
   createdAt: number;
+  parsedHcr?: string;
+  parsedTripNumber?: string;
+}
+
+export interface ColumnVisibility {
+  hcr: boolean;
+  tripNumber: boolean;
 }
 
 interface VirtualizedLoadsTableProps {
@@ -52,6 +59,7 @@ interface VirtualizedLoadsTableProps {
   getStatusColor: (status: string) => string;
   getTrackingColor: (status: string) => string;
   emptyMessage?: string;
+  columnVisibility?: ColumnVisibility;
 }
 
 export function VirtualizedLoadsTable({
@@ -66,6 +74,7 @@ export function VirtualizedLoadsTable({
   getStatusColor,
   getTrackingColor,
   emptyMessage = 'No loads found',
+  columnVisibility = { hcr: false, tripNumber: false },
 }: VirtualizedLoadsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -95,6 +104,12 @@ export function VirtualizedLoadsTable({
             <div className="px-4 flex-[0.7] font-medium text-muted-foreground text-sm text-center">Stops</div>
             <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
             <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Tracking</div>
+            {columnVisibility.hcr && (
+              <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">HCR</div>
+            )}
+            {columnVisibility.tripNumber && (
+              <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Trip #</div>
+            )}
             <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Load Date</div>
           </div>
         </div>
@@ -125,6 +140,12 @@ export function VirtualizedLoadsTable({
           <div className="px-4 flex-[0.7] font-medium text-muted-foreground text-sm text-center">Stops</div>
           <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
           <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Tracking</div>
+          {columnVisibility.hcr && (
+            <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">HCR</div>
+          )}
+          {columnVisibility.tripNumber && (
+            <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Trip #</div>
+          )}
           <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Load Date</div>
         </div>
       </div>
@@ -198,6 +219,16 @@ export function VirtualizedLoadsTable({
                     {load.trackingStatus}
                   </Badge>
                 </div>
+                {columnVisibility.hcr && (
+                  <div className="px-4 flex-[0.8] text-sm text-muted-foreground truncate">
+                    {load.parsedHcr || '—'}
+                  </div>
+                )}
+                {columnVisibility.tripNumber && (
+                  <div className="px-4 flex-[0.8] text-sm text-muted-foreground truncate">
+                    {load.parsedTripNumber || '—'}
+                  </div>
+                )}
                 <div className="px-4 flex-[1.2] text-sm text-muted-foreground">
                   {load.firstStopDate 
                     ? formatDateOnly(load.firstStopDate).display 
