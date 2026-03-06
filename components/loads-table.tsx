@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { useMutation, useQuery } from 'convex/react';
+import { useMutation, useQuery, usePaginatedQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Card } from '@/components/ui/card';
@@ -70,9 +70,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // ✅ Debounce search input to prevent excessive queries (300ms delay)
   const debouncedSearch = useDebounce(filters.search, 300);
 
-  // Track pagination cursor state for reactivity
-  const [paginationCursor, setPaginationCursor] = useState<string | null>(null);
-  
   // Force query refresh by temporarily skipping query
   const [skipQuery, setSkipQuery] = useState(false);
 
@@ -80,32 +77,25 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   const formatDateForQuery = (timestamp: number | undefined): string | undefined => {
     if (!timestamp) return undefined;
     const date = new Date(timestamp);
-    return date.toISOString().split('T')[0]; // Returns YYYY-MM-DD
+    return date.toISOString().split('T')[0];
   };
 
-  // Fetch loads with filters for active tab
-  const loadsData = useQuery(
+  // Fetch loads with infinite scroll via usePaginatedQuery.
+  // The hook manages cursor state internally and resets when args change.
+  const { results, status: paginationStatus, loadMore } = usePaginatedQuery(
     api.loads.getLoads,
     skipQuery ? "skip" : {
       workosOrgId: organizationId,
       status: statusFilter as any,
       hcr: filters.hcr,
       tripNumber: filters.trip,
-      search: debouncedSearch || undefined, // ✅ Use debounced search
+      search: debouncedSearch || undefined,
       mileRange: filters.mileRange,
       startDate: formatDateForQuery(filters.dateRange?.start),
       endDate: formatDateForQuery(filters.dateRange?.end),
-      paginationOpts: {
-        numItems: 50, // ✅ Reduced from 1000 to 50 (95% read reduction)
-        cursor: paginationCursor,
-      },
     },
+    { initialNumItems: 50 },
   );
-
-  // Reset pagination cursor when filters change
-  useEffect(() => {
-    setPaginationCursor(null);
-  }, [activeTab, debouncedSearch, filters.hcr, filters.trip, filters.mileRange, filters.dateRange]);
 
   // Mutations
   const updateLoadStatus = useMutation(api.loads.updateLoadStatus);
@@ -123,8 +113,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       : 'skip'
   );
 
-  // Get current loads
-  const currentLoads = loadsData?.page || [];
+  const currentLoads = results ?? [];
 
   // Extract unique HCRs and Trips from current loads
   const availableHCRs = useMemo(() => {
@@ -285,8 +274,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       }
       setSelectedLoadIds(new Set());
       
-      // ✅ Force table refresh by skipping query briefly, then re-enabling
-      setPaginationCursor(null);
       setSkipQuery(true);
       setTimeout(() => setSkipQuery(false), 0);
     } catch (error) {
@@ -325,7 +312,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
         }
         setSelectedLoadIds(new Set());
         
-        setPaginationCursor(null);
         setSkipQuery(true);
         setTimeout(() => setSkipQuery(false), 0);
       } catch (error) {
@@ -356,8 +342,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       }
       setSelectedLoadIds(new Set());
       
-      // ✅ Force table refresh by skipping query briefly, then re-enabling
-      setPaginationCursor(null);
       setSkipQuery(true);
       setTimeout(() => setSkipQuery(false), 0);
     } catch (error) {
@@ -582,6 +566,10 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                   getTrackingColor={getTrackingColor}
                   columnVisibility={columnVisibility}
                   emptyMessage={`No ${activeTab === 'all' ? '' : activeTab.toLowerCase() + ' '}loads${filters.search ? ' matching your search' : ''}`}
+                  isLoadingFirstPage={paginationStatus === 'LoadingFirstPage'}
+                  onLoadMore={() => loadMore(50)}
+                  hasMore={paginationStatus === 'CanLoadMore'}
+                  isLoadingMore={paginationStatus === 'LoadingMore'}
                 />
               </div>
             </div>

@@ -1,12 +1,12 @@
 'use client';
 
-import { useRef } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Id } from '@/convex/_generated/dataModel';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
 import { formatDateOnly } from '@/lib/format-date-timezone';
@@ -79,6 +79,10 @@ interface VirtualizedLoadsTableProps {
   getTrackingColor: (status: string) => string;
   emptyMessage?: string;
   columnVisibility?: ColumnVisibility;
+  isLoadingFirstPage?: boolean;
+  onLoadMore?: () => void;
+  hasMore?: boolean;
+  isLoadingMore?: boolean;
 }
 
 export function VirtualizedLoadsTable({
@@ -94,6 +98,10 @@ export function VirtualizedLoadsTable({
   getTrackingColor,
   emptyMessage = 'No loads found',
   columnVisibility = DEFAULT_COLUMN_VISIBILITY,
+  isLoadingFirstPage = false,
+  onLoadMore,
+  hasMore = false,
+  isLoadingMore = false,
 }: VirtualizedLoadsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -142,6 +150,49 @@ export function VirtualizedLoadsTable({
       )}
     </>
   );
+
+  // Infinite scroll: detect when near bottom and trigger loadMore
+  const handleScroll = useCallback(() => {
+    const el = parentRef.current;
+    if (!el || !hasMore || isLoadingMore || !onLoadMore) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 200) {
+      onLoadMore();
+    }
+  }, [hasMore, isLoadingMore, onLoadMore]);
+
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, [handleScroll]);
+
+  if (isLoadingFirstPage) {
+    return (
+      <div className="flex flex-col flex-1 min-h-0">
+        <div className="flex-shrink-0 border-b bg-background">
+          <div className="flex items-center h-10 w-full">
+            {headerCells}
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="flex items-center h-[48px] border-b px-2 gap-4 animate-pulse">
+              <div className="w-12 flex items-center"><div className="h-4 w-4 rounded bg-muted" /></div>
+              <div className="flex-[1.2]"><div className="h-4 w-20 rounded bg-muted" /></div>
+              <div className="flex-[1.5]"><div className="h-4 w-28 rounded bg-muted" /></div>
+              <div className="flex-[2.5]"><div className="h-4 w-48 rounded bg-muted" /></div>
+              <div className="flex-[0.7] flex justify-center"><div className="h-4 w-8 rounded bg-muted" /></div>
+              <div className="flex-1"><div className="h-5 w-16 rounded-full bg-muted" /></div>
+              <div className="flex-1"><div className="h-5 w-16 rounded-full bg-muted" /></div>
+              <div className="flex-[1.2]"><div className="h-4 w-20 rounded bg-muted" /></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (loads.length === 0) {
     return (
@@ -269,6 +320,12 @@ export function VirtualizedLoadsTable({
             );
           })}
         </div>
+        {isLoadingMore && (
+          <div className="flex items-center justify-center py-4">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            <span className="ml-2 text-sm text-muted-foreground">Loading more...</span>
+          </div>
+        )}
       </div>
     </div>
   );

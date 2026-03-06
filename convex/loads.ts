@@ -160,6 +160,18 @@ export const getLoads = query({
         if (args.tripNumber && load.parsedTripNumber !== args.tripNumber) return false;
         if (args.requiresManualReview !== undefined && load.requiresManualReview !== args.requiresManualReview) return false;
         if (args.loadType && load.loadType !== args.loadType) return false;
+        if (args.mileRange && args.mileRange !== 'all') {
+          const miles = load.effectiveMiles;
+          if (!miles) return false;
+          switch (args.mileRange) {
+            case '0-100': if (miles < 0 || miles > 100) return false; break;
+            case '100-250': if (miles <= 100 || miles > 250) return false; break;
+            case '250-500': if (miles <= 250 || miles > 500) return false; break;
+            case '500+': if (miles <= 500) return false; break;
+          }
+        }
+        if (args.startDate && (!load.firstStopDate || load.firstStopDate < args.startDate)) return false;
+        if (args.endDate && (!load.firstStopDate || load.firstStopDate > args.endDate)) return false;
         return true;
       };
 
@@ -253,6 +265,12 @@ export const getLoads = query({
         }),
       );
 
+      enriched.sort((a, b) => {
+        const dateA = a.firstStopDate || '';
+        const dateB = b.firstStopDate || '';
+        return dateB.localeCompare(dateA);
+      });
+
       return {
         page: enriched,
         isDone: true,
@@ -261,12 +279,11 @@ export const getLoads = query({
     }
 
     // ── NORMAL PATH: paginated query (no search) ──
-    // Index strategy:
-    // 1. Date filter active → by_org_first_stop_date (narrows by date range)
-    // 2. Status filter, no date → by_status (narrows by status, avoids scanning all loads)
-    // 3. No filters → by_organization (includes all loads)
+    // Always use by_org_first_stop_date for consistent date ordering.
+    // Status and other filters are post-index .filter() calls which run
+    // inside .paginate(), guaranteeing full pages.
     let loadsQuery;
-    
+
     if (args.startDate && args.endDate) {
       loadsQuery = ctx.db
         .query('loadInformation')
@@ -289,22 +306,17 @@ export const getLoads = query({
           q.eq('workosOrgId', args.workosOrgId)
             .lte('firstStopDate', args.endDate!)
         );
-    } else if (args.status) {
-      loadsQuery = ctx.db
-        .query('loadInformation')
-        .withIndex('by_status', (q) =>
-          q.eq('workosOrgId', args.workosOrgId).eq('status', args.status! as any)
-        );
     } else {
       loadsQuery = ctx.db
         .query('loadInformation')
-        .withIndex('by_organization', (q) =>
+        .withIndex('by_org_first_stop_date', (q) =>
           q.eq('workosOrgId', args.workosOrgId)
         );
     }
 
-    // Apply remaining filters as post-index filters
-    if (args.status && (args.startDate || args.endDate)) {
+    // All remaining filters are post-index .filter() calls.
+    // Convex .filter() runs inside .paginate(), so pages are always full.
+    if (args.status) {
       loadsQuery = loadsQuery.filter((q) => q.eq(q.field('status'), args.status));
     }
     if (args.trackingStatus) {
@@ -324,6 +336,29 @@ export const getLoads = query({
     }
     if (args.loadType) {
       loadsQuery = loadsQuery.filter((q) => q.eq(q.field('loadType'), args.loadType));
+    }
+    if (args.mileRange && args.mileRange !== 'all') {
+      switch (args.mileRange) {
+        case '0-100':
+          loadsQuery = loadsQuery
+            .filter((q) => q.gte(q.field('effectiveMiles'), 0))
+            .filter((q) => q.lte(q.field('effectiveMiles'), 100));
+          break;
+        case '100-250':
+          loadsQuery = loadsQuery
+            .filter((q) => q.gt(q.field('effectiveMiles'), 100))
+            .filter((q) => q.lte(q.field('effectiveMiles'), 250));
+          break;
+        case '250-500':
+          loadsQuery = loadsQuery
+            .filter((q) => q.gt(q.field('effectiveMiles'), 250))
+            .filter((q) => q.lte(q.field('effectiveMiles'), 500));
+          break;
+        case '500+':
+          loadsQuery = loadsQuery
+            .filter((q) => q.gt(q.field('effectiveMiles'), 500));
+          break;
+      }
     }
 
     const paginatedResult = await loadsQuery.order('desc').paginate(args.paginationOpts);
@@ -352,25 +387,9 @@ export const getLoads = query({
       }),
     );
 
-    // Apply mile range filter after enrichment
-    let finalLoads = loadsWithStops;
-    if (args.mileRange && args.mileRange !== 'all') {
-      finalLoads = finalLoads.filter((load) => {
-        const miles = load.effectiveMiles;
-        if (!miles) return false;
-        switch (args.mileRange) {
-          case '0-100': return miles >= 0 && miles <= 100;
-          case '100-250': return miles > 100 && miles <= 250;
-          case '250-500': return miles > 250 && miles <= 500;
-          case '500+': return miles > 500;
-          default: return true;
-        }
-      });
-    }
-
     return {
       ...paginatedResult,
-      page: finalLoads,
+      page: loadsWithStops,
     };
   },
 });
