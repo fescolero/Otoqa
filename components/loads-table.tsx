@@ -29,7 +29,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { LoadFilterBar, LoadFilterState } from './loads/load-filter-bar';
-import { VirtualizedLoadsTable, ColumnVisibility } from './loads/virtualized-loads-table';
+import { VirtualizedLoadsTable, ColumnVisibility, DEFAULT_COLUMN_VISIBILITY } from './loads/virtualized-loads-table';
 import { FloatingActionBar } from './loads/floating-action-bar';
 import { BulkActionResolutionModal } from './loads/bulk-action-resolution-modal';
 import { CancellationReasonModal, CancellationReasonCode } from './loads/cancellation-reason-modal';
@@ -49,10 +49,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   const [filters, setFilters] = useState<LoadFilterState>({
     search: '',
   });
-  const [columnVisibility, setColumnVisibility] = useState<ColumnVisibility>({
-    hcr: false,
-    tripNumber: false,
-  });
+  const [columnVisibility, setColumnVisibility] = useState<ColumnVisibility>(DEFAULT_COLUMN_VISIBILITY);
 
   // Bulk action modal state
   const [showResolutionModal, setShowResolutionModal] = useState(false);
@@ -449,22 +446,27 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
             <DropdownMenuContent align="end">
               <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuCheckboxItem
-                checked={columnVisibility.hcr}
-                onCheckedChange={(checked) =>
-                  setColumnVisibility((prev) => ({ ...prev, hcr: !!checked }))
-                }
-              >
-                HCR
-              </DropdownMenuCheckboxItem>
-              <DropdownMenuCheckboxItem
-                checked={columnVisibility.tripNumber}
-                onCheckedChange={(checked) =>
-                  setColumnVisibility((prev) => ({ ...prev, tripNumber: !!checked }))
-                }
-              >
-                Trip #
-              </DropdownMenuCheckboxItem>
+              {([
+                { key: 'orderNumber', label: 'Order #' },
+                { key: 'customer', label: 'Customer' },
+                { key: 'route', label: 'Route' },
+                { key: 'stops', label: 'Stops' },
+                { key: 'status', label: 'Status' },
+                { key: 'tracking', label: 'Tracking' },
+                { key: 'hcr', label: 'HCR' },
+                { key: 'tripNumber', label: 'Trip #' },
+                { key: 'loadDate', label: 'Load Date' },
+              ] as { key: keyof ColumnVisibility; label: string }[]).map(({ key, label }) => (
+                <DropdownMenuCheckboxItem
+                  key={key}
+                  checked={columnVisibility[key]}
+                  onCheckedChange={(checked) =>
+                    setColumnVisibility((prev) => ({ ...prev, [key]: !!checked }))
+                  }
+                >
+                  {label}
+                </DropdownMenuCheckboxItem>
+              ))}
             </DropdownMenuContent>
           </DropdownMenu>
           <Link href="/loads/new">

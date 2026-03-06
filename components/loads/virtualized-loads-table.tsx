@@ -43,9 +43,28 @@ interface Load {
 }
 
 export interface ColumnVisibility {
+  orderNumber: boolean;
+  customer: boolean;
+  route: boolean;
+  stops: boolean;
+  status: boolean;
+  tracking: boolean;
   hcr: boolean;
   tripNumber: boolean;
+  loadDate: boolean;
 }
+
+export const DEFAULT_COLUMN_VISIBILITY: ColumnVisibility = {
+  orderNumber: true,
+  customer: true,
+  route: true,
+  stops: true,
+  status: true,
+  tracking: true,
+  hcr: false,
+  tripNumber: false,
+  loadDate: true,
+};
 
 interface VirtualizedLoadsTableProps {
   loads: Load[];
@@ -74,7 +93,7 @@ export function VirtualizedLoadsTable({
   getStatusColor,
   getTrackingColor,
   emptyMessage = 'No loads found',
-  columnVisibility = { hcr: false, tripNumber: false },
+  columnVisibility = DEFAULT_COLUMN_VISIBILITY,
 }: VirtualizedLoadsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -85,36 +104,53 @@ export function VirtualizedLoadsTable({
     overscan: 10, // Number of items to render outside viewport
   });
 
+  const headerCells = (
+    <>
+      <div className="px-2 w-12 flex items-center">
+        <Checkbox
+          checked={isAllSelected}
+          onCheckedChange={onSelectAll}
+          aria-label="Select all"
+        />
+      </div>
+      {columnVisibility.orderNumber && (
+        <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Order #</div>
+      )}
+      {columnVisibility.customer && (
+        <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Customer</div>
+      )}
+      {columnVisibility.route && (
+        <div className="px-4 flex-[2.5] font-medium text-muted-foreground text-sm">Route</div>
+      )}
+      {columnVisibility.stops && (
+        <div className="px-4 flex-[0.7] font-medium text-muted-foreground text-sm text-center">Stops</div>
+      )}
+      {columnVisibility.status && (
+        <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
+      )}
+      {columnVisibility.tracking && (
+        <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Tracking</div>
+      )}
+      {columnVisibility.hcr && (
+        <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">HCR</div>
+      )}
+      {columnVisibility.tripNumber && (
+        <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Trip #</div>
+      )}
+      {columnVisibility.loadDate && (
+        <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Load Date</div>
+      )}
+    </>
+  );
+
   if (loads.length === 0) {
     return (
       <div className="flex flex-col flex-1 min-h-0">
-        {/* Fixed Header */}
         <div className="flex-shrink-0 border-b bg-background">
           <div className="flex items-center h-10 w-full">
-            <div className="px-2 w-12 flex items-center">
-              <Checkbox
-                checked={isAllSelected}
-                onCheckedChange={onSelectAll}
-                aria-label="Select all"
-              />
-            </div>
-            <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Order #</div>
-            <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Customer</div>
-            <div className="px-4 flex-[2.5] font-medium text-muted-foreground text-sm">Route</div>
-            <div className="px-4 flex-[0.7] font-medium text-muted-foreground text-sm text-center">Stops</div>
-            <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
-            <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Tracking</div>
-            {columnVisibility.hcr && (
-              <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">HCR</div>
-            )}
-            {columnVisibility.tripNumber && (
-              <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Trip #</div>
-            )}
-            <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Load Date</div>
+            {headerCells}
           </div>
         </div>
-        
-        {/* Empty State */}
         <div className="flex-1 flex items-center justify-center py-12 text-muted-foreground">
           {emptyMessage}
         </div>
@@ -127,26 +163,7 @@ export function VirtualizedLoadsTable({
       {/* Fixed Header */}
       <div className="flex-shrink-0 border-b bg-background">
         <div className="flex items-center h-10 w-full">
-          <div className="px-2 w-12 flex items-center">
-            <Checkbox
-              checked={isAllSelected}
-              onCheckedChange={onSelectAll}
-              aria-label="Select all"
-            />
-          </div>
-          <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Order #</div>
-          <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Customer</div>
-          <div className="px-4 flex-[2.5] font-medium text-muted-foreground text-sm">Route</div>
-          <div className="px-4 flex-[0.7] font-medium text-muted-foreground text-sm text-center">Stops</div>
-          <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
-          <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Tracking</div>
-          {columnVisibility.hcr && (
-            <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">HCR</div>
-          )}
-          {columnVisibility.tripNumber && (
-            <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Trip #</div>
-          )}
-          <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Load Date</div>
+          {headerCells}
         </div>
       </div>
       
@@ -181,44 +198,56 @@ export function VirtualizedLoadsTable({
                     aria-label={`Select load ${load.orderNumber}`}
                   />
                 </div>
-                <div className="px-4 flex-[1.2]">
-                  <Link href={`/loads/${load._id}`} className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800">
-                    {load.orderNumber}
-                  </Link>
-                </div>
-                <div className="px-4 flex-[1.5] text-sm font-medium min-w-0">
-                  <div className="truncate">{load.customerName || 'Unknown'}</div>
-                </div>
-                <div className="px-4 flex-[2.5] min-w-0">
-                  {load.origin && load.destination ? (
-                    <div className="flex items-center gap-2 text-sm overflow-hidden">
-                      <span className="font-medium whitespace-nowrap truncate">
-                        {toTitleCase(load.origin.city)}, {load.origin.state}
-                      </span>
-                      <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                      <span className="font-medium whitespace-nowrap truncate">
-                        {toTitleCase(load.destination.city)}, {load.destination.state}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground text-sm">N/A</span>
-                  )}
-                </div>
-                <div className="px-4 flex-[0.7] text-center">
-                  <Badge variant="outline" className="font-mono">
-                    {load.stopsCount}
-                  </Badge>
-                </div>
-                <div className="px-4 flex-1">
-                  <Badge variant="outline" className={getStatusColor(load.status)}>
-                    {load.status}
-                  </Badge>
-                </div>
-                <div className="px-4 flex-1">
-                  <Badge variant="secondary" className={getTrackingColor(load.trackingStatus)}>
-                    {load.trackingStatus}
-                  </Badge>
-                </div>
+                {columnVisibility.orderNumber && (
+                  <div className="px-4 flex-[1.2]">
+                    <Link href={`/loads/${load._id}`} className="font-mono text-sm font-medium text-blue-600 hover:text-blue-800">
+                      {load.orderNumber}
+                    </Link>
+                  </div>
+                )}
+                {columnVisibility.customer && (
+                  <div className="px-4 flex-[1.5] text-sm font-medium min-w-0">
+                    <div className="truncate">{load.customerName || 'Unknown'}</div>
+                  </div>
+                )}
+                {columnVisibility.route && (
+                  <div className="px-4 flex-[2.5] min-w-0">
+                    {load.origin && load.destination ? (
+                      <div className="flex items-center gap-2 text-sm overflow-hidden">
+                        <span className="font-medium whitespace-nowrap truncate">
+                          {toTitleCase(load.origin.city)}, {load.origin.state}
+                        </span>
+                        <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                        <span className="font-medium whitespace-nowrap truncate">
+                          {toTitleCase(load.destination.city)}, {load.destination.state}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">N/A</span>
+                    )}
+                  </div>
+                )}
+                {columnVisibility.stops && (
+                  <div className="px-4 flex-[0.7] text-center">
+                    <Badge variant="outline" className="font-mono">
+                      {load.stopsCount}
+                    </Badge>
+                  </div>
+                )}
+                {columnVisibility.status && (
+                  <div className="px-4 flex-1">
+                    <Badge variant="outline" className={getStatusColor(load.status)}>
+                      {load.status}
+                    </Badge>
+                  </div>
+                )}
+                {columnVisibility.tracking && (
+                  <div className="px-4 flex-1">
+                    <Badge variant="secondary" className={getTrackingColor(load.trackingStatus)}>
+                      {load.trackingStatus}
+                    </Badge>
+                  </div>
+                )}
                 {columnVisibility.hcr && (
                   <div className="px-4 flex-[0.8] text-sm text-muted-foreground truncate">
                     {load.parsedHcr || '—'}
@@ -229,11 +258,13 @@ export function VirtualizedLoadsTable({
                     {load.parsedTripNumber || '—'}
                   </div>
                 )}
-                <div className="px-4 flex-[1.2] text-sm text-muted-foreground">
-                  {load.firstStopDate 
-                    ? formatDateOnly(load.firstStopDate).display 
-                    : formatDateOnly(new Date(load.createdAt).toISOString()).display}
-                </div>
+                {columnVisibility.loadDate && (
+                  <div className="px-4 flex-[1.2] text-sm text-muted-foreground">
+                    {load.firstStopDate 
+                      ? formatDateOnly(load.firstStopDate).display 
+                      : formatDateOnly(new Date(load.createdAt).toISOString()).display}
+                  </div>
+                )}
               </div>
             );
           })}
