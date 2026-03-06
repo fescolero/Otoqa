@@ -365,7 +365,9 @@ export default function AppLayout() {
     return () => { cancelled = true; };
   }, [profile?._id]);
 
-  // Flush buffered locations when app returns to foreground
+  // Flush buffered locations when app returns to foreground.
+  // Delay slightly to let Convex auth token refresh first — the
+  // ConvexAuthProvider re-auth runs asynchronously on foreground return.
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextState) => {
       if (nextState === 'active') {
@@ -374,7 +376,9 @@ export default function AppLayout() {
           if (!state?.isActive) return;
           const count = await getBufferedLocationCount();
           if (count > 0) {
-            console.log(`[App] Foreground: flushing ${count} buffered locations`);
+            console.log(`[App] Foreground: ${count} buffered locations, waiting for auth...`);
+            await new Promise((r) => setTimeout(r, 2000));
+            console.log(`[App] Foreground: flushing buffered locations`);
             await forceFlush();
           }
         } catch (err) {

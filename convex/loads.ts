@@ -921,6 +921,21 @@ export const updateLoadStatus = mutation({
     // Auto-update tracking status based on workflow status
     if (args.status === 'Completed') {
       updates.trackingStatus = 'Completed';
+
+      // Sync carrier assignment status to COMPLETED
+      const carrierAssignments = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect();
+      for (const ca of carrierAssignments) {
+        if (ca.status === 'AWARDED' || ca.status === 'IN_PROGRESS') {
+          await ctx.db.patch(ca._id, {
+            status: 'COMPLETED' as const,
+            completedAt: now,
+            paymentStatus: ca.paymentStatus ?? ('PENDING' as const),
+          });
+        }
+      }
     } else if (args.status === 'Assigned') {
       if (load.trackingStatus === 'Pending') {
         updates.trackingStatus = 'In Transit';
@@ -1070,6 +1085,20 @@ export const bulkUpdateLoadStatus = mutation({
 
         if (args.status === 'Completed') {
           updates.trackingStatus = 'Completed';
+
+          const carrierAssignments = await ctx.db
+            .query('loadCarrierAssignments')
+            .withIndex('by_load', (q) => q.eq('loadId', id))
+            .collect();
+          for (const ca of carrierAssignments) {
+            if (ca.status === 'AWARDED' || ca.status === 'IN_PROGRESS') {
+              await ctx.db.patch(ca._id, {
+                status: 'COMPLETED' as const,
+                completedAt: now,
+                paymentStatus: ca.paymentStatus ?? ('PENDING' as const),
+              });
+            }
+          }
         } else if (args.status === 'Assigned') {
           if (load.trackingStatus === 'Pending') {
             updates.trackingStatus = 'In Transit';
@@ -1703,12 +1732,13 @@ export const getByDriver = query({
     }
 
     // --- Fallback 2: carrier assignments where this driver is the assignedDriverId ---
-    // Mirrors the mobile app's Method 2 for finding carrier-assigned loads.
+    // For Completed loads, check all active-ish statuses since the assignment
+    // status may not have been synced when the load was marked Completed.
     const assignmentStatuses = args.status === 'Assigned'
       ? (['AWARDED', 'IN_PROGRESS'] as const)
-      : args.status === 'Completed'
-        ? (['COMPLETED'] as const)
-        : (['CANCELED'] as const);
+      : args.status === 'Canceled'
+        ? (['CANCELED'] as const)
+        : (['COMPLETED', 'AWARDED', 'IN_PROGRESS'] as const);
 
     for (const aStatus of assignmentStatuses) {
       const assignments = await ctx.db
@@ -1736,6 +1766,7 @@ export const getByDriver = query({
       }
     }
 
+    enrichedLoads.sort((a, b) => b.createdAt - a.createdAt);
     return enrichedLoads;
   },
 });
@@ -1840,13 +1871,10 @@ export const getByCarrierPartnership = query({
       if (seenLoadIds.has(assignment.loadId)) continue;
       seenLoadIds.add(assignment.loadId);
 
-      // Only include active assignments for the "Assigned" filter
       if (args.status === 'Assigned') {
         if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') continue;
       } else if (args.status === 'Canceled') {
         if (assignment.status !== 'CANCELED') continue;
-      } else if (args.status === 'Completed') {
-        if (assignment.status !== 'COMPLETED') continue;
       }
 
       const load = await ctx.db.get(assignment.loadId);
@@ -1890,6 +1918,7 @@ export const getByCarrierPartnership = query({
       });
     }
 
+    enrichedLoads.sort((a, b) => b.createdAt - a.createdAt);
     return enrichedLoads;
   },
 });

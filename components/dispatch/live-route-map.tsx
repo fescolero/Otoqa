@@ -331,6 +331,97 @@ function GpsBreadcrumbs({ points }: { points: LocationPoint[] }) {
 }
 
 // ============================================
+// PLANNED ROUTE POLYLINE - Draws route between stops via Directions API
+// Used as fallback when no GPS history is available
+// ============================================
+function PlannedRoutePolyline({ stops }: { stops: StopData[] }) {
+  const map = useMap();
+  const routesLibrary = useMapsLibrary('routes');
+  const mapsLibrary = useMapsLibrary('maps');
+
+  // Stabilize stops reference - only recompute when coordinates actually change
+  const stopsKey = useMemo(
+    () => stops.map((s) => `${s.sequenceNumber}:${s.lat}:${s.lng}`).join('|'),
+    [stops]
+  );
+
+  useEffect(() => {
+    if (!map || !routesLibrary || !mapsLibrary || stops.length < 2) return;
+
+    let cancelled = false;
+    let fallbackLine: google.maps.Polyline | null = null;
+
+    const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    const origin = sortedStops[0];
+    const destination = sortedStops[sortedStops.length - 1];
+    const waypoints = sortedStops.slice(1, -1).map((s) => ({
+      location: { lat: s.lat, lng: s.lng },
+      stopover: true,
+    }));
+
+    const directionsService = new routesLibrary.DirectionsService();
+    const directionsRenderer = new routesLibrary.DirectionsRenderer({
+      map,
+      suppressMarkers: true,
+      polylineOptions: {
+        strokeColor: '#6366f1',
+        strokeOpacity: 0.6,
+        strokeWeight: 4,
+      },
+    });
+
+    directionsService.route(
+      {
+        origin: { lat: origin.lat, lng: origin.lng },
+        destination: { lat: destination.lat, lng: destination.lng },
+        waypoints,
+        travelMode: google.maps.TravelMode.DRIVING,
+        optimizeWaypoints: false,
+      },
+      (result, status) => {
+        if (cancelled) return;
+        if (status === google.maps.DirectionsStatus.OK && result) {
+          directionsRenderer.setDirections(result);
+        } else {
+          console.warn('[PlannedRoutePolyline] Directions request failed:', status);
+          const path = sortedStops.map((s) => ({ lat: s.lat, lng: s.lng }));
+          fallbackLine = new mapsLibrary.Polyline({
+            path,
+            geodesic: true,
+            strokeColor: '#94a3b8',
+            strokeOpacity: 0,
+            strokeWeight: 3,
+            icons: [
+              {
+                icon: {
+                  path: 'M 0,-1 0,1',
+                  strokeOpacity: 0.5,
+                  strokeColor: '#94a3b8',
+                  scale: 3,
+                },
+                offset: '0',
+                repeat: '16px',
+              },
+            ],
+            map,
+            zIndex: 1,
+          });
+        }
+      }
+    );
+
+    return () => {
+      cancelled = true;
+      directionsRenderer.setMap(null);
+      fallbackLine?.setMap(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, routesLibrary, mapsLibrary, stopsKey]);
+
+  return null;
+}
+
+// ============================================
 // GEOFENCE CIRCLES - Around stops
 // ============================================
 function GeofenceCircles({ 
@@ -775,17 +866,20 @@ export function LiveRouteMap({
   organizationId,
   driverId,
   height = '350px',
-  stops,
+  stops: stopsProp,
   selectedStopId,
   onStopSelect,
 }: LiveRouteMapProps) {
   const apiKey = useGoogleMapsKey();
 
-  // #region agent log
-  useEffect(() => {
-    console.log('[DEBUG-1355cc] LiveRouteMap apiKey via context:', { exists: !!apiKey, length: apiKey?.length ?? 0 });
-  }, [apiKey]);
-  // #endregion
+  // Stabilize stops reference so child effects don't re-fire on every parent render.
+  // The parent creates a new stops array on every render via .filter().map(),
+  // but we only want to re-run map effects when the actual stop data changes.
+  const stopsFingerprint = useMemo(
+    () => stopsProp?.map((s) => `${s.id}:${s.lat}:${s.lng}:${s.status}`).join('|') ?? '',
+    [stopsProp]
+  );
+  const stops = useMemo(() => stopsProp, [stopsFingerprint]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Route path state (road-following path from Map Matching API)
   const [routePath, setRoutePath] = useState<Array<{ latitude: number; longitude: number }>>([]);
@@ -804,9 +898,22 @@ export function LiveRouteMap({
   const mapMatchRoute = useAction(api.googleRoads.mapMatchRoute);
 
   // Fetch route history for this load
-  const routeHistory = useAuthQuery(api.driverLocations.getRouteHistoryForLoad, {
+  const routeHistoryRaw = useAuthQuery(api.driverLocations.getRouteHistoryForLoad, {
     loadId,
   });
+
+  // Stabilize routeHistory reference — Convex reactive queries return a new array
+  // on every subscription tick even when data is unchanged, which causes polyline
+  // effects to tear down and recreate (the "disappearing vector" bug).
+  const routeHistoryFingerprint = useMemo(
+    () => routeHistoryRaw === undefined
+      ? '__loading__'
+      : routeHistoryRaw.length === 0
+        ? '__empty__'
+        : `${routeHistoryRaw.length}:${routeHistoryRaw[0]?.recordedAt}:${routeHistoryRaw[routeHistoryRaw.length - 1]?.recordedAt}`,
+    [routeHistoryRaw]
+  );
+  const routeHistory = useMemo(() => routeHistoryRaw, [routeHistoryFingerprint]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch live driver location if we have a driver
   const liveLocations = useAuthQuery(api.driverLocations.getActiveDriverLocations, {
@@ -1007,7 +1114,6 @@ export function LiveRouteMap({
           {/* GPS trail polyline - uses snapped points when available */}
           {hasRouteData && (
             <RoutePolylineRenderer 
-              key={`route-${routeHistory.length}-${routePath.length}`}
               points={routeHistory} 
               snappedPoints={routePath.length > 0 ? routePath : undefined}
               liveLocation={driverLiveLocation ? {
@@ -1015,6 +1121,11 @@ export function LiveRouteMap({
                 longitude: driverLiveLocation.longitude,
               } : null}
             />
+          )}
+
+          {/* Planned route between stops when no GPS data yet */}
+          {!hasRouteData && hasStops && stops!.length >= 2 && (
+            <PlannedRoutePolyline stops={stops!} />
           )}
 
           {/* GPS breadcrumb dots - shows actual data capture points */}
@@ -1063,6 +1174,16 @@ export function LiveRouteMap({
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
               <span>Matched {Math.round(matchConfidence * 100)}%</span>
+            </div>
+          </div>
+        )}
+
+        {/* Planned route indicator when no GPS data */}
+        {!hasRouteData && !hasLiveData && hasStops && (
+          <div className="bg-white/95 backdrop-blur border rounded-lg px-2.5 py-1.5 shadow-sm">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Route className="w-3.5 h-3.5 text-indigo-500" />
+              <span>Planned Route</span>
             </div>
           </div>
         )}

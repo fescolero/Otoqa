@@ -6,17 +6,28 @@ import { storage } from './storage';
 import { convex } from './convex';
 import { api } from '../../convex/_generated/api';
 import { Id } from '../../convex/_generated/dataModel';
+import {
+  insertLocation,
+  getUnsyncedLocations,
+  getUnsyncedCount,
+  getUnsyncedCountForLoad,
+  markAsSynced,
+  getLastLocationForLoad,
+  deleteOldSyncedLocations,
+} from './location-db';
 
 // ============================================
 // LOCATION TRACKING
 // Background location tracking for route recording
 // Tracks driver from first stop checkout to last stop checkout
+// GPS points are stored durably in SQLite and only marked synced
+// after confirmed upload to Convex. No data loss on auth failures,
+// app kills, or network issues.
 // NOTE: Background location requires a development build (not Expo Go)
 // ============================================
 
 const LOCATION_TASK_NAME = 'OTOQA_LOCATION_TRACKING';
 const TRACKING_STATE_KEY = 'location_tracking_state';
-const LOCATION_BUFFER_KEY = 'location_buffer';
 
 // ============================================
 // TRACKING CONFIGURATION
@@ -85,21 +96,15 @@ interface TrackingState {
   startedAt: number;
 }
 
-interface BufferedLocation {
-  driverId: string;
-  loadId: string;
-  latitude: number;
-  longitude: number;
-  accuracy: number | null;
-  speed: number | null;
-  heading: number | null;
-  trackingType: 'LOAD_ROUTE';
-  recordedAt: number;
-}
+// BufferedLocation type removed — GPS points are now stored in SQLite
+// via location-db.ts instead of AsyncStorage JSON arrays.
 
 // ============================================
 // BACKGROUND TASK DEFINITION
 // Must be at module scope for background execution
+// Points are written to SQLite immediately (durable).
+// Sync to Convex is best-effort — failures are safe because
+// SQLite retains unsynced rows for later retry.
 // ============================================
 
 const BACKGROUND_FLUSH_THRESHOLD = 3;
@@ -131,99 +136,72 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       return;
     }
 
-    // Get existing buffer
-    const bufferJson = await storage.getString(LOCATION_BUFFER_KEY);
-    const buffer: BufferedLocation[] = bufferJson ? JSON.parse(bufferJson) : [];
-
-    // Get last buffered location for distance check
-    const lastPoint = buffer.length > 0 ? buffer[buffer.length - 1] : null;
+    // Get last stored location for distance filtering
+    const lastPoint = await getLastLocationForLoad(state.loadId);
 
     let addedCount = 0;
     let rejectedAccuracy = 0;
     let rejectedDistance = 0;
+    let prevLat = lastPoint?.latitude ?? null;
+    let prevLng = lastPoint?.longitude ?? null;
 
-    // Add new locations to buffer with filtering
     for (const loc of locations) {
-      // Filter 1: Reject inaccurate readings (> 50m accuracy)
       if (loc.coords.accuracy && loc.coords.accuracy > MAX_ACCURACY_METERS) {
         rejectedAccuracy++;
         continue;
       }
 
-      // Filter 2: Skip if too close to last point (avoid duplicates)
-      if (lastPoint || buffer.length > 0) {
-        const prevPoint = buffer.length > 0 ? buffer[buffer.length - 1] : lastPoint;
-        if (prevPoint) {
-          const distance = calculateDistance(
-            prevPoint.latitude,
-            prevPoint.longitude,
-            loc.coords.latitude,
-            loc.coords.longitude
-          );
-          if (distance < MIN_DISTANCE_BETWEEN_POINTS) {
-            rejectedDistance++;
-            continue;
-          }
+      if (prevLat !== null && prevLng !== null) {
+        const distance = calculateDistance(
+          prevLat, prevLng,
+          loc.coords.latitude, loc.coords.longitude
+        );
+        if (distance < MIN_DISTANCE_BETWEEN_POINTS) {
+          rejectedDistance++;
+          continue;
         }
       }
 
-      buffer.push({
+      // Write directly to SQLite — durable even if app is killed
+      await insertLocation({
         driverId: state.driverId,
         loadId: state.loadId,
+        organizationId: state.organizationId,
         latitude: loc.coords.latitude,
         longitude: loc.coords.longitude,
         accuracy: loc.coords.accuracy,
         speed: loc.coords.speed,
         heading: loc.coords.heading,
-        trackingType: state.trackingType,
         recordedAt: loc.timestamp,
       });
+
+      prevLat = loc.coords.latitude;
+      prevLng = loc.coords.longitude;
       addedCount++;
     }
 
-    // Save updated buffer
-    await storage.set(LOCATION_BUFFER_KEY, JSON.stringify(buffer));
-    console.log(`[LocationTracking] Added ${addedCount}/${locations.length} locations (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance) (total: ${buffer.length})`);
+    console.log(`[LocationTracking] Saved ${addedCount}/${locations.length} to SQLite (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance)`);
 
-    // Flush buffer to Convex from background task
-    // The JS execution window during background location delivery is brief but
-    // sufficient for a single network call. We flush when we have enough points
-    // OR enough time has passed since the last background flush.
+    // Best-effort sync to Convex
     const now = Date.now();
     const lastFlushStr = await storage.getString(LAST_BACKGROUND_FLUSH_KEY);
     const lastFlushTime = lastFlushStr ? parseInt(lastFlushStr, 10) : 0;
     const timeSinceFlush = now - lastFlushTime;
+    const unsyncedCount = await getUnsyncedCount();
 
     const shouldFlush =
-      buffer.length >= BACKGROUND_FLUSH_THRESHOLD ||
-      (buffer.length > 0 && timeSinceFlush >= BACKGROUND_FLUSH_INTERVAL_MS);
+      unsyncedCount >= BACKGROUND_FLUSH_THRESHOLD ||
+      (unsyncedCount > 0 && timeSinceFlush >= BACKGROUND_FLUSH_INTERVAL_MS);
 
     if (shouldFlush) {
       try {
-        console.log(`[LocationTracking] Background flush: ${buffer.length} locations`);
-        const flushLocations = buffer.map((loc) => ({
-          driverId: loc.driverId as Id<'drivers'>,
-          loadId: loc.loadId as Id<'loadInformation'>,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-          accuracy: loc.accuracy ?? undefined,
-          speed: loc.speed ?? undefined,
-          heading: loc.heading ?? undefined,
-          trackingType: 'LOAD_ROUTE' as const,
-          recordedAt: loc.recordedAt,
-        }));
-
-        const result = await convex.mutation(api.driverLocations.batchInsertLocations, {
-          locations: flushLocations,
-          organizationId: state.organizationId,
-        });
-
-        await storage.set(LOCATION_BUFFER_KEY, JSON.stringify([]));
-        await storage.set(LAST_BACKGROUND_FLUSH_KEY, now.toString());
-        console.log(`[LocationTracking] Background flush success: ${result.inserted} synced`);
+        const result = await syncUnsyncedToConvex(state.organizationId);
+        if (result.success) {
+          await storage.set(LAST_BACKGROUND_FLUSH_KEY, now.toString());
+        }
       } catch (flushError) {
-        // Non-fatal: buffer is preserved in AsyncStorage for next attempt or foreground flush
-        console.warn('[LocationTracking] Background flush failed (will retry):', flushError);
+        const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
+        console.warn(`[LocationTracking] Background sync failed (SQLite retains data): ${errMsg}`);
       }
     }
   } catch (err) {
@@ -255,7 +233,6 @@ export async function startLocationTracking(params: {
       console.warn('[LocationTracking] Running in Expo Go - background location not supported');
       console.warn('[LocationTracking] Please use a development build for background tracking');
       
-      // Still save state and capture initial location for testing
       const state: TrackingState = {
         isActive: true,
         driverId: params.driverId as string,
@@ -265,7 +242,6 @@ export async function startLocationTracking(params: {
         startedAt: Date.now(),
       };
       await storage.set(TRACKING_STATE_KEY, JSON.stringify(state));
-      await storage.set(LOCATION_BUFFER_KEY, JSON.stringify([]));
       
       // Capture initial location
       await captureCurrentLocation(state);
@@ -315,9 +291,6 @@ export async function startLocationTracking(params: {
       startedAt: Date.now(),
     };
     await storage.set(TRACKING_STATE_KEY, JSON.stringify(state));
-
-    // Clear any existing buffer
-    await storage.set(LOCATION_BUFFER_KEY, JSON.stringify([]));
 
     // Check if task is already registered
     const isTaskDefined = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
@@ -397,13 +370,18 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
     stopSyncInterval();
     await stopForegroundPolling();
 
-    // Flush remaining buffer before stopping
+    // Final sync attempt — any failures are safe, SQLite retains unsynced rows
     const state = await getTrackingState();
     if (state?.isActive) {
-      await flushLocationBuffer(state.organizationId);
+      try {
+        await syncUnsyncedToConvex(state.organizationId);
+      } catch (err) {
+        const unsyncedRemaining = await getUnsyncedCount();
+        console.warn(`[LocationTracking] Final sync incomplete, ${unsyncedRemaining} points retained in SQLite for later upload`);
+      }
     }
 
-    // Clear tracking state
+    // Clear tracking state (but NOT the SQLite data — it persists for re-upload)
     await storage.set(TRACKING_STATE_KEY, JSON.stringify({ isActive: false }));
 
     // Stop background updates if registered (only in non-Expo Go)
@@ -414,8 +392,15 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
       }
     }
 
-    // Clear buffer
-    await storage.delete(LOCATION_BUFFER_KEY);
+    // Clean up old synced data (keep 7 days for debugging)
+    try {
+      const cleaned = await deleteOldSyncedLocations();
+      if (cleaned > 0) {
+        console.log(`[LocationTracking] Cleaned ${cleaned} old synced records from SQLite`);
+      }
+    } catch {
+      // Non-critical
+    }
 
     console.log('[LocationTracking] Stopped successfully');
     return { success: true, message: 'Location tracking stopped' };
@@ -448,28 +433,25 @@ export async function isTracking(): Promise<boolean> {
 }
 
 /**
- * Get buffered location count (for debugging)
+ * Get count of unsynced locations in SQLite
  */
 export async function getBufferedLocationCount(): Promise<number> {
   try {
-    const bufferJson = await storage.getString(LOCATION_BUFFER_KEY);
-    if (!bufferJson) return 0;
-    const buffer: BufferedLocation[] = JSON.parse(bufferJson);
-    return buffer.length;
+    return await getUnsyncedCount();
   } catch {
     return 0;
   }
 }
 
 /**
- * Force flush buffer to Convex (useful for testing or manual sync)
+ * Force sync all unsynced points to Convex
  */
 export async function forceFlush(): Promise<{ success: boolean; synced: number }> {
   const state = await getTrackingState();
   if (!state?.organizationId) {
     return { success: false, synced: 0 };
   }
-  return await flushLocationBuffer(state.organizationId);
+  return await syncUnsyncedToConvex(state.organizationId);
 }
 
 /**
@@ -533,11 +515,11 @@ export async function resumeTracking(): Promise<{
       startForegroundPolling(state.organizationId);
     }
 
-    // Flush any buffered locations from before restart
-    const bufferedCount = await getBufferedLocationCount();
-    if (bufferedCount > 0) {
-      console.log(`[LocationTracking] Flushing ${bufferedCount} buffered locations`);
-      await flushLocationBuffer(state.organizationId);
+    // Sync any unsynced locations from SQLite (survived app restart)
+    const unsyncedCount = await getUnsyncedCount();
+    if (unsyncedCount > 0) {
+      console.log(`[LocationTracking] Found ${unsyncedCount} unsynced locations in SQLite, syncing...`);
+      await syncUnsyncedToConvex(state.organizationId);
     }
 
     console.log('[LocationTracking] Tracking resumed successfully');
@@ -564,9 +546,12 @@ function startSyncInterval(organizationId: string) {
     clearInterval(syncIntervalId);
   }
 
-  // Sync to server every 2 minutes
   syncIntervalId = setInterval(async () => {
-    await flushLocationBuffer(organizationId);
+    try {
+      await syncUnsyncedToConvex(organizationId);
+    } catch (err) {
+      console.warn('[LocationTracking] Periodic sync failed (will retry):', err);
+    }
   }, SYNC_INTERVAL_MS);
 
   console.log('[LocationTracking] Sync interval started (every 2 min)');
@@ -612,13 +597,11 @@ async function startForegroundPolling(organizationId: string) {
             return;
           }
 
-          // Filter: Reject inaccurate readings (> 50m accuracy)
           if (location.coords.accuracy && location.coords.accuracy > MAX_ACCURACY_METERS) {
             console.log(`[LocationTracking] Watch: rejected (accuracy ${location.coords.accuracy?.toFixed(0)}m)`);
             return;
           }
 
-          // Filter: Skip if too close to last location (< 20m)
           if (lastForegroundLocation) {
             const distance = calculateDistance(
               lastForegroundLocation.latitude,
@@ -627,46 +610,40 @@ async function startForegroundPolling(organizationId: string) {
               location.coords.longitude
             );
             if (distance < MIN_DISTANCE_BETWEEN_POINTS) {
-              return; // Silent skip for nearby points
+              return;
             }
           }
 
-          // Filter: Skip if too recent (< 30 seconds since last save)
           const now = Date.now();
           if (lastForegroundLocation && now - lastForegroundLocation.time < 30000) {
             return;
           }
 
-          // Add to buffer
-          const bufferJson = await storage.getString(LOCATION_BUFFER_KEY);
-          const buffer: BufferedLocation[] = bufferJson ? JSON.parse(bufferJson) : [];
-
-          buffer.push({
+          // Write to SQLite (durable)
+          await insertLocation({
             driverId: state.driverId,
             loadId: state.loadId,
+            organizationId: state.organizationId,
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
             accuracy: location.coords.accuracy,
             speed: location.coords.speed,
             heading: location.coords.heading,
-            trackingType: state.trackingType,
             recordedAt: location.timestamp,
           });
 
-          await storage.set(LOCATION_BUFFER_KEY, JSON.stringify(buffer));
-          
-          // Update last location
           lastForegroundLocation = {
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
             time: now,
           };
 
-          console.log(`[LocationTracking] Watch: captured (accuracy ${location.coords.accuracy?.toFixed(0)}m, speed ${((location.coords.speed || 0) * 2.237).toFixed(0)}mph)`);
+          console.log(`[LocationTracking] Watch: saved to SQLite (accuracy ${location.coords.accuracy?.toFixed(0)}m, speed ${((location.coords.speed || 0) * 2.237).toFixed(0)}mph)`);
 
-          // Flush to server when we have a few points
-          if (buffer.length >= 3) {
-            await flushLocationBuffer(organizationId);
+          // Sync to Convex when we have a few unsynced points
+          const unsyncedCount = await getUnsyncedCount();
+          if (unsyncedCount >= 3) {
+            await syncUnsyncedToConvex(organizationId);
           }
         } catch (error) {
           console.error('[LocationTracking] Watch callback error:', error);
@@ -698,49 +675,45 @@ async function captureCurrentLocation(state: TrackingState) {
       accuracy: Location.Accuracy.High,
     });
 
-    const bufferJson = await storage.getString(LOCATION_BUFFER_KEY);
-    const buffer: BufferedLocation[] = bufferJson ? JSON.parse(bufferJson) : [];
-
-    buffer.push({
+    await insertLocation({
       driverId: state.driverId,
       loadId: state.loadId,
+      organizationId: state.organizationId,
       latitude: location.coords.latitude,
       longitude: location.coords.longitude,
       accuracy: location.coords.accuracy,
       speed: location.coords.speed,
       heading: location.coords.heading,
-      trackingType: state.trackingType,
       recordedAt: location.timestamp,
     });
 
-    await storage.set(LOCATION_BUFFER_KEY, JSON.stringify(buffer));
-    console.log('[LocationTracking] Captured initial location');
+    console.log('[LocationTracking] Captured initial location to SQLite');
   } catch (error) {
     console.error('[LocationTracking] Failed to capture initial location:', error);
   }
 }
 
 /**
- * Flush buffered locations to Convex
+ * Sync unsynced GPS points from SQLite to Convex.
+ * Reads unsynced rows, uploads in batches, marks each batch as synced.
+ * On auth failure, retries once after a delay. Unsynced rows are never
+ * deleted — they persist in SQLite for future retry.
  */
-async function flushLocationBuffer(
-  organizationId: string
+const SYNC_BATCH_SIZE = 50;
+
+async function syncUnsyncedToConvex(
+  organizationId: string,
+  isRetry = false
 ): Promise<{ success: boolean; synced: number }> {
   try {
-    const bufferJson = await storage.getString(LOCATION_BUFFER_KEY);
-    if (!bufferJson) {
+    const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
+    if (unsynced.length === 0) {
       return { success: true, synced: 0 };
     }
 
-    const buffer: BufferedLocation[] = JSON.parse(bufferJson);
-    if (buffer.length === 0) {
-      return { success: true, synced: 0 };
-    }
+    console.log(`[LocationTracking] Syncing ${unsynced.length} unsynced points to Convex...${isRetry ? ' (retry)' : ''}`);
 
-    console.log(`[LocationTracking] Flushing ${buffer.length} locations to Convex...`);
-
-    // Transform buffer to Convex format
-    const locations = buffer.map((loc) => ({
+    const locations = unsynced.map((loc) => ({
       driverId: loc.driverId as Id<'drivers'>,
       loadId: loc.loadId as Id<'loadInformation'>,
       latitude: loc.latitude,
@@ -752,23 +725,44 @@ async function flushLocationBuffer(
       recordedAt: loc.recordedAt,
     }));
 
-    // Send to Convex
     const result = await convex.mutation(api.driverLocations.batchInsertLocations, {
       locations,
       organizationId,
     });
 
-    // Clear buffer on success
-    await storage.set(LOCATION_BUFFER_KEY, JSON.stringify([]));
-    console.log(`[LocationTracking] Synced ${result.inserted} locations`);
+    // Mark these specific rows as synced in SQLite
+    const syncedIds = unsynced.map((r) => r.id);
+    await markAsSynced(syncedIds);
+
+    console.log(`[LocationTracking] Synced ${result.inserted} locations, marked ${syncedIds.length} rows`);
+
+    // If there are more unsynced points, schedule another batch
+    const remaining = await getUnsyncedCount();
+    if (remaining > 0) {
+      console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
+      const nextResult = await syncUnsyncedToConvex(organizationId);
+      return { success: true, synced: result.inserted + nextResult.synced };
+    }
 
     return { success: true, synced: result.inserted };
   } catch (error) {
-    console.error('[LocationTracking] Flush failed:', error);
-    // Keep buffer for retry
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    const isAuthError = errorMsg.includes('Not authenticated') || errorMsg.includes('auth');
+
+    if (isAuthError && !isRetry) {
+      console.warn('[LocationTracking] Sync auth failed, retrying in 3s... (SQLite data safe)');
+      await new Promise((r) => setTimeout(r, 3000));
+      return syncUnsyncedToConvex(organizationId, true);
+    }
+
+    const remaining = await getUnsyncedCount();
+    console.error(`[LocationTracking] Sync failed${isRetry ? ' (retry)' : ''}: ${errorMsg} — ${remaining} points retained in SQLite`);
     return { success: false, synced: 0 };
   }
 }
+
+// Export for use by the app layout's foreground flush
+export { syncUnsyncedToConvex };
 
 // ============================================
 // UTILITY FUNCTIONS

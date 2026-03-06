@@ -45,6 +45,7 @@
     "expo-notifications": "^0.32.16",
     "expo-router": "~6.0.23",
     "expo-secure-store": "~15.0.8",
+    "expo-sqlite": "^55.0.10",
     "expo-status-bar": "~3.0.9",
     "expo-task-manager": "~14.0.9",
     "expo-updates": "~29.0.16",

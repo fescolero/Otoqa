@@ -1,7 +1,7 @@
 'use client';
 
-import { useRef, useEffect, useCallback } from 'react';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { useRef, useEffect, useCallback, useReducer, useState } from 'react';
+import { Virtualizer, observeElementRect, observeElementOffset, elementScroll } from '@tanstack/virtual-core';
 import { Id } from '@/convex/_generated/dataModel';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -104,12 +104,28 @@ export function VirtualizedLoadsTable({
   isLoadingMore = false,
 }: VirtualizedLoadsTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const rerender = useReducer(() => ({}), {})[1];
 
-  const rowVirtualizer = useVirtualizer({
+  const options = {
     count: loads.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 48, // Row height
-    overscan: 10, // Number of items to render outside viewport
+    estimateSize: () => 48,
+    overscan: 10,
+    observeElementRect,
+    observeElementOffset,
+    scrollToFn: elementScroll,
+    onChange: () => { rerender(); },
+  };
+
+  const [rowVirtualizer] = useState(() => new Virtualizer(options));
+  rowVirtualizer.setOptions(options);
+
+  useEffect(() => {
+    return rowVirtualizer._didMount();
+  }, []);
+
+  useEffect(() => {
+    return rowVirtualizer._willUpdate();
   });
 
   const headerCells = (
