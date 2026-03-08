@@ -696,11 +696,14 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
                 <label className="text-sm font-medium text-muted-foreground">Next Billing Date</label>
                 <p className="text-base font-medium mt-1">
                   {orgSettings?.nextBillingDate
-                    ? new Date(orgSettings.nextBillingDate).toLocaleDateString('en-US', {
-                        year: 'numeric',
-                        month: 'long',
-                        day: 'numeric',
-                      })
+                    ? (() => {
+                        const m = orgSettings.nextBillingDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+                        if (m) {
+                          const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+                          return `${months[parseInt(m[2],10)-1]} ${parseInt(m[3],10)}, ${m[1]}`;
+                        }
+                        return new Date(orgSettings.nextBillingDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+                      })()
                     : 'January 15, 2025'}
                 </p>
               </div>

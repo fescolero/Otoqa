@@ -59,30 +59,17 @@ export default function DriverDetailScreen() {
     });
   };
 
-  // Format date for display
   const formatDate = (dateString?: string) => {
-    // #region agent log
-    console.log('[DEBUG] formatDate called with:', dateString, 'type:', typeof dateString);
-    // #endregion
     if (!dateString) return 'Not provided';
+    const m = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) {
+      const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      return `${months[parseInt(m[2],10)-1]} ${parseInt(m[3],10)}, ${m[1]}`;
+    }
     try {
       const date = new Date(dateString);
-      // Check if date is valid (new Date() doesn't throw for invalid dates)
-      if (isNaN(date.getTime())) {
-        // #region agent log
-        console.log('[DEBUG] Invalid date detected for:', dateString);
-        // #endregion
-        return 'Not provided';
-      }
-      const formatted = date.toLocaleDateString('en-US', {
-        month: 'long',
-        day: 'numeric',
-        year: 'numeric',
-      });
-      // #region agent log
-      console.log('[DEBUG] Date formatted:', dateString, '->', formatted);
-      // #endregion
-      return formatted;
+      if (isNaN(date.getTime())) return 'Not provided';
+      return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
     } catch {
       return 'Not provided';
     }

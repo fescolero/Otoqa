@@ -256,7 +256,11 @@ export function AssignedLoadsTable({
           <span className="text-sm text-muted-foreground">
             {load.firstStopDate
               ? formatDateOnly(load.firstStopDate).display
-              : formatDateOnly(new Date(load.createdAt).toISOString()).display}
+              : (() => {
+                  const d = new Date(load.createdAt);
+                  const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                  return formatDateOnly(dateStr).display;
+                })()}
           </span>
         );
       case 'carrierRate':

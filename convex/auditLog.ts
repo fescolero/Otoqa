@@ -123,10 +123,11 @@ export const getRecentActivity = query({
   args: {
     organizationId: v.string(),
     hours: v.optional(v.number()),
+    nowMs: v.number(),
   },
   handler: async (ctx, args) => {
     const hoursAgo = args.hours || 24;
-    const cutoffTime = Date.now() - hoursAgo * 60 * 60 * 1000;
+    const cutoffTime = args.nowMs - hoursAgo * 60 * 60 * 1000;
 
     const logs = await ctx.db
       .query('auditLog')

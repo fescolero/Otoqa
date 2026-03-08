@@ -102,11 +102,11 @@ export function FixLaneModal({ group, organizationId, userId, onClose }: FixLane
       const endDate = new Date(group.lastLoadDate);
       
       startDate.setDate(1);
-      setContractStartDate(startDate.toISOString().split('T')[0]);
+      setContractStartDate(`${startDate.getFullYear()}-${String(startDate.getMonth()+1).padStart(2,'0')}-${String(startDate.getDate()).padStart(2,'0')}`);
       
       endDate.setFullYear(endDate.getFullYear() + 1);
       endDate.setMonth(endDate.getMonth() + 1, 0);
-      setContractEndDate(endDate.toISOString().split('T')[0]);
+      setContractEndDate(`${endDate.getFullYear()}-${String(endDate.getMonth()+1).padStart(2,'0')}-${String(endDate.getDate()).padStart(2,'0')}`);
     }
   }, [group]);
 

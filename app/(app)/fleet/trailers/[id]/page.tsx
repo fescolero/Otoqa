@@ -71,8 +71,12 @@ export default function TrailerDetailsPage({ params }: { params: Promise<{ id: s
   const getExpirationStatus = (expiration: string | undefined) => {
     if (!expiration) return { text: 'Not Set', variant: 'secondary' as const, days: null };
 
-    const expirationDate = new Date(expiration);
+    const m = expiration.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    const expirationDate = m
+      ? new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]))
+      : new Date(expiration);
     const now = new Date();
+    now.setHours(0, 0, 0, 0);
     const daysUntilExpiration = Math.ceil((expirationDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
 
     if (daysUntilExpiration < 0) {
@@ -303,7 +307,7 @@ export default function TrailerDetailsPage({ params }: { params: Promise<{ id: s
                           }
                         >
                           {trailer.registrationExpiration
-                            ? new Date(trailer.registrationExpiration).toLocaleDateString()
+                            ? (() => { const m = trailer.registrationExpiration.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${parseInt(m[2])}/${parseInt(m[3])}/${m[1]}` : trailer.registrationExpiration; })()
                             : 'Not Set'}
                         </dd>
                       </div>
@@ -356,7 +360,7 @@ export default function TrailerDetailsPage({ params }: { params: Promise<{ id: s
                           }
                         >
                           {trailer.insuranceExpiration
-                            ? new Date(trailer.insuranceExpiration).toLocaleDateString()
+                            ? (() => { const m = trailer.insuranceExpiration.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${parseInt(m[2])}/${parseInt(m[3])}/${m[1]}` : trailer.insuranceExpiration; })()
                             : 'Not Set'}
                         </dd>
                       </div>
@@ -417,7 +421,7 @@ export default function TrailerDetailsPage({ params }: { params: Promise<{ id: s
                     <div>
                       <dt className="text-sm font-medium text-muted-foreground">Purchase Date</dt>
                       <dd className="mt-1 text-sm">
-                        {trailer.purchaseDate ? new Date(trailer.purchaseDate).toLocaleDateString() : 'N/A'}
+                        {trailer.purchaseDate ? (() => { const m = trailer.purchaseDate.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${parseInt(m[2])}/${parseInt(m[3])}/${m[1]}` : trailer.purchaseDate; })() : 'N/A'}
                       </dd>
                     </div>
                     <div>

@@ -217,6 +217,7 @@ export function HelicopterView({
   // Convex reactive query - auto-updates when data changes
   const driverLocations = useAuthQuery(api.driverLocations.getActiveDriverLocations, {
     organizationId,
+    nowMs: now,
   });
 
   useEffect(() => {

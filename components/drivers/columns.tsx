@@ -13,16 +13,13 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { MoreHorizontal, ArrowUpDown } from 'lucide-react';
 import { Doc } from '@/convex/_generated/dataModel';
+import { formatCalendarDate } from '@/lib/format-date-timezone';
 
 export type Driver = Doc<'drivers'>;
 
 const formatDate = (dateString?: string) => {
   if (!dateString) return 'N/A';
-  return new Date(dateString).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
+  return formatCalendarDate(dateString) || 'N/A';
 };
 
 export const columns: ColumnDef<Driver>[] = [

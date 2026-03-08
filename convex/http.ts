@@ -95,7 +95,7 @@ async function authenticateRequest(
   const keyHash = await sha256(rawKey);
 
   // Look up key
-  const keyData = await ctx.runQuery(internal.externalTrackingAuth.validateKeyByHash, { keyHash });
+  const keyData = await ctx.runQuery(internal.externalTrackingAuth.validateKeyByHash, { keyHash, nowMs: Date.now() });
   if (!keyData) {
     return errorResponse('UNAUTHORIZED', 'Invalid or expired API key', 401, requestId);
   }

@@ -9,6 +9,63 @@ export interface FormattedDateWithTimezone {
   timezone: string;
 }
 
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Timezone-safe formatter for date-only strings (YYYY-MM-DD).
+ *
+ * NEVER pass a YYYY-MM-DD string through `new Date()` and then use
+ * `.toLocaleDateString()` or date-fns `format()` — JavaScript parses
+ * date-only strings as UTC midnight, so in US timezones the displayed
+ * date shifts backward by one day.
+ *
+ * This function parses the string components directly, avoiding any
+ * Date object timezone conversion.
+ */
+export function formatCalendarDate(
+  dateStr: string | undefined | null,
+  options?: { format?: 'short' | 'long' | 'numeric' }
+): string {
+  if (!dateStr) return '';
+
+  let dateOnly = dateStr.trim();
+  if (dateOnly.includes('T')) {
+    dateOnly = dateOnly.split('T')[0];
+  }
+
+  const match = dateOnly.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return dateStr;
+
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+
+  const fmt = options?.format ?? 'long';
+
+  if (fmt === 'numeric') {
+    return `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${year}`;
+  }
+
+  const monthName = MONTH_NAMES[month - 1];
+  if (fmt === 'short') {
+    return `${monthName} ${day}`;
+  }
+  return `${monthName} ${day}, ${year}`;
+}
+
+/**
+ * Timezone-safe conversion of a local Date picker timestamp to YYYY-MM-DD.
+ * Uses the local date components (not UTC) so the calendar date the user
+ * selected is preserved regardless of timezone.
+ */
+export function timestampToDateString(timestamp: number): string {
+  const d = new Date(timestamp);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 /**
  * Extract timezone abbreviation from ISO string offset
  * e.g., "2025-11-29T06:36:00-08:00" -> "PST"

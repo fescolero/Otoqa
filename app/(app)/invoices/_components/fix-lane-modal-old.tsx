@@ -99,12 +99,11 @@ export function FixLaneModal({ group, organizationId, userId, onClose }: FixLane
       
       // Set start date to first day of month
       startDate.setDate(1);
-      setContractStartDate(startDate.toISOString().split('T')[0]);
-      
-      // Set end date to last day of current month + 1 year
+      setContractStartDate(`${startDate.getFullYear()}-${String(startDate.getMonth()+1).padStart(2,'0')}-${String(startDate.getDate()).padStart(2,'0')}`);
+
       endDate.setFullYear(endDate.getFullYear() + 1);
       endDate.setMonth(endDate.getMonth() + 1, 0);
-      setContractEndDate(endDate.toISOString().split('T')[0]);
+      setContractEndDate(`${endDate.getFullYear()}-${String(endDate.getMonth()+1).padStart(2,'0')}-${String(endDate.getDate()).padStart(2,'0')}`);
     }
   }, [group]);
 

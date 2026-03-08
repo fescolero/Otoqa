@@ -20,11 +20,14 @@ interface DriverListProps {
   onDeactivateDrivers?: (driverIds: string[]) => Promise<void>;
 }
 
-// Helper to get date status
+// Helper to get date status — parses YYYY-MM-DD as local to avoid timezone shift
 const getDateStatus = (dateString?: string): 'expired' | 'expiring' | 'warning' | 'valid' => {
   if (!dateString) return 'valid';
   
-  const date = new Date(dateString);
+  const m = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const date = m
+    ? new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]))
+    : new Date(dateString);
   date.setHours(0, 0, 0, 0);
   
   const today = new Date();
@@ -48,9 +51,14 @@ export function DriverList({ data, organizationId, onDeactivateDrivers }: Driver
     search: '',
   });
 
+  const todayDateStr = React.useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }, []);
+
   const driverCounts = useQuery(
     api.drivers.countDriversByStatus,
-    isAuthenticated ? { organizationId } : 'skip',
+    isAuthenticated ? { organizationId, todayDateStr } : 'skip',
   );
 
   const driversWithSensitive = useQuery(

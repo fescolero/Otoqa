@@ -9,6 +9,7 @@
  */
 
 import type * as _helpers_cronUtils from "../_helpers/cronUtils.js";
+import type * as _helpers_dateUtils from "../_helpers/dateUtils.js";
 import type * as _helpers_timeUtils from "../_helpers/timeUtils.js";
 import type * as analytics from "../analytics.js";
 import type * as auditLog from "../auditLog.js";
@@ -101,6 +102,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "_helpers/cronUtils": typeof _helpers_cronUtils;
+  "_helpers/dateUtils": typeof _helpers_dateUtils;
   "_helpers/timeUtils": typeof _helpers_timeUtils;
   analytics: typeof analytics;
   auditLog: typeof auditLog;

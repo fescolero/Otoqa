@@ -631,7 +631,7 @@ export default function DriversScreen() {
               setDateOfBirth(date);
               setNewDriver(prev => ({
                 ...prev,
-                dateOfBirth: date.toISOString().split('T')[0],
+                dateOfBirth: `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`,
               }));
             }}
             value={dateOfBirth}
@@ -648,7 +648,7 @@ export default function DriversScreen() {
               setLicenseExpirationDate(date);
               setNewDriver(prev => ({
                 ...prev,
-                licenseExpiration: date.toISOString().split('T')[0],
+                licenseExpiration: `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`,
               }));
             }}
             value={licenseExpirationDate}

@@ -107,8 +107,14 @@ export function ScheduledLoadCard({ load, tripNumber, onPress }: ScheduledLoadCa
   const getMultiDayDate = () => {
     if (!load.lastDelivery?.windowBeginDate) return null;
     try {
-      const date = new Date(load.lastDelivery.windowBeginDate);
-      return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      const raw = load.lastDelivery.windowBeginDate;
+      const dateOnly = raw.includes('T') ? raw.split('T')[0] : raw.trim();
+      const m = dateOnly.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (m) {
+        const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+        return `${months[parseInt(m[2], 10) - 1]} ${parseInt(m[3], 10)}, ${m[1]}`;
+      }
+      return new Date(raw).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
     } catch {
       return null;
     }
@@ -142,11 +148,19 @@ export function ScheduledLoadCard({ load, tripNumber, onPress }: ScheduledLoadCa
   const formatExpectedDelivery = () => {
     if (!load.lastDelivery?.windowBeginDate) return null;
     try {
-      const date = new Date(load.lastDelivery.windowBeginDate);
+      const raw = load.lastDelivery.windowBeginDate;
       const time = load.lastDelivery?.windowEndTime 
         ? formatTime(load.lastDelivery.windowEndTime) 
-        : formatTime(load.lastDelivery.windowBeginDate);
-      const dateStr = date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+        : formatTime(raw);
+      const dateOnly = raw.includes('T') ? raw.split('T')[0] : raw.trim();
+      const m = dateOnly.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      let dateStr: string;
+      if (m) {
+        const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+        dateStr = `${months[parseInt(m[2], 10) - 1]} ${parseInt(m[3], 10)}`;
+      } else {
+        dateStr = new Date(raw).toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+      }
       return `${dateStr}, ${time}`;
     } catch {
       return null;

@@ -471,7 +471,7 @@ export default function EditDriverScreen() {
             setDateOfBirth(date);
             setFormData(prev => ({
               ...prev,
-              dateOfBirth: date.toISOString().split('T')[0],
+              dateOfBirth: `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`,
             }));
           }}
           value={dateOfBirth}
@@ -488,7 +488,7 @@ export default function EditDriverScreen() {
             setLicenseExpirationDate(date);
             setFormData(prev => ({
               ...prev,
-              licenseExpiration: date.toISOString().split('T')[0],
+              licenseExpiration: `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`,
             }));
           }}
           value={licenseExpirationDate}

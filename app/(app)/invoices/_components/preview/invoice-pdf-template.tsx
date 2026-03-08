@@ -265,6 +265,11 @@ const formatCurrency = (amount: number, currency: string = 'USD') => {
 
 const formatDate = (dateString?: string) => {
   if (!dateString) return '-';
+  const m = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${months[parseInt(m[2], 10) - 1]} ${parseInt(m[3], 10)}, ${m[1]}`;
+  }
   return new Date(dateString).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',

@@ -19,6 +19,10 @@ export interface DateInputProps extends Omit<React.InputHTMLAttributes<HTMLInput
 // Helper functions for date parsing and formatting
 const parseISODate = (dateStr: string): Date | null => {
   if (!dateStr) return null;
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+  }
   const date = new Date(dateStr);
   return isNaN(date.getTime()) ? null : date;
 };

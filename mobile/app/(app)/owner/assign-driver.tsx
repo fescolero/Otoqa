@@ -65,9 +65,13 @@ export default function AssignDriverScreen() {
   // Assign driver mutation
   const assignDriverMutation = useMutation(api.loadCarrierAssignments.assignDriver);
 
-  // Helper to format date strings
   const formatDate = (dateStr: string | undefined) => {
     if (!dateStr) return 'TBD';
+    const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) {
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return `${months[parseInt(m[2],10)-1]} ${parseInt(m[3],10)}`;
+    }
     try {
       const date = new Date(dateStr);
       return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });

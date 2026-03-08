@@ -11,10 +11,22 @@ export function formatCurrency(amount: number, currency: string = 'USD') {
 }
 
 /**
- * Formats a date string (ISO) to a readable format
+ * Formats a date string (YYYY-MM-DD or ISO) to a readable format.
+ * Parses date-only strings by component to avoid timezone shift.
  */
 export function formatDate(dateString?: string) {
   if (!dateString) return '';
+
+  const dateOnly = dateString.includes('T') ? dateString.split('T')[0] : dateString.trim();
+  const match = dateOnly.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const month = parseInt(match[2], 10);
+    const day = parseInt(match[3], 10);
+    const year = parseInt(match[1], 10);
+    return `${months[month - 1]} ${day}, ${year}`;
+  }
+
   return new Date(dateString).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',
@@ -23,7 +35,8 @@ export function formatDate(dateString?: string) {
 }
 
 /**
- * Formats a Unix timestamp to a readable format
+ * Formats a Unix timestamp (ms) to a readable date.
+ * Uses local time components since timestamps represent real instants.
  */
 export function formatTimestamp(timestamp?: number) {
   if (timestamp == null) return '';

@@ -305,14 +305,14 @@ export const getLineItems = query({
       
       lineItems.push({
         _id: 'dynamic-freight' as any,
-        _creationTime: Date.now(),
+        _creationTime: 0,
         invoiceId: args.invoiceId,
         type: 'FREIGHT' as const,
         description,
         quantity: 1,
         rate: amounts.subtotal,
         amount: amounts.subtotal,
-        createdAt: Date.now(),
+        createdAt: 0,
       });
     }
 
@@ -320,14 +320,14 @@ export const getLineItems = query({
     if (amounts.fuelSurcharge > 0 && contractLane) {
       lineItems.push({
         _id: 'dynamic-fuel' as any,
-        _creationTime: Date.now(),
+        _creationTime: 0,
         invoiceId: args.invoiceId,
         type: 'FUEL' as const,
         description: `Fuel Surcharge (${contractLane.fuelSurchargeType || 'N/A'})`,
         quantity: 1,
         rate: amounts.fuelSurcharge,
         amount: amounts.fuelSurcharge,
-        createdAt: Date.now(),
+        createdAt: 0,
       });
     }
 
@@ -338,14 +338,14 @@ export const getLineItems = query({
       
       lineItems.push({
         _id: 'dynamic-accessorial' as any,
-        _creationTime: Date.now(),
+        _creationTime: 0,
         invoiceId: args.invoiceId,
         type: 'ACCESSORIAL' as const,
         description: `Stop-off charges (${extraStops} extra stops)`,
         quantity: extraStops,
         rate: contractLane.stopOffRate || 0,
         amount: amounts.accessorialsTotal,
-        createdAt: Date.now(),
+        createdAt: 0,
       });
     }
 

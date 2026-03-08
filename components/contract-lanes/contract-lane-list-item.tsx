@@ -20,6 +20,11 @@ interface ContractLaneListItemProps {
 }
 
 function formatDate(dateStr: string): string {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${months[parseInt(m[2], 10) - 1]} ${String(parseInt(m[3], 10)).padStart(2, '0')}, ${m[1]}`;
+  }
   try {
     return format(parseISO(dateStr), 'MMM dd, yyyy');
   } catch {

@@ -85,9 +85,14 @@ function getExpirationStatusColor(status: string): string {
   }
 }
 
-// Format date
+// Format date — parses YYYY-MM-DD by component to avoid timezone shift
 function formatDate(dateString?: string): string {
   if (!dateString) return 'N/A';
+  const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${months[parseInt(match[2], 10) - 1]} ${String(parseInt(match[3], 10)).padStart(2, '0')}, ${match[1]}`;
+  }
   try {
     return format(new Date(dateString), 'MMM dd, yyyy');
   } catch {

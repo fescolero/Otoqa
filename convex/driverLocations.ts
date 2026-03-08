@@ -92,7 +92,7 @@ export const batchInsertLocations = mutation({
  * Returns drivers who have reported location in the last 30 minutes
  */
 export const getActiveDriverLocations = query({
-  args: { organizationId: v.string() },
+  args: { organizationId: v.string(), nowMs: v.number() },
   returns: v.array(
     v.object({
       driverId: v.id('drivers'),
@@ -111,7 +111,7 @@ export const getActiveDriverLocations = query({
   ),
   handler: async (ctx, args) => {
     // Get locations from last 30 minutes (active tracking)
-    const cutoff = Date.now() - 30 * 60 * 1000;
+    const cutoff = args.nowMs - 30 * 60 * 1000;
 
     const recentLocations = await ctx.db
       .query('driverLocations')
@@ -219,7 +219,8 @@ export const getRouteHistoryForLoad = query({
 export const getRecentRouteForDriver = query({
   args: {
     driverId: v.id('drivers'),
-    hoursBack: v.optional(v.number()), // Default 24 hours
+    hoursBack: v.optional(v.number()),
+    nowMs: v.number(),
   },
   returns: v.array(
     v.object({
@@ -231,7 +232,7 @@ export const getRecentRouteForDriver = query({
   ),
   handler: async (ctx, args) => {
     const hours = args.hoursBack ?? 24;
-    const cutoff = Date.now() - hours * 60 * 60 * 1000;
+    const cutoff = args.nowMs - hours * 60 * 60 * 1000;
 
     const locations = await ctx.db
       .query('driverLocations')
@@ -254,7 +255,7 @@ export const getRecentRouteForDriver = query({
  * Check if a driver is currently being tracked
  */
 export const isDriverBeingTracked = query({
-  args: { driverId: v.id('drivers') },
+  args: { driverId: v.id('drivers'), nowMs: v.number() },
   returns: v.object({
     isTracking: v.boolean(),
     lastLocation: v.optional(
@@ -268,7 +269,7 @@ export const isDriverBeingTracked = query({
   }),
   handler: async (ctx, args) => {
     // Check for location in last 10 minutes
-    const cutoff = Date.now() - 10 * 60 * 1000;
+    const cutoff = args.nowMs - 10 * 60 * 1000;
 
     const recentLocation = await ctx.db
       .query('driverLocations')

@@ -59,6 +59,11 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
 
   const formatDate = (dateString?: string) => {
     if (!dateString) return '-';
+    const m = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) {
+      const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      return `${months[parseInt(m[2],10)-1]} ${parseInt(m[3],10)}, ${m[1]}`;
+    }
     const date = new Date(dateString);
     return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   };

@@ -57,6 +57,11 @@ import { toast } from 'sonner';
 
 const formatDate = (dateString?: string) => {
   if (!dateString) return null;
+  const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${months[parseInt(match[2], 10) - 1]} ${parseInt(match[3], 10)}, ${match[1]}`;
+  }
   return new Date(dateString).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',
@@ -67,11 +72,14 @@ const formatDate = (dateString?: string) => {
 const getDateStatus = (dateString?: string) => {
   if (!dateString) return { status: 'none', label: '', color: '' };
 
-  const date = new Date(dateString);
-  date.setHours(0, 0, 0, 0); // Normalize to start of day
+  const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const date = match
+    ? new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]))
+    : new Date(dateString);
+  date.setHours(0, 0, 0, 0);
 
   const today = new Date();
-  today.setHours(0, 0, 0, 0); // Normalize to start of day
+  today.setHours(0, 0, 0, 0);
 
   const diffTime = date.getTime() - today.getTime();
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));

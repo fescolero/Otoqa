@@ -55,37 +55,39 @@ const validatePhone = (phone: string): { error: string | null; suggestion?: stri
   return { error: null };
 };
 
+const dateToLocalYMD = (d: Date): string => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
 const validateDate = (dateStr: string): { valid: boolean; suggestion?: string } => {
   if (!dateStr) return { valid: true };
+
+  const isoFormat = /^\d{4}-\d{2}-\d{2}$/;
+  if (isoFormat.test(dateStr)) {
+    return { valid: true };
+  }
 
   // Try to parse the date
   const date = new Date(dateStr);
   if (!isNaN(date.getTime())) {
-    // Valid date - check if it's already in ISO format
-    const isoFormat = /^\d{4}-\d{2}-\d{2}$/;
-    if (isoFormat.test(dateStr)) {
-      return { valid: true };
-    } else {
-      // Valid date but not ISO format - suggest ISO format
-      return {
-        valid: false,
-        suggestion: date.toISOString().split('T')[0], // YYYY-MM-DD
-      };
-    }
+    return {
+      valid: false,
+      suggestion: dateToLocalYMD(date),
+    };
   }
 
   // Try to extract numbers and create a valid date
   const numbers = dateStr.match(/\d+/g);
   if (numbers && numbers.length === 3) {
-    // Assume MM/DD/YYYY or similar
     const [first, second, third] = numbers;
     let testDate: Date | null = null;
 
-    // Try MM/DD/YYYY
     if (parseInt(first) <= 12) {
       testDate = new Date(parseInt(third), parseInt(first) - 1, parseInt(second));
     }
-    // Try DD/MM/YYYY
     if (!testDate || isNaN(testDate.getTime())) {
       testDate = new Date(parseInt(third), parseInt(second) - 1, parseInt(first));
     }
@@ -93,7 +95,7 @@ const validateDate = (dateStr: string): { valid: boolean; suggestion?: string } 
     if (testDate && !isNaN(testDate.getTime())) {
       return {
         valid: false,
-        suggestion: testDate.toISOString().split('T')[0], // YYYY-MM-DD
+        suggestion: dateToLocalYMD(testDate),
       };
     }
   }
@@ -104,9 +106,10 @@ const validateDate = (dateStr: string): { valid: boolean; suggestion?: string } 
 // Normalize date to ISO 8601 format (YYYY-MM-DD)
 const normalizeDate = (dateStr: string): string => {
   if (!dateStr) return dateStr;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
   const date = new Date(dateStr);
   if (!isNaN(date.getTime())) {
-    return date.toISOString().split('T')[0];
+    return dateToLocalYMD(date);
   }
   return dateStr;
 };

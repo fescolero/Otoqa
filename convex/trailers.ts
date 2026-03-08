@@ -1,24 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
-
-// Helper function to determine expiration status
-const getExpirationStatus = (dateString?: string) => {
-  if (!dateString) return 'unknown';
-  
-  const date = new Date(dateString);
-  date.setHours(0, 0, 0, 0);
-  
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  
-  const diffTime = date.getTime() - today.getTime();
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  
-  if (diffDays < 0) return 'expired';
-  if (diffDays <= 30) return 'expiring';
-  return 'valid';
-};
+import { getExpirationStatus } from './_helpers/dateUtils';
 
 // Count trailers by status for tab badges
 export const countTrailersByStatus = query({
@@ -63,6 +46,7 @@ export const list = query({
   args: {
     organizationId: v.string(),
     includeDeleted: v.optional(v.boolean()),
+    todayDateStr: v.optional(v.string()),
     // Filters
     search: v.optional(v.string()),
     status: v.optional(v.string()),
@@ -72,6 +56,8 @@ export const list = query({
     bodyType: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const todayStr = args.todayDateStr ?? '9999-12-31';
+
     let trailers = await ctx.db
       .query('trailers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
@@ -105,7 +91,7 @@ export const list = query({
     // Apply registration status filter
     if (args.registrationStatus) {
       trailers = trailers.filter((trailer) => {
-        const status = getExpirationStatus(trailer.registrationExpiration);
+        const status = getExpirationStatus(trailer.registrationExpiration, todayStr);
         return status === args.registrationStatus;
       });
     }
@@ -113,7 +99,7 @@ export const list = query({
     // Apply insurance status filter
     if (args.insuranceStatus) {
       trailers = trailers.filter((trailer) => {
-        const status = getExpirationStatus(trailer.insuranceExpiration);
+        const status = getExpirationStatus(trailer.insuranceExpiration, todayStr);
         return status === args.insuranceStatus;
       });
     }

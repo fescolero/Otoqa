@@ -67,13 +67,21 @@ export function VirtualizedCarriersTable({
   const getInsuranceStatus = (expiration?: string | number) => {
     if (!expiration) return { label: "N/A", variant: "secondary" as const };
     
-    // Handle both string (ISO date) and number (timestamp) formats
-    const expirationDate = typeof expiration === 'string' 
-      ? new Date(expiration).getTime() 
-      : expiration;
+    let expirationDate: number;
+    if (typeof expiration === 'string') {
+      const match = expiration.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (match) {
+        expirationDate = Date.UTC(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
+      } else {
+        expirationDate = new Date(expiration).getTime();
+      }
+    } else {
+      expirationDate = expiration;
+    }
     
-    const now = Date.now();
-    const daysUntilExpiration = Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24));
+    const nowUtcMidnight = new Date();
+    const todayUtc = Date.UTC(nowUtcMidnight.getFullYear(), nowUtcMidnight.getMonth(), nowUtcMidnight.getDate());
+    const daysUntilExpiration = Math.ceil((expirationDate - todayUtc) / (1000 * 60 * 60 * 24));
     
     if (daysUntilExpiration < 0) return { label: "Expired", variant: "destructive" as const };
     if (daysUntilExpiration <= 30) return { label: "Expiring", variant: "warning" as const };
@@ -127,6 +135,12 @@ export function VirtualizedCarriersTable({
 
   const formatExpirationDate = (expiration?: string | number) => {
     if (!expiration) return null;
+    if (typeof expiration === 'string') {
+      const match = expiration.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (match) {
+        return `${match[2]}/${match[3]}/${match[1]}`;
+      }
+    }
     const date = typeof expiration === 'string' ? new Date(expiration) : new Date(expiration);
     return format(date, "MM/dd/yyyy");
   };

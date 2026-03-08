@@ -2,30 +2,13 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
-
-// Helper function to check if a date is expiring or expired
-function getDateStatus(dateString?: string): 'expired' | 'expiring' | 'warning' | 'valid' {
-  if (!dateString) return 'valid';
-  
-  const date = new Date(dateString);
-  date.setHours(0, 0, 0, 0);
-  
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  
-  const diffTime = date.getTime() - today.getTime();
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  
-  if (diffDays < 0) return 'expired';
-  if (diffDays <= 30) return 'expiring';
-  if (diffDays <= 60) return 'warning';
-  return 'valid';
-}
+import { getDateStatus } from './_helpers/dateUtils';
 
 // Count drivers by status for tab badges
 export const countDriversByStatus = query({
   args: {
     organizationId: v.string(),
+    todayDateStr: v.string(),
   },
   handler: async (ctx, args) => {
     // Auth: verify caller is authenticated
@@ -66,10 +49,10 @@ export const countDriversByStatus = query({
       }
 
       // Count needs attention (expiring/expired documents)
-      const licenseStatus = getDateStatus(driver.licenseExpiration);
-      const medicalStatus = getDateStatus(driver.medicalExpiration);
-      const badgeStatus = getDateStatus(driver.badgeExpiration);
-      const twicStatus = getDateStatus(driver.twicExpiration);
+      const licenseStatus = getDateStatus(driver.licenseExpiration, args.todayDateStr);
+      const medicalStatus = getDateStatus(driver.medicalExpiration, args.todayDateStr);
+      const badgeStatus = getDateStatus(driver.badgeExpiration, args.todayDateStr);
+      const twicStatus = getDateStatus(driver.twicExpiration, args.todayDateStr);
 
       if (
         licenseStatus === 'expired' ||

@@ -19,7 +19,10 @@ interface DriverListItemProps {
 const getDateStatus = (dateString?: string) => {
   if (!dateString) return null;
 
-  const date = new Date(dateString);
+  const m = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const date = m
+    ? new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]))
+    : new Date(dateString);
   date.setHours(0, 0, 0, 0);
 
   const today = new Date();
@@ -68,6 +71,11 @@ const getDateStatus = (dateString?: string) => {
 
 const formatDate = (dateString?: string) => {
   if (!dateString) return null;
+  const m = dateString.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${months[parseInt(m[2], 10) - 1]} ${parseInt(m[3], 10)}, ${m[1]}`;
+  }
   return new Date(dateString).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',

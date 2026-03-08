@@ -131,7 +131,7 @@ export function DatePicker({
         </Popover>
       </div>
       {/* Hidden input to submit the date value with the form */}
-      <input type="hidden" name={name} value={date ? date.toISOString().split('T')[0] : ''} required={required} />
+      <input type="hidden" name={name} value={date ? `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}` : ''} required={required} />
     </>
   );
 }

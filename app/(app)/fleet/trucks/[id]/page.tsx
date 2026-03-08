@@ -85,8 +85,14 @@ export default function TruckDetailPage({ params }: { params: Promise<{ id: stri
     return colors[status] || 'bg-gray-100 text-gray-800';
   };
 
+  const parseDateStr = (dateStr: string): Date => {
+    const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+    return new Date(dateStr);
+  };
+
   const getDaysAgo = (dateStr: string) => {
-    const date = new Date(dateStr);
+    const date = parseDateStr(dateStr);
     const daysAgo = Math.abs(differenceInDays(new Date(), date));
     return daysAgo;
   };
@@ -100,13 +106,16 @@ export default function TruckDetailPage({ params }: { params: Promise<{ id: stri
       expired: false
     };
     
-    const date = new Date(dateStr);
+    const date = parseDateStr(dateStr);
     const daysUntil = differenceInDays(date, new Date());
     
     if (isPast(date)) {
       const daysAgo = getDaysAgo(dateStr);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      const formatted = m ? `${months[parseInt(m[2],10)-1]} ${parseInt(m[3],10)}, ${m[1]}` : format(date, 'MMM d, yyyy');
       return { 
-        text: `Expired ${format(date, 'MMM d, yyyy')} (${daysAgo} days ago)`, 
+        text: `Expired ${formatted} (${daysAgo} days ago)`, 
         variant: 'destructive' as const, 
         icon: AlertTriangle,
         color: 'text-red-600',
@@ -435,7 +444,7 @@ export default function TruckDetailPage({ params }: { params: Promise<{ id: stri
                     <div>
                       <label className="text-sm font-medium text-muted-foreground">Purchase Date</label>
                       <p className="text-base font-medium mt-1">
-                        {format(new Date(truck.purchaseDate), 'MMM d, yyyy')}
+                        {(() => { const m = truck.purchaseDate.match(/^(\d{4})-(\d{2})-(\d{2})/); const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return m ? `${months[parseInt(m[2],10)-1]} ${parseInt(m[3],10)}, ${m[1]}` : truck.purchaseDate; })()}
                       </p>
                     </div>
                   )}

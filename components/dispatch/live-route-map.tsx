@@ -918,6 +918,7 @@ export function LiveRouteMap({
   // Fetch live driver location if we have a driver
   const liveLocations = useAuthQuery(api.driverLocations.getActiveDriverLocations, {
     organizationId,
+    nowMs: now,
   });
 
   // Find the specific driver's live location

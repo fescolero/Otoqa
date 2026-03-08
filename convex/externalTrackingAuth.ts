@@ -16,7 +16,7 @@ import { internalMutation, internalQuery } from './_generated/server';
  * httpAction hashes the key with Web Crypto, then calls this query.
  */
 export const validateKeyByHash = internalQuery({
-  args: { keyHash: v.string() },
+  args: { keyHash: v.string(), nowMs: v.number() },
   returns: v.union(
     v.object({
       keyId: v.id('partnerApiKeys'),
@@ -40,7 +40,7 @@ export const validateKeyByHash = internalQuery({
 
     if (!key) return null;
     if (key.status !== 'ACTIVE') return null;
-    if (key.expiresAt && key.expiresAt < Date.now()) return null;
+    if (key.expiresAt && key.expiresAt < args.nowMs) return null;
 
     return {
       keyId: key._id,

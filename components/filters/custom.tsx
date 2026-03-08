@@ -52,8 +52,9 @@ function CustomDateRangeInput({ values, onChange }: CustomRendererProps) {
 
   const handleApply = () => {
     if (date?.from) {
-      const fromStr = date.from.toISOString().split('T')[0];
-      const toStr = date.to ? date.to.toISOString().split('T')[0] : fromStr;
+      const toDateStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const fromStr = toDateStr(date.from);
+      const toStr = date.to ? toDateStr(date.to) : fromStr;
       onChange([fromStr, toStr]);
     }
     setIsOpen(false);
@@ -144,8 +145,9 @@ function CustomDateRangeWithPresetsInput({ values, onChange }: CustomRendererPro
 
   const handleApply = () => {
     if (date?.from) {
-      const fromStr = date.from.toISOString().split('T')[0];
-      const toStr = date.to ? date.to.toISOString().split('T')[0] : fromStr;
+      const toDateStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const fromStr = toDateStr(date.from);
+      const toStr = date.to ? toDateStr(date.to) : fromStr;
       onChange([fromStr, toStr]);
     }
     setIsOpen(false);

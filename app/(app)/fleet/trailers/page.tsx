@@ -19,14 +19,20 @@ import { api } from '@/convex/_generated/api';
 import { TrailerList } from '@/components/trailers/trailer-list';
 import { useRouter } from 'next/navigation';
 import { useOrganizationId } from '@/contexts/organization-context';
+import { useMemo } from 'react';
 
 export default function TrailersPage() {
   const { user } = useAuth();
   const router = useRouter();
   const organizationId = useOrganizationId();
 
+  const todayDateStr = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }, []);
+
   // Query trailers from Convex
-  const trailers = useAuthQuery(api.trailers.list, { organizationId });
+  const trailers = useAuthQuery(api.trailers.list, { organizationId, todayDateStr });
   const bulkDeactivateTrailers = useMutation(api.trailers.bulkDeactivate);
 
   // Get user initials for avatar fallback
