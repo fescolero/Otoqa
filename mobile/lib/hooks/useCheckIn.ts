@@ -7,12 +7,26 @@ import { startLocationTracking, stopLocationTracking } from '../location-trackin
 import * as Location from 'expo-location';
 import { useNetworkStatus } from './useNetworkStatus';
 import { usePostHog } from 'posthog-react-native';
+import { trackCheckinOfflineQueued, trackCheckinMutationTimeout } from '../analytics';
 
 // ============================================
 // HOOK: CHECK-IN/OUT AT STOPS
-// Handles both online and offline scenarios
-// Integrates with location tracking for route recording
+// Handles online, weak-signal, and offline scenarios.
+// On good connection: tries mutation with 8s timeout, falls back to queue.
+// On poor/offline: queues immediately.
+// Accepts optional getFreshLocation from useGPSLocation for pre-warmed GPS.
 // ============================================
+
+const MUTATION_TIMEOUT_MS = 8_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Request timed out')), ms)
+    ),
+  ]);
+}
 
 interface CheckInOptions {
   stopId: Id<'loadStops'>;
@@ -20,10 +34,9 @@ interface CheckInOptions {
   loadId?: Id<'loadInformation'>;
   notes?: string;
   photoUri?: string;
-  // For location tracking - determines when to start/stop
-  stopSequence?: number; // Current stop's sequence number (1-based)
-  totalStops?: number; // Total number of stops in the load
-  organizationId?: string; // Required for location tracking
+  stopSequence?: number;
+  totalStops?: number;
+  organizationId?: string;
 }
 
 interface CheckInResult {
@@ -32,68 +45,91 @@ interface CheckInResult {
   queued?: boolean;
 }
 
-export function useCheckIn() {
+type LocationGetter = () => Promise<{ latitude: number; longitude: number }>;
+
+export function useCheckIn(getFreshLocation?: LocationGetter) {
   const checkInMutation = useMutation(api.driverMobile.checkInAtStop);
   const checkOutMutation = useMutation(api.driverMobile.checkOutFromStop);
   const getUploadUrl = useAction(api.s3Upload.getPODUploadUrl);
-  const { isConnected } = useNetworkStatus();
+  const { connectionQuality } = useNetworkStatus();
   const posthog = usePostHog();
-  
-  // Be conservative: if network status is unknown (null), treat as offline
-  const shouldQueue = isConnected !== true;
 
-  // Get current location
-  const getCurrentLocation = async () => {
+  const shouldQueue = connectionQuality !== 'good';
+
+  // Fallback location getter when no pre-warmed GPS is provided
+  const fallbackGetLocation: LocationGetter = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') {
       throw new Error('Location permission not granted');
     }
-
     const location = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.High,
+      accuracy: Location.Accuracy.Balanced,
     });
-
     return {
       latitude: location.coords.latitude,
       longitude: location.coords.longitude,
     };
   };
 
-  // Check in at a stop
+  const getLocation = getFreshLocation || fallbackGetLocation;
+
   const checkIn = async (options: CheckInOptions): Promise<CheckInResult> => {
     try {
-      const location = await getCurrentLocation();
+      const location = await getLocation();
       const driverTimestamp = new Date().toISOString();
 
-      if (shouldQueue) {
-        // Queue for later (offline or network status unknown)
-        await enqueueMutation('checkIn', {
-          stopId: options.stopId,
-          driverId: options.driverId,
-          latitude: location.latitude,
-          longitude: location.longitude,
-          driverTimestamp,
-          notes: options.notes,
-        });
-
-        return {
-          success: true,
-          message: shouldQueue && isConnected === null ? 'Check-in queued (checking network...)' : 'Check-in queued for sync',
-          queued: true,
-        };
-      }
-
-      // Online - call mutation directly
-      const result = await checkInMutation({
+      const mutationArgs = {
         stopId: options.stopId,
         driverId: options.driverId,
         latitude: location.latitude,
         longitude: location.longitude,
         driverTimestamp,
         notes: options.notes,
-      });
+      };
 
-      return result;
+      if (shouldQueue) {
+        await enqueueMutation('checkIn', mutationArgs);
+        trackCheckinOfflineQueued({
+          stopId: String(options.stopId),
+          loadId: options.loadId ? String(options.loadId) : undefined,
+          connectionQuality,
+          action: 'check_in',
+        });
+        return {
+          success: true,
+          message: connectionQuality === 'offline'
+            ? 'Check-in saved offline - will sync when connected'
+            : 'Weak signal - check-in queued for sync',
+          queued: true,
+        };
+      }
+
+      // Good connection -- try with timeout, fall back to queue
+      const mutationStart = Date.now();
+      try {
+        const result = await withTimeout(
+          checkInMutation(mutationArgs),
+          MUTATION_TIMEOUT_MS
+        );
+        return result;
+      } catch (onlineError) {
+        await enqueueMutation('checkIn', mutationArgs);
+        trackCheckinMutationTimeout({
+          stopId: String(options.stopId),
+          loadId: options.loadId ? String(options.loadId) : undefined,
+          action: 'check_in',
+          elapsed_ms: Date.now() - mutationStart,
+        });
+        posthog.capture('checkin_timeout_queued', {
+          stopId: options.stopId,
+          error: onlineError instanceof Error ? onlineError.message : 'timeout',
+        });
+        return {
+          success: true,
+          message: 'Connection slow - check-in queued for sync',
+          queued: true,
+        };
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Check-in failed';
       posthog.capture('checkin_failed', {
@@ -108,43 +144,49 @@ export function useCheckIn() {
     }
   };
 
-  // Check out from a stop
   const checkOut = async (options: CheckInOptions): Promise<CheckInResult> => {
     try {
-      const location = await getCurrentLocation();
+      const location = await getLocation();
       const driverTimestamp = new Date().toISOString();
 
+      const baseMutationArgs = {
+        stopId: options.stopId,
+        driverId: options.driverId,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        driverTimestamp,
+        notes: options.notes,
+      };
+
       if (shouldQueue) {
-        // Queue for later (with photo if provided)
         await enqueueMutation(
           'checkOut',
-          {
-            stopId: options.stopId,
-            driverId: options.driverId,
-            latitude: location.latitude,
-            longitude: location.longitude,
-            driverTimestamp,
-            notes: options.notes,
-          },
+          baseMutationArgs,
           { photoUri: options.photoUri }
         );
-
+        trackCheckinOfflineQueued({
+          stopId: String(options.stopId),
+          loadId: options.loadId ? String(options.loadId) : undefined,
+          connectionQuality,
+          action: 'check_out',
+        });
         return {
           success: true,
-          message: 'Check-out queued for sync',
+          message: connectionQuality === 'offline'
+            ? 'Check-out saved offline - will sync when connected'
+            : 'Weak signal - check-out queued for sync',
           queued: true,
         };
       }
 
-      // Online - upload photo first if provided
+      // Good connection -- upload photo first if provided
       let podPhotoUrl: string | undefined;
-      
+
       if (options.photoUri) {
         try {
           console.log('[CheckOut] Photo URI:', options.photoUri);
           console.log('[CheckOut] Getting presigned URL from Convex...');
-          
-          // Get presigned URL from Convex
+
           const { uploadUrl, fileUrl } = await getUploadUrl({
             loadId: options.loadId ? String(options.loadId) : 'unknown',
             stopId: String(options.stopId),
@@ -154,9 +196,8 @@ export function useCheckIn() {
           console.log('[CheckOut] Got presigned URL, uploading to R2...');
           console.log('[CheckOut] Upload URL (first 100 chars):', uploadUrl.substring(0, 100));
 
-          // Upload to S3/R2
           const uploadResult = await uploadPODPhoto(uploadUrl, options.photoUri);
-          
+
           if (uploadResult.success) {
             podPhotoUrl = fileUrl;
             console.log('[CheckOut] Photo uploaded successfully:', podPhotoUrl);
@@ -187,57 +228,77 @@ export function useCheckIn() {
         }
       }
 
-      // Call check-out mutation with photo URL
-      const result = await checkOutMutation({
-        stopId: options.stopId,
-        driverId: options.driverId,
-        latitude: location.latitude,
-        longitude: location.longitude,
-        driverTimestamp,
-        notes: options.notes,
-        podPhotoUrl,
-      });
+      // Try mutation with timeout, fall back to queue
+      const checkoutMutationStart = Date.now();
+      try {
+        const result = await withTimeout(
+          checkOutMutation({
+            ...baseMutationArgs,
+            podPhotoUrl,
+          }),
+          MUTATION_TIMEOUT_MS
+        );
 
-      // Handle location tracking based on stop position
-      if (result.success && options.stopSequence && options.totalStops && options.loadId && options.organizationId) {
-        const isFirstStop = options.stopSequence === 1;
-        const isLastStop = options.stopSequence === options.totalStops;
+        // Handle location tracking based on stop position
+        if (result.success && options.stopSequence && options.totalStops && options.loadId && options.organizationId) {
+          const isFirstStop = options.stopSequence === 1;
+          const isLastStop = options.stopSequence === options.totalStops;
 
-        if (isFirstStop) {
-          // START tracking after checking out of first stop (pickup complete, starting route)
-          console.log('[CheckOut] First stop - starting location tracking');
-          const trackingResult = await startLocationTracking({
-            driverId: options.driverId,
-            loadId: options.loadId,
-            organizationId: options.organizationId,
-          });
-          
-          posthog.capture('location_tracking_started', {
-            loadId: options.loadId ?? null,
-            stopId: options.stopId,
-            success: trackingResult.success,
-            message: trackingResult.message,
-          });
+          if (isFirstStop) {
+            console.log('[CheckOut] First stop - starting location tracking');
+            const trackingResult = await startLocationTracking({
+              driverId: options.driverId,
+              loadId: options.loadId,
+              organizationId: options.organizationId,
+            });
 
-          if (!trackingResult.success) {
-            console.warn('[CheckOut] Location tracking failed to start:', trackingResult.message);
-            // Don't fail the checkout - tracking is supplementary
+            posthog.capture('location_tracking_started', {
+              loadId: options.loadId ?? null,
+              stopId: options.stopId,
+              success: trackingResult.success,
+              message: trackingResult.message,
+            });
+
+            if (!trackingResult.success) {
+              console.warn('[CheckOut] Location tracking failed to start:', trackingResult.message);
+            }
+          } else if (isLastStop) {
+            console.log('[CheckOut] Last stop - stopping location tracking');
+            const trackingResult = await stopLocationTracking();
+
+            posthog.capture('location_tracking_stopped', {
+              loadId: options.loadId ?? null,
+              stopId: options.stopId,
+              success: trackingResult.success,
+            });
           }
-        } else if (isLastStop) {
-          // STOP tracking after checking out of last stop (delivery complete)
-          console.log('[CheckOut] Last stop - stopping location tracking');
-          const trackingResult = await stopLocationTracking();
-          
-          posthog.capture('location_tracking_stopped', {
-            loadId: options.loadId ?? null,
-            stopId: options.stopId,
-            success: trackingResult.success,
-          });
         }
-        // Middle stops: tracking continues automatically
-      }
 
-      return result;
+        return result;
+      } catch (onlineError) {
+        // Mutation timed out or failed -- queue it (photo already uploaded or will be re-uploaded from queue)
+        await enqueueMutation(
+          'checkOut',
+          { ...baseMutationArgs, podPhotoUrl },
+          { photoUri: !podPhotoUrl ? options.photoUri : undefined }
+        );
+        trackCheckinMutationTimeout({
+          stopId: String(options.stopId),
+          loadId: options.loadId ? String(options.loadId) : undefined,
+          action: 'check_out',
+          elapsed_ms: Date.now() - checkoutMutationStart,
+        });
+        posthog.capture('checkout_timeout_queued', {
+          stopId: options.stopId,
+          loadId: options.loadId ?? null,
+          error: onlineError instanceof Error ? onlineError.message : 'timeout',
+        });
+        return {
+          success: true,
+          message: 'Connection slow - check-out queued for sync',
+          queued: true,
+        };
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Check-out failed';
       posthog.capture('checkout_failed', {

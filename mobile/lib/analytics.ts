@@ -184,6 +184,124 @@ export function trackQueryAuthFailure(query: string, context?: Record<string, un
   });
 }
 
+// ============================================
+// OFFLINE / CONNECTIVITY TRACKING
+// ============================================
+
+export function trackConnectionQualityChange(
+  quality: 'good' | 'poor' | 'offline',
+  context?: { connectionType?: string | null; cellularGeneration?: string | null },
+) {
+  capture('connection_quality_changed', { quality, ...context });
+}
+
+export function trackOfflineQueueEnqueued(
+  mutationType: string,
+  context?: { connectionQuality?: string; stopId?: string; loadId?: string },
+) {
+  capture('offline_queue_enqueued', { mutation_type: mutationType, ...context });
+}
+
+export function trackOfflineQueueProcessed(context: {
+  total: number;
+  succeeded: number;
+  failed: number;
+  elapsed_ms: number;
+}) {
+  capture('offline_queue_processed', context);
+}
+
+export function trackOfflineQueueItemSynced(
+  mutationType: string,
+  context?: { retryCount?: number; queuedAgeMs?: number },
+) {
+  capture('offline_queue_item_synced', { mutation_type: mutationType, ...context });
+}
+
+export function trackOfflineQueueItemFailed(
+  mutationType: string,
+  context?: { retryCount?: number; error?: string },
+) {
+  capture('offline_queue_item_failed', { mutation_type: mutationType, ...context });
+}
+
+// ============================================
+// GPS TRACKING
+// ============================================
+
+export function trackGPSPrewarmComplete(context: {
+  source: 'balanced' | 'high';
+  accuracy_m: number | null;
+  elapsed_ms: number;
+}) {
+  capture('gps_prewarm_complete', context);
+}
+
+export function trackGPSPrewarmFailed(error: string) {
+  capture('gps_prewarm_failed', { error });
+}
+
+export function trackGPSFreshFixObtained(context: {
+  source: 'prewarmed_high' | 'prewarmed_balanced' | 'fresh_balanced';
+  accuracy_m: number | null;
+  age_ms: number;
+}) {
+  capture('gps_fresh_fix_obtained', context);
+}
+
+export function trackGPSFreshFixTimeout(elapsed_ms: number) {
+  capture('gps_fresh_fix_timeout', { elapsed_ms });
+}
+
+export function trackGPSHighAccuracyUpgrade(context: {
+  accuracy_m: number | null;
+  elapsed_since_balanced_ms: number;
+}) {
+  capture('gps_high_accuracy_upgrade', context);
+}
+
+export function trackGPSPermissionDenied() {
+  capture('gps_permission_denied');
+}
+
+// ============================================
+// CHECK-IN/OUT OFFLINE FLOW TRACKING
+// ============================================
+
+export function trackCheckinOfflineQueued(context: {
+  stopId: string;
+  loadId?: string;
+  connectionQuality: string;
+  action: 'check_in' | 'check_out';
+}) {
+  capture('checkin_offline_queued', context);
+}
+
+export function trackCheckinMutationTimeout(context: {
+  stopId: string;
+  loadId?: string;
+  action: 'check_in' | 'check_out';
+  elapsed_ms: number;
+}) {
+  capture('checkin_mutation_timeout', context);
+}
+
+export function trackPendingActionRecorded(context: {
+  stopId: string;
+  loadId: string;
+  action: 'in' | 'out';
+}) {
+  capture('pending_action_recorded', context);
+}
+
+export function trackPendingActionReconciled(context: {
+  stopId: string;
+  loadId: string;
+  action: 'in' | 'out';
+}) {
+  capture('pending_action_reconciled', context);
+}
+
 function maskPhone(phone: string): string {
   if (phone.length <= 4) return '****';
   return phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);

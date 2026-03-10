@@ -7,25 +7,25 @@ import { useNetworkStatus } from './useNetworkStatus';
 
 // ============================================
 // HOOK: GET DRIVER'S ASSIGNED LOADS
-// With offline caching support
+// With offline caching support.
+// Skips Convex query on poor/offline connections to avoid hanging.
 // ============================================
 
 const LOADS_CACHE_KEY = 'cached_loads';
 const LAST_SYNC_KEY = 'last_sync_time';
 
 export function useMyLoads(driverId: Id<'drivers'> | null) {
-  const { isOffline, isConnected } = useNetworkStatus();
+  const { connectionQuality } = useNetworkStatus();
   const [cachedLoads, setCachedLoads] = useState<any[] | null>(null);
   const [cacheLoaded, setCacheLoaded] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<number | null>(null);
   const [isRefetching, setIsRefetching] = useState(false);
 
-  // Round to nearest minute so the query arg doesn't change every millisecond,
-  // which would cause constant re-subscriptions. Updates once per minute.
+  // Round to nearest minute so the query arg doesn't change every millisecond
   const nowMs = Math.floor(Date.now() / 60_000) * 60_000;
 
-  // Fetch from Convex (only when online and we have a driverId)
-  const shouldSkip = !driverId || isOffline === true;
+  // Only fetch from Convex when connection is good
+  const shouldSkip = !driverId || connectionQuality !== 'good';
   const loads = useQuery(
     api.driverMobile.getMyAssignedLoads,
     shouldSkip ? 'skip' : { driverId, nowMs }
@@ -82,7 +82,7 @@ export function useMyLoads(driverId: Id<'drivers'> | null) {
     return () => { cancelled = true; };
   }, [loads]);
 
-  // Manual refetch function — clear timeout on unmount
+  // Manual refetch function
   const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refetch = useCallback(async () => {
     setIsRefetching(true);
@@ -92,16 +92,15 @@ export function useMyLoads(driverId: Id<'drivers'> | null) {
     }, 1000);
   }, []);
 
-  // Clean up refetch timer on unmount
   useEffect(() => {
     return () => {
       if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
     };
   }, []);
 
-  // Determine what data to return
+  const isOffline = connectionQuality !== 'good';
   const displayLoads = isOffline ? (cachedLoads ?? []) : (loads ?? cachedLoads ?? []);
-  const isLoading = !cacheLoaded || (isConnected !== false && loads === undefined && !cachedLoads);
+  const isLoading = !cacheLoaded || (connectionQuality === 'good' && loads === undefined && !cachedLoads);
 
   return {
     loads: displayLoads,
@@ -111,5 +110,6 @@ export function useMyLoads(driverId: Id<'drivers'> | null) {
     isOffline,
     isCached: isOffline && cachedLoads !== null,
     lastSyncTime,
+    hasNoData: cacheLoaded && displayLoads.length === 0 && isOffline,
   };
 }

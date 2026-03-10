@@ -79,7 +79,7 @@ export default function HomeScreen() {
   const router = useRouter();
   const { driverId } = useDriver();
   const { loads, isLoading, refetch, isRefetching } = useMyLoads(driverId);
-  const { isConnected } = useNetworkStatus();
+  const { connectionQuality } = useNetworkStatus();
   const { pendingCount } = useOfflineQueue();
   const { t, locale } = useLanguage();
 
@@ -319,11 +319,23 @@ export default function HomeScreen() {
         />
       )}
       
-      {/* Offline Banner */}
-      {isConnected === false && (
+      {/* Connection Quality Banners */}
+      {connectionQuality === 'offline' && (
         <View style={styles.offlineBanner}>
           <Ionicons name="wifi-outline" size={16} color={colors.background} />
-          <Text style={styles.offlineBannerText}>{locale === 'es' ? 'Modo sin conexión — Mostrando datos en caché' : 'Offline Mode — Showing cached data'}</Text>
+          <Text style={styles.offlineBannerText}>
+            {locale === 'es' ? 'Sin conexión — Mostrando datos en caché' : 'Offline — Showing cached data'}
+            {pendingCount > 0 ? ` (${pendingCount} ${locale === 'es' ? 'pendientes' : 'pending'})` : ''}
+          </Text>
+        </View>
+      )}
+      {connectionQuality === 'poor' && (
+        <View style={[styles.offlineBanner, { backgroundColor: colors.secondary }]}>
+          <Ionicons name="cellular" size={16} color={colors.background} />
+          <Text style={styles.offlineBannerText}>
+            {locale === 'es' ? 'Señal débil — Usando datos en caché' : 'Weak signal — Using cached data'}
+            {pendingCount > 0 ? ` (${pendingCount} ${locale === 'es' ? 'pendientes' : 'pending'})` : ''}
+          </Text>
         </View>
       )}
 

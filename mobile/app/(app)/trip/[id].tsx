@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -22,10 +22,18 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useLoadDetail } from '../../../lib/hooks/useLoadDetail';
 import { useCheckIn } from '../../../lib/hooks/useCheckIn';
+import { useGPSLocation } from '../../../lib/hooks/useGPSLocation';
 import { useDriver } from '../_layout';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
+import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
 import { Id } from '../../../../convex/_generated/dataModel';
 import { usePostHog } from 'posthog-react-native';
+import {
+  type PendingActionsMap,
+  loadPendingActions,
+  addPendingAction,
+  reconcilePendingActions,
+} from '../../../lib/pending-actions';
 
 // ============================================
 // DESIGN SYSTEM
@@ -71,11 +79,13 @@ export default function TripDetailScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { driverId, organizationId } = useDriver();
-  const { isOffline } = useNetworkStatus();
-  const { checkIn, checkOut } = useCheckIn();
+  const { connectionQuality } = useNetworkStatus();
+  const { isWarming: isGPSWarming, getFreshLocation } = useGPSLocation();
+  const { checkIn, checkOut } = useCheckIn(getFreshLocation);
+  const { pendingCount } = useOfflineQueue();
   const posthog = usePostHog();
 
-  const { load, stops, isLoading } = useLoadDetail(
+  const { load, stops, isLoading, hasNoData } = useLoadDetail(
     id as Id<'loadInformation'>,
     driverId
   );
@@ -92,6 +102,47 @@ export default function TripDetailScreen() {
   const [showQuickActions, setShowQuickActions] = useState(false);
   const [showDetourModal, setShowDetourModal] = useState(false);
   const [detourStops, setDetourStops] = useState(1);
+
+  // Optimistic pending actions (persisted across restarts)
+  const [pendingActions, setPendingActions] = useState<PendingActionsMap>({});
+
+  // Load persisted pending actions on mount
+  useEffect(() => {
+    if (!id) return;
+    loadPendingActions(id).then(setPendingActions);
+  }, [id]);
+
+  // Reconcile pending actions when server data arrives
+  useEffect(() => {
+    if (!id || stops.length === 0) return;
+    reconcilePendingActions(id, stops).then(setPendingActions);
+  }, [id, stops]);
+
+  // Merge pending actions into stops for display
+  const displayStops = useMemo(() => {
+    return stops.map((stop: any) => {
+      const pending = pendingActions[stop._id];
+      if (!pending) return stop;
+      return {
+        ...stop,
+        checkedInAt: pending.type === 'in' ? pending.timestamp : stop.checkedInAt,
+        checkedOutAt: pending.type === 'out' ? pending.timestamp : stop.checkedOutAt,
+        pendingSync: true,
+      };
+    });
+  }, [stops, pendingActions]);
+
+  // Record a pending action (optimistic + persisted)
+  const recordPendingAction = useCallback(
+    async (stopId: string, type: 'in' | 'out') => {
+      if (!id) return;
+      const now = new Date().toISOString();
+      const action = { type, timestamp: now, driverTimestamp: now };
+      setPendingActions((prev) => ({ ...prev, [stopId]: action }));
+      await addPendingAction(id, stopId, action);
+    },
+    [id]
+  );
 
   // Open maps for navigation
   const openMaps = (address: string, city?: string, state?: string) => {
@@ -147,9 +198,8 @@ export default function TripDetailScreen() {
     });
 
     try {
-      // Get the current stop to determine sequence number
-      const currentStop = stops.find(s => s._id === checkInModal.stopId);
-      const totalStops = stops.length;
+      const currentStop = displayStops.find((s: any) => s._id === checkInModal.stopId);
+      const totalStops = displayStops.length;
       
       const result = checkInModal.type === 'in'
         ? await checkIn({
@@ -178,6 +228,11 @@ export default function TripDetailScreen() {
       });
       
       if (result.success) {
+        // Optimistic UI update -- immediately reflect in stop state
+        await recordPendingAction(
+          checkInModal.stopId as string,
+          checkInModal.type
+        );
         Alert.alert(
           result.queued ? 'Queued' : 'Success',
           result.message
@@ -260,10 +315,10 @@ export default function TripDetailScreen() {
     }
   };
 
-  // Determine which stop is the current active stop
+  // Determine which stop is the current active stop (uses displayStops for optimistic state)
   const getCurrentStopIndex = () => {
-    for (let i = 0; i < stops.length; i++) {
-      const stop = stops[i];
+    for (let i = 0; i < displayStops.length; i++) {
+      const stop = displayStops[i];
       if (stop.status !== 'Completed' && !stop.checkedOutAt) {
         return i;
       }
@@ -275,6 +330,21 @@ export default function TripDetailScreen() {
     return (
       <View style={[styles.loading, { paddingTop: insets.top }]}>
         <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  if (hasNoData) {
+    return (
+      <View style={[styles.error, { paddingTop: insets.top }]}>
+        <Ionicons name="cloud-offline" size={64} color={colors.secondary} />
+        <Text style={styles.errorText}>Load data unavailable offline</Text>
+        <Text style={[styles.errorText, { fontSize: 14, fontWeight: '400', marginTop: 0 }]}>
+          Please try again when you have a stronger signal
+        </Text>
+        <Pressable style={styles.backButton} onPress={() => router.back()}>
+          <Text style={styles.backButtonText}>Go Back</Text>
+        </Pressable>
       </View>
     );
   }
@@ -316,11 +386,23 @@ export default function TripDetailScreen() {
           contentContainerStyle={[styles.scrollContent, { paddingBottom: spacing.md }]}
           showsVerticalScrollIndicator={false}
         >
-          {/* Offline Banner */}
-          {isOffline && (
+          {/* Connection Quality Banner */}
+          {connectionQuality === 'offline' && (
             <View style={styles.offlineBanner}>
               <Ionicons name="cloud-offline" size={16} color={colors.foreground} />
-              <Text style={styles.offlineText}>Offline - Changes will sync later</Text>
+              <Text style={styles.offlineText}>
+                Offline - Changes will sync when connected
+                {pendingCount > 0 ? ` (${pendingCount} pending)` : ''}
+              </Text>
+            </View>
+          )}
+          {connectionQuality === 'poor' && (
+            <View style={styles.weakSignalBanner}>
+              <Ionicons name="cellular" size={16} color={colors.background} />
+              <Text style={styles.weakSignalText}>
+                Weak signal - Actions will be queued
+                {pendingCount > 0 ? ` (${pendingCount} pending)` : ''}
+              </Text>
             </View>
           )}
 
@@ -350,13 +432,14 @@ export default function TripDetailScreen() {
             </View>
 
             <View style={styles.stopsContainer}>
-              {stops.map((stop, index) => {
+              {displayStops.map((stop: any, index: number) => {
                 const isPickup = stop.stopType === 'PICKUP';
                 const isCompleted = stop.status === 'Completed' || !!stop.checkedOutAt;
                 const isCheckedIn = !!stop.checkedInAt && !stop.checkedOutAt;
                 const isCurrent = index === currentStopIndex;
                 const isFuture = index > currentStopIndex && currentStopIndex !== -1;
-                const isLast = index === stops.length - 1;
+                const isLast = index === displayStops.length - 1;
+                const isPendingSync = !!(stop as any).pendingSync;
 
                 return (
                   <View key={stop._id} style={styles.stopRow}>
@@ -415,6 +498,14 @@ export default function TripDetailScreen() {
                               </Text>
                             </View>
                           )}
+                          {isPendingSync && (
+                            <View style={styles.pendingSyncBadge}>
+                              <Ionicons name="sync" size={10} color={colors.secondary} />
+                              <Text style={styles.pendingSyncBadgeText} maxFontSizeMultiplier={1.2}>
+                                Pending sync
+                              </Text>
+                            </View>
+                          )}
                         </View>
                       )}
 
@@ -435,6 +526,14 @@ export default function TripDetailScreen() {
                           ]}>
                             Target: {formatDateTime(stop.windowBeginDate, stop.windowBeginTime) || 'TBD'}
                           </Text>
+                        </View>
+                      )}
+
+                      {/* GPS warming indicator */}
+                      {isCurrent && !isCheckedIn && isGPSWarming && (
+                        <View style={styles.gpsWarmingBadge}>
+                          <ActivityIndicator size="small" color={colors.secondary} />
+                          <Text style={styles.gpsWarmingText}>Acquiring GPS...</Text>
                         </View>
                       )}
 
@@ -558,7 +657,7 @@ export default function TripDetailScreen() {
                   style={styles.quickActionItem}
                   onPress={() => {
                     setShowQuickActions(false);
-                    const targetStop = stops[currentStopIndex] || stops[0];
+                    const targetStop = displayStops[currentStopIndex] || displayStops[0];
                     if (targetStop) {
                       openMaps(targetStop.address, targetStop.city, targetStop.state);
                     }
@@ -658,7 +757,7 @@ export default function TripDetailScreen() {
                     {checkInModal.type === 'in' ? 'Confirm Check-In' : 'Confirm Check-Out'}
                   </Text>
                   <Text style={styles.modalSubtitle}>
-                    Stop {stops[currentStopIndex]?.sequenceNumber}: {stops[currentStopIndex]?.locationName || `${stops[currentStopIndex]?.city}, ${stops[currentStopIndex]?.state}`}
+                    Stop {displayStops[currentStopIndex]?.sequenceNumber}: {displayStops[currentStopIndex]?.locationName || `${displayStops[currentStopIndex]?.city}, ${displayStops[currentStopIndex]?.state}`}
                   </Text>
                 </View>
                 <Pressable style={styles.modalCancelButton} onPress={closeModal}>
@@ -965,7 +1064,7 @@ const styles = StyleSheet.create({
     gap: spacing.lg,
   },
 
-  // Offline banner
+  // Offline / weak signal banners
   offlineBanner: {
     backgroundColor: colors.destructive,
     padding: spacing.md,
@@ -979,6 +1078,20 @@ const styles = StyleSheet.create({
     color: colors.foreground,
     fontSize: 14,
     fontWeight: '500',
+  },
+  weakSignalBanner: {
+    backgroundColor: colors.secondary,
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  weakSignalText: {
+    color: colors.background,
+    fontSize: 14,
+    fontWeight: '600',
   },
 
   // Card
@@ -1149,6 +1262,38 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.primary,
     fontWeight: '600',
+  },
+  pendingSyncBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: `${colors.secondary}30`,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.md,
+  },
+  pendingSyncBadgeText: {
+    fontSize: 12,
+    color: colors.secondary,
+    fontWeight: '600',
+  },
+
+  // GPS warming
+  gpsWarmingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: spacing.xs + 2,
+    backgroundColor: `${colors.secondary}20`,
+    borderRadius: borderRadius.md,
+    alignSelf: 'flex-start',
+  },
+  gpsWarmingText: {
+    fontSize: 13,
+    color: colors.secondary,
+    fontWeight: '500',
   },
 
   // Target time

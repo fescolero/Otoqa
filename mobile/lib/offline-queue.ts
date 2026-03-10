@@ -1,8 +1,15 @@
 import { queueStorage } from './storage';
 import { v4 as uuidv4 } from 'uuid';
 import NetInfo from '@react-native-community/netinfo';
+import { getConnectionQualityFromNetInfo } from './hooks/useNetworkStatus';
 // Using legacy API for SDK 54 compatibility
 import * as FileSystem from 'expo-file-system/legacy';
+import {
+  trackOfflineQueueEnqueued,
+  trackOfflineQueueProcessed,
+  trackOfflineQueueItemSynced,
+  trackOfflineQueueItemFailed,
+} from './analytics';
 
 // ============================================
 // OFFLINE WRITE QUEUE
@@ -107,10 +114,14 @@ export async function enqueueMutation(
   queue.push(mutation);
   await saveQueue(queue);
 
-  // Try to process immediately if online
+  trackOfflineQueueEnqueued(type, {
+    stopId: typeof payload.stopId === 'string' ? payload.stopId : undefined,
+    loadId: typeof payload.loadId === 'string' ? payload.loadId : undefined,
+  });
+
+  // Try to process immediately if connection is good
   const netInfo = await NetInfo.fetch();
-  if (netInfo.isConnected) {
-    // Don't await - let it process in background
+  if (getConnectionQualityFromNetInfo(netInfo) === 'good') {
     processQueue().catch(console.error);
   }
 
@@ -162,7 +173,7 @@ export async function processQueue(): Promise<void> {
 
   try {
     const netInfo = await NetInfo.fetch();
-    if (!netInfo.isConnected) {
+    if (getConnectionQualityFromNetInfo(netInfo) !== 'good') {
       return;
     }
 
@@ -170,6 +181,12 @@ export async function processQueue(): Promise<void> {
     const pendingMutations = queue.filter(
       (m) => m.status === 'pending' || (m.status === 'failed' && m.retryCount < m.maxRetries)
     );
+
+    if (pendingMutations.length === 0) return;
+
+    const batchStart = Date.now();
+    let succeeded = 0;
+    let failed = 0;
 
     for (const mutation of pendingMutations) {
       try {
@@ -183,6 +200,11 @@ export async function processQueue(): Promise<void> {
           await deleteLocalPhoto(mutation.photoPath);
         }
         await removeMutation(mutation.id);
+        succeeded++;
+        trackOfflineQueueItemSynced(mutation.type, {
+          retryCount: mutation.retryCount,
+          queuedAgeMs: Date.now() - mutation.queuedAt,
+        });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         await updateMutation(mutation.id, {
@@ -190,8 +212,20 @@ export async function processQueue(): Promise<void> {
           retryCount: mutation.retryCount + 1,
           errorMessage,
         });
+        failed++;
+        trackOfflineQueueItemFailed(mutation.type, {
+          retryCount: mutation.retryCount + 1,
+          error: errorMessage,
+        });
       }
     }
+
+    trackOfflineQueueProcessed({
+      total: pendingMutations.length,
+      succeeded,
+      failed,
+      elapsed_ms: Date.now() - batchStart,
+    });
   } finally {
     isProcessing = false;
   }
@@ -220,10 +254,10 @@ export function setMutationProcessor(processor: MutationProcessor) {
   mutationProcessor = processor;
 }
 
-// Set up network listener to process queue when coming online
+// Set up network listener to process queue when connection quality becomes good
 export function setupNetworkListener() {
   return NetInfo.addEventListener((state) => {
-    if (state.isConnected) {
+    if (getConnectionQualityFromNetInfo(state) === 'good') {
       processQueue().catch(console.error);
     }
   });

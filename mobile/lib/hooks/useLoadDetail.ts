@@ -7,7 +7,8 @@ import { useNetworkStatus } from './useNetworkStatus';
 
 // ============================================
 // HOOK: GET LOAD DETAIL WITH STOPS
-// With offline caching support
+// With offline caching support.
+// Skips Convex query on poor/offline connections to avoid hanging.
 // ============================================
 
 function getCacheKey(loadId: string) {
@@ -18,12 +19,12 @@ export function useLoadDetail(
   loadId: Id<'loadInformation'> | null,
   driverId: Id<'drivers'> | null
 ) {
-  const { isOffline, isConnected } = useNetworkStatus();
+  const { connectionQuality } = useNetworkStatus();
   const [cachedData, setCachedData] = useState<{ load: any; stops: any[] } | null>(null);
   const [cacheLoaded, setCacheLoaded] = useState(false);
 
-  // Fetch from Convex (only when online)
-  const shouldSkip = !loadId || !driverId || isOffline === true;
+  // Only fetch from Convex when connection is good
+  const shouldSkip = !loadId || !driverId || connectionQuality !== 'good';
   const data = useQuery(
     api.driverMobile.getLoadWithStops,
     shouldSkip ? 'skip' : { loadId, driverId }
@@ -50,7 +51,7 @@ export function useLoadDetail(
     loadCache();
   }, [loadId]);
 
-  // Cache data when we get fresh data
+  // Cache data when we get fresh data from server
   useEffect(() => {
     async function saveCache() {
       if (loadId && data?.load) {
@@ -65,9 +66,10 @@ export function useLoadDetail(
     saveCache();
   }, [loadId, data]);
 
-  // Determine what data to return
-  const displayData = isOffline ? cachedData : (data ?? cachedData);
-  const isLoading = !cacheLoaded || (isConnected !== false && data === undefined && !cachedData);
+  // On poor/offline: show cached data immediately. On good: prefer live data, fall back to cache.
+  const displayData = connectionQuality !== 'good' ? cachedData : (data ?? cachedData);
+  const isLoading = !cacheLoaded || (connectionQuality === 'good' && data === undefined && !cachedData);
+  const isOffline = connectionQuality !== 'good';
 
   return {
     load: displayData?.load ?? null,
@@ -75,5 +77,6 @@ export function useLoadDetail(
     isLoading,
     isOffline,
     isCached: isOffline && cachedData !== null,
+    hasNoData: cacheLoaded && !displayData && isOffline,
   };
 }
