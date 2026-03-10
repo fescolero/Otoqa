@@ -17,7 +17,8 @@ import { useState, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'expo-router';
 import { useQueryHealth } from '../../../../lib/hooks/useQueryHealth';
 
-type TabType = 'needsDriver' | 'active' | 'completed';
+type DateFilter = 'today' | 'tomorrow' | 'history';
+type StatusFilter = 'needsDriver' | 'active' | 'completed';
 
 // Avatar color palette
 const AVATAR_COLORS = [
@@ -155,17 +156,58 @@ function groupByPickupDate(loads: any[]): { title: string; isToday: boolean; dat
   }));
 }
 
-const TAB_CONFIG: { key: TabType; label: string }[] = [
+const DATE_FILTER_CONFIG: { key: DateFilter; label: string }[] = [
+  { key: 'today', label: 'Today' },
+  { key: 'tomorrow', label: 'Tomorrow' },
+  { key: 'history', label: 'History' },
+];
+
+const STATUS_FILTER_CONFIG: { key: StatusFilter; label: string }[] = [
   { key: 'needsDriver', label: 'Needs Driver' },
   { key: 'active', label: 'Active' },
   { key: 'completed', label: 'Completed' },
 ];
 
+function getDateBounds(filter: DateFilter): { start: Date; end: Date } | null {
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const todayEnd = new Date(todayStart);
+  todayEnd.setDate(todayEnd.getDate() + 1);
+
+  switch (filter) {
+    case 'today':
+      return { start: todayStart, end: todayEnd };
+    case 'tomorrow': {
+      const tomorrowStart = new Date(todayEnd);
+      const tomorrowEnd = new Date(tomorrowStart);
+      tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
+      return { start: tomorrowStart, end: tomorrowEnd };
+    }
+    case 'history':
+      return { start: new Date(0), end: todayStart };
+  }
+}
+
+function loadMatchesDateFilter(load: any, filter: DateFilter): boolean {
+  const firstStop = load.stops?.[0];
+  if (!firstStop?.windowBeginDate) return filter === 'history';
+
+  const dateStr = firstStop.windowBeginDate.split('T')[0];
+  const [yearStr, monthStr, dayStr] = dateStr.split('-');
+  const loadDate = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr));
+
+  const bounds = getDateBounds(filter);
+  if (!bounds) return true;
+
+  return loadDate >= bounds.start && loadDate < bounds.end;
+}
+
 export default function ManageLoadsScreen() {
   const insets = useSafeAreaInsets();
   const { carrierOrgId, carrierExternalOrgId } = useCarrierOwner();
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<TabType>('needsDriver');
+  const [dateFilter, setDateFilter] = useState<DateFilter>('today');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('needsDriver');
   const [refreshing, setRefreshing] = useState(false);
 
   const loadQueryOrgId = carrierExternalOrgId || carrierOrgId;
@@ -207,43 +249,49 @@ export default function ManageLoadsScreen() {
     setTimeout(() => setRefreshing(false), 1000);
   }, []);
 
-  const needsDriverLoads = useMemo(
-    () => (activeLoads || []).filter(
-      (load) => !load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED')
-    ),
-    [activeLoads]
-  );
-
-  const activeTabLoads = useMemo(
-    () => (activeLoads || []).filter(
-      (load) => load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED' || load.status === 'IN_PROGRESS')
-    ),
-    [activeLoads]
-  );
-
-  const completedTabLoads = useMemo(() => {
-    const done = (completedLoads || []).filter((load) => load.status === 'COMPLETED');
-    const canceledDeclined = (activeLoads || []).filter(
+  const allLoads = useMemo(() => {
+    const active = activeLoads || [];
+    const completed = completedLoads || [];
+    const done = completed.filter((load) => load.status === 'COMPLETED');
+    const canceledDeclined = active.filter(
       (load) => load.status === 'CANCELED' || load.status === 'DECLINED'
     );
-    return [...done, ...canceledDeclined];
+    return [...active, ...done, ...canceledDeclined];
   }, [activeLoads, completedLoads]);
 
-  const tabCounts: Record<TabType, number> = {
-    needsDriver: needsDriverLoads.length,
-    active: activeTabLoads.length,
-    completed: completedTabLoads.length,
-  };
-
-  const getDataForTab = (): any[] => {
-    switch (activeTab) {
-      case 'needsDriver': return needsDriverLoads;
-      case 'active': return activeTabLoads;
-      case 'completed': return completedTabLoads;
+  const filterByStatus = useCallback((loads: any[], status: StatusFilter): any[] => {
+    switch (status) {
+      case 'needsDriver':
+        return loads.filter(
+          (load) => !load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED')
+        );
+      case 'active':
+        return loads.filter(
+          (load) => load.driver && (load.status === 'ACCEPTED' || load.status === 'AWARDED' || load.status === 'IN_PROGRESS')
+        );
+      case 'completed':
+        return loads.filter(
+          (load) => load.status === 'COMPLETED' || load.status === 'CANCELED' || load.status === 'DECLINED'
+        );
     }
-  };
+  }, []);
 
-  const flatData = isLoading ? [] : getDataForTab();
+  const dateFilteredLoads = useMemo(
+    () => allLoads.filter((load) => loadMatchesDateFilter(load, dateFilter)),
+    [allLoads, dateFilter]
+  );
+
+  const statusCounts: Record<StatusFilter, number> = useMemo(() => ({
+    needsDriver: filterByStatus(dateFilteredLoads, 'needsDriver').length,
+    active: filterByStatus(dateFilteredLoads, 'active').length,
+    completed: filterByStatus(dateFilteredLoads, 'completed').length,
+  }), [dateFilteredLoads, filterByStatus]);
+
+  const flatData = useMemo(
+    () => isLoading ? [] : filterByStatus(dateFilteredLoads, statusFilter),
+    [isLoading, dateFilteredLoads, statusFilter, filterByStatus]
+  );
+
   const sections = useMemo(() => groupByPickupDate(flatData), [flatData]);
   const totalCount = flatData.length;
 
@@ -389,18 +437,42 @@ export default function ManageLoadsScreen() {
         <View style={{ width: 40 }} />
       </View>
 
-      {/* Tab Bar */}
-      <View style={styles.tabBarContainer}>
-        <View style={styles.tabBar}>
-          {TAB_CONFIG.map(({ key, label }) => (
+      {/* Date Filter Bar */}
+      <View style={styles.dateFilterContainer}>
+        <View style={styles.dateFilterBar}>
+          {DATE_FILTER_CONFIG.map(({ key, label }) => (
             <Pressable
               key={key}
-              style={[styles.tab, activeTab === key && styles.activeTab]}
-              onPress={() => setActiveTab(key)}
+              style={[styles.dateTab, dateFilter === key && styles.dateTabActive]}
+              onPress={() => setDateFilter(key)}
             >
-              <Text style={[styles.tabText, activeTab === key && styles.activeTabText]}>
-                {label} ({tabCounts[key]})
+              <Text style={[styles.dateTabText, dateFilter === key && styles.dateTabTextActive]}>
+                {label}
               </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
+      {/* Status Filter Bar */}
+      <View style={styles.statusFilterContainer}>
+        <View style={styles.statusFilterBar}>
+          {STATUS_FILTER_CONFIG.map(({ key, label }) => (
+            <Pressable
+              key={key}
+              style={[styles.statusTab, statusFilter === key && styles.statusTabActive]}
+              onPress={() => setStatusFilter(key)}
+            >
+              <Text style={[styles.statusTabText, statusFilter === key && styles.statusTabTextActive]}>
+                {label}
+              </Text>
+              {statusCounts[key] > 0 && (
+                <View style={[styles.statusBadgeCount, statusFilter === key && styles.statusBadgeCountActive]}>
+                  <Text style={[styles.statusBadgeCountText, statusFilter === key && styles.statusBadgeCountTextActive]}>
+                    {statusCounts[key]}
+                  </Text>
+                </View>
+              )}
             </Pressable>
           ))}
         </View>
@@ -409,7 +481,7 @@ export default function ManageLoadsScreen() {
       {/* Section Header */}
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>
-          {activeTab === 'needsDriver' ? 'NEEDS DRIVER' : activeTab === 'active' ? 'ACTIVE LOADS' : 'HISTORY'}
+          {statusFilter === 'needsDriver' ? 'NEEDS DRIVER' : statusFilter === 'active' ? 'ACTIVE LOADS' : 'COMPLETED'}
         </Text>
         <Text style={styles.sectionCount}>{totalCount} load{totalCount !== 1 ? 's' : ''}</Text>
       </View>
@@ -480,36 +552,86 @@ const styles = StyleSheet.create({
     color: colors.foreground,
   },
 
-  // Tab Bar
-  tabBarContainer: {
+  // Date Filter Bar
+  dateFilterContainer: {
+    paddingHorizontal: spacing.md,
     marginBottom: spacing.sm,
   },
-  tabBar: {
+  dateFilterBar: {
     flexDirection: 'row',
-    paddingHorizontal: spacing.md,
-    gap: spacing.xs,
-    alignItems: 'center',
+    backgroundColor: colors.muted,
+    borderRadius: 24,
+    padding: 3,
   },
-  tab: {
+  dateTab: {
     flex: 1,
+    paddingVertical: 10,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dateTabActive: {
+    backgroundColor: colors.foreground,
+  },
+  dateTabText: {
+    fontSize: typography.base,
+    fontWeight: '600',
+    color: colors.foregroundMuted,
+  },
+  dateTabTextActive: {
+    color: colors.background,
+  },
+
+  // Status Filter Bar
+  statusFilterContainer: {
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  statusFilterBar: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  statusTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     paddingVertical: 8,
-    paddingHorizontal: 6,
+    paddingHorizontal: 14,
     borderRadius: 20,
     backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.border,
-    alignItems: 'center',
   },
-  activeTab: {
+  statusTabActive: {
     backgroundColor: colors.primary,
     borderColor: colors.primary,
   },
-  tabText: {
+  statusTabText: {
     fontSize: typography.sm,
     fontWeight: '600',
     color: colors.foreground,
   },
-  activeTabText: {
+  statusTabTextActive: {
+    color: colors.primaryForeground,
+  },
+  statusBadgeCount: {
+    backgroundColor: colors.muted,
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  statusBadgeCountActive: {
+    backgroundColor: 'rgba(26, 29, 33, 0.3)',
+  },
+  statusBadgeCountText: {
+    fontSize: typography.xs,
+    fontWeight: '700',
+    color: colors.foreground,
+  },
+  statusBadgeCountTextActive: {
     color: colors.primaryForeground,
   },
 
