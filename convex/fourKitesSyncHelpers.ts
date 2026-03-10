@@ -379,15 +379,12 @@ export const importLoadFromShipment = internalMutation({
     // Trigger auto-assignment for FourKites loads with parsedHcr
     if (shipment.hcr) {
       try {
-        const autoResult = await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
+        await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
           loadId: loadId as Id<"loadInformation">,
           workosOrgId,
           userId: "fourkites-sync",
           userName: "FourKites Sync",
         });
-        // #region agent log
-        console.log(`[DEBUG-c171be] importLoadFromShipment auto-assign: loadId=${loadId}, hcr=${shipment.hcr}, trip=${shipment.trip}, result=${JSON.stringify(autoResult)}`);
-        // #endregion
       } catch (error) {
         console.error("Auto-assignment failed for FourKites load:", error);
       }
@@ -676,15 +673,12 @@ export const promoteUnmappedLoad = internalMutation({
     // Trigger auto-assignment after promotion (load now has proper HCR)
     if (load.parsedHcr && load.status === "Open" && !load.primaryDriverId && !load.primaryCarrierPartnershipId) {
       try {
-        const autoResult = await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
+        await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
           loadId,
           workosOrgId: load.workosOrgId,
           userId: "fourkites-sync",
           userName: "FourKites Sync (Promotion)",
         });
-        // #region agent log
-        console.log(`[DEBUG-c171be] promoteUnmappedLoad auto-assign: loadId=${loadId}, hcr=${load.parsedHcr}, result=${JSON.stringify(autoResult)}`);
-        // #endregion
       } catch (error) {
         console.error("Auto-assignment failed for promoted load:", error);
       }

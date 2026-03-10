@@ -83,8 +83,8 @@ export const findRouteAssignment = internalQuery({
       if (exactMatch) return exactMatch;
     }
 
-    // Fall back to HCR-only match
-    const hcrMatch = await ctx.db
+    // Fall back to HCR-only match (route with no trip specified)
+    const hcrOnlyMatch = await ctx.db
       .query('routeAssignments')
       .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', args.workosOrgId).eq('hcr', args.hcr))
       .filter((q) =>
@@ -92,7 +92,16 @@ export const findRouteAssignment = internalQuery({
       )
       .first();
 
-    return hcrMatch;
+    if (hcrOnlyMatch) return hcrOnlyMatch;
+
+    // Fall back to any active route for this HCR (highest priority first)
+    const anyHcrMatch = await ctx.db
+      .query('routeAssignments')
+      .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', args.workosOrgId).eq('hcr', args.hcr))
+      .filter((q) => q.eq(q.field('isActive'), true))
+      .first();
+
+    return anyHcrMatch;
   },
 });
 
@@ -153,7 +162,8 @@ export const autoAssignLoad = internalMutation({
       };
     }
 
-    // 5. Find matching route assignment - try exact match first, then HCR-only
+    // 5. Find matching route assignment
+    // Priority: exact HCR+Trip > HCR-only rule > any route for this HCR
     let routeAssignment: Doc<'routeAssignments'> | null = null;
 
     if (load.parsedTripNumber) {
@@ -176,6 +186,14 @@ export const autoAssignLoad = internalMutation({
         .filter((q) =>
           q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
         )
+        .first();
+    }
+
+    if (!routeAssignment) {
+      routeAssignment = await ctx.db
+        .query('routeAssignments')
+        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', load.parsedHcr!))
+        .filter((q) => q.eq(q.field('isActive'), true))
         .first();
     }
 
@@ -333,10 +351,6 @@ export const autoAssignPendingLoads = internalAction({
     let assigned = 0;
     let skipped = 0;
     let errors = 0;
-    // #region agent log
-    const actionCounts: Record<string, number> = {};
-    const sampleMessages: Record<string, string> = {};
-    // #endregion
 
     // 3. Process each load
     for (const load of openLoads) {
@@ -347,12 +361,6 @@ export const autoAssignPendingLoads = internalAction({
       });
 
       results.push(result);
-      // #region agent log
-      actionCounts[result.action] = (actionCounts[result.action] || 0) + 1;
-      if (!sampleMessages[result.action]) {
-        sampleMessages[result.action] = `loadId=${load._id}, hcr=${load.parsedHcr}, trip=${load.parsedTripNumber}, msg=${result.message}`;
-      }
-      // #endregion
 
       if (result.success) {
         assigned++;
@@ -362,11 +370,6 @@ export const autoAssignPendingLoads = internalAction({
         errors++;
       }
     }
-
-    // #region agent log
-    const sampleHcrs = [...new Set(openLoads.slice(0, 30).map(l => l.parsedHcr))];
-    console.log(`[DEBUG-c171be] CRON-BREAKDOWN: actionCounts=${JSON.stringify(actionCounts)}, sampleMessages=${JSON.stringify(sampleMessages)}, sampleHcrs=${JSON.stringify(sampleHcrs.slice(0, 10))}`);
-    // #endregion
 
     return {
       processed: openLoads.length,
@@ -459,6 +462,7 @@ export const triggerAutoAssignmentForLoad = internalMutation({
     }
 
     // Find matching route assignment
+    // Priority: exact HCR+Trip > HCR-only rule > any route for this HCR
     let routeAssignment: Doc<'routeAssignments'> | null = null;
 
     if (load.parsedTripNumber) {
@@ -481,6 +485,14 @@ export const triggerAutoAssignmentForLoad = internalMutation({
         .filter((q) =>
           q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
         )
+        .first();
+    }
+
+    if (!routeAssignment) {
+      routeAssignment = await ctx.db
+        .query('routeAssignments')
+        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', load.parsedHcr!))
+        .filter((q) => q.eq(q.field('isActive'), true))
         .first();
     }
 
