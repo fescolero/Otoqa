@@ -376,6 +376,23 @@ export const importLoadFromShipment = internalMutation({
     // Note: Line items are no longer created during import
     // They will be calculated dynamically when querying the invoice
 
+    // Trigger auto-assignment for FourKites loads with parsedHcr
+    if (shipment.hcr) {
+      try {
+        const autoResult = await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
+          loadId: loadId as Id<"loadInformation">,
+          workosOrgId,
+          userId: "fourkites-sync",
+          userName: "FourKites Sync",
+        });
+        // #region agent log
+        console.log(`[DEBUG-c171be] importLoadFromShipment auto-assign: loadId=${loadId}, hcr=${shipment.hcr}, trip=${shipment.trip}, result=${JSON.stringify(autoResult)}`);
+        // #endregion
+      } catch (error) {
+        console.error("Auto-assignment failed for FourKites load:", error);
+      }
+    }
+
     return loadId;
   },
 });
@@ -654,6 +671,23 @@ export const promoteUnmappedLoad = internalMutation({
         lastImportMatchAt: Date.now(),
         importMatchCount: (freshLane.importMatchCount ?? 0) + 1,
       });
+    }
+
+    // Trigger auto-assignment after promotion (load now has proper HCR)
+    if (load.parsedHcr && load.status === "Open" && !load.primaryDriverId && !load.primaryCarrierPartnershipId) {
+      try {
+        const autoResult = await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
+          loadId,
+          workosOrgId: load.workosOrgId,
+          userId: "fourkites-sync",
+          userName: "FourKites Sync (Promotion)",
+        });
+        // #region agent log
+        console.log(`[DEBUG-c171be] promoteUnmappedLoad auto-assign: loadId=${loadId}, hcr=${load.parsedHcr}, result=${JSON.stringify(autoResult)}`);
+        // #endregion
+      } catch (error) {
+        console.error("Auto-assignment failed for promoted load:", error);
+      }
     }
 
     console.log(`[promoteUnmappedLoad] Promoted load ${loadId} from UNMAPPED to ${isWildcard ? "SPOT" : "CONTRACT"}`);

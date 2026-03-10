@@ -333,6 +333,10 @@ export const autoAssignPendingLoads = internalAction({
     let assigned = 0;
     let skipped = 0;
     let errors = 0;
+    // #region agent log
+    const actionCounts: Record<string, number> = {};
+    const sampleMessages: Record<string, string> = {};
+    // #endregion
 
     // 3. Process each load
     for (const load of openLoads) {
@@ -343,6 +347,12 @@ export const autoAssignPendingLoads = internalAction({
       });
 
       results.push(result);
+      // #region agent log
+      actionCounts[result.action] = (actionCounts[result.action] || 0) + 1;
+      if (!sampleMessages[result.action]) {
+        sampleMessages[result.action] = `loadId=${load._id}, hcr=${load.parsedHcr}, trip=${load.parsedTripNumber}, msg=${result.message}`;
+      }
+      // #endregion
 
       if (result.success) {
         assigned++;
@@ -352,6 +362,11 @@ export const autoAssignPendingLoads = internalAction({
         errors++;
       }
     }
+
+    // #region agent log
+    const sampleHcrs = [...new Set(openLoads.slice(0, 30).map(l => l.parsedHcr))];
+    console.log(`[DEBUG-c171be] CRON-BREAKDOWN: actionCounts=${JSON.stringify(actionCounts)}, sampleMessages=${JSON.stringify(sampleMessages)}, sampleHcrs=${JSON.stringify(sampleHcrs.slice(0, 10))}`);
+    // #endregion
 
     return {
       processed: openLoads.length,
