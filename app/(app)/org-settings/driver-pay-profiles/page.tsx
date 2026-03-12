@@ -182,15 +182,15 @@ export default function DriverPayProfilesPage() {
             </div>
           </Card>
         ) : (
-          <Card>
+          <Card className="py-0 overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[300px]">Profile Name</TableHead>
+                  <TableHead className="w-[300px] pl-6">Profile Name</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Pay Basis</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  <TableHead className="text-right pr-6">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -200,7 +200,7 @@ export default function DriverPayProfilesPage() {
                     className={`cursor-pointer ${!profile.isActive ? 'opacity-60' : ''}`}
                     onClick={() => { setEditingProfileId(profile._id); setEditorOpen(true); }}
                   >
-                    <TableCell>
+                    <TableCell className="pl-6">
                       <div className="flex items-center gap-3">
                         <div className="p-2 bg-primary/10 rounded-lg">
                           {getPayBasisIcon(profile.payBasis)}
@@ -237,7 +237,7 @@ export default function DriverPayProfilesPage() {
                         {profile.isActive ? 'Active' : 'Inactive'}
                       </Badge>
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="text-right pr-6">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
                           <Button variant="ghost" size="icon" className="h-8 w-8">
