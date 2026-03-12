@@ -1380,6 +1380,10 @@ export default defineSchema({
     minThreshold: v.optional(v.float64()), // e.g., "Only applies after 2 hours"
     maxCap: v.optional(v.float64()),       // e.g., "Max $150 detention"
 
+    // Optional equipment type condition
+    // When set, rule only fires if load.equipmentType matches (case-insensitive)
+    equipmentTypeCondition: v.optional(v.string()),
+
     isActive: v.boolean(),
   })
     .index('by_profile', ['profileId'])

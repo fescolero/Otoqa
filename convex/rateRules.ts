@@ -67,6 +67,7 @@ export const create = mutation({
     rateAmount: v.number(),
     minThreshold: v.optional(v.number()),
     maxCap: v.optional(v.number()),
+    equipmentTypeCondition: v.optional(v.string()),
     userId: v.string(),
     userName: v.optional(v.string()),
   },
@@ -84,6 +85,7 @@ export const create = mutation({
       rateAmount: args.rateAmount,
       minThreshold: args.minThreshold,
       maxCap: args.maxCap,
+      equipmentTypeCondition: args.equipmentTypeCondition,
       isActive: true,
     });
 
@@ -113,6 +115,7 @@ export const update = mutation({
     rateAmount: v.optional(v.number()),
     minThreshold: v.optional(v.number()),
     maxCap: v.optional(v.number()),
+    equipmentTypeCondition: v.optional(v.string()),
     isActive: v.optional(v.boolean()),
     userId: v.string(),
     userName: v.optional(v.string()),
@@ -131,6 +134,7 @@ export const update = mutation({
     if (updates.rateAmount !== undefined) updateData.rateAmount = updates.rateAmount;
     if (updates.minThreshold !== undefined) updateData.minThreshold = updates.minThreshold;
     if (updates.maxCap !== undefined) updateData.maxCap = updates.maxCap;
+    if (updates.equipmentTypeCondition !== undefined) updateData.equipmentTypeCondition = updates.equipmentTypeCondition;
     if (updates.isActive !== undefined) updateData.isActive = updates.isActive;
 
     if (Object.keys(updateData).length > 0) {
@@ -229,6 +233,7 @@ export const bulkCreate = mutation({
         rateAmount: v.number(),
         minThreshold: v.optional(v.number()),
         maxCap: v.optional(v.number()),
+        equipmentTypeCondition: v.optional(v.string()),
       })
     ),
     userId: v.string(),
@@ -250,6 +255,7 @@ export const bulkCreate = mutation({
         rateAmount: rule.rateAmount,
         minThreshold: rule.minThreshold,
         maxCap: rule.maxCap,
+        equipmentTypeCondition: rule.equipmentTypeCondition,
         isActive: true,
       });
       ruleIds.push(ruleId);

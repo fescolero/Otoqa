@@ -85,10 +85,21 @@ interface RuleFormData {
   rateAmount: string;
   minThreshold?: string;
   maxCap?: string;
+  equipmentTypeCondition?: string;
   isActive: boolean;
   isNew?: boolean;
   isEditing?: boolean;
 }
+
+const EQUIPMENT_TYPES = [
+  'Dry Van',
+  'Refrigerated',
+  'Flatbed',
+  'Tanker',
+  'Lowboy',
+  'Step Deck',
+  'Bobtail',
+] as const;
 
 // Map pay basis to default base trigger
 const PAY_BASIS_TRIGGERS: Record<PayBasis, TriggerEvent> = {
@@ -200,6 +211,7 @@ export function PayProfileEditor({
         rateAmount: r.rateAmount.toString(),
         minThreshold: r.minThreshold?.toString(),
         maxCap: r.maxCap?.toString(),
+        equipmentTypeCondition: r.equipmentTypeCondition ?? undefined,
         isActive: r.isActive,
         isEditing: false,
       }));
@@ -291,6 +303,26 @@ export function PayProfileEditor({
     setHasChanges(true);
   };
 
+  // Add new BASE rule for a specific equipment type
+  const handleAddBaseRule = () => {
+    const defaultTrigger = PAY_BASIS_TRIGGERS[payBasis];
+    const triggerLabel = TRIGGER_LABELS[defaultTrigger].replace('s Worked', '').replace('s', '');
+
+    setRules((prev) => [
+      ...prev,
+      {
+        name: `Base ${triggerLabel}`,
+        category: 'BASE' as RuleCategory,
+        triggerEvent: defaultTrigger,
+        rateAmount: '',
+        equipmentTypeCondition: '',
+        isActive: true,
+        isNew: true,
+        isEditing: true,
+      },
+    ]);
+  };
+
   // Add new accessorial rule
   const handleAddRule = () => {
     const availableTriggers = TRIGGERS_BY_BASIS[payBasis].filter(
@@ -370,6 +402,19 @@ export function PayProfileEditor({
       }
     }
 
+    // Check for duplicate BASE rules with the same equipment type condition
+    const baseRulesForValidation = rules.filter((r) => r.category === 'BASE');
+    const seenEquipmentConditions = new Set<string>();
+    for (const rule of baseRulesForValidation) {
+      const key = (rule.equipmentTypeCondition?.trim() || '__any__').toLowerCase();
+      if (seenEquipmentConditions.has(key)) {
+        const label = rule.equipmentTypeCondition?.trim() || 'Any (No Condition)';
+        alert(`Duplicate base pay rule for equipment type "${label}". Each equipment type can only have one base pay rule.`);
+        return;
+      }
+      seenEquipmentConditions.add(key);
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -400,6 +445,7 @@ export function PayProfileEditor({
 
       // Sync rules
       for (const rule of rules) {
+        const equipmentCondition = rule.equipmentTypeCondition?.trim() || undefined;
         if (rule._id && !rule.isNew) {
           // Update existing rule
           await updateRule({
@@ -410,6 +456,7 @@ export function PayProfileEditor({
             rateAmount: parseFloat(rule.rateAmount),
             minThreshold: rule.minThreshold ? parseFloat(rule.minThreshold) : undefined,
             maxCap: rule.maxCap ? parseFloat(rule.maxCap) : undefined,
+            equipmentTypeCondition: equipmentCondition,
             isActive: rule.isActive,
             userId,
           });
@@ -423,6 +470,7 @@ export function PayProfileEditor({
             rateAmount: parseFloat(rule.rateAmount),
             minThreshold: rule.minThreshold ? parseFloat(rule.minThreshold) : undefined,
             maxCap: rule.maxCap ? parseFloat(rule.maxCap) : undefined,
+            equipmentTypeCondition: equipmentCondition,
             userId,
           });
         }
@@ -611,6 +659,7 @@ export function PayProfileEditor({
 
                 {baseRules.map((rule, idx) => {
                   const ruleIndex = rules.findIndex((r) => r === rule);
+                  const isFirstBaseRule = idx === 0 && !rule.equipmentTypeCondition;
                   return (
                     <RuleCard
                       key={rule._id ?? `base-${idx}`}
@@ -621,9 +670,20 @@ export function PayProfileEditor({
                       onSave={() => handleSaveRuleEdit(ruleIndex)}
                       onCancel={() => handleCancelEdit(ruleIndex)}
                       onChange={(field, value) => updateRuleField(ruleIndex, field, value)}
+                      onDelete={!isFirstBaseRule ? () => setDeletingRuleId(rule._id ?? `base-new-${idx}`) : undefined}
                     />
                   );
                 })}
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={handleAddBaseRule}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add Base Rate for Equipment Type
+                </Button>
               </div>
 
               {/* Accessorials & Bonuses */}
@@ -847,6 +907,29 @@ function RuleCard({
           </div>
         </div>
 
+        <div className="space-y-1">
+          <Label className="text-xs">Equipment Type Condition</Label>
+          <Select
+            value={rule.equipmentTypeCondition ?? '__any__'}
+            onValueChange={(v) => onChange('equipmentTypeCondition', v === '__any__' ? '' : v)}
+          >
+            <SelectTrigger className="h-9">
+              <SelectValue placeholder="Any (No Condition)" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__any__">Any (No Condition)</SelectItem>
+              {EQUIPMENT_TYPES.map((type) => (
+                <SelectItem key={type} value={type}>
+                  {type}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            When set, this rule only applies to loads with the matching equipment type.
+          </p>
+        </div>
+
         <div className="flex items-center justify-between pt-2">
           <div className="flex items-center gap-2">
             <Switch
@@ -880,6 +963,11 @@ function RuleCard({
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="font-medium">{rule.name}</span>
+            {rule.equipmentTypeCondition && (
+              <Badge variant="outline" className="text-xs">
+                {rule.equipmentTypeCondition}
+              </Badge>
+            )}
             {!rule.isActive && (
               <Badge variant="secondary" className="text-xs">
                 Inactive

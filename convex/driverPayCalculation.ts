@@ -124,6 +124,14 @@ function evaluateRule(
   legStops: Doc<'loadStops'>[],
   invoiceTotal: number | null
 ): { qty: number; amount: number; warning: string | null } {
+  if (rule.equipmentTypeCondition) {
+    const loadEquipment = load.equipmentType?.toLowerCase().trim();
+    const ruleEquipment = rule.equipmentTypeCondition.toLowerCase().trim();
+    if (loadEquipment !== ruleEquipment) {
+      return { qty: 0, amount: 0, warning: null };
+    }
+  }
+
   let qty = 0;
   let amount = 0;
   let warning: string | null = null;
@@ -258,13 +266,21 @@ export const calculateDriverPay = internalMutation({
       .collect();
 
     // Enrich assignments with BASE rule minThreshold
+    // Prefer equipment-specific BASE rule, fall back to unconditional BASE rule
+    const loadEquipment = load.equipmentType?.toLowerCase().trim();
     const assignmentsWithBaseRule = await Promise.all(
       assignments.map(async (assignment) => {
         const rules = await ctx.db
           .query('rateRules')
           .withIndex('by_profile', (q) => q.eq('profileId', assignment.profileId))
           .collect();
-        const baseRule = rules.find((r) => r.category === 'BASE' && r.isActive);
+        const baseRule =
+          rules.find((r) =>
+            r.category === 'BASE' && r.isActive &&
+            r.equipmentTypeCondition &&
+            r.equipmentTypeCondition.toLowerCase().trim() === loadEquipment
+          ) ??
+          rules.find((r) => r.category === 'BASE' && r.isActive && !r.equipmentTypeCondition);
         return {
           assignment,
           minThreshold: baseRule?.minThreshold ?? 0,
@@ -501,13 +517,20 @@ export const previewCalculation = internalQuery({
       .withIndex('by_driver', (q) => q.eq('driverId', leg.driverId!))
       .collect();
 
+    const previewLoadEquipment = load.equipmentType?.toLowerCase().trim();
     const assignmentsWithBaseRule = await Promise.all(
       assignments.map(async (assignment) => {
         const rules = await ctx.db
           .query('rateRules')
           .withIndex('by_profile', (q) => q.eq('profileId', assignment.profileId))
           .collect();
-        const baseRule = rules.find((r) => r.category === 'BASE' && r.isActive);
+        const baseRule =
+          rules.find((r) =>
+            r.category === 'BASE' && r.isActive &&
+            r.equipmentTypeCondition &&
+            r.equipmentTypeCondition.toLowerCase().trim() === previewLoadEquipment
+          ) ??
+          rules.find((r) => r.category === 'BASE' && r.isActive && !r.equipmentTypeCondition);
         return {
           assignment,
           minThreshold: baseRule?.minThreshold ?? 0,
