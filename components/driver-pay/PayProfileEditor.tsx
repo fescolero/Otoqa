@@ -496,10 +496,10 @@ export function PayProfileEditor({
   return (
     <>
       <Sheet open={open} onOpenChange={onOpenChange}>
-        <SheetContent className="w-full sm:max-w-[540px] overflow-y-auto">
-          <SheetHeader className="pb-4 border-b">
+        <SheetContent className="w-full sm:max-w-[540px] p-0 gap-0">
+          <SheetHeader className="px-6 py-4 border-b shrink-0">
             <div className="flex items-center justify-between">
-              <SheetTitle>
+              <SheetTitle className="text-lg">
                 {isEditing ? 'Edit Pay Profile' : 'Create Pay Profile'}
               </SheetTitle>
               {isEditing && (
@@ -514,10 +514,10 @@ export function PayProfileEditor({
             </SheetDescription>
           </SheetHeader>
 
-          <div className="py-6 space-y-8">
+          <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
             {/* Section A: Profile Settings */}
             <section className="space-y-4">
-              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 General Info
               </h3>
 
@@ -556,7 +556,7 @@ export function PayProfileEditor({
 
                 {/* Show profile type badge when editing */}
                 {isEditing && (
-                  <div className="flex items-center gap-2 p-2 bg-muted rounded-lg">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-muted rounded-lg">
                     {profileType === 'DRIVER' ? (
                       <><User className="h-4 w-4" /><span className="text-sm font-medium">Driver Profile</span></>
                     ) : (
@@ -565,7 +565,7 @@ export function PayProfileEditor({
                   </div>
                 )}
 
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <Label htmlFor="name">Profile Name</Label>
                   <Input
                     id="name"
@@ -575,7 +575,7 @@ export function PayProfileEditor({
                   />
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <Label>Pay Basis</Label>
                   <Select value={payBasis} onValueChange={(v) => handlePayBasisChange(v as PayBasis)}>
                     <SelectTrigger>
@@ -610,7 +610,7 @@ export function PayProfileEditor({
                   </Select>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <Label htmlFor="description">Description (optional)</Label>
                   <Textarea
                     id="description"
@@ -621,8 +621,8 @@ export function PayProfileEditor({
                   />
                 </div>
 
-                <div className="flex items-center justify-between py-2">
-                  <div>
+                <div className="flex items-center justify-between py-1">
+                  <div className="space-y-0.5">
                     <Label>Organization Default</Label>
                     <p className="text-xs text-muted-foreground">
                       Use as default for {profileType === 'DRIVER' ? 'drivers' : 'carriers'} without an assigned profile
@@ -632,7 +632,6 @@ export function PayProfileEditor({
                     checked={isDefault}
                     onCheckedChange={(checked) => {
                       if (checked) {
-                        // Show confirmation when enabling org default
                         setShowDefaultConfirm(true);
                       } else {
                         setIsDefault(false);
@@ -644,9 +643,11 @@ export function PayProfileEditor({
               </div>
             </section>
 
+            <div className="border-t" />
+
             {/* Section B: Compensation Rules */}
             <section className="space-y-4">
-              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                 Compensation Rules
               </h3>
 
@@ -687,14 +688,14 @@ export function PayProfileEditor({
               </div>
 
               {/* Accessorials & Bonuses */}
-              <div className="space-y-3 pt-4">
+              <div className="space-y-3 pt-2">
                 <h4 className="text-sm font-medium flex items-center gap-2">
                   <div className="h-2 w-2 rounded-full bg-green-500" />
                   Accessorials &amp; Bonuses
                 </h4>
 
                 {accessorialRules.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-2">
+                  <p className="text-sm text-muted-foreground py-1">
                     No additional pay rules configured.
                   </p>
                 ) : (
@@ -728,7 +729,7 @@ export function PayProfileEditor({
             </section>
           </div>
 
-          <SheetFooter className="border-t pt-4">
+          <SheetFooter className="px-6 py-4 border-t shrink-0">
             <div className="flex gap-3 w-full">
               <Button
                 variant="outline"
@@ -833,7 +834,7 @@ function RuleCard({
       <div className="border rounded-lg p-4 space-y-3 bg-muted/30">
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
-            <Label className="text-xs">Rule Name</Label>
+            <Label className="text-xs text-muted-foreground">Rule Name</Label>
             <Input
               value={rule.name}
               onChange={(e) => onChange('name', e.target.value)}
@@ -842,7 +843,7 @@ function RuleCard({
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Trigger</Label>
+            <Label className="text-xs text-muted-foreground">Trigger</Label>
             <Select
               value={rule.triggerEvent}
               onValueChange={(v) => onChange('triggerEvent', v)}
@@ -863,7 +864,7 @@ function RuleCard({
 
         <div className="grid grid-cols-3 gap-3">
           <div className="space-y-1">
-            <Label className="text-xs">
+            <Label className="text-xs text-muted-foreground">
               Rate {rule.triggerEvent === 'PCT_OF_LOAD' ? '(%)' : '($)'}
             </Label>
             <div className="relative">
@@ -882,7 +883,7 @@ function RuleCard({
             </div>
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Min Threshold</Label>
+            <Label className="text-xs text-muted-foreground">Min Threshold</Label>
             <Input
               type="number"
               step="0.01"
@@ -894,7 +895,7 @@ function RuleCard({
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Max Cap ($)</Label>
+            <Label className="text-xs text-muted-foreground">Max Cap ($)</Label>
             <Input
               type="number"
               step="0.01"
@@ -908,7 +909,7 @@ function RuleCard({
         </div>
 
         <div className="space-y-1">
-          <Label className="text-xs">Equipment Type Condition</Label>
+          <Label className="text-xs text-muted-foreground">Equipment Type Condition</Label>
           <Select
             value={rule.equipmentTypeCondition ?? '__any__'}
             onValueChange={(v) => onChange('equipmentTypeCondition', v === '__any__' ? '' : v)}
@@ -925,12 +926,12 @@ function RuleCard({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-[11px] text-muted-foreground">
             When set, this rule only applies to loads with the matching equipment type.
           </p>
         </div>
 
-        <div className="flex items-center justify-between pt-2">
+        <div className="flex items-center justify-between pt-1 border-t">
           <div className="flex items-center gap-2">
             <Switch
               checked={rule.isActive}
@@ -943,11 +944,11 @@ function RuleCard({
           </div>
           <div className="flex gap-2">
             <Button variant="ghost" size="sm" onClick={onCancel}>
-              <X className="h-4 w-4 mr-1" />
+              <X className="h-3.5 w-3.5 mr-1" />
               Cancel
             </Button>
             <Button size="sm" onClick={onSave}>
-              <Check className="h-4 w-4 mr-1" />
+              <Check className="h-3.5 w-3.5 mr-1" />
               Done
             </Button>
           </div>
@@ -958,23 +959,23 @@ function RuleCard({
 
   // View Mode
   return (
-    <div className={`border rounded-lg p-3 ${!rule.isActive ? 'opacity-50' : ''} ${isBase ? 'bg-primary/5 border-primary/20' : ''}`}>
-      <div className="flex items-center justify-between">
-        <div className="flex-1">
-          <div className="flex items-center gap-2">
-            <span className="font-medium">{rule.name}</span>
+    <div className={`border rounded-lg px-4 py-3 ${!rule.isActive ? 'opacity-50' : ''} ${isBase ? 'bg-primary/5 border-primary/20' : ''}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-sm">{rule.name}</span>
             {rule.equipmentTypeCondition && (
-              <Badge variant="outline" className="text-xs">
+              <Badge variant="outline" className="text-[11px] shrink-0">
                 {rule.equipmentTypeCondition}
               </Badge>
             )}
             {!rule.isActive && (
-              <Badge variant="secondary" className="text-xs">
+              <Badge variant="secondary" className="text-[11px] shrink-0">
                 Inactive
               </Badge>
             )}
           </div>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground mt-0.5">
             {rule.triggerEvent === 'PCT_OF_LOAD'
               ? `${rule.rateAmount}% ${TRIGGER_UNITS[rule.triggerEvent]}`
               : `$${parseFloat(rule.rateAmount || '0').toFixed(2)} ${TRIGGER_UNITS[rule.triggerEvent]}`}
@@ -982,13 +983,13 @@ function RuleCard({
             {rule.maxCap && ` (max $${rule.maxCap})`}
           </p>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onEdit}>
-            <Pencil className="h-4 w-4" />
+            <Pencil className="h-3.5 w-3.5" />
           </Button>
-          {!isBase && onDelete && (
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-red-600" onClick={onDelete}>
-              <Trash2 className="h-4 w-4" />
+          {onDelete && (
+            <Button variant="ghost" size="icon" className="h-8 w-8 text-red-600 hover:text-red-700" onClick={onDelete}>
+              <Trash2 className="h-3.5 w-3.5" />
             </Button>
           )}
         </div>
