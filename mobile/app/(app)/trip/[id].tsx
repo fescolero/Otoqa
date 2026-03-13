@@ -34,6 +34,8 @@ import {
   addPendingAction,
   reconcilePendingActions,
 } from '../../../lib/pending-actions';
+import { getTrackingState, getBufferedLocationCount } from '../../../lib/location-tracking';
+import { getTotalCountForLoad, getUnsyncedCountForLoad } from '../../../lib/location-db';
 
 // ============================================
 // DESIGN SYSTEM
@@ -105,6 +107,37 @@ export default function TripDetailScreen() {
 
   // Optimistic pending actions (persisted across restarts)
   const [pendingActions, setPendingActions] = useState<PendingActionsMap>({});
+
+  // GPS tracking debug info
+  const [trackingDebug, setTrackingDebug] = useState<{
+    isActive: boolean;
+    totalPoints: number;
+    unsyncedPoints: number;
+    loadId: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const state = await getTrackingState();
+        const total = await getTotalCountForLoad(id);
+        const unsynced = await getUnsyncedCountForLoad(id);
+        if (!cancelled) {
+          setTrackingDebug({
+            isActive: state?.isActive ?? false,
+            totalPoints: total,
+            unsyncedPoints: unsynced,
+            loadId: state?.loadId ?? null,
+          });
+        }
+      } catch { /* ignore */ }
+    };
+    refresh();
+    const interval = setInterval(refresh, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [id]);
 
   // Load persisted pending actions on mount
   useEffect(() => {
@@ -205,7 +238,11 @@ export default function TripDetailScreen() {
         ? await checkIn({
             stopId: checkInModal.stopId,
             driverId,
+            loadId: id as Id<'loadInformation'>,
             notes: notes || undefined,
+            stopSequence: currentStop?.sequenceNumber,
+            totalStops,
+            organizationId: organizationId || undefined,
           })
         : await checkOut({
             stopId: checkInModal.stopId,
@@ -402,6 +439,29 @@ export default function TripDetailScreen() {
               <Text style={styles.weakSignalText}>
                 Weak signal - Actions will be queued
                 {pendingCount > 0 ? ` (${pendingCount} pending)` : ''}
+              </Text>
+            </View>
+          )}
+
+          {/* GPS Tracking Debug Banner */}
+          {trackingDebug && (
+            <View style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              backgroundColor: trackingDebug.isActive ? '#064e3b' : '#1e293b',
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 8,
+              marginBottom: 8,
+              gap: 8,
+            }}>
+              <Ionicons
+                name={trackingDebug.isActive ? 'radio' : 'radio-outline'}
+                size={14}
+                color={trackingDebug.isActive ? '#34d399' : '#94a3b8'}
+              />
+              <Text style={{ color: '#d1d5db', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>
+                GPS {trackingDebug.isActive ? 'ON' : 'OFF'} · {trackingDebug.totalPoints} pts · {trackingDebug.unsyncedPoints} pending
               </Text>
             </View>
           )}

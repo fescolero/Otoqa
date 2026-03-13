@@ -3,7 +3,7 @@ import { api } from '../../../convex/_generated/api';
 import { Id } from '../../../convex/_generated/dataModel';
 import { enqueueMutation } from '../offline-queue';
 import { uploadPODPhoto } from '../s3-upload';
-import { startLocationTracking, stopLocationTracking } from '../location-tracking';
+import { startLocationTracking, stopLocationTracking, isTracking } from '../location-tracking';
 import * as Location from 'expo-location';
 import { useNetworkStatus } from './useNetworkStatus';
 import { usePostHog } from 'posthog-react-native';
@@ -95,6 +95,21 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           connectionQuality,
           action: 'check_in',
         });
+
+        // Start tracking even when offline -- GPS points go to SQLite
+        if (options.stopSequence === 1 && options.loadId && options.organizationId) {
+          console.log('[CheckIn] First stop (offline) - starting location tracking');
+          try {
+            await startLocationTracking({
+              driverId: options.driverId,
+              loadId: options.loadId,
+              organizationId: options.organizationId,
+            });
+          } catch (trackErr) {
+            console.warn('[CheckIn] Tracking start failed while offline:', trackErr);
+          }
+        }
+
         return {
           success: true,
           message: connectionQuality === 'offline'
@@ -111,6 +126,34 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           checkInMutation(mutationArgs),
           MUTATION_TIMEOUT_MS
         );
+
+        // Start location tracking on check-in at the first stop
+        console.log(`[CheckIn] Tracking check: success=${result.success}, seq=${options.stopSequence}, total=${options.totalStops}, loadId=${options.loadId ? 'yes' : 'no'}, orgId=${options.organizationId ? 'yes' : 'no'}`);
+        if (result.success && options.stopSequence && options.totalStops && options.loadId && options.organizationId) {
+          const isFirstStop = options.stopSequence === 1;
+
+          if (isFirstStop) {
+            console.log('[CheckIn] First stop check-in - starting location tracking');
+            const trackingResult = await startLocationTracking({
+              driverId: options.driverId,
+              loadId: options.loadId,
+              organizationId: options.organizationId,
+            });
+
+            posthog.capture('location_tracking_started', {
+              loadId: options.loadId ?? null,
+              stopId: options.stopId,
+              trigger: 'check_in',
+              success: trackingResult.success,
+              message: trackingResult.message,
+            });
+
+            if (!trackingResult.success) {
+              console.warn('[CheckIn] Location tracking failed to start:', trackingResult.message);
+            }
+          }
+        }
+
         return result;
       } catch (onlineError) {
         await enqueueMutation('checkIn', mutationArgs);
@@ -124,6 +167,21 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           stopId: options.stopId,
           error: onlineError instanceof Error ? onlineError.message : 'timeout',
         });
+
+        // Still try to start tracking even if the mutation was queued
+        if (options.stopSequence === 1 && options.loadId && options.organizationId) {
+          console.log('[CheckIn] First stop (queued) - starting location tracking anyway');
+          try {
+            await startLocationTracking({
+              driverId: options.driverId,
+              loadId: options.loadId,
+              organizationId: options.organizationId,
+            });
+          } catch (trackErr) {
+            console.warn('[CheckIn] Tracking start failed after queue:', trackErr);
+          }
+        }
+
         return {
           success: true,
           message: 'Connection slow - check-in queued for sync',
@@ -245,22 +303,29 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           const isLastStop = options.stopSequence === options.totalStops;
 
           if (isFirstStop) {
-            console.log('[CheckOut] First stop - starting location tracking');
-            const trackingResult = await startLocationTracking({
-              driverId: options.driverId,
-              loadId: options.loadId,
-              organizationId: options.organizationId,
-            });
+            // Safety net: check-in should have started tracking, but ensure it's running
+            const alreadyTracking = await isTracking();
+            if (!alreadyTracking) {
+              console.log('[CheckOut] First stop checkout - tracking not running, starting as fallback');
+              const trackingResult = await startLocationTracking({
+                driverId: options.driverId,
+                loadId: options.loadId,
+                organizationId: options.organizationId,
+              });
 
-            posthog.capture('location_tracking_started', {
-              loadId: options.loadId ?? null,
-              stopId: options.stopId,
-              success: trackingResult.success,
-              message: trackingResult.message,
-            });
+              posthog.capture('location_tracking_started', {
+                loadId: options.loadId ?? null,
+                stopId: options.stopId,
+                trigger: 'check_out_fallback',
+                success: trackingResult.success,
+                message: trackingResult.message,
+              });
 
-            if (!trackingResult.success) {
-              console.warn('[CheckOut] Location tracking failed to start:', trackingResult.message);
+              if (!trackingResult.success) {
+                console.warn('[CheckOut] Location tracking failed to start:', trackingResult.message);
+              }
+            } else {
+              console.log('[CheckOut] First stop checkout - tracking already running from check-in');
             }
           } else if (isLastStop) {
             console.log('[CheckOut] Last stop - stopping location tracking');

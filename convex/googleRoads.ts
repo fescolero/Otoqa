@@ -299,6 +299,234 @@ export const mapMatchRoute = action({
 });
 
 /**
+ * Diagnostic variant of mapMatchRoute that also returns per-point tracepoint data.
+ * Used by the GPS Logs debugging page to show match status, snapped coordinates,
+ * road names, drift distance, and batch boundaries for every raw GPS point.
+ */
+export const mapMatchRouteWithDiagnostics = action({
+  args: {
+    coordinates: v.array(
+      v.object({
+        latitude: v.float64(),
+        longitude: v.float64(),
+        timestamp: v.optional(v.float64()),
+      })
+    ),
+  },
+  returns: v.object({
+    encodedPolyline: v.optional(v.string()),
+    confidence: v.number(),
+    matchedPoints: v.number(),
+    fallbackPoints: v.array(
+      v.object({
+        latitude: v.float64(),
+        longitude: v.float64(),
+      })
+    ),
+    tracepoints: v.array(
+      v.object({
+        originalIndex: v.number(),
+        matched: v.boolean(),
+        snappedLat: v.optional(v.float64()),
+        snappedLng: v.optional(v.float64()),
+        roadName: v.optional(v.string()),
+        driftMeters: v.optional(v.float64()),
+        batchIndex: v.number(),
+      })
+    ),
+  }),
+  handler: async (ctx, args) => {
+    const accessToken = process.env.MAPBOX_ACCESS_TOKEN;
+
+    const emptyResult = {
+      encodedPolyline: undefined as string | undefined,
+      confidence: 0,
+      matchedPoints: 0,
+      fallbackPoints: args.coordinates.map(c => ({ latitude: c.latitude, longitude: c.longitude })),
+      tracepoints: args.coordinates.map((_, i) => ({
+        originalIndex: i,
+        matched: false,
+        snappedLat: undefined as number | undefined,
+        snappedLng: undefined as number | undefined,
+        roadName: undefined as string | undefined,
+        driftMeters: undefined as number | undefined,
+        batchIndex: 0,
+      })),
+    };
+
+    if (!accessToken) {
+      console.warn('[MapboxDiag] Access token not configured');
+      return emptyResult;
+    }
+
+    if (args.coordinates.length < 2) {
+      return emptyResult;
+    }
+
+    try {
+      const allEncodedSegments: string[] = [];
+      const allTracepoints: Array<{
+        originalIndex: number;
+        matched: boolean;
+        snappedLat?: number;
+        snappedLng?: number;
+        roadName?: string;
+        driftMeters?: number;
+        batchIndex: number;
+      }> = [];
+      let totalConfidence = 0;
+      let totalMatched = 0;
+      let batchCount = 0;
+      let batchIndex = 0;
+
+      const BATCH_OVERLAP = 5;
+
+      for (let i = 0; i < args.coordinates.length; i += MAX_MAPBOX_COORDINATES - BATCH_OVERLAP) {
+        const batchEnd = Math.min(i + MAX_MAPBOX_COORDINATES, args.coordinates.length);
+        const batch = args.coordinates.slice(i, batchEnd);
+
+        if (batch.length < 2) continue;
+
+        const coordString = batch
+          .map(c => `${c.longitude},${c.latitude}`)
+          .join(';');
+
+        const url = new URL(`${MAPBOX_MATCHING_API_URL}/${coordString}`);
+        url.searchParams.set('access_token', accessToken);
+        url.searchParams.set('geometries', 'polyline6');
+        url.searchParams.set('overview', 'full');
+        url.searchParams.set('tidy', 'true');
+
+        if (batch[0].timestamp && batch.every(c => c.timestamp)) {
+          const timestamps = batch.map(c => Math.floor((c.timestamp || 0) / 1000)).join(';');
+          url.searchParams.set('timestamps', timestamps);
+        }
+
+        const radiuses = batch.map(() => '50').join(';');
+        url.searchParams.set('radiuses', radiuses);
+
+        console.log(`[MapboxDiag] Batch ${batchIndex}: matching ${batch.length} coordinates (indices ${i}-${batchEnd - 1})...`);
+        const response = await fetch(url.toString());
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error('[MapboxDiag] API error:', response.status, errorText);
+          for (let j = 0; j < batch.length; j++) {
+            const globalIdx = i + j;
+            if (i > 0 && j < BATCH_OVERLAP) continue;
+            allTracepoints.push({
+              originalIndex: globalIdx,
+              matched: false,
+              batchIndex,
+            });
+          }
+          batchIndex++;
+          continue;
+        }
+
+        const data = await response.json();
+
+        if (data.code !== 'Ok' || !data.matchings || data.matchings.length === 0) {
+          console.warn('[MapboxDiag] No match found:', data.code);
+          for (let j = 0; j < batch.length; j++) {
+            const globalIdx = i + j;
+            if (i > 0 && j < BATCH_OVERLAP) continue;
+            allTracepoints.push({
+              originalIndex: globalIdx,
+              matched: false,
+              batchIndex,
+            });
+          }
+          batchIndex++;
+          continue;
+        }
+
+        const matching = data.matchings[0];
+        if (matching.geometry) {
+          allEncodedSegments.push(matching.geometry);
+          totalConfidence += matching.confidence || 0;
+          batchCount++;
+        }
+
+        const tracepoints: Array<any> = data.tracepoints || [];
+        let matchedInBatch = 0;
+
+        for (let j = 0; j < batch.length; j++) {
+          const globalIdx = i + j;
+          if (i > 0 && j < BATCH_OVERLAP) continue;
+
+          const tp = tracepoints[j];
+          const raw = batch[j];
+
+          if (tp && tp.location) {
+            const snappedLng = tp.location[0];
+            const snappedLat = tp.location[1];
+            const drift = haversineDistance(raw.latitude, raw.longitude, snappedLat, snappedLng) * 1000;
+
+            allTracepoints.push({
+              originalIndex: globalIdx,
+              matched: true,
+              snappedLat,
+              snappedLng,
+              roadName: tp.name || undefined,
+              driftMeters: Math.round(drift * 10) / 10,
+              batchIndex,
+            });
+            matchedInBatch++;
+          } else {
+            allTracepoints.push({
+              originalIndex: globalIdx,
+              matched: false,
+              batchIndex,
+            });
+          }
+        }
+
+        totalMatched += matchedInBatch;
+        batchIndex++;
+      }
+
+      if (allEncodedSegments.length === 0) {
+        console.warn('[MapboxDiag] No matches found, returning raw coordinates');
+        return {
+          ...emptyResult,
+          tracepoints: allTracepoints,
+        };
+      }
+
+      const avgConfidence = batchCount > 0 ? totalConfidence / batchCount : 0;
+
+      console.log(`[MapboxDiag] Matched ${totalMatched}/${args.coordinates.length} points across ${batchIndex} batches (${(avgConfidence * 100).toFixed(1)}% confidence)`);
+
+      return {
+        encodedPolyline: allEncodedSegments[0],
+        confidence: avgConfidence,
+        matchedPoints: totalMatched,
+        fallbackPoints: [],
+        tracepoints: allTracepoints,
+      };
+    } catch (error) {
+      console.error('[MapboxDiag] Failed:', error);
+      return {
+        encodedPolyline: undefined,
+        confidence: 0,
+        matchedPoints: 0,
+        fallbackPoints: args.coordinates.map(c => ({ latitude: c.latitude, longitude: c.longitude })),
+        tracepoints: args.coordinates.map((_, i) => ({
+          originalIndex: i,
+          matched: false,
+          snappedLat: undefined as number | undefined,
+          snappedLng: undefined as number | undefined,
+          roadName: undefined as string | undefined,
+          driftMeters: undefined as number | undefined,
+          batchIndex: 0,
+        })),
+      };
+    }
+  },
+});
+
+/**
  * Get road-following path between GPS points using Directions API
  * Makes individual API calls for each pair of consecutive points
  * This ensures the path follows the actual roads between sparse GPS pings

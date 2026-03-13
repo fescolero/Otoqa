@@ -366,8 +366,8 @@ export default function AppLayout() {
   }, [profile?._id]);
 
   // Flush buffered locations when app returns to foreground.
-  // Delay slightly to let Convex auth token refresh first — the
-  // ConvexAuthProvider re-auth runs asynchronously on foreground return.
+  // forceFlush now has its own exponential backoff to handle auth delays,
+  // so we just need a small initial delay for the Convex WS to reconnect.
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextState) => {
       if (nextState === 'active') {
@@ -376,10 +376,9 @@ export default function AppLayout() {
           if (!state?.isActive) return;
           const count = await getBufferedLocationCount();
           if (count > 0) {
-            console.log(`[App] Foreground: ${count} buffered locations, waiting for auth...`);
-            await new Promise((r) => setTimeout(r, 2000));
-            console.log(`[App] Foreground: flushing buffered locations`);
-            await forceFlush();
+            console.log(`[App] Foreground: ${count} buffered locations, flushing with retry...`);
+            const result = await forceFlush();
+            console.log(`[App] Foreground flush result: synced=${result.synced}, success=${result.success}`);
           }
         } catch (err) {
           console.warn('[App] Foreground flush failed:', err);

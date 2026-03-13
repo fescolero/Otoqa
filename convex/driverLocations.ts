@@ -49,18 +49,25 @@ export const batchInsertLocations = mutation({
 
     const now = Date.now();
     let inserted = 0;
+    let skippedDriver = 0;
+    let skippedOrgMismatch = 0;
+    let skippedLoad = 0;
 
     for (const loc of args.locations) {
-      // Verify driver exists and belongs to org
       const driver = await ctx.db.get(loc.driverId);
-      if (!driver || driver.isDeleted || driver.organizationId !== args.organizationId) {
-        continue; // Skip invalid locations
+      if (!driver || driver.isDeleted) {
+        skippedDriver++;
+        continue;
+      }
+      if (driver.organizationId !== args.organizationId) {
+        skippedOrgMismatch++;
+        continue;
       }
 
-      // Verify load exists
       const load = await ctx.db.get(loc.loadId);
       if (!load) {
-        continue; // Skip if load doesn't exist
+        skippedLoad++;
+        continue;
       }
 
       await ctx.db.insert('driverLocations', {
@@ -77,6 +84,13 @@ export const batchInsertLocations = mutation({
         createdAt: now,
       });
       inserted++;
+    }
+
+    if (skippedDriver > 0 || skippedOrgMismatch > 0 || skippedLoad > 0) {
+      console.warn(
+        `[batchInsertLocations] Skipped ${skippedDriver + skippedOrgMismatch + skippedLoad}/${args.locations.length} points:`,
+        `driver=${skippedDriver}, orgMismatch=${skippedOrgMismatch} (passed="${args.organizationId}"), load=${skippedLoad}`
+      );
     }
 
     return { inserted };
@@ -208,6 +222,44 @@ export const getRouteHistoryForLoad = query({
       speed: loc.speed,
       heading: loc.heading,
       recordedAt: loc.recordedAt,
+    }));
+  },
+});
+
+/**
+ * Get detailed route history for GPS diagnostics page.
+ * Returns all fields including accuracy and createdAt (for sync delay analysis).
+ */
+export const getDetailedRouteHistoryForLoad = query({
+  args: { loadId: v.id('loadInformation') },
+  returns: v.array(
+    v.object({
+      _id: v.id('driverLocations'),
+      latitude: v.float64(),
+      longitude: v.float64(),
+      accuracy: v.optional(v.float64()),
+      speed: v.optional(v.float64()),
+      heading: v.optional(v.float64()),
+      recordedAt: v.float64(),
+      createdAt: v.float64(),
+    })
+  ),
+  handler: async (ctx, args) => {
+    const locations = await ctx.db
+      .query('driverLocations')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .order('asc')
+      .collect();
+
+    return locations.map((loc) => ({
+      _id: loc._id,
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      accuracy: loc.accuracy,
+      speed: loc.speed,
+      heading: loc.heading,
+      recordedAt: loc.recordedAt,
+      createdAt: loc.createdAt,
     }));
   },
 });

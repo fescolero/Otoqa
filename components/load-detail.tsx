@@ -50,6 +50,7 @@ import {
   ZoomOut,
   Image as ImageIcon,
   Route,
+  Radar,
 } from 'lucide-react';
 import Link from 'next/link';
 import { Id } from '@/convex/_generated/dataModel';
@@ -481,6 +482,12 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Link href={`/loads/${loadId}/gps-logs`}>
+            <Button variant="outline">
+              <Radar className="mr-2 h-4 w-4" />
+              GPS Logs
+            </Button>
+          </Link>
           <Button variant="outline">
             <FileText className="mr-2 h-4 w-4" />
             Export

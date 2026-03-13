@@ -3,6 +3,7 @@ import { AppState, AppStateStatus } from 'react-native';
 import { ConvexReactClient } from 'convex/react';
 import { useAuth } from '@clerk/clerk-expo';
 import { trackConvexAuthEvent } from './analytics';
+import { storeAuthToken, clearAuthToken } from './auth-token-store';
 
 // ============================================
 // CONVEX CLIENT SETUP
@@ -93,6 +94,7 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
     if (!isSignedIn) {
       console.log('[ConvexAuth] Not signed in, clearing auth');
       convex.clearAuth();
+      clearAuthToken().catch(() => {});
       hasSetAuthRef.current = false;
       wasAuthenticatedRef.current = false;
       clearFalseDebounce();
@@ -133,6 +135,7 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
           });
           if (token) {
             tokenRetryCount = 0;
+            storeAuthToken(token).catch(() => {});
             return token;
           }
           // Token was null — Clerk session may not be ready yet (common right
@@ -147,6 +150,7 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
             });
             if (retryToken) {
               tokenRetryCount = 0;
+              storeAuthToken(retryToken).catch(() => {});
               return retryToken;
             }
           }
@@ -250,6 +254,7 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
       console.log('[ConvexAuth] Signed out, resetting');
       authSetupCount.current = 0;
       convex.clearAuth();
+      clearAuthToken().catch(() => {});
       hasSetAuthRef.current = false;
       wasAuthenticatedRef.current = false;
       clearFalseDebounce();
