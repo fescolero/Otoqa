@@ -11,7 +11,6 @@ import {
   insertLocation,
   getUnsyncedLocations,
   getUnsyncedCount,
-  getUnsyncedCountForLoad,
   markAsSynced,
   getLastLocationForLoad,
   deleteOldSyncedLocations,
@@ -34,9 +33,9 @@ const TRACKING_STATE_KEY = 'location_tracking_state';
 // TRACKING CONFIGURATION
 // Optimized for accurate route reconstruction
 // ============================================
-const TRACKING_INTERVAL_MS = 1 * 60 * 1000;  // 1 minute (was 5 minutes)
-const SYNC_INTERVAL_MS = 2 * 60 * 1000;      // Sync to server every 2 minutes
-const MIN_DISTANCE_METERS = 50;               // Also track on 50m movement (was 100m)
+const TRACKING_INTERVAL_MS = 1 * 60 * 1000;  // Android: fire every 60s
+const SYNC_INTERVAL_MS = 30 * 1000;           // Sync to server every 30 seconds
+const BG_DISTANCE_INTERVAL = 10;              // iOS: deliver updates every 10m (OS still throttles)
 const MAX_ACCURACY_METERS = 50;               // Reject readings with > 50m accuracy
 const MIN_DISTANCE_BETWEEN_POINTS = 20;       // Skip if < 20m from last point (avoid duplicates)
 
@@ -57,22 +56,33 @@ async function authedMutation<T>(
   mutationRef: any,
   args: any
 ): Promise<T> {
-  // Try the React client first -- it has a live WebSocket and fresh auth
+  // Try the React client first with a timeout.
+  // The React client queues mutations over WebSocket and may hang indefinitely
+  // if the WS is disconnected (background) or auth is in limbo.
   try {
-    return await convex.mutation(mutationRef, args);
+    const REACT_CLIENT_TIMEOUT = 5_000;
+    const result = await Promise.race([
+      convex.mutation(mutationRef, args),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT)
+      ),
+    ]);
+    return result;
   } catch (reactErr) {
     const msg = reactErr instanceof Error ? reactErr.message : String(reactErr);
-    const isAuthErr = msg.includes('Not authenticated') || msg.includes('Unauthenticated') || msg.includes('auth');
-    if (!isAuthErr) throw reactErr;
+    const isRecoverable = msg.includes('Not authenticated') || msg.includes('Unauthenticated') || msg.includes('auth') || msg.includes('timeout');
+    if (!isRecoverable) throw reactErr;
 
-    console.log('[LocationTracking] React client auth failed, trying HTTP client with stored token...');
+    console.log(`[LocationTracking] React client failed (${msg}), trying HTTP client...`);
   }
 
-  // Fallback: HTTP client with stored token
-  const { getStoredAuthToken } = require('./auth-token-store');
-  const token = await getStoredAuthToken();
+  // Fallback: HTTP client with a fresh token from the Clerk singleton.
+  // Unlike the stored token (which expires in ~60s), the Clerk singleton
+  // can mint fresh JWTs as long as the session is alive in SecureStore.
+  const { getFreshToken } = require('./auth-token-store');
+  const token = await getFreshToken();
   if (!token) {
-    throw new Error('No stored auth token available for background sync');
+    throw new Error('No auth token available (Clerk session may have expired)');
   }
 
   const httpClient = new ConvexHttpClient(CONVEX_URL);
@@ -81,7 +91,7 @@ async function authedMutation<T>(
     return await httpClient.mutation(mutationRef, args);
   } catch (httpErr) {
     const msg = httpErr instanceof Error ? httpErr.message : String(httpErr);
-    console.error(`[LocationTracking] HTTP client mutation also failed: ${msg}`);
+    console.error(`[LocationTracking] HTTP client also failed: ${msg}`);
     throw httpErr;
   }
 }
@@ -154,9 +164,7 @@ interface TrackingState {
 // SQLite retains unsynced rows for later retry.
 // ============================================
 
-const BACKGROUND_FLUSH_THRESHOLD = 3;
-const BACKGROUND_FLUSH_INTERVAL_MS = 2 * 60 * 1000;
-const LAST_BACKGROUND_FLUSH_KEY = 'location_last_bg_flush';
+// (Background flush threshold removed -- we now sync on every BG task invocation)
 
 // Minimum interval for saving a "heartbeat" point even when stationary.
 // Ensures we always have proof the background task is running.
@@ -188,7 +196,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       return;
     }
 
-    console.log(`[LocationTracking] BG task fired: ${locations.length} location(s), accuracy=${locations.map(l => l.coords.accuracy?.toFixed(0)).join(',')}`);
+    console.log(`[LocationTracking] BG task fired: ${locations.length} location(s), accuracy=${locations.map(l => l.coords.accuracy?.toFixed(0)).join(',')}, ts=${locations.map(l => new Date(l.timestamp).toISOString().substring(11, 19)).join(',')}`);
 
     const lastPoint = await getLastLocationForLoad(state.loadId);
 
@@ -201,13 +209,30 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     let addedCount = 0;
     let rejectedAccuracy = 0;
     let rejectedDistance = 0;
+    let rejectedStale = 0;
     let prevLat = lastPoint?.latitude ?? null;
     let prevLng = lastPoint?.longitude ?? null;
+    let prevTimestamp = lastPoint?.recordedAt ?? 0;
     let savedHeartbeat = false;
 
     for (const loc of locations) {
       if (loc.coords.accuracy && loc.coords.accuracy > MAX_ACCURACY_METERS) {
         rejectedAccuracy++;
+        continue;
+      }
+
+      // Reject stale/cached locations: iOS can deliver the same cached
+      // position repeatedly with identical or very old timestamps.
+      // A location older than 30s before the task fired is stale.
+      const locationAge = now - loc.timestamp;
+      if (locationAge > 30_000) {
+        rejectedStale++;
+        continue;
+      }
+
+      // Reject duplicate timestamps (same GPS fix delivered twice)
+      if (prevTimestamp > 0 && Math.abs(loc.timestamp - prevTimestamp) < 1000) {
+        rejectedStale++;
         continue;
       }
 
@@ -242,6 +267,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
       prevLat = loc.coords.latitude;
       prevLng = loc.coords.longitude;
+      prevTimestamp = loc.timestamp;
       addedCount++;
 
       if (needsHeartbeat && !savedHeartbeat) {
@@ -250,28 +276,17 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       }
     }
 
-    console.log(`[LocationTracking] BG task: saved ${addedCount}/${locations.length} to SQLite (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance${savedHeartbeat ? ', +heartbeat' : ''})`);
+    console.log(`[LocationTracking] BG task: saved ${addedCount}/${locations.length} to SQLite (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance, ${rejectedStale} stale${savedHeartbeat ? ', +heartbeat' : ''})`);
 
-    // Best-effort sync to Convex
-    const flushNow = Date.now();
-    const lastFlushStr = await storage.getString(LAST_BACKGROUND_FLUSH_KEY);
-    const lastFlushTime = lastFlushStr ? parseInt(lastFlushStr, 10) : 0;
-    const timeSinceFlush = flushNow - lastFlushTime;
+    // Sync to Convex on every background task invocation
     const unsyncedCount = await getUnsyncedCount();
-
-    const shouldFlush =
-      unsyncedCount >= BACKGROUND_FLUSH_THRESHOLD ||
-      (unsyncedCount > 0 && timeSinceFlush >= BACKGROUND_FLUSH_INTERVAL_MS);
-
-    if (shouldFlush) {
+    if (unsyncedCount > 0) {
       try {
         const result = await syncUnsyncedToConvex(state.organizationId);
-        if (result.success) {
-          await storage.set(LAST_BACKGROUND_FLUSH_KEY, flushNow.toString());
-        }
+        console.log(`[LocationTracking] BG sync: ${result.synced} synced, success=${result.success}`);
       } catch (flushError) {
         const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
-        console.warn(`[LocationTracking] Background sync failed (SQLite retains data): ${errMsg}`);
+        console.warn(`[LocationTracking] BG sync failed (${unsyncedCount} pts safe in SQLite): ${errMsg}`);
       }
     }
   } catch (err) {
@@ -375,30 +390,26 @@ export async function startLocationTracking(params: {
     try {
       console.log('[LocationTracking] Starting background location updates...');
       await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-        // HIGH ACCURACY for better route reconstruction
         accuracy: Location.Accuracy.BestForNavigation,
         
-        // Track every 1 minute OR 50m movement (whichever comes first)
+        // Android: fires every 60s OR 50m movement.
+        // iOS: timeInterval is IGNORED for background — only distanceInterval matters.
+        // We set distanceInterval low (10m) so iOS delivers fresh GPS fixes
+        // while driving instead of caching the last-known position.
+        // Our SQLite distance filter (MIN_DISTANCE_BETWEEN_POINTS=20m) handles dedup.
         timeInterval: TRACKING_INTERVAL_MS,
-        distanceInterval: MIN_DISTANCE_METERS,
+        distanceInterval: BG_DISTANCE_INTERVAL,
         
-        // Show indicator so user knows tracking is active
         showsBackgroundLocationIndicator: true,
         
-        // Android foreground service (required for background)
         foregroundService: {
           notificationTitle: 'Route Tracking Active',
           notificationBody: 'Recording your delivery route',
           notificationColor: '#22c55e',
         },
         
-        // iOS specific - optimize for driving
         activityType: Location.ActivityType.AutomotiveNavigation,
         pausesUpdatesAutomatically: false,
-        
-        // Android specific - batch updates for efficiency
-        deferredUpdatesInterval: TRACKING_INTERVAL_MS,
-        deferredUpdatesDistance: MIN_DISTANCE_METERS,
       });
 
       // Start sync interval
@@ -595,7 +606,7 @@ export async function resumeTracking(): Promise<{
     // Restart sync interval
     startSyncInterval(state.organizationId);
 
-    // Try to restart background tracking (for development builds)
+    // Restart background tracking if needed (development builds only)
     if (!isExpoGo && isPhysicalDevice) {
       try {
         const isRegistered = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
@@ -603,7 +614,7 @@ export async function resumeTracking(): Promise<{
           await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
             accuracy: Location.Accuracy.BestForNavigation,
             timeInterval: TRACKING_INTERVAL_MS,
-            distanceInterval: MIN_DISTANCE_METERS,
+            distanceInterval: BG_DISTANCE_INTERVAL,
             showsBackgroundLocationIndicator: true,
             foregroundService: {
               notificationTitle: 'Route Tracking Active',
@@ -619,13 +630,13 @@ export async function resumeTracking(): Promise<{
         }
       } catch (bgError) {
         console.warn('[LocationTracking] Could not resume background tracking:', bgError);
-        // Fall back to foreground polling
-        startForegroundPolling(state.organizationId);
       }
-    } else {
-      // Expo Go - use foreground polling
-      startForegroundPolling(state.organizationId);
     }
+
+    // Always start foreground watch when the app is open.
+    // This is the primary data source while the app is in the foreground --
+    // the background task is throttled by the OS and fires infrequently.
+    startForegroundPolling(state.organizationId);
 
     // Sync any unsynced locations from SQLite (survived app restart)
     const unsyncedCount = await getUnsyncedCount();
@@ -666,7 +677,7 @@ function startSyncInterval(organizationId: string) {
     }
   }, SYNC_INTERVAL_MS);
 
-  console.log('[LocationTracking] Sync interval started (every 2 min)');
+  console.log('[LocationTracking] Sync interval started (every 30s)');
 }
 
 function stopSyncInterval() {
@@ -680,6 +691,7 @@ function stopSyncInterval() {
 // Foreground watch subscription for real-time continuous updates
 let foregroundWatchSubscription: Location.LocationSubscription | null = null;
 let lastForegroundLocation: { latitude: number; longitude: number; time: number } | null = null;
+let isSyncing = false;
 
 /**
  * Start foreground location watching with continuous real-time updates
@@ -694,12 +706,12 @@ async function startForegroundPolling(organizationId: string) {
   try {
     foregroundWatchSubscription = await Location.watchPositionAsync(
       {
-        // Highest accuracy for best GPS readings
         accuracy: Location.Accuracy.BestForNavigation,
-        // Update when moved 30 meters (more granular than background)
-        distanceInterval: 30,
-        // Also update every 30 seconds minimum
-        timeInterval: 30000,
+        // Deliver updates every 10m or 10s -- whichever comes first.
+        // We do our own filtering in the callback so we want frequent
+        // fresh GPS fixes to keep the position current.
+        distanceInterval: 10,
+        timeInterval: 10_000,
       },
       async (location) => {
         try {
@@ -710,15 +722,14 @@ async function startForegroundPolling(organizationId: string) {
           }
 
           if (location.coords.accuracy && location.coords.accuracy > MAX_ACCURACY_METERS) {
-            console.log(`[LocationTracking] Watch: rejected (accuracy ${location.coords.accuracy?.toFixed(0)}m)`);
             return;
           }
 
           const now = Date.now();
           const timeSinceLast = lastForegroundLocation ? now - lastForegroundLocation.time : Infinity;
 
-          // Throttle: don't save more than once per 30s
-          if (timeSinceLast < 30000) {
+          // Minimum 10s between saved points to avoid flooding SQLite
+          if (timeSinceLast < 10_000) {
             return;
           }
 
@@ -759,12 +770,18 @@ async function startForegroundPolling(organizationId: string) {
             time: now,
           };
 
-          console.log(`[LocationTracking] Watch: saved to SQLite (accuracy ${location.coords.accuracy?.toFixed(0)}m, speed ${((location.coords.speed || 0) * 2.237).toFixed(0)}mph${tooClose ? ', heartbeat' : ''})`);
+          console.log(`[LocationTracking] Watch: saved (acc=${location.coords.accuracy?.toFixed(0)}m, spd=${((location.coords.speed || 0) * 2.237).toFixed(0)}mph, gap=${(timeSinceLast / 1000).toFixed(0)}s${tooClose ? ', heartbeat' : ''})`);
 
-          // Sync to Convex when we have a few unsynced points
-          const unsyncedCount = await getUnsyncedCount();
-          if (unsyncedCount >= 3) {
-            await syncUnsyncedToConvex(organizationId);
+          // Sync immediately -- we're in the foreground with valid auth.
+          if (!isSyncing) {
+            isSyncing = true;
+            try {
+              await syncUnsyncedToConvex(organizationId);
+            } catch (syncErr) {
+              console.warn('[LocationTracking] Watch: sync failed, will retry:', syncErr instanceof Error ? syncErr.message : syncErr);
+            } finally {
+              isSyncing = false;
+            }
           }
         } catch (error) {
           console.error('[LocationTracking] Watch callback error:', error);
@@ -811,6 +828,13 @@ async function captureCurrentLocation(state: TrackingState) {
 
     console.log(`[LocationTracking] Captured initial location to SQLite (rowId=${rowId}, accuracy=${location.coords.accuracy?.toFixed(0)}m, lat=${location.coords.latitude.toFixed(5)}, lng=${location.coords.longitude.toFixed(5)})`);
 
+    // Seed the foreground watch state so it doesn't immediately save a duplicate
+    lastForegroundLocation = {
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+      time: Date.now(),
+    };
+
     // Immediately try to sync this point while we have valid auth
     try {
       await syncUnsyncedToConvex(state.organizationId);
@@ -834,8 +858,8 @@ async function syncUnsyncedToConvex(
   organizationId: string,
   retryAttempt = 0
 ): Promise<{ success: boolean; synced: number }> {
-  const MAX_AUTH_RETRIES = 3;
-  const AUTH_RETRY_DELAYS = [3000, 6000, 12000];
+  const MAX_AUTH_RETRIES = 2;
+  const AUTH_RETRY_DELAYS = [1000, 3000];
 
   try {
     const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
@@ -898,6 +922,20 @@ async function syncUnsyncedToConvex(
 
 // Export for use by the app layout's foreground flush
 export { syncUnsyncedToConvex };
+
+/**
+ * Restart foreground services (watch + sync interval) when the app returns
+ * from background. iOS suspends JS timers and watch subscriptions when the
+ * app is backgrounded, so they must be re-established on foreground return.
+ */
+export async function restartForegroundServices(): Promise<void> {
+  const state = await getTrackingState();
+  if (!state?.isActive) return;
+
+  console.log('[LocationTracking] Restarting foreground services after app resume');
+  startSyncInterval(state.organizationId);
+  startForegroundPolling(state.organizationId);
+}
 
 // ============================================
 // UTILITY FUNCTIONS

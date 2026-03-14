@@ -52,6 +52,7 @@ export const batchInsertLocations = mutation({
     let skippedDriver = 0;
     let skippedOrgMismatch = 0;
     let skippedLoad = 0;
+    let skippedDuplicate = 0;
 
     for (const loc of args.locations) {
       const driver = await ctx.db.get(loc.driverId);
@@ -67,6 +68,18 @@ export const batchInsertLocations = mutation({
       const load = await ctx.db.get(loc.loadId);
       if (!load) {
         skippedLoad++;
+        continue;
+      }
+
+      // Server-side dedup: skip if a point with the same loadId and
+      // recordedAt already exists (catches duplicate syncs from client)
+      const existing = await ctx.db
+        .query('driverLocations')
+        .withIndex('by_load', (q) => q.eq('loadId', loc.loadId))
+        .filter((q) => q.eq(q.field('recordedAt'), loc.recordedAt))
+        .first();
+      if (existing) {
+        skippedDuplicate++;
         continue;
       }
 
@@ -86,10 +99,10 @@ export const batchInsertLocations = mutation({
       inserted++;
     }
 
-    if (skippedDriver > 0 || skippedOrgMismatch > 0 || skippedLoad > 0) {
+    if (skippedDriver > 0 || skippedOrgMismatch > 0 || skippedLoad > 0 || skippedDuplicate > 0) {
       console.warn(
-        `[batchInsertLocations] Skipped ${skippedDriver + skippedOrgMismatch + skippedLoad}/${args.locations.length} points:`,
-        `driver=${skippedDriver}, orgMismatch=${skippedOrgMismatch} (passed="${args.organizationId}"), load=${skippedLoad}`
+        `[batchInsertLocations] Skipped ${skippedDriver + skippedOrgMismatch + skippedLoad + skippedDuplicate}/${args.locations.length} points:`,
+        `driver=${skippedDriver}, orgMismatch=${skippedOrgMismatch} (passed="${args.organizationId}"), load=${skippedLoad}, duplicate=${skippedDuplicate}`
       );
     }
 

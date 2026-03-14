@@ -171,6 +171,12 @@ export const mapMatchRoute = action({
     encodedPolyline: v.optional(v.string()),
     confidence: v.number(),
     matchedPoints: v.number(),
+    decodedPath: v.array(
+      v.object({
+        latitude: v.float64(),
+        longitude: v.float64(),
+      })
+    ),
     fallbackPoints: v.array(
       v.object({
         latitude: v.float64(),
@@ -187,6 +193,7 @@ export const mapMatchRoute = action({
         encodedPolyline: undefined,
         confidence: 0,
         matchedPoints: 0,
+        decodedPath: [],
         fallbackPoints: args.coordinates.map(c => ({ latitude: c.latitude, longitude: c.longitude })),
       };
     }
@@ -196,45 +203,44 @@ export const mapMatchRoute = action({
         encodedPolyline: undefined,
         confidence: 0,
         matchedPoints: 0,
+        decodedPath: [],
         fallbackPoints: args.coordinates.map(c => ({ latitude: c.latitude, longitude: c.longitude })),
       };
     }
 
     try {
-      // Process in batches if more than 100 coordinates
-      const allEncodedSegments: string[] = [];
+      // Collect all decoded path points from all matchings across all batches.
+      // Mapbox returns multiple matchings when there are gaps in the GPS data
+      // (e.g., app was backgrounded). We decode and concatenate them all so
+      // the route vector is continuous.
+      const allPathPoints: Array<{ latitude: number; longitude: number }> = [];
+      let firstEncodedPolyline: string | undefined;
       let totalConfidence = 0;
       let totalMatched = 0;
       let batchCount = 0;
 
       for (let i = 0; i < args.coordinates.length; i += MAX_MAPBOX_COORDINATES - 5) {
-        // Overlap batches slightly for continuity
         const batchEnd = Math.min(i + MAX_MAPBOX_COORDINATES, args.coordinates.length);
         const batch = args.coordinates.slice(i, batchEnd);
         
         if (batch.length < 2) continue;
 
-        // Format coordinates as lng,lat;lng,lat (Mapbox uses lng,lat order!)
         const coordString = batch
           .map(c => `${c.longitude},${c.latitude}`)
           .join(';');
 
-        // Build URL with parameters
         const url = new URL(`${MAPBOX_MATCHING_API_URL}/${coordString}`);
         url.searchParams.set('access_token', accessToken);
-        url.searchParams.set('geometries', 'polyline6'); // High precision polyline
-        url.searchParams.set('overview', 'full'); // Full route geometry
-        url.searchParams.set('tidy', 'true'); // Remove redundant coordinates
+        url.searchParams.set('geometries', 'polyline6');
+        url.searchParams.set('overview', 'full');
+        url.searchParams.set('tidy', 'true');
         
-        // Add timestamps if available (improves matching accuracy)
         if (batch[0].timestamp && batch.every(c => c.timestamp)) {
           const timestamps = batch.map(c => Math.floor((c.timestamp || 0) / 1000)).join(';');
           url.searchParams.set('timestamps', timestamps);
         }
 
-        // Add radiuses - how far from each point to search for roads (in meters)
-        // Larger radius = more forgiving of GPS drift
-        const radiuses = batch.map(() => '50').join(';'); // 50m search radius
+        const radiuses = batch.map(() => '50').join(';');
         url.searchParams.set('radiuses', radiuses);
 
         console.log(`[MapboxMatching] Matching ${batch.length} coordinates...`);
@@ -253,37 +259,41 @@ export const mapMatchRoute = action({
           continue;
         }
 
-        // Get the best matching
-        const matching = data.matchings[0];
-        if (matching.geometry) {
-          allEncodedSegments.push(matching.geometry);
-          totalConfidence += matching.confidence || 0;
-          totalMatched += batch.length;
-          batchCount++;
+        // Collect ALL matchings (Mapbox splits into multiple when there are gaps)
+        for (const matching of data.matchings) {
+          if (matching.geometry) {
+            if (!firstEncodedPolyline) {
+              firstEncodedPolyline = matching.geometry;
+            }
+            const decoded = decodePolyline6(matching.geometry);
+            allPathPoints.push(...decoded);
+            totalConfidence += matching.confidence || 0;
+            batchCount++;
+          }
         }
+        totalMatched += batch.length;
       }
 
-      if (allEncodedSegments.length === 0) {
+      if (allPathPoints.length === 0) {
         console.warn('[MapboxMatching] No matches found, returning raw coordinates');
         return {
           encodedPolyline: undefined,
           confidence: 0,
           matchedPoints: 0,
+          decodedPath: [],
           fallbackPoints: args.coordinates.map(c => ({ latitude: c.latitude, longitude: c.longitude })),
         };
       }
 
-      // If multiple segments, we need to combine them
-      // For now, return the first segment's polyline (most common case)
-      // TODO: Combine multiple polylines for very long routes
       const avgConfidence = batchCount > 0 ? totalConfidence / batchCount : 0;
       
-      console.log(`[MapboxMatching] Matched ${totalMatched}/${args.coordinates.length} points with ${(avgConfidence * 100).toFixed(1)}% confidence`);
+      console.log(`[MapboxMatching] Matched ${totalMatched}/${args.coordinates.length} points → ${allPathPoints.length} path points across ${batchCount} segments (${(avgConfidence * 100).toFixed(1)}% confidence)`);
       
       return {
-        encodedPolyline: allEncodedSegments[0],
+        encodedPolyline: firstEncodedPolyline,
         confidence: avgConfidence,
         matchedPoints: totalMatched,
+        decodedPath: allPathPoints,
         fallbackPoints: [],
       };
     } catch (error) {
@@ -292,11 +302,56 @@ export const mapMatchRoute = action({
         encodedPolyline: undefined,
         confidence: 0,
         matchedPoints: 0,
+        decodedPath: [],
         fallbackPoints: args.coordinates.map(c => ({ latitude: c.latitude, longitude: c.longitude })),
       };
     }
   },
 });
+
+/**
+ * Decode Mapbox polyline6 format (precision 1e6)
+ */
+function decodePolyline6(encoded: string): Array<{ latitude: number; longitude: number }> {
+  const points: Array<{ latitude: number; longitude: number }> = [];
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+
+  while (index < encoded.length) {
+    let shift = 0;
+    let result = 0;
+    let byte: number;
+
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    const dlat = result & 1 ? ~(result >> 1) : result >> 1;
+    lat += dlat;
+
+    shift = 0;
+    result = 0;
+
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    const dlng = result & 1 ? ~(result >> 1) : result >> 1;
+    lng += dlng;
+
+    points.push({
+      latitude: lat / 1e6,
+      longitude: lng / 1e6,
+    });
+  }
+
+  return points;
+}
 
 /**
  * Diagnostic variant of mapMatchRoute that also returns per-point tracepoint data.

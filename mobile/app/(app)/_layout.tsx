@@ -15,7 +15,7 @@ import { Id } from '../../../convex/_generated/dataModel';
 import { useConvexAuthState } from '../../lib/convex';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { colors, typography, borderRadius } from '../../lib/theme';
-import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush } from '../../lib/location-tracking';
+import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush, restartForegroundServices } from '../../lib/location-tracking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import { useRequestPermissionsOnce } from '../../lib/request-permissions';
@@ -365,23 +365,26 @@ export default function AppLayout() {
     return () => { cancelled = true; };
   }, [profile?._id]);
 
-  // Flush buffered locations when app returns to foreground.
-  // forceFlush now has its own exponential backoff to handle auth delays,
-  // so we just need a small initial delay for the Convex WS to reconnect.
+  // When app returns to foreground:
+  // 1. Restart foreground watch + sync interval (iOS suspends JS timers in background)
+  // 2. Flush any buffered locations collected while backgrounded
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextState) => {
       if (nextState === 'active') {
         try {
+          // Restart foreground location watch and sync timer
+          await restartForegroundServices();
+
           const state = await getTrackingState();
           if (!state?.isActive) return;
           const count = await getBufferedLocationCount();
           if (count > 0) {
-            console.log(`[App] Foreground: ${count} buffered locations, flushing with retry...`);
+            console.log(`[App] Foreground: ${count} buffered locations, flushing...`);
             const result = await forceFlush();
             console.log(`[App] Foreground flush result: synced=${result.synced}, success=${result.success}`);
           }
         } catch (err) {
-          console.warn('[App] Foreground flush failed:', err);
+          console.warn('[App] Foreground resume failed:', err);
         }
       }
     });

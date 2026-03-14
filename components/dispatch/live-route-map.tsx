@@ -948,8 +948,8 @@ export function LiveRouteMap({
       return;
     }
     
-    // Only re-fetch if we have 2+ new points (or first time)
-    if (pathStateRef.current.lastCount > 0 && newPointsCount < 2) {
+    // Re-match whenever any new points arrive
+    if (pathStateRef.current.lastCount > 0 && newPointsCount < 1) {
       return;
     }
 
@@ -966,10 +966,16 @@ export function LiveRouteMap({
 
         const result = await mapMatchRoute({ coordinates });
         
-        // Decode the matched polyline (Mapbox uses polyline6 format)
-        if (result.encodedPolyline) {
+        // Use the server-decoded combined path (includes all matchings/segments).
+        // Falls back to client-side decode of first polyline for backward compat.
+        if (result.decodedPath && result.decodedPath.length > 0) {
+          console.log(`[LiveRouteMap] Mapbox matched ${result.matchedPoints} points → ${result.decodedPath.length} path points (${(result.confidence * 100).toFixed(1)}% confidence)`);
+          setRoutePath(result.decodedPath);
+          setMatchConfidence(result.confidence);
+          setIsUsingFallback(false);
+        } else if (result.encodedPolyline) {
           const decoded = decodePolyline6(result.encodedPolyline);
-          console.log(`[LiveRouteMap] Mapbox matched ${result.matchedPoints} points → ${decoded.length} path points (${(result.confidence * 100).toFixed(1)}% confidence)`);
+          console.log(`[LiveRouteMap] Mapbox matched ${result.matchedPoints} points → ${decoded.length} path points (${(result.confidence * 100).toFixed(1)}% confidence, single segment)`);
           setRoutePath(decoded);
           setMatchConfidence(result.confidence);
           setIsUsingFallback(false);

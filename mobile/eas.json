@@ -34,6 +34,17 @@
         "buildType": "apk"
       }
     },
+    "testflight": {
+      "distribution": "store",
+      "channel": "preview",
+      "env": {
+        "EXPO_PUBLIC_CONVEX_URL": "https://greedy-vole-262.convex.cloud",
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk",
+        "EXPO_PUBLIC_POSTHOG_KEY": "phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X",
+        "EXPO_PUBLIC_POSTHOG_HOST": "https://us.i.posthog.com"
+      },
+      "autoIncrement": true
+    },
     "production": {
       "autoIncrement": true,
       "channel": "production",
@@ -46,7 +57,21 @@
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "ios": {
+        "ascAppId": "6759530653"
+      }
+    },
+    "preview": {
+      "ios": {
+        "ascAppId": "6759530653"
+      }
+    },
+    "testflight": {
+      "ios": {
+        "ascAppId": "6759530653"
+      }
+    }
   }
 }
 
