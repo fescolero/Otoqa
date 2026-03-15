@@ -17,7 +17,6 @@ type AutoAssignResult = {
     | 'ASSIGNED_CARRIER'
     | 'NO_MATCH'
     | 'ALREADY_ASSIGNED'
-    | 'CONFLICT'
     | 'DRIVER_INACTIVE'
     | 'CARRIER_INACTIVE'
     | 'ERROR';
@@ -35,7 +34,6 @@ const autoAssignResultValidator = v.object({
     v.literal('ASSIGNED_CARRIER'),
     v.literal('NO_MATCH'),
     v.literal('ALREADY_ASSIGNED'),
-    v.literal('CONFLICT'),
     v.literal('DRIVER_INACTIVE'),
     v.literal('CARRIER_INACTIVE'),
     v.literal('ERROR')
@@ -221,7 +219,6 @@ export const autoAssignLoad = internalMutation({
         };
       }
 
-      // Call existing assignDriver mutation
       const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
         loadId: args.loadId,
         driverId: routeAssignment.driverId,
@@ -231,20 +228,15 @@ export const autoAssignLoad = internalMutation({
       });
 
       if (result.status === 'SUCCESS') {
+        const overlapNote = result.overlaps && result.overlaps.length > 0
+          ? ` (schedule overlap with ${result.overlaps.map((o) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
+          : '';
+
         return {
           success: true,
           loadId: args.loadId,
           action: 'ASSIGNED_DRIVER',
-          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      } else if (result.status === 'CONFLICT') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'CONFLICT',
-          message: `Driver ${driver.firstName} ${driver.lastName} has a conflicting load`,
+          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}${overlapNote}`,
           routeAssignmentId: routeAssignment._id,
           driverId: routeAssignment.driverId,
         };
@@ -528,20 +520,15 @@ export const triggerAutoAssignmentForLoad = internalMutation({
       });
 
       if (result.status === 'SUCCESS') {
+        const overlapNote = result.overlaps && result.overlaps.length > 0
+          ? ` (schedule overlap with ${result.overlaps.map((o) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
+          : '';
+
         return {
           success: true,
           loadId: args.loadId,
           action: 'ASSIGNED_DRIVER',
-          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}`,
-          routeAssignmentId: routeAssignment._id,
-          driverId: routeAssignment.driverId,
-        };
-      } else if (result.status === 'CONFLICT') {
-        return {
-          success: false,
-          loadId: args.loadId,
-          action: 'CONFLICT',
-          message: `Driver has a conflicting load`,
+          message: `Auto-assigned to driver ${driver.firstName} ${driver.lastName}${overlapNote}`,
           routeAssignmentId: routeAssignment._id,
           driverId: routeAssignment.driverId,
         };

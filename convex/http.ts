@@ -428,4 +428,63 @@ http.route({
   }),
 });
 
+// ============================================
+// MOBILE BACKGROUND LOCATION SYNC
+// Uses a static API key (env var) instead of Clerk JWT.
+// The mobile app calls this from background tasks where
+// Clerk tokens can't be refreshed.
+// ============================================
+
+http.route({
+  path: '/v1/mobile/locations',
+  method: 'POST',
+  handler: httpAction(async (ctx, request) => {
+    const apiKey = request.headers.get('X-Mobile-Api-Key');
+    const expectedKey = process.env.MOBILE_LOCATION_API_KEY;
+
+    if (!expectedKey || !apiKey || apiKey !== expectedKey) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    let body: any;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const { locations, organizationId } = body;
+    if (!Array.isArray(locations) || !organizationId) {
+      return new Response(JSON.stringify({ error: 'Missing locations array or organizationId' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    try {
+      const result = await ctx.runMutation(internal.driverLocations.internalBatchInsertLocations, {
+        locations,
+        organizationId,
+      });
+
+      return new Response(JSON.stringify({ inserted: result.inserted }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (err: any) {
+      console.error('[MobileLocations] Insert failed:', err.message || err);
+      return new Response(JSON.stringify({ error: 'Insert failed', message: err.message || 'Unknown error' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }),
+});
+
 export default http;

@@ -110,6 +110,91 @@ export const batchInsertLocations = mutation({
   },
 });
 
+/**
+ * Internal mutation for inserting locations from the mobile HTTP endpoint.
+ * Skips Clerk auth -- the HTTP endpoint validates a static API key instead.
+ * Same validation logic as batchInsertLocations minus the identity check.
+ */
+export const internalBatchInsertLocations = internalMutation({
+  args: {
+    locations: v.array(
+      v.object({
+        driverId: v.id('drivers'),
+        loadId: v.id('loadInformation'),
+        latitude: v.float64(),
+        longitude: v.float64(),
+        accuracy: v.optional(v.float64()),
+        speed: v.optional(v.float64()),
+        heading: v.optional(v.float64()),
+        trackingType: v.literal('LOAD_ROUTE'),
+        recordedAt: v.float64(),
+      })
+    ),
+    organizationId: v.string(),
+  },
+  returns: v.object({ inserted: v.number() }),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    let inserted = 0;
+    let skippedDriver = 0;
+    let skippedOrgMismatch = 0;
+    let skippedLoad = 0;
+    let skippedDuplicate = 0;
+
+    for (const loc of args.locations) {
+      const driver = await ctx.db.get(loc.driverId);
+      if (!driver || driver.isDeleted) {
+        skippedDriver++;
+        continue;
+      }
+      if (driver.organizationId !== args.organizationId) {
+        skippedOrgMismatch++;
+        continue;
+      }
+
+      const load = await ctx.db.get(loc.loadId);
+      if (!load) {
+        skippedLoad++;
+        continue;
+      }
+
+      const existing = await ctx.db
+        .query('driverLocations')
+        .withIndex('by_load', (q) => q.eq('loadId', loc.loadId))
+        .filter((q) => q.eq(q.field('recordedAt'), loc.recordedAt))
+        .first();
+      if (existing) {
+        skippedDuplicate++;
+        continue;
+      }
+
+      await ctx.db.insert('driverLocations', {
+        driverId: loc.driverId,
+        loadId: loc.loadId,
+        organizationId: args.organizationId,
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy: loc.accuracy,
+        speed: loc.speed,
+        heading: loc.heading,
+        trackingType: loc.trackingType,
+        recordedAt: loc.recordedAt,
+        createdAt: now,
+      });
+      inserted++;
+    }
+
+    if (skippedDriver > 0 || skippedOrgMismatch > 0 || skippedLoad > 0 || skippedDuplicate > 0) {
+      console.warn(
+        `[internalBatchInsert] Skipped ${skippedDriver + skippedOrgMismatch + skippedLoad + skippedDuplicate}/${args.locations.length} points:`,
+        `driver=${skippedDriver}, orgMismatch=${skippedOrgMismatch} (passed="${args.organizationId}"), load=${skippedLoad}, duplicate=${skippedDuplicate}`
+      );
+    }
+
+    return { inserted };
+  },
+});
+
 // ============================================
 // PUBLIC QUERIES
 // ============================================

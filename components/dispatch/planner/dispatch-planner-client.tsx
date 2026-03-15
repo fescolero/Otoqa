@@ -10,7 +10,7 @@ import { toast } from 'sonner';
 import { TripsTable } from './trips-table';
 import { AssetsTable, CarrierPartnership } from './assets-table';
 import { IntelligenceSidebar } from './intelligence-sidebar';
-import { ConflictModal } from './conflict-modal';
+import { OverlapNoticeModal, OverlapDetail } from './conflict-modal';
 import { CarrierAssignmentModal } from './carrier-assignment-modal';
 import { FilterToolbar, TripFiltersState } from './trip-filters';
 
@@ -40,12 +40,10 @@ export function DispatchPlannerClient({
     endDate: '',
   });
 
-  // Conflict handling
-  const [showConflictModal, setShowConflictModal] = useState(false);
-  const [conflictData, setConflictData] = useState<{
-    orderNumber?: string;
-    loadId: Id<'loadInformation'>;
-  } | null>(null);
+  // Overlap notice (shown after successful assignment with overlaps)
+  const [showOverlapNotice, setShowOverlapNotice] = useState(false);
+  const [overlapData, setOverlapData] = useState<OverlapDetail[]>([]);
+  const [overlapDriverName, setOverlapDriverName] = useState('');
 
   // Assignment state
   const [isAssigning, setIsAssigning] = useState(false);
@@ -63,7 +61,7 @@ export function DispatchPlannerClient({
     workosOrgId: organizationId,
   });
 
-  // Get available drivers when a trip is selected (filtered by time window)
+  // Get drivers with overlap insight when a trip is selected
   const availableDrivers = useQuery(
     api.dispatchLegs.getAvailableDrivers,
     loadDetails?.startTime
@@ -94,7 +92,6 @@ export function DispatchPlannerClient({
   const unassignResourceMutation = useMutation(api.dispatchLegs.unassignResource);
 
   // Get selected driver/carrier objects
-  // Use availableDrivers when a trip is selected, otherwise use allDrivers
   const driversToUse = selectedLoadId ? availableDrivers : allDrivers;
 
   const selectedDriver = useMemo(() => {
@@ -125,7 +122,7 @@ export function DispatchPlannerClient({
   };
 
   // Assignment handler for drivers
-  const handleAssignDriver = async (force = false) => {
+  const handleAssignDriver = async () => {
     if (!selectedLoadId || !selectedDriverId) return;
     setIsAssigning(true);
 
@@ -133,19 +130,11 @@ export function DispatchPlannerClient({
       const result = await assignDriverMutation({
         loadId: selectedLoadId,
         driverId: selectedDriverId,
-        truckId: selectedDriver?.assignedTruck?._id, // Pass truck from driver's current assignment
+        truckId: selectedDriver?.assignedTruck?._id,
         userId,
         userName,
         workosOrgId: organizationId,
-        force,
       });
-
-      if (result.status === 'CONFLICT') {
-        setConflictData(result.conflictingLoad);
-        setShowConflictModal(true);
-        setIsAssigning(false);
-        return;
-      }
 
       if (result.status === 'ERROR') {
         toast.error(result.message);
@@ -153,10 +142,21 @@ export function DispatchPlannerClient({
         return;
       }
 
-      // SUCCESS
-      toast.success(`Assigned to ${selectedDriver?.firstName} ${selectedDriver?.lastName}`);
+      // SUCCESS — check if there are overlaps to surface
+      const driverName = selectedDriver
+        ? `${selectedDriver.firstName} ${selectedDriver.lastName}`
+        : '';
+
+      if (result.overlaps && result.overlaps.length > 0) {
+        setOverlapData(result.overlaps);
+        setOverlapDriverName(driverName);
+        setShowOverlapNotice(true);
+        toast.success(`Assigned to ${driverName} (schedule overlap detected)`);
+      } else {
+        toast.success(`Assigned to ${driverName}`);
+      }
+
       setSelectedDriverId(null);
-      setShowConflictModal(false);
     } catch (error) {
       console.error('Assignment error:', error);
       toast.error('Failed to assign. Please try again.');
@@ -177,9 +177,9 @@ export function DispatchPlannerClient({
   };
 
   // Combined assign handler based on asset type
-  const handleAssign = (force = false) => {
+  const handleAssign = () => {
     if (assetType === 'driver') {
-      handleAssignDriver(force);
+      handleAssignDriver();
     } else if (assetType === 'carrier') {
       handleOpenCarrierAssignment();
     }
@@ -209,15 +209,11 @@ export function DispatchPlannerClient({
     }
   };
 
-  // Force assign from conflict modal
-  const handleForceAssign = () => {
-    handleAssign(true);
-  };
-
-  // Cancel conflict modal
-  const handleCancelConflict = () => {
-    setShowConflictModal(false);
-    setConflictData(null);
+  // Dismiss overlap notice
+  const handleDismissOverlapNotice = () => {
+    setShowOverlapNotice(false);
+    setOverlapData([]);
+    setOverlapDriverName('');
   };
 
   // Calculate toolbar height (40px) for grid height
@@ -270,7 +266,7 @@ export function DispatchPlannerClient({
           selectedCarrier={selectedCarrier}
           assetType={assetType}
           driverSchedule={driverSchedule ?? null}
-          onAssign={() => handleAssign(false)}
+          onAssign={handleAssign}
           onUnassign={handleUnassign}
           isAssigning={isAssigning}
           totalDrivers={allDrivers?.length ?? 0}
@@ -281,19 +277,13 @@ export function DispatchPlannerClient({
         />
       </aside>
 
-        {/* Conflict Modal */}
-        <ConflictModal
-          open={showConflictModal}
-          onOpenChange={setShowConflictModal}
-          conflictingLoad={conflictData}
-          driverName={
-            selectedDriver
-              ? `${selectedDriver.firstName} ${selectedDriver.lastName}`
-              : ''
-          }
-          onCancel={handleCancelConflict}
-          onForceAssign={handleForceAssign}
-          isLoading={isAssigning}
+        {/* Overlap Notice Modal (informational, shown after successful assignment) */}
+        <OverlapNoticeModal
+          open={showOverlapNotice}
+          onOpenChange={setShowOverlapNotice}
+          overlaps={overlapData}
+          driverName={overlapDriverName}
+          onDismiss={handleDismissOverlapNotice}
         />
 
         {/* Carrier Assignment Modal */}

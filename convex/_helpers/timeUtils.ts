@@ -73,3 +73,77 @@ export function doTimeRangesOverlap(
 ): boolean {
   return rangeA.start < rangeB.end && rangeA.end > rangeB.start;
 }
+
+/**
+ * Calculates the overlap between two time ranges in minutes.
+ * Returns 0 if ranges don't overlap. Negative values indicate
+ * the gap between non-overlapping ranges (useful for "how close" insight).
+ *
+ * @returns overlapMinutes (positive = overlap, negative = gap between ranges)
+ */
+export function calculateOverlapMinutes(
+  rangeA: { start: number; end: number },
+  rangeB: { start: number; end: number }
+): number {
+  const overlapStart = Math.max(rangeA.start, rangeB.start);
+  const overlapEnd = Math.min(rangeA.end, rangeB.end);
+  const overlapMs = overlapEnd - overlapStart;
+  return Math.round(overlapMs / (1000 * 60));
+}
+
+export type OverlapInfo = {
+  loadId: string;
+  orderNumber?: string;
+  overlapMinutes: number;
+};
+
+/**
+ * Detects all time overlaps between a set of new leg ranges and a driver's
+ * existing active legs. Returns overlap details for each conflicting load
+ * rather than a simple boolean, so callers can surface insight without blocking.
+ */
+export async function detectDriverOverlaps(
+  ctx: QueryCtx | MutationCtx,
+  driverId: string,
+  newLegRanges: ({ start: number; end: number } | null)[],
+  excludeLoadId?: string
+): Promise<OverlapInfo[]> {
+  const existingDriverLegs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_driver', (q) => q.eq('driverId', driverId as any))
+    .collect();
+
+  const activeDriverLegs = existingDriverLegs.filter(
+    (leg) =>
+      leg.loadId !== excludeLoadId &&
+      (leg.status === 'PENDING' || leg.status === 'ACTIVE')
+  );
+
+  const overlapsMap = new Map<string, OverlapInfo>();
+
+  for (const existingLeg of activeDriverLegs) {
+    const existingRange = await getLegTimeRange(ctx, existingLeg);
+    if (!existingRange) continue;
+
+    for (const newRange of newLegRanges) {
+      if (!newRange) continue;
+
+      if (doTimeRangesOverlap(newRange, existingRange)) {
+        const minutes = calculateOverlapMinutes(newRange, existingRange);
+        const loadIdStr = existingLeg.loadId as string;
+
+        const existing = overlapsMap.get(loadIdStr);
+        if (!existing || minutes > existing.overlapMinutes) {
+          const conflictLoad = await ctx.db.get(existingLeg.loadId);
+          overlapsMap.set(loadIdStr, {
+            loadId: loadIdStr,
+            orderNumber: conflictLoad?.orderNumber,
+            overlapMinutes: minutes,
+          });
+        }
+      }
+    }
+  }
+
+  return Array.from(overlapsMap.values());
+}

@@ -5,10 +5,16 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Users, Building2, Truck, MapPin, CheckCircle2, DollarSign } from 'lucide-react';
+import { Users, Building2, Truck, MapPin, CheckCircle2, DollarSign, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // Types for the data we receive
+interface DriverOverlap {
+  overlapMinutes: number;
+  orderNumber?: string;
+  loadId: string;
+}
+
 interface DriverWithTruck {
   _id: Id<'drivers'>;
   firstName: string;
@@ -26,6 +32,7 @@ interface DriverWithTruck {
     lastLocationLng?: number;
     lastLocationUpdatedAt?: number;
   } | null;
+  overlap?: DriverOverlap | null;
 }
 
 // Carrier partnership type (from carrierPartnerships.getActiveForDispatch)
@@ -90,19 +97,8 @@ export function AssetsTable({
   onSelectDriver,
   onSelectCarrier,
 }: AssetsTableProps) {
-  // Use availableDrivers when trip is selected, otherwise show all drivers
+  // Use availableDrivers (with overlap insight) when trip is selected, otherwise show all
   const driversToShow = loadDetails ? availableDrivers : allDrivers;
-  
-  // Build set of unavailable driver IDs (for dimming when trip is selected)
-  const unavailableDriverIds = new Set<string>();
-  if (loadDetails && allDrivers.length > 0) {
-    const availableIds = new Set(availableDrivers.map(d => d._id));
-    allDrivers.forEach(d => {
-      if (!availableIds.has(d._id)) {
-        unavailableDriverIds.add(d._id);
-      }
-    });
-  }
 
   // Check equipment compatibility
   const isEquipmentMatch = (bodyType?: string) => {
@@ -191,7 +187,7 @@ export function AssetsTable({
               {/* Driver Rows - Compact */}
               {driversToShow.map((driver) => {
                   const equipmentMatch = isEquipmentMatch(driver.assignedTruck?.bodyType);
-                  const isUnavailable = unavailableDriverIds.has(driver._id);
+                  const hasOverlap = !!driver.overlap;
 
                   return (
                     <div
@@ -202,13 +198,23 @@ export function AssetsTable({
                         'hover:bg-muted/50',
                         selectedDriverId === driver._id &&
                           'bg-primary/10 ring-2 ring-primary ring-inset',
-                        isUnavailable && 'opacity-50'
+                        hasOverlap && 'bg-amber-50/50 dark:bg-amber-950/10'
                       )}
                     >
                       {/* Driver Name & Phone */}
                       <div>
-                        <div className="font-medium text-sm">
+                        <div className="font-medium text-sm flex items-center gap-1.5">
                           {driver.firstName} {driver.lastName}
+                          {hasOverlap && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] px-1 py-0 h-4 bg-amber-100 text-amber-700 border-amber-200"
+                              title={`Overlaps with Load #${driver.overlap!.orderNumber ?? 'Unknown'} by ${driver.overlap!.overlapMinutes}m`}
+                            >
+                              <Clock className="h-2.5 w-2.5 mr-0.5" />
+                              {driver.overlap!.overlapMinutes}m
+                            </Badge>
+                          )}
                         </div>
                         <div className="text-xs text-muted-foreground">{driver.phone}</div>
                       </div>

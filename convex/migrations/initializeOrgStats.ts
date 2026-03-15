@@ -33,25 +33,16 @@ export const initialize = internalMutation({
     let failed = 0;
 
     for (const org of orgs) {
-      // Skip carrier orgs without workosOrgId (they use clerkOrgId)
       if (!org.workosOrgId) {
         console.log(`Skipping org without workosOrgId: ${org.name}`);
         continue;
       }
 
-      try {
-        console.log(`Processing organization: ${org.name} (${org.workosOrgId})`);
-        
-        // Recalculate stats from source data
-        await ctx.runMutation(internal.stats.recalculateOrgStats, {
-          workosOrgId: org.workosOrgId,
-        });
-        
-        success++;
-      } catch (error) {
-        console.error(`❌ Failed to initialize stats for org ${org.workosOrgId}:`, error);
-        failed++;
-      }
+      console.log(`Scheduling stats init for: ${org.name} (${org.workosOrgId})`);
+      await ctx.scheduler.runAfter(0, internal.stats.recalculateOrgStats, {
+        workosOrgId: org.workosOrgId,
+      });
+      success++;
     }
 
     const duration = Date.now() - startTime;

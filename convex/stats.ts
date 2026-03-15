@@ -6,84 +6,123 @@
  * - But bugs or edge cases can cause drift
  * - Daily recalculation ensures accuracy
  * - Same pattern used by Stripe, Shopify, etc.
+ * 
+ * Architecture: Uses paginated batch counting to stay well within
+ * Convex transaction limits (32k doc reads / 16MB bytes).
+ * Each countStatus mutation counts one (table, status) pair in
+ * paginated batches, then schedules the next status in the sequence.
+ * This ensures each transaction reads at most BATCH_SIZE documents.
  */
 
 import { internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
 
+const BATCH_SIZE = 5000;
+
+const LOAD_STATUSES = ["Open", "Assigned", "Completed", "Canceled"] as const;
+const INVOICE_STATUSES = ["MISSING_DATA", "DRAFT", "BILLED", "PENDING_PAYMENT", "PAID", "VOID"] as const;
+
+type StatusStep =
+  | { table: "loadInformation"; status: typeof LOAD_STATUSES[number] }
+  | { table: "loadInvoices"; status: typeof INVOICE_STATUSES[number] };
+
+const ALL_STEPS: StatusStep[] = [
+  ...LOAD_STATUSES.map((s) => ({ table: "loadInformation" as const, status: s })),
+  ...INVOICE_STATUSES.map((s) => ({ table: "loadInvoices" as const, status: s })),
+];
+
 /**
- * Recalculate organization stats from source data
- * This catches any drift from bugs or missed mutation updates
+ * Count documents for a single (table, status) pair in paginated batches.
+ * Accumulates the count across batches, then schedules the next status step.
+ * On the final step, writes all counts to organizationStats.
  */
-export const recalculateOrgStats = internalMutation({
+export const countStatus = internalMutation({
   args: {
     workosOrgId: v.string(),
+    stepIndex: v.number(),
+    cursor: v.union(v.string(), v.null()),
+    runningCount: v.number(),
+    accumulated: v.string(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    console.log(`Recalculating stats for org: ${args.workosOrgId}`);
+    const { workosOrgId, stepIndex, cursor, runningCount } = args;
+    const accumulated: Record<string, number> = JSON.parse(args.accumulated);
+    const step = ALL_STEPS[stepIndex];
 
-    // Count loads by status
-    const allLoads = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
-      .collect();
+    const results = await ctx.db
+      .query(step.table)
+      .withIndex("by_status", (q) =>
+        q.eq("workosOrgId", workosOrgId).eq("status", step.status)
+      )
+      .paginate({ numItems: BATCH_SIZE, cursor });
+
+    const batchCount = results.page.length;
+    const newRunningCount = runningCount + batchCount;
+
+    if (!results.isDone) {
+      await ctx.scheduler.runAfter(0, internal.stats.countStatus, {
+        workosOrgId,
+        stepIndex,
+        cursor: results.continueCursor,
+        runningCount: newRunningCount,
+        accumulated: args.accumulated,
+      });
+      return null;
+    }
+
+    const key = `${step.table}:${step.status}`;
+    accumulated[key] = newRunningCount;
+
+    const nextStepIndex = stepIndex + 1;
+    if (nextStepIndex < ALL_STEPS.length) {
+      await ctx.scheduler.runAfter(0, internal.stats.countStatus, {
+        workosOrgId,
+        stepIndex: nextStepIndex,
+        cursor: null,
+        runningCount: 0,
+        accumulated: JSON.stringify(accumulated),
+      });
+      return null;
+    }
 
     const loadCounts = {
-      Open: allLoads.filter(l => l.status === "Open").length,
-      Assigned: allLoads.filter(l => l.status === "Assigned").length,
-      Completed: allLoads.filter(l => l.status === "Completed").length,
-      Canceled: allLoads.filter(l => l.status === "Canceled").length,
+      Open: accumulated["loadInformation:Open"] ?? 0,
+      Assigned: accumulated["loadInformation:Assigned"] ?? 0,
+      Completed: accumulated["loadInformation:Completed"] ?? 0,
+      Canceled: accumulated["loadInformation:Canceled"] ?? 0,
     };
-
-    // Count invoices by status
-    const allInvoices = await ctx.db
-      .query("loadInvoices")
-      .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
-      .collect();
-
     const invoiceCounts = {
-      MISSING_DATA: allInvoices.filter(i => i.status === "MISSING_DATA").length,
-      DRAFT: allInvoices.filter(i => i.status === "DRAFT").length,
-      BILLED: allInvoices.filter(i => i.status === "BILLED").length,
-      PENDING_PAYMENT: allInvoices.filter(i => i.status === "PENDING_PAYMENT").length,
-      PAID: allInvoices.filter(i => i.status === "PAID").length,
-      VOID: allInvoices.filter(i => i.status === "VOID").length,
+      MISSING_DATA: accumulated["loadInvoices:MISSING_DATA"] ?? 0,
+      DRAFT: accumulated["loadInvoices:DRAFT"] ?? 0,
+      BILLED: accumulated["loadInvoices:BILLED"] ?? 0,
+      PENDING_PAYMENT: accumulated["loadInvoices:PENDING_PAYMENT"] ?? 0,
+      PAID: accumulated["loadInvoices:PAID"] ?? 0,
+      VOID: accumulated["loadInvoices:VOID"] ?? 0,
     };
 
-    // Update or create stats
-    const existingStats = await ctx.db
+    const stats = await ctx.db
       .query("organizationStats")
-      .withIndex("by_org", (q) => q.eq("workosOrgId", args.workosOrgId))
+      .withIndex("by_org", (q) => q.eq("workosOrgId", workosOrgId))
       .first();
 
     const now = Date.now();
-
-    if (existingStats) {
-      // Check if there's drift
+    if (stats) {
       const loadDrift = Object.entries(loadCounts).some(
-        ([status, count]) => existingStats.loadCounts[status as keyof typeof existingStats.loadCounts] !== count
+        ([s, c]) => stats.loadCounts[s as keyof typeof stats.loadCounts] !== c
       );
       const invoiceDrift = Object.entries(invoiceCounts).some(
-        ([status, count]) => existingStats.invoiceCounts[status as keyof typeof existingStats.invoiceCounts] !== count
+        ([s, c]) => stats.invoiceCounts[s as keyof typeof stats.invoiceCounts] !== c
       );
-
       if (loadDrift || invoiceDrift) {
-        console.log(`⚠️  Drift detected for org ${args.workosOrgId} - correcting stats`);
+        console.log(`⚠️  Drift detected for org ${workosOrgId} - correcting`);
       }
-
-      await ctx.db.patch(existingStats._id, {
-        loadCounts,
-        invoiceCounts,
-        lastRecalculated: now,
-        updatedAt: now,
-      });
+      await ctx.db.patch(stats._id, { loadCounts, invoiceCounts, lastRecalculated: now, updatedAt: now });
     } else {
-      // Create new stats
-      console.log(`✅ Creating initial stats for org ${args.workosOrgId}`);
+      console.log(`✅ Creating initial stats for org ${workosOrgId}`);
       await ctx.db.insert("organizationStats", {
-        workosOrgId: args.workosOrgId,
+        workosOrgId,
         loadCounts,
         invoiceCounts,
         lastRecalculated: now,
@@ -91,42 +130,56 @@ export const recalculateOrgStats = internalMutation({
       });
     }
 
-    console.log(`✅ Stats recalculated for org ${args.workosOrgId}: ${allLoads.length} loads, ${allInvoices.length} invoices`);
+    const totalLoads = Object.values(loadCounts).reduce((a, b) => a + b, 0);
+    const totalInvoices = Object.values(invoiceCounts).reduce((a, b) => a + b, 0);
+    console.log(`✅ Stats recalculated for org ${workosOrgId}: ${totalLoads} loads, ${totalInvoices} invoices`);
     return null;
   },
 });
 
 /**
- * Recalculate stats for all organizations
- * Called by cron job daily
+ * Entry point for recalculating a single org's stats.
+ * Kicks off the sequential countStatus chain.
+ */
+export const recalculateOrgStats = internalMutation({
+  args: { workosOrgId: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await ctx.scheduler.runAfter(0, internal.stats.countStatus, {
+      workosOrgId: args.workosOrgId,
+      stepIndex: 0,
+      cursor: null,
+      runningCount: 0,
+      accumulated: JSON.stringify({}),
+    });
+    return null;
+  },
+});
+
+/**
+ * Recalculate stats for all organizations.
+ * Called by cron job daily.
  */
 export const recalculateAllOrgs = internalMutation({
   args: {},
   returns: v.null(),
-  handler: async (ctx, args) => {
-    const startTime = Date.now();
+  handler: async (ctx) => {
     console.log("🔄 Starting daily stats recalculation for all organizations");
 
     const orgs = await ctx.db.query("organizations").collect();
+    let scheduled = 0;
     
     for (const org of orgs) {
-      // Skip carrier orgs without workosOrgId (they use clerkOrgId)
       if (!org.workosOrgId) {
         continue;
       }
-
-      try {
-        await ctx.runMutation(internal.stats.recalculateOrgStats, {
-          workosOrgId: org.workosOrgId,
-        });
-      } catch (error) {
-        console.error(`❌ Failed to recalculate stats for org ${org.workosOrgId}:`, error);
-        // Continue with other orgs even if one fails
-      }
+      await ctx.scheduler.runAfter(0, internal.stats.recalculateOrgStats, {
+        workosOrgId: org.workosOrgId,
+      });
+      scheduled++;
     }
     
-    const duration = Date.now() - startTime;
-    console.log(`✅ Daily stats recalculation complete for ${orgs.length} organizations in ${duration}ms`);
+    console.log(`✅ Scheduled stats recalculation for ${scheduled} organizations`);
     return null;
   },
 });

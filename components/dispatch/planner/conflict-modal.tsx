@@ -1,71 +1,85 @@
 'use client';
 
-import { Id } from '@/convex/_generated/dataModel';
 import {
   AlertDialog,
   AlertDialogAction,
-  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { AlertTriangle, Loader2 } from 'lucide-react';
+import { Info } from 'lucide-react';
 
-interface ConflictModalProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  conflictingLoad: {
-    orderNumber?: string;
-    loadId: Id<'loadInformation'>;
-  } | null;
-  driverName: string;
-  onCancel: () => void;
-  onForceAssign: () => void;
-  isLoading: boolean;
+export interface OverlapDetail {
+  loadId: string;
+  orderNumber?: string;
+  overlapMinutes: number;
 }
 
-export function ConflictModal({
+interface OverlapNoticeModalProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  overlaps: OverlapDetail[];
+  driverName: string;
+  onDismiss: () => void;
+}
+
+function formatOverlapDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remaining = minutes % 60;
+  return remaining > 0 ? `${hours}h ${remaining}m` : `${hours}h`;
+}
+
+export function OverlapNoticeModal({
   open,
   onOpenChange,
-  conflictingLoad,
+  overlaps,
   driverName,
-  onCancel,
-  onForceAssign,
-  isLoading,
-}: ConflictModalProps) {
+  onDismiss,
+}: OverlapNoticeModalProps) {
+  if (overlaps.length === 0) return null;
+
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2">
-            <AlertTriangle className="h-5 w-5 text-yellow-500" />
-            Schedule Conflict Detected
+            <Info className="h-5 w-5 text-amber-500" />
+            Schedule Overlap Notice
           </AlertDialogTitle>
-          <AlertDialogDescription className="space-y-2">
-            <p>
-              <strong>{driverName}</strong> is already assigned to{' '}
-              <strong>Load #{conflictingLoad?.orderNumber || 'Unknown'}</strong> during this
-              time window.
-            </p>
-            <p className="text-yellow-600 dark:text-yellow-500">
-              Force assigning will leave Load #{conflictingLoad?.orderNumber || 'Unknown'}{' '}
-              unassigned.
-            </p>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p>
+                <strong>{driverName}</strong> was assigned successfully. The following schedule
+                overlaps were detected:
+              </p>
+              <ul className="space-y-1.5">
+                {overlaps.map((overlap) => (
+                  <li
+                    key={overlap.loadId}
+                    className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
+                  >
+                    <span className="font-medium">
+                      Load #{overlap.orderNumber || 'Unknown'}
+                    </span>
+                    <span className="text-amber-600 dark:text-amber-400 font-mono text-xs">
+                      {formatOverlapDuration(overlap.overlapMinutes)} overlap
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-xs text-muted-foreground">
+                This is informational only — the assignment has been completed. Review the
+                driver&apos;s schedule if needed.
+              </p>
+            </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel onClick={onCancel} disabled={isLoading}>
-            Cancel
-          </AlertDialogCancel>
-          <AlertDialogAction
-            onClick={onForceAssign}
-            className="bg-yellow-600 hover:bg-yellow-700 text-white"
-            disabled={isLoading}
-          >
-            {isLoading && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Force Assign
+          <AlertDialogAction onClick={onDismiss}>
+            Got it
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

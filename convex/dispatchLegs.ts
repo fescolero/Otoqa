@@ -2,7 +2,8 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
-import { getLegTimeRange, doTimeRangesOverlap } from './_helpers/timeUtils';
+import { getLegTimeRange, doTimeRangesOverlap, calculateOverlapMinutes, detectDriverOverlaps } from './_helpers/timeUtils';
+import type { OverlapInfo } from './_helpers/timeUtils';
 
 /**
  * Dispatch Legs - The atomic unit of work
@@ -16,16 +17,16 @@ const legStatusValidator = v.union(
   v.literal('CANCELED')
 );
 
-// Response type for assignment mutations (structured responses instead of throws)
+// Response type for assignment mutations
+// Assignments always proceed — overlaps are surfaced as insight, not blocks
+const overlapInfoValidator = v.object({
+  loadId: v.string(),
+  orderNumber: v.optional(v.string()),
+  overlapMinutes: v.number(),
+});
+
 const assignmentResponseValidator = v.union(
-  v.object({ status: v.literal('SUCCESS') }),
-  v.object({
-    status: v.literal('CONFLICT'),
-    conflictingLoad: v.object({
-      orderNumber: v.optional(v.string()),
-      loadId: v.id('loadInformation'),
-    }),
-  }),
+  v.object({ status: v.literal('SUCCESS'), overlaps: v.optional(v.array(overlapInfoValidator)) }),
   v.object({ status: v.literal('ERROR'), message: v.string() })
 );
 
@@ -261,7 +262,7 @@ export const update = mutation({
 });
 
 // Assign driver to a load (creates leg if none exists, or updates existing)
-// Enhanced with conflict detection, structured responses, and accounting-safe updates
+// Always proceeds with assignment — overlaps are detected and returned as insight
 export const assignDriver = mutation({
   args: {
     loadId: v.id('loadInformation'),
@@ -271,7 +272,6 @@ export const assignDriver = mutation({
     userId: v.string(),
     userName: v.optional(v.string()),
     workosOrgId: v.string(),
-    force: v.optional(v.boolean()), // Skip conflict check if true
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
@@ -303,7 +303,6 @@ export const assignDriver = mutation({
     );
 
     if (legs.length === 0) {
-      // No assignable legs — create a new one
       const stops = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -337,49 +336,19 @@ export const assignDriver = mutation({
       if (newLeg) legs = [newLeg];
     }
 
-    // 4. Conflict detection (skip if force === true)
-    if (!args.force) {
-      // Get time ranges for the legs of the NEW load
-      const newLegRanges: ({ start: number; end: number } | null)[] = [];
-      for (const leg of legs) {
-        const range = await getLegTimeRange(ctx, leg);
-        newLegRanges.push(range);
-      }
-
-      // Get all PENDING/ACTIVE legs already assigned to this driver (excluding current load)
-      const existingDriverLegs = await ctx.db
-        .query('dispatchLegs')
-        .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
-        .collect();
-
-      // Filter to only PENDING/ACTIVE and not current load
-      const activeDriverLegs = existingDriverLegs.filter(
-        (leg) =>
-          leg.loadId !== args.loadId &&
-          (leg.status === 'PENDING' || leg.status === 'ACTIVE')
-      );
-
-      // Check for overlaps
-      for (const existingLeg of activeDriverLegs) {
-        const existingRange = await getLegTimeRange(ctx, existingLeg);
-        if (!existingRange) continue;
-
-        for (const newRange of newLegRanges) {
-          if (!newRange) continue;
-
-          if (doTimeRangesOverlap(newRange, existingRange)) {
-            const conflictLoad = await ctx.db.get(existingLeg.loadId);
-            return {
-              status: 'CONFLICT' as const,
-              conflictingLoad: {
-                orderNumber: conflictLoad?.orderNumber,
-                loadId: existingLeg.loadId,
-              },
-            };
-          }
-        }
-      }
+    // 4. Detect overlaps (informational — never blocks assignment)
+    const newLegRanges: ({ start: number; end: number } | null)[] = [];
+    for (const leg of legs) {
+      const range = await getLegTimeRange(ctx, leg);
+      newLegRanges.push(range);
     }
+
+    const overlaps = await detectDriverOverlaps(
+      ctx,
+      args.driverId,
+      newLegRanges,
+      args.loadId
+    );
 
     // 5. Delete existing SYSTEM payables (non-locked) for affected legs before recalculating
     for (const leg of legs) {
@@ -410,12 +379,16 @@ export const assignDriver = mutation({
     const nextStatus = load.status === 'Open' ? 'Assigned' : load.status;
     await ctx.db.patch(args.loadId, {
       primaryDriverId: args.driverId,
-      primaryCarrierPartnershipId: undefined, // Clear carrier
+      primaryCarrierPartnershipId: undefined,
       status: nextStatus,
       updatedAt: now,
     });
 
-    // 8. Audit log
+    // 8. Audit log — include overlap context when present
+    const overlapNote = overlaps.length > 0
+      ? ` (schedule overlap with ${overlaps.map((o) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
+      : '';
+
     await ctx.runMutation(internal.auditLog.logAction, {
       organizationId: args.workosOrgId,
       entityType: 'LOAD',
@@ -424,7 +397,7 @@ export const assignDriver = mutation({
       action: 'ASSIGN_DRIVER',
       performedBy: args.userId,
       performedByName: args.userName,
-      description: `Assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber} (${legs.length} leg${legs.length !== 1 ? 's' : ''} updated)`,
+      description: `Assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber} (${legs.length} leg${legs.length !== 1 ? 's' : ''} updated)${overlapNote}`,
     });
 
     // 9. Trigger pay recalculation
@@ -433,12 +406,16 @@ export const assignDriver = mutation({
       userId: args.userId,
     });
 
-    // 10. Return success
-    return { status: 'SUCCESS' as const };
+    // 10. Return success with overlap insight
+    return {
+      status: 'SUCCESS' as const,
+      overlaps: overlaps.length > 0 ? overlaps : undefined,
+    };
   },
 });
 
 // Internal version of assignDriver for system calls (auto-assignment, load creation)
+// Always proceeds — returns overlap insight alongside SUCCESS for logging/visibility
 export const assignDriverInternal = internalMutation({
   args: {
     loadId: v.id('loadInformation'),
@@ -447,7 +424,7 @@ export const assignDriverInternal = internalMutation({
     assignedBy: v.string(),
     assignedByName: v.optional(v.string()),
   },
-  handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR' | 'CONFLICT'; message?: string }> => {
+  handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR'; message?: string; overlaps?: OverlapInfo[] }> => {
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
       return { status: 'ERROR', message: 'Driver is inactive or not found' };
@@ -468,7 +445,7 @@ export const assignDriverInternal = internalMutation({
 
     const now = Date.now();
 
-    const assignableLegs = allLegsForLoad.filter(
+    let assignableLegs = allLegsForLoad.filter(
       (leg) => leg.status === 'PENDING' || leg.status === 'ACTIVE'
     );
 
@@ -482,7 +459,6 @@ export const assignDriverInternal = internalMutation({
         });
       }
     } else {
-      // No assignable legs — create a new one
       const stops = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -496,7 +472,7 @@ export const assignDriverInternal = internalMutation({
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
 
-      await ctx.db.insert('dispatchLegs', {
+      const legId = await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
         driverId: args.driverId,
         truckId: args.truckId,
@@ -510,7 +486,24 @@ export const assignDriverInternal = internalMutation({
         createdAt: now,
         updatedAt: now,
       });
+
+      const newLeg = await ctx.db.get(legId);
+      if (newLeg) assignableLegs = [newLeg];
     }
+
+    // Detect overlaps for insight (never blocks)
+    const legRanges: ({ start: number; end: number } | null)[] = [];
+    for (const leg of assignableLegs) {
+      const range = await getLegTimeRange(ctx, leg);
+      legRanges.push(range);
+    }
+
+    const overlaps = await detectDriverOverlaps(
+      ctx,
+      args.driverId,
+      legRanges,
+      args.loadId
+    );
 
     // Update load
     await ctx.db.patch(args.loadId, {
@@ -520,7 +513,11 @@ export const assignDriverInternal = internalMutation({
       updatedAt: now,
     });
 
-    // Audit log
+    // Audit log — include overlap context
+    const overlapNote = overlaps.length > 0
+      ? ` (schedule overlap with ${overlaps.map((o) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
+      : '';
+
     await ctx.runMutation(internal.auditLog.logAction, {
       organizationId: load.workosOrgId,
       entityType: 'LOAD',
@@ -529,7 +526,7 @@ export const assignDriverInternal = internalMutation({
       action: 'ASSIGN_DRIVER',
       performedBy: args.assignedBy,
       performedByName: args.assignedByName,
-      description: `Auto-assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber}`,
+      description: `Auto-assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber}${overlapNote}`,
     });
 
     // Trigger pay recalculation
@@ -538,7 +535,10 @@ export const assignDriverInternal = internalMutation({
       userId: args.assignedBy,
     });
 
-    return { status: 'SUCCESS' };
+    return {
+      status: 'SUCCESS',
+      overlaps: overlaps.length > 0 ? overlaps : undefined,
+    };
   },
 });
 
@@ -1084,14 +1084,14 @@ export const removeDriver = mutation({
   },
 });
 
-// Get available drivers for a time window (optimized: legs first, then filter)
-// Enhanced to include truck/equipment data for dispatch planning
+// Get drivers for a time window with overlap insight
+// Returns ALL active drivers — overlapping drivers are flagged, not hidden
 export const getAvailableDrivers = query({
   args: {
     workosOrgId: v.string(),
     startTime: v.number(), // Unix timestamp (ms)
     endTime: v.number(), // Unix timestamp (ms)
-    excludeLoadId: v.optional(v.id('loadInformation')), // Exclude legs from this load
+    excludeLoadId: v.optional(v.id('loadInformation')),
   },
   handler: async (ctx, args) => {
     // 1. Get all legs with drivers in PENDING/ACTIVE status for this org
@@ -1109,20 +1109,29 @@ export const getAvailableDrivers = query({
       )
       .collect();
 
-    // 2. Build set of busy driver IDs by checking time overlaps
-    const busyDriverIds = new Set<string>();
+    // 2. Build overlap map: driverId -> worst overlap info
+    const driverOverlaps = new Map<string, { overlapMinutes: number; orderNumber?: string; loadId: string }>();
     const requestedRange = { start: args.startTime, end: args.endTime };
 
     for (const leg of allOrgLegs) {
-      // Skip legs from the excluded load
       if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
       if (!leg.driverId) continue;
 
       const legRange = await getLegTimeRange(ctx, leg);
-      if (!legRange) continue; // Skip legs without valid times
+      if (!legRange) continue;
 
       if (doTimeRangesOverlap(requestedRange, legRange)) {
-        busyDriverIds.add(leg.driverId);
+        const minutes = calculateOverlapMinutes(requestedRange, legRange);
+        const existing = driverOverlaps.get(leg.driverId);
+
+        if (!existing || minutes > existing.overlapMinutes) {
+          const conflictLoad = await ctx.db.get(leg.loadId);
+          driverOverlaps.set(leg.driverId, {
+            overlapMinutes: minutes,
+            orderNumber: conflictLoad?.orderNumber,
+            loadId: leg.loadId as string,
+          });
+        }
       }
     }
 
@@ -1140,27 +1149,25 @@ export const getAvailableDrivers = query({
 
     if (allDrivers.length === 0) return [];
 
-    // 4. Filter available and enrich with truck data
-    const availableDrivers = [];
+    // 4. Enrich all drivers with truck data and overlap insight
+    const drivers = [];
     for (const driver of allDrivers) {
-      if (busyDriverIds.has(driver._id)) continue;
+      let truck = null;
+      if (driver.currentTruckId) {
+        truck = await ctx.db.get(driver.currentTruckId);
+      }
+      if (!truck) {
+        const lastLeg = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_driver', (q) => q.eq('driverId', driver._id))
+          .order('desc')
+          .first();
+        truck = lastLeg?.truckId ? await ctx.db.get(lastLeg.truckId) : null;
+      }
 
-      // Get truck - first try currentTruckId, then fallback to last dispatch leg
-        let truck = null;
-        if (driver.currentTruckId) {
-          truck = await ctx.db.get(driver.currentTruckId);
-        }
-        if (!truck) {
-          // Fallback: check last dispatch leg
-          const lastLeg = await ctx.db
-            .query('dispatchLegs')
-            .withIndex('by_driver', (q) => q.eq('driverId', driver._id))
-            .order('desc')
-            .first();
-          truck = lastLeg?.truckId ? await ctx.db.get(lastLeg.truckId) : null;
-        }
+      const overlap = driverOverlaps.get(driver._id) ?? null;
 
-        availableDrivers.push({
+      drivers.push({
         _id: driver._id,
         firstName: driver.firstName,
         lastName: driver.lastName,
@@ -1169,22 +1176,29 @@ export const getAvailableDrivers = query({
         licenseState: driver.licenseState,
         city: driver.city,
         state: driver.state,
-        // Equipment data for filtering/display
         assignedTruck: truck
           ? {
               _id: truck._id,
               unitId: truck.unitId,
               bodyType: truck.bodyType,
-              // Location for deadhead calculation
               lastLocationLat: truck.lastLocationLat,
               lastLocationLng: truck.lastLocationLng,
               lastLocationUpdatedAt: truck.lastLocationUpdatedAt,
             }
           : null,
+        overlap,
       });
     }
 
-    return availableDrivers;
+    // Sort: available drivers first, then by overlap minutes ascending
+    drivers.sort((a, b) => {
+      if (!a.overlap && !b.overlap) return 0;
+      if (!a.overlap) return -1;
+      if (!b.overlap) return 1;
+      return a.overlap.overlapMinutes - b.overlap.overlapMinutes;
+    });
+
+    return drivers;
   },
 });
 

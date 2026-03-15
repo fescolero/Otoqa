@@ -265,6 +265,62 @@ export function trackGPSPermissionDenied() {
 }
 
 // ============================================
+// BACKGROUND LOCATION TASK DIAGNOSTICS
+// ============================================
+
+export function trackBGTaskFired(context: {
+  locationCount: number;
+  accuracies: string;
+  ages: string;
+  sqliteAvailable: boolean;
+  trackingActive: boolean;
+}) {
+  capture('bg_task_fired', context);
+}
+
+export function trackBGTaskResult(context: {
+  saved: number;
+  total: number;
+  rejectedAccuracy: number;
+  rejectedDistance: number;
+  rejectedStale: number;
+  usedFallback: boolean;
+  syncAttempted: boolean;
+  syncSuccess?: boolean;
+  syncCount?: number;
+  durationMs: number;
+}) {
+  capture('bg_task_result', context);
+}
+
+export function trackBGTaskError(context: {
+  step: string;
+  error: string;
+}) {
+  capture('bg_task_error', context);
+}
+
+export function trackBGTaskReregistered(context: {
+  source: 'foreground_return' | 'app_resume';
+  wasRegistered: boolean;
+  success: boolean;
+  error?: string;
+}) {
+  capture('bg_task_reregistered', context);
+}
+
+export function trackForegroundResume(context: {
+  bgTaskLastAliveAgoSec: number | null;
+  fallbackRecovered: number;
+  unsyncedCount: number;
+  isExpoGo?: boolean;
+  isPhysicalDevice?: boolean;
+  platform?: string;
+}) {
+  capture('foreground_resume', context);
+}
+
+// ============================================
 // CHECK-IN/OUT OFFLINE FLOW TRACKING
 // ============================================
 
