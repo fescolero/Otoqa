@@ -1203,6 +1203,10 @@ export default defineSchema({
     checkoutLongitude: v.optional(v.number()),
     dwellTime: v.optional(v.number()), // Minutes
 
+    // Redirect (driver sent to different location than scheduled)
+    isRedirected: v.optional(v.boolean()),
+    redirectNotes: v.optional(v.string()),
+
     // Status Tracking
     lastStatusChangeTimestamp: v.optional(v.string()),
     lastStatusChangeLatitude: v.optional(v.number()),

@@ -426,18 +426,20 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       }
     }
 
-    let tooClose = false;
+    let distance = Infinity;
     if (prevLat !== null && prevLng !== null) {
-      const distance = calculateDistance(
+      distance = calculateDistance(
         prevLat, prevLng,
         loc.coords.latitude, loc.coords.longitude
       );
-      if (distance < MIN_DISTANCE_BETWEEN_POINTS) {
-        tooClose = true;
-      }
     }
 
-    if (tooClose && !(needsHeartbeat && !savedHeartbeat)) {
+    const timeSincePrev = prevTimestamp > 0 ? (loc.timestamp - prevTimestamp) : Infinity;
+    const enoughDistance = distance >= MIN_DISTANCE_BETWEEN_POINTS;
+    const enoughTime = timeSincePrev >= TRACKING_INTERVAL_MS;
+    const isHeartbeat = needsHeartbeat && !savedHeartbeat;
+
+    if (!enoughDistance && !enoughTime && !isHeartbeat) {
       rejectedDistance++;
       continue;
     }
@@ -646,24 +648,17 @@ export async function startLocationTracking(params: {
       console.log('[LocationTracking] Starting background location updates...');
       await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
         accuracy: Location.Accuracy.BestForNavigation,
-        
-        // Android: fires every 60s OR 50m movement.
-        // iOS: timeInterval is IGNORED for background — only distanceInterval matters.
-        // We set distanceInterval low (10m) so iOS delivers fresh GPS fixes
-        // while driving instead of caching the last-known position.
-        // Our SQLite distance filter (MIN_DISTANCE_BETWEEN_POINTS=20m) handles dedup.
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
-        
         showsBackgroundLocationIndicator: true,
-        
         foregroundService: {
           notificationTitle: 'Route Tracking Active',
           notificationBody: 'Recording your delivery route',
           notificationColor: '#22c55e',
         },
-        
-        activityType: Location.ActivityType.AutomotiveNavigation,
+        // OtherNavigation avoids competing with the driver's active nav app
+        // (Apple Maps, Google Maps, Waze) for the AutomotiveNavigation slot.
+        activityType: Location.ActivityType.OtherNavigation,
         pausesUpdatesAutomatically: false,
       });
 
@@ -861,32 +856,32 @@ export async function resumeTracking(): Promise<{
     // Restart sync interval
     startSyncInterval(state.organizationId);
 
-    // Force re-register background task (stop + start) to ensure the native
-    // layer points to the current JS callback. After OTA updates or app restarts,
-    // the task registration can become stale.
+    // Only start the background task if it's not already registered.
+    // Avoid stop/restart cycle which creates a gap in tracking.
     if (!isExpoGo && isPhysicalDevice) {
       try {
         const isRegistered = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
-        if (isRegistered) {
-          console.log('[LocationTracking] Stopping stale background task before re-registering...');
-          await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+        if (!isRegistered) {
+          console.log('[LocationTracking] BG task not registered, starting on resume...');
+          await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: TRACKING_INTERVAL_MS,
+            distanceInterval: BG_DISTANCE_INTERVAL,
+            showsBackgroundLocationIndicator: true,
+            foregroundService: {
+              notificationTitle: 'Route Tracking Active',
+              notificationBody: 'Recording your delivery route',
+              notificationColor: '#22c55e',
+            },
+            activityType: Location.ActivityType.OtherNavigation,
+            pausesUpdatesAutomatically: false,
+          });
+          console.log('[LocationTracking] Background task registered on resume');
+        } else {
+          console.log('[LocationTracking] BG task already registered on resume, skipping');
         }
-        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-          accuracy: Location.Accuracy.BestForNavigation,
-          timeInterval: TRACKING_INTERVAL_MS,
-          distanceInterval: BG_DISTANCE_INTERVAL,
-          showsBackgroundLocationIndicator: true,
-          foregroundService: {
-            notificationTitle: 'Route Tracking Active',
-            notificationBody: 'Recording your delivery route',
-            notificationColor: '#22c55e',
-          },
-          activityType: Location.ActivityType.AutomotiveNavigation,
-          pausesUpdatesAutomatically: false,
-        });
-        console.log('[LocationTracking] Background task re-registered on resume');
       } catch (bgError) {
-        console.warn('[LocationTracking] Could not resume background tracking:', bgError);
+        console.warn('[LocationTracking] Could not start background tracking:', bgError);
       }
     }
 
@@ -964,8 +959,11 @@ async function startForegroundPolling(organizationId: string) {
     foregroundWatchSubscription = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.BestForNavigation,
-        distanceInterval: 100,
-        timeInterval: 2 * 60 * 1000,
+        // Get frequent fixes from the OS; our callback does its own
+        // time/distance filtering (TRACKING_INTERVAL_MS / MIN_DISTANCE_BETWEEN_POINTS).
+        // Setting these low ensures we don't miss a point that passes our filter.
+        distanceInterval: 10,
+        timeInterval: 30_000,
       },
       async (location) => {
         try {
@@ -982,27 +980,23 @@ async function startForegroundPolling(organizationId: string) {
           const now = Date.now();
           const timeSinceLast = lastForegroundLocation ? now - lastForegroundLocation.time : Infinity;
 
-          // Minimum 2 min between saved points
-          if (timeSinceLast < 2 * 60 * 1000) {
-            return;
-          }
-
-          let tooClose = false;
+          let distance = Infinity;
           if (lastForegroundLocation) {
-            const distance = calculateDistance(
+            distance = calculateDistance(
               lastForegroundLocation.latitude,
               lastForegroundLocation.longitude,
               location.coords.latitude,
               location.coords.longitude
             );
-            if (distance < MIN_DISTANCE_BETWEEN_POINTS) {
-              tooClose = true;
-            }
           }
 
-          // Save if moved enough, OR every 5 min as heartbeat even if stationary
+          // Save if EITHER enough time has passed OR enough distance covered.
+          // Also save heartbeat every 5 min even if stationary.
+          const enoughTime = timeSinceLast >= TRACKING_INTERVAL_MS;
+          const enoughDistance = distance >= MIN_DISTANCE_BETWEEN_POINTS;
           const needsHeartbeat = timeSinceLast >= HEARTBEAT_INTERVAL_MS;
-          if (tooClose && !needsHeartbeat) {
+
+          if (!enoughTime && !enoughDistance && !needsHeartbeat) {
             return;
           }
 
@@ -1024,7 +1018,8 @@ async function startForegroundPolling(organizationId: string) {
             time: now,
           };
 
-          console.log(`[LocationTracking] Watch: saved (acc=${location.coords.accuracy?.toFixed(0)}m, spd=${((location.coords.speed || 0) * 2.237).toFixed(0)}mph, gap=${(timeSinceLast / 1000).toFixed(0)}s${tooClose ? ', heartbeat' : ''})`);
+          const reason = enoughDistance ? 'distance' : enoughTime ? 'time' : 'heartbeat';
+          console.log(`[LocationTracking] Watch: saved (acc=${location.coords.accuracy?.toFixed(0)}m, dist=${distance.toFixed(0)}m, gap=${(timeSinceLast / 1000).toFixed(0)}s, reason=${reason})`);
 
           // Sync immediately -- we're in the foreground with valid auth.
           if (!isSyncing) {
@@ -1233,35 +1228,40 @@ export async function restartForegroundServices(): Promise<void> {
     platform: Platform.OS,
   });
 
-  // Force re-register the background task to ensure the native layer
-  // points to the current JS callback (critical after OTA updates)
+  // Only re-register the background task if it's NOT already running.
+  // Stopping and restarting on every foreground return creates a gap where
+  // no background tracking is active -- iOS may not restart it in time if
+  // the user quickly switches back to another app (e.g., navigation).
   if (!isExpoGo && isPhysicalDevice) {
     let wasRegistered = false;
     try {
       wasRegistered = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
-      console.log(`[LocationTracking] BG task isRegistered=${wasRegistered}, attempting re-register...`);
+      console.log(`[LocationTracking] BG task isRegistered=${wasRegistered}`);
       
-      if (wasRegistered) {
-        await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+      if (!wasRegistered) {
+        console.log('[LocationTracking] BG task not registered, starting...');
+        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+          accuracy: Location.Accuracy.BestForNavigation,
+          timeInterval: TRACKING_INTERVAL_MS,
+          distanceInterval: BG_DISTANCE_INTERVAL,
+          showsBackgroundLocationIndicator: true,
+          foregroundService: {
+            notificationTitle: 'Route Tracking Active',
+            notificationBody: 'Recording your delivery route',
+            notificationColor: '#22c55e',
+          },
+          activityType: Location.ActivityType.OtherNavigation,
+          pausesUpdatesAutomatically: false,
+        });
+        console.log('[LocationTracking] Background task registered on foreground return');
+        trackBGTaskReregistered({ source: 'foreground_return', wasRegistered, success: true });
+      } else {
+        console.log('[LocationTracking] BG task already registered, skipping re-register');
+        trackBGTaskReregistered({ source: 'foreground_return', wasRegistered, success: true, error: 'already_registered' });
       }
-      await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-        accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: TRACKING_INTERVAL_MS,
-        distanceInterval: BG_DISTANCE_INTERVAL,
-        showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: 'Route Tracking Active',
-          notificationBody: 'Recording your delivery route',
-          notificationColor: '#22c55e',
-        },
-        activityType: Location.ActivityType.AutomotiveNavigation,
-        pausesUpdatesAutomatically: false,
-      });
-      console.log('[LocationTracking] Background task re-registered successfully');
-      trackBGTaskReregistered({ source: 'foreground_return', wasRegistered, success: true });
     } catch (bgErr) {
       const errMsg = bgErr instanceof Error ? bgErr.message : String(bgErr);
-      console.warn('[LocationTracking] Failed to re-register background task:', errMsg);
+      console.warn('[LocationTracking] Failed to register background task:', errMsg);
       trackBGTaskReregistered({ source: 'foreground_return', wasRegistered, success: false, error: errMsg });
     }
   } else {

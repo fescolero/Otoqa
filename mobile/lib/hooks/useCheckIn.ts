@@ -37,12 +37,15 @@ interface CheckInOptions {
   stopSequence?: number;
   totalStops?: number;
   organizationId?: string;
+  isRedirected?: boolean;
 }
 
 interface CheckInResult {
   success: boolean;
   message: string;
   queued?: boolean;
+  trackingFailed?: boolean;
+  trackingMessage?: string;
 }
 
 type LocationGetter = () => Promise<{ latitude: number; longitude: number }>;
@@ -85,6 +88,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         longitude: location.longitude,
         driverTimestamp,
         notes: options.notes,
+        ...(options.isRedirected ? { isRedirected: true } : {}),
       };
 
       if (shouldQueue) {
@@ -97,16 +101,19 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         });
 
         // Start tracking even when offline -- GPS points go to SQLite
-        if (options.stopSequence === 1 && options.loadId && options.organizationId) {
-          console.log('[CheckIn] First stop (offline) - starting location tracking');
-          try {
-            await startLocationTracking({
-              driverId: options.driverId,
-              loadId: options.loadId,
-              organizationId: options.organizationId,
-            });
-          } catch (trackErr) {
-            console.warn('[CheckIn] Tracking start failed while offline:', trackErr);
+        if (options.loadId && options.organizationId) {
+          const alreadyTracking = await isTracking();
+          if (!alreadyTracking) {
+            console.log(`[CheckIn] Stop ${options.stopSequence} (offline) - starting location tracking`);
+            try {
+              await startLocationTracking({
+                driverId: options.driverId,
+                loadId: options.loadId,
+                organizationId: options.organizationId,
+              });
+            } catch (trackErr) {
+              console.warn('[CheckIn] Tracking start failed while offline:', trackErr);
+            }
           }
         }
 
@@ -127,13 +134,15 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           MUTATION_TIMEOUT_MS
         );
 
-        // Start location tracking on check-in at the first stop
-        console.log(`[CheckIn] Tracking check: success=${result.success}, seq=${options.stopSequence}, total=${options.totalStops}, loadId=${options.loadId ? 'yes' : 'no'}, orgId=${options.organizationId ? 'yes' : 'no'}`);
-        if (result.success && options.stopSequence && options.totalStops && options.loadId && options.organizationId) {
-          const isFirstStop = options.stopSequence === 1;
+        // Start location tracking if not already running.
+        let trackingFailed = false;
+        let trackingMessage: string | undefined;
 
-          if (isFirstStop) {
-            console.log('[CheckIn] First stop check-in - starting location tracking');
+        console.log(`[CheckIn] Tracking check: success=${result.success}, seq=${options.stopSequence}, total=${options.totalStops}, loadId=${options.loadId ? 'yes' : 'no'}, orgId=${options.organizationId ? 'yes' : 'no'}`);
+        if (result.success && options.loadId && options.organizationId) {
+          const alreadyTracking = await isTracking();
+          if (!alreadyTracking) {
+            console.log(`[CheckIn] Stop ${options.stopSequence} check-in - tracking not running, starting now`);
             const trackingResult = await startLocationTracking({
               driverId: options.driverId,
               loadId: options.loadId,
@@ -143,18 +152,20 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
             posthog.capture('location_tracking_started', {
               loadId: options.loadId ?? null,
               stopId: options.stopId,
-              trigger: 'check_in',
+              trigger: options.stopSequence === 1 ? 'check_in' : 'check_in_late_start',
               success: trackingResult.success,
               message: trackingResult.message,
             });
 
             if (!trackingResult.success) {
               console.warn('[CheckIn] Location tracking failed to start:', trackingResult.message);
+              trackingFailed = true;
+              trackingMessage = trackingResult.message;
             }
           }
         }
 
-        return result;
+        return { ...result, trackingFailed, trackingMessage };
       } catch (onlineError) {
         await enqueueMutation('checkIn', mutationArgs);
         trackCheckinMutationTimeout({
@@ -169,16 +180,19 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         });
 
         // Still try to start tracking even if the mutation was queued
-        if (options.stopSequence === 1 && options.loadId && options.organizationId) {
-          console.log('[CheckIn] First stop (queued) - starting location tracking anyway');
-          try {
-            await startLocationTracking({
-              driverId: options.driverId,
-              loadId: options.loadId,
-              organizationId: options.organizationId,
-            });
-          } catch (trackErr) {
-            console.warn('[CheckIn] Tracking start failed after queue:', trackErr);
+        if (options.loadId && options.organizationId) {
+          const alreadyTracking = await isTracking();
+          if (!alreadyTracking) {
+            console.log(`[CheckIn] Stop ${options.stopSequence} (queued) - starting location tracking`);
+            try {
+              await startLocationTracking({
+                driverId: options.driverId,
+                loadId: options.loadId,
+                organizationId: options.organizationId,
+              });
+            } catch (trackErr) {
+              console.warn('[CheckIn] Tracking start failed after queue:', trackErr);
+            }
           }
         }
 
@@ -298,15 +312,26 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         );
 
         // Handle location tracking based on stop position
-        if (result.success && options.stopSequence && options.totalStops && options.loadId && options.organizationId) {
-          const isFirstStop = options.stopSequence === 1;
+        let trackingFailed = false;
+        let trackingMessage: string | undefined;
+
+        console.log(`[CheckOut] Tracking check: success=${result.success}, seq=${options.stopSequence}, total=${options.totalStops}, loadId=${options.loadId ? 'yes' : 'no'}, orgId=${options.organizationId ? 'yes' : 'no'}`);
+        if (result.success && options.loadId && options.organizationId) {
           const isLastStop = options.stopSequence === options.totalStops;
 
-          if (isFirstStop) {
-            // Safety net: check-in should have started tracking, but ensure it's running
+          if (isLastStop) {
+            console.log('[CheckOut] Last stop - stopping location tracking');
+            const trackingResult = await stopLocationTracking();
+
+            posthog.capture('location_tracking_stopped', {
+              loadId: options.loadId ?? null,
+              stopId: options.stopId,
+              success: trackingResult.success,
+            });
+          } else {
             const alreadyTracking = await isTracking();
             if (!alreadyTracking) {
-              console.log('[CheckOut] First stop checkout - tracking not running, starting as fallback');
+              console.log(`[CheckOut] Stop ${options.stopSequence} checkout - tracking not running, starting now`);
               const trackingResult = await startLocationTracking({
                 driverId: options.driverId,
                 loadId: options.loadId,
@@ -316,30 +341,21 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
               posthog.capture('location_tracking_started', {
                 loadId: options.loadId ?? null,
                 stopId: options.stopId,
-                trigger: 'check_out_fallback',
+                trigger: 'check_out_late_start',
                 success: trackingResult.success,
                 message: trackingResult.message,
               });
 
               if (!trackingResult.success) {
                 console.warn('[CheckOut] Location tracking failed to start:', trackingResult.message);
+                trackingFailed = true;
+                trackingMessage = trackingResult.message;
               }
-            } else {
-              console.log('[CheckOut] First stop checkout - tracking already running from check-in');
             }
-          } else if (isLastStop) {
-            console.log('[CheckOut] Last stop - stopping location tracking');
-            const trackingResult = await stopLocationTracking();
-
-            posthog.capture('location_tracking_stopped', {
-              loadId: options.loadId ?? null,
-              stopId: options.stopId,
-              success: trackingResult.success,
-            });
           }
         }
 
-        return result;
+        return { ...result, trackingFailed, trackingMessage };
       } catch (onlineError) {
         // Mutation timed out or failed -- queue it (photo already uploaded or will be re-uploaded from queue)
         await enqueueMutation(

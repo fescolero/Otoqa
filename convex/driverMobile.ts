@@ -568,6 +568,8 @@ export const checkInAtStop = mutation({
     notes: v.optional(v.string()),
     // Skip distance validation (for testing or special cases)
     skipDistanceCheck: v.optional(v.boolean()),
+    // Driver flagged this stop as redirected to a different location
+    isRedirected: v.optional(v.boolean()),
   },
   returns: v.object({
     success: v.boolean(),
@@ -620,8 +622,10 @@ export const checkInAtStop = mutation({
     }
 
     // GPS Distance Validation (if stop has coordinates)
+    // Redirected stops always skip the geofence since the driver is at a different location
+    const skipGeofence = args.skipDistanceCheck || args.isRedirected;
     let distanceFromStop: number | undefined;
-    if (stop.latitude && stop.longitude && !args.skipDistanceCheck) {
+    if (stop.latitude && stop.longitude && !skipGeofence) {
       distanceFromStop = calculateDistanceMeters(
         args.latitude,
         args.longitude,
@@ -648,6 +652,7 @@ export const checkInAtStop = mutation({
       checkinLongitude: args.longitude,
       status: 'In Transit',
       driverNotes: args.notes || stop.driverNotes,
+      ...(args.isRedirected ? { isRedirected: true } : {}),
       updatedAt: Date.now(), // Server timestamp for audit
     });
 

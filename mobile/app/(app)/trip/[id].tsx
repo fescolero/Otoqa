@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import {
   Image,
   Keyboard,
   TouchableWithoutFeedback,
+  Switch,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -34,8 +35,9 @@ import {
   addPendingAction,
   reconcilePendingActions,
 } from '../../../lib/pending-actions';
-import { getTrackingState, getBufferedLocationCount } from '../../../lib/location-tracking';
+import { getTrackingState, getBufferedLocationCount, isTracking, startLocationTracking } from '../../../lib/location-tracking';
 import { getTotalCountForLoad, getUnsyncedCountForLoad } from '../../../lib/location-db';
+import { AppState } from 'react-native';
 
 // ============================================
 // DESIGN SYSTEM
@@ -101,6 +103,7 @@ export default function TripDetailScreen() {
   const [notes, setNotes] = useState('');
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRedirected, setIsRedirected] = useState(false);
   const [showQuickActions, setShowQuickActions] = useState(false);
   const [showDetourModal, setShowDetourModal] = useState(false);
   const [detourStops, setDetourStops] = useState(1);
@@ -115,6 +118,10 @@ export default function TripDetailScreen() {
     unsyncedPoints: number;
     loadId: string | null;
   } | null>(null);
+
+  // Track whether we should retry starting tracking on foreground return
+  // (e.g., after the driver grants "Always" permission in Settings)
+  const pendingTrackingRetry = useRef(false);
 
   useEffect(() => {
     if (!id) return;
@@ -138,6 +145,32 @@ export default function TripDetailScreen() {
     const interval = setInterval(refresh, 10000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [id]);
+
+  // When the app returns from Settings, retry starting tracking if it
+  // previously failed due to missing permissions.
+  useEffect(() => {
+    if (!id || !driverId || !organizationId) return;
+    const sub = AppState.addEventListener('change', async (nextState) => {
+      if (nextState === 'active' && pendingTrackingRetry.current) {
+        pendingTrackingRetry.current = false;
+        const alreadyTracking = await isTracking();
+        if (alreadyTracking) return;
+        console.log('[TripDetail] Retrying tracking start after Settings return');
+        const result = await startLocationTracking({
+          driverId: driverId as Id<'drivers'>,
+          loadId: id as Id<'loadInformation'>,
+          organizationId,
+        });
+        if (result.success) {
+          Alert.alert('GPS Tracking Active', 'Route tracking has started successfully.');
+        } else {
+          Alert.alert('GPS Tracking Failed', result.message);
+        }
+      }
+    });
+    return () => sub.remove();
+  }, [id, driverId, organizationId]);
+
 
   // Load persisted pending actions on mount
   useEffect(() => {
@@ -233,7 +266,19 @@ export default function TripDetailScreen() {
     try {
       const currentStop = displayStops.find((s: any) => s._id === checkInModal.stopId);
       const totalStops = displayStops.length;
-      
+
+      console.log(`[TripDetail] ${actionType}: stopId=${checkInModal.stopId}, seq=${currentStop?.sequenceNumber}, total=${totalStops}, driverId=${driverId ? 'yes' : 'NULL'}, orgId=${organizationId ? organizationId.substring(0, 12) + '...' : 'NULL'}`);
+      posthog?.capture('tracking_params_debug', {
+        loadId: id,
+        stopId: checkInModal.stopId,
+        action: actionType,
+        stopSequence: currentStop?.sequenceNumber ?? null,
+        totalStops,
+        hasDriverId: !!driverId,
+        hasOrgId: !!organizationId,
+        orgId: organizationId ?? null,
+      });
+
       const result = checkInModal.type === 'in'
         ? await checkIn({
             stopId: checkInModal.stopId,
@@ -243,6 +288,7 @@ export default function TripDetailScreen() {
             stopSequence: currentStop?.sequenceNumber,
             totalStops,
             organizationId: organizationId || undefined,
+            ...(isRedirected ? { isRedirected: true } : {}),
           })
         : await checkOut({
             stopId: checkInModal.stopId,
@@ -270,11 +316,32 @@ export default function TripDetailScreen() {
           checkInModal.stopId as string,
           checkInModal.type
         );
-        Alert.alert(
-          result.queued ? 'Queued' : 'Success',
-          result.message
-        );
-        closeModal();
+
+        if (result.trackingFailed) {
+          closeModal();
+          setTimeout(() => {
+            Alert.alert(
+              'Location Permission Required',
+              'Route tracking could not start. Please enable "Always" location access in Settings so we can record your delivery route.',
+              [
+                { text: 'Not Now', style: 'cancel' },
+                {
+                  text: 'Open Settings',
+                  onPress: () => {
+                    pendingTrackingRetry.current = true;
+                    Linking.openSettings();
+                  },
+                },
+              ]
+            );
+          }, 500);
+        } else {
+          Alert.alert(
+            result.queued ? 'Queued' : 'Success',
+            result.message
+          );
+          closeModal();
+        }
       } else {
         Alert.alert('Error', result.message);
       }
@@ -298,6 +365,7 @@ export default function TripDetailScreen() {
     setCheckInModal({ visible: false, stopId: null, type: 'in' });
     setNotes('');
     setPhotoUri(null);
+    setIsRedirected(false);
   };
 
   // Format date and time together
@@ -566,6 +634,14 @@ export default function TripDetailScreen() {
                               </Text>
                             </View>
                           )}
+                          {stop.isRedirected && (
+                            <View style={styles.redirectedBadge}>
+                              <Ionicons name="swap-horizontal" size={10} color={colors.secondary} />
+                              <Text style={styles.redirectedBadgeText} maxFontSizeMultiplier={1.2}>
+                                Redirected
+                              </Text>
+                            </View>
+                          )}
                         </View>
                       )}
 
@@ -824,6 +900,32 @@ export default function TripDetailScreen() {
                   <Text style={styles.modalCancelButtonText}>Cancel</Text>
                 </Pressable>
               </View>
+
+              {/* Redirected Stop Toggle (check-in only) */}
+              {checkInModal.type === 'in' && (
+                <View style={styles.redirectToggleRow}>
+                  <View style={styles.redirectToggleLeft}>
+                    <Ionicons name="swap-horizontal" size={20} color={colors.secondary} />
+                    <Text style={styles.redirectToggleLabel}>
+                      Redirected {displayStops[currentStopIndex]?.stopType === 'PICKUP' ? 'Pickup' : 'Delivery'}
+                    </Text>
+                  </View>
+                  <Switch
+                    value={isRedirected}
+                    onValueChange={setIsRedirected}
+                    trackColor={{ false: colors.muted, true: `${colors.secondary}80` }}
+                    thumbColor={isRedirected ? colors.secondary : colors.foregroundMuted}
+                  />
+                </View>
+              )}
+              {isRedirected && (
+                <View style={styles.redirectBanner}>
+                  <Ionicons name="information-circle" size={16} color={colors.secondary} />
+                  <Text style={styles.redirectBannerText}>
+                    You'll check in at your current GPS location. The scheduled address is kept for records.
+                  </Text>
+                </View>
+              )}
 
               {/* Photo Row — shows camera prompt or attached photo */}
               {photoUri ? (
@@ -1337,6 +1439,20 @@ const styles = StyleSheet.create({
     color: colors.secondary,
     fontWeight: '600',
   },
+  redirectedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: `${colors.secondary}20`,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.md,
+  },
+  redirectedBadgeText: {
+    fontSize: 12,
+    color: colors.secondary,
+    fontWeight: '600',
+  },
 
   // GPS warming
   gpsWarmingBadge: {
@@ -1688,6 +1804,40 @@ const styles = StyleSheet.create({
     color: colors.destructive,
     fontSize: 15,
     fontWeight: '600',
+  },
+  redirectToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.background,
+    padding: spacing.lg,
+    borderRadius: borderRadius['2xl'],
+    marginBottom: spacing.sm,
+  },
+  redirectToggleLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  redirectToggleLabel: {
+    color: colors.foreground,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  redirectBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    backgroundColor: `${colors.secondary}15`,
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    marginBottom: spacing.sm,
+  },
+  redirectBannerText: {
+    flex: 1,
+    color: colors.secondary,
+    fontSize: 13,
+    lineHeight: 18,
   },
   modalPhotoRow: {
     flexDirection: 'row',
