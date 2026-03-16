@@ -198,15 +198,14 @@ export const processOrg = internalAction({
 
       for (const shipment of shipments) {
         try {
-          // Skip shipments without HCR or Trip (can't match)
           if (!shipment.hcr || !shipment.trip) {
             console.log(`Skipping shipment ${shipment.id}: missing HCR or Trip`);
             skipped++;
             continue;
           }
           
-          // STEP 1: Gate 1 - Try Exact Match (HCR + Trip)
-          let laneMatch = await ctx.runMutation(internal.fourKitesSyncHelpers.findContractLane, {
+          // STEP 1: Gate 1 - Try Exact Match (HCR + Trip) via compound index query
+          let laneMatch = await ctx.runQuery(internal.fourKitesSyncHelpers.findContractLane, {
             workosOrgId: orgId,
             hcr: shipment.hcr,
             tripNumber: shipment.trip,
@@ -216,10 +215,10 @@ export const processOrg = internalAction({
 
           // STEP 2: Gate 2 - Try Wildcard Match (HCR + *)
           if (!laneMatch) {
-            laneMatch = await ctx.runMutation(internal.fourKitesSyncHelpers.findContractLane, {
+            laneMatch = await ctx.runQuery(internal.fourKitesSyncHelpers.findContractLane, {
               workosOrgId: orgId,
               hcr: shipment.hcr,
-              tripNumber: "*", // Wildcard for known customer
+              tripNumber: "*",
             });
             
             if (laneMatch) {
@@ -228,39 +227,29 @@ export const processOrg = internalAction({
             }
           }
 
+          // Single load lookup -- reused across all branches below
+          const existingLoad = await ctx.runQuery(internal.fourKitesSyncHelpers.findLoadByExternalId, {
+            externalLoadId: shipment.id,
+          });
+
           // STEP 3: Gate 3 - No match? Create or update UNMAPPED load
           if (!laneMatch) {
-            // Check if load already exists
-            const existingLoad = await ctx.runMutation(internal.fourKitesSyncHelpers.findLoadByExternalId, {
-              externalLoadId: shipment.id,
-            });
-
             if (!existingLoad) {
-              // Create UNMAPPED load with GPS tracking enabled + MISSING_DATA invoice
               await ctx.runMutation(internal.fourKitesSyncHelpers.importUnmappedLoad, {
                 workosOrgId: orgId,
                 shipment,
                 createdBy: "FourKites Integration",
               });
-              
-              quarantined++; // Keep counter for reporting
+              quarantined++;
             }
-            // Note: If load exists as UNMAPPED, it will be promoted when:
-            // 1. A lane is created via createLaneAndBackfill (immediately)
-            // 2. The load is accessed via checkAndPromoteLoad (on-demand)
             continue;
           }
 
-          // ✅ STEP 3.5: If lane NOW exists but load was UNMAPPED, promote it!
-          // This handles the case where a lane is created AFTER the load was imported
-          const unmappedLoad = await ctx.runMutation(internal.fourKitesSyncHelpers.findLoadByExternalId, {
-            externalLoadId: shipment.id,
-          });
-          
-          if (unmappedLoad && unmappedLoad.loadType === "UNMAPPED") {
-            // Lane now exists! Promote this load
+          // STEP 3.5: If lane NOW exists but load was UNMAPPED, promote it
+          // (promoteUnmappedLoad stamps the lane internally, no separate stamp needed)
+          if (existingLoad && existingLoad.loadType === "UNMAPPED") {
             await ctx.runMutation(internal.fourKitesSyncHelpers.promoteUnmappedLoad, {
-              loadId: unmappedLoad._id,
+              loadId: existingLoad._id,
               contractLane: laneMatch,
               isWildcard,
             });
@@ -268,17 +257,16 @@ export const processOrg = internalAction({
             continue;
           }
 
-          // STEP 3: Find existing load
-          const existingLoad = await ctx.runMutation(internal.fourKitesSyncHelpers.findLoadByExternalId, {
-            externalLoadId: shipment.id,
-          });
-
-          // STEP 4: Skip if unchanged (✅ Change Detection Pattern)
-          // Only patch if data actually changed - prevents unnecessary reactive query triggers
+          // STEP 4: Skip if unchanged (change detection)
           if (existingLoad && existingLoad.lastExternalUpdatedAt === shipment.updated_at) {
             skipped++;
             continue;
           }
+
+          // Stamp the matched lane with import metadata (only for actual creates/updates)
+          await ctx.runMutation(internal.fourKitesSyncHelpers.stampLaneMatch, {
+            laneId: laneMatch._id,
+          });
 
           // STEP 5: Prepare data
           const loadData = {
@@ -292,13 +280,11 @@ export const processOrg = internalAction({
           let loadId;
 
           if (existingLoad) {
-            // UPDATE (only if data changed - verified by check above)
             loadId = await ctx.runMutation(internal.fourKitesSyncHelpers.updateLoad, {
               loadId: existingLoad._id,
               data: loadData,
             });
 
-            // Handle cancellation
             if (shipment.status === 'CANCELED' || shipment.status === 'WITHDRAWN') {
               await ctx.runMutation(internal.fourKitesSyncHelpers.updateLoad, {
                 loadId: existingLoad._id,
@@ -306,19 +292,18 @@ export const processOrg = internalAction({
               });
             }
           } else {
-            // CREATE - Use shared import helper (creates load + DRAFT invoice)
             loadId = await ctx.runMutation(internal.fourKitesSyncHelpers.importLoadFromShipment, {
               workosOrgId: orgId,
               shipment,
               contractLane: laneMatch,
               createdBy: "FourKites Integration",
-              isWildcard: isWildcard, // Pass wildcard flag for load classification
+              isWildcard,
             });
           }
 
-          // STEP 6: Sync stops (for UPDATE case only, CREATE handled by import helper)
+          // STEP 6: Sync stops (UPDATE case only, CREATE handled by import helper)
           if (existingLoad) {
-            const existingStops = await ctx.runMutation(internal.fourKitesSyncHelpers.getLoadStops, {
+            const existingStops = await ctx.runQuery(internal.fourKitesSyncHelpers.getLoadStops, {
               loadId,
             });
 
@@ -330,7 +315,6 @@ export const processOrg = internalAction({
                 const dbStop = existingStops.find((s: { externalStopId?: string; _id: any; windowBeginTime?: string; windowEndTime?: string; windowBeginDate?: string; windowEndDate?: string }) => s.externalStopId === String(stopId));
 
                 if (dbStop) {
-                  // Update existing stop
                   await ctx.runMutation(internal.fourKitesSyncHelpers.updateStop, {
                     stopId: dbStop._id,
                     data: {
@@ -350,7 +334,6 @@ export const processOrg = internalAction({
               }
             }
 
-            // Sync firstStopDate after stop updates (in case first stop's date changed)
             await ctx.runMutation(internal.loads.syncFirstStopDateMutation, { loadId });
           }
 

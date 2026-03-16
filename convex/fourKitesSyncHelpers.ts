@@ -1,41 +1,48 @@
 /**
- * Helper mutations for the FourKites sync worker
- * Actions can't directly access the database, so we need these mutations
+ * Helper queries and mutations for the FourKites sync worker.
+ * Read-only lookups use internalQuery to avoid write-transaction overhead.
+ * Only functions that modify data use internalMutation.
  */
 
-import { internalMutation } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
 
-// Find contract lane by HCR and trip, stamping import match metadata
-export const findContractLane = internalMutation({
+// Read-only lane lookup using the compound index (reads ~1 doc instead of full table scan)
+export const findContractLane = internalQuery({
   args: {
     workosOrgId: v.string(),
     hcr: v.string(),
     tripNumber: v.string(),
   },
   handler: async (ctx, args) => {
-    const lane = await ctx.db
+    return await ctx.db
       .query("contractLanes")
-      .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field("hcr"), args.hcr),
-          q.eq(q.field("tripNumber"), args.tripNumber)
-        )
+      .withIndex("by_org_hcr_trip", (q) =>
+        q
+          .eq("workosOrgId", args.workosOrgId)
+          .eq("hcr", args.hcr)
+          .eq("tripNumber", args.tripNumber)
       )
       .first();
+  },
+});
 
+// Stamp import match metadata on a lane after a successful match
+export const stampLaneMatch = internalMutation({
+  args: {
+    laneId: v.id("contractLanes"),
+  },
+  handler: async (ctx, args) => {
+    const lane = await ctx.db.get(args.laneId);
     if (lane) {
       await ctx.db.patch(lane._id, {
         lastImportMatchAt: Date.now(),
         importMatchCount: (lane.importMatchCount ?? 0) + 1,
       });
     }
-
-    return lane;
   },
 });
 
@@ -99,8 +106,8 @@ export const createInvoiceLineItem = internalMutation({
   },
 });
 
-// Find existing load by external ID
-export const findLoadByExternalId = internalMutation({
+// Read-only load lookup by external ID
+export const findLoadByExternalId = internalQuery({
   args: {
     externalLoadId: v.string(),
   },
@@ -157,8 +164,8 @@ export const createLoad = internalMutation({
   },
 });
 
-// Get existing stops for a load
-export const getLoadStops = internalMutation({
+// Read-only stop lookup for a load
+export const getLoadStops = internalQuery({
   args: {
     loadId: v.id("loadInformation"),
   },
@@ -191,8 +198,8 @@ export const createStop = internalMutation({
   },
 });
 
-// Get customer name by ID
-export const getCustomerName = internalMutation({
+// Read-only customer name lookup
+export const getCustomerName = internalQuery({
   args: {
     customerId: v.id("customers"),
   },
