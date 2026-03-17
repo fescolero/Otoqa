@@ -75,6 +75,40 @@ export default function CreateDefEntryPage() {
     }
   };
 
+  const handleSubmitAndContinue = async (data: FuelEntryFormData) => {
+    if (!organizationId || !user) return;
+
+    setIsSubmitting(true);
+    try {
+      await createDefEntry({
+        organizationId,
+        entryDate: data.entryDate,
+        vendorId: data.vendorId as Id<'fuelVendors'>,
+        gallons: data.gallons,
+        pricePerGallon: data.pricePerGallon,
+        ...(data.driverId && { driverId: data.driverId as Id<'drivers'> }),
+        ...(data.carrierId && { carrierId: data.carrierId as Id<'carrierPartnerships'> }),
+        ...(data.truckId && { truckId: data.truckId as Id<'trucks'> }),
+        ...(data.odometerReading && { odometerReading: data.odometerReading }),
+        ...(data.location && { location: data.location }),
+        ...(data.fuelCardNumber && { fuelCardNumber: data.fuelCardNumber }),
+        ...(data.receiptNumber && { receiptNumber: data.receiptNumber }),
+        ...(data.loadId && { loadId: data.loadId as Id<'loadInformation'> }),
+        ...(data.paymentMethod && { paymentMethod: data.paymentMethod as 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA' }),
+        ...(data.notes && { notes: data.notes }),
+        ...(data.receiptStorageId && { receiptStorageId: data.receiptStorageId as Id<'_storage'> }),
+        createdBy: user.id,
+      });
+
+      toast.success('DEF entry created — ready for next entry');
+    } catch (error) {
+      console.error('Failed to create DEF entry:', error);
+      toast.error('Failed to create DEF entry. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
     <>
       <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b bg-background">
@@ -111,6 +145,7 @@ export default function CreateDefEntryPage() {
           trucks={trucks ?? []}
           vendors={vendors ?? []}
           onSubmit={handleSubmit}
+          onSubmitAndContinue={handleSubmitAndContinue}
           onCancel={() => router.push('/operations/diesel')}
           isSubmitting={isSubmitting}
           generateUploadUrl={generateUploadUrl}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { DatePicker } from '@/components/ui/date-picker';
-import { Loader2, Upload, X } from 'lucide-react';
+import { Loader2, Plus, Upload, X } from 'lucide-react';
 
 export interface FuelEntryFormData {
   entryDate: number;
@@ -64,6 +64,7 @@ interface FuelEntryFormProps {
   }>;
   vendors: Array<{ _id: string; name: string }>;
   onSubmit: (data: FuelEntryFormData) => Promise<void>;
+  onSubmitAndContinue?: (data: FuelEntryFormData) => Promise<void>;
   onCancel: () => void;
   isSubmitting: boolean;
   generateUploadUrl: () => Promise<string>;
@@ -86,6 +87,7 @@ export function FuelEntryForm({
   trucks,
   vendors,
   onSubmit,
+  onSubmitAndContinue,
   onCancel,
   isSubmitting,
   generateUploadUrl,
@@ -132,6 +134,27 @@ export function FuelEntryForm({
   );
   const [isUploading, setIsUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
+  const pendingContinue = useRef(false);
+
+  const resetForm = useCallback(() => {
+    setEntryDate(new Date());
+    setGallons('');
+    setPricePerGallon('');
+    setDriverId('');
+    setCarrierId('');
+    setTruckId('');
+    setLoadId('');
+    setOdometerReading('');
+    setCity('');
+    setState('');
+    setFuelCardNumber('');
+    setReceiptNumber('');
+    setPaymentMethod('');
+    setNotes('');
+    setReceiptStorageId('');
+    setReceiptPreviewUrl('');
+    // Keep vendorId — user is likely entering multiple entries from the same vendor
+  }, []);
 
   const totalCost = useMemo(() => {
     const g = parseFloat(gallons);
@@ -207,7 +230,13 @@ export function FuelEntryForm({
       ...(receiptStorageId && { receiptStorageId }),
     };
 
-    await onSubmit(data);
+    if (pendingContinue.current && onSubmitAndContinue) {
+      await onSubmitAndContinue(data);
+      resetForm();
+    } else {
+      await onSubmit(data);
+    }
+    pendingContinue.current = false;
   };
 
   return (
@@ -535,7 +564,7 @@ export function FuelEntryForm({
           Cancel
         </Button>
         <Button type="submit" form="fuel-entry-form" disabled={isSubmitting || !vendorId}>
-          {isSubmitting ? (
+          {isSubmitting && !pendingContinue.current ? (
             <>
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               {isEditing ? 'Saving...' : 'Creating...'}
@@ -546,6 +575,27 @@ export function FuelEntryForm({
             `Create ${typeLabel} Entry`
           )}
         </Button>
+        {!isEditing && onSubmitAndContinue && (
+          <Button
+            type="submit"
+            form="fuel-entry-form"
+            variant="secondary"
+            disabled={isSubmitting || !vendorId}
+            onClick={() => { pendingContinue.current = true; }}
+          >
+            {isSubmitting && pendingContinue.current ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              <>
+                <Plus className="mr-2 h-4 w-4" />
+                Save &amp; Continue
+              </>
+            )}
+          </Button>
+        )}
       </div>
     </div>
     </>
