@@ -30,33 +30,63 @@ export interface LocationRow {
   synced: number; // 0 = unsynced, 1 = synced
 }
 
+const SCHEMA_SQL = `
+  PRAGMA journal_mode = WAL;
+  CREATE TABLE IF NOT EXISTS locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    driverId TEXT NOT NULL,
+    loadId TEXT NOT NULL,
+    organizationId TEXT NOT NULL,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    accuracy REAL,
+    speed REAL,
+    heading REAL,
+    recordedAt REAL NOT NULL,
+    createdAt REAL NOT NULL,
+    synced INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_locations_load_synced ON locations (loadId, synced);
+  CREATE INDEX IF NOT EXISTS idx_locations_synced ON locations (synced);
+  CREATE INDEX IF NOT EXISTS idx_locations_recorded ON locations (recordedAt);
+`;
+
+async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
+  const newDb = await SQLite.openDatabaseAsync(DB_NAME);
+  await newDb.execAsync(SCHEMA_SQL);
+  return newDb;
+}
+
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
-  if (db) return db;
+  if (db) {
+    // Verify the native handle is still alive. Android can destroy it after
+    // long background periods while the JS reference remains cached.
+    try {
+      await db.execAsync('SELECT 1');
+      return db;
+    } catch {
+      console.warn('[LocationDB] Stale DB handle detected, reopening...');
+      try { await db.closeAsync(); } catch { /* already dead */ }
+      db = null;
+    }
+  }
 
-  db = await SQLite.openDatabaseAsync(DB_NAME);
-
-  await db.execAsync(`
-    PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS locations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      driverId TEXT NOT NULL,
-      loadId TEXT NOT NULL,
-      organizationId TEXT NOT NULL,
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL,
-      accuracy REAL,
-      speed REAL,
-      heading REAL,
-      recordedAt REAL NOT NULL,
-      createdAt REAL NOT NULL,
-      synced INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS idx_locations_load_synced ON locations (loadId, synced);
-    CREATE INDEX IF NOT EXISTS idx_locations_synced ON locations (synced);
-    CREATE INDEX IF NOT EXISTS idx_locations_recorded ON locations (recordedAt);
-  `);
-
+  db = await openAndInit();
   return db;
+}
+
+/**
+ * Force-close and reopen the database connection.
+ * Call on foreground resume to proactively replace handles that Android
+ * may have invalidated while the app was backgrounded.
+ */
+export async function reopenDb(): Promise<void> {
+  if (db) {
+    try { await db.closeAsync(); } catch { /* may already be dead */ }
+    db = null;
+  }
+  db = await openAndInit();
+  console.log('[LocationDB] Database connection refreshed');
 }
 
 // ============================================
