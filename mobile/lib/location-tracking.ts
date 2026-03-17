@@ -14,6 +14,7 @@ import {
   markAsSynced,
   getLastLocationForLoad,
   deleteOldSyncedLocations,
+  reopenDb,
 } from './location-db';
 import {
   trackBGTaskFired,
@@ -1185,6 +1186,15 @@ export async function restartForegroundServices(): Promise<void> {
   if (!state?.isActive) return;
 
   console.log('[LocationTracking] Restarting foreground services after app resume');
+
+  // Proactively refresh the SQLite connection. Android can destroy the native
+  // database handle after long background periods while the JS-side reference
+  // remains cached, causing NullPointerException on the next prepareAsync/runAsync.
+  try {
+    await reopenDb();
+  } catch (err) {
+    console.warn('[LocationTracking] DB reopen failed, getDb() will retry on demand:', err);
+  }
 
   // Recover any locations saved to AsyncStorage fallback during background
   let fallbackRecovered = 0;
