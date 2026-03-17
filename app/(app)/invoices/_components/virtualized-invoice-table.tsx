@@ -1,8 +1,10 @@
 'use client';
 
-import { useRef, useEffect } from 'react';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { Id } from '@/convex/_generated/dataModel';
+
+const ROW_HEIGHT = 48;
+const OVERSCAN = 15;
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -78,26 +80,66 @@ export function VirtualizedInvoiceTable({
   isLoadingMore = false,
 }: VirtualizedInvoiceTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
   const headerChecked = isAllSelected ? true : isSomeSelected ? 'indeterminate' : false;
 
-  const rowVirtualizer = useVirtualizer({
-    count: invoices.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 48,
-    overscan: 15,
-  });
+  // Custom scroll-based virtualization (avoids @tanstack/react-virtual's flushSync)
+  const [scrollState, setScrollState] = useState({ scrollTop: 0, height: 400 });
+  const rafRef = useRef<number>();
+  const onScroll = useCallback(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = undefined;
+      const scrollTop = el.scrollTop;
+      const height = el.clientHeight;
+      setScrollState({ scrollTop, height });
 
-  // Infinite scroll: load more when user scrolls near the bottom.
-  // Defer onLoadMore to avoid flushSync during render (Convex loadMore triggers state updates).
+      // Scroll-based load: when near bottom (500px from end), load more
+      if (canLoadMore && !isLoadingMore && onLoadMore) {
+        const totalH = invoices.length * ROW_HEIGHT;
+        if (totalH > 0 && scrollTop + height >= totalH - 500) {
+          queueMicrotask(() => onLoadMore());
+        }
+      }
+    });
+  }, [canLoadMore, isLoadingMore, onLoadMore, invoices.length]);
+
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    onScroll();
+    const ro = new ResizeObserver(onScroll);
+    ro.observe(el);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      ro.disconnect();
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, [onScroll]);
+
+  const count = invoices.length;
+  const totalHeight = count * ROW_HEIGHT;
+  const startIndex = Math.max(0, Math.floor(scrollState.scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const visibleCount = Math.max(50, Math.ceil(scrollState.height / ROW_HEIGHT) + OVERSCAN * 2);
+  const endIndex = Math.min(count, startIndex + visibleCount);
+  const visibleItems = Array.from({ length: Math.max(0, endIndex - startIndex) }, (_, i) => startIndex + i);
+
+  // Infinite scroll: IntersectionObserver when sentinel comes into view (500px before bottom)
   useEffect(() => {
-    if (!canLoadMore || isLoadingMore || !onLoadMore) return;
-    const items = rowVirtualizer.getVirtualItems();
-    const lastItem = items[items.length - 1];
-    if (!lastItem) return;
-    if (lastItem.index >= invoices.length - 10) {
-      queueMicrotask(() => onLoadMore());
-    }
-  }, [canLoadMore, isLoadingMore, onLoadMore, invoices.length, rowVirtualizer]);
+    if (!canLoadMore || isLoadingMore || !onLoadMore || !loadMoreSentinelRef.current || !parentRef.current) return;
+    const sentinel = loadMoreSentinelRef.current;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0]?.isIntersecting) return;
+        queueMicrotask(() => onLoadMore());
+      },
+      { root: parentRef.current, rootMargin: '0px 0px 500px 0px', threshold: 0 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [canLoadMore, isLoadingMore, onLoadMore]);
 
   if (invoices.length === 0) {
     return (
@@ -152,22 +194,23 @@ export function VirtualizedInvoiceTable({
       </div>
       
       {/* Scrollable Body */}
-      <div className="flex-1 overflow-auto" ref={parentRef}>
-        <div className="relative" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
-          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            const invoice = invoices[virtualRow.index];
-            const index = virtualRow.index;
+      <div className="flex-1 min-h-[300px] overflow-auto" ref={parentRef}>
+        <div className="relative" style={{ height: `${totalHeight}px` }}>
+          {visibleItems.map((index) => {
+            const invoice = invoices[index];
+            if (!invoice) return null;
 
             return (
               <div
                 key={invoice._id}
-                data-index={virtualRow.index}
+                data-index={index}
                 className={cn(
-                  'absolute top-0 left-0 w-full h-[48px] cursor-pointer hover:bg-slate-50/80 transition-colors group border-b flex items-center',
+                  'absolute top-0 left-0 w-full cursor-pointer bg-background hover:bg-slate-50/80 transition-colors group border-b flex items-center',
                   focusedRowIndex === index && 'ring-2 ring-primary'
                 )}
                 style={{
-                  transform: `translateY(${virtualRow.start}px)`,
+                  height: ROW_HEIGHT,
+                  transform: `translateY(${index * ROW_HEIGHT}px)`,
                 }}
                 onClick={(e) => {
                   if (!(e.target as HTMLElement).closest('input[type="checkbox"]')) {
@@ -271,6 +314,7 @@ export function VirtualizedInvoiceTable({
             </div>
           )}
         </div>
+        {canLoadMore && <div ref={loadMoreSentinelRef} className="h-1 min-h-1 shrink-0" aria-hidden="true" />}
       </div>
 
       {/* Footer status bar */}

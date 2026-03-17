@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef, startTransition } from 'react';
 import { useQuery, useMutation, usePaginatedQuery } from 'convex/react';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
@@ -135,7 +135,7 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
       dateRangeStart: filters.dateRange?.start,
       dateRangeEnd: filters.dateRange?.end,
     } : 'skip',
-    { initialNumItems: 50 }
+    { initialNumItems: 100 }
   );
 
   // Distinct filter values from ALL invoices (not just loaded page)
@@ -230,7 +230,7 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
 
   const handleLoadMore = useCallback(() => {
     if (paginationStatus === 'CanLoadMore') {
-      loadMore(50);
+      startTransition(() => loadMore(100));
     }
   }, [paginationStatus, loadMore]);
 

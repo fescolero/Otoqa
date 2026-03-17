@@ -425,9 +425,6 @@ export const assignDriverInternal = internalMutation({
     assignedByName: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<{ status: 'SUCCESS' | 'ERROR'; message?: string; overlaps?: OverlapInfo[] }> => {
-    // #region agent log
-    console.log(`[DEBUG-30f4a4] assignDriverInternal ENTER: load=${args.loadId}, driver=${args.driverId}`);
-    // #endregion
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
       return { status: 'ERROR', message: 'Driver is inactive or not found' };
@@ -495,9 +492,6 @@ export const assignDriverInternal = internalMutation({
     }
 
     // Detect overlaps for insight (never blocks)
-    // #region agent log
-    console.log(`[DEBUG-30f4a4] assignDriverInternal: legs=${assignableLegs.length}, about to detect overlaps`);
-    // #endregion
     const legRanges: ({ start: number; end: number } | null)[] = [];
     for (const leg of assignableLegs) {
       const range = await getLegTimeRange(ctx, leg);
@@ -510,10 +504,6 @@ export const assignDriverInternal = internalMutation({
       legRanges,
       args.loadId
     );
-
-    // #region agent log
-    console.log(`[DEBUG-30f4a4] assignDriverInternal: overlaps=${overlaps.length}, patching load`);
-    // #endregion
 
     // Update load
     await ctx.db.patch(args.loadId, {
@@ -528,9 +518,6 @@ export const assignDriverInternal = internalMutation({
       ? ` (schedule overlap with ${overlaps.map((o) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
       : '';
 
-    // #region agent log
-    console.log(`[DEBUG-30f4a4] assignDriverInternal: about to audit log + pay recalc`);
-    // #endregion
     await ctx.runMutation(internal.auditLog.logAction, {
       organizationId: load.workosOrgId,
       entityType: 'LOAD',

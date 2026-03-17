@@ -114,10 +114,6 @@ export const autoAssignLoad = internalMutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<AutoAssignResult> => {
-    // #region agent log
-    console.log(`[DEBUG-30f4a4] autoAssignLoad ENTER: loadId=${args.loadId}`);
-    // #endregion
-
     // 1. Get the load
     const load = await ctx.db.get(args.loadId);
     if (!load) {
@@ -128,10 +124,6 @@ export const autoAssignLoad = internalMutation({
         message: 'Load not found',
       };
     }
-
-    // #region agent log
-    console.log(`[DEBUG-30f4a4] autoAssignLoad: load status=${load.status}, hcr=${load.parsedHcr}, driverId=${load.primaryDriverId ?? 'none'}, carrierId=${load.primaryCarrierPartnershipId ?? 'none'}`);
-    // #endregion
 
     // 2. Skip if already assigned
     if (load.status === 'Assigned' || load.primaryDriverId || load.primaryCarrierPartnershipId) {
@@ -227,9 +219,6 @@ export const autoAssignLoad = internalMutation({
         };
       }
 
-      // #region agent log
-      console.log(`[DEBUG-30f4a4] autoAssignLoad: CALLING assignDriverInternal for load=${args.loadId}, driver=${routeAssignment.driverId}, route=${routeAssignment._id}`);
-      // #endregion
       const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
         loadId: args.loadId,
         driverId: routeAssignment.driverId,
@@ -355,10 +344,6 @@ export const autoAssignPendingLoads = internalAction({
     let skipped = 0;
     let errors = 0;
 
-    // #region agent log
-    console.log(`[DEBUG-30f4a4] autoAssignPendingLoads: org=${args.workosOrgId}, openLoads=${openLoads.length}`);
-    // #endregion
-
     const MAX_RETRIES = 3;
 
     // 3. Process each load
@@ -368,18 +353,11 @@ export const autoAssignPendingLoads = internalAction({
 
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         try {
-          // #region agent log
-          console.log(`[DEBUG-30f4a4] Processing load ${i + 1}/${openLoads.length}: id=${load._id}, hcr=${load.parsedHcr}, trip=${load.parsedTripNumber ?? 'none'}, attempt=${attempt + 1}`);
-          // #endregion
           const result = await ctx.runMutation(internal.autoAssignment.autoAssignLoad, {
             loadId: load._id,
             userId: 'system',
             userName: 'Scheduled Auto-Assignment',
           });
-
-          // #region agent log
-          console.log(`[DEBUG-30f4a4] Load ${load._id} result: action=${result.action}, success=${result.success}, msg=${result.message}`);
-          // #endregion
 
           results.push(result);
 
@@ -395,16 +373,10 @@ export const autoAssignPendingLoads = internalAction({
         } catch (err) {
           const isRetryable = String(err).includes("couldn't be completed");
           if (isRetryable && attempt < MAX_RETRIES - 1) {
-            // #region agent log
-            console.log(`[DEBUG-30f4a4] OCC conflict on load ${load._id} (attempt ${attempt + 1}), retrying after backoff`);
-            // #endregion
             const backoffMs = 500 * Math.pow(2, attempt);
             await new Promise((resolve) => setTimeout(resolve, backoffMs));
             continue;
           }
-          // #region agent log
-          console.log(`[DEBUG-30f4a4] EXCEPTION on load ${load._id} (attempt ${attempt + 1}/${MAX_RETRIES}): ${String(err)}`);
-          // #endregion
           errors++;
           results.push({
             success: false,
