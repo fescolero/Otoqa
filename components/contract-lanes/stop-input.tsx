@@ -90,8 +90,8 @@ export function StopInput({ stops, onChange }: StopInputProps) {
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="space-y-2 lg:col-span-4">
-              <Label>
-                Address <span className="text-destructive">*</span>
+              <Label className={stop.address ? 'text-foreground' : 'text-destructive'}>
+                Address
               </Label>
               <AddressAutocomplete
                 value={stop.address}
@@ -101,9 +101,9 @@ export function StopInput({ stops, onChange }: StopInputProps) {
               />
               <p className="text-xs text-muted-foreground">Type to search or enter manually</p>
             </div>
-            <div className="space-y-2">
-              <Label>
-                City <span className="text-destructive">*</span>
+            <div className="group/field space-y-2">
+              <Label className="text-destructive group-has-[:valid]/field:text-foreground">
+                City
               </Label>
               <Input
                 value={stop.city}
@@ -111,9 +111,9 @@ export function StopInput({ stops, onChange }: StopInputProps) {
                 required
               />
             </div>
-            <div className="space-y-2">
-              <Label>
-                State <span className="text-destructive">*</span>
+            <div className="group/field space-y-2">
+              <Label className="text-destructive group-has-[:valid]/field:text-foreground">
+                State
               </Label>
               <Input
                 value={stop.state}
@@ -122,9 +122,9 @@ export function StopInput({ stops, onChange }: StopInputProps) {
                 required
               />
             </div>
-            <div className="space-y-2">
-              <Label>
-                ZIP <span className="text-destructive">*</span>
+            <div className="group/field space-y-2">
+              <Label className="text-destructive group-has-[:valid]/field:text-foreground">
+                ZIP
               </Label>
               <Input
                 value={stop.zip}
@@ -134,8 +134,8 @@ export function StopInput({ stops, onChange }: StopInputProps) {
             </div>
 
             <div className="space-y-2">
-              <Label>
-                Stop Type <span className="text-destructive">*</span>
+              <Label className="text-destructive">
+                Stop Type
               </Label>
               <Select
                 value={stop.stopType}
@@ -152,8 +152,8 @@ export function StopInput({ stops, onChange }: StopInputProps) {
             </div>
 
             <div className="space-y-2">
-              <Label>
-                Type <span className="text-destructive">*</span>
+              <Label className="text-destructive">
+                Type
               </Label>
               <Select value={stop.type} onValueChange={(value) => updateStop(index, 'type', value)}>
                 <SelectTrigger>
@@ -167,9 +167,9 @@ export function StopInput({ stops, onChange }: StopInputProps) {
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <Label>
-                Arrival Time <span className="text-destructive">*</span>
+            <div className="group/field space-y-2">
+              <Label className="text-destructive group-has-[:valid]/field:text-foreground">
+                Arrival Time
               </Label>
               <Input
                 type="time"

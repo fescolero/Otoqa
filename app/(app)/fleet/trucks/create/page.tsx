@@ -259,21 +259,21 @@ export default function CreateTruckPage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">Vehicle Identity</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="unitId">
-                    Unit ID <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="unitId" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Unit ID
                   </Label>
                   <Input id="unitId" name="unitId" required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="vin">
-                    VIN <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="vin" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    VIN
                   </Label>
                   <Input id="vin" name="vin" maxLength={17} className="font-mono" required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="status">
-                    Status <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="status" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Status
                   </Label>
                   <Select name="status" value={status} onValueChange={setStatus} required>
                     <SelectTrigger id="status" className="w-full">

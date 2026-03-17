@@ -164,15 +164,15 @@ export default function CreateCustomerPage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">Customer Information</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="name">
-                    Customer Name <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="name" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Customer Name *
                   </Label>
                   <Input id="name" name="name" required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="companyType">
-                    Company Type <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="companyType" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Company Type *
                   </Label>
                   <Select name="companyType" required defaultValue="Shipper">
                     <SelectTrigger id="companyType" className="w-full">
@@ -186,9 +186,9 @@ export default function CreateCustomerPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="status">
-                    Status <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="status" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Status *
                   </Label>
                   <Select name="status" required defaultValue="Prospect">
                     <SelectTrigger id="status" className="w-full">
@@ -212,9 +212,9 @@ export default function CreateCustomerPage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">Address</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2 md:col-span-2">
-                  <Label htmlFor="addressLine1">
-                    Address Line 1 <span className="text-destructive">*</span>
+                <div className="group/field space-y-2 md:col-span-2">
+                  <Label htmlFor="addressLine1" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Address Line 1 *
                   </Label>
                   <AddressAutocomplete
                     value={addressLine1}
@@ -229,9 +229,9 @@ export default function CreateCustomerPage() {
                   <Label htmlFor="addressLine2">Address Line 2 (Apt, Suite, etc.)</Label>
                   <Input id="addressLine2" name="addressLine2" placeholder="Optional" />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="city">
-                    City <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="city" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    City *
                   </Label>
                   <Input
                     id="city"
@@ -241,9 +241,9 @@ export default function CreateCustomerPage() {
                     onChange={(e) => setCity(e.target.value)}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="state">
-                    State/Province <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="state" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    State/Province *
                   </Label>
                   <Input
                     id="state"
@@ -253,9 +253,9 @@ export default function CreateCustomerPage() {
                     onChange={(e) => setState(e.target.value)}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="zip">
-                    ZIP/Postal Code <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="zip" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    ZIP/Postal Code *
                   </Label>
                   <Input
                     id="zip"
@@ -265,9 +265,9 @@ export default function CreateCustomerPage() {
                     onChange={(e) => setZip(e.target.value)}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="country">
-                    Country <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="country" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Country *
                   </Label>
                   <Input
                     id="country"
@@ -368,23 +368,23 @@ export default function CreateCustomerPage() {
                 <Textarea id="internalNotes" name="internalNotes" rows={4} />
               </div>
             </Card>
-
-            {/* Submit Buttons */}
-            <div className="flex justify-end gap-4">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => router.push('/operations/customers')}
-                disabled={isSubmitting}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" disabled={isSubmitting}>
-                {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Create Customer
-              </Button>
-            </div>
           </form>
+        </div>
+        <div className="sticky bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 mt-auto">
+          <div className="flex h-16 items-center justify-end gap-4 px-6">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => router.push('/operations/customers')}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" form="customer-form" disabled={isSubmitting}>
+              {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Create Customer
+            </Button>
+          </div>
         </div>
       </>
   );

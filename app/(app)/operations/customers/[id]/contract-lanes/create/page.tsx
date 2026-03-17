@@ -200,9 +200,9 @@ export default function CreateContractLanePage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">Contract Information</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="contractName">
-                    Contract Name <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="contractName" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Contract Name
                   </Label>
                   <Input id="contractName" name="contractName" required />
                 </div>
@@ -226,15 +226,15 @@ export default function CreateContractLanePage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="contractPeriodStart">
-                    Contract Start <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="contractPeriodStart" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Contract Start
                   </Label>
                   <Input id="contractPeriodStart" name="contractPeriodStart" type="date" required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="contractPeriodEnd">
-                    Contract End <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="contractPeriodEnd" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Contract End
                   </Label>
                   <Input id="contractPeriodEnd" name="contractPeriodEnd" type="date" required />
                 </div>
@@ -256,8 +256,8 @@ export default function CreateContractLanePage() {
               <h2 className="text-xl font-semibold mb-4">Lane Details</h2>
               <div className="space-y-4">
                 <div>
-                  <Label className="mb-2 block">
-                    Stops <span className="text-destructive">*</span>
+                  <Label className="mb-2 block text-destructive">
+                    Stops
                   </Label>
                   <StopInput stops={stops} onChange={setStops} />
                 </div>
@@ -313,15 +313,15 @@ export default function CreateContractLanePage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">Rate Information</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="rate">
-                    Rate <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="rate" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Rate
                   </Label>
                   <Input id="rate" name="rate" type="number" step="0.01" required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="rateType">
-                    Rate Type <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="rateType" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Rate Type
                   </Label>
                   <Select name="rateType" required defaultValue="Flat Rate">
                     <SelectTrigger id="rateType">
@@ -361,22 +361,23 @@ export default function CreateContractLanePage() {
                 </div>
               </div>
             </Card>
-
-            {/* Form Actions */}
-            <div className="flex justify-end gap-4">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => router.push(`/operations/customers/${customerId}/contract-lanes`)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" disabled={isSubmitting}>
-                {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Create Contract Lane
-              </Button>
-            </div>
           </form>
+        </div>
+        <div className="sticky bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 mt-auto">
+          <div className="flex h-16 items-center justify-end gap-4 px-6">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => router.push(`/operations/customers/${customerId}/contract-lanes`)}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" form="contract-lane-form" disabled={isSubmitting}>
+              {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Create Contract Lane
+            </Button>
+          </div>
         </div>
       </>
   );

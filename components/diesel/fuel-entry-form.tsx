@@ -211,7 +211,8 @@ export function FuelEntryForm({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6 pb-24">
+    <>
+    <form id="fuel-entry-form" onSubmit={handleSubmit} className="space-y-6 pb-24">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">{title}</h1>
         <p className="text-muted-foreground">
@@ -226,7 +227,7 @@ export function FuelEntryForm({
         <h2 className="text-xl font-semibold mb-4">Purchase Information</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="entryDate">Entry Date *</Label>
+            <Label htmlFor="entryDate" className="text-destructive">Entry Date</Label>
             <DatePicker
               id="entryDate"
               name="entryDate"
@@ -237,7 +238,7 @@ export function FuelEntryForm({
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="vendor">Vendor *</Label>
+            <Label htmlFor="vendor" className={vendorId ? 'text-foreground' : 'text-destructive'}>Vendor</Label>
             <Select value={vendorId} onValueChange={setVendorId}>
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Select a vendor..." />
@@ -252,8 +253,8 @@ export function FuelEntryForm({
             </Select>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="gallons">Gallons *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="gallons" className="text-destructive group-has-[:valid]/field:text-foreground">Gallons</Label>
             <Input
               id="gallons"
               type="number"
@@ -266,8 +267,8 @@ export function FuelEntryForm({
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="pricePerGallon">Price Per Gallon *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="pricePerGallon" className="text-destructive group-has-[:valid]/field:text-foreground">Price Per Gallon</Label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">
                 $
@@ -526,12 +527,14 @@ export function FuelEntryForm({
         </div>
       </Card>
 
-      {/* Submit / Cancel */}
-      <div className="flex items-center justify-end gap-3">
-        <Button type="button" variant="outline" onClick={onCancel}>
+    </form>
+
+    <div className="sticky bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 mt-auto">
+      <div className="flex h-16 items-center justify-end gap-4 px-6">
+        <Button type="button" variant="outline" onClick={onCancel} disabled={isSubmitting}>
           Cancel
         </Button>
-        <Button type="submit" disabled={isSubmitting || !vendorId}>
+        <Button type="submit" form="fuel-entry-form" disabled={isSubmitting || !vendorId}>
           {isSubmitting ? (
             <>
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -544,6 +547,7 @@ export function FuelEntryForm({
           )}
         </Button>
       </div>
-    </form>
+    </div>
+    </>
   );
 }

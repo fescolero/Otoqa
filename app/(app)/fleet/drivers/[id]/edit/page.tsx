@@ -236,9 +236,9 @@ export default function EditDriverPage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">Personal Information</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="firstName">
-                    First Name <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="firstName" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    First Name
                   </Label>
                   <Input id="firstName" name="firstName" defaultValue={driver.firstName} required />
                 </div>
@@ -246,21 +246,21 @@ export default function EditDriverPage() {
                   <Label htmlFor="middleName">Middle Name</Label>
                   <Input id="middleName" name="middleName" defaultValue={driver.middleName || ''} />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="lastName">
-                    Last Name <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="lastName" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Last Name
                   </Label>
                   <Input id="lastName" name="lastName" defaultValue={driver.lastName} required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="email">
-                    Email <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="email" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Email
                   </Label>
                   <Input id="email" name="email" type="email" defaultValue={driver.email} required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="phone">
-                    Phone <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="phone" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Phone
                   </Label>
                   <PhoneInput id="phone" name="phone" defaultValue={driver.phone} required />
                 </div>
@@ -279,15 +279,15 @@ export default function EditDriverPage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">License Information</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="licenseNumber">
-                    License Number <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="licenseNumber" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    License Number
                   </Label>
                   <Input id="licenseNumber" name="licenseNumber" defaultValue={driver.licenseNumber} required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="licenseState">
-                    License State <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="licenseState" className="text-destructive group-has-[:valid]/field:text-foreground group-has-[[data-value]]/field:text-foreground">
+                    License State
                   </Label>
                   <Select name="licenseState" defaultValue={driver.licenseState} required>
                     <SelectTrigger id="licenseState" className="w-full">
@@ -347,9 +347,9 @@ export default function EditDriverPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="licenseExpiration">
-                    License Expiration <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="licenseExpiration" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    License Expiration
                   </Label>
                   <DatePicker
                     id="licenseExpiration"
@@ -358,9 +358,9 @@ export default function EditDriverPage() {
                     required
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="licenseClass">
-                    License Class <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="licenseClass" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    License Class
                   </Label>
                   <Select name="licenseClass" defaultValue={driver.licenseClass} required>
                     <SelectTrigger id="licenseClass" className="w-full">
@@ -403,15 +403,15 @@ export default function EditDriverPage() {
             <Card className="p-6 mb-6">
               <h2 className="text-xl font-semibold mb-4">Employment Information</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="hireDate">
-                    Hire Date <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="hireDate" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Hire Date
                   </Label>
                   <DatePicker id="hireDate" name="hireDate" defaultValue={driver.hireDate} required />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="employmentStatus">
-                    Employment Status <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="employmentStatus" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Employment Status
                   </Label>
                   <Select name="employmentStatus" defaultValue={driver.employmentStatus} required>
                     <SelectTrigger id="employmentStatus" className="w-full">
@@ -424,9 +424,9 @@ export default function EditDriverPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="employmentType">
-                    Employment Type <span className="text-destructive">*</span>
+                <div className="group/field space-y-2">
+                  <Label htmlFor="employmentType" className="text-destructive group-has-[:valid]/field:text-foreground">
+                    Employment Type
                   </Label>
                   <Select name="employmentType" defaultValue={driver.employmentType} required>
                     <SelectTrigger id="employmentType" className="w-full">

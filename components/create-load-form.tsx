@@ -385,7 +385,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6 pb-24">
+    <>
+    <form id="load-form" onSubmit={handleSubmit} className="space-y-6 pb-24">
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Create Load</h1>
@@ -396,8 +397,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
       <Card className="p-6 shadow-sm">
         <h2 className="text-xl font-semibold mb-4">Load Details</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="space-y-2">
-            <Label htmlFor="internalId">Internal ID *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="internalId" className="text-destructive group-has-[:valid]/field:text-foreground">Internal ID</Label>
             <Input
               id="internalId"
               value={internalId}
@@ -407,8 +408,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="orderNumber">Order Number *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="orderNumber" className="text-destructive group-has-[:valid]/field:text-foreground">Order Number</Label>
             <Input
               id="orderNumber"
               value={orderNumber}
@@ -428,8 +429,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="customer">Customer *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="customer" className="text-destructive group-has-[:valid]/field:text-foreground">Customer</Label>
             <Select value={customerId} onValueChange={(value) => setCustomerId(value as Id<'customers'>)}>
               <SelectTrigger>
                 <SelectValue placeholder="Select customer" />
@@ -444,8 +445,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
             </Select>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="fleet">Fleet *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="fleet" className="text-destructive group-has-[:valid]/field:text-foreground">Fleet</Label>
             <Input
               id="fleet"
               value={fleet}
@@ -596,8 +597,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
           <CollapsibleContent>
             <div className="px-6 pb-6 pt-2 border-t space-y-4">
               {/* Template Name */}
-              <div className="space-y-2">
-                <Label htmlFor="recurringName">Template Name *</Label>
+              <div className="group/field space-y-2">
+                <Label htmlFor="recurringName" className="text-destructive group-has-[:valid]/field:text-foreground">Template Name</Label>
                 <Input
                   id="recurringName"
                   value={recurringName}
@@ -609,7 +610,7 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
 
               {/* Days of Week */}
               <div className="space-y-2">
-                <Label>Generate On *</Label>
+                <Label className="text-destructive">Generate On</Label>
                 <div className="flex flex-wrap gap-2">
                   {DAYS_OF_WEEK.map((day) => (
                     <Button
@@ -761,8 +762,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="units">Units *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="units" className="text-destructive group-has-[:valid]/field:text-foreground">Units</Label>
             <Select value={units} onValueChange={(value: any) => setUnits(value)}>
               <SelectTrigger>
                 <SelectValue />
@@ -789,8 +790,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="billingRateType">Billing Rate Type *</Label>
+          <div className="group/field space-y-2">
+            <Label htmlFor="billingRateType" className="text-destructive group-has-[:valid]/field:text-foreground">Billing Rate Type</Label>
             <Select value={billingRateType} onValueChange={(value: any) => setBillingRateType(value)}>
               <SelectTrigger>
                 <SelectValue />
@@ -875,8 +876,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div className="space-y-2">
-                <Label>Stop Type *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Stop Type</Label>
                 <Select
                   value={stop.stopType}
                   onValueChange={(value: any) => updateStop(index, 'stopType', value)}
@@ -891,8 +892,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 </Select>
               </div>
 
-              <div className="space-y-2">
-                <Label>Loading Type *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Loading Type</Label>
                 <Select
                   value={stop.loadingType}
                   onValueChange={(value: any) => updateStop(index, 'loadingType', value)}
@@ -908,8 +909,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 </Select>
               </div>
 
-              <div className="space-y-2 md:col-span-3">
-                <Label>Address *</Label>
+              <div className="group/field space-y-2 md:col-span-3">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Address</Label>
                 <AddressAutocomplete
                   value={stop.formattedAddress || ''}
                   onSelect={(data) => handleAddressSelect(index, data)}
@@ -924,8 +925,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 </div>
               )}
 
-              <div className="space-y-2">
-                <Label>Window Begin Date *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Window Begin Date</Label>
                 <Input
                   type="date"
                   value={stop.windowBeginDate}
@@ -934,8 +935,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label>Window Begin Time *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Window Begin Time</Label>
                 <Input
                   type="time"
                   value={stop.windowBeginTime}
@@ -944,8 +945,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label>Window End Date *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Window End Date</Label>
                 <Input
                   type="date"
                   value={stop.windowEndDate}
@@ -954,8 +955,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label>Window End Time *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Window End Time</Label>
                 <Input
                   type="time"
                   value={stop.windowEndTime}
@@ -964,8 +965,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label>Commodity *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Commodity</Label>
                 <Input
                   value={stop.commodityDescription}
                   onChange={(e) => updateStop(index, 'commodityDescription', e.target.value)}
@@ -974,8 +975,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label>Commodity Units *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Commodity Units</Label>
                 <Select
                   value={stop.commodityUnits}
                   onValueChange={(value: any) => updateStop(index, 'commodityUnits', value)}
@@ -993,8 +994,8 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
                 </Select>
               </div>
 
-              <div className="space-y-2">
-                <Label>Pieces *</Label>
+              <div className="group/field space-y-2">
+                <Label className="text-destructive group-has-[:valid]/field:text-foreground">Pieces</Label>
                 <Input
                   type="number"
                   value={stop.pieces}
@@ -1029,29 +1030,28 @@ export function CreateLoadForm({ organizationId, userId }: CreateLoadFormProps) 
         ))}
       </div>
 
-      {/* Sticky Footer */}
-      <div className="fixed bottom-0 left-0 right-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border-t z-50">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <p className="text-sm text-muted-foreground hidden sm:block">
-            {stops.length} stop{stops.length !== 1 ? 's' : ''} • {getAssignmentSummary()} • {getRecurringSummary()}
-          </p>
-          <div className="flex gap-3 ml-auto">
-            <Button type="button" variant="outline" onClick={() => router.back()}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={isSubmitting || !customers}>
-              {isSubmitting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Creating...
-                </>
-              ) : (
-                'Create Load'
-              )}
-            </Button>
-          </div>
-        </div>
-      </div>
     </form>
+
+    <div className="sticky bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 mt-auto">
+      <div className="flex h-16 items-center justify-end gap-4 px-6">
+        <p className="text-sm text-muted-foreground hidden sm:block mr-auto">
+          {stops.length} stop{stops.length !== 1 ? 's' : ''} • {getAssignmentSummary()} • {getRecurringSummary()}
+        </p>
+        <Button type="button" variant="outline" onClick={() => router.back()}>
+          Cancel
+        </Button>
+        <Button type="submit" form="load-form" disabled={isSubmitting || !customers}>
+          {isSubmitting ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Creating...
+            </>
+          ) : (
+            'Create Load'
+          )}
+        </Button>
+      </div>
+    </div>
+    </>
   );
 }

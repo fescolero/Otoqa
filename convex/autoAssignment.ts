@@ -114,6 +114,10 @@ export const autoAssignLoad = internalMutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<AutoAssignResult> => {
+    // #region agent log
+    console.log(`[DEBUG-30f4a4] autoAssignLoad ENTER: loadId=${args.loadId}`);
+    // #endregion
+
     // 1. Get the load
     const load = await ctx.db.get(args.loadId);
     if (!load) {
@@ -124,6 +128,10 @@ export const autoAssignLoad = internalMutation({
         message: 'Load not found',
       };
     }
+
+    // #region agent log
+    console.log(`[DEBUG-30f4a4] autoAssignLoad: load status=${load.status}, hcr=${load.parsedHcr}, driverId=${load.primaryDriverId ?? 'none'}, carrierId=${load.primaryCarrierPartnershipId ?? 'none'}`);
+    // #endregion
 
     // 2. Skip if already assigned
     if (load.status === 'Assigned' || load.primaryDriverId || load.primaryCarrierPartnershipId) {
@@ -219,6 +227,9 @@ export const autoAssignLoad = internalMutation({
         };
       }
 
+      // #region agent log
+      console.log(`[DEBUG-30f4a4] autoAssignLoad: CALLING assignDriverInternal for load=${args.loadId}, driver=${routeAssignment.driverId}, route=${routeAssignment._id}`);
+      // #endregion
       const result = await ctx.runMutation(internal.dispatchLegs.assignDriverInternal, {
         loadId: args.loadId,
         driverId: routeAssignment.driverId,
@@ -344,22 +355,47 @@ export const autoAssignPendingLoads = internalAction({
     let skipped = 0;
     let errors = 0;
 
+    // #region agent log
+    console.log(`[DEBUG-30f4a4] autoAssignPendingLoads: org=${args.workosOrgId}, openLoads=${openLoads.length}`);
+    // #endregion
+
     // 3. Process each load
-    for (const load of openLoads) {
-      const result = await ctx.runMutation(internal.autoAssignment.autoAssignLoad, {
-        loadId: load._id,
-        userId: 'system',
-        userName: 'Scheduled Auto-Assignment',
-      });
+    for (let i = 0; i < openLoads.length; i++) {
+      const load = openLoads[i];
+      try {
+        // #region agent log
+        console.log(`[DEBUG-30f4a4] Processing load ${i + 1}/${openLoads.length}: id=${load._id}, hcr=${load.parsedHcr}, trip=${load.parsedTripNumber ?? 'none'}`);
+        // #endregion
+        const result = await ctx.runMutation(internal.autoAssignment.autoAssignLoad, {
+          loadId: load._id,
+          userId: 'system',
+          userName: 'Scheduled Auto-Assignment',
+        });
 
-      results.push(result);
+        // #region agent log
+        console.log(`[DEBUG-30f4a4] Load ${load._id} result: action=${result.action}, success=${result.success}, msg=${result.message}`);
+        // #endregion
 
-      if (result.success) {
-        assigned++;
-      } else if (result.action === 'NO_MATCH' || result.action === 'ALREADY_ASSIGNED') {
-        skipped++;
-      } else {
+        results.push(result);
+
+        if (result.success) {
+          assigned++;
+        } else if (result.action === 'NO_MATCH' || result.action === 'ALREADY_ASSIGNED') {
+          skipped++;
+        } else {
+          errors++;
+        }
+      } catch (err) {
+        // #region agent log
+        console.log(`[DEBUG-30f4a4] EXCEPTION on load ${load._id} (index ${i}): ${String(err)}`);
+        // #endregion
         errors++;
+        results.push({
+          success: false,
+          loadId: load._id,
+          action: 'ERROR' as const,
+          message: `Exception: ${String(err)}`,
+        });
       }
     }
 

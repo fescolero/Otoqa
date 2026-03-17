@@ -238,9 +238,9 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
           <Card className="p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Carrier Information</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="carrierName">
-                  Carrier Name <span className="text-destructive">*</span>
+              <div className="group/field space-y-2">
+                <Label htmlFor="carrierName" className="text-destructive group-has-[:valid]/field:text-foreground">
+                  Carrier Name
                 </Label>
                 <Input
                   id="carrierName"
@@ -259,9 +259,9 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
                   disabled={isLinkedCarrier}
                 />
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="status">
-                  Status <span className="text-destructive">*</span>
+              <div className="group/field space-y-2">
+                <Label htmlFor="status" className="text-destructive group-has-[:valid]/field:text-foreground">
+                  Status
                 </Label>
                 <Select name="status" required defaultValue={partnership.status}>
                   <SelectTrigger id="status" className="w-full">
@@ -635,23 +635,24 @@ export function CarrierEditContent({ carrierId }: { carrierId: string }) {
               </div>
             </Card>
           )}
-
-          {/* Submit Buttons */}
-          <div className="flex justify-end gap-4">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => router.push(`/operations/carriers/${partnershipId}`)}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Save Changes
-            </Button>
-          </div>
         </form>
+      </div>
+
+      <div className="sticky bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 mt-auto">
+        <div className="flex h-16 items-center justify-end gap-4 px-6">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => router.push(`/operations/carriers/${partnershipId}`)}
+            disabled={isSubmitting}
+          >
+            Cancel
+          </Button>
+          <Button type="submit" form="carrier-form" disabled={isSubmitting}>
+            {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Save Changes
+          </Button>
+        </div>
       </div>
     </>
   );
