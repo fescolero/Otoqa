@@ -565,6 +565,118 @@ export const bulkVoidInvoices = mutation({
 });
 
 /**
+ * Batch confirm payments via CSV import.
+ * Matches invoices by invoiceNumber or orderNumber, records payment details,
+ * and computes the discrepancy between invoiced and paid amounts.
+ */
+export const confirmPaymentBatch = mutation({
+  args: {
+    workosOrgId: v.string(),
+    updatedBy: v.string(),
+    matchType: v.union(v.literal("invoiceNumber"), v.literal("orderNumber")),
+    payments: v.array(
+      v.object({
+        matchKey: v.string(),
+        paidAmount: v.number(),
+        paymentDate: v.optional(v.string()),
+        paymentReference: v.optional(v.string()),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const results = {
+      success: 0,
+      failed: 0,
+      notFound: [] as string[],
+      discrepancies: [] as Array<{
+        matchKey: string;
+        invoicedAmount: number;
+        paidAmount: number;
+        difference: number;
+      }>,
+    };
+
+    for (const payment of args.payments) {
+      try {
+        let invoice: Doc<"loadInvoices"> | null = null;
+
+        if (args.matchType === "invoiceNumber") {
+          const candidates = await ctx.db
+            .query("loadInvoices")
+            .withIndex("by_organization", (q) =>
+              q.eq("workosOrgId", args.workosOrgId)
+            )
+            .filter((q) =>
+              q.eq(q.field("invoiceNumber"), payment.matchKey)
+            )
+            .take(1);
+          invoice = candidates[0] ?? null;
+        } else {
+          const load = await ctx.db
+            .query("loadInformation")
+            .withIndex("by_order_number", (q) =>
+              q.eq("workosOrgId", args.workosOrgId).eq("orderNumber", payment.matchKey)
+            )
+            .first();
+
+          if (load) {
+            invoice = await ctx.db
+              .query("loadInvoices")
+              .withIndex("by_load", (q) => q.eq("loadId", load._id))
+              .first();
+          }
+        }
+
+        if (!invoice) {
+          results.notFound.push(payment.matchKey);
+          results.failed++;
+          continue;
+        }
+
+        if (invoice.workosOrgId !== args.workosOrgId) {
+          results.notFound.push(payment.matchKey);
+          results.failed++;
+          continue;
+        }
+
+        const invoicedAmount = invoice.totalAmount ?? 0;
+        const difference = payment.paidAmount - invoicedAmount;
+        const oldStatus = invoice.status;
+
+        await ctx.db.patch(invoice._id, {
+          status: "PAID",
+          paidAmount: payment.paidAmount,
+          paymentDate: payment.paymentDate,
+          paymentReference: payment.paymentReference,
+          paymentDifference: difference,
+          updatedAt: now,
+        });
+
+        if (oldStatus !== "PAID") {
+          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, "PAID");
+        }
+
+        if (Math.abs(difference) > 0.005) {
+          results.discrepancies.push({
+            matchKey: payment.matchKey,
+            invoicedAmount,
+            paidAmount: payment.paidAmount,
+            difference,
+          });
+        }
+
+        results.success++;
+      } catch (error) {
+        results.failed++;
+      }
+    }
+
+    return results;
+  },
+});
+
+/**
  * Bulk update load type classification (CONTRACT/SPOT)
  * Note: This updates the associated load, not the invoice directly
  */

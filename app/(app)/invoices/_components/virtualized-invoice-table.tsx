@@ -13,14 +13,23 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Download, Printer } from 'lucide-react';
+import { Download, Printer, TrendingDown, TrendingUp } from 'lucide-react';
 import { InvoiceStatusBadge } from './invoice-status-badge';
 import { cn } from '@/lib/utils';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 interface Invoice {
   _id: Id<'loadInvoices'>;
   invoiceNumber?: string;
   totalAmount: number;
+  paidAmount?: number;
+  paymentDifference?: number;
+  status?: string;
   createdAt: number;
   customer?: {
     name: string;
@@ -168,7 +177,42 @@ export function VirtualizedInvoiceTable({
                   )}
                 </div>
                 <div className="px-4 flex-1 font-semibold text-sm">
-                  {formatCurrency(invoice.totalAmount)}
+                  <span>{formatCurrency(invoice.totalAmount)}</span>
+                  {invoice.status === 'PAID' &&
+                    invoice.paymentDifference !== undefined &&
+                    Math.abs(invoice.paymentDifference) > 0.005 && (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span
+                              className={cn(
+                                'ml-1.5 inline-flex items-center gap-0.5 text-xs font-medium rounded px-1 py-0.5',
+                                invoice.paymentDifference > 0
+                                  ? 'text-amber-700 bg-amber-50 dark:text-amber-300 dark:bg-amber-950/40'
+                                  : 'text-red-700 bg-red-50 dark:text-red-300 dark:bg-red-950/40'
+                              )}
+                            >
+                              {invoice.paymentDifference > 0 ? (
+                                <TrendingUp className="h-3 w-3" />
+                              ) : (
+                                <TrendingDown className="h-3 w-3" />
+                              )}
+                              {formatCurrency(Math.abs(invoice.paymentDifference))}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">
+                            <p>
+                              Paid {formatCurrency(invoice.paidAmount ?? 0)} vs invoiced{' '}
+                              {formatCurrency(invoice.totalAmount)}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {invoice.paymentDifference > 0 ? 'Overpaid' : 'Underpaid'} by{' '}
+                              {formatCurrency(Math.abs(invoice.paymentDifference))}
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
                 </div>
                 <div className="px-4 flex-1 text-sm text-muted-foreground">
                   {formatDate(invoice.createdAt)}

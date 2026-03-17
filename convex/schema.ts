@@ -1278,6 +1278,12 @@ export default defineSchema({
     taxAmount: v.optional(v.number()),     // Sales tax
     totalAmount: v.optional(v.number()),   // Grand total
 
+    // Payment Confirmation
+    paidAmount: v.optional(v.number()),
+    paymentDate: v.optional(v.string()),       // ISO 8601
+    paymentReference: v.optional(v.string()),  // check #, wire ref, etc.
+    paymentDifference: v.optional(v.number()), // paidAmount - totalAmount (negative = underpaid)
+
     // Metadata
     missingDataReason: v.optional(v.string()), // e.g., "No Contract Lane found for HCR 925L0"
     erpInvoiceId: v.optional(v.string()),      // QuickBooks/Wave ID

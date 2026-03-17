@@ -16,7 +16,8 @@ import {
   DollarSign, 
   CheckCircle2, 
   Ban,
-  Info
+  Info,
+  Upload,
 } from 'lucide-react';
 import { FixLaneModal } from './fix-lane-modal';
 import { InvoicePreviewSheet } from './invoice-preview-sheet';
@@ -26,6 +27,7 @@ import { useKeyboardNavigation } from './use-keyboard-navigation';
 import { useBulkActions } from './use-bulk-actions';
 import { KeyboardShortcutsDialog } from './keyboard-shortcuts-dialog';
 import { VirtualizedInvoiceTable } from './virtualized-invoice-table';
+import { PaymentCsvImportDialog } from './payment-csv-import-dialog';
 import { useDebounce } from '@/hooks/use-debounce';
 
 interface InvoicesDashboardProps {
@@ -39,6 +41,7 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
   const [previewInvoiceId, setPreviewInvoiceId] = useState<Id<"loadInvoices"> | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [pendingPreviewAction, setPendingPreviewAction] = useState<'print' | 'download' | null>(null);
+  const [isPaymentImportOpen, setIsPaymentImportOpen] = useState(false);
   
   // Multi-select state
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<Set<Id<"loadInvoices">>>(new Set());
@@ -337,6 +340,16 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Invoices</h1>
           <p className="text-sm text-muted-foreground">Manage billing and resolve unmapped loads</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setIsPaymentImportOpen(true)}
+          >
+            <Upload className="mr-2 h-4 w-4" />
+            Import Payments
+          </Button>
         </div>
       </div>
 
@@ -705,6 +718,14 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
       
       {/* Keyboard Shortcuts Dialog */}
       <KeyboardShortcutsDialog />
+
+      {/* Payment CSV Import Dialog */}
+      <PaymentCsvImportDialog
+        open={isPaymentImportOpen}
+        onOpenChange={setIsPaymentImportOpen}
+        workosOrgId={organizationId}
+        userId={userId}
+      />
     </div>
   );
 }
