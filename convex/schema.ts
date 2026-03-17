@@ -1014,6 +1014,7 @@ export default defineSchema({
       v.literal('Assigned'),
       v.literal('Canceled'),
       v.literal('Completed'),
+      v.literal('Expired'),
     ),
     trackingStatus: v.union(
       v.literal('Pending'),
@@ -1782,6 +1783,7 @@ export default defineSchema({
       Assigned: v.number(),
       Completed: v.number(),
       Canceled: v.number(),
+      Expired: v.optional(v.number()),
     }),
     
     // Invoice counts by status

@@ -104,4 +104,18 @@ crons.cron(
   {}
 );
 
+// ==========================================
+// LOAD EXPIRATION
+// ==========================================
+
+// ✅ Auto-expire stale loads (daily at 1 AM UTC)
+// Marks Open/Assigned loads as Expired when the pickup date has passed
+// and no tracking data was received (trackingStatus still 'Pending')
+crons.cron(
+  "auto-expire-stale-loads",
+  "0 1 * * *",
+  internal.loads.autoExpireStaleLoads,
+  {}
+);
+
 export default crons;

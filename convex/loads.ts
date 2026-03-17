@@ -17,6 +17,7 @@ export const countLoadsByStatus = query({
     Assigned: v.number(),
     Delivered: v.number(),
     Canceled: v.number(),
+    Expired: v.number(),
   }),
   handler: async (ctx, args) => {
     // Auth: verify caller is authenticated
@@ -30,21 +31,21 @@ export const countLoadsByStatus = query({
       .first();
 
     if (!stats) {
-      // Return zeros if stats don't exist yet (before migration)
       return {
         Open: 0,
         Assigned: 0,
         Delivered: 0,
         Canceled: 0,
+        Expired: 0,
       };
     }
 
-    // Map 'Completed' to 'Delivered' for UI consistency
     return {
       Open: stats.loadCounts.Open,
       Assigned: stats.loadCounts.Assigned,
-      Delivered: stats.loadCounts.Completed, // Map for UI
+      Delivered: stats.loadCounts.Completed,
       Canceled: stats.loadCounts.Canceled,
+      Expired: stats.loadCounts.Expired ?? 0,
     };
   },
 });
@@ -893,7 +894,7 @@ export const createLoad = mutation({
 export const updateLoadStatus = mutation({
   args: {
     loadId: v.id('loadInformation'),
-    status: v.union(v.literal('Open'), v.literal('Assigned'), v.literal('Canceled'), v.literal('Completed')),
+    status: v.union(v.literal('Open'), v.literal('Assigned'), v.literal('Canceled'), v.literal('Completed'), v.literal('Expired')),
     // Cancellation tracking (required when status = 'Canceled' and was 'Assigned')
     cancellationReason: v.optional(v.union(
       v.literal('DRIVER_BREAKDOWN'),
@@ -978,6 +979,9 @@ export const updateLoadStatus = mutation({
           }
         }
       }
+    } else if (args.status === 'Expired') {
+      // EXPIRED: Pickup date passed with no tracking data
+      updates.trackingStatus = 'Canceled';
     } else if (args.status === 'Open') {
       // UNASSIGN: Clear assignment data when reverting to Open
       updates.primaryDriverId = undefined;
@@ -1028,7 +1032,7 @@ export const updateLoadStatus = mutation({
 export const bulkUpdateLoadStatus = mutation({
   args: {
     loadIds: v.array(v.id('loadInformation')),
-    status: v.union(v.literal('Open'), v.literal('Assigned'), v.literal('Canceled'), v.literal('Completed')),
+    status: v.union(v.literal('Open'), v.literal('Assigned'), v.literal('Canceled'), v.literal('Completed'), v.literal('Expired')),
     cancellationReason: v.optional(v.union(
       v.literal('DRIVER_BREAKDOWN'),
       v.literal('CUSTOMER_CANCELLED'),
@@ -1137,6 +1141,8 @@ export const bulkUpdateLoadStatus = mutation({
               }
             }
           }
+        } else if (args.status === 'Expired') {
+          updates.trackingStatus = 'Canceled';
         } else if (args.status === 'Open') {
           updates.primaryDriverId = undefined;
           updates.primaryCarrierPartnershipId = undefined;
@@ -1365,8 +1371,8 @@ export const validateBulkStatusChange = query({
       const load = await ctx.db.get(loadId);
       if (!load) continue;
 
-      // 1. Check if load is already finalized (Completed/Canceled)
-      if (load.status === 'Completed' || load.status === 'Canceled') {
+      // 1. Check if load is already finalized (Completed/Canceled/Expired)
+      if (load.status === 'Completed' || load.status === 'Canceled' || load.status === 'Expired') {
         results.finalized.push({
           id: loadId,
           orderNumber: load.orderNumber,
@@ -1562,6 +1568,7 @@ const assignedLoadStatusValidator = v.union(
   v.literal('Assigned'),
   v.literal('Completed'),
   v.literal('Canceled'),
+  v.literal('Expired'),
 );
 
 async function enrichLoadFromLeg(
@@ -1646,11 +1653,12 @@ async function enrichLoadDirectly(ctx: { db: any }, load: any) {
   };
 }
 
-function mapLoadStatusToDispatchStatus(status: 'Assigned' | 'Completed' | 'Canceled'): 'COMPLETED' | 'CANCELED' | undefined {
+function mapLoadStatusToDispatchStatus(status: 'Assigned' | 'Completed' | 'Canceled' | 'Expired'): 'COMPLETED' | 'CANCELED' | undefined {
   switch (status) {
     case 'Assigned': return undefined;
     case 'Completed': return 'COMPLETED';
     case 'Canceled': return 'CANCELED';
+    case 'Expired': return undefined;
   }
 }
 
@@ -1705,7 +1713,8 @@ export const getByDriver = query({
       const loadStatusMatchesFilter =
         (args.status === 'Assigned' && enriched.status === 'Assigned') ||
         (args.status === 'Completed' && enriched.status === 'Completed') ||
-        (args.status === 'Canceled' && enriched.status === 'Canceled');
+        (args.status === 'Canceled' && enriched.status === 'Canceled') ||
+        (args.status === 'Expired' && enriched.status === 'Expired');
       if (!loadStatusMatchesFilter) continue;
 
       enrichedLoads.push(enriched);
@@ -1714,6 +1723,7 @@ export const getByDriver = query({
     // --- Fallback 1: loads where primaryDriverId matches but no dispatch leg found ---
     const statusToMatch = args.status === 'Completed' ? 'Completed'
       : args.status === 'Canceled' ? 'Canceled'
+      : args.status === 'Expired' ? 'Expired'
       : 'Assigned';
 
     const fallbackLoads = await ctx.db
@@ -1738,7 +1748,9 @@ export const getByDriver = query({
       ? (['AWARDED', 'IN_PROGRESS'] as const)
       : args.status === 'Canceled'
         ? (['CANCELED'] as const)
-        : (['COMPLETED', 'AWARDED', 'IN_PROGRESS'] as const);
+        : args.status === 'Expired'
+          ? (['AWARDED', 'IN_PROGRESS'] as const)
+          : (['COMPLETED', 'AWARDED', 'IN_PROGRESS'] as const);
 
     for (const aStatus of assignmentStatuses) {
       const assignments = await ctx.db
@@ -1758,7 +1770,8 @@ export const getByDriver = query({
         const loadStatusMatchesFilter =
           (args.status === 'Assigned' && load.status === 'Assigned') ||
           (args.status === 'Completed' && load.status === 'Completed') ||
-          (args.status === 'Canceled' && load.status === 'Canceled');
+          (args.status === 'Canceled' && load.status === 'Canceled') ||
+          (args.status === 'Expired' && load.status === 'Expired');
         if (!loadStatusMatchesFilter) continue;
 
         const enrichedFallback = await enrichLoadDirectly(ctx, load);
@@ -1824,7 +1837,8 @@ export const getByCarrierPartnership = query({
       const loadStatusMatchesFilter =
         (args.status === 'Assigned' && enriched.status === 'Assigned') ||
         (args.status === 'Completed' && enriched.status === 'Completed') ||
-        (args.status === 'Canceled' && enriched.status === 'Canceled');
+        (args.status === 'Canceled' && enriched.status === 'Canceled') ||
+        (args.status === 'Expired' && enriched.status === 'Expired');
       if (!loadStatusMatchesFilter) continue;
 
       const assignment = await ctx.db
@@ -1875,6 +1889,8 @@ export const getByCarrierPartnership = query({
         if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') continue;
       } else if (args.status === 'Canceled') {
         if (assignment.status !== 'CANCELED') continue;
+      } else if (args.status === 'Expired') {
+        if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') continue;
       }
 
       const load = await ctx.db.get(assignment.loadId);
@@ -1883,7 +1899,8 @@ export const getByCarrierPartnership = query({
       const loadStatusMatchesFilter =
         (args.status === 'Assigned' && load.status === 'Assigned') ||
         (args.status === 'Completed' && load.status === 'Completed') ||
-        (args.status === 'Canceled' && load.status === 'Canceled');
+        (args.status === 'Canceled' && load.status === 'Canceled') ||
+        (args.status === 'Expired' && load.status === 'Expired');
       if (!loadStatusMatchesFilter) continue;
 
       const stops = await ctx.db
@@ -1920,5 +1937,69 @@ export const getByCarrierPartnership = query({
 
     enrichedLoads.sort((a, b) => b.createdAt - a.createdAt);
     return enrichedLoads;
+  },
+});
+
+// ==========================================
+// AUTO-EXPIRE LOADS
+// ==========================================
+
+/**
+ * Auto-expire loads whose first stop date has passed with no tracking activity.
+ * Targets loads that are Open or Assigned where:
+ *   - firstStopDate is in the past (before today)
+ *   - trackingStatus is still 'Pending' (no GPS/tracking data received)
+ *
+ * Processes in batches to stay within transaction limits.
+ * Called by cron job (daily).
+ */
+export const autoExpireStaleLoads = internalMutation({
+  args: {
+    cursor: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    const BATCH_SIZE = 200;
+    let expired = 0;
+
+    const statusesToCheck = ['Open', 'Assigned'] as const;
+
+    for (const status of statusesToCheck) {
+      const loads = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_org_first_stop_date')
+        .take(BATCH_SIZE * 5);
+
+      for (const load of loads) {
+        if (load.status !== status) continue;
+        if (!load.firstStopDate || load.firstStopDate >= todayStr) continue;
+        if (load.trackingStatus !== 'Pending') continue;
+
+        await ctx.db.patch(load._id, {
+          status: 'Expired',
+          trackingStatus: 'Canceled',
+          updatedAt: Date.now(),
+        });
+
+        await updateLoadCount(ctx, load.workosOrgId, status, 'Expired');
+        expired++;
+
+        if (expired >= BATCH_SIZE) break;
+      }
+      if (expired >= BATCH_SIZE) break;
+    }
+
+    if (expired > 0) {
+      console.log(`⏰ Auto-expired ${expired} stale loads`);
+    }
+
+    if (expired >= BATCH_SIZE) {
+      await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {});
+    }
+
+    return null;
   },
 });

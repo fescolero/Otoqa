@@ -20,7 +20,7 @@ import { v } from "convex/values";
 
 const BATCH_SIZE = 5000;
 
-const LOAD_STATUSES = ["Open", "Assigned", "Completed", "Canceled"] as const;
+const LOAD_STATUSES = ["Open", "Assigned", "Completed", "Canceled", "Expired"] as const;
 const INVOICE_STATUSES = ["MISSING_DATA", "DRAFT", "BILLED", "PENDING_PAYMENT", "PAID", "VOID"] as const;
 
 type StatusStep =
@@ -92,6 +92,7 @@ export const countStatus = internalMutation({
       Assigned: accumulated["loadInformation:Assigned"] ?? 0,
       Completed: accumulated["loadInformation:Completed"] ?? 0,
       Canceled: accumulated["loadInformation:Canceled"] ?? 0,
+      Expired: accumulated["loadInformation:Expired"] ?? 0,
     };
     const invoiceCounts = {
       MISSING_DATA: accumulated["loadInvoices:MISSING_DATA"] ?? 0,

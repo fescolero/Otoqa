@@ -243,7 +243,7 @@ function PhotoLightbox({
 export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) {
   const router = useRouter();
   const [isEditingStatus, setIsEditingStatus] = useState(false);
-  const [selectedStatus, setSelectedStatus] = useState<'Open' | 'Assigned' | 'Canceled' | 'Completed'>('Open');
+  const [selectedStatus, setSelectedStatus] = useState<'Open' | 'Assigned' | 'Canceled' | 'Completed' | 'Expired'>('Open');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [selectedStop, setSelectedStop] = useState<StopWithEvidence | null>(null);
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -329,6 +329,8 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         return 'bg-blue-50 text-blue-700 border-blue-200';
       case 'Completed':
         return 'bg-green-50 text-green-700 border-green-200';
+      case 'Expired':
+        return 'bg-orange-50 text-orange-700 border-orange-200';
       case 'Canceled':
         return 'bg-red-50 text-red-700 border-red-200';
       default:
@@ -453,6 +455,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
                       <SelectItem value="Assigned">Assigned</SelectItem>
                       <SelectItem value="Canceled">Canceled</SelectItem>
                       <SelectItem value="Completed">Completed</SelectItem>
+                      <SelectItem value="Expired">Expired</SelectItem>
                     </SelectContent>
                   </Select>
                   <Button size="sm" className="h-7 text-xs" onClick={handleStatusUpdate}>Save</Button>

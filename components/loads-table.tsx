@@ -18,6 +18,7 @@ import {
   Truck,
   CheckCircle2,
   Ban,
+  TimerOff,
   Columns3,
 } from 'lucide-react';
 import {
@@ -54,7 +55,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // Bulk action modal state
   const [showResolutionModal, setShowResolutionModal] = useState(false);
   const [showCancellationModal, setShowCancellationModal] = useState(false);
-  const [pendingTargetStatus, setPendingTargetStatus] = useState<'Open' | 'Assigned' | 'Delivered' | 'Canceled' | null>(null);
+  const [pendingTargetStatus, setPendingTargetStatus] = useState<'Open' | 'Assigned' | 'Delivered' | 'Canceled' | 'Expired' | null>(null);
   const [validationResult, setValidationResult] = useState<any>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [cancellationLoads, setCancellationLoads] = useState<{ id: string; orderNumber?: string }[]>([]);
@@ -179,7 +180,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
 
   // Status color helpers
   const getStatusColor = (status: string) => {
-    // Map 'Completed' to 'Delivered' for display
     const displayStatus = status === 'Completed' ? 'Delivered' : status;
     switch (displayStatus) {
       case 'Delivered':
@@ -188,6 +188,8 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
         return 'bg-blue-100 text-blue-800 border-blue-200';
       case 'Open':
         return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'Expired':
+        return 'bg-orange-100 text-orange-800 border-orange-200';
       case 'Canceled':
         return 'bg-gray-100 text-gray-800 border-gray-200';
       default:
@@ -292,7 +294,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   };
 
   // Initiate bulk status update with validation
-  const handleUpdateStatus = async (status: 'Open' | 'Assigned' | 'Delivered' | 'Canceled') => {
+  const handleUpdateStatus = async (status: 'Open' | 'Assigned' | 'Delivered' | 'Canceled' | 'Expired') => {
     const needsValidation = 
       status === 'Open' || 
       status === 'Delivered' || 
@@ -524,6 +526,18 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                 {(loadCounts?.Canceled || 0) > 0 && (
                   <Badge variant="secondary" className="ml-2">
                     {loadCounts?.Canceled}
+                  </Badge>
+                )}
+              </TabsTrigger>
+              <TabsTrigger 
+                value="Expired" 
+                className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
+              >
+                <TimerOff className="mr-2 h-4 w-4" />
+                Expired
+                {(loadCounts?.Expired || 0) > 0 && (
+                  <Badge variant="secondary" className="ml-2 bg-orange-100 text-orange-800">
+                    {loadCounts?.Expired}
                   </Badge>
                 )}
               </TabsTrigger>

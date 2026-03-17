@@ -29,6 +29,7 @@ async function getOrCreateStats(ctx: MutationCtx, orgId: string): Promise<Id<"or
         Assigned: 0,
         Completed: 0,
         Canceled: 0,
+        Expired: 0,
       },
       invoiceCounts: {
         MISSING_DATA: 0,
