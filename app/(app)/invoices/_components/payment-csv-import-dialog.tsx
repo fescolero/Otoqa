@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
-import { useMutation } from 'convex/react';
+import { useAction } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Button } from '@/components/ui/button';
 import {
@@ -85,32 +85,186 @@ interface ImportResults {
 
 type Step = 'upload' | 'mapping' | 'review' | 'results';
 
-const AUTO_MATCH_MAP: Record<string, keyof ColumnMapping> = {
-  invoicenumber: 'matchKey',
-  invoice_number: 'matchKey',
-  invoice: 'matchKey',
-  ordernumber: 'matchKey',
-  order_number: 'matchKey',
-  order: 'matchKey',
-  paidamount: 'paidAmount',
-  paid_amount: 'paidAmount',
-  amount: 'paidAmount',
-  amountpaid: 'paidAmount',
-  amount_paid: 'paidAmount',
-  payment: 'paidAmount',
-  paymentdate: 'paymentDate',
-  payment_date: 'paymentDate',
-  date: 'paymentDate',
-  paiddate: 'paymentDate',
-  paid_date: 'paymentDate',
-  paymentreference: 'paymentReference',
-  payment_reference: 'paymentReference',
-  reference: 'paymentReference',
-  ref: 'paymentReference',
-  checknumber: 'paymentReference',
-  check_number: 'paymentReference',
-  wirenumber: 'paymentReference',
-};
+// Prioritized auto-match rules. Earlier entries win when multiple columns match the same field.
+// Each entry: [normalizedHeader, field, priority] -- lower priority number = preferred match.
+const AUTO_MATCH_RULES: Array<{
+  pattern: string;
+  field: keyof ColumnMapping;
+  priority: number;
+}> = [
+  // Match key: invoice number (high priority)
+  { pattern: 'invoicenumber', field: 'matchKey', priority: 1 },
+  { pattern: 'invoice_number', field: 'matchKey', priority: 1 },
+  { pattern: 'invoiceno', field: 'matchKey', priority: 1 },
+  { pattern: 'invoice_no', field: 'matchKey', priority: 1 },
+  // Match key: order / load identifiers
+  { pattern: 'ordernumber', field: 'matchKey', priority: 2 },
+  { pattern: 'order_number', field: 'matchKey', priority: 2 },
+  { pattern: 'loadid', field: 'matchKey', priority: 3 },
+  { pattern: 'load_id', field: 'matchKey', priority: 3 },
+  { pattern: 'svtripid', field: 'matchKey', priority: 4 },
+  { pattern: 'sv_trip_id', field: 'matchKey', priority: 4 },
+  { pattern: 'vouchernumber', field: 'matchKey', priority: 5 },
+  { pattern: 'voucher_number', field: 'matchKey', priority: 5 },
+  // Paid amount (prefer "paid amt" over generic "amount")
+  { pattern: 'paidamount', field: 'paidAmount', priority: 1 },
+  { pattern: 'paid_amount', field: 'paidAmount', priority: 1 },
+  { pattern: 'paidamt', field: 'paidAmount', priority: 1 },
+  { pattern: 'paid_amt', field: 'paidAmount', priority: 1 },
+  { pattern: 'amountpaid', field: 'paidAmount', priority: 2 },
+  { pattern: 'amount_paid', field: 'paidAmount', priority: 2 },
+  { pattern: 'finalcharge', field: 'paidAmount', priority: 3 },
+  { pattern: 'final_charge', field: 'paidAmount', priority: 3 },
+  { pattern: 'billedamt', field: 'paidAmount', priority: 4 },
+  { pattern: 'billed_amt', field: 'paidAmount', priority: 4 },
+  { pattern: 'amount', field: 'paidAmount', priority: 5 },
+  // Payment date
+  { pattern: 'paymentdate', field: 'paymentDate', priority: 1 },
+  { pattern: 'payment_date', field: 'paymentDate', priority: 1 },
+  { pattern: 'paiddate', field: 'paymentDate', priority: 2 },
+  { pattern: 'paid_date', field: 'paymentDate', priority: 2 },
+  { pattern: 'inv_date', field: 'paymentDate', priority: 3 },
+  { pattern: 'invoicedate', field: 'paymentDate', priority: 4 },
+  { pattern: 'invoice_date', field: 'paymentDate', priority: 4 },
+  // Payment reference
+  { pattern: 'checknumber', field: 'paymentReference', priority: 1 },
+  { pattern: 'check_number', field: 'paymentReference', priority: 1 },
+  { pattern: 'checkno', field: 'paymentReference', priority: 1 },
+  { pattern: 'check_no', field: 'paymentReference', priority: 1 },
+  { pattern: 'paymentreference', field: 'paymentReference', priority: 2 },
+  { pattern: 'payment_reference', field: 'paymentReference', priority: 2 },
+  { pattern: 'wirenumber', field: 'paymentReference', priority: 3 },
+  { pattern: 'wire_number', field: 'paymentReference', priority: 3 },
+  { pattern: 'reference', field: 'paymentReference', priority: 4 },
+  { pattern: 'ref', field: 'paymentReference', priority: 5 },
+];
+
+function normalizeHeader(header: string): string {
+  return header.toLowerCase().replace(/[\s\-]/g, '');
+}
+
+function autoDetectMappings(headers: string[]): {
+  mapping: ColumnMapping;
+  matchType: MatchType;
+} {
+  const candidates: Record<
+    keyof ColumnMapping,
+    { header: string; priority: number } | null
+  > = {
+    matchKey: null,
+    paidAmount: null,
+    paymentDate: null,
+    paymentReference: null,
+  };
+
+  const ORDER_PATTERNS = new Set([
+    'ordernumber', 'order_number',
+    'loadid', 'load_id',
+    'svtripid', 'sv_trip_id',
+    'vouchernumber', 'voucher_number',
+  ]);
+  const INVOICE_PATTERNS = new Set([
+    'invoicenumber', 'invoice_number',
+    'invoiceno', 'invoice_no',
+  ]);
+
+  let detectedMatchType: MatchType = 'invoiceNumber';
+
+  for (const header of headers) {
+    const normalized = normalizeHeader(header);
+
+    for (const rule of AUTO_MATCH_RULES) {
+      if (rule.pattern !== normalized) continue;
+
+      const current = candidates[rule.field];
+      if (!current || rule.priority < current.priority) {
+        candidates[rule.field] = { header, priority: rule.priority };
+
+        if (rule.field === 'matchKey') {
+          if (ORDER_PATTERNS.has(normalized)) {
+            detectedMatchType = 'orderNumber';
+          } else if (INVOICE_PATTERNS.has(normalized)) {
+            detectedMatchType = 'invoiceNumber';
+          }
+        }
+      }
+      break;
+    }
+  }
+
+  return {
+    mapping: {
+      matchKey: candidates.matchKey?.header ?? null,
+      paidAmount: candidates.paidAmount?.header ?? null,
+      paymentDate: candidates.paymentDate?.header ?? null,
+      paymentReference: candidates.paymentReference?.header ?? null,
+    },
+    matchType: detectedMatchType,
+  };
+}
+
+// Flat lookup for the "is this column recognized?" highlight in step 1
+const AUTO_MATCH_PATTERNS = new Set(AUTO_MATCH_RULES.map((r) => r.pattern));
+
+const DELIMITERS = [',', '\t', '|', ';'] as const;
+
+function detectDelimiter(headerLine: string): string {
+  let best = ',';
+  let bestCount = 0;
+
+  for (const d of DELIMITERS) {
+    const count = headerLine.split(d).length;
+    if (count > bestCount) {
+      bestCount = count;
+      best = d;
+    }
+  }
+
+  return best;
+}
+
+function cleanValue(val: string): string {
+  return val
+    .replace(/^\uFEFF/, '')       // BOM
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '') // zero-width chars, NBSP
+    .replace(/\r/g, '')           // stray carriage returns
+    .trim();
+}
+
+function parseCSVLine(line: string, delimiter: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (inQuotes) {
+      if (char === '"') {
+        if (i + 1 < line.length && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += char;
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true;
+      } else if (char === delimiter) {
+        fields.push(cleanValue(current));
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+  }
+
+  fields.push(cleanValue(current));
+  return fields;
+}
 
 function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('en-US', {
@@ -139,7 +293,7 @@ export function PaymentCsvImportDialog({
   const [isProcessing, setIsProcessing] = useState(false);
   const [importResults, setImportResults] = useState<ImportResults | null>(null);
 
-  const confirmPaymentBatch = useMutation(api.invoices.confirmPaymentBatch);
+  const confirmPaymentBatch = useAction(api.invoices.confirmPaymentBatch);
 
   const resetState = useCallback(() => {
     setStep('upload');
@@ -176,23 +330,27 @@ export function PaymentCsvImportDialog({
       }
 
       try {
-        const text = await selectedFile.text();
-        const lines = text.split('\n').filter((line) => line.trim());
+        const rawText = await selectedFile.text();
+        const text = rawText.replace(/^\uFEFF/, '');
+        const lines = text
+          .split(/\r?\n/)
+          .filter((line) => line.trim());
         if (lines.length < 2) {
           toast.error('CSV file is empty or has no data rows');
           return;
         }
 
-        const headers = lines[0].split(',').map((h) => h.trim());
+        const delimiter = detectDelimiter(lines[0]);
+        const headers = parseCSVLine(lines[0], delimiter);
         const rows: Record<string, string>[] = [];
 
         for (let i = 1; i < lines.length; i++) {
-          const values = lines[i].split(',').map((v) => v.trim());
-          if (values.length !== headers.length) continue;
+          const values = parseCSVLine(lines[i], delimiter);
+          if (values.length === 0) continue;
 
           const row: Record<string, string> = {};
           headers.forEach((col, idx) => {
-            row[col] = values[idx];
+            row[col] = idx < values.length ? values[idx] : '';
           });
           rows.push(row);
         }
@@ -201,38 +359,9 @@ export function PaymentCsvImportDialog({
         setCsvHeaders(headers);
         setCsvData(rows);
 
-        // Auto-detect column mappings
-        const autoMapping: ColumnMapping = {
-          matchKey: null,
-          paidAmount: null,
-          paymentDate: null,
-          paymentReference: null,
-        };
-
-        const ORDER_KEYWORDS = ['ordernumber', 'order_number', 'order'];
-        const INVOICE_KEYWORDS = ['invoicenumber', 'invoice_number', 'invoice'];
-        let detectedMatchType: MatchType | null = null;
-
-        for (const header of headers) {
-          const normalized = header.toLowerCase().replace(/[\s\-]/g, '');
-          const field = AUTO_MATCH_MAP[normalized];
-          if (field && !autoMapping[field]) {
-            autoMapping[field] = header;
-          }
-          if (field === 'matchKey') {
-            if (ORDER_KEYWORDS.includes(normalized)) {
-              detectedMatchType = 'orderNumber';
-            } else if (INVOICE_KEYWORDS.includes(normalized)) {
-              detectedMatchType = 'invoiceNumber';
-            }
-          }
-        }
-
-        if (detectedMatchType) {
-          setMatchType(detectedMatchType);
-        }
-
-        setColumnMapping(autoMapping);
+        const { mapping, matchType: detectedType } = autoDetectMappings(headers);
+        setMatchType(detectedType);
+        setColumnMapping(mapping);
       } catch {
         toast.error('Failed to parse CSV file');
       }
@@ -258,8 +387,9 @@ export function PaymentCsvImportDialog({
         return;
       }
 
-      const paidAmount = parseFloat(amountStr?.replace(/[$,]/g, '') ?? '');
-      if (isNaN(paidAmount) || paidAmount < 0) {
+      const cleaned = (amountStr ?? '').replace(/[^0-9.\-]/g, '');
+      const paidAmount = parseFloat(cleaned);
+      if (!cleaned || isNaN(paidAmount) || paidAmount < 0) {
         errors.push({
           row: rowNum,
           message: `Invalid amount "${amountStr}" for ${matchKey}`,
@@ -286,8 +416,7 @@ export function PaymentCsvImportDialog({
   }, [csvData, columnMapping]);
 
   const canProceedToMapping = file && csvHeaders.length > 0 && csvData.length > 0;
-  const canProceedToReview =
-    columnMapping.matchKey && columnMapping.paidAmount && parsedPayments.length > 0;
+  const canProceedToReview = !!columnMapping.matchKey && !!columnMapping.paidAmount;
 
   const handleImport = useCallback(async () => {
     if (parsedPayments.length === 0) return;
@@ -322,7 +451,7 @@ export function PaymentCsvImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>Import Payment Confirmations</DialogTitle>
           <DialogDescription>
@@ -334,6 +463,7 @@ export function PaymentCsvImportDialog({
           </DialogDescription>
         </DialogHeader>
 
+        <div className="flex-1 overflow-y-auto min-h-0">
         {/* Step 1: Upload */}
         {step === 'upload' && (
           <div className="space-y-5">
@@ -369,18 +499,32 @@ export function PaymentCsvImportDialog({
             {file && csvHeaders.length > 0 && (
               <div className="p-3 bg-muted/50 border rounded-lg">
                 <p className="text-xs font-medium text-muted-foreground mb-1.5">
-                  Detected columns
+                  {csvHeaders.length} columns detected
                 </p>
                 <div className="flex flex-wrap gap-1.5">
-                  {csvHeaders.map((h) => (
-                    <span
-                      key={h}
-                      className="inline-block px-2 py-0.5 text-xs font-mono bg-background border rounded"
-                    >
-                      {h}
-                    </span>
-                  ))}
+                  {csvHeaders.map((h) => {
+                    const isMapped = AUTO_MATCH_PATTERNS.has(normalizeHeader(h));
+                    return (
+                      <span
+                        key={h}
+                        className={cn(
+                          'inline-block px-2 py-0.5 text-xs font-mono rounded',
+                          isMapped
+                            ? 'bg-blue-50 border border-blue-200 text-blue-800 dark:bg-blue-950/40 dark:border-blue-900 dark:text-blue-300'
+                            : 'bg-background border'
+                        )}
+                      >
+                        {h}
+                      </span>
+                    );
+                  })}
                 </div>
+                {Object.values(columnMapping).some(Boolean) && (
+                  <p className="text-xs text-muted-foreground mt-2">
+                    <span className="inline-block w-2 h-2 rounded-sm bg-blue-200 dark:bg-blue-800 mr-1 align-middle" />
+                    Highlighted columns were auto-matched to payment fields
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -580,6 +724,22 @@ export function PaymentCsvImportDialog({
         {/* Step 3: Review & Confirm */}
         {step === 'review' && (
           <div className="space-y-4">
+            {parsedPayments.length === 0 && validationErrors.length === 0 && (
+              <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg dark:bg-amber-950/30 dark:border-amber-900">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
+                      No payments could be parsed
+                    </p>
+                    <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                      Go back and verify the column mapping matches your CSV data.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-3">
               {parsedPayments.length > 0 && (
                 <div className="flex-1 p-3 bg-green-50 border border-green-200 rounded-lg dark:bg-green-950/30 dark:border-green-900">
@@ -775,8 +935,9 @@ export function PaymentCsvImportDialog({
             )}
           </div>
         )}
+        </div>
 
-        <DialogFooter className="flex items-center justify-between sm:justify-between">
+        <DialogFooter className="flex-shrink-0 flex items-center justify-between sm:justify-between border-t pt-4">
           <div>
             {step === 'mapping' && (
               <Button variant="ghost" size="sm" onClick={() => setStep('upload')}>

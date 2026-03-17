@@ -6,8 +6,9 @@
  * Amounts are only stored for BILLED/PAID/VOID status (frozen snapshot).
  */
 
-import { query, mutation } from "./_generated/server";
+import { query, mutation, internalMutation, action } from "./_generated/server";
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
 import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from "./invoiceCalculations";
 import { Doc } from "./_generated/dataModel";
 import { updateInvoiceCount } from "./stats_helpers";
@@ -564,25 +565,27 @@ export const bulkVoidInvoices = mutation({
   },
 });
 
+const PAYMENT_BATCH_SIZE = 25;
+
+const paymentBatchArgs = {
+  workosOrgId: v.string(),
+  matchType: v.union(v.literal("invoiceNumber"), v.literal("orderNumber")),
+  payments: v.array(
+    v.object({
+      matchKey: v.string(),
+      paidAmount: v.number(),
+      paymentDate: v.optional(v.string()),
+      paymentReference: v.optional(v.string()),
+    })
+  ),
+};
+
 /**
- * Batch confirm payments via CSV import.
- * Matches invoices by invoiceNumber or orderNumber, records payment details,
- * and computes the discrepancy between invoiced and paid amounts.
+ * Internal mutation: process a small batch of payment confirmations.
+ * Called by the confirmPaymentBatch action in chunks to stay within transaction limits.
  */
-export const confirmPaymentBatch = mutation({
-  args: {
-    workosOrgId: v.string(),
-    updatedBy: v.string(),
-    matchType: v.union(v.literal("invoiceNumber"), v.literal("orderNumber")),
-    payments: v.array(
-      v.object({
-        matchKey: v.string(),
-        paidAmount: v.number(),
-        paymentDate: v.optional(v.string()),
-        paymentReference: v.optional(v.string()),
-      })
-    ),
-  },
+export const processPaymentChunk = internalMutation({
+  args: paymentBatchArgs,
   handler: async (ctx, args) => {
     const now = Date.now();
     const results = {
@@ -673,6 +676,55 @@ export const confirmPaymentBatch = mutation({
     }
 
     return results;
+  },
+});
+
+/**
+ * Public action: batch confirm payments via CSV import.
+ * Splits the payments into chunks and processes each in a separate transaction.
+ */
+export const confirmPaymentBatch = action({
+  args: {
+    workosOrgId: v.string(),
+    updatedBy: v.string(),
+    matchType: v.union(v.literal("invoiceNumber"), v.literal("orderNumber")),
+    payments: v.array(
+      v.object({
+        matchKey: v.string(),
+        paidAmount: v.number(),
+        paymentDate: v.optional(v.string()),
+        paymentReference: v.optional(v.string()),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const totals = {
+      success: 0,
+      failed: 0,
+      notFound: [] as string[],
+      discrepancies: [] as Array<{
+        matchKey: string;
+        invoicedAmount: number;
+        paidAmount: number;
+        difference: number;
+      }>,
+    };
+
+    for (let i = 0; i < args.payments.length; i += PAYMENT_BATCH_SIZE) {
+      const chunk = args.payments.slice(i, i + PAYMENT_BATCH_SIZE);
+      const result = await ctx.runMutation(internal.invoices.processPaymentChunk, {
+        workosOrgId: args.workosOrgId,
+        matchType: args.matchType,
+        payments: chunk,
+      });
+
+      totals.success += result.success;
+      totals.failed += result.failed;
+      totals.notFound.push(...result.notFound);
+      totals.discrepancies.push(...result.discrepancies);
+    }
+
+    return totals;
   },
 });
 
