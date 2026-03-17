@@ -18,12 +18,14 @@ interface DispatchPlannerClientProps {
   organizationId: string;
   userId: string;
   userName: string;
+  initialSearch?: string;
 }
 
 export function DispatchPlannerClient({
   organizationId,
   userId,
   userName,
+  initialSearch,
 }: DispatchPlannerClientProps) {
   // Core selection state
   const [selectedLoadId, setSelectedLoadId] = useState<Id<'loadInformation'> | null>(null);
@@ -33,7 +35,7 @@ export function DispatchPlannerClient({
 
   // Filter state (lifted up for sub-header toolbar)
   const [filters, setFilters] = useState<TripFiltersState>({
-    search: '',
+    search: initialSearch ?? '',
     hcr: '',
     tripNumber: '',
     startDate: '',
@@ -56,6 +58,10 @@ export function DispatchPlannerClient({
     api.loads.getByIdWithRange,
     selectedLoadId ? { loadId: selectedLoadId } : 'skip'
   );
+
+  const filterValues = useAuthQuery(api.loads.getDistinctFilterValues, {
+    workosOrgId: organizationId,
+  });
 
   const allDrivers = useAuthQuery(api.dispatchLegs.getAllActiveDrivers, {
     workosOrgId: organizationId,
@@ -222,7 +228,12 @@ export function DispatchPlannerClient({
   return (
     <div className="flex flex-col h-[calc(100vh-64px)] overflow-hidden">
       {/* ROW 2: FILTER TOOLBAR (Sub-header below main app header) */}
-      <FilterToolbar filters={filters} onFiltersChange={setFilters} />
+      <FilterToolbar
+        filters={filters}
+        onFiltersChange={setFilters}
+        availableHCRs={filterValues?.hcrs ?? []}
+        availableTrips={filterValues?.trips ?? []}
+      />
 
       {/* MAIN CONTENT GRID */}
       <div className="grid flex-1 grid-cols-[1fr_400px] gap-0 overflow-hidden">

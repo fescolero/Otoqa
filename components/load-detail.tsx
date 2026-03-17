@@ -831,7 +831,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
                   <p className="text-xs text-amber-600">Assign a resource to calculate driver pay</p>
                 </div>
               </div>
-              <Link href="/dispatch/planner">
+              <Link href={`/dispatch/planner?order=${encodeURIComponent(loadData.orderNumber)}`}>
                 <Button size="sm" className="shrink-0">
                   Assign Resource
                 </Button>

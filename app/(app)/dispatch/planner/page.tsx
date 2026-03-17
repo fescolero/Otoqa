@@ -13,7 +13,12 @@ import { redirect } from 'next/navigation';
 import { DispatchPlannerClient } from '@/components/dispatch/planner/dispatch-planner-client';
 import { requireWorkOS } from '@/lib/workos';
 
-export default async function DispatchPlannerPage() {
+export default async function DispatchPlannerPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ order?: string }>;
+}) {
+  const { order } = await searchParams;
   const { user } = await withAuth();
 
   if (!user) {
@@ -74,6 +79,7 @@ export default async function DispatchPlannerPage() {
           organizationId={organizationId}
           userId={user.id}
           userName={userName}
+          initialSearch={order}
         />
       </div>
     </>

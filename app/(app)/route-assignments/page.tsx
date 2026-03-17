@@ -192,7 +192,7 @@ export default function RouteAssignmentsPage() {
           </div>
 
           {/* Search and Type Filters */}
-          <div className="flex items-center gap-4 mb-4">
+          <div className="flex-shrink-0 flex items-center gap-4 mb-4">
             <div className="relative flex-1 max-w-md">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
@@ -221,14 +221,14 @@ export default function RouteAssignmentsPage() {
           </div>
 
           {/* Status Tabs */}
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
-            <TabsList className="w-fit">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
+            <TabsList className="w-fit flex-shrink-0">
               <TabsTrigger value="all">All ({totalCount})</TabsTrigger>
               <TabsTrigger value="active">Active ({activeCount})</TabsTrigger>
               <TabsTrigger value="inactive">Inactive ({inactiveCount})</TabsTrigger>
             </TabsList>
 
-            <TabsContent value={activeTab} className="flex-1 mt-4">
+            <TabsContent value={activeTab} className="flex-1 mt-4 min-h-0 overflow-hidden">
               {!isLoading && organizationId ? (
                 <RouteAssignmentsTable
                   data={displayData}

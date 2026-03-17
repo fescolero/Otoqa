@@ -125,6 +125,28 @@ export const syncFirstStopDateMutation = internalMutation({
   },
 });
 
+export const getDistinctFilterValues = query({
+  args: {
+    workosOrgId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const hcrs = new Set<string>();
+    const trips = new Set<string>();
+
+    for await (const load of ctx.db
+      .query('loadInformation')
+      .withIndex('by_hcr_trip', (q) => q.eq('workosOrgId', args.workosOrgId))) {
+      if (load.parsedHcr) hcrs.add(load.parsedHcr);
+      if (load.parsedTripNumber) trips.add(load.parsedTripNumber);
+    }
+
+    return {
+      hcrs: Array.from(hcrs).sort(),
+      trips: Array.from(trips).sort(),
+    };
+  },
+});
+
 // ✅ 1. GET LOADS (Read) - Optimized with denormalized firstStopDate index
 export const getLoads = query({
   args: {

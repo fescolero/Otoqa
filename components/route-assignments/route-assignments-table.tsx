@@ -177,11 +177,11 @@ export function RouteAssignmentsTable({ data, organizationId }: RouteAssignments
 
   return (
     <>
-      <div className="border rounded-lg overflow-hidden">
+      <div className="border rounded-lg h-full overflow-auto [&_[data-slot=table-container]]:overflow-visible">
         <Table>
-          <TableHeader>
+          <TableHeader className="sticky top-0 z-10 bg-background">
             <TableRow>
-              <TableHead className="w-[100px]">Type</TableHead>
+              <TableHead className="w-[100px] pl-4">Type</TableHead>
               <TableHead>Route / Name</TableHead>
               <TableHead>Assigned To</TableHead>
               <TableHead>Schedule</TableHead>
@@ -192,7 +192,7 @@ export function RouteAssignmentsTable({ data, organizationId }: RouteAssignments
           <TableBody>
             {data.map((item) => (
               <TableRow key={`${item.type}-${item.id}`}>
-                <TableCell>
+                <TableCell className="pl-4">
                   <Badge 
                     variant="outline" 
                     className={item.type === 'external' 
