@@ -7,6 +7,7 @@
  */
 
 import { query, mutation, internalMutation, action } from "./_generated/server";
+import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from "./invoiceCalculations";
@@ -360,8 +361,8 @@ export const getLineItems = query({
 });
 
 /**
- * List invoices with pagination for standard invoice tabs
- * Used in Invoices dashboard for DRAFT, PENDING_PAYMENT, PAID, VOID tabs
+ * List invoices with cursor-based pagination for standard invoice tabs.
+ * Supports infinite scroll via usePaginatedQuery on the frontend.
  */
 export const listInvoices = query({
   args: {
@@ -373,9 +374,8 @@ export const listInvoices = query({
       v.literal("PAID"),
       v.literal("VOID")
     ),
-    limit: v.optional(v.number()), // Default 50
-    // Filter parameters
-    search: v.optional(v.string()), // Search across orderNumber, customer name, invoiceNumber
+    paginationOpts: paginationOptsValidator,
+    search: v.optional(v.string()),
     hcr: v.optional(v.string()),
     trip: v.optional(v.string()),
     loadType: v.optional(v.union(
@@ -387,18 +387,16 @@ export const listInvoices = query({
     dateRangeEnd: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const limit = args.limit || 50;
-    
-    const invoices = await ctx.db
+    const result = await ctx.db
       .query("loadInvoices")
-      .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
-      .filter((q) => q.eq(q.field("status"), args.status))
+      .withIndex("by_status", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("status", args.status)
+      )
       .order("desc")
-      .take(limit);
+      .paginate(args.paginationOpts);
 
-    // Enrich with load, customer info, and calculated amounts
     const enriched = await Promise.all(
-      invoices.map(async (invoice) => {
+      result.page.map(async (invoice) => {
         const load = await ctx.db.get(invoice.loadId);
         const customer = await ctx.db.get(invoice.customerId);
         const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
@@ -423,10 +421,9 @@ export const listInvoices = query({
       })
     );
 
-    // Apply filters
+    // Apply post-fetch filters (search, hcr, trip, loadType, dateRange)
     let filtered = enriched;
 
-    // Search filter (orderNumber, customer name, invoiceNumber)
     if (args.search && args.search.trim() !== '') {
       const searchLower = args.search.toLowerCase().trim();
       filtered = filtered.filter((inv) => {
@@ -434,7 +431,6 @@ export const listInvoices = query({
         const customerName = inv.customer?.name?.toLowerCase() || '';
         const invoiceNumber = inv.invoiceNumber?.toLowerCase() || '';
         const amount = inv.totalAmount?.toString() || '';
-        
         return orderNumber.includes(searchLower) ||
                customerName.includes(searchLower) ||
                invoiceNumber.includes(searchLower) ||
@@ -442,22 +438,15 @@ export const listInvoices = query({
       });
     }
 
-    // HCR filter
     if (args.hcr) {
       filtered = filtered.filter((inv) => inv.load?.parsedHcr === args.hcr);
     }
-
-    // Trip filter
     if (args.trip) {
       filtered = filtered.filter((inv) => inv.load?.parsedTripNumber === args.trip);
     }
-
-    // Load type filter
     if (args.loadType) {
       filtered = filtered.filter((inv) => inv.load?.loadType === args.loadType);
     }
-
-    // Date range filter
     if (args.dateRangeStart !== undefined) {
       filtered = filtered.filter((inv) => inv.createdAt >= args.dateRangeStart!);
     }
@@ -465,7 +454,51 @@ export const listInvoices = query({
       filtered = filtered.filter((inv) => inv.createdAt <= args.dateRangeEnd!);
     }
 
-    return filtered;
+    return {
+      ...result,
+      page: filtered,
+    };
+  },
+});
+
+/**
+ * Get distinct HCR and Trip values for filter dropdowns.
+ * Scans invoices by status to provide complete filter options.
+ */
+export const getFilterOptions = query({
+  args: {
+    workosOrgId: v.string(),
+    status: v.union(
+      v.literal("DRAFT"),
+      v.literal("BILLED"),
+      v.literal("PENDING_PAYMENT"),
+      v.literal("PAID"),
+      v.literal("VOID")
+    ),
+  },
+  handler: async (ctx, args) => {
+    const invoices = await ctx.db
+      .query("loadInvoices")
+      .withIndex("by_status", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("status", args.status)
+      )
+      .take(500);
+
+    const hcrs = new Set<string>();
+    const trips = new Set<string>();
+
+    await Promise.all(
+      invoices.map(async (invoice) => {
+        const load = await ctx.db.get(invoice.loadId);
+        if (load?.parsedHcr) hcrs.add(load.parsedHcr);
+        if (load?.parsedTripNumber) trips.add(load.parsedTripNumber);
+      })
+    );
+
+    return {
+      hcrs: Array.from(hcrs).sort(),
+      trips: Array.from(trips).sort(),
+    };
   },
 });
 

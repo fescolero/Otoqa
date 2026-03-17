@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useQuery, useMutation, usePaginatedQuery } from 'convex/react';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -105,133 +105,63 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
     });
   }, [allUnmappedGroups, debouncedAttentionSearch, attentionFilters.hcr, attentionFilters.trip]);
 
-  const draftInvoices = useQuery(
-    api.invoices.listInvoices,
-    activeTab === 'draft' ? {
-      workosOrgId: organizationId,
-      status: 'DRAFT',
-      limit: 50, // ✅ Reduced from 1000 to 50 (95% read reduction)
-      search: debouncedSearch || undefined, // ✅ Use debounced search
-      hcr: filters.hcr,
-      trip: filters.trip,
-      loadType: filters.loadType,
-      dateRangeStart: filters.dateRange?.start,
-      dateRangeEnd: filters.dateRange?.end,
-    } : 'skip'
-  );
-
-  const pendingInvoices = useQuery(
-    api.invoices.listInvoices,
-    activeTab === 'pending' ? {
-      workosOrgId: organizationId,
-      status: 'PENDING_PAYMENT',
-      limit: 50, // ✅ Reduced from 1000 to 50 (95% read reduction)
-      search: debouncedSearch || undefined, // ✅ Use debounced search
-      hcr: filters.hcr,
-      trip: filters.trip,
-      loadType: filters.loadType,
-      dateRangeStart: filters.dateRange?.start,
-      dateRangeEnd: filters.dateRange?.end,
-    } : 'skip'
-  );
-
-  const paidInvoices = useQuery(
-    api.invoices.listInvoices,
-    activeTab === 'paid' ? {
-      workosOrgId: organizationId,
-      status: 'PAID',
-      limit: 50, // ✅ Reduced from 1000 to 50 (95% read reduction)
-      search: debouncedSearch || undefined, // ✅ Use debounced search
-      hcr: filters.hcr,
-      trip: filters.trip,
-      loadType: filters.loadType,
-      dateRangeStart: filters.dateRange?.start,
-      dateRangeEnd: filters.dateRange?.end,
-    } : 'skip'
-  );
-
-  const voidInvoices = useQuery(
-    api.invoices.listInvoices,
-    activeTab === 'void' ? {
-      workosOrgId: organizationId,
-      status: 'VOID',
-      limit: 50, // ✅ Reduced from 1000 to 50 (95% read reduction)
-      search: debouncedSearch || undefined, // ✅ Use debounced search
-      hcr: filters.hcr,
-      trip: filters.trip,
-      loadType: filters.loadType,
-      dateRangeStart: filters.dateRange?.start,
-      dateRangeEnd: filters.dateRange?.end,
-    } : 'skip'
-  );
-  
-  // Get current tab's invoices with client-side filtering as fallback
-  const currentInvoices = useMemo(() => {
-    let invoices: any[] = [];
-    switch (activeTab) {
-      case 'draft': invoices = draftInvoices || []; break;
-      case 'pending': invoices = pendingInvoices || []; break;
-      case 'paid': invoices = paidInvoices || []; break;
-      case 'void': invoices = voidInvoices || []; break;
-      default: invoices = [];
+  // Map tab names to invoice statuses
+  const statusForTab = (tab: string) => {
+    switch (tab) {
+      case 'draft': return 'DRAFT' as const;
+      case 'pending': return 'PENDING_PAYMENT' as const;
+      case 'paid': return 'PAID' as const;
+      case 'void': return 'VOID' as const;
+      default: return null;
     }
-    
-    // Client-side filtering as fallback for any filters not handled by backend
-    return invoices.filter(inv => {
-      // Search filter (case-insensitive)
-      if (filters.search) {
-        const searchLower = filters.search.toLowerCase();
-        const matchesSearch = 
-          inv.invoiceNumber?.toLowerCase().includes(searchLower) ||
-          inv.load?.orderNumber?.toLowerCase().includes(searchLower) ||
-          inv.customer?.name?.toLowerCase().includes(searchLower);
-        if (!matchesSearch) return false;
-      }
-      
-      // HCR filter
-      if (filters.hcr && inv.load?.parsedHcr !== filters.hcr) {
-        return false;
-      }
-      
-      // Trip filter
-      if (filters.trip && inv.load?.parsedTripNumber !== filters.trip) {
-        return false;
-      }
-      
-      // Load type filter
-      if (filters.loadType) {
-        const invoiceLoadType = inv.load?.loadType || 'UNMAPPED';
-        if (invoiceLoadType !== filters.loadType) return false;
-      }
-      
-      // Date range filter
-      if (filters.dateRange) {
-        const invoiceDate = inv._creationTime;
-        if (invoiceDate < filters.dateRange.start || invoiceDate > filters.dateRange.end) {
-          return false;
-        }
-      }
-      
-      return true;
-    });
-  }, [activeTab, draftInvoices, pendingInvoices, paidInvoices, voidInvoices, filters]);
-  
-  // Extract unique HCRs and Trips from current invoices
-  const availableHCRs = useMemo(() => {
-    const hcrs = new Set<string>();
-    currentInvoices.forEach(inv => {
-      if (inv.load?.parsedHcr) hcrs.add(inv.load.parsedHcr);
-    });
-    return Array.from(hcrs).sort();
-  }, [currentInvoices]);
-  
-  const availableTrips = useMemo(() => {
-    const trips = new Set<string>();
-    currentInvoices.forEach(inv => {
-      if (inv.load?.parsedTripNumber) trips.add(inv.load.parsedTripNumber);
-    });
-    return Array.from(trips).sort();
-  }, [currentInvoices]);
+  };
+
+  const currentStatus = statusForTab(activeTab);
+
+  // Paginated invoice query — only runs for the active tab
+  const {
+    results: paginatedInvoices,
+    status: paginationStatus,
+    loadMore,
+  } = usePaginatedQuery(
+    api.invoices.listInvoices,
+    currentStatus ? {
+      workosOrgId: organizationId,
+      status: currentStatus,
+      search: debouncedSearch || undefined,
+      hcr: filters.hcr,
+      trip: filters.trip,
+      loadType: filters.loadType,
+      dateRangeStart: filters.dateRange?.start,
+      dateRangeEnd: filters.dateRange?.end,
+    } : 'skip',
+    { initialNumItems: 50 }
+  );
+
+  // Distinct filter values from ALL invoices (not just loaded page)
+  const filterOptions = useQuery(
+    api.invoices.getFilterOptions,
+    currentStatus ? {
+      workosOrgId: organizationId,
+      status: currentStatus,
+    } : 'skip'
+  );
+
+  // Compatibility shims so the rest of the component keeps working
+  const draftInvoices = activeTab === 'draft' ? paginatedInvoices : undefined;
+  const pendingInvoices = activeTab === 'pending' ? paginatedInvoices : undefined;
+  const paidInvoices = activeTab === 'paid' ? paginatedInvoices : undefined;
+  const voidInvoices = activeTab === 'void' ? paginatedInvoices : undefined;
+
+  // Current invoices — all filtering is done server-side via paginated query
+  const currentInvoices = useMemo(() => {
+    if (activeTab === 'attention') return [];
+    return paginatedInvoices ?? [];
+  }, [activeTab, paginatedInvoices]);
+
+  // Filter options from server (all distinct HCRs/Trips for this status)
+  const availableHCRs = filterOptions?.hcrs ?? [];
+  const availableTrips = filterOptions?.trips ?? [];
   
   // Extract unique HCRs and Trips from unmapped groups for attention tab
   const attentionAvailableHCRs = useMemo(() => {
@@ -297,6 +227,12 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
     setIsPreviewOpen(false);
     setPendingPreviewAction('print');
   }, []);
+
+  const handleLoadMore = useCallback(() => {
+    if (paginationStatus === 'CanLoadMore') {
+      loadMore(50);
+    }
+  }, [paginationStatus, loadMore]);
 
   const handlePreviewOpen = useCallback((invoiceId: Id<'loadInvoices'>) => {
     setPreviewInvoiceId(invoiceId);
@@ -619,6 +555,9 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No draft invoices${filters.search ? ' matching your search' : ''}`}
+                    onLoadMore={handleLoadMore}
+                    canLoadMore={paginationStatus === 'CanLoadMore'}
+                    isLoadingMore={paginationStatus === 'LoadingMore'}
                   />
                 </div>
               </div>
@@ -664,6 +603,9 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No pending invoices${filters.search ? ' matching your search' : ''}`}
+                    onLoadMore={handleLoadMore}
+                    canLoadMore={paginationStatus === 'CanLoadMore'}
+                    isLoadingMore={paginationStatus === 'LoadingMore'}
                   />
                 </div>
               </div>
@@ -709,6 +651,9 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No paid invoices${filters.search ? ' matching your search' : ''}`}
+                    onLoadMore={handleLoadMore}
+                    canLoadMore={paginationStatus === 'CanLoadMore'}
+                    isLoadingMore={paginationStatus === 'LoadingMore'}
                   />
                 </div>
               </div>
@@ -754,6 +699,9 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
                     formatDate={formatDate}
                     formatCurrency={formatCurrency}
                     emptyMessage={`No voided invoices${filters.search ? ' matching your search' : ''}`}
+                    onLoadMore={handleLoadMore}
+                    canLoadMore={paginationStatus === 'CanLoadMore'}
+                    isLoadingMore={paginationStatus === 'LoadingMore'}
                   />
                 </div>
               </div>

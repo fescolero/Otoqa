@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef } from 'react';
+import { useRef, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Id } from '@/convex/_generated/dataModel';
 import { Button } from '@/components/ui/button';
@@ -54,6 +54,9 @@ interface VirtualizedInvoiceTableProps {
   formatDate: (timestamp: number) => string;
   formatCurrency: (amount: number) => string;
   emptyMessage?: string;
+  onLoadMore?: () => void;
+  canLoadMore?: boolean;
+  isLoadingMore?: boolean;
 }
 
 export function VirtualizedInvoiceTable({
@@ -70,6 +73,9 @@ export function VirtualizedInvoiceTable({
   formatDate,
   formatCurrency,
   emptyMessage = 'No invoices found',
+  onLoadMore,
+  canLoadMore = false,
+  isLoadingMore = false,
 }: VirtualizedInvoiceTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const headerChecked = isAllSelected ? true : isSomeSelected ? 'indeterminate' : false;
@@ -77,9 +83,21 @@ export function VirtualizedInvoiceTable({
   const rowVirtualizer = useVirtualizer({
     count: invoices.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 48, // Row height
-    overscan: 10, // Number of items to render outside viewport
+    estimateSize: () => 48,
+    overscan: 15,
   });
+
+  // Infinite scroll: load more when user scrolls near the bottom.
+  // Defer onLoadMore to avoid flushSync during render (Convex loadMore triggers state updates).
+  useEffect(() => {
+    if (!canLoadMore || isLoadingMore || !onLoadMore) return;
+    const items = rowVirtualizer.getVirtualItems();
+    const lastItem = items[items.length - 1];
+    if (!lastItem) return;
+    if (lastItem.index >= invoices.length - 10) {
+      queueMicrotask(() => onLoadMore());
+    }
+  }, [canLoadMore, isLoadingMore, onLoadMore, invoices.length, rowVirtualizer]);
 
   if (invoices.length === 0) {
     return (
@@ -246,7 +264,35 @@ export function VirtualizedInvoiceTable({
               </div>
             );
           })}
+          {isLoadingMore && (
+            <div className="flex items-center justify-center py-4 text-sm text-muted-foreground">
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary mr-2" />
+              Loading more...
+            </div>
+          )}
         </div>
+      </div>
+
+      {/* Footer status bar */}
+      <div className="flex-shrink-0 border-t px-4 py-2 flex items-center justify-between text-xs text-muted-foreground bg-slate-50/50">
+        <span>
+          Showing {invoices.length} invoice{invoices.length !== 1 ? 's' : ''}
+          {canLoadMore && ' — scroll for more'}
+        </span>
+        {canLoadMore && !isLoadingMore && (
+          <button
+            onClick={onLoadMore}
+            className="text-primary hover:underline font-medium"
+          >
+            Load more
+          </button>
+        )}
+        {isLoadingMore && (
+          <span className="flex items-center gap-1">
+            <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-primary" />
+            Loading...
+          </span>
+        )}
       </div>
     </div>
   );
