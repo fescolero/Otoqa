@@ -616,12 +616,31 @@ export const processPaymentChunk = internalMutation({
             .take(1);
           invoice = candidates[0] ?? null;
         } else {
-          const load = await ctx.db
+          // Try orderNumber first, then internalId, then FK-prefixed internalId
+          let load = await ctx.db
             .query("loadInformation")
             .withIndex("by_order_number", (q) =>
               q.eq("workosOrgId", args.workosOrgId).eq("orderNumber", payment.matchKey)
             )
             .first();
+
+          if (!load) {
+            load = await ctx.db
+              .query("loadInformation")
+              .withIndex("by_internal_id", (q) =>
+                q.eq("workosOrgId", args.workosOrgId).eq("internalId", payment.matchKey)
+              )
+              .first();
+          }
+
+          if (!load) {
+            load = await ctx.db
+              .query("loadInformation")
+              .withIndex("by_internal_id", (q) =>
+                q.eq("workosOrgId", args.workosOrgId).eq("internalId", `FK-${payment.matchKey}`)
+              )
+              .first();
+          }
 
           if (load) {
             invoice = await ctx.db
