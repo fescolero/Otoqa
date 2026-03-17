@@ -20,6 +20,9 @@ export type InvoiceTotals = {
   taxAmount?: number;
   totalAmount: number;
   currency: string;
+  paidAmount?: number;
+  paymentDifference?: number;
+  status?: string;
 };
 
 export type Customer = {
@@ -133,6 +136,8 @@ export function LineItemsTable({
  */
 export function InvoiceSummary({ totals }: { totals: InvoiceTotals }) {
   const { currency } = totals;
+  const isPaid = totals.status === 'PAID';
+  const hasDifference = totals.paymentDifference != null && Math.abs(totals.paymentDifference) > 0.005;
   
   return (
     <div className="w-full md:w-[320px] flex flex-col gap-3 font-mono text-[11px] bg-muted/30 p-4 rounded-lg border border-border">
@@ -167,9 +172,41 @@ export function InvoiceSummary({ totals }: { totals: InvoiceTotals }) {
       )}
 
       <div className="flex justify-between py-2 text-sm font-bold border-t-2 border-border mt-1">
-        <span>Total Due</span>
+        <span>{isPaid ? 'Total Invoiced' : 'Total Due'}</span>
         <span className="text-base">{formatCurrency(totals.totalAmount, currency)}</span>
       </div>
+
+      {isPaid && totals.paidAmount != null && (
+        <>
+          <Separator className="my-0" />
+          <div className="flex justify-between py-1">
+            <span className="text-muted-foreground">Amount Paid</span>
+            <span className="font-medium text-green-600 dark:text-green-400">
+              {formatCurrency(totals.paidAmount, currency)}
+            </span>
+          </div>
+          {hasDifference && (
+            <div className="flex justify-between py-1">
+              <span className="text-muted-foreground">
+                {totals.paymentDifference! > 0 ? 'Overpaid' : 'Underpaid'}
+              </span>
+              <span className={cn(
+                "font-bold",
+                totals.paymentDifference! > 0 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"
+              )}>
+                {totals.paymentDifference! > 0 ? '+' : ''}
+                {formatCurrency(totals.paymentDifference!, currency)}
+              </span>
+            </div>
+          )}
+          {!hasDifference && (
+            <div className="flex justify-between py-1">
+              <span className="text-muted-foreground">Balance</span>
+              <span className="font-medium text-green-600 dark:text-green-400">$0.00 ✓</span>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

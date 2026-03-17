@@ -1283,6 +1283,7 @@ export default defineSchema({
     paymentDate: v.optional(v.string()),       // ISO 8601
     paymentReference: v.optional(v.string()),  // check #, wire ref, etc.
     paymentDifference: v.optional(v.number()), // paidAmount - totalAmount (negative = underpaid)
+    paymentMiles: v.optional(v.number()),      // Miles reported in payment CSV
 
     // Metadata
     missingDataReason: v.optional(v.string()), // e.g., "No Contract Lane found for HCR 925L0"

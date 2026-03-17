@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
-import { useAction } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Button } from '@/components/ui/button';
 import {
@@ -39,9 +39,14 @@ import {
   AlertTriangle,
   TrendingDown,
   TrendingUp,
+  Download,
+  Search,
+  X,
 } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { Progress } from '@/components/ui/progress';
 
 interface PaymentCsvImportDialogProps {
   open: boolean;
@@ -57,12 +62,14 @@ interface ColumnMapping {
   paidAmount: string | null;
   paymentDate: string | null;
   paymentReference: string | null;
+  paymentMiles: string | null;
 }
 
 interface ParsedPayment {
   matchKey: string;
   paidAmount: number;
   paymentDate?: string;
+  paymentMiles?: number;
   paymentReference?: string;
 }
 
@@ -71,10 +78,19 @@ interface ValidationError {
   message: string;
 }
 
+interface NotFoundItem {
+  matchKey: string;
+  paidAmount: number;
+  paymentDate?: string;
+  paymentReference?: string;
+}
+
 interface ImportResults {
   success: number;
   failed: number;
-  notFound: string[];
+  alreadyPaid: number;
+  notFound: NotFoundItem[];
+  noInvoice: NotFoundItem[];
   discrepancies: Array<{
     matchKey: string;
     invoicedAmount: number;
@@ -83,7 +99,7 @@ interface ImportResults {
   }>;
 }
 
-type Step = 'upload' | 'mapping' | 'review' | 'results';
+type Step = 'upload' | 'mapping' | 'review' | 'processing' | 'results';
 
 // Prioritized auto-match rules. Earlier entries win when multiple columns match the same field.
 // Each entry: [normalizedHeader, field, priority] -- lower priority number = preferred match.
@@ -137,6 +153,14 @@ const AUTO_MATCH_RULES: Array<{
   { pattern: 'wire_number', field: 'paymentReference', priority: 3 },
   { pattern: 'reference', field: 'paymentReference', priority: 4 },
   { pattern: 'ref', field: 'paymentReference', priority: 5 },
+  // Payment miles
+  { pattern: 'miles', field: 'paymentMiles', priority: 1 },
+  { pattern: 'totalmiles', field: 'paymentMiles', priority: 1 },
+  { pattern: 'total_miles', field: 'paymentMiles', priority: 1 },
+  { pattern: 'paymentmiles', field: 'paymentMiles', priority: 1 },
+  { pattern: 'payment_miles', field: 'paymentMiles', priority: 1 },
+  { pattern: 'mileage', field: 'paymentMiles', priority: 2 },
+  { pattern: 'distance', field: 'paymentMiles', priority: 3 },
 ];
 
 function normalizeHeader(header: string): string {
@@ -155,6 +179,7 @@ function autoDetectMappings(headers: string[]): {
     paidAmount: null,
     paymentDate: null,
     paymentReference: null,
+    paymentMiles: null,
   };
 
   const ORDER_PATTERNS = new Set([
@@ -198,6 +223,7 @@ function autoDetectMappings(headers: string[]): {
       paidAmount: candidates.paidAmount?.header ?? null,
       paymentDate: candidates.paymentDate?.header ?? null,
       paymentReference: candidates.paymentReference?.header ?? null,
+      paymentMiles: candidates.paymentMiles?.header ?? null,
     },
     matchType: detectedMatchType,
   };
@@ -225,6 +251,7 @@ function detectDelimiter(headerLine: string): string {
 
 function cleanValue(val: string): string {
   return val
+    .replace(/\u0000/g, '')      // null bytes (UTF-16 artifacts)
     .replace(/^\uFEFF/, '')       // BOM
     .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '') // zero-width chars, NBSP
     .replace(/\r/g, '')           // stray carriage returns
@@ -273,6 +300,22 @@ function formatCurrency(amount: number): string {
   }).format(amount);
 }
 
+function exportNotFoundCsv(items: NotFoundItem[], filename: string) {
+  const header = 'Match Key,Paid Amount,Payment Date,Payment Reference';
+  const rows = items.map(
+    (item) =>
+      `"${item.matchKey}",${item.paidAmount},"${item.paymentDate ?? ''}","${item.paymentReference ?? ''}"`
+  );
+  const csv = [header, ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${filename}-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 export function PaymentCsvImportDialog({
   open,
   onOpenChange,
@@ -289,11 +332,22 @@ export function PaymentCsvImportDialog({
     paidAmount: null,
     paymentDate: null,
     paymentReference: null,
+    paymentMiles: null,
   });
   const [isProcessing, setIsProcessing] = useState(false);
+  const [progress, setProgress] = useState({ processed: 0, total: 0 });
   const [importResults, setImportResults] = useState<ImportResults | null>(null);
 
-  const confirmPaymentBatch = useAction(api.invoices.confirmPaymentBatch);
+  const confirmPaymentChunk = useMutation(api.invoices.confirmPaymentChunk);
+  const [debugKey, setDebugKey] = useState<string | null>(null);
+  const debugResult = useQuery(
+    api.invoices.debugLoadLookup,
+    debugKey ? { workosOrgId, searchValue: debugKey } : "skip"
+  );
+  const [detailModal, setDetailModal] = useState<{
+    type: 'notFound' | 'noInvoice' | 'discrepancies';
+    title: string;
+  } | null>(null);
 
   const resetState = useCallback(() => {
     setStep('upload');
@@ -306,17 +360,22 @@ export function PaymentCsvImportDialog({
       paidAmount: null,
       paymentDate: null,
       paymentReference: null,
+      paymentMiles: null,
     });
     setIsProcessing(false);
+    setProgress({ processed: 0, total: 0 });
     setImportResults(null);
+    setDebugKey(null);
+    setDetailModal(null);
   }, []);
 
   const handleClose = useCallback(
     (open: boolean) => {
+      if (isProcessing) return;
       if (!open) resetState();
       onOpenChange(open);
     },
-    [onOpenChange, resetState]
+    [onOpenChange, resetState, isProcessing]
   );
 
   const handleFileChange = useCallback(
@@ -331,7 +390,8 @@ export function PaymentCsvImportDialog({
 
       try {
         const rawText = await selectedFile.text();
-        const text = rawText.replace(/^\uFEFF/, '');
+        // Strip null bytes (UTF-16 files read as UTF-8 leave \u0000 between chars) and BOM
+        const text = rawText.replace(/\u0000/g, '').replace(/^\uFEFF/, '');
         const lines = text
           .split(/\r?\n/)
           .filter((line) => line.trim());
@@ -369,12 +429,13 @@ export function PaymentCsvImportDialog({
     []
   );
 
-  const { parsedPayments, validationErrors } = useMemo(() => {
+  const { parsedPayments, validationErrors, zeroAmountCount } = useMemo(() => {
     const payments: ParsedPayment[] = [];
     const errors: ValidationError[] = [];
+    let zeroes = 0;
 
     if (!columnMapping.matchKey || !columnMapping.paidAmount) {
-      return { parsedPayments: payments, validationErrors: errors };
+      return { parsedPayments: payments, validationErrors: errors, zeroAmountCount: 0 };
     }
 
     csvData.forEach((row, idx) => {
@@ -397,6 +458,11 @@ export function PaymentCsvImportDialog({
         return;
       }
 
+      if (paidAmount === 0) {
+        zeroes++;
+        return;
+      }
+
       const payment: ParsedPayment = { matchKey, paidAmount };
 
       if (columnMapping.paymentDate) {
@@ -409,47 +475,109 @@ export function PaymentCsvImportDialog({
         if (refVal) payment.paymentReference = refVal;
       }
 
+      if (columnMapping.paymentMiles) {
+        const milesStr = row[columnMapping.paymentMiles]?.trim();
+        if (milesStr) {
+          const milesVal = parseFloat(milesStr.replace(/[^0-9.\-]/g, ''));
+          if (!isNaN(milesVal) && milesVal > 0) payment.paymentMiles = milesVal;
+        }
+      }
+
       payments.push(payment);
     });
 
-    return { parsedPayments: payments, validationErrors: errors };
+    return { parsedPayments: payments, validationErrors: errors, zeroAmountCount: zeroes };
   }, [csvData, columnMapping]);
 
   const canProceedToMapping = file && csvHeaders.length > 0 && csvData.length > 0;
   const canProceedToReview = !!columnMapping.matchKey && !!columnMapping.paidAmount;
 
+  const CHUNK_SIZE = 25;
+
   const handleImport = useCallback(async () => {
     if (parsedPayments.length === 0) return;
 
     setIsProcessing(true);
-    try {
-      const result = await confirmPaymentBatch({
-        workosOrgId,
-        updatedBy: userId,
-        matchType,
-        payments: parsedPayments,
-      });
+    setStep('processing');
+    setProgress({ processed: 0, total: parsedPayments.length });
 
-      setImportResults(result);
+    const totals: ImportResults = {
+      success: 0,
+      failed: 0,
+      alreadyPaid: 0,
+      notFound: [],
+      noInvoice: [],
+      discrepancies: [],
+    };
+
+    try {
+      for (let i = 0; i < parsedPayments.length; i += CHUNK_SIZE) {
+        const chunk = parsedPayments.slice(i, i + CHUNK_SIZE);
+        const chunkLookup = new Map(chunk.map((p) => [p.matchKey.trim(), p]));
+
+        const result = await confirmPaymentChunk({
+          workosOrgId,
+          matchType,
+          payments: chunk,
+        });
+
+        totals.success += result.success;
+        totals.failed += result.failed;
+        totals.alreadyPaid += result.alreadyPaid ?? 0;
+        for (const key of result.notFound) {
+          const orig = chunkLookup.get(key);
+          totals.notFound.push({
+            matchKey: key,
+            paidAmount: orig?.paidAmount ?? 0,
+            paymentDate: orig?.paymentDate,
+            paymentReference: orig?.paymentReference,
+          });
+        }
+        for (const key of (result.noInvoice ?? [])) {
+          const orig = chunkLookup.get(key);
+          totals.noInvoice.push({
+            matchKey: key,
+            paidAmount: orig?.paidAmount ?? 0,
+            paymentDate: orig?.paymentDate,
+            paymentReference: orig?.paymentReference,
+          });
+        }
+        totals.discrepancies.push(...result.discrepancies);
+
+        setProgress({ processed: Math.min(i + CHUNK_SIZE, parsedPayments.length), total: parsedPayments.length });
+      }
+
+      setImportResults(totals);
       setStep('results');
 
-      if (result.success > 0) {
+      if (totals.success > 0) {
         toast.success(
-          `${result.success} payment${result.success === 1 ? '' : 's'} confirmed`
+          `${totals.success} payment${totals.success === 1 ? '' : 's'} confirmed`
         );
       }
-      if (result.notFound.length > 0) {
-        toast.warning(`${result.notFound.length} invoice(s) not found`);
+      if (totals.alreadyPaid > 0) {
+        toast.info(`${totals.alreadyPaid} invoice(s) already paid — skipped`);
+      }
+      if (totals.notFound.length > 0) {
+        toast.warning(`${totals.notFound.length} load(s) not found in system`);
+      }
+      if (totals.noInvoice.length > 0) {
+        toast.warning(`${totals.noInvoice.length} load(s) found but have no invoice`);
       }
     } catch (error) {
       toast.error('Failed to process payments');
       console.error(error);
+      if (totals.success > 0) {
+        setImportResults(totals);
+        setStep('results');
+      }
     } finally {
       setIsProcessing(false);
     }
-  }, [parsedPayments, confirmPaymentBatch, workosOrgId, userId, matchType]);
+  }, [parsedPayments, confirmPaymentChunk, workosOrgId, matchType]);
 
   return (
+    <>
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
         <DialogHeader>
@@ -459,6 +587,7 @@ export function PaymentCsvImportDialog({
               'Upload any CSV file with payment data. We\'ll auto-detect the columns in the next step.'}
             {step === 'mapping' && 'Verify the column mapping and adjust if needed.'}
             {step === 'review' && 'Review parsed payments before importing.'}
+            {step === 'processing' && 'Processing payments...'}
             {step === 'results' && 'Import complete. Review the results below.'}
           </DialogDescription>
         </DialogHeader>
@@ -670,6 +799,33 @@ export function PaymentCsvImportDialog({
                   </SelectContent>
                 </Select>
               </div>
+
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-muted-foreground">
+                  Miles column <span className="text-xs">(optional)</span>
+                </Label>
+                <Select
+                  value={columnMapping.paymentMiles ?? '__none__'}
+                  onValueChange={(v) =>
+                    setColumnMapping((prev) => ({
+                      ...prev,
+                      paymentMiles: v === '__none__' ? null : v,
+                    }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None</SelectItem>
+                    {csvHeaders.map((h) => (
+                      <SelectItem key={h} value={h}>
+                        {h}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             {/* Live preview */}
@@ -761,25 +917,35 @@ export function PaymentCsvImportDialog({
                 </div>
               )}
 
-              {validationErrors.length > 0 && (
-                <div className="flex-1 p-3 bg-red-50 border border-red-200 rounded-lg dark:bg-red-950/30 dark:border-red-900">
+              {(validationErrors.length > 0 || zeroAmountCount > 0) && (
+                <div className="flex-1 p-3 bg-muted/50 border rounded-lg">
                   <div className="flex items-start gap-2">
-                    <AlertCircle className="h-4 w-4 text-red-600 mt-0.5" />
-                    <div>
-                      <p className="text-sm font-medium text-red-900 dark:text-red-200">
-                        {validationErrors.length} row{validationErrors.length === 1 ? '' : 's'}{' '}
-                        skipped
-                      </p>
-                      <ul className="text-xs text-red-700 dark:text-red-400 mt-1 list-disc list-inside max-h-20 overflow-y-auto">
-                        {validationErrors.slice(0, 5).map((err, idx) => (
-                          <li key={idx}>
-                            Row {err.row}: {err.message}
-                          </li>
-                        ))}
-                        {validationErrors.length > 5 && (
-                          <li>... and {validationErrors.length - 5} more</li>
-                        )}
-                      </ul>
+                    <AlertCircle className="h-4 w-4 text-muted-foreground mt-0.5" />
+                    <div className="space-y-1">
+                      {zeroAmountCount > 0 && (
+                        <p className="text-sm text-muted-foreground">
+                          {zeroAmountCount.toLocaleString()} row{zeroAmountCount === 1 ? '' : 's'}{' '}
+                          skipped ($0.00 paid)
+                        </p>
+                      )}
+                      {validationErrors.length > 0 && (
+                        <>
+                          <p className="text-sm text-muted-foreground">
+                            {validationErrors.length} row{validationErrors.length === 1 ? '' : 's'}{' '}
+                            skipped (invalid data)
+                          </p>
+                          <ul className="text-xs text-muted-foreground mt-1 list-disc list-inside max-h-20 overflow-y-auto">
+                            {validationErrors.slice(0, 5).map((err, idx) => (
+                              <li key={idx}>
+                                Row {err.row}: {err.message}
+                              </li>
+                            ))}
+                            {validationErrors.length > 5 && (
+                              <li>... and {validationErrors.length - 5} more</li>
+                            )}
+                          </ul>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -829,11 +995,33 @@ export function PaymentCsvImportDialog({
           </div>
         )}
 
-        {/* Step 4: Results */}
+        {/* Step 4: Processing */}
+        {step === 'processing' && (
+          <div className="space-y-6 py-8">
+            <div className="text-center space-y-2">
+              <p className="text-sm font-medium">
+                Processing {progress.processed.toLocaleString()} of{' '}
+                {progress.total.toLocaleString()} payments...
+              </p>
+              <Progress
+                value={progress.total > 0 ? (progress.processed / progress.total) * 100 : 0}
+                className="h-2"
+              />
+              <p className="text-xs text-muted-foreground">
+                {Math.round(
+                  progress.total > 0 ? (progress.processed / progress.total) * 100 : 0
+                )}
+                % complete
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Step 5: Results */}
         {step === 'results' && importResults && (
           <div className="space-y-4">
             {/* Summary cards */}
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg bg-green-50 border border-green-200 dark:bg-green-950/30 dark:border-green-900">
                 <p className="text-2xl font-bold text-green-700 dark:text-green-300">
                   {importResults.success}
@@ -845,14 +1033,28 @@ export function PaymentCsvImportDialog({
                   {importResults.discrepancies.length}
                 </p>
                 <p className="text-xs text-amber-600 dark:text-amber-400">
-                  With Discrepancy
+                  Discrepancy
                 </p>
               </div>
+              {importResults.alreadyPaid > 0 && (
+                <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 dark:bg-blue-950/30 dark:border-blue-900">
+                  <p className="text-2xl font-bold text-blue-700 dark:text-blue-300">
+                    {importResults.alreadyPaid}
+                  </p>
+                  <p className="text-xs text-blue-600 dark:text-blue-400">Already Paid</p>
+                </div>
+              )}
               <div className="p-3 rounded-lg bg-red-50 border border-red-200 dark:bg-red-950/30 dark:border-red-900">
                 <p className="text-2xl font-bold text-red-700 dark:text-red-300">
                   {importResults.notFound.length}
                 </p>
-                <p className="text-xs text-red-600 dark:text-red-400">Not Found</p>
+                <p className="text-xs text-red-600 dark:text-red-400">Load Not Found</p>
+              </div>
+              <div className="p-3 rounded-lg bg-orange-50 border border-orange-200 dark:bg-orange-950/30 dark:border-orange-900">
+                <p className="text-2xl font-bold text-orange-700 dark:text-orange-300">
+                  {importResults.noInvoice.length}
+                </p>
+                <p className="text-xs text-orange-600 dark:text-orange-400">No Invoice</p>
               </div>
             </div>
 
@@ -912,31 +1114,53 @@ export function PaymentCsvImportDialog({
               </div>
             )}
 
-            {/* Not found list */}
+            {/* Compact rows for not-found / no-invoice — click to open detail modal */}
             {importResults.notFound.length > 0 && (
-              <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setDetailModal({ type: 'notFound', title: `Loads Not Found (${importResults.notFound.length})` })}
+                className="w-full flex items-center justify-between p-3 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 dark:bg-red-950/30 dark:border-red-900 dark:hover:bg-red-950/50 transition-colors text-left"
+              >
                 <div className="flex items-center gap-2">
-                  <AlertCircle className="h-4 w-4 text-red-600" />
-                  <p className="text-sm font-medium">Invoices Not Found</p>
-                </div>
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg dark:bg-red-950/30 dark:border-red-900 max-h-32 overflow-y-auto">
-                  <div className="flex flex-wrap gap-2">
-                    {importResults.notFound.map((key, idx) => (
-                      <span
-                        key={idx}
-                        className="inline-block px-2 py-0.5 text-xs font-mono bg-red-100 text-red-800 rounded dark:bg-red-900 dark:text-red-200"
-                      >
-                        {key}
-                      </span>
-                    ))}
+                  <AlertCircle className="h-4 w-4 text-red-600 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm font-medium text-red-800 dark:text-red-200">
+                      {importResults.notFound.length} Loads Not Found
+                    </p>
+                    <p className="text-xs text-red-600 dark:text-red-400">
+                      No matching load in the system — click to review
+                    </p>
                   </div>
                 </div>
-              </div>
+                <ArrowRight className="h-4 w-4 text-red-400" />
+              </button>
+            )}
+
+            {importResults.noInvoice.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setDetailModal({ type: 'noInvoice', title: `Load Found, No Invoice (${importResults.noInvoice.length})` })}
+                className="w-full flex items-center justify-between p-3 rounded-lg border border-orange-200 bg-orange-50 hover:bg-orange-100 dark:bg-orange-950/30 dark:border-orange-900 dark:hover:bg-orange-950/50 transition-colors text-left"
+              >
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 text-orange-600 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm font-medium text-orange-800 dark:text-orange-200">
+                      {importResults.noInvoice.length} Loads — No Invoice
+                    </p>
+                    <p className="text-xs text-orange-600 dark:text-orange-400">
+                      Load exists but has no invoice record — click to review
+                    </p>
+                  </div>
+                </div>
+                <ArrowRight className="h-4 w-4 text-orange-400" />
+              </button>
             )}
           </div>
         )}
         </div>
 
+        {step !== 'processing' && (
         <DialogFooter className="flex-shrink-0 flex items-center justify-between sm:justify-between border-t pt-4">
           <div>
             {step === 'mapping' && (
@@ -1000,6 +1224,159 @@ export function PaymentCsvImportDialog({
             )}
           </div>
         </DialogFooter>
+        )}
+      </DialogContent>
+    </Dialog>
+
+    {/* Detail modal — full-width table for not-found / no-invoice items */}
+    <NotFoundDetailModal
+      open={!!detailModal}
+      onClose={() => setDetailModal(null)}
+      title={detailModal?.title ?? ''}
+      items={
+        detailModal?.type === 'notFound'
+          ? importResults?.notFound ?? []
+          : detailModal?.type === 'noInvoice'
+            ? importResults?.noInvoice ?? []
+            : []
+      }
+      matchLabel={matchType === 'invoiceNumber' ? 'Invoice #' : 'Order #'}
+      exportFilename={
+        detailModal?.type === 'notFound' ? 'loads-not-found' : 'loads-no-invoice'
+      }
+    />
+    </>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Full-screen detail modal for reviewing not-found / no-invoice items
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+function NotFoundDetailModal({
+  open,
+  onClose,
+  title,
+  items,
+  matchLabel,
+  exportFilename,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  items: NotFoundItem[];
+  matchLabel: string;
+  exportFilename: string;
+}) {
+  const [search, setSearch] = useState('');
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return items;
+    const q = search.toLowerCase().trim();
+    return items.filter(
+      (item) =>
+        item.matchKey.toLowerCase().includes(q) ||
+        item.paymentReference?.toLowerCase().includes(q) ||
+        item.paymentDate?.toLowerCase().includes(q) ||
+        String(item.paidAmount).includes(q)
+    );
+  }, [items, search]);
+
+  const totalAmount = useMemo(
+    () => filtered.reduce((sum, item) => sum + item.paidAmount, 0),
+    [filtered]
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="w-[calc(100vw-3rem)] max-w-[calc(100vw-3rem)] h-[calc(100vh-3rem)] flex flex-col p-0 gap-0">
+        <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4 border-b">
+          <div className="flex items-center justify-between">
+            <div>
+              <DialogTitle className="text-lg">{title}</DialogTitle>
+              <DialogDescription className="mt-1">
+                {filtered.length === items.length
+                  ? `${items.length} items — Total: ${formatCurrency(totalAmount)}`
+                  : `Showing ${filtered.length} of ${items.length} items — Filtered Total: ${formatCurrency(totalAmount)}`}
+              </DialogDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => exportNotFoundCsv(filtered, exportFilename)}
+              >
+                <Download className="mr-1.5 h-3.5 w-3.5" />
+                Export CSV
+              </Button>
+            </div>
+          </div>
+          <div className="relative mt-3">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search by order #, reference, amount..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9 pr-9"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-auto">
+          <Table>
+            <TableHeader className="sticky top-0 bg-background z-10">
+              <TableRow>
+                <TableHead className="w-16 pl-6">#</TableHead>
+                <TableHead>{matchLabel}</TableHead>
+                <TableHead className="text-right">Paid Amount</TableHead>
+                <TableHead>Payment Date</TableHead>
+                <TableHead className="pr-6">Reference</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center py-12 text-muted-foreground">
+                    {search ? 'No items match your search' : 'No items'}
+                  </TableCell>
+                </TableRow>
+              ) : (
+                filtered.map((item, idx) => (
+                  <TableRow key={idx} className="hover:bg-muted/50">
+                    <TableCell className="text-xs text-muted-foreground pl-6 tabular-nums">
+                      {idx + 1}
+                    </TableCell>
+                    <TableCell className="font-mono text-sm font-medium">
+                      {item.matchKey}
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-sm tabular-nums">
+                      {formatCurrency(item.paidAmount)}
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {item.paymentDate || '—'}
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground pr-6">
+                      {item.paymentReference || '—'}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+
+        <div className="flex-shrink-0 border-t px-6 py-4 flex justify-end">
+          <Button onClick={onClose}>Close</Button>
+        </div>
       </DialogContent>
     </Dialog>
   );

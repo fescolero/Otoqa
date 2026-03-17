@@ -36,9 +36,12 @@ export const previewBackfillImpact = query({
     const startTimestamp = new Date(args.contractStartDate).getTime();
     const endTimestamp = new Date(args.contractEndDate).getTime();
 
-    // Filter by date range
+    // Filter by date range using operational date (firstStopDate), not sync date
     const affectedLoads = candidateLoads.filter((load) => {
-      return load.createdAt >= startTimestamp && load.createdAt <= endTimestamp;
+      const loadDate = load.firstStopDate
+        ? new Date(load.firstStopDate).getTime()
+        : load.createdAt;
+      return loadDate >= startTimestamp && loadDate <= endTimestamp;
     });
 
     // Get invoices for affected loads
@@ -198,9 +201,14 @@ export const createLaneAndBackfill = mutation({
       .filter((q) => q.eq(q.field("loadType"), "UNMAPPED"))
       .collect();
 
-    // Filter by date range and granular selection (if provided)
+    // Filter by date range using the load's operational date (firstStopDate),
+    // falling back to createdAt. Contract period dates define when the lane is valid,
+    // so we compare against when the load actually operated, not when it was synced.
     let affectedLoads = candidateLoads.filter((load) => {
-      const inDateRange = load.createdAt >= startTimestamp && load.createdAt <= endTimestamp;
+      const loadDate = load.firstStopDate
+        ? new Date(load.firstStopDate).getTime()
+        : load.createdAt;
+      const inDateRange = loadDate >= startTimestamp && loadDate <= endTimestamp;
       const isSelected = !args.selectedLoadIds || args.selectedLoadIds.includes(load._id);
       return inDateRange && isSelected;
     });
@@ -441,6 +449,156 @@ export const voidUnmappedGroup = mutation({
     return {
       voidedCount,
       customerId: finalCustomerId || null,
+    };
+  },
+});
+
+/**
+ * ONE-TIME: Re-promote stuck UNMAPPED loads that now have matching contract lanes.
+ * Finds UNMAPPED loads, checks if a matching active lane exists, and promotes them.
+ * Processes in batches to avoid transaction limits.
+ */
+export const rePromoteStuckLoads = mutation({
+  args: {
+    workosOrgId: v.string(),
+    batchSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = args.batchSize ?? 50;
+    const now = Date.now();
+
+    const unmappedLoads = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_load_type", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("loadType", "UNMAPPED")
+      )
+      .take(limit);
+
+    let promoted = 0;
+    let skipped = 0;
+
+    for (const load of unmappedLoads) {
+      if (!load.parsedHcr || !load.parsedTripNumber) {
+        skipped++;
+        continue;
+      }
+
+      // Try exact match
+      let lane = await ctx.db
+        .query("contractLanes")
+        .withIndex("by_org_hcr_trip", (q) =>
+          q.eq("workosOrgId", args.workosOrgId)
+           .eq("hcr", load.parsedHcr)
+           .eq("tripNumber", load.parsedTripNumber)
+        )
+        .filter((q) =>
+          q.and(
+            q.eq(q.field("isDeleted"), false),
+            q.eq(q.field("isActive"), true)
+          )
+        )
+        .first();
+
+      let isWildcard = false;
+
+      // Try wildcard match
+      if (!lane) {
+        lane = await ctx.db
+          .query("contractLanes")
+          .withIndex("by_org_hcr_trip", (q) =>
+            q.eq("workosOrgId", args.workosOrgId)
+             .eq("hcr", load.parsedHcr)
+             .eq("tripNumber", "*")
+          )
+          .filter((q) =>
+            q.and(
+              q.eq(q.field("isDeleted"), false),
+              q.eq(q.field("isActive"), true)
+            )
+          )
+          .first();
+        if (lane) isWildcard = true;
+      }
+
+      if (!lane) {
+        skipped++;
+        continue;
+      }
+
+      // Get customer
+      const customer = await ctx.db.get(lane.customerCompanyId);
+      const customerName = customer && 'name' in customer ? (customer as any).name : "Unknown";
+
+      // Promote load
+      await ctx.db.patch(load._id, {
+        loadType: isWildcard ? "SPOT" : "CONTRACT",
+        customerId: lane.customerCompanyId,
+        customerName,
+        requiresManualReview: isWildcard,
+        updatedAt: now,
+      });
+
+      // Promote invoice MISSING_DATA → DRAFT
+      const invoice = await ctx.db
+        .query("loadInvoices")
+        .withIndex("by_load", (q) => q.eq("loadId", load._id))
+        .first();
+
+      if (invoice && invoice.status === "MISSING_DATA") {
+        const stopCount = load.stopCount || 2;
+        const includedStops = (lane as any).includedStops || 2;
+        const extraStops = Math.max(0, stopCount - includedStops);
+        const effectiveMiles = (lane as any).miles ?? load.effectiveMiles;
+
+        let baseRate = 0;
+        if ((lane as any).rateType === "Per Mile" && effectiveMiles) {
+          baseRate = (lane as any).rate * effectiveMiles;
+        } else if ((lane as any).rateType === "Flat Rate") {
+          baseRate = (lane as any).rate;
+        } else if ((lane as any).rateType === "Per Stop") {
+          baseRate = (lane as any).rate * stopCount;
+        }
+
+        let fuelSurcharge = 0;
+        if ((lane as any).fuelSurchargeType === "PERCENTAGE" && (lane as any).fuelSurchargeValue) {
+          fuelSurcharge = baseRate * ((lane as any).fuelSurchargeValue / 100);
+        } else if ((lane as any).fuelSurchargeType === "FLAT" && (lane as any).fuelSurchargeValue) {
+          fuelSurcharge = (lane as any).fuelSurchargeValue;
+        }
+
+        const stopOffCharges = extraStops * ((lane as any).stopOffRate || 0);
+        const subtotal = baseRate;
+        const totalAmount = subtotal + fuelSurcharge + stopOffCharges;
+
+        await ctx.db.patch(invoice._id, {
+          status: "DRAFT",
+          customerId: lane.customerCompanyId,
+          contractLaneId: lane._id,
+          subtotal,
+          fuelSurcharge: fuelSurcharge > 0 ? fuelSurcharge : undefined,
+          accessorialsTotal: stopOffCharges > 0 ? stopOffCharges : undefined,
+          totalAmount,
+          missingDataReason: undefined,
+          updatedAt: now,
+        });
+
+        await updateInvoiceCount(ctx, args.workosOrgId, "MISSING_DATA", "DRAFT");
+      }
+
+      promoted++;
+    }
+
+    const remaining = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_load_type", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("loadType", "UNMAPPED")
+      )
+      .take(1);
+
+    return {
+      promoted,
+      skipped,
+      hasMore: remaining.length > 0,
     };
   },
 });

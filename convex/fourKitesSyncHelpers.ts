@@ -26,6 +26,12 @@ export const findContractLane = internalQuery({
           .eq("hcr", args.hcr)
           .eq("tripNumber", args.tripNumber)
       )
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("isDeleted"), false),
+          q.eq(q.field("isActive"), true)
+        )
+      )
       .first();
   },
 });

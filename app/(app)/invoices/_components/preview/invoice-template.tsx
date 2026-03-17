@@ -18,12 +18,25 @@ interface Invoice {
   dueDate?: string;
   status: 'MISSING_DATA' | 'DRAFT' | 'BILLED' | 'PENDING_PAYMENT' | 'PAID' | 'VOID';
   currency: 'USD' | 'CAD' | 'MXN';
-  subtotal?: number;  // Optional - calculated for DRAFT, stored for finalized
+  subtotal?: number;
   fuelSurcharge?: number;
   accessorialsTotal?: number;
   taxAmount?: number;
-  totalAmount?: number;  // Optional - calculated for DRAFT, stored for finalized
+  totalAmount?: number;
   missingDataReason?: string;
+  paidAmount?: number;
+  paymentDate?: string;
+  paymentReference?: string;
+  paymentMiles?: number;
+  paymentDifference?: number;
+  load?: {
+    effectiveMiles?: number;
+    contractMiles?: number;
+    googleMiles?: number;
+    importedMiles?: number;
+    manualMiles?: number;
+  } | null;
+  contractLaneMiles?: number | null;
 }
 
 interface CompanyDetails {
@@ -145,6 +158,60 @@ export function InvoiceTemplate({
           />
         </div>
 
+        {/* Miles Comparison */}
+        {(invoice.load?.contractMiles || invoice.load?.googleMiles || invoice.load?.effectiveMiles || invoice.paymentMiles || invoice.contractLaneMiles) && (
+          <div className="mb-4 print:mb-3 p-3 bg-muted/30 border rounded-lg">
+            <p className="text-[11px] font-mono text-muted-foreground mb-2 uppercase tracking-wide">Miles</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {invoice.contractLaneMiles != null && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground font-mono">Contract Lane</p>
+                  <p className="text-sm font-mono font-medium">{invoice.contractLaneMiles.toLocaleString()}</p>
+                </div>
+              )}
+              {invoice.load?.googleMiles != null && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground font-mono">Google Maps</p>
+                  <p className="text-sm font-mono font-medium">{invoice.load.googleMiles.toLocaleString()}</p>
+                </div>
+              )}
+              {invoice.load?.effectiveMiles != null && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground font-mono">Effective</p>
+                  <p className="text-sm font-mono font-medium">{invoice.load.effectiveMiles.toLocaleString()}</p>
+                </div>
+              )}
+              {invoice.paymentMiles != null && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground font-mono">Payment Reported</p>
+                  <p className="text-sm font-mono font-medium">{invoice.paymentMiles.toLocaleString()}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Payment Info (for PAID invoices) — date & reference */}
+        {invoice.status === 'PAID' && (invoice.paymentDate || invoice.paymentReference) && (
+          <div className="mb-4 print:mb-3 p-3 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-900 rounded-lg">
+            <p className="text-[11px] font-mono text-muted-foreground mb-2 uppercase tracking-wide">Payment Info</p>
+            <div className="grid grid-cols-2 gap-3">
+              {invoice.paymentDate && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground font-mono">Payment Date</p>
+                  <p className="text-sm font-mono font-medium">{invoice.paymentDate}</p>
+                </div>
+              )}
+              {invoice.paymentReference && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground font-mono">Reference / Check #</p>
+                  <p className="text-sm font-mono font-medium">{invoice.paymentReference}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Footer / Summary */}
         <div className="mt-auto pt-3 print:pt-2">
           <div className="flex justify-end">
@@ -155,7 +222,10 @@ export function InvoiceTemplate({
                 accessorialsTotal: invoice.accessorialsTotal,
                 taxAmount: invoice.taxAmount,
                 totalAmount: invoice.totalAmount ?? 0,
-                currency: invoice.currency
+                currency: invoice.currency,
+                paidAmount: invoice.paidAmount,
+                paymentDifference: invoice.paymentDifference,
+                status: invoice.status,
               }} 
             />
           </div>

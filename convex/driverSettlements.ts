@@ -224,121 +224,87 @@ function calculatePlanPeriod(
 /**
  * Get the payable trigger timestamp based on the plan's trigger type
  * Maps payableTrigger to actual database fields
+ *
+ * @param preloadedLoad - Optional pre-fetched load to avoid duplicate reads
+ * @param stopsCache - Optional shared cache for loadStops queries keyed by loadId string
  */
 async function getPayableTriggerTimestamp(
   ctx: any,
   payable: Doc<'loadPayables'>,
-  triggerType: 'DELIVERY_DATE' | 'COMPLETION_DATE' | 'APPROVAL_DATE'
+  triggerType: 'DELIVERY_DATE' | 'COMPLETION_DATE' | 'APPROVAL_DATE',
+  preloadedLoad?: any,
+  stopsCache?: Map<string, any[]>
 ): Promise<number | null> {
-  const payableLabel = payable.loadId ? `LOAD-${payable._id.slice(-8)}` : 'STANDALONE';
-  const debugLog = (source: string, timestamp: number | null, details?: string) => {
-    console.log(`[PAYABLE_TIMESTAMP] ${payableLabel} | Source: ${source} | Timestamp: ${timestamp ? new Date(timestamp).toISOString() : 'null'} ${details || ''}`);
-  };
-
   switch (triggerType) {
     case 'APPROVAL_DATE':
-      // Use the payable's approvedAt field
-      debugLog('APPROVAL_DATE', payable.approvedAt || null);
       return payable.approvedAt || null;
 
     case 'DELIVERY_DATE':
     case 'COMPLETION_DATE':
-      // For standalone payables (no loadId), use createdAt as the trigger
       if (!payable.loadId) {
-        debugLog('STANDALONE_CREATED_AT', payable.createdAt);
         return payable.createdAt;
       }
 
-      // Try to get timestamp from leg first
       if (payable.legId) {
         const leg = await ctx.db.get(payable.legId);
         if (leg) {
           if (triggerType === 'COMPLETION_DATE' && leg.completedAt) {
-            debugLog('LEG_COMPLETED_AT', leg.completedAt);
             return leg.completedAt;
           }
 
-          // DELIVERY_DATE - get end stop's checkedOutAt
           if (leg.endStopId) {
             const endStop = await ctx.db.get(leg.endStopId);
             if (endStop?.checkedOutAt) {
               const timestamp = new Date(endStop.checkedOutAt).getTime();
-              if (!isNaN(timestamp)) {
-                debugLog('LEG_ENDSTOP_CHECKEDOUT', timestamp, `raw: ${endStop.checkedOutAt}`);
-                return timestamp;
-              }
+              if (!isNaN(timestamp)) return timestamp;
             }
           }
 
-          // Fall back to leg completedAt if available
-          if (leg.completedAt) {
-            debugLog('LEG_COMPLETED_AT_FALLBACK', leg.completedAt);
-            return leg.completedAt;
-          }
+          if (leg.completedAt) return leg.completedAt;
         }
       }
 
-      // Try to get delivery timestamp from the load's last delivery stop
-      const load = await ctx.db.get(payable.loadId);
+      const load = preloadedLoad ?? await ctx.db.get(payable.loadId);
       if (load) {
-        // Get all stops for this load
-        const stops = await ctx.db
-          .query('loadStops')
-          .withIndex('by_load', (q: any) => q.eq('loadId', payable.loadId))
-          .collect();
+        const loadIdStr = payable.loadId as string;
+        let stops: any[];
+        if (stopsCache && stopsCache.has(loadIdStr)) {
+          stops = stopsCache.get(loadIdStr)!;
+        } else {
+          stops = await ctx.db
+            .query('loadStops')
+            .withIndex('by_load', (q: any) => q.eq('loadId', payable.loadId))
+            .collect();
+          if (stopsCache) stopsCache.set(loadIdStr, stops);
+        }
 
-        // Filter to delivery stops, sorted by sequence (last delivery first)
         const deliveryStops = stops
           .filter((s: typeof stops[0]) => s.stopType === 'DELIVERY')
           .sort((a: typeof stops[0], b: typeof stops[0]) => (b.sequenceNumber || 0) - (a.sequenceNumber || 0));
 
-        console.log(`[PAYABLE_TIMESTAMP] ${payableLabel} | Total stops: ${stops.length} | Delivery stops: ${deliveryStops.length}`);
-
         if (deliveryStops.length > 0) {
           const lastDelivery = deliveryStops[0];
-          console.log(`[PAYABLE_TIMESTAMP] ${payableLabel} | Last delivery stop: checkedOutAt=${lastDelivery.checkedOutAt}, windowEndTime=${lastDelivery.windowEndTime}, windowBeginTime=${lastDelivery.windowBeginTime}`);
-          
-          // Priority 1: Use actual checkedOutAt if available (physical event)
+
           if (lastDelivery.checkedOutAt) {
             const timestamp = new Date(lastDelivery.checkedOutAt).getTime();
-            if (!isNaN(timestamp)) {
-              debugLog('LOADSTOP_CHECKEDOUT', timestamp, `raw: ${lastDelivery.checkedOutAt}`);
-              return timestamp;
-            }
+            if (!isNaN(timestamp)) return timestamp;
           }
-          
-          // Priority 2: Fall back to scheduled delivery window end time
-          // This is the "expected" delivery time for payroll purposes
+
           if (lastDelivery.windowEndTime) {
             const timestamp = new Date(lastDelivery.windowEndTime).getTime();
-            if (!isNaN(timestamp)) {
-              debugLog('LOADSTOP_WINDOW_END', timestamp, `raw: ${lastDelivery.windowEndTime}`);
-              return timestamp;
-            }
+            if (!isNaN(timestamp)) return timestamp;
           }
-          
-          // Priority 3: Fall back to scheduled delivery window begin time
+
           if (lastDelivery.windowBeginTime) {
             const timestamp = new Date(lastDelivery.windowBeginTime).getTime();
-            if (!isNaN(timestamp)) {
-              debugLog('LOADSTOP_WINDOW_BEGIN', timestamp, `raw: ${lastDelivery.windowBeginTime}`);
-              return timestamp;
-            }
+            if (!isNaN(timestamp)) return timestamp;
           }
         }
-        
-        // NOTE: Do NOT use lastExternalUpdatedAt as it represents sync time, not delivery time
       }
 
-      // IMPORTANT: Do NOT fall back to createdAt for load-based payables
-      // This prevents old loads from being pulled into current settlements
-      // Payables without valid trigger timestamps will be skipped
-      debugLog('NO_TIMESTAMP_FOUND', null);
       return null;
 
     default:
-      // Unknown trigger type - skip this payable
-      debugLog('UNKNOWN_TRIGGER_TYPE', null);
       return null;
   }
 }
@@ -1754,7 +1720,7 @@ export const generateStatementFromPlan = mutation({
 
 /**
  * Bulk generate settlements for all drivers on a specific Pay Plan
- * VERSION: 2026-01-06-v2 (with date filtering fix)
+ * VERSION: 2026-03-16-v3 (with load/stops caching + reduced logging)
  */
 export const bulkGenerateByPlan = mutation({
   args: {
@@ -1777,7 +1743,7 @@ export const bulkGenerateByPlan = mutation({
     })),
   }),
   handler: async (ctx, args) => {
-    console.log('🚀 [BULK_GENERATE] VERSION 2026-01-06-v2 - Starting settlement generation with DATE FILTERING FIX');
+    console.log(`[BULK_SETTLE] v3 | Plan: ${args.planId} | Drivers on plan: pending...`);
     
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay Plan not found');
@@ -1846,9 +1812,35 @@ export const bulkGenerateByPlan = mutation({
       timezone = org?.defaultTimezone || 'America/New_York';
     }
 
+    // Shared caches to avoid duplicate reads across drivers
+    const loadCache = new Map<string, any>();
+    const stopsCache = new Map<string, any[]>();
+
+    // Pre-fetch the highest statement number once instead of per-driver
+    const existingStatements = await ctx.db
+      .query('driverSettlements')
+      .withIndex('by_org_status', (q: any) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+    const year = new Date().getFullYear();
+    const stmtPrefix = `SET-${year}-`;
+    let maxStatementNum = 0;
+    for (const stmt of existingStatements) {
+      if (stmt.statementNumber.startsWith(stmtPrefix)) {
+        const num = parseInt(stmt.statementNumber.split('-')[2], 10);
+        if (num > maxStatementNum) maxStatementNum = num;
+      }
+    }
+
+    const getLoadCached = async (loadId: Id<'loadInformation'>): Promise<any> => {
+      const key = loadId as string;
+      if (loadCache.has(key)) return loadCache.get(key);
+      const load = await ctx.db.get(loadId);
+      loadCache.set(key, load);
+      return load;
+    };
+
     for (const driver of drivers) {
       try {
-        // Check if driver already has a settlement for this period
         const existingSettlement = await ctx.db
           .query('driverSettlements')
           .withIndex('by_driver_status', (q) => q.eq('driverId', driver._id))
@@ -1870,7 +1862,6 @@ export const bulkGenerateByPlan = mutation({
           continue;
         }
 
-        // Find all unassigned payables
         const allUnassigned = await ctx.db
           .query('loadPayables')
           .withIndex('by_driver_unassigned', (q) =>
@@ -1878,30 +1869,36 @@ export const bulkGenerateByPlan = mutation({
           )
           .collect();
 
-        // Filter payables
         const payablesToAssign: Array<Id<'loadPayables'>> = [];
         let grossTotal = 0;
+        let skippedNoTimestamp = 0;
+        let skippedOutOfPeriod = 0;
+        let skippedHeld = 0;
 
         for (const payable of allUnassigned) {
           let isLoadHeld = false;
+          let cachedLoad: any = null;
           if (payable.loadId) {
-            const load = await ctx.db.get(payable.loadId);
-            if (load?.isHeld) isLoadHeld = true;
+            cachedLoad = await getLoadCached(payable.loadId);
+            if (cachedLoad?.isHeld) isLoadHeld = true;
           }
 
           if (isLoadHeld) {
             if (args.includeHeldItems) {
               payablesToAssign.push(payable._id);
               grossTotal += payable.totalAmount;
+            } else {
+              skippedHeld++;
             }
             continue;
           }
 
-          const triggerTimestamp = await getPayableTriggerTimestamp(ctx, payable, plan.payableTrigger);
-          const payableLabel = payable.loadId ? `LOAD-${payable._id.slice(-8)}` : 'STANDALONE';
-          
+          const triggerTimestamp = await getPayableTriggerTimestamp(
+            ctx, payable, plan.payableTrigger, cachedLoad, stopsCache
+          );
+
           if (!triggerTimestamp) {
-            console.log(`[PERIOD_CHECK] ${payableLabel} | SKIPPED - no trigger timestamp`);
+            skippedNoTimestamp++;
             continue;
           }
 
@@ -1909,20 +1906,21 @@ export const bulkGenerateByPlan = mutation({
             triggerTimestamp >= periodStart.getTime() &&
             triggerTimestamp <= periodEnd.getTime();
 
-          console.log(`[PERIOD_CHECK] ${payableLabel} | Trigger: ${new Date(triggerTimestamp).toISOString()} | Period: ${periodStart.toISOString()} - ${periodEnd.toISOString()} | Within: ${withinPeriod}`);
+          if (!withinPeriod) {
+            skippedOutOfPeriod++;
+            continue;
+          }
 
-          if (withinPeriod) {
-            const withinCutoff = isWithinCutoffWindow(
-              triggerTimestamp,
-              periodEnd.getTime(),
-              plan.cutoffTime,
-              timezone!
-            );
+          const withinCutoff = isWithinCutoffWindow(
+            triggerTimestamp,
+            periodEnd.getTime(),
+            plan.cutoffTime,
+            timezone!
+          );
 
-            if (withinCutoff) {
-              payablesToAssign.push(payable._id);
-              grossTotal += payable.totalAmount;
-            }
+          if (withinCutoff) {
+            payablesToAssign.push(payable._id);
+            grossTotal += payable.totalAmount;
           }
         }
 
@@ -1939,7 +1937,10 @@ export const bulkGenerateByPlan = mutation({
           }
         }
 
-        // Skip if no payables
+        // #region agent log
+        console.log(`[BULK_SETTLE] Driver: ${driver.firstName} ${driver.lastName} | Payables: ${allUnassigned.length} | Matched: ${payablesToAssign.length} | OutOfPeriod: ${skippedOutOfPeriod} | NoTimestamp: ${skippedNoTimestamp} | Held: ${skippedHeld}`);
+        // #endregion
+
         if (payablesToAssign.length === 0) {
           settlements.push({
             driverId: driver._id,
@@ -1950,10 +1951,10 @@ export const bulkGenerateByPlan = mutation({
           continue;
         }
 
-        // Generate statement number
-        const statementNumber = await generateStatementNumber(ctx, args.workosOrgId);
+        // Increment shared counter instead of re-querying all settlements
+        maxStatementNum++;
+        const statementNumber = `${stmtPrefix}${String(maxStatementNum).padStart(3, '0')}`;
 
-        // Create settlement with Pay Plan link
         const settlementId = await ctx.db.insert('driverSettlements', {
           driverId: driver._id,
           workosOrgId: args.workosOrgId,
@@ -1969,7 +1970,6 @@ export const bulkGenerateByPlan = mutation({
           updatedAt: now,
         });
 
-        // Assign payables
         for (const payableId of payablesToAssign) {
           await ctx.db.patch(payableId, {
             settlementId,
@@ -1994,6 +1994,10 @@ export const bulkGenerateByPlan = mutation({
         failed++;
       }
     }
+
+    // #region agent log
+    console.log(`[BULK_SETTLE] Complete | Drivers: ${drivers.length} | Success: ${success} | Failed: ${failed} | LoadCache: ${loadCache.size} | StopsCache: ${stopsCache.size}`);
+    // #endregion
 
     return { success, failed, settlements };
   },

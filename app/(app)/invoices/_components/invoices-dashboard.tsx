@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -18,7 +18,9 @@ import {
   Ban,
   Info,
   Upload,
+  RotateCcw,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { FixLaneModal } from './fix-lane-modal';
 import { InvoicePreviewSheet } from './invoice-preview-sheet';
 import { FloatingActionBar } from './floating-action-bar';
@@ -42,6 +44,10 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [pendingPreviewAction, setPendingPreviewAction] = useState<'print' | 'download' | null>(null);
   const [isPaymentImportOpen, setIsPaymentImportOpen] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const [isRePromoting, setIsRePromoting] = useState(false);
+  const resetPaidToDraft = useMutation(api.invoices.resetPaidToDraft);
+  const rePromoteStuckLoads = useMutation(api.lanes.rePromoteStuckLoads);
   
   // Multi-select state
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<Set<Id<"loadInvoices">>>(new Set());
@@ -345,6 +351,36 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
           <Button
             variant="outline"
             size="sm"
+            className="text-destructive border-destructive/30 hover:bg-destructive/10"
+            disabled={isResetting}
+            onClick={async () => {
+              if (!confirm('This will reset ALL paid invoices back to DRAFT so they can be re-imported with proper line items. Continue?')) return;
+              setIsResetting(true);
+              try {
+                let totalReset = 0;
+                let totalLineItems = 0;
+                let hasMore = true;
+                while (hasMore) {
+                  const result = await resetPaidToDraft({ workosOrgId: organizationId, batchSize: 100 });
+                  totalReset += result.reset;
+                  totalLineItems += result.lineItemsDeleted;
+                  hasMore = result.hasMore;
+                }
+                toast.success(`Reset ${totalReset} invoices to DRAFT (${totalLineItems} line items cleaned)`);
+              } catch (err) {
+                toast.error('Failed to reset invoices');
+                console.error(err);
+              } finally {
+                setIsResetting(false);
+              }
+            }}
+          >
+            <RotateCcw className={`mr-2 h-4 w-4 ${isResetting ? 'animate-spin' : ''}`} />
+            {isResetting ? 'Resetting...' : 'Reset Paid → Draft'}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => setIsPaymentImportOpen(true)}
           >
             <Upload className="mr-2 h-4 w-4" />
@@ -434,14 +470,45 @@ export function InvoicesDashboard({ organizationId, userId }: InvoicesDashboardP
               
               <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
                 <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
-                  {/* Alert banner for instructions */}
-                  <div className="flex-shrink-0 p-4 border-b">
-                    <Alert>
+                  {/* Alert banner with re-promote action */}
+                  <div className="flex-shrink-0 p-4 border-b flex items-center justify-between gap-4">
+                    <Alert className="flex-1">
                       <Info className="h-4 w-4" />
                       <AlertDescription>
                         These loads need contract lanes. Define a contract to backfill invoices or void to discard.
                       </AlertDescription>
                     </Alert>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isRePromoting}
+                      onClick={async () => {
+                        setIsRePromoting(true);
+                        try {
+                          let totalPromoted = 0;
+                          let hasMore = true;
+                          while (hasMore) {
+                            const result = await rePromoteStuckLoads({ workosOrgId: organizationId, batchSize: 50 });
+                            totalPromoted += result.promoted;
+                            hasMore = result.hasMore && result.promoted > 0;
+                          }
+                          if (totalPromoted > 0) {
+                            toast.success(`Re-promoted ${totalPromoted} loads from Attention → Draft`);
+                          } else {
+                            toast.info('No stuck loads found — all loads either lack a matching lane or are already promoted');
+                          }
+                        } catch (err) {
+                          toast.error('Failed to re-promote loads');
+                          console.error(err);
+                        } finally {
+                          setIsRePromoting(false);
+                        }
+                      }}
+                      className="shrink-0"
+                    >
+                      <RotateCcw className={`mr-2 h-4 w-4 ${isRePromoting ? 'animate-spin' : ''}`} />
+                      {isRePromoting ? 'Re-matching...' : 'Re-match Lanes'}
+                    </Button>
                   </div>
                   
                   {/* Fixed Header */}

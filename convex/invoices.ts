@@ -149,9 +149,12 @@ export const getInvoice = query({
     // Calculate amounts dynamically
     const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
 
-    // Get load and customer info
+    // Get load, customer, and contract lane info
     const load = await ctx.db.get(invoice.loadId);
     const customer = await ctx.db.get(invoice.customerId);
+    const contractLane = invoice.contractLaneId
+      ? await ctx.db.get(invoice.contractLaneId)
+      : null;
 
     return {
       ...invoice,
@@ -165,12 +168,17 @@ export const getInvoice = query({
         parsedHcr: load.parsedHcr,
         parsedTripNumber: load.parsedTripNumber,
         effectiveMiles: load.effectiveMiles,
+        contractMiles: load.contractMiles,
+        googleMiles: load.googleMiles,
+        importedMiles: load.importedMiles,
+        manualMiles: load.manualMiles,
         stopCount: load.stopCount,
       } : null,
       customer: customer ? {
         _id: customer._id,
         name: customer.name,
       } : null,
+      contractLaneMiles: contractLane?.miles ?? null,
     };
   },
 });
@@ -271,39 +279,38 @@ export const getLineItems = query({
     const invoice = await ctx.db.get(args.invoiceId);
     if (!invoice) return [];
 
-    // For finalized invoices, return stored line items
+    // For finalized invoices, try stored line items first
     const isFinalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(invoice.status);
     if (isFinalized) {
-      return await ctx.db
+      const stored = await ctx.db
         .query("invoiceLineItems")
         .withIndex("by_invoice", (q) => q.eq("invoiceId", args.invoiceId))
         .collect();
+      if (stored.length > 0) return stored;
+      // Fall through to dynamic generation if no stored line items exist
     }
 
-    // For DRAFT/MISSING_DATA: generate line items dynamically
+    // Generate line items dynamically (DRAFT/MISSING_DATA, or finalized without stored items)
     const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
-    
-    // Get load and contract lane for details
+
     const load = await ctx.db.get(invoice.loadId);
-    const contractLane = invoice.contractLaneId 
+    const contractLane = invoice.contractLaneId
       ? await ctx.db.get(invoice.contractLaneId)
       : null;
 
     const lineItems: any[] = [];
 
-    // Generate freight line item
     if (amounts.subtotal > 0 && contractLane && load) {
-      // For wildcard/SPOT loads (trip = *), show "Extra Trips - HCR TRIP"
       const isWildcard = contractLane.tripNumber === '*';
       let description: string;
-      
+
       if (isWildcard) {
         description = `Extra Trips - ${load.parsedHcr || 'Unknown HCR'} ${load.parsedTripNumber || 'Unknown Trip'}`;
       } else {
-        description = contractLane.contractName || 
+        description = contractLane.contractName ||
           `${load.parsedHcr || 'Unknown HCR'} - ${load.parsedTripNumber || 'Unknown Trip'}`;
       }
-      
+
       lineItems.push({
         _id: 'dynamic-freight' as any,
         _creationTime: 0,
@@ -317,7 +324,6 @@ export const getLineItems = query({
       });
     }
 
-    // Generate fuel surcharge line item
     if (amounts.fuelSurcharge > 0 && contractLane) {
       lineItems.push({
         _id: 'dynamic-fuel' as any,
@@ -332,11 +338,10 @@ export const getLineItems = query({
       });
     }
 
-    // Generate accessorials line item
     if (amounts.accessorialsTotal > 0 && load && contractLane) {
       const includedStops = contractLane.includedStops || 2;
       const extraStops = Math.max(0, (load.stopCount || 0) - includedStops);
-      
+
       lineItems.push({
         _id: 'dynamic-accessorial' as any,
         _creationTime: 0,
@@ -484,12 +489,12 @@ export const bulkUpdateStatus = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const results = { success: 0, failed: 0, errors: [] as string[] };
+    const finalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'];
 
     for (const invoiceId of args.invoiceIds) {
       try {
         const invoice = await ctx.db.get(invoiceId);
-        
-        // Security check: verify invoice belongs to organization
+
         if (!invoice || invoice.workosOrgId !== args.workosOrgId) {
           results.failed++;
           results.errors.push(`Invoice ${invoiceId} not found or access denied`);
@@ -497,15 +502,87 @@ export const bulkUpdateStatus = mutation({
         }
 
         const oldStatus = invoice.status;
+        const wasFinalized = finalized.includes(oldStatus);
+        const willBeFinalized = finalized.includes(args.newStatus);
 
-        await ctx.db.patch(invoiceId, {
-          status: args.newStatus,
-          updatedAt: now,
-        });
+        // Freeze amounts when moving from non-finalized → finalized
+        if (!wasFinalized && willBeFinalized && invoice.totalAmount === undefined) {
+          const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
 
-        // ✅ Update organization stats (aggregate table pattern)
+          // Store line items if none exist
+          const existingItems = await ctx.db
+            .query("invoiceLineItems")
+            .withIndex("by_invoice", (q) => q.eq("invoiceId", invoiceId))
+            .take(1);
+
+          if (existingItems.length === 0) {
+            const load = await ctx.db.get(invoice.loadId);
+            const contractLane = invoice.contractLaneId
+              ? await ctx.db.get(invoice.contractLaneId)
+              : null;
+
+            if (amounts.subtotal > 0 && contractLane && load) {
+              const isWildcard = (contractLane as any).tripNumber === '*';
+              const desc = isWildcard
+                ? `Extra Trips - ${(load as any).parsedHcr || 'Unknown HCR'} ${(load as any).parsedTripNumber || 'Unknown Trip'}`
+                : (contractLane as any).contractName ||
+                  `${(load as any).parsedHcr || 'Unknown HCR'} - ${(load as any).parsedTripNumber || 'Unknown Trip'}`;
+
+              await ctx.db.insert("invoiceLineItems", {
+                invoiceId,
+                type: "FREIGHT",
+                description: desc,
+                quantity: 1,
+                rate: amounts.subtotal,
+                amount: amounts.subtotal,
+                createdAt: now,
+              });
+            }
+
+            if (amounts.fuelSurcharge > 0 && contractLane) {
+              await ctx.db.insert("invoiceLineItems", {
+                invoiceId,
+                type: "FUEL",
+                description: `Fuel Surcharge (${(contractLane as any).fuelSurchargeType || 'N/A'})`,
+                quantity: 1,
+                rate: amounts.fuelSurcharge,
+                amount: amounts.fuelSurcharge,
+                createdAt: now,
+              });
+            }
+
+            if (amounts.accessorialsTotal > 0 && load && contractLane) {
+              const includedStops = (contractLane as any).includedStops || 2;
+              const extraStops = Math.max(0, ((load as any).stopCount || 0) - includedStops);
+              await ctx.db.insert("invoiceLineItems", {
+                invoiceId,
+                type: "ACCESSORIAL",
+                description: `Stop-off charges (${extraStops} extra stops)`,
+                quantity: extraStops,
+                rate: (contractLane as any).stopOffRate || 0,
+                amount: amounts.accessorialsTotal,
+                createdAt: now,
+              });
+            }
+          }
+
+          await ctx.db.patch(invoiceId, {
+            status: args.newStatus,
+            subtotal: amounts.subtotal,
+            fuelSurcharge: amounts.fuelSurcharge,
+            accessorialsTotal: amounts.accessorialsTotal,
+            taxAmount: amounts.taxAmount,
+            totalAmount: amounts.totalAmount,
+            updatedAt: now,
+          });
+        } else {
+          await ctx.db.patch(invoiceId, {
+            status: args.newStatus,
+            updatedAt: now,
+          });
+        }
+
         await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, args.newStatus);
-
         results.success++;
       } catch (error) {
         results.failed++;
@@ -576,6 +653,7 @@ const paymentBatchArgs = {
       paidAmount: v.number(),
       paymentDate: v.optional(v.string()),
       paymentReference: v.optional(v.string()),
+      paymentMiles: v.optional(v.number()),
     })
   ),
 };
@@ -699,28 +777,19 @@ export const processPaymentChunk = internalMutation({
 });
 
 /**
- * Public action: batch confirm payments via CSV import.
- * Splits the payments into chunks and processes each in a separate transaction.
+ * Public mutation: process a single chunk of payment confirmations.
+ * Called from the client in a loop so the UI can show progress between chunks.
  */
-export const confirmPaymentBatch = action({
-  args: {
-    workosOrgId: v.string(),
-    updatedBy: v.string(),
-    matchType: v.union(v.literal("invoiceNumber"), v.literal("orderNumber")),
-    payments: v.array(
-      v.object({
-        matchKey: v.string(),
-        paidAmount: v.number(),
-        paymentDate: v.optional(v.string()),
-        paymentReference: v.optional(v.string()),
-      })
-    ),
-  },
+export const confirmPaymentChunk = mutation({
+  args: paymentBatchArgs,
   handler: async (ctx, args) => {
-    const totals = {
+    const now = Date.now();
+    const results = {
       success: 0,
       failed: 0,
+      alreadyPaid: 0,
       notFound: [] as string[],
+      noInvoice: [] as string[],
       discrepancies: [] as Array<{
         matchKey: string;
         invoicedAmount: number;
@@ -729,21 +798,207 @@ export const confirmPaymentBatch = action({
       }>,
     };
 
-    for (let i = 0; i < args.payments.length; i += PAYMENT_BATCH_SIZE) {
-      const chunk = args.payments.slice(i, i + PAYMENT_BATCH_SIZE);
-      const result = await ctx.runMutation(internal.invoices.processPaymentChunk, {
-        workosOrgId: args.workosOrgId,
-        matchType: args.matchType,
-        payments: chunk,
-      });
+    for (const payment of args.payments) {
+      try {
+        let invoice: Doc<"loadInvoices"> | null = null;
+        const matchKey = payment.matchKey.trim();
 
-      totals.success += result.success;
-      totals.failed += result.failed;
-      totals.notFound.push(...result.notFound);
-      totals.discrepancies.push(...result.discrepancies);
+        if (args.matchType === "invoiceNumber") {
+          const candidates = await ctx.db
+            .query("loadInvoices")
+            .withIndex("by_organization", (q) =>
+              q.eq("workosOrgId", args.workosOrgId)
+            )
+            .filter((q) =>
+              q.eq(q.field("invoiceNumber"), matchKey)
+            )
+            .take(1);
+          invoice = candidates[0] ?? null;
+        } else {
+          // 1. Try orderNumber (e.g. "96073365")
+          let load = await ctx.db
+            .query("loadInformation")
+            .withIndex("by_order_number", (q) =>
+              q.eq("workosOrgId", args.workosOrgId).eq("orderNumber", matchKey)
+            )
+            .first();
+
+          // 2. Try internalId directly (e.g. "96073365")
+          if (!load) {
+            load = await ctx.db
+              .query("loadInformation")
+              .withIndex("by_internal_id", (q) =>
+                q.eq("workosOrgId", args.workosOrgId).eq("internalId", matchKey)
+              )
+              .first();
+          }
+
+          // 3. Try internalId with FK- prefix (e.g. "FK-96073365")
+          if (!load) {
+            load = await ctx.db
+              .query("loadInformation")
+              .withIndex("by_internal_id", (q) =>
+                q.eq("workosOrgId", args.workosOrgId).eq("internalId", `FK-${matchKey}`)
+              )
+              .first();
+          }
+
+          // 4. Try externalLoadId (FourKites shipment ID) — both casing variants
+          if (!load) {
+            load = await ctx.db
+              .query("loadInformation")
+              .withIndex("by_external_id", (q) =>
+                q.eq("externalSource", "FourKites").eq("externalLoadId", matchKey)
+              )
+              .first();
+            if (!load) {
+              load = await ctx.db
+                .query("loadInformation")
+                .withIndex("by_external_id", (q) =>
+                  q.eq("externalSource", "FOURKITES").eq("externalLoadId", matchKey)
+                )
+                .first();
+            }
+            if (load && load.workosOrgId !== args.workosOrgId) {
+              load = null;
+            }
+          }
+
+          // Load found but no invoice exists for it
+          if (load && !invoice) {
+            invoice = await ctx.db
+              .query("loadInvoices")
+              .withIndex("by_load", (q) => q.eq("loadId", load!._id))
+              .first();
+            if (!invoice) {
+              results.noInvoice.push(matchKey);
+              results.failed++;
+              continue;
+            }
+          }
+        }
+
+        if (!invoice) {
+          results.notFound.push(matchKey);
+          results.failed++;
+          continue;
+        }
+
+        if (invoice.workosOrgId !== args.workosOrgId) {
+          results.notFound.push(matchKey);
+          results.failed++;
+          continue;
+        }
+
+        // Duplicate protection: skip if already PAID with the same amount
+        if (
+          invoice.status === "PAID" &&
+          invoice.paidAmount !== undefined &&
+          Math.abs(invoice.paidAmount - payment.paidAmount) < 0.005
+        ) {
+          results.alreadyPaid++;
+          continue;
+        }
+
+        const oldStatus = invoice.status;
+        const needsFreeze = !['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(oldStatus) ||
+          invoice.totalAmount === undefined;
+
+        let invoicedAmount = invoice.totalAmount ?? 0;
+        if (needsFreeze) {
+          const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
+          invoicedAmount = amounts.totalAmount;
+
+          const load = await ctx.db.get(invoice.loadId);
+          const contractLane = invoice.contractLaneId
+            ? await ctx.db.get(invoice.contractLaneId)
+            : null;
+
+          if (amounts.subtotal > 0 && contractLane && load) {
+            const isWildcard = (contractLane as any).tripNumber === '*';
+            const desc = isWildcard
+              ? `Extra Trips - ${(load as any).parsedHcr || 'Unknown HCR'} ${(load as any).parsedTripNumber || 'Unknown Trip'}`
+              : (contractLane as any).contractName ||
+                `${(load as any).parsedHcr || 'Unknown HCR'} - ${(load as any).parsedTripNumber || 'Unknown Trip'}`;
+
+            await ctx.db.insert("invoiceLineItems", {
+              invoiceId: invoice._id,
+              type: "FREIGHT",
+              description: desc,
+              quantity: 1,
+              rate: amounts.subtotal,
+              amount: amounts.subtotal,
+              createdAt: now,
+            });
+          }
+
+          if (amounts.fuelSurcharge > 0 && contractLane) {
+            await ctx.db.insert("invoiceLineItems", {
+              invoiceId: invoice._id,
+              type: "FUEL",
+              description: `Fuel Surcharge (${(contractLane as any).fuelSurchargeType || 'N/A'})`,
+              quantity: 1,
+              rate: amounts.fuelSurcharge,
+              amount: amounts.fuelSurcharge,
+              createdAt: now,
+            });
+          }
+
+          if (amounts.accessorialsTotal > 0 && load && contractLane) {
+            const includedStops = (contractLane as any).includedStops || 2;
+            const extraStops = Math.max(0, ((load as any).stopCount || 0) - includedStops);
+            await ctx.db.insert("invoiceLineItems", {
+              invoiceId: invoice._id,
+              type: "ACCESSORIAL",
+              description: `Stop-off charges (${extraStops} extra stops)`,
+              quantity: extraStops,
+              rate: (contractLane as any).stopOffRate || 0,
+              amount: amounts.accessorialsTotal,
+              createdAt: now,
+            });
+          }
+
+          await ctx.db.patch(invoice._id, {
+            subtotal: amounts.subtotal,
+            fuelSurcharge: amounts.fuelSurcharge,
+            accessorialsTotal: amounts.accessorialsTotal,
+            taxAmount: amounts.taxAmount,
+            totalAmount: amounts.totalAmount,
+          });
+        }
+
+        const difference = payment.paidAmount - invoicedAmount;
+
+        await ctx.db.patch(invoice._id, {
+          status: "PAID",
+          paidAmount: payment.paidAmount,
+          paymentDate: payment.paymentDate,
+          paymentReference: payment.paymentReference,
+          paymentMiles: payment.paymentMiles,
+          paymentDifference: difference,
+          updatedAt: now,
+        });
+
+        if (oldStatus !== "PAID") {
+          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, "PAID");
+        }
+
+        if (Math.abs(difference) > 0.005) {
+          results.discrepancies.push({
+            matchKey: payment.matchKey,
+            invoicedAmount,
+            paidAmount: payment.paidAmount,
+            difference,
+          });
+        }
+
+        results.success++;
+      } catch (error) {
+        results.failed++;
+      }
     }
 
-    return totals;
+    return results;
   },
 });
 
@@ -799,5 +1054,184 @@ export const bulkUpdateLoadType = mutation({
     }
 
     return results;
+  },
+});
+
+/**
+ * Diagnostic query: debug why a CSV match key isn't finding a load.
+ * Searches all identifier fields and returns what was found at each step.
+ */
+export const debugLoadLookup = query({
+  args: {
+    workosOrgId: v.string(),
+    searchValue: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const val = args.searchValue.trim();
+    const results: Record<string, unknown> = { searchValue: val };
+
+    // 1. orderNumber exact match
+    const byOrder = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_order_number", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("orderNumber", val)
+      )
+      .first();
+    results.byOrderNumber = byOrder
+      ? { _id: byOrder._id, orderNumber: byOrder.orderNumber, internalId: byOrder.internalId, externalLoadId: byOrder.externalLoadId, externalSource: byOrder.externalSource }
+      : null;
+
+    // 2. internalId exact match
+    const byInternal = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_internal_id", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("internalId", val)
+      )
+      .first();
+    results.byInternalId = byInternal
+      ? { _id: byInternal._id, orderNumber: byInternal.orderNumber, internalId: byInternal.internalId }
+      : null;
+
+    // 3. internalId with FK- prefix
+    const byFk = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_internal_id", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("internalId", `FK-${val}`)
+      )
+      .first();
+    results.byFkPrefix = byFk
+      ? { _id: byFk._id, orderNumber: byFk.orderNumber, internalId: byFk.internalId }
+      : null;
+
+    // 4. externalLoadId
+    const byExt1 = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_external_id", (q) =>
+        q.eq("externalSource", "FourKites").eq("externalLoadId", val)
+      )
+      .first();
+    const byExt2 = !byExt1
+      ? await ctx.db
+          .query("loadInformation")
+          .withIndex("by_external_id", (q) =>
+            q.eq("externalSource", "FOURKITES").eq("externalLoadId", val)
+          )
+          .first()
+      : null;
+    const byExt = byExt1 ?? byExt2;
+    results.byExternalLoadId = byExt
+      ? { _id: byExt._id, orderNumber: byExt.orderNumber, internalId: byExt.internalId, externalLoadId: byExt.externalLoadId, workosOrgId: byExt.workosOrgId }
+      : null;
+
+    // 5. Brute-force: scan a sample of loads to find any containing this value
+    const sampleLoads = await ctx.db
+      .query("loadInformation")
+      .withIndex("by_organization", (q) =>
+        q.eq("workosOrgId", args.workosOrgId)
+      )
+      .take(500);
+
+    const fuzzyMatch = sampleLoads.find(
+      (l) =>
+        l.orderNumber?.includes(val) ||
+        l.internalId?.includes(val) ||
+        l.externalLoadId?.includes(val) ||
+        l.poNumber?.includes(val)
+    );
+    results.fuzzyMatchInFirst500 = fuzzyMatch
+      ? { _id: fuzzyMatch._id, orderNumber: fuzzyMatch.orderNumber, internalId: fuzzyMatch.internalId, externalLoadId: fuzzyMatch.externalLoadId, poNumber: fuzzyMatch.poNumber }
+      : null;
+
+    // 6. Sample of what identifiers look like in the org
+    const firstFew = sampleLoads.slice(0, 5).map((l) => ({
+      orderNumber: l.orderNumber,
+      internalId: l.internalId,
+      externalLoadId: l.externalLoadId,
+      poNumber: l.poNumber,
+    }));
+    results.sampleLoadIdentifiers = firstFew;
+    results.totalLoadsScanned = sampleLoads.length;
+
+    // 7. If any load was found, check if it has an invoice
+    const foundLoad = byOrder ?? byInternal ?? byFk ?? byExt ?? fuzzyMatch;
+    if (foundLoad) {
+      const invoice = await ctx.db
+        .query("loadInvoices")
+        .withIndex("by_load", (q) => q.eq("loadId", foundLoad._id))
+        .first();
+      results.hasInvoice = !!invoice;
+      results.invoiceStatus = invoice?.status ?? null;
+    }
+
+    return results;
+  },
+});
+
+/**
+ * ONE-TIME: Reset all PAID invoices back to DRAFT so they can be re-imported
+ * with proper line items and frozen amounts. Clears payment fields and deletes
+ * any existing line items. Process in batches to avoid transaction limits.
+ */
+export const resetPaidToDraft = mutation({
+  args: {
+    workosOrgId: v.string(),
+    batchSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const limit = args.batchSize ?? 100;
+    const now = Date.now();
+
+    const paidInvoices = await ctx.db
+      .query("loadInvoices")
+      .withIndex("by_status", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("status", "PAID")
+      )
+      .take(limit);
+
+    let reset = 0;
+    let lineItemsDeleted = 0;
+
+    for (const invoice of paidInvoices) {
+      const existingItems = await ctx.db
+        .query("invoiceLineItems")
+        .withIndex("by_invoice", (q) => q.eq("invoiceId", invoice._id))
+        .collect();
+
+      for (const item of existingItems) {
+        await ctx.db.delete(item._id);
+        lineItemsDeleted++;
+      }
+
+      await ctx.db.patch(invoice._id, {
+        status: "DRAFT",
+        paidAmount: undefined,
+        paymentDate: undefined,
+        paymentReference: undefined,
+        paymentDifference: undefined,
+        paymentMiles: undefined,
+        subtotal: undefined,
+        fuelSurcharge: undefined,
+        accessorialsTotal: undefined,
+        taxAmount: undefined,
+        totalAmount: undefined,
+        updatedAt: now,
+      });
+
+      await updateInvoiceCount(ctx, invoice.workosOrgId, "PAID", "DRAFT");
+      reset++;
+    }
+
+    const remaining = await ctx.db
+      .query("loadInvoices")
+      .withIndex("by_status", (q) =>
+        q.eq("workosOrgId", args.workosOrgId).eq("status", "PAID")
+      )
+      .take(1);
+
+    return {
+      reset,
+      lineItemsDeleted,
+      hasMore: remaining.length > 0,
+    };
   },
 });
