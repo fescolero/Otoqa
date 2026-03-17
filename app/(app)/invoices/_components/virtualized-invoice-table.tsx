@@ -85,7 +85,7 @@ export function VirtualizedInvoiceTable({
 
   // Custom scroll-based virtualization (avoids @tanstack/react-virtual's flushSync)
   const [scrollState, setScrollState] = useState({ scrollTop: 0, height: 400 });
-  const rafRef = useRef<number>();
+  const rafRef = useRef<number | undefined>(undefined);
   const onScroll = useCallback(() => {
     const el = parentRef.current;
     if (!el) return;
