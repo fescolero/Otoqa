@@ -7,7 +7,7 @@ import { TripDetailsSidebar } from './trip-details-sidebar';
 interface LoadStop {
   _id: string;
   sequenceNumber: number;
-  stopType: 'PICKUP' | 'DELIVERY';
+  stopType: 'PICKUP' | 'DELIVERY' | 'DETOUR';
   city?: string;
   state?: string;
   address?: string;

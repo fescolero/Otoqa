@@ -9,7 +9,8 @@ import { Doc } from '../_generated/dataModel';
  * @param timeStr - Time string (e.g., "09:00:00-05:00" or full ISO)
  * @returns Unix timestamp in milliseconds, or null if parsing fails
  */
-export function parseStopDateTime(dateStr: string, timeStr: string): number | null {
+export function parseStopDateTime(dateStr: string | undefined, timeStr: string | undefined): number | null {
+  if (!dateStr || !timeStr) return null;
   try {
     // If timeStr already contains "T", it's a full ISO string - use as-is
     const combined = timeStr.includes('T') ? timeStr : `${dateStr}T${timeStr}`;

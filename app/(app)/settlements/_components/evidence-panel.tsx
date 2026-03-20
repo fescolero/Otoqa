@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 
 interface LoadStop {
   sequenceNumber: number;
-  stopType: 'PICKUP' | 'DELIVERY';
+  stopType: 'PICKUP' | 'DELIVERY' | 'DETOUR';
   city?: string;
   state?: string;
   windowBeginTime?: string;

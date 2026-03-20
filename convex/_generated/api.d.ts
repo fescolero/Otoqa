@@ -11,6 +11,10 @@
 import type * as _helpers_cronUtils from "../_helpers/cronUtils.js";
 import type * as _helpers_dateUtils from "../_helpers/dateUtils.js";
 import type * as _helpers_timeUtils from "../_helpers/timeUtils.js";
+import type * as accountingHelpers from "../accountingHelpers.js";
+import type * as accountingReports from "../accountingReports.js";
+import type * as accountingStats from "../accountingStats.js";
+import type * as accountingStatsHelpers from "../accountingStatsHelpers.js";
 import type * as analytics from "../analytics.js";
 import type * as auditLog from "../auditLog.js";
 import type * as autoAssignment from "../autoAssignment.js";
@@ -104,6 +108,10 @@ declare const fullApi: ApiFromModules<{
   "_helpers/cronUtils": typeof _helpers_cronUtils;
   "_helpers/dateUtils": typeof _helpers_dateUtils;
   "_helpers/timeUtils": typeof _helpers_timeUtils;
+  accountingHelpers: typeof accountingHelpers;
+  accountingReports: typeof accountingReports;
+  accountingStats: typeof accountingStats;
+  accountingStatsHelpers: typeof accountingStatsHelpers;
   analytics: typeof analytics;
   auditLog: typeof auditLog;
   autoAssignment: typeof autoAssignment;

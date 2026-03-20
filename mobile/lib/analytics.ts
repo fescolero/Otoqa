@@ -1,5 +1,7 @@
 import PostHog from 'posthog-react-native';
 import type { PostHogEventProperties } from '@posthog/core';
+import * as Updates from 'expo-updates';
+import * as Application from 'expo-application';
 
 let posthogClient: PostHog | null = null;
 
@@ -21,6 +23,26 @@ function capture(event: string, properties?: PostHogEventProperties) {
   } else {
     eventBuffer.push({ event, properties });
   }
+}
+
+// ============================================
+// OTA / APP VERSION HELPERS
+// ============================================
+
+/**
+ * Returns OTA bundle and native app version info for inclusion in analytics.
+ * This lets us determine exactly which JS bundle and native build a device is running.
+ */
+export function getAppVersionContext(): Record<string, string | null> {
+  return {
+    ota_update_id: Updates.updateId ?? null,
+    ota_created_at: Updates.createdAt?.toISOString() ?? null,
+    ota_channel: Updates.channel ?? null,
+    ota_runtime_version: Updates.runtimeVersion ?? null,
+    ota_is_embedded: Updates.isEmbeddedLaunch ? 'true' : 'false',
+    native_version: Application.nativeApplicationVersion ?? null,
+    native_build: Application.nativeBuildVersion ?? null,
+  };
 }
 
 export function identifyUser(user: {
@@ -103,7 +125,7 @@ export function trackPhotoSaveFailed(loadId?: string, error?: string) {
 }
 
 export function trackOtaUpdateCheck(result: 'available' | 'none' | 'error', error?: string) {
-  capture('ota_update_check', { result, error: error ?? null });
+  capture('ota_update_check', { result, error: error ?? null, ...getAppVersionContext() });
 }
 
 export function trackWeatherFetchFailed(error: string) {
@@ -117,10 +139,7 @@ export function trackErrorBoundary(error: string, componentStack?: string) {
   });
 }
 
-export function trackPermissionRequest(
-  permission: string,
-  granted: boolean,
-) {
+export function trackPermissionRequest(permission: string, granted: boolean) {
   capture('permission_request', { permission, granted });
 }
 
@@ -162,7 +181,14 @@ export function trackLoadingGateRetry(gate: LoadingGate, attemptNumber: number, 
 }
 
 export function trackConvexAuthEvent(
-  event: 'setup_started' | 'setup_complete' | 'token_fetch_failed' | 'auth_timeout' | 'debouncing_false' | 'auth_false_propagated' | 'foreground_return',
+  event:
+    | 'setup_started'
+    | 'setup_complete'
+    | 'token_fetch_failed'
+    | 'auth_timeout'
+    | 'debouncing_false'
+    | 'auth_false_propagated'
+    | 'foreground_return',
   context?: Record<string, unknown>,
 ) {
   capture(`convex_auth_${event}`, context);
@@ -218,10 +244,7 @@ export function trackOfflineQueueItemSynced(
   capture('offline_queue_item_synced', { mutation_type: mutationType, ...context });
 }
 
-export function trackOfflineQueueItemFailed(
-  mutationType: string,
-  context?: { retryCount?: number; error?: string },
-) {
+export function trackOfflineQueueItemFailed(mutationType: string, context?: { retryCount?: number; error?: string }) {
   capture('offline_queue_item_failed', { mutation_type: mutationType, ...context });
 }
 
@@ -253,10 +276,7 @@ export function trackGPSFreshFixTimeout(elapsed_ms: number) {
   capture('gps_fresh_fix_timeout', { elapsed_ms });
 }
 
-export function trackGPSHighAccuracyUpgrade(context: {
-  accuracy_m: number | null;
-  elapsed_since_balanced_ms: number;
-}) {
+export function trackGPSHighAccuracyUpgrade(context: { accuracy_m: number | null; elapsed_since_balanced_ms: number }) {
   capture('gps_high_accuracy_upgrade', context);
 }
 
@@ -293,10 +313,7 @@ export function trackBGTaskResult(context: {
   capture('bg_task_result', context);
 }
 
-export function trackBGTaskError(context: {
-  step: string;
-  error: string;
-}) {
+export function trackBGTaskError(context: { step: string; error: string }) {
   capture('bg_task_error', context);
 }
 
@@ -306,7 +323,7 @@ export function trackBGTaskReregistered(context: {
   success: boolean;
   error?: string;
 }) {
-  capture('bg_task_reregistered', context);
+  capture('bg_task_reregistered', { ...context, ...getAppVersionContext() });
 }
 
 export function trackForegroundResume(context: {
@@ -317,7 +334,7 @@ export function trackForegroundResume(context: {
   isPhysicalDevice?: boolean;
   platform?: string;
 }) {
-  capture('foreground_resume', context);
+  capture('foreground_resume', { ...context, ...getAppVersionContext() });
 }
 
 // ============================================
@@ -342,19 +359,11 @@ export function trackCheckinMutationTimeout(context: {
   capture('checkin_mutation_timeout', context);
 }
 
-export function trackPendingActionRecorded(context: {
-  stopId: string;
-  loadId: string;
-  action: 'in' | 'out';
-}) {
+export function trackPendingActionRecorded(context: { stopId: string; loadId: string; action: 'in' | 'out' }) {
   capture('pending_action_recorded', context);
 }
 
-export function trackPendingActionReconciled(context: {
-  stopId: string;
-  loadId: string;
-  action: 'in' | 'out';
-}) {
+export function trackPendingActionReconciled(context: { stopId: string; loadId: string; action: 'in' | 'out' }) {
   capture('pending_action_reconciled', context);
 }
 

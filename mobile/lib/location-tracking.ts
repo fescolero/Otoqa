@@ -39,14 +39,18 @@ const TRACKING_STATE_KEY = 'location_tracking_state';
 
 // ============================================
 // TRACKING CONFIGURATION
-// Optimized for accurate route reconstruction
+// Tuned for trucking: battery-friendly + smooth route reconstruction.
+// At 60 mph a truck covers ~27 m/s → a 250 m distance gate fires every ~9 s.
+// The 30-second hard floor prevents that from flooding the DB.
+// Result: ~2 pts/min on highway, ~1.5 pts/min in city, 1 pt/5 min stationary.
 // ============================================
-const TRACKING_INTERVAL_MS = 2 * 60 * 1000;  // Android: fire every 2 min
-const SYNC_INTERVAL_MS = 2 * 60 * 1000;      // Sync to server every 2 minutes
-const BG_DISTANCE_INTERVAL = 100;             // iOS/Android: deliver updates every 100m
-const MAX_ACCURACY_METERS = 50;               // Reject readings with > 50m accuracy
-const MIN_DISTANCE_BETWEEN_POINTS = 100;      // Skip if < 100m from last point (avoid duplicates)
-const SYNC_BATCH_SIZE = 50;                   // Max points per sync batch
+const TRACKING_INTERVAL_MS = 2 * 60 * 1000; // "enough time" gate — 2 min
+const SYNC_INTERVAL_MS = 2 * 60 * 1000; // Sync to server every 2 minutes
+const BG_DISTANCE_INTERVAL = 200; // iOS/Android: OS delivers updates every 200 m
+const MAX_ACCURACY_METERS = 50; // Reject readings with > 50 m accuracy
+const MIN_DISTANCE_BETWEEN_POINTS = 250; // Skip if < 250 m from last point
+const MIN_TIME_BETWEEN_SAVES_MS = 30 * 1000; // Hard floor — never save more often than 30 s
+const SYNC_BATCH_SIZE = 50; // Max points per sync batch
 
 // ============================================
 // BACKGROUND-SAFE CONVEX CLIENT
@@ -79,7 +83,7 @@ async function syncViaHttpEndpoint(
     trackingType: 'LOAD_ROUTE';
     recordedAt: number;
   }>,
-  organizationId: string
+  organizationId: string,
 ): Promise<{ inserted: number }> {
   if (!MOBILE_LOCATION_API_KEY) {
     throw new Error('MOBILE_LOCATION_API_KEY not configured');
@@ -107,10 +111,7 @@ async function syncViaHttpEndpoint(
  * (works in foreground) then falling back to an HTTP client with
  * the stored JWT (works in background tasks).
  */
-async function authedMutation<T>(
-  mutationRef: any,
-  args: any
-): Promise<T> {
+async function authedMutation<T>(mutationRef: any, args: any): Promise<T> {
   // Try the React client first with a timeout.
   // The React client queues mutations over WebSocket and may hang indefinitely
   // if the WS is disconnected (background) or auth is in limbo.
@@ -119,13 +120,17 @@ async function authedMutation<T>(
     const result = await Promise.race([
       convex.mutation(mutationRef, args),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT)
+        setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT),
       ),
     ]);
     return result;
   } catch (reactErr) {
     const msg = reactErr instanceof Error ? reactErr.message : String(reactErr);
-    const isRecoverable = msg.includes('Not authenticated') || msg.includes('Unauthenticated') || msg.includes('auth') || msg.includes('timeout');
+    const isRecoverable =
+      msg.includes('Not authenticated') ||
+      msg.includes('Unauthenticated') ||
+      msg.includes('auth') ||
+      msg.includes('timeout');
     if (!isRecoverable) throw reactErr;
 
     console.log(`[LocationTracking] React client failed (${msg}), trying HTTP client...`);
@@ -155,9 +160,7 @@ async function authedMutation<T>(
 // In EAS builds, appOwnership is null and executionEnvironment may be undefined,
 // so we ONLY check for the positive Expo Go indicators, never negate device checks
 // (Constants.isDevice can be undefined in production, which would false-positive).
-const isExpoGo = 
-  Constants.appOwnership === 'expo' || 
-  Constants.executionEnvironment === 'storeClient';
+const isExpoGo = Constants.appOwnership === 'expo' || Constants.executionEnvironment === 'storeClient';
 
 // Safe device check - expo-device may not be available in Expo Go
 let isPhysicalDevice = true;
@@ -177,21 +180,13 @@ try {
 /**
  * Calculate distance between two points in meters (Haversine formula)
  */
-function calculateDistance(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000; // Earth's radius in meters
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
@@ -234,17 +229,19 @@ const BG_FALLBACK_LOCATIONS_KEY = 'bg_fallback_locations';
  * Save locations to AsyncStorage as a fallback when SQLite is unavailable.
  * These get recovered and inserted into SQLite on the next foreground return.
  */
-async function saveFallbackLocations(locations: Array<{
-  driverId: string;
-  loadId: string;
-  organizationId: string;
-  latitude: number;
-  longitude: number;
-  accuracy: number | null;
-  speed: number | null;
-  heading: number | null;
-  recordedAt: number;
-}>): Promise<void> {
+async function saveFallbackLocations(
+  locations: Array<{
+    driverId: string;
+    loadId: string;
+    organizationId: string;
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+    speed: number | null;
+    heading: number | null;
+    recordedAt: number;
+  }>,
+): Promise<void> {
   try {
     const existingJson = await storage.getString(BG_FALLBACK_LOCATIONS_KEY);
     const existing = existingJson ? JSON.parse(existingJson) : [];
@@ -252,7 +249,9 @@ async function saveFallbackLocations(locations: Array<{
     // Cap at 500 to prevent unbounded growth
     const capped = combined.slice(-500);
     await storage.set(BG_FALLBACK_LOCATIONS_KEY, JSON.stringify(capped));
-    console.log(`[LocationTracking] BG fallback: saved ${locations.length} locations to AsyncStorage (total: ${capped.length})`);
+    console.log(
+      `[LocationTracking] BG fallback: saved ${locations.length} locations to AsyncStorage (total: ${capped.length})`,
+    );
   } catch (err) {
     console.error('[LocationTracking] BG fallback save failed:', err);
   }
@@ -280,7 +279,9 @@ export async function recoverFallbackLocations(): Promise<number> {
     }
 
     await storage.delete(BG_FALLBACK_LOCATIONS_KEY);
-    console.log(`[LocationTracking] Recovered ${inserted}/${locations.length} fallback locations from AsyncStorage to SQLite`);
+    console.log(
+      `[LocationTracking] Recovered ${inserted}/${locations.length} fallback locations from AsyncStorage to SQLite`,
+    );
     return inserted;
   } catch (err) {
     console.error('[LocationTracking] Fallback recovery failed:', err);
@@ -346,9 +347,11 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     return;
   }
 
-  const accuracies = locations.map(l => l.coords.accuracy?.toFixed(0) ?? '?').join(',');
-  const ages = locations.map(l => ((taskStartTime - l.timestamp) / 1000).toFixed(0) + 's').join(',');
-  console.log(`[LocationTracking] BG task: ${locations.length} location(s) received, accuracy=[${accuracies}], ages=[${ages}]`);
+  const accuracies = locations.map((l) => l.coords.accuracy?.toFixed(0) ?? '?').join(',');
+  const ages = locations.map((l) => ((taskStartTime - l.timestamp) / 1000).toFixed(0) + 's').join(',');
+  console.log(
+    `[LocationTracking] BG task: ${locations.length} location(s) received, accuracy=[${accuracies}], ages=[${ages}]`,
+  );
 
   // Step 3: Try to get last point from SQLite (may fail in headless context)
   let lastPoint: { latitude: number; longitude: number; recordedAt: number } | null = null;
@@ -358,7 +361,10 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     console.log(`[LocationTracking] BG task: SQLite available, lastPoint=${lastPoint ? 'yes' : 'none'}`);
   } catch (dbErr) {
     sqliteAvailable = false;
-    console.warn('[LocationTracking] BG task: SQLite NOT available in background:', dbErr instanceof Error ? dbErr.message : dbErr);
+    console.warn(
+      '[LocationTracking] BG task: SQLite NOT available in background:',
+      dbErr instanceof Error ? dbErr.message : dbErr,
+    );
     trackBGTaskError({ step: 'sqlite_init', error: dbErr instanceof Error ? dbErr.message : String(dbErr) });
   }
 
@@ -379,7 +385,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   } catch {
     // Non-critical
   }
-  const needsHeartbeat = (now - lastHeartbeat) >= HEARTBEAT_INTERVAL_MS;
+  const needsHeartbeat = now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS;
 
   let addedCount = 0;
   let rejectedAccuracy = 0;
@@ -417,10 +423,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     // Reject truly stale cached locations: same coordinates AND old
     const locationAge = now - loc.timestamp;
     if (prevLat !== null && prevLng !== null && locationAge > 60_000) {
-      const distFromPrev = calculateDistance(
-        prevLat, prevLng,
-        loc.coords.latitude, loc.coords.longitude
-      );
+      const distFromPrev = calculateDistance(prevLat, prevLng, loc.coords.latitude, loc.coords.longitude);
       if (distFromPrev < 1) {
         rejectedStale++;
         continue;
@@ -429,13 +432,17 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
     let distance = Infinity;
     if (prevLat !== null && prevLng !== null) {
-      distance = calculateDistance(
-        prevLat, prevLng,
-        loc.coords.latitude, loc.coords.longitude
-      );
+      distance = calculateDistance(prevLat, prevLng, loc.coords.latitude, loc.coords.longitude);
     }
 
-    const timeSincePrev = prevTimestamp > 0 ? (loc.timestamp - prevTimestamp) : Infinity;
+    const timeSincePrev = prevTimestamp > 0 ? loc.timestamp - prevTimestamp : Infinity;
+
+    // Hard floor: never save more often than MIN_TIME_BETWEEN_SAVES_MS
+    if (timeSincePrev < MIN_TIME_BETWEEN_SAVES_MS) {
+      rejectedDistance++;
+      continue;
+    }
+
     const enoughDistance = distance >= MIN_DISTANCE_BETWEEN_POINTS;
     const enoughTime = timeSincePrev >= TRACKING_INTERVAL_MS;
     const isHeartbeat = needsHeartbeat && !savedHeartbeat;
@@ -473,7 +480,9 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     }
   }
 
-  console.log(`[LocationTracking] BG task: filtered ${addedCount}/${locations.length} to save (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance, ${rejectedStale} stale${savedHeartbeat ? ', +heartbeat' : ''})`);
+  console.log(
+    `[LocationTracking] BG task: filtered ${addedCount}/${locations.length} to save (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance, ${rejectedStale} stale${savedHeartbeat ? ', +heartbeat' : ''})`,
+  );
 
   // Step 5: Save to SQLite (primary) or AsyncStorage (fallback)
   let usedFallback = false;
@@ -485,8 +494,14 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         }
         console.log(`[LocationTracking] BG task: saved ${locationsToSave.length} to SQLite`);
       } catch (sqliteErr) {
-        console.error('[LocationTracking] BG task: SQLite insert failed, falling back to AsyncStorage:', sqliteErr instanceof Error ? sqliteErr.message : sqliteErr);
-        trackBGTaskError({ step: 'sqlite_insert', error: sqliteErr instanceof Error ? sqliteErr.message : String(sqliteErr) });
+        console.error(
+          '[LocationTracking] BG task: SQLite insert failed, falling back to AsyncStorage:',
+          sqliteErr instanceof Error ? sqliteErr.message : sqliteErr,
+        );
+        trackBGTaskError({
+          step: 'sqlite_insert',
+          error: sqliteErr instanceof Error ? sqliteErr.message : String(sqliteErr),
+        });
         usedFallback = true;
         await saveFallbackLocations(locationsToSave);
       }
@@ -522,8 +537,19 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         syncSuccess = true;
         syncCount = result.inserted;
 
-        await markAsSynced(unsynced.map((r) => r.id));
-        console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
+        if (result.inserted > 0) {
+          // Only mark synced if the server actually accepted points.
+          // If inserted === 0, the server rejected everything (org mismatch,
+          // driver deleted, etc.) — retaining as unsynced lets us retry later
+          // or investigate why points are rejected.
+          await markAsSynced(unsynced.map((r) => r.id));
+          console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
+        } else {
+          console.warn(
+            `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
+          );
+          trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+        }
       }
     } catch (flushError) {
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
@@ -579,7 +605,7 @@ export async function startLocationTracking(params: {
     if (isExpoGo) {
       console.warn('[LocationTracking] Running in Expo Go - background location not supported');
       console.warn('[LocationTracking] Please use a development build for background tracking');
-      
+
       const state: TrackingState = {
         isActive: true,
         driverId: params.driverId as string,
@@ -589,16 +615,16 @@ export async function startLocationTracking(params: {
         startedAt: Date.now(),
       };
       await storage.set(TRACKING_STATE_KEY, JSON.stringify(state));
-      
+
       // Capture initial location
       await captureCurrentLocation(state);
-      
+
       // Start foreground-only polling as fallback
       startForegroundPolling(params.organizationId);
-      
-      return { 
-        success: true, 
-        message: 'Tracking started (foreground only in Expo Go)' 
+
+      return {
+        success: true,
+        message: 'Tracking started (foreground only in Expo Go)',
       };
     }
 
@@ -625,7 +651,10 @@ export async function startLocationTracking(params: {
     const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
     console.log('[LocationTracking] Background permission status:', bgStatus);
     if (bgStatus !== 'granted') {
-      return { success: false, message: 'Background location permission required. Please enable "Always" location access in Settings.' };
+      return {
+        success: false,
+        message: 'Background location permission required. Please enable "Always" location access in Settings.',
+      };
     }
 
     // Save tracking state
@@ -648,7 +677,7 @@ export async function startLocationTracking(params: {
     try {
       console.log('[LocationTracking] Starting background location updates...');
       await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-        accuracy: Location.Accuracy.BestForNavigation,
+        accuracy: Location.Accuracy.High,
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
         showsBackgroundLocationIndicator: true,
@@ -719,7 +748,9 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
         await syncUnsyncedToConvex(state.organizationId);
       } catch (err) {
         const unsyncedRemaining = await getUnsyncedCount();
-        console.warn(`[LocationTracking] Final sync incomplete, ${unsyncedRemaining} points retained in SQLite for later upload`);
+        console.warn(
+          `[LocationTracking] Final sync incomplete, ${unsyncedRemaining} points retained in SQLite for later upload`,
+        );
       }
     }
 
@@ -832,14 +863,14 @@ export async function forceFlush(): Promise<{ success: boolean; synced: number }
  * Resume tracking after app restart
  * Call this on app startup to restore tracking if it was active
  */
-export async function resumeTracking(): Promise<{ 
-  resumed: boolean; 
+export async function resumeTracking(): Promise<{
+  resumed: boolean;
   message: string;
   state?: TrackingState;
 }> {
   try {
     const state = await getTrackingState();
-    
+
     if (!state?.isActive) {
       console.log('[LocationTracking] No active tracking to resume');
       return { resumed: false, message: 'No active tracking session' };
@@ -857,30 +888,38 @@ export async function resumeTracking(): Promise<{
     // Restart sync interval
     startSyncInterval(state.organizationId);
 
-    // Only start the background task if it's not already registered.
-    // Avoid stop/restart cycle which creates a gap in tracking.
+    // Always force-cycle the background task on app resume.
+    // We no longer trust isTaskRegisteredAsync() — after OTA updates or
+    // phone restarts the native registration persists but the JS callback
+    // is stale (zombie). Force-cycling is the only reliable fix.
     if (!isExpoGo && isPhysicalDevice) {
       try {
         const isRegistered = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
-        if (!isRegistered) {
-          console.log('[LocationTracking] BG task not registered, starting on resume...');
-          await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-            accuracy: Location.Accuracy.BestForNavigation,
-            timeInterval: TRACKING_INTERVAL_MS,
-            distanceInterval: BG_DISTANCE_INTERVAL,
-            showsBackgroundLocationIndicator: true,
-            foregroundService: {
-              notificationTitle: 'Route Tracking Active',
-              notificationBody: 'Recording your delivery route',
-              notificationColor: '#22c55e',
-            },
-            activityType: Location.ActivityType.OtherNavigation,
-            pausesUpdatesAutomatically: false,
-          });
-          console.log('[LocationTracking] Background task registered on resume');
-        } else {
-          console.log('[LocationTracking] BG task already registered on resume, skipping');
+
+        if (isRegistered) {
+          console.log('[LocationTracking] Resume: force-cycling BG task to reconnect JS callback');
+          try {
+            await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+          } catch {
+            /* ok if native side already cleaned up */
+          }
         }
+
+        console.log('[LocationTracking] Resume: (re-)starting BG location task...');
+        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+          accuracy: Location.Accuracy.High,
+          timeInterval: TRACKING_INTERVAL_MS,
+          distanceInterval: BG_DISTANCE_INTERVAL,
+          showsBackgroundLocationIndicator: true,
+          foregroundService: {
+            notificationTitle: 'Route Tracking Active',
+            notificationBody: 'Recording your delivery route',
+            notificationColor: '#22c55e',
+          },
+          activityType: Location.ActivityType.OtherNavigation,
+          pausesUpdatesAutomatically: false,
+        });
+        console.log(`[LocationTracking] BG task registered on resume (wasRegistered=${isRegistered})`);
       } catch (bgError) {
         console.warn('[LocationTracking] Could not start background tracking:', bgError);
       }
@@ -899,10 +938,10 @@ export async function resumeTracking(): Promise<{
     }
 
     console.log('[LocationTracking] Tracking resumed successfully');
-    return { 
-      resumed: true, 
+    return {
+      resumed: true,
       message: `Tracking resumed for load ${state.loadId}`,
-      state 
+      state,
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Failed to resume tracking';
@@ -959,12 +998,13 @@ async function startForegroundPolling(organizationId: string) {
   try {
     foregroundWatchSubscription = await Location.watchPositionAsync(
       {
-        accuracy: Location.Accuracy.BestForNavigation,
-        // Get frequent fixes from the OS; our callback does its own
-        // time/distance filtering (TRACKING_INTERVAL_MS / MIN_DISTANCE_BETWEEN_POINTS).
-        // Setting these low ensures we don't miss a point that passes our filter.
-        distanceInterval: 10,
-        timeInterval: 30_000,
+        accuracy: Location.Accuracy.High,
+        // Let the OS pre-filter — only wake us every 50 m / 10 s.
+        // Our callback applies stricter gates (250 m / 30 s) so we
+        // still get reliable coverage without burning battery on
+        // callbacks we'll just discard.
+        distanceInterval: 50,
+        timeInterval: 10_000,
       },
       async (location) => {
         try {
@@ -987,12 +1027,17 @@ async function startForegroundPolling(organizationId: string) {
               lastForegroundLocation.latitude,
               lastForegroundLocation.longitude,
               location.coords.latitude,
-              location.coords.longitude
+              location.coords.longitude,
             );
           }
 
-          // Save if EITHER enough time has passed OR enough distance covered.
-          // Also save heartbeat every 5 min even if stationary.
+          // Hard floor: never save more often than MIN_TIME_BETWEEN_SAVES_MS
+          // regardless of distance. Prevents flooding at highway speeds.
+          if (timeSinceLast < MIN_TIME_BETWEEN_SAVES_MS) {
+            return;
+          }
+
+          // After the hard floor, save if enough distance OR enough time OR heartbeat.
           const enoughTime = timeSinceLast >= TRACKING_INTERVAL_MS;
           const enoughDistance = distance >= MIN_DISTANCE_BETWEEN_POINTS;
           const needsHeartbeat = timeSinceLast >= HEARTBEAT_INTERVAL_MS;
@@ -1020,7 +1065,9 @@ async function startForegroundPolling(organizationId: string) {
           };
 
           const reason = enoughDistance ? 'distance' : enoughTime ? 'time' : 'heartbeat';
-          console.log(`[LocationTracking] Watch: saved (acc=${location.coords.accuracy?.toFixed(0)}m, dist=${distance.toFixed(0)}m, gap=${(timeSinceLast / 1000).toFixed(0)}s, reason=${reason})`);
+          console.log(
+            `[LocationTracking] Watch: saved (acc=${location.coords.accuracy?.toFixed(0)}m, dist=${distance.toFixed(0)}m, gap=${(timeSinceLast / 1000).toFixed(0)}s, reason=${reason})`,
+          );
 
           // Sync immediately -- we're in the foreground with valid auth.
           if (!isSyncing) {
@@ -1028,7 +1075,10 @@ async function startForegroundPolling(organizationId: string) {
             try {
               await syncUnsyncedToConvex(organizationId);
             } catch (syncErr) {
-              console.warn('[LocationTracking] Watch: sync failed, will retry:', syncErr instanceof Error ? syncErr.message : syncErr);
+              console.warn(
+                '[LocationTracking] Watch: sync failed, will retry:',
+                syncErr instanceof Error ? syncErr.message : syncErr,
+              );
             } finally {
               isSyncing = false;
             }
@@ -1036,7 +1086,7 @@ async function startForegroundPolling(organizationId: string) {
         } catch (error) {
           console.error('[LocationTracking] Watch callback error:', error);
         }
-      }
+      },
     );
 
     console.log('[LocationTracking] Foreground watch started successfully');
@@ -1076,7 +1126,9 @@ async function captureCurrentLocation(state: TrackingState) {
       recordedAt: location.timestamp,
     });
 
-    console.log(`[LocationTracking] Captured initial location to SQLite (rowId=${rowId}, accuracy=${location.coords.accuracy?.toFixed(0)}m, lat=${location.coords.latitude.toFixed(5)}, lng=${location.coords.longitude.toFixed(5)})`);
+    console.log(
+      `[LocationTracking] Captured initial location to SQLite (rowId=${rowId}, accuracy=${location.coords.accuracy?.toFixed(0)}m, lat=${location.coords.latitude.toFixed(5)}, lng=${location.coords.longitude.toFixed(5)})`,
+    );
 
     // Seed the foreground watch state so it doesn't immediately save a duplicate
     lastForegroundLocation = {
@@ -1089,7 +1141,10 @@ async function captureCurrentLocation(state: TrackingState) {
     try {
       await syncUnsyncedToConvex(state.organizationId);
     } catch (syncErr) {
-      console.warn('[LocationTracking] Immediate sync of initial point failed (will retry later):', syncErr instanceof Error ? syncErr.message : syncErr);
+      console.warn(
+        '[LocationTracking] Immediate sync of initial point failed (will retry later):',
+        syncErr instanceof Error ? syncErr.message : syncErr,
+      );
     }
   } catch (error) {
     console.error('[LocationTracking] Failed to capture initial location:', error);
@@ -1104,7 +1159,7 @@ async function captureCurrentLocation(state: TrackingState) {
  */
 async function syncUnsyncedToConvex(
   organizationId: string,
-  retryAttempt = 0
+  retryAttempt = 0,
 ): Promise<{ success: boolean; synced: number }> {
   const MAX_AUTH_RETRIES = 2;
   const AUTH_RETRY_DELAYS = [1000, 3000];
@@ -1115,7 +1170,9 @@ async function syncUnsyncedToConvex(
       return { success: true, synced: 0 };
     }
 
-    console.log(`[LocationTracking] Syncing ${unsynced.length} unsynced points to Convex (orgId=${organizationId.substring(0, 12)}..., attempt=${retryAttempt})`);
+    console.log(
+      `[LocationTracking] Syncing ${unsynced.length} unsynced points to Convex (orgId=${organizationId.substring(0, 12)}..., attempt=${retryAttempt})`,
+    );
 
     const locations = unsynced.map((loc) => ({
       driverId: loc.driverId as Id<'drivers'>,
@@ -1129,18 +1186,30 @@ async function syncUnsyncedToConvex(
       recordedAt: loc.recordedAt,
     }));
 
-    const result = await authedMutation<{ inserted: number }>(
-      api.driverLocations.batchInsertLocations,
-      { locations, organizationId }
-    );
+    const result = await authedMutation<{ inserted: number }>(api.driverLocations.batchInsertLocations, {
+      locations,
+      organizationId,
+    });
 
     const syncedIds = unsynced.map((r) => r.id);
-    await markAsSynced(syncedIds);
 
-    console.log(`[LocationTracking] Synced ${result.inserted} locations, marked ${syncedIds.length} rows`);
+    if (result.inserted > 0) {
+      // Only mark synced if the server actually accepted some/all points.
+      // This prevents permanent data loss when the server rejects everything
+      // (e.g. org mismatch, deleted driver, missing load).
+      await markAsSynced(syncedIds);
+      console.log(`[LocationTracking] Synced ${result.inserted} locations, marked ${syncedIds.length} rows`);
 
-    if (result.inserted < syncedIds.length) {
-      console.warn(`[LocationTracking] Server accepted ${result.inserted}/${syncedIds.length} — some points may have been rejected (org mismatch or invalid driver/load)`);
+      if (result.inserted < syncedIds.length) {
+        console.warn(
+          `[LocationTracking] Server accepted ${result.inserted}/${syncedIds.length} — some points may have been rejected (org mismatch or invalid driver/load)`,
+        );
+      }
+    } else {
+      console.warn(
+        `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — NOT marking synced, will retry`,
+      );
+      trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
     }
 
     const remaining = await getUnsyncedCount();
@@ -1153,17 +1222,22 @@ async function syncUnsyncedToConvex(
     return { success: true, synced: result.inserted };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    const isAuthError = errorMsg.includes('Not authenticated') || errorMsg.includes('auth') || errorMsg.includes('Unauthenticated');
+    const isAuthError =
+      errorMsg.includes('Not authenticated') || errorMsg.includes('auth') || errorMsg.includes('Unauthenticated');
 
     if (isAuthError && retryAttempt < MAX_AUTH_RETRIES) {
       const delay = AUTH_RETRY_DELAYS[retryAttempt] ?? 12000;
-      console.warn(`[LocationTracking] Sync auth failed (attempt ${retryAttempt + 1}/${MAX_AUTH_RETRIES}), retrying in ${delay / 1000}s... (SQLite data safe)`);
+      console.warn(
+        `[LocationTracking] Sync auth failed (attempt ${retryAttempt + 1}/${MAX_AUTH_RETRIES}), retrying in ${delay / 1000}s... (SQLite data safe)`,
+      );
       await new Promise((r) => setTimeout(r, delay));
       return syncUnsyncedToConvex(organizationId, retryAttempt + 1);
     }
 
     const remaining = await getUnsyncedCount();
-    console.error(`[LocationTracking] Sync failed (attempt ${retryAttempt + 1}): ${errorMsg} — ${remaining} points retained in SQLite for later`);
+    console.error(
+      `[LocationTracking] Sync failed (attempt ${retryAttempt + 1}): ${errorMsg} — ${remaining} points retained in SQLite for later`,
+    );
     return { success: false, synced: 0 };
   }
 }
@@ -1238,45 +1312,91 @@ export async function restartForegroundServices(): Promise<void> {
     platform: Platform.OS,
   });
 
-  // Only re-register the background task if it's NOT already running.
-  // Stopping and restarting on every foreground return creates a gap where
-  // no background tracking is active -- iOS may not restart it in time if
-  // the user quickly switches back to another app (e.g., navigation).
+  // Re-register the background task.
+  // We ALWAYS force-cycle on foreground return now. The previous approach
+  // of skipping re-register when "already_registered" caused silent GPS
+  // loss: the native task registration persists across OTA updates and
+  // phone restarts, but the JS callback becomes stale. isTaskRegisteredAsync()
+  // returns true, yet the JS callback never fires.
+  //
+  // Force-cycling is safe: there's a brief gap (~1-2s) during stop+start,
+  // but that's far better than the task being permanently dead. The
+  // foreground watch covers the gap anyway.
+
   if (!isExpoGo && isPhysicalDevice) {
     let wasRegistered = false;
     try {
       wasRegistered = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
-      console.log(`[LocationTracking] BG task isRegistered=${wasRegistered}`);
-      
-      if (!wasRegistered) {
-        console.log('[LocationTracking] BG task not registered, starting...');
-        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-          accuracy: Location.Accuracy.BestForNavigation,
-          timeInterval: TRACKING_INTERVAL_MS,
-          distanceInterval: BG_DISTANCE_INTERVAL,
-          showsBackgroundLocationIndicator: true,
-          foregroundService: {
-            notificationTitle: 'Route Tracking Active',
-            notificationBody: 'Recording your delivery route',
-            notificationColor: '#22c55e',
-          },
-          activityType: Location.ActivityType.OtherNavigation,
-          pausesUpdatesAutomatically: false,
-        });
-        console.log('[LocationTracking] Background task registered on foreground return');
-        trackBGTaskReregistered({ source: 'foreground_return', wasRegistered, success: true });
-      } else {
-        console.log('[LocationTracking] BG task already registered, skipping re-register');
-        trackBGTaskReregistered({ source: 'foreground_return', wasRegistered, success: true, error: 'already_registered' });
+
+      // Classify the task health for diagnostics
+      const isZombie = wasRegistered && bgTaskLastAliveAgoSec !== null && bgTaskLastAliveAgoSec > 5 * 60; // > 5 min = definitely zombie
+      const isSuspect = wasRegistered && bgTaskLastAliveAgoSec !== null && bgTaskLastAliveAgoSec > 3 * 60; // > 3 min = likely zombie (should fire every ~30s-2min)
+      const neverFired = wasRegistered && (bgTaskLastAliveAgoSec === null || bgTaskLastAliveAgoSec === 0);
+
+      const healthStatus = isZombie ? 'zombie' : isSuspect ? 'suspect' : neverFired ? 'never_fired' : 'alive';
+
+      console.log(
+        `[LocationTracking] BG task isRegistered=${wasRegistered}, ` +
+          `lastAliveAgo=${bgTaskLastAliveAgoSec}s, health=${healthStatus}`,
+      );
+
+      // Always stop first if registered — ensures native layer reconnects to current JS callback
+      if (wasRegistered) {
+        console.log(`[LocationTracking] Force-cycling BG task (health=${healthStatus})...`);
+        try {
+          await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+        } catch {
+          // May fail if native side already cleaned up -- that's fine
+        }
       }
+
+      // (Re-)register the background task
+      console.log('[LocationTracking] (Re-)starting BG location task...');
+      await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+        accuracy: Location.Accuracy.High,
+        timeInterval: TRACKING_INTERVAL_MS,
+        distanceInterval: BG_DISTANCE_INTERVAL,
+        showsBackgroundLocationIndicator: true,
+        foregroundService: {
+          notificationTitle: 'Route Tracking Active',
+          notificationBody: 'Recording your delivery route',
+          notificationColor: '#22c55e',
+        },
+        activityType: Location.ActivityType.OtherNavigation,
+        pausesUpdatesAutomatically: false,
+      });
+
+      const reason = !wasRegistered
+        ? 'not_registered'
+        : isZombie
+          ? 'zombie_recycled'
+          : isSuspect
+            ? 'suspect_recycled'
+            : neverFired
+              ? 'never_fired_recycled'
+              : 'force_cycled';
+      console.log(`[LocationTracking] BG task registered on foreground return (${reason})`);
+      trackBGTaskReregistered({
+        source: 'foreground_return',
+        wasRegistered,
+        success: true,
+        error: reason === 'force_cycled' ? undefined : reason,
+      });
     } catch (bgErr) {
       const errMsg = bgErr instanceof Error ? bgErr.message : String(bgErr);
       console.warn('[LocationTracking] Failed to register background task:', errMsg);
       trackBGTaskReregistered({ source: 'foreground_return', wasRegistered, success: false, error: errMsg });
     }
   } else {
-    console.log(`[LocationTracking] Skipping BG re-register: isExpoGo=${isExpoGo}, isPhysicalDevice=${isPhysicalDevice}`);
-    trackBGTaskReregistered({ source: 'foreground_return', wasRegistered: false, success: false, error: `skipped: isExpoGo=${isExpoGo}, isPhysicalDevice=${isPhysicalDevice}` });
+    console.log(
+      `[LocationTracking] Skipping BG re-register: isExpoGo=${isExpoGo}, isPhysicalDevice=${isPhysicalDevice}`,
+    );
+    trackBGTaskReregistered({
+      source: 'foreground_return',
+      wasRegistered: false,
+      success: false,
+      error: `skipped: isExpoGo=${isExpoGo}, isPhysicalDevice=${isPhysicalDevice}`,
+    });
   }
 
   startSyncInterval(state.organizationId);

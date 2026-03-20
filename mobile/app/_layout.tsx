@@ -2,7 +2,7 @@
 import '../lib/polyfills';
 
 import React, { useEffect } from 'react';
-import { View, Text, ScrollView, StyleSheet } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, AppState } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ClerkProvider, ClerkLoaded } from '@clerk/clerk-expo';
@@ -22,7 +22,7 @@ import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
 import { uploadPODPhoto } from '../lib/s3-upload';
 import { LanguageProvider } from '../lib/LanguageContext';
-import { setPostHogClient, trackErrorBoundary, trackOtaUpdateCheck } from '../lib/analytics';
+import { setPostHogClient, trackErrorBoundary, trackOtaUpdateCheck, getAppVersionContext } from '../lib/analytics';
 
 // ============================================
 // ERROR BOUNDARY
@@ -34,10 +34,7 @@ interface ErrorBoundaryState {
   error: Error | null;
 }
 
-class ErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  ErrorBoundaryState
-> {
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, ErrorBoundaryState> {
   constructor(props: { children: React.ReactNode }) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -48,10 +45,7 @@ class ErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    trackErrorBoundary(
-      error.message || 'Unknown error',
-      errorInfo.componentStack ?? undefined,
-    );
+    trackErrorBoundary(error.message || 'Unknown error', errorInfo.componentStack ?? undefined);
   }
 
   render() {
@@ -60,12 +54,8 @@ class ErrorBoundary extends React.Component<
         <View style={errorStyles.container}>
           <ScrollView contentContainerStyle={errorStyles.scroll}>
             <Text style={errorStyles.title}>App Crashed</Text>
-            <Text style={errorStyles.message}>
-              {this.state.error?.message || 'Unknown error'}
-            </Text>
-            <Text style={errorStyles.stack}>
-              {this.state.error?.stack || ''}
-            </Text>
+            <Text style={errorStyles.message}>{this.state.error?.message || 'Unknown error'}</Text>
+            <Text style={errorStyles.stack}>{this.state.error?.stack || ''}</Text>
           </ScrollView>
         </View>
       );
@@ -115,18 +105,19 @@ const tokenCache = {
 // Registers the PostHog client with the analytics module so non-hook code can track events
 function PostHogInit() {
   const posthog = usePostHog();
-  
+
   useEffect(() => {
     if (posthog) {
       setPostHogClient(posthog);
       posthog.capture('app_started', {
         timestamp: new Date().toISOString(),
         platform: 'react-native',
+        ...getAppVersionContext(),
       });
       posthog.flush();
     }
   }, [posthog]);
-  
+
   return null;
 }
 
@@ -225,7 +216,8 @@ export default function RootLayout() {
 
   useEffect(() => {
     let cancelled = false;
-    async function checkForOTAUpdate() {
+
+    async function checkForOTAUpdate(trigger: 'mount' | 'foreground') {
       if (__DEV__) return;
       try {
         if (!Updates.isEnabled) return;
@@ -235,6 +227,7 @@ export default function RootLayout() {
           trackOtaUpdateCheck('available');
           await Updates.fetchUpdateAsync();
           if (cancelled) return;
+          // Reload immediately — applies the new JS bundle
           await Updates.reloadAsync();
         } else {
           trackOtaUpdateCheck('none');
@@ -243,11 +236,26 @@ export default function RootLayout() {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
         trackOtaUpdateCheck('error', msg);
-        console.log('OTA update check failed:', e);
+        console.log(`OTA update check failed (${trigger}):`, e);
       }
     }
-    checkForOTAUpdate();
-    return () => { cancelled = true; };
+
+    // Check on mount
+    checkForOTAUpdate('mount');
+
+    // Also re-check every time the app returns to the foreground.
+    // This ensures critical fixes (like GPS/SQLite patches) are applied
+    // without the driver having to manually kill the app.
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        checkForOTAUpdate('foreground');
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
   }, []);
 
   return (
@@ -255,58 +263,57 @@ export default function RootLayout() {
       <GestureHandlerRootView style={{ flex: 1 }}>
         <SafeAreaProvider>
           <LanguageProvider>
-          <PostHogProvider 
-            apiKey={process.env.EXPO_PUBLIC_POSTHOG_KEY || 'phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X'}
-            options={{
-              host: process.env.EXPO_PUBLIC_POSTHOG_HOST || 'https://us.i.posthog.com',
-              enableSessionReplay: true,
-              sessionReplayConfig: {
-                maskAllTextInputs: true,
-                maskAllImages: true,
-                captureLog: true,
-                captureNetworkTelemetry: true,
-                throttleDelayMs: 1000,
-              },
-              flushAt: 1,
-              flushInterval: 1000,
-            }}
-          >
-            <PostHogInit />
-            <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
-              <ClerkLoaded>
-                <ConvexProvider client={convex}>
-                  <ConvexAuthProvider>
-                    <QueryClientProvider client={queryClient}>
-                      <ConvexInitializer>
-                        <Stack
-                          screenOptions={{
-                            headerStyle: {
-                              backgroundColor: '#1a1a2e',
-                            },
-                            headerTintColor: '#fff',
-                            headerTitleStyle: {
-                              fontWeight: 'bold',
-                            },
-                            contentStyle: {
-                              backgroundColor: '#16213e',
-                            },
-                          }}
-                        >
-                          <Stack.Screen name="(auth)" options={{ headerShown: false }} />
-                          <Stack.Screen name="(app)" options={{ headerShown: false }} />
-                        </Stack>
-                        <StatusBar style="light" />
-                      </ConvexInitializer>
-                    </QueryClientProvider>
-                  </ConvexAuthProvider>
-                </ConvexProvider>
-              </ClerkLoaded>
-            </ClerkProvider>
-          </PostHogProvider>
+            <PostHogProvider
+              apiKey={process.env.EXPO_PUBLIC_POSTHOG_KEY || 'phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X'}
+              options={{
+                host: process.env.EXPO_PUBLIC_POSTHOG_HOST || 'https://us.i.posthog.com',
+                enableSessionReplay: true,
+                sessionReplayConfig: {
+                  maskAllTextInputs: true,
+                  maskAllImages: true,
+                  captureLog: true,
+                  captureNetworkTelemetry: true,
+                  throttleDelayMs: 1000,
+                },
+                flushAt: 1,
+                flushInterval: 1000,
+              }}
+            >
+              <PostHogInit />
+              <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
+                <ClerkLoaded>
+                  <ConvexProvider client={convex}>
+                    <ConvexAuthProvider>
+                      <QueryClientProvider client={queryClient}>
+                        <ConvexInitializer>
+                          <Stack
+                            screenOptions={{
+                              headerStyle: {
+                                backgroundColor: '#1a1a2e',
+                              },
+                              headerTintColor: '#fff',
+                              headerTitleStyle: {
+                                fontWeight: 'bold',
+                              },
+                              contentStyle: {
+                                backgroundColor: '#16213e',
+                              },
+                            }}
+                          >
+                            <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+                            <Stack.Screen name="(app)" options={{ headerShown: false }} />
+                          </Stack>
+                          <StatusBar style="light" />
+                        </ConvexInitializer>
+                      </QueryClientProvider>
+                    </ConvexAuthProvider>
+                  </ConvexProvider>
+                </ClerkLoaded>
+              </ClerkProvider>
+            </PostHogProvider>
           </LanguageProvider>
         </SafeAreaProvider>
       </GestureHandlerRootView>
     </ErrorBoundary>
   );
 }
-

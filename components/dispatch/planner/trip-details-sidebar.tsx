@@ -40,7 +40,7 @@ import {
 interface StopType {
   _id: string;
   sequenceNumber: number;
-  stopType: 'PICKUP' | 'DELIVERY';
+  stopType: 'PICKUP' | 'DELIVERY' | 'DETOUR';
   status?: 'Pending' | 'In Transit' | 'Completed' | 'Delayed' | 'Canceled';
   city?: string;
   state?: string;

@@ -208,8 +208,8 @@ export const getMyAssignedLoads = query({
         v.object({
           city: v.optional(v.string()),
           state: v.optional(v.string()),
-          windowBeginDate: v.string(),
-          windowBeginTime: v.string(),
+          windowBeginDate: v.optional(v.string()),
+          windowBeginTime: v.optional(v.string()),
         })
       ),
       // Last delivery info
@@ -217,8 +217,8 @@ export const getMyAssignedLoads = query({
         v.object({
           city: v.optional(v.string()),
           state: v.optional(v.string()),
-          windowBeginDate: v.string(),
-          windowEndTime: v.string(),
+          windowBeginDate: v.optional(v.string()),
+          windowEndTime: v.optional(v.string()),
         })
       ),
     })
@@ -439,16 +439,20 @@ export const getLoadWithStops = query({
           longitude: v.optional(v.number()),
           referenceName: v.optional(v.string()),
           referenceValue: v.optional(v.string()),
-          windowBeginDate: v.string(),
-          windowBeginTime: v.string(),
-          windowEndDate: v.string(),
-          windowEndTime: v.string(),
-          commodityDescription: v.string(),
-          pieces: v.number(),
+          windowBeginDate: v.optional(v.string()),
+          windowBeginTime: v.optional(v.string()),
+          windowEndDate: v.optional(v.string()),
+          windowEndTime: v.optional(v.string()),
+          commodityDescription: v.optional(v.string()),
+          pieces: v.optional(v.number()),
           weight: v.optional(v.number()),
           instructions: v.optional(v.string()),
           checkedInAt: v.optional(v.string()),
           checkedOutAt: v.optional(v.string()),
+          // Detour fields
+          isDetour: v.optional(v.boolean()),
+          detourReason: v.optional(v.string()),
+          detourNotes: v.optional(v.string()),
         })
       ),
     }),
@@ -544,6 +548,10 @@ export const getLoadWithStops = query({
         instructions: stop.instructions,
         checkedInAt: stop.checkedInAt,
         checkedOutAt: stop.checkedOutAt,
+        // Detour fields
+        isDetour: stop.isDetour,
+        detourReason: stop.detourReason,
+        detourNotes: stop.detourNotes,
       })),
     };
   },
@@ -1155,6 +1163,168 @@ export const getTruckForSwitch = query({
       status: truck.status,
       canSwitch,
       reason,
+    };
+  },
+});
+
+// ============================================
+// DETOUR STOPS
+// ============================================
+
+/**
+ * Add detour stops to a load.
+ * Driver-initiated — creates DETOUR stop(s) in the loadStops table
+ * at the current GPS location. Stops are inserted after the current
+ * active stop (or appended at the end).
+ */
+export const addDetourStops = mutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    driverId: v.id('drivers'),
+    numberOfStops: v.number(),
+    reason: v.union(
+      v.literal('FUEL'),
+      v.literal('REST'),
+      v.literal('FOOD'),
+      v.literal('SCALE'),
+      v.literal('REPAIR'),
+      v.literal('REDIRECT'),
+      v.literal('CUSTOMER'),
+      v.literal('OTHER'),
+    ),
+    notes: v.optional(v.string()),
+    // Driver's current GPS position (used as the detour location)
+    latitude: v.number(),
+    longitude: v.number(),
+    // Driver's device timestamp
+    driverTimestamp: v.string(), // ISO 8601
+  },
+  returns: v.object({
+    success: v.boolean(),
+    message: v.string(),
+    stopIds: v.optional(v.array(v.id('loadStops'))),
+  }),
+  handler: async (ctx, args) => {
+    // 1. Auth check
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return { success: false, message: 'Not authenticated' };
+    }
+    if (!isDriverToken(identity as any)) {
+      return { success: false, message: 'Invalid token type for driver operations' };
+    }
+
+    // 2. Verify driver
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.isDeleted) {
+      return { success: false, message: 'Driver not found' };
+    }
+
+    // 3. Verify load and driver access
+    const load = await ctx.db.get(args.loadId);
+    if (!load) {
+      return { success: false, message: 'Load not found' };
+    }
+
+    let hasAccess = load.primaryDriverId === args.driverId;
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .first();
+      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+        hasAccess = true;
+      }
+    }
+    if (!hasAccess) {
+      return { success: false, message: 'Not authorized for this load' };
+    }
+
+    // 4. Get existing stops to determine insertion point
+    const existingStops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    existingStops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+
+    // Find the current active stop (checked in but not checked out),
+    // or the last completed stop, to insert detours after
+    const activeStop = existingStops.find(
+      (s) => s.checkedInAt && !s.checkedOutAt && s.stopType !== 'DETOUR'
+    );
+    const lastCompletedStop = [...existingStops]
+      .reverse()
+      .find((s) => s.status === 'Completed');
+
+    const afterStop = activeStop || lastCompletedStop || existingStops[existingStops.length - 1];
+    const afterStopId = afterStop?._id;
+
+    // Calculate the sequence number for new detour stops.
+    // Use fractional sequences (e.g., 1.1, 1.2) to avoid renumbering existing stops.
+    const baseSequence = afterStop ? afterStop.sequenceNumber : existingStops.length;
+
+    const now = Date.now();
+    const driverUserId = identity.subject; // Clerk user ID
+    const stopIds: Id<'loadStops'>[] = [];
+
+    const reasonLabels: Record<string, string> = {
+      FUEL: 'Fuel Stop',
+      REST: 'Rest Stop',
+      FOOD: 'Food Stop',
+      SCALE: 'Weigh Station',
+      REPAIR: 'Repair Stop',
+      REDIRECT: 'Redirect',
+      CUSTOMER: 'Customer Stop',
+      OTHER: 'Detour Stop',
+    };
+
+    // 5. Create the detour stop(s)
+    for (let i = 0; i < args.numberOfStops; i++) {
+      const stopId = await ctx.db.insert('loadStops', {
+        loadId: args.loadId,
+        internalId: load.internalId,
+
+        // Fractional sequence: 2.01, 2.02, etc.
+        sequenceNumber: baseSequence + (i + 1) * 0.01,
+
+        stopType: 'DETOUR',
+        loadingType: 'N/A',
+        status: 'Pending',
+
+        // Location = driver's current GPS
+        address: `${reasonLabels[args.reason]} (GPS: ${args.latitude.toFixed(4)}, ${args.longitude.toFixed(4)})`,
+        latitude: args.latitude,
+        longitude: args.longitude,
+
+        // Detour-specific fields
+        isDetour: true,
+        detourReason: args.reason,
+        detourNotes: args.notes,
+        detourRequestedAt: args.driverTimestamp,
+        detourRequestedBy: driverUserId,
+        afterStopId,
+
+        // WorkOS org from the load
+        workosOrgId: load.workosOrgId,
+
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      stopIds.push(stopId);
+    }
+
+    // 6. Update load stop count
+    await ctx.db.patch(args.loadId, {
+      stopCount: (load.stopCount ?? existingStops.length) + args.numberOfStops,
+      updatedAt: now,
+    });
+
+    const label = args.numberOfStops === 1 ? 'Detour stop' : `${args.numberOfStops} detour stops`;
+    return {
+      success: true,
+      message: `${label} added to route`,
+      stopIds,
     };
   },
 });

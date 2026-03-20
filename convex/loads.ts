@@ -67,13 +67,13 @@ function calculateEffectiveMiles(
 
 /**
  * Sync the denormalized firstStopDate field on loadInformation.
- * 
+ *
  * This is the SINGLE SOURCE OF TRUTH for keeping firstStopDate in sync.
  * Call this function whenever:
  * - A new load is created with stops
  * - Stop times are updated (especially windowBeginDate)
  * - Stops are synced from external sources (FourKites)
- * 
+ *
  * @param ctx - Convex mutation context
  * @param loadId - ID of the load to sync
  * @returns The synced firstStopDate value (or undefined if no valid date)
@@ -90,15 +90,15 @@ async function syncFirstStopDate(
 
   // Extract and sanitize the date
   let firstStopDate: string | undefined = undefined;
-  
+
   if (firstStop?.windowBeginDate) {
     const rawDate = firstStop.windowBeginDate;
-    
+
     // Handle TBD or empty values
     if (rawDate && rawDate !== 'TBD') {
       // Extract YYYY-MM-DD from potential ISO string
       const dateOnly = rawDate.split('T')[0];
-      
+
       // Validate format (must be YYYY-MM-DD)
       if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
         firstStopDate = dateOnly;
@@ -108,7 +108,7 @@ async function syncFirstStopDate(
 
   // Update the load with the synced date
   await ctx.db.patch(loadId, { firstStopDate });
-  
+
   return firstStopDate;
 }
 
@@ -181,16 +181,25 @@ export const getLoads = query({
         if (args.customerId && load.customerId !== args.customerId) return false;
         if (args.hcr && load.parsedHcr !== args.hcr) return false;
         if (args.tripNumber && load.parsedTripNumber !== args.tripNumber) return false;
-        if (args.requiresManualReview !== undefined && load.requiresManualReview !== args.requiresManualReview) return false;
+        if (args.requiresManualReview !== undefined && load.requiresManualReview !== args.requiresManualReview)
+          return false;
         if (args.loadType && load.loadType !== args.loadType) return false;
         if (args.mileRange && args.mileRange !== 'all') {
           const miles = load.effectiveMiles;
           if (!miles) return false;
           switch (args.mileRange) {
-            case '0-100': if (miles < 0 || miles > 100) return false; break;
-            case '100-250': if (miles <= 100 || miles > 250) return false; break;
-            case '250-500': if (miles <= 250 || miles > 500) return false; break;
-            case '500+': if (miles <= 500) return false; break;
+            case '0-100':
+              if (miles < 0 || miles > 100) return false;
+              break;
+            case '100-250':
+              if (miles <= 100 || miles > 250) return false;
+              break;
+            case '250-500':
+              if (miles <= 250 || miles > 500) return false;
+              break;
+            case '500+':
+              if (miles <= 500) return false;
+              break;
           }
         }
         if (args.startDate && (!load.firstStopDate || load.firstStopDate < args.startDate)) return false;
@@ -209,14 +218,12 @@ export const getLoads = query({
       const [byOrder, byInternal] = await Promise.all([
         ctx.db
           .query('loadInformation')
-          .withIndex('by_order_number', (q) =>
-            q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', args.search!)
-          )
+          .withIndex('by_order_number', (q) => q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', args.search!))
           .first(),
         ctx.db
           .query('loadInformation')
           .withIndex('by_internal_id', (q) =>
-            q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${args.search!}`)
+            q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${args.search!}`),
           )
           .first(),
       ]);
@@ -230,15 +237,11 @@ export const getLoads = query({
         if (args.status) {
           scanQuery = ctx.db
             .query('loadInformation')
-            .withIndex('by_status', (q) =>
-              q.eq('workosOrgId', args.workosOrgId).eq('status', args.status! as any)
-            );
+            .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status! as any));
         } else {
           scanQuery = ctx.db
             .query('loadInformation')
-            .withIndex('by_organization', (q) =>
-              q.eq('workosOrgId', args.workosOrgId)
-            );
+            .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId));
         }
 
         // Scan up to 2000 documents for partial matches (avoids reading all 13K+).
@@ -311,30 +314,27 @@ export const getLoads = query({
       loadsQuery = ctx.db
         .query('loadInformation')
         .withIndex('by_org_first_stop_date', (q) =>
-          q.eq('workosOrgId', args.workosOrgId)
+          q
+            .eq('workosOrgId', args.workosOrgId)
             .gte('firstStopDate', args.startDate!)
-            .lte('firstStopDate', args.endDate!)
+            .lte('firstStopDate', args.endDate!),
         );
     } else if (args.startDate) {
       loadsQuery = ctx.db
         .query('loadInformation')
         .withIndex('by_org_first_stop_date', (q) =>
-          q.eq('workosOrgId', args.workosOrgId)
-            .gte('firstStopDate', args.startDate!)
+          q.eq('workosOrgId', args.workosOrgId).gte('firstStopDate', args.startDate!),
         );
     } else if (args.endDate) {
       loadsQuery = ctx.db
         .query('loadInformation')
         .withIndex('by_org_first_stop_date', (q) =>
-          q.eq('workosOrgId', args.workosOrgId)
-            .lte('firstStopDate', args.endDate!)
+          q.eq('workosOrgId', args.workosOrgId).lte('firstStopDate', args.endDate!),
         );
     } else {
       loadsQuery = ctx.db
         .query('loadInformation')
-        .withIndex('by_org_first_stop_date', (q) =>
-          q.eq('workosOrgId', args.workosOrgId)
-        );
+        .withIndex('by_org_first_stop_date', (q) => q.eq('workosOrgId', args.workosOrgId));
     }
 
     // All remaining filters are post-index .filter() calls.
@@ -378,8 +378,7 @@ export const getLoads = query({
             .filter((q) => q.lte(q.field('effectiveMiles'), 500));
           break;
         case '500+':
-          loadsQuery = loadsQuery
-            .filter((q) => q.gt(q.field('effectiveMiles'), 500));
+          loadsQuery = loadsQuery.filter((q) => q.gt(q.field('effectiveMiles'), 500));
           break;
       }
     }
@@ -438,13 +437,11 @@ export const getLoad = query({
       .collect();
 
     // Get assigned driver (from load's primaryDriverId cache)
-    const primaryDriver = load.primaryDriverId 
-      ? await ctx.db.get(load.primaryDriverId) 
-      : null;
+    const primaryDriver = load.primaryDriverId ? await ctx.db.get(load.primaryDriverId) : null;
 
     // Get assigned carrier partnership
-    let primaryCarrierPartnership = load.primaryCarrierPartnershipId 
-      ? await ctx.db.get(load.primaryCarrierPartnershipId) 
+    let primaryCarrierPartnership = load.primaryCarrierPartnershipId
+      ? await ctx.db.get(load.primaryCarrierPartnershipId)
       : null;
 
     // If no direct partnership, check the marketplace assignment system
@@ -453,71 +450,60 @@ export const getLoad = query({
       carrierAssignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-        .filter((q) =>
-          q.or(
-            q.eq(q.field('status'), 'AWARDED'),
-            q.eq(q.field('status'), 'IN_PROGRESS')
-          )
-        )
+        .filter((q) => q.or(q.eq(q.field('status'), 'AWARDED'), q.eq(q.field('status'), 'IN_PROGRESS')))
         .first();
     }
 
     // Get truck and trailer from first leg (primary equipment)
-    const firstLeg = legs.length > 0 
-      ? legs.sort((a, b) => a.sequence - b.sequence)[0] 
-      : null;
-    
-    const truck = firstLeg?.truckId 
-      ? await ctx.db.get(firstLeg.truckId) 
-      : null;
-    
-    const trailer = firstLeg?.trailerId 
-      ? await ctx.db.get(firstLeg.trailerId) 
-      : null;
+    const firstLeg = legs.length > 0 ? legs.sort((a, b) => a.sequence - b.sequence)[0] : null;
 
-    return { 
-      ...load, 
+    const truck = firstLeg?.truckId ? await ctx.db.get(firstLeg.truckId) : null;
+
+    const trailer = firstLeg?.trailerId ? await ctx.db.get(firstLeg.trailerId) : null;
+
+    return {
+      ...load,
       stops,
       // Enriched assignment data
-      assignedDriver: primaryDriver 
-        ? { 
+      assignedDriver: primaryDriver
+        ? {
             _id: primaryDriver._id,
             name: `${primaryDriver.firstName} ${primaryDriver.lastName}`,
             phone: primaryDriver.phone,
-          } 
+          }
         : null,
-      assignedCarrier: primaryCarrierPartnership 
-        ? { 
+      assignedCarrier: primaryCarrierPartnership
+        ? {
             _id: primaryCarrierPartnership._id,
             companyName: primaryCarrierPartnership.carrierName,
             phone: primaryCarrierPartnership.contactPhone,
             mcNumber: primaryCarrierPartnership.mcNumber,
-          } 
+          }
         : carrierAssignment
+          ? {
+              _id: carrierAssignment._id,
+              companyName: carrierAssignment.carrierName,
+              phone: carrierAssignment.assignedDriverPhone,
+              mcNumber: carrierAssignment.carrierMcNumber,
+              carrierRate: carrierAssignment.carrierTotalAmount,
+              // Carrier's assigned driver for this load
+              driverName: carrierAssignment.assignedDriverName,
+              driverPhone: carrierAssignment.assignedDriverPhone,
+            }
+          : null,
+      assignedTruck: truck
         ? {
-            _id: carrierAssignment._id,
-            companyName: carrierAssignment.carrierName,
-            phone: carrierAssignment.assignedDriverPhone,
-            mcNumber: carrierAssignment.carrierMcNumber,
-            carrierRate: carrierAssignment.carrierTotalAmount,
-            // Carrier's assigned driver for this load
-            driverName: carrierAssignment.assignedDriverName,
-            driverPhone: carrierAssignment.assignedDriverPhone,
+            _id: truck._id,
+            unitId: truck.unitId,
+            bodyType: truck.bodyType,
           }
         : null,
-      assignedTruck: truck 
-        ? { 
-            _id: truck._id,
-            unitId: truck.unitId, 
-            bodyType: truck.bodyType,
-          } 
-        : null,
-      assignedTrailer: trailer 
-        ? { 
+      assignedTrailer: trailer
+        ? {
             _id: trailer._id,
-            unitId: trailer.unitId, 
+            unitId: trailer.unitId,
             trailerType: trailer.bodyType,
-          } 
+          }
         : null,
     };
   },
@@ -544,13 +530,11 @@ export const getByIdWithRange = query({
       .collect();
 
     // Get assigned driver (from load's primaryDriverId cache)
-    const primaryDriver = load.primaryDriverId 
-      ? await ctx.db.get(load.primaryDriverId) 
-      : null;
+    const primaryDriver = load.primaryDriverId ? await ctx.db.get(load.primaryDriverId) : null;
 
     // Get assigned carrier partnership
-    let primaryCarrierPartnership = load.primaryCarrierPartnershipId 
-      ? await ctx.db.get(load.primaryCarrierPartnershipId) 
+    let primaryCarrierPartnership = load.primaryCarrierPartnershipId
+      ? await ctx.db.get(load.primaryCarrierPartnershipId)
       : null;
 
     // If no direct partnership, check the marketplace assignment system
@@ -559,33 +543,22 @@ export const getByIdWithRange = query({
       carrierAssignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-        .filter((q) => 
-          q.or(
-            q.eq(q.field('status'), 'AWARDED'),
-            q.eq(q.field('status'), 'IN_PROGRESS')
-          )
-        )
+        .filter((q) => q.or(q.eq(q.field('status'), 'AWARDED'), q.eq(q.field('status'), 'IN_PROGRESS')))
         .first();
     }
 
     // Get truck and trailer from first leg (primary equipment)
-    const firstLeg = legs.length > 0 
-      ? legs.sort((a, b) => a.sequence - b.sequence)[0] 
-      : null;
-    
-    const truck = firstLeg?.truckId 
-      ? await ctx.db.get(firstLeg.truckId) 
-      : null;
-    
-    const trailer = firstLeg?.trailerId 
-      ? await ctx.db.get(firstLeg.trailerId) 
-      : null;
+    const firstLeg = legs.length > 0 ? legs.sort((a, b) => a.sequence - b.sequence)[0] : null;
+
+    const truck = firstLeg?.truckId ? await ctx.db.get(firstLeg.truckId) : null;
+
+    const trailer = firstLeg?.trailerId ? await ctx.db.get(firstLeg.trailerId) : null;
 
     if (stops.length === 0) {
-      return { 
-        ...load, 
-        startTime: null, 
-        endTime: null, 
+      return {
+        ...load,
+        startTime: null,
+        endTime: null,
         stops: [],
         legs: [],
         assignedDriver: null,
@@ -595,21 +568,27 @@ export const getByIdWithRange = query({
       };
     }
 
-    // Sort to find the true start and end of the load
-    const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    // Sort to find the true start and end of the load (exclude detour stops from time range)
+    const scheduledStops = [...stops]
+      .filter((s) => s.stopType !== 'DETOUR')
+      .sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
-    const startTime = parseStopDateTime(
-      sortedStops[0].windowBeginDate,
-      sortedStops[0].windowBeginTime
-    );
+    const startTime =
+      scheduledStops.length > 0
+        ? parseStopDateTime(scheduledStops[0].windowBeginDate, scheduledStops[0].windowBeginTime)
+        : null;
     // Use windowBeginTime (appointment time) not windowEndTime (end of delivery window)
     // This prevents false scheduling conflicts from wide delivery windows
-    const endTime = parseStopDateTime(
-      sortedStops[sortedStops.length - 1].windowBeginDate,
-      sortedStops[sortedStops.length - 1].windowBeginTime
-    );
+    const endTime =
+      scheduledStops.length > 0
+        ? parseStopDateTime(
+            scheduledStops[scheduledStops.length - 1].windowBeginDate,
+            scheduledStops[scheduledStops.length - 1].windowBeginTime,
+          )
+        : null;
 
-    // Get origin/destination for display
+    // Get origin/destination for display (from scheduled stops only)
+    const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
     const firstPickup = sortedStops.find((s) => s.stopType === 'PICKUP');
     const lastDelivery = sortedStops.filter((s) => s.stopType === 'DELIVERY').pop();
 
@@ -638,48 +617,48 @@ export const getByIdWithRange = query({
       stops: sortedStops,
       // Enriched assignment data
       legs: legs.sort((a, b) => a.sequence - b.sequence),
-      assignedDriver: primaryDriver 
-        ? { 
+      assignedDriver: primaryDriver
+        ? {
             _id: primaryDriver._id,
             name: `${primaryDriver.firstName} ${primaryDriver.lastName}`,
             phone: primaryDriver.phone,
             city: primaryDriver.city,
             state: primaryDriver.state,
-          } 
+          }
         : null,
-      assignedCarrier: primaryCarrierPartnership 
-        ? { 
+      assignedCarrier: primaryCarrierPartnership
+        ? {
             _id: primaryCarrierPartnership._id,
             companyName: primaryCarrierPartnership.carrierName,
             phone: primaryCarrierPartnership.contactPhone,
             mcNumber: primaryCarrierPartnership.mcNumber,
-          } 
+          }
         : carrierAssignment
+          ? {
+              _id: carrierAssignment._id,
+              companyName: carrierAssignment.carrierName,
+              phone: carrierAssignment.assignedDriverPhone,
+              // Extra fields from marketplace assignment
+              mcNumber: carrierAssignment.carrierMcNumber,
+              carrierRate: carrierAssignment.carrierTotalAmount,
+              // Carrier's assigned driver for this load
+              driverName: carrierAssignment.assignedDriverName,
+              driverPhone: carrierAssignment.assignedDriverPhone,
+            }
+          : null,
+      assignedTruck: truck
         ? {
-            _id: carrierAssignment._id,
-            companyName: carrierAssignment.carrierName,
-            phone: carrierAssignment.assignedDriverPhone,
-            // Extra fields from marketplace assignment
-            mcNumber: carrierAssignment.carrierMcNumber,
-            carrierRate: carrierAssignment.carrierTotalAmount,
-            // Carrier's assigned driver for this load
-            driverName: carrierAssignment.assignedDriverName,
-            driverPhone: carrierAssignment.assignedDriverPhone,
+            _id: truck._id,
+            unitId: truck.unitId,
+            bodyType: truck.bodyType,
           }
         : null,
-      assignedTruck: truck 
-        ? { 
-            _id: truck._id,
-            unitId: truck.unitId, 
-            bodyType: truck.bodyType,
-          } 
-        : null,
-      assignedTrailer: trailer 
-        ? { 
+      assignedTrailer: trailer
+        ? {
             _id: trailer._id,
-            unitId: trailer.unitId, 
+            unitId: trailer.unitId,
             trailerType: trailer.bodyType,
-          } 
+          }
         : null,
     };
   },
@@ -762,7 +741,7 @@ export const createLoad = mutation({
       args.manualMiles,
       args.contractMiles,
       args.importedMiles,
-      args.googleMiles
+      args.googleMiles,
     );
 
     // HCR/Trip for route identification
@@ -916,18 +895,26 @@ export const createLoad = mutation({
 export const updateLoadStatus = mutation({
   args: {
     loadId: v.id('loadInformation'),
-    status: v.union(v.literal('Open'), v.literal('Assigned'), v.literal('Canceled'), v.literal('Completed'), v.literal('Expired')),
+    status: v.union(
+      v.literal('Open'),
+      v.literal('Assigned'),
+      v.literal('Canceled'),
+      v.literal('Completed'),
+      v.literal('Expired'),
+    ),
     // Cancellation tracking (required when status = 'Canceled' and was 'Assigned')
-    cancellationReason: v.optional(v.union(
-      v.literal('DRIVER_BREAKDOWN'),
-      v.literal('CUSTOMER_CANCELLED'),
-      v.literal('EQUIPMENT_ISSUE'),
-      v.literal('RATE_DISPUTE'),
-      v.literal('WEATHER_CONDITIONS'),
-      v.literal('CAPACITY_ISSUE'),
-      v.literal('SCHEDULING_CONFLICT'),
-      v.literal('OTHER'),
-    )),
+    cancellationReason: v.optional(
+      v.union(
+        v.literal('DRIVER_BREAKDOWN'),
+        v.literal('CUSTOMER_CANCELLED'),
+        v.literal('EQUIPMENT_ISSUE'),
+        v.literal('RATE_DISPUTE'),
+        v.literal('WEATHER_CONDITIONS'),
+        v.literal('CAPACITY_ISSUE'),
+        v.literal('SCHEDULING_CONFLICT'),
+        v.literal('OTHER'),
+      ),
+    ),
     cancellationNotes: v.optional(v.string()),
     canceledBy: v.optional(v.string()), // WorkOS user ID
   },
@@ -944,6 +931,7 @@ export const updateLoadStatus = mutation({
     // Auto-update tracking status based on workflow status
     if (args.status === 'Completed') {
       updates.trackingStatus = 'Completed';
+      updates.deliveredAt = now; // Set delivery timestamp for accounting reports
 
       // Sync carrier assignment status to COMPLETED
       const carrierAssignments = await ctx.db
@@ -966,7 +954,7 @@ export const updateLoadStatus = mutation({
     } else if (args.status === 'Canceled') {
       // CANCEL: Store cancellation metadata
       updates.trackingStatus = 'Canceled';
-      
+
       // Store cancellation reason if provided (required for Assigned -> Canceled)
       if (args.cancellationReason) {
         updates.cancellationReason = args.cancellationReason;
@@ -1054,17 +1042,25 @@ export const updateLoadStatus = mutation({
 export const bulkUpdateLoadStatus = mutation({
   args: {
     loadIds: v.array(v.id('loadInformation')),
-    status: v.union(v.literal('Open'), v.literal('Assigned'), v.literal('Canceled'), v.literal('Completed'), v.literal('Expired')),
-    cancellationReason: v.optional(v.union(
-      v.literal('DRIVER_BREAKDOWN'),
-      v.literal('CUSTOMER_CANCELLED'),
-      v.literal('EQUIPMENT_ISSUE'),
-      v.literal('RATE_DISPUTE'),
-      v.literal('WEATHER_CONDITIONS'),
-      v.literal('CAPACITY_ISSUE'),
-      v.literal('SCHEDULING_CONFLICT'),
-      v.literal('OTHER'),
-    )),
+    status: v.union(
+      v.literal('Open'),
+      v.literal('Assigned'),
+      v.literal('Canceled'),
+      v.literal('Completed'),
+      v.literal('Expired'),
+    ),
+    cancellationReason: v.optional(
+      v.union(
+        v.literal('DRIVER_BREAKDOWN'),
+        v.literal('CUSTOMER_CANCELLED'),
+        v.literal('EQUIPMENT_ISSUE'),
+        v.literal('RATE_DISPUTE'),
+        v.literal('WEATHER_CONDITIONS'),
+        v.literal('CAPACITY_ISSUE'),
+        v.literal('SCHEDULING_CONFLICT'),
+        v.literal('OTHER'),
+      ),
+    ),
     cancellationNotes: v.optional(v.string()),
     canceledBy: v.optional(v.string()),
   },
@@ -1207,7 +1203,7 @@ export const bulkUpdateLoadStatus = mutation({
           orgStatusChanges.set(orgId, new Map());
         }
         const orgChanges = orgStatusChanges.get(orgId)!;
-        
+
         // Decrement old status
         orgChanges.set(oldStatus, (orgChanges.get(oldStatus) || 0) - 1);
         // Increment new status
@@ -1232,8 +1228,10 @@ export const bulkUpdateLoadStatus = mutation({
 
         for (const [status, delta] of statusChanges.entries()) {
           if (status in newLoadCounts) {
-            newLoadCounts[status as keyof typeof newLoadCounts] = 
-              Math.max(0, (newLoadCounts[status as keyof typeof newLoadCounts] || 0) + delta);
+            newLoadCounts[status as keyof typeof newLoadCounts] = Math.max(
+              0,
+              (newLoadCounts[status as keyof typeof newLoadCounts] || 0) + delta,
+            );
           }
         }
 
@@ -1270,7 +1268,7 @@ export const updateLoadMiles = mutation({
       updatedManualMiles,
       updatedContractMiles,
       updatedImportedMiles,
-      updatedGoogleMiles
+      updatedGoogleMiles,
     );
 
     await ctx.db.patch(args.loadId, {
@@ -1375,7 +1373,13 @@ export const validateBulkStatusChange = query({
 
     const results: {
       safe: { id: string; orderNumber?: string; currentStatus?: string }[];
-      imminent: { id: string; orderNumber?: string; pickupTime: string; hoursUntilPickup: number; currentStatus?: string }[];
+      imminent: {
+        id: string;
+        orderNumber?: string;
+        pickupTime: string;
+        hoursUntilPickup: number;
+        currentStatus?: string;
+      }[];
       active: { id: string; orderNumber?: string }[];
       finalized: { id: string; orderNumber?: string; status: string }[];
       blocked: { id: string; orderNumber?: string; reason: string }[]; // New: hard blocks
@@ -1465,9 +1469,7 @@ export const validateBulkStatusChange = query({
         let isImminent = false;
         if (firstPickup?.windowBeginDate && firstPickup?.windowBeginTime) {
           try {
-            const pickupTime = new Date(
-              `${firstPickup.windowBeginDate}T${firstPickup.windowBeginTime}`
-            ).getTime();
+            const pickupTime = new Date(`${firstPickup.windowBeginDate}T${firstPickup.windowBeginTime}`).getTime();
             const timeUntilPickup = pickupTime - now;
             isImminent = timeUntilPickup > 0 && timeUntilPickup < bufferMs;
           } catch {
@@ -1496,11 +1498,9 @@ export const validateBulkStatusChange = query({
 
         if (firstPickup?.windowBeginDate && firstPickup?.windowBeginTime) {
           try {
-            const pickupTime = new Date(
-              `${firstPickup.windowBeginDate}T${firstPickup.windowBeginTime}`
-            ).getTime();
+            const pickupTime = new Date(`${firstPickup.windowBeginDate}T${firstPickup.windowBeginTime}`).getTime();
             const timeUntilPickup = pickupTime - now;
-            const hoursUntilPickup = Math.round(timeUntilPickup / (60 * 60 * 1000) * 10) / 10;
+            const hoursUntilPickup = Math.round((timeUntilPickup / (60 * 60 * 1000)) * 10) / 10;
 
             if (timeUntilPickup > 0 && timeUntilPickup < bufferMs) {
               results.imminent.push({
@@ -1536,9 +1536,9 @@ export const validateBulkStatusChange = query({
         finalizedCount: results.finalized.length,
         blockedCount: results.blocked.length,
         requiresReasonCount: results.requiresReason.length,
-        canProceedSafely: 
-          results.imminent.length === 0 && 
-          results.active.length === 0 && 
+        canProceedSafely:
+          results.imminent.length === 0 &&
+          results.active.length === 0 &&
           results.blocked.length === 0 &&
           results.requiresReason.length === 0,
       },
@@ -1675,12 +1675,18 @@ async function enrichLoadDirectly(ctx: { db: any }, load: any) {
   };
 }
 
-function mapLoadStatusToDispatchStatus(status: 'Assigned' | 'Completed' | 'Canceled' | 'Expired'): 'COMPLETED' | 'CANCELED' | undefined {
+function mapLoadStatusToDispatchStatus(
+  status: 'Assigned' | 'Completed' | 'Canceled' | 'Expired',
+): 'COMPLETED' | 'CANCELED' | undefined {
   switch (status) {
-    case 'Assigned': return undefined;
-    case 'Completed': return 'COMPLETED';
-    case 'Canceled': return 'CANCELED';
-    case 'Expired': return undefined;
+    case 'Assigned':
+      return undefined;
+    case 'Completed':
+      return 'COMPLETED';
+    case 'Canceled':
+      return 'CANCELED';
+    case 'Expired':
+      return undefined;
   }
 }
 
@@ -1708,13 +1714,9 @@ export const getByDriver = query({
     if (dispatchStatus) {
       legsQuery = ctx.db
         .query('dispatchLegs')
-        .withIndex('by_driver', (q) =>
-          q.eq('driverId', args.driverId).eq('status', dispatchStatus)
-        );
+        .withIndex('by_driver', (q) => q.eq('driverId', args.driverId).eq('status', dispatchStatus));
     } else {
-      legsQuery = ctx.db
-        .query('dispatchLegs')
-        .withIndex('by_driver', (q) => q.eq('driverId', args.driverId));
+      legsQuery = ctx.db.query('dispatchLegs').withIndex('by_driver', (q) => q.eq('driverId', args.driverId));
     }
 
     const allLegs = await legsQuery.order('desc').collect();
@@ -1743,16 +1745,18 @@ export const getByDriver = query({
     }
 
     // --- Fallback 1: loads where primaryDriverId matches but no dispatch leg found ---
-    const statusToMatch = args.status === 'Completed' ? 'Completed'
-      : args.status === 'Canceled' ? 'Canceled'
-      : args.status === 'Expired' ? 'Expired'
-      : 'Assigned';
+    const statusToMatch =
+      args.status === 'Completed'
+        ? 'Completed'
+        : args.status === 'Canceled'
+          ? 'Canceled'
+          : args.status === 'Expired'
+            ? 'Expired'
+            : 'Assigned';
 
     const fallbackLoads = await ctx.db
       .query('loadInformation')
-      .withIndex('by_primary_driver_status', (q) =>
-        q.eq('primaryDriverId', args.driverId).eq('status', statusToMatch)
-      )
+      .withIndex('by_primary_driver_status', (q) => q.eq('primaryDriverId', args.driverId).eq('status', statusToMatch))
       .collect();
 
     for (const load of fallbackLoads) {
@@ -1766,20 +1770,19 @@ export const getByDriver = query({
     // --- Fallback 2: carrier assignments where this driver is the assignedDriverId ---
     // For Completed loads, check all active-ish statuses since the assignment
     // status may not have been synced when the load was marked Completed.
-    const assignmentStatuses = args.status === 'Assigned'
-      ? (['AWARDED', 'IN_PROGRESS'] as const)
-      : args.status === 'Canceled'
-        ? (['CANCELED'] as const)
-        : args.status === 'Expired'
-          ? (['AWARDED', 'IN_PROGRESS'] as const)
-          : (['COMPLETED', 'AWARDED', 'IN_PROGRESS'] as const);
+    const assignmentStatuses =
+      args.status === 'Assigned'
+        ? (['AWARDED', 'IN_PROGRESS'] as const)
+        : args.status === 'Canceled'
+          ? (['CANCELED'] as const)
+          : args.status === 'Expired'
+            ? (['AWARDED', 'IN_PROGRESS'] as const)
+            : (['COMPLETED', 'AWARDED', 'IN_PROGRESS'] as const);
 
     for (const aStatus of assignmentStatuses) {
       const assignments = await ctx.db
         .query('loadCarrierAssignments')
-        .withIndex('by_assigned_driver', (q) =>
-          q.eq('assignedDriverId', args.driverId).eq('status', aStatus)
-        )
+        .withIndex('by_assigned_driver', (q) => q.eq('assignedDriverId', args.driverId).eq('status', aStatus))
         .collect();
 
       for (const assignment of assignments) {
@@ -1831,14 +1834,12 @@ export const getByCarrierPartnership = query({
       legsQuery = ctx.db
         .query('dispatchLegs')
         .withIndex('by_carrier_partnership', (q) =>
-          q.eq('carrierPartnershipId', args.partnershipId).eq('status', dispatchStatus)
+          q.eq('carrierPartnershipId', args.partnershipId).eq('status', dispatchStatus),
         );
     } else {
       legsQuery = ctx.db
         .query('dispatchLegs')
-        .withIndex('by_carrier_partnership', (q) =>
-          q.eq('carrierPartnershipId', args.partnershipId)
-        );
+        .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.partnershipId));
     }
 
     const allLegs = await legsQuery.order('desc').collect();
@@ -1866,9 +1867,7 @@ export const getByCarrierPartnership = query({
       const assignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', leg.loadId))
-        .filter((q) =>
-          q.eq(q.field('partnershipId'), args.partnershipId)
-        )
+        .filter((q) => q.eq(q.field('partnershipId'), args.partnershipId))
         .first();
 
       enrichedLoads.push({
@@ -1886,21 +1885,13 @@ export const getByCarrierPartnership = query({
     const carrierAssignments = partnership.carrierOrgId
       ? await ctx.db
           .query('loadCarrierAssignments')
-          .withIndex('by_carrier', (q) =>
-            q.eq('carrierOrgId', partnership.carrierOrgId!)
-          )
-          .filter((q) =>
-            q.eq(q.field('partnershipId'), args.partnershipId)
-          )
+          .withIndex('by_carrier', (q) => q.eq('carrierOrgId', partnership.carrierOrgId!))
+          .filter((q) => q.eq(q.field('partnershipId'), args.partnershipId))
           .collect()
       : await ctx.db
           .query('loadCarrierAssignments')
-          .withIndex('by_broker', (q) =>
-            q.eq('brokerOrgId', partnership.brokerOrgId)
-          )
-          .filter((q) =>
-            q.eq(q.field('partnershipId'), args.partnershipId)
-          )
+          .withIndex('by_broker', (q) => q.eq('brokerOrgId', partnership.brokerOrgId))
+          .filter((q) => q.eq(q.field('partnershipId'), args.partnershipId))
           .collect();
 
     for (const assignment of carrierAssignments) {
@@ -2008,9 +1999,7 @@ export const autoExpireStaleLoads = internalMutation({
 
     const loads = await ctx.db
       .query('loadInformation')
-      .withIndex('by_status', (q) =>
-        q.eq('workosOrgId', args.orgId!).eq('status', status)
-      )
+      .withIndex('by_status', (q) => q.eq('workosOrgId', args.orgId!).eq('status', status))
       .take(BATCH_SIZE * 5);
 
     for (const load of loads) {

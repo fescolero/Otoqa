@@ -74,7 +74,7 @@ interface LoadDetailProps {
 interface StopWithEvidence {
   _id: string;
   sequenceNumber: number;
-  stopType: 'PICKUP' | 'DELIVERY';
+  stopType: 'PICKUP' | 'DELIVERY' | 'DETOUR';
   status?: string;
   city?: string;
   state?: string;

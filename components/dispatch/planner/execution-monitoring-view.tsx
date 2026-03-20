@@ -61,7 +61,7 @@ interface EnrichedLoadDetails {
 interface StopType {
   _id: Id<'loadStops'>;
   sequenceNumber: number;
-  stopType: 'PICKUP' | 'DELIVERY';
+  stopType: 'PICKUP' | 'DELIVERY' | 'DETOUR';
   status?: 'Pending' | 'In Transit' | 'Completed' | 'Delayed' | 'Canceled';
   city?: string;
   state?: string;

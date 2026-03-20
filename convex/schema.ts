@@ -11,11 +11,13 @@ export default defineSchema({
 
     // Organization type - determines capabilities
     // Optional for backward compatibility - defaults to BROKER for existing orgs with workosOrgId
-    orgType: v.optional(v.union(
-      v.literal('BROKER'), // Web TMS only (WorkOS)
-      v.literal('CARRIER'), // Mobile only (Clerk)
-      v.literal('BROKER_CARRIER') // Both (upgraded carrier)
-    )),
+    orgType: v.optional(
+      v.union(
+        v.literal('BROKER'), // Web TMS only (WorkOS)
+        v.literal('CARRIER'), // Mobile only (Clerk)
+        v.literal('BROKER_CARRIER'), // Both (upgraded carrier)
+      ),
+    ),
 
     name: v.string(),
     industry: v.optional(v.string()),
@@ -94,9 +96,7 @@ export default defineSchema({
 
     // === BANKING (for receiving payments) ===
     bankName: v.optional(v.string()),
-    bankAccountType: v.optional(
-      v.union(v.literal('CHECKING'), v.literal('SAVINGS'))
-    ),
+    bankAccountType: v.optional(v.union(v.literal('CHECKING'), v.literal('SAVINGS'))),
     bankRoutingNumber: v.optional(v.string()), // Should be encrypted
     bankAccountNumber: v.optional(v.string()), // Should be encrypted
     bankAccountVerified: v.optional(v.boolean()),
@@ -115,12 +115,7 @@ export default defineSchema({
 
     // === PAYMENT PREFERENCES ===
     preferredPaymentMethod: v.optional(
-      v.union(
-        v.literal('ACH'),
-        v.literal('CHECK'),
-        v.literal('WIRE'),
-        v.literal('QUICKPAY')
-      )
+      v.union(v.literal('ACH'), v.literal('CHECK'), v.literal('WIRE'), v.literal('QUICKPAY')),
     ),
     paymentTerms: v.optional(v.string()), // Net15, Net30, etc.
     factoringCompany: v.optional(v.string()), // If they use factoring
@@ -182,7 +177,7 @@ export default defineSchema({
       v.literal('INVITED'), // Invite sent, awaiting carrier signup
       v.literal('PENDING'), // Carrier has account, awaiting acceptance
       v.literal('SUSPENDED'), // Temporarily paused
-      v.literal('TERMINATED') // Ended
+      v.literal('TERMINATED'), // Ended
     ),
 
     // === BROKER'S PREFERENCES FOR THIS CARRIER ===
@@ -194,17 +189,13 @@ export default defineSchema({
     // === CONTRACT RATE DEFAULTS ===
     // Pre-negotiated rates for direct assignment (skips offer/accept flow)
     defaultRate: v.optional(v.number()), // Base rate amount
-    defaultRateType: v.optional(
-      v.union(v.literal('FLAT'), v.literal('PER_MILE'), v.literal('PERCENTAGE'))
-    ),
-    defaultCurrency: v.optional(
-      v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))
-    ),
+    defaultRateType: v.optional(v.union(v.literal('FLAT'), v.literal('PER_MILE'), v.literal('PERCENTAGE'))),
+    defaultCurrency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
 
     // === OWNER-OPERATOR FIELDS ===
     // Broker's categorization - this carrier is a single-driver owner-operator
     isOwnerOperator: v.optional(v.boolean()),
-    
+
     // Owner-operator driver details (for unlinked carriers or broker override)
     ownerDriverFirstName: v.optional(v.string()),
     ownerDriverLastName: v.optional(v.string()),
@@ -250,11 +241,7 @@ export default defineSchema({
     // The negotiated rate (what carrier gets paid - NOT visible to carrier's customer)
     // Optional when usePayProfile is true
     carrierRate: v.optional(v.number()),
-    carrierRateType: v.optional(v.union(
-      v.literal('FLAT'),
-      v.literal('PER_MILE'),
-      v.literal('PERCENTAGE')
-    )),
+    carrierRateType: v.optional(v.union(v.literal('FLAT'), v.literal('PER_MILE'), v.literal('PERCENTAGE'))),
     currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
 
     // Accessorials for carrier
@@ -274,7 +261,7 @@ export default defineSchema({
       v.literal('WITHDRAWN'), // Broker withdrew offer (chose another carrier)
       v.literal('IN_PROGRESS'), // Load is being executed
       v.literal('COMPLETED'), // Delivered
-      v.literal('CANCELED') // Canceled after award
+      v.literal('CANCELED'), // Canceled after award
     ),
 
     // === DRIVER ASSIGNMENT ===
@@ -291,17 +278,10 @@ export default defineSchema({
         v.literal('INVOICED'), // Carrier sent invoice
         v.literal('SCHEDULED'), // Payment scheduled
         v.literal('PAID'), // Payment sent
-        v.literal('DISPUTED') // Payment dispute
-      )
+        v.literal('DISPUTED'), // Payment dispute
+      ),
     ),
-    paymentMethod: v.optional(
-      v.union(
-        v.literal('ACH'),
-        v.literal('CHECK'),
-        v.literal('WIRE'),
-        v.literal('QUICKPAY')
-      )
-    ),
+    paymentMethod: v.optional(v.union(v.literal('ACH'), v.literal('CHECK'), v.literal('WIRE'), v.literal('QUICKPAY'))),
     paymentReference: v.optional(v.string()), // Check #, ACH ref, etc.
     paymentDate: v.optional(v.number()), // When payment was made
     paymentAmount: v.optional(v.number()), // Actual amount paid (may differ)
@@ -310,9 +290,7 @@ export default defineSchema({
     // === CANCELLATION TRACKING ===
     canceledAt: v.optional(v.number()),
     canceledBy: v.optional(v.string()), // User ID who canceled
-    canceledByParty: v.optional(
-      v.union(v.literal('BROKER'), v.literal('CARRIER'))
-    ),
+    canceledByParty: v.optional(v.union(v.literal('BROKER'), v.literal('CARRIER'))),
     cancellationReason: v.optional(
       v.union(
         v.literal('DRIVER_UNAVAILABLE'),
@@ -320,8 +298,8 @@ export default defineSchema({
         v.literal('RATE_DISPUTE'),
         v.literal('LOAD_CANCELED_BY_CUSTOMER'),
         v.literal('WEATHER'),
-        v.literal('OTHER')
-      )
+        v.literal('OTHER'),
+      ),
     ),
     cancellationNotes: v.optional(v.string()),
 
@@ -400,7 +378,7 @@ export default defineSchema({
       v.literal('POD'), // Proof of delivery
       v.literal('LUMPER_RECEIPT'), // Lumper fees
       v.literal('SCALE_TICKET'), // Weight ticket
-      v.literal('OTHER')
+      v.literal('OTHER'),
     ),
 
     storageId: v.id('_storage'),
@@ -695,9 +673,7 @@ export default defineSchema({
     secondaryContactPhone: v.optional(v.string()),
 
     // Operations
-    loadingType: v.optional(
-      v.union(v.literal('Live Load'), v.literal('Drop & Hook'), v.literal('Appointment')),
-    ),
+    loadingType: v.optional(v.union(v.literal('Live Load'), v.literal('Drop & Hook'), v.literal('Appointment'))),
     locationScheduleType: v.optional(
       v.union(
         v.literal('24/7'),
@@ -710,6 +686,20 @@ export default defineSchema({
 
     // Internal
     internalNotes: v.optional(v.string()),
+
+    // === PAYMENT PREFERENCES ===
+    paymentTerms: v.optional(
+      v.union(
+        v.literal('NET_15'),
+        v.literal('NET_30'),
+        v.literal('NET_45'),
+        v.literal('NET_60'),
+        v.literal('NET_90'),
+        v.literal('DUE_ON_RECEIPT'),
+      ),
+    ),
+    factoringCompany: v.optional(v.string()),
+    factoringStatus: v.optional(v.boolean()),
 
     // WorkOS Integration
     workosOrgId: v.string(),
@@ -776,18 +766,20 @@ export default defineSchema({
     currency: v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN')), // Required, strict typing
     minimumRate: v.optional(v.number()),
     minimumQuantity: v.optional(v.number()),
-    
+
     // Accessorials (NEW)
-    stopOffRate: v.optional(v.number()),          // e.g., 50.00 for $50 per stop
-    includedStops: v.optional(v.number()),        // Default 2 (pickup + delivery)
-    
+    stopOffRate: v.optional(v.number()), // e.g., 50.00 for $50 per stop
+    includedStops: v.optional(v.number()), // Default 2 (pickup + delivery)
+
     // Fuel Surcharge (NEW)
-    fuelSurchargeType: v.optional(v.union(
-      v.literal('PERCENTAGE'),     // % of base rate
-      v.literal('FLAT'),          // Fixed amount
-      v.literal('DOE_INDEX')      // Based on DOE diesel index
-    )),
-    fuelSurchargeValue: v.optional(v.number()),   // 22 (for 22%) or 150 (for $150)
+    fuelSurchargeType: v.optional(
+      v.union(
+        v.literal('PERCENTAGE'), // % of base rate
+        v.literal('FLAT'), // Fixed amount
+        v.literal('DOE_INDEX'), // Based on DOE diesel index
+      ),
+    ),
+    fuelSurchargeValue: v.optional(v.number()), // 22 (for 22%) or 150 (for $150)
 
     // Additional Info
     subsidiary: v.optional(v.string()),
@@ -889,7 +881,7 @@ export default defineSchema({
         pieces: v.optional(v.number()),
         weight: v.optional(v.number()),
         instructions: v.optional(v.string()),
-      })
+      }),
     ),
     equipmentType: v.optional(v.string()),
     weight: v.optional(v.number()),
@@ -1033,7 +1025,7 @@ export default defineSchema({
 
     // Miles Calculation
     contractMiles: v.optional(v.number()),
-    importedMiles: v.optional(v.number()),  // Miles from external integration (FourKites, etc.)
+    importedMiles: v.optional(v.number()), // Miles from external integration (FourKites, etc.)
     googleMiles: v.optional(v.number()),
     manualMiles: v.optional(v.number()),
     effectiveMiles: v.optional(v.number()), // Calculated: manual > contract > imported > google
@@ -1063,26 +1055,28 @@ export default defineSchema({
     parsedTripNumber: v.optional(v.string()),
 
     // Load Classification (Ops needs to know type even if billing is separate)
-    loadType: v.optional(v.union(
-      v.literal('CONTRACT'), // Exact match (high confidence)
-      v.literal('SPOT'),     // Wildcard match (low confidence)
-      v.literal('UNMAPPED')  // No match (GPS active, billing review needed)
-    )),
+    loadType: v.optional(
+      v.union(
+        v.literal('CONTRACT'), // Exact match (high confidence)
+        v.literal('SPOT'), // Wildcard match (low confidence)
+        v.literal('UNMAPPED'), // No match (GPS active, billing review needed)
+      ),
+    ),
 
     // Operational Flags
     requiresManualReview: v.optional(v.boolean()), // True if wildcard match or validation fails
-    isTracking: v.optional(v.boolean()),           // GPS tracking status
-    
+    isTracking: v.optional(v.boolean()), // GPS tracking status
+
     // Stop Count (Physical Data)
-    stopCount: v.optional(v.number()),             // Total stops (pickup + deliveries)
+    stopCount: v.optional(v.number()), // Total stops (pickup + deliveries)
 
     // Driver Pay Engine
-    primaryDriverId: v.optional(v.id('drivers')),  // Read-only cache, updated by dispatchLegs
+    primaryDriverId: v.optional(v.id('drivers')), // Read-only cache, updated by dispatchLegs
     primaryCarrierPartnershipId: v.optional(v.id('carrierPartnerships')), // Read-only cache, updated by dispatchLegs
     // Legacy field - existing data may have this from old carriers table (deprecated)
     primaryCarrierId: v.optional(v.string()),
-    isHazmat: v.optional(v.boolean()),             // Triggers ATTR_HAZMAT pay rule
-    requiresTarp: v.optional(v.boolean()),         // Triggers ATTR_TARP pay rule
+    isHazmat: v.optional(v.boolean()), // Triggers ATTR_HAZMAT pay rule
+    requiresTarp: v.optional(v.boolean()), // Triggers ATTR_TARP pay rule
 
     // Denormalized First Stop Date (for efficient date range filtering)
     // Source of truth: loadStops where sequenceNumber = 1, windowBeginDate
@@ -1090,30 +1084,35 @@ export default defineSchema({
     firstStopDate: v.optional(v.string()),
 
     // Cancellation Tracking (when status = 'Canceled')
-    cancellationReason: v.optional(v.union(
-      v.literal('DRIVER_BREAKDOWN'),
-      v.literal('CUSTOMER_CANCELLED'),
-      v.literal('EQUIPMENT_ISSUE'),
-      v.literal('RATE_DISPUTE'),
-      v.literal('WEATHER_CONDITIONS'),
-      v.literal('CAPACITY_ISSUE'),
-      v.literal('SCHEDULING_CONFLICT'),
-      v.literal('OTHER'),
-    )),
+    cancellationReason: v.optional(
+      v.union(
+        v.literal('DRIVER_BREAKDOWN'),
+        v.literal('CUSTOMER_CANCELLED'),
+        v.literal('EQUIPMENT_ISSUE'),
+        v.literal('RATE_DISPUTE'),
+        v.literal('WEATHER_CONDITIONS'),
+        v.literal('CAPACITY_ISSUE'),
+        v.literal('SCHEDULING_CONFLICT'),
+        v.literal('OTHER'),
+      ),
+    ),
     cancellationNotes: v.optional(v.string()),
-    canceledAt: v.optional(v.number()),            // Timestamp when canceled
-    canceledBy: v.optional(v.string()),            // WorkOS user ID who canceled
+    canceledAt: v.optional(v.number()), // Timestamp when canceled
+    canceledBy: v.optional(v.string()), // WorkOS user ID who canceled
 
     // Settlement & Hold Logic
-    isHeld: v.optional(v.boolean()),               // Hold from current settlement (missing paperwork)
-    heldReason: v.optional(v.string()),            // Why is this load held?
+    isHeld: v.optional(v.boolean()), // Hold from current settlement (missing paperwork)
+    heldReason: v.optional(v.string()), // Why is this load held?
     heldAt: v.optional(v.float64()),
     heldBy: v.optional(v.string()),
 
+    // Delivery Tracking
+    deliveredAt: v.optional(v.number()), // Unix timestamp, set when status -> Completed
+
     // POD (Proof of Delivery) Tracking
-    podStorageId: v.optional(v.id('_storage')),   // Uploaded POD document
+    podStorageId: v.optional(v.id('_storage')), // Uploaded POD document
     podUploadedAt: v.optional(v.float64()),
-    hasSignedPod: v.optional(v.boolean()),         // Quick flag for auditing
+    hasSignedPod: v.optional(v.boolean()), // Quick flag for auditing
 
     // WorkOS Integration
     workosOrgId: v.string(),
@@ -1133,7 +1132,8 @@ export default defineSchema({
     .index('by_hcr_trip', ['workosOrgId', 'parsedHcr', 'parsedTripNumber'])
     .index('by_org_first_stop_date', ['workosOrgId', 'firstStopDate'])
     .index('by_org_tracking_status', ['workosOrgId', 'trackingStatus'])
-    .index('by_primary_driver_status', ['primaryDriverId', 'status']),
+    .index('by_primary_driver_status', ['primaryDriverId', 'status'])
+    .index('by_org_status_first_stop', ['workosOrgId', 'status', 'firstStopDate']),
 
   loadStops: defineTable({
     // Load Reference
@@ -1145,8 +1145,8 @@ export default defineSchema({
     sequenceNumber: v.number(), // 1, 2, 3...
 
     // Stop Type
-    stopType: v.union(v.literal('PICKUP'), v.literal('DELIVERY')),
-    loadingType: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
+    stopType: v.union(v.literal('PICKUP'), v.literal('DELIVERY'), v.literal('DETOUR')),
+    loadingType: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live'), v.literal('N/A')), // N/A for detour stops
 
     // Status
     status: v.optional(
@@ -1173,21 +1173,19 @@ export default defineSchema({
     referenceValue: v.optional(v.string()),
 
     // Schedule (Business Time - ISO Strings)
-    windowBeginDate: v.string(), // ISO 8601
-    windowBeginTime: v.string(), // ISO 8601 with timezone offset
-    windowEndDate: v.string(), // ISO 8601
-    windowEndTime: v.string(), // ISO 8601 with timezone offset
+    // Optional for DETOUR stops (driver-created, no scheduled window)
+    windowBeginDate: v.optional(v.string()), // ISO 8601
+    windowBeginTime: v.optional(v.string()), // ISO 8601 with timezone offset
+    windowEndDate: v.optional(v.string()), // ISO 8601
+    windowEndTime: v.optional(v.string()), // ISO 8601 with timezone offset
 
     // Commodity
-    commodityDescription: v.string(),
-    commodityUnits: v.union(
-      v.literal('Pallets'),
-      v.literal('Boxes'),
-      v.literal('Pieces'),
-      v.literal('Lbs'),
-      v.literal('Kg'),
+    // Optional for DETOUR stops (no commodity on fuel/rest stops)
+    commodityDescription: v.optional(v.string()),
+    commodityUnits: v.optional(
+      v.union(v.literal('Pallets'), v.literal('Boxes'), v.literal('Pieces'), v.literal('Lbs'), v.literal('Kg')),
     ),
-    pieces: v.number(),
+    pieces: v.optional(v.number()),
     weight: v.optional(v.number()),
 
     // Instructions & Requirements
@@ -1208,6 +1206,25 @@ export default defineSchema({
     isRedirected: v.optional(v.boolean()),
     redirectNotes: v.optional(v.string()),
 
+    // Detour (driver-initiated ad-hoc stop — fuel, rest, redirect, etc.)
+    isDetour: v.optional(v.boolean()),
+    detourReason: v.optional(
+      v.union(
+        v.literal('FUEL'),
+        v.literal('REST'),
+        v.literal('FOOD'),
+        v.literal('SCALE'),
+        v.literal('REPAIR'),
+        v.literal('REDIRECT'), // Dispatch told driver to go somewhere else
+        v.literal('CUSTOMER'), // Customer requested additional stop
+        v.literal('OTHER'),
+      ),
+    ),
+    detourNotes: v.optional(v.string()), // Driver freeform notes
+    detourRequestedAt: v.optional(v.string()), // ISO 8601 - when driver initiated the detour
+    detourRequestedBy: v.optional(v.string()), // Driver userId (Clerk)
+    afterStopId: v.optional(v.id('loadStops')), // Inserted after this stop in the route
+
     // Status Tracking
     lastStatusChangeTimestamp: v.optional(v.string()),
     lastStatusChangeLatitude: v.optional(v.number()),
@@ -1226,7 +1243,7 @@ export default defineSchema({
 
     // WorkOS Integration
     workosOrgId: v.string(),
-    createdBy: v.string(), // WorkOS user ID
+    createdBy: v.optional(v.string()), // WorkOS user ID (optional for driver-created detour stops)
 
     // Timestamps (System Time - Numbers)
     createdAt: v.number(),
@@ -1235,7 +1252,8 @@ export default defineSchema({
     .index('by_load', ['loadId'])
     .index('by_organization', ['workosOrgId'])
     .index('by_sequence', ['loadId', 'sequenceNumber'])
-    .index('by_stop_type', ['loadId', 'stopType']),
+    .index('by_stop_type', ['loadId', 'stopType'])
+    .index('by_load_detours', ['loadId', 'isDetour']),
 
   // ==========================================
   // ACCOUNTING (Financial Data Separation)
@@ -1260,34 +1278,35 @@ export default defineSchema({
       v.literal('BILLED'),
       v.literal('PENDING_PAYMENT'),
       v.literal('PAID'),
-      v.literal('VOID')
+      v.literal('VOID'),
     ),
 
     // Invoice Details
     invoiceNumber: v.optional(v.string()), // Generated when status -> BILLED
-    invoiceDate: v.optional(v.string()),   // ISO 8601
-    dueDate: v.optional(v.string()),       // ISO 8601
+    invoiceDate: v.optional(v.string()), // ISO 8601
+    dueDate: v.optional(v.string()), // ISO 8601
     currency: v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN')),
 
     // The Numbers (Optional - only stored when invoice is finalized/billed)
     // For DRAFT/MISSING_DATA: calculated on-the-fly from load + contract lane
     // For BILLED/PAID: frozen snapshot
-    subtotal: v.optional(v.number()),                  // Freight base amount
+    subtotal: v.optional(v.number()), // Freight base amount
     fuelSurcharge: v.optional(v.number()), // FSC amount
     accessorialsTotal: v.optional(v.number()), // Stop-offs, detention, etc.
-    taxAmount: v.optional(v.number()),     // Sales tax
-    totalAmount: v.optional(v.number()),   // Grand total
+    taxAmount: v.optional(v.number()), // Sales tax
+    totalAmount: v.optional(v.number()), // Grand total
 
     // Payment Confirmation
     paidAmount: v.optional(v.number()),
-    paymentDate: v.optional(v.string()),       // ISO 8601
-    paymentReference: v.optional(v.string()),  // check #, wire ref, etc.
+    paymentDate: v.optional(v.string()), // ISO 8601
+    paymentReference: v.optional(v.string()), // check #, wire ref, etc.
     paymentDifference: v.optional(v.number()), // paidAmount - totalAmount (negative = underpaid)
-    paymentMiles: v.optional(v.number()),      // Miles reported in payment CSV
+    paymentMiles: v.optional(v.number()), // Miles reported in payment CSV
 
     // Metadata
     missingDataReason: v.optional(v.string()), // e.g., "No Contract Lane found for HCR 925L0"
-    erpInvoiceId: v.optional(v.string()),      // QuickBooks/Wave ID
+    erpInvoiceId: v.optional(v.string()), // QuickBooks/Wave ID
+    invoiceDateNumeric: v.optional(v.number()), // Unix timestamp, set when BILLED (for indexed reporting)
 
     // WorkOS Integration
     createdBy: v.string(), // WorkOS user ID
@@ -1297,26 +1316,27 @@ export default defineSchema({
     .index('by_load', ['loadId'])
     .index('by_customer', ['customerId'])
     .index('by_organization', ['workosOrgId'])
-    .index('by_status', ['workosOrgId', 'status']),
+    .index('by_status', ['workosOrgId', 'status'])
+    .index('by_org_created', ['workosOrgId', 'createdAt'])
+    .index('by_org_status_created', ['workosOrgId', 'status', 'createdAt']),
 
   invoiceLineItems: defineTable({
     invoiceId: v.id('loadInvoices'),
 
     type: v.union(
-      v.literal('FREIGHT'),     // Base freight charge
-      v.literal('FUEL'),        // Fuel surcharge
+      v.literal('FREIGHT'), // Base freight charge
+      v.literal('FUEL'), // Fuel surcharge
       v.literal('ACCESSORIAL'), // Detention, Lumper, Stop-off
-      v.literal('TAX')          // Sales tax
+      v.literal('TAX'), // Sales tax
     ),
 
     description: v.string(), // "Freight: Chicago to Denver", "Stop-off charge (3 stops)"
-    quantity: v.number(),    // e.g., 1, 3 (for 3 stops)
-    rate: v.number(),        // Unit rate
-    amount: v.number(),      // quantity * rate
+    quantity: v.number(), // e.g., 1, 3 (for 3 stops)
+    rate: v.number(), // Unit rate
+    amount: v.number(), // quantity * rate
 
     createdAt: v.number(),
-  })
-    .index('by_invoice', ['invoiceId']),
+  }).index('by_invoice', ['invoiceId']),
 
   // ==========================================
   // DRIVER PAY ENGINE
@@ -1330,20 +1350,20 @@ export default defineSchema({
     workosOrgId: v.string(),
     name: v.string(),
     description: v.optional(v.string()),
-    
+
     // Who is this profile for?
     profileType: v.union(
-      v.literal('DRIVER'),    // Company drivers (W2)
-      v.literal('CARRIER')    // Owner operators / external carriers (1099)
+      v.literal('DRIVER'), // Company drivers (W2)
+      v.literal('CARRIER'), // Owner operators / external carriers (1099)
     ),
-    
+
     payBasis: v.union(
       v.literal('MILEAGE'),
       v.literal('HOURLY'),
       v.literal('PERCENTAGE'),
-      v.literal('FLAT')          // Flat rate per load
+      v.literal('FLAT'), // Flat rate per load
     ),
-    
+
     // Org-level default for this profileType
     // Only ONE profile per type can be the org default
     // Used when driver/carrier has no explicit assignment
@@ -1361,36 +1381,36 @@ export default defineSchema({
    */
   rateRules: defineTable({
     profileId: v.id('rateProfiles'),
-    workosOrgId: v.string(),             // Denormalized for RLS queries
-    name: v.string(),                    // e.g., "Base Loaded Mile", "Detention"
+    workosOrgId: v.string(), // Denormalized for RLS queries
+    name: v.string(), // e.g., "Base Loaded Mile", "Detention"
 
     // Category: Base pay vs Add-ons vs Deductions vs Manual Templates
     category: v.union(
       v.literal('BASE'),
       v.literal('ACCESSORIAL'),
       v.literal('DEDUCTION'),
-      v.literal('MANUAL_TEMPLATE')  // Quick-add templates for accountants
+      v.literal('MANUAL_TEMPLATE'), // Quick-add templates for accountants
     ),
 
     // What data triggers this rule?
     triggerEvent: v.union(
       v.literal('MILE_LOADED'),
       v.literal('MILE_EMPTY'),
-      v.literal('TIME_DURATION'),  // Total hours
-      v.literal('TIME_WAITING'),   // Detention
+      v.literal('TIME_DURATION'), // Total hours
+      v.literal('TIME_WAITING'), // Detention
       v.literal('COUNT_STOPS'),
-      v.literal('FLAT_LOAD'),      // Flat rate per entire load
-      v.literal('FLAT_LEG'),       // Flat rate per leg segment
+      v.literal('FLAT_LOAD'), // Flat rate per entire load
+      v.literal('FLAT_LEG'), // Flat rate per leg segment
       v.literal('ATTR_HAZMAT'),
       v.literal('ATTR_TARP'),
-      v.literal('PCT_OF_LOAD')     // % of Load Revenue
+      v.literal('PCT_OF_LOAD'), // % of Load Revenue
     ),
 
-    rateAmount: v.float64(),             // The $, %, or Multiplier
+    rateAmount: v.float64(), // The $, %, or Multiplier
 
     // Optional Constraints
     minThreshold: v.optional(v.float64()), // e.g., "Only applies after 2 hours"
-    maxCap: v.optional(v.float64()),       // e.g., "Max $150 detention"
+    maxCap: v.optional(v.float64()), // e.g., "Max $150 detention"
 
     // Optional equipment type condition
     // When set, rule only fires if load.equipmentType matches (case-insensitive)
@@ -1419,13 +1439,13 @@ export default defineSchema({
     // Profile selection strategy
     selectionStrategy: v.optional(
       v.union(
-        v.literal('ALWAYS_ACTIVE'),      // Always use this profile
+        v.literal('ALWAYS_ACTIVE'), // Always use this profile
         v.literal('DISTANCE_THRESHOLD'), // Use when miles exceed threshold
-        v.literal('MANUAL_ONLY')         // Only when explicitly selected
-      )
+        v.literal('MANUAL_ONLY'), // Only when explicitly selected
+      ),
     ),
     thresholdValue: v.optional(v.number()), // Miles threshold for DISTANCE_THRESHOLD
-    effectiveDate: v.optional(v.string()),  // When this assignment becomes active
+    effectiveDate: v.optional(v.string()), // When this assignment becomes active
   })
     .index('by_driver', ['driverId'])
     .index('by_org', ['workosOrgId']),
@@ -1446,13 +1466,13 @@ export default defineSchema({
     // Profile selection strategy
     selectionStrategy: v.optional(
       v.union(
-        v.literal('ALWAYS_ACTIVE'),      // Always use this profile
+        v.literal('ALWAYS_ACTIVE'), // Always use this profile
         v.literal('DISTANCE_THRESHOLD'), // Use when miles exceed threshold
-        v.literal('MANUAL_ONLY')         // Only when explicitly selected
-      )
+        v.literal('MANUAL_ONLY'), // Only when explicitly selected
+      ),
     ),
     thresholdValue: v.optional(v.number()), // Miles threshold for DISTANCE_THRESHOLD
-    effectiveDate: v.optional(v.string()),  // When this assignment becomes active
+    effectiveDate: v.optional(v.string()), // When this assignment becomes active
   })
     .index('by_carrier_partnership', ['carrierPartnershipId'])
     .index('by_org', ['workosOrgId']),
@@ -1464,38 +1484,45 @@ export default defineSchema({
    */
   payPlans: defineTable({
     workosOrgId: v.string(),
-    name: v.string(),                    // "Weekly - Monday Start"
+    name: v.string(), // "Weekly - Monday Start"
     description: v.optional(v.string()),
 
     // === Timing & Schedule (The "When") ===
     frequency: v.union(
       v.literal('WEEKLY'),
       v.literal('BIWEEKLY'),
-      v.literal('SEMIMONTHLY'),          // Fixed: 1st-15th, 16th-end
-      v.literal('MONTHLY')
+      v.literal('SEMIMONTHLY'), // Fixed: 1st-15th, 16th-end
+      v.literal('MONTHLY'),
     ),
 
     // Anchor configuration (varies by frequency)
-    periodStartDayOfWeek: v.optional(v.union(  // For WEEKLY/BIWEEKLY only
-      v.literal('SUNDAY'), v.literal('MONDAY'), v.literal('TUESDAY'),
-      v.literal('WEDNESDAY'), v.literal('THURSDAY'), v.literal('FRIDAY'),
-      v.literal('SATURDAY')
-    )),
+    periodStartDayOfWeek: v.optional(
+      v.union(
+        // For WEEKLY/BIWEEKLY only
+        v.literal('SUNDAY'),
+        v.literal('MONDAY'),
+        v.literal('TUESDAY'),
+        v.literal('WEDNESDAY'),
+        v.literal('THURSDAY'),
+        v.literal('FRIDAY'),
+        v.literal('SATURDAY'),
+      ),
+    ),
     periodStartDayOfMonth: v.optional(v.number()), // For MONTHLY: 1-28 (avoid 29-31 edge cases)
     // SEMIMONTHLY is always 1st and 16th (industry standard, no config needed)
 
     // Timezone (optional - inherits from organization.defaultTimezone if not set)
-    timezone: v.optional(v.string()),   // IANA timezone: "America/New_York" (overrides org default)
-    cutoffTime: v.string(),             // "17:00" (5PM in the resolved timezone)
-    paymentLagDays: v.number(),         // Days after period ends for pay date
+    timezone: v.optional(v.string()), // IANA timezone: "America/New_York" (overrides org default)
+    cutoffTime: v.string(), // "17:00" (5PM in the resolved timezone)
+    paymentLagDays: v.number(), // Days after period ends for pay date
 
     // === Calculation Logic (The "What") ===
     payableTrigger: v.union(
-      v.literal('DELIVERY_DATE'),       // Maps to: dispatchLegs.endStop.checkedOutAt
-      v.literal('COMPLETION_DATE'),     // Maps to: dispatchLegs.completedAt
-      v.literal('APPROVAL_DATE')        // Maps to: loadPayables.approvedAt
+      v.literal('DELIVERY_DATE'), // Maps to: dispatchLegs.endStop.checkedOutAt
+      v.literal('COMPLETION_DATE'), // Maps to: dispatchLegs.completedAt
+      v.literal('APPROVAL_DATE'), // Maps to: loadPayables.approvedAt
     ),
-    autoCarryover: v.boolean(),         // Auto-move held items to next period
+    autoCarryover: v.boolean(), // Auto-move held items to next period
     includeStandaloneAdjustments: v.boolean(), // Pull in unassigned bonuses/deductions
 
     // === Metadata ===
@@ -1521,7 +1548,7 @@ export default defineSchema({
     truckId: v.optional(v.id('trucks')),
     trailerId: v.optional(v.id('trailers')),
 
-    sequence: v.float64(),               // 1, 2, 3...
+    sequence: v.float64(), // 1, 2, 3...
 
     // Where does this leg start/end? (References loadStops)
     startStopId: v.id('loadStops'),
@@ -1529,14 +1556,9 @@ export default defineSchema({
 
     // Miles for THIS leg (may differ from total load)
     legLoadedMiles: v.float64(),
-    legEmptyMiles: v.float64(),          // Default 0 in V1
+    legEmptyMiles: v.float64(), // Default 0 in V1
 
-    status: v.union(
-      v.literal('PENDING'),
-      v.literal('ACTIVE'),
-      v.literal('COMPLETED'),
-      v.literal('CANCELED')
-    ),
+    status: v.union(v.literal('PENDING'), v.literal('ACTIVE'), v.literal('COMPLETED'), v.literal('CANCELED')),
 
     workosOrgId: v.string(),
     createdAt: v.float64(),
@@ -1545,7 +1567,8 @@ export default defineSchema({
     .index('by_load', ['loadId'])
     .index('by_driver', ['driverId', 'status'])
     .index('by_carrier_partnership', ['carrierPartnershipId', 'status'])
-    .index('by_org', ['workosOrgId']),
+    .index('by_org', ['workosOrgId'])
+    .index('by_truck', ['truckId']),
 
   /**
    * Load Payables - Calculated pay line items
@@ -1553,21 +1576,21 @@ export default defineSchema({
    * SINGLE SOURCE OF TRUTH for all driver payments
    */
   loadPayables: defineTable({
-    loadId: v.optional(v.id('loadInformation')),  // Optional - allows standalone bonuses
+    loadId: v.optional(v.id('loadInformation')), // Optional - allows standalone bonuses
     legId: v.optional(v.id('dispatchLegs')),
     driverId: v.id('drivers'),
 
-    description: v.string(),             // e.g., "Base Line Haul", "Manual Bonus"
+    description: v.string(), // e.g., "Base Line Haul", "Manual Bonus"
 
     // The Math
-    quantity: v.float64(),               // Miles, Hours, or 1 (Flat)
+    quantity: v.float64(), // Miles, Hours, or 1 (Flat)
     rate: v.float64(),
     totalAmount: v.float64(),
 
     // Source of Truth flags
     sourceType: v.union(
-      v.literal('SYSTEM'),               // Calculated by Rules
-      v.literal('MANUAL')                // Added/Edited by User
+      v.literal('SYSTEM'), // Calculated by Rules
+      v.literal('MANUAL'), // Added/Edited by User
     ),
 
     // If TRUE, Rules Engine will NEVER delete/overwrite this row
@@ -1575,11 +1598,11 @@ export default defineSchema({
 
     // Settlement Assignment
     settlementId: v.optional(v.id('driverSettlements')), // Which pay period this belongs to
-    
+
     // Rebillable to Customer (for manual accessorials)
-    isRebillable: v.optional(v.boolean()),        // Should this be added to customer invoice?
+    isRebillable: v.optional(v.boolean()), // Should this be added to customer invoice?
     rebilledToCustomerId: v.optional(v.id('customers')), // If rebilled, which customer?
-    rebilledAmount: v.optional(v.float64()),      // Amount charged to customer (may differ from driver pay)
+    rebilledAmount: v.optional(v.float64()), // Amount charged to customer (may differ from driver pay)
 
     // Receipt/Proof for Manual Items
     receiptStorageId: v.optional(v.id('_storage')), // Lumper receipts, etc.
@@ -1590,7 +1613,7 @@ export default defineSchema({
     warningMessage: v.optional(v.string()), // e.g., "Missing stop times"
 
     // Approval timestamp (for APPROVAL_DATE payable trigger in Pay Plans)
-    approvedAt: v.optional(v.float64()),  // Set when settlement moves to APPROVED
+    approvedAt: v.optional(v.float64()), // Set when settlement moves to APPROVED
 
     workosOrgId: v.string(),
     createdAt: v.float64(),
@@ -1602,16 +1625,16 @@ export default defineSchema({
     .index('by_leg', ['legId'])
     .index('by_org', ['workosOrgId'])
     .index('by_settlement', ['settlementId'])
-    .index('by_driver_unassigned', ['driverId', 'settlementId']), // For gathering unassigned payables
+    .index('by_driver_unassigned', ['driverId', 'settlementId']) // For gathering unassigned payables
+    .index('by_org_created', ['workosOrgId', 'createdAt'])
+    .index('by_driver_created', ['driverId', 'createdAt']),
 
   /**
    * Load Documents - Attachments for loads (e.g., extra documentation images)
    */
   loadDocuments: defineTable({
     loadId: v.id('loadInformation'),
-    type: v.union(
-      v.literal('EXTRA_DOC')
-    ),
+    type: v.union(v.literal('EXTRA_DOC')),
     storageId: v.id('_storage'),
     fileName: v.optional(v.string()),
     contentType: v.optional(v.string()),
@@ -1629,21 +1652,21 @@ export default defineSchema({
    * Mirrors loadPayables structure but for carrier partnerships
    */
   loadCarrierPayables: defineTable({
-    loadId: v.optional(v.id('loadInformation')),  // Optional - allows standalone adjustments
+    loadId: v.optional(v.id('loadInformation')), // Optional - allows standalone adjustments
     legId: v.optional(v.id('dispatchLegs')),
     carrierPartnershipId: v.id('carrierPartnerships'),
 
-    description: v.string(),             // e.g., "Base Line Haul", "Fuel Surcharge"
+    description: v.string(), // e.g., "Base Line Haul", "Fuel Surcharge"
 
     // The Math
-    quantity: v.float64(),               // Miles, Hours, or 1 (Flat)
+    quantity: v.float64(), // Miles, Hours, or 1 (Flat)
     rate: v.float64(),
     totalAmount: v.float64(),
 
     // Source of Truth flags
     sourceType: v.union(
-      v.literal('SYSTEM'),               // Calculated by Rules
-      v.literal('MANUAL')                // Added/Edited by User
+      v.literal('SYSTEM'), // Calculated by Rules
+      v.literal('MANUAL'), // Added/Edited by User
     ),
 
     // If TRUE, Rules Engine will NEVER delete/overwrite this row
@@ -1669,7 +1692,9 @@ export default defineSchema({
     .index('by_leg', ['legId'])
     .index('by_org', ['workosOrgId'])
     .index('by_settlement', ['settlementId'])
-    .index('by_carrier_unassigned', ['carrierPartnershipId', 'settlementId']),
+    .index('by_carrier_unassigned', ['carrierPartnershipId', 'settlementId'])
+    .index('by_org_created', ['workosOrgId', 'createdAt'])
+    .index('by_carrier_created', ['carrierPartnershipId', 'createdAt']),
 
   /**
    * Carrier Settlements - Pay Period Statements for Carriers
@@ -1680,28 +1705,28 @@ export default defineSchema({
     workosOrgId: v.string(),
 
     // Pay Period
-    periodStart: v.float64(),           // Unix timestamp
+    periodStart: v.float64(), // Unix timestamp
     periodEnd: v.float64(),
 
     // Settlement Status
     status: v.union(
-      v.literal('DRAFT'),               // Building statement
-      v.literal('PENDING'),             // Awaiting approval
-      v.literal('APPROVED'),            // Locked for payment processing
-      v.literal('PAID'),                // Payment completed
-      v.literal('DISPUTED')             // Carrier disputed
+      v.literal('DRAFT'), // Building statement
+      v.literal('PENDING'), // Awaiting approval
+      v.literal('APPROVED'), // Locked for payment processing
+      v.literal('PAID'), // Payment completed
+      v.literal('DISPUTED'), // Carrier disputed
     ),
 
     // Totals (denormalized for quick display)
-    totalGross: v.float64(),            // Sum of all payables
+    totalGross: v.float64(), // Sum of all payables
     totalDeductions: v.optional(v.float64()),
     totalNet: v.float64(),
 
     // Payment Info
     paidAt: v.optional(v.float64()),
     paidBy: v.optional(v.string()),
-    paymentMethod: v.optional(v.string()),     // Check, ACH, Wire
-    paymentReference: v.optional(v.string()),  // Check #, Transaction ID
+    paymentMethod: v.optional(v.string()), // Check, ACH, Wire
+    paymentReference: v.optional(v.string()), // Check #, Transaction ID
 
     // Carrier Info (denormalized for historical record)
     carrierName: v.optional(v.string()),
@@ -1727,31 +1752,31 @@ export default defineSchema({
     workosOrgId: v.string(),
 
     // Pay Period
-    periodStart: v.float64(),           // Unix timestamp
+    periodStart: v.float64(), // Unix timestamp
     periodEnd: v.float64(),
 
     // Pay Plan Link (for auto-calculated periods)
     payPlanId: v.optional(v.id('payPlans')),
-    periodNumber: v.optional(v.number()),   // e.g., Week 1, Period 2
-    payPlanName: v.optional(v.string()),    // Denormalized for display
+    periodNumber: v.optional(v.number()), // e.g., Week 1, Period 2
+    payPlanName: v.optional(v.string()), // Denormalized for display
 
     // Settlement Status
     status: v.union(
-      v.literal('DRAFT'),               // Accountant building statement
-      v.literal('PENDING'),             // Driver can view, awaiting approval
-      v.literal('APPROVED'),            // Locked for payment processing
-      v.literal('PAID'),                // Payment completed
-      v.literal('VOID')                 // Cancelled/reversed
+      v.literal('DRAFT'), // Accountant building statement
+      v.literal('PENDING'), // Driver can view, awaiting approval
+      v.literal('APPROVED'), // Locked for payment processing
+      v.literal('PAID'), // Payment completed
+      v.literal('VOID'), // Cancelled/reversed
     ),
 
     // Frozen Totals (calculated when APPROVED)
-    grossTotal: v.optional(v.float64()),        // Total gross pay
-    totalMiles: v.optional(v.float64()),        // Total miles driven
-    totalLoads: v.optional(v.number()),         // Number of loads
+    grossTotal: v.optional(v.float64()), // Total gross pay
+    totalMiles: v.optional(v.float64()), // Total miles driven
+    totalLoads: v.optional(v.number()), // Number of loads
     totalManualAdjustments: v.optional(v.float64()), // Sum of manual items
 
     // Statement Identification
-    statementNumber: v.string(),        // e.g., "SET-2025-001"
+    statementNumber: v.string(), // e.g., "SET-2025-001"
 
     // Approval Workflow
     approvedBy: v.optional(v.string()),
@@ -1783,7 +1808,7 @@ export default defineSchema({
   // Organization statistics for fast count queries (aggregate table pattern)
   organizationStats: defineTable({
     workosOrgId: v.string(),
-    
+
     // Load counts by status
     loadCounts: v.object({
       Open: v.number(),
@@ -1792,7 +1817,7 @@ export default defineSchema({
       Canceled: v.number(),
       Expired: v.optional(v.number()),
     }),
-    
+
     // Invoice counts by status
     invoiceCounts: v.object({
       MISSING_DATA: v.number(),
@@ -1802,13 +1827,34 @@ export default defineSchema({
       PAID: v.number(),
       VOID: v.number(),
     }),
-    
+
     // Drift detection
     lastRecalculated: v.optional(v.number()), // Last time counts were recalculated from source
-    
+
     // Timestamps
     updatedAt: v.number(),
   }).index('by_org', ['workosOrgId']),
+
+  // Accounting period statistics for fast reporting queries (aggregate table pattern)
+  // Revenue-side metrics are pre-computed; cost-side metrics are queried on-demand
+  accountingPeriodStats: defineTable({
+    workosOrgId: v.string(),
+    periodKey: v.string(), // "2026-03" (monthly granularity)
+
+    // Revenue (pre-computed, event-driven updates)
+    totalInvoiced: v.number(), // Sum of totalAmount for invoices finalized in this period
+    totalCollected: v.number(), // Sum of paidAmount for payments received in this period
+    invoiceCount: v.number(), // Count of invoices finalized in this period
+    paidInvoiceCount: v.number(), // Count of invoices paid in this period
+
+    // Drift detection
+    lastRecalculated: v.optional(v.number()),
+
+    // Timestamps
+    updatedAt: v.number(),
+  })
+    .index('by_org', ['workosOrgId'])
+    .index('by_org_period', ['workosOrgId', 'periodKey']),
 
   // ==========================================
   // DRIVER LOCATION TRACKING
@@ -1849,20 +1895,20 @@ export default defineSchema({
     partnerName: v.string(),
 
     // Key material (never store raw keys - hash only)
-    keyPrefix: v.string(),             // First 12 chars for identification (e.g., "otq_live_a1b2")
-    keyHash: v.string(),               // SHA-256 hash of full key
+    keyPrefix: v.string(), // First 12 chars for identification (e.g., "otq_live_a1b2")
+    keyHash: v.string(), // SHA-256 hash of full key
 
     // Scoping
-    permissions: v.array(v.string()),  // ["tracking:read", "tracking:subscribe", "tracking:events"]
+    permissions: v.array(v.string()), // ["tracking:read", "tracking:subscribe", "tracking:events"]
     allowedLoadSources: v.optional(v.array(v.string())), // Restrict to specific externalSource values
-    ipAllowlist: v.optional(v.array(v.string())),        // CIDR ranges
+    ipAllowlist: v.optional(v.array(v.string())), // CIDR ranges
 
     // Rate limiting (configurable per partner)
     rateLimitTier: v.union(
-      v.literal('low'),     // 60/min
-      v.literal('medium'),  // 300/min
-      v.literal('high'),    // 1000/min
-      v.literal('custom')
+      v.literal('low'), // 60/min
+      v.literal('medium'), // 300/min
+      v.literal('high'), // 1000/min
+      v.literal('custom'),
     ),
     customRateLimit: v.optional(v.number()), // requests/min if tier = "custom"
 
@@ -1872,7 +1918,7 @@ export default defineSchema({
     // Lifecycle
     status: v.union(v.literal('ACTIVE'), v.literal('REVOKED'), v.literal('EXPIRED')),
     expiresAt: v.optional(v.number()),
-    lastUsedAt: v.optional(v.number()),   // Updated at most once per minute (debounced)
+    lastUsedAt: v.optional(v.number()), // Updated at most once per minute (debounced)
 
     // Metadata
     createdBy: v.string(),
@@ -1889,20 +1935,20 @@ export default defineSchema({
     partnerKeyId: v.id('partnerApiKeys'),
 
     // Webhook config
-    url: v.string(),                        // HTTPS only (validated on creation)
-    events: v.array(v.string()),            // ["position.update", "status.changed", "tracking.started", "tracking.ended"]
-    encryptedSecret: v.string(),            // AES-256-GCM encrypted signing secret
+    url: v.string(), // HTTPS only (validated on creation)
+    events: v.array(v.string()), // ["position.update", "status.changed", "tracking.started", "tracking.ended"]
+    encryptedSecret: v.string(), // AES-256-GCM encrypted signing secret
 
     // Delivery settings
-    intervalMinutes: v.number(),            // Default 5
-    batchSize: v.optional(v.number()),      // Max positions per payload (default 100)
+    intervalMinutes: v.number(), // Default 5
+    batchSize: v.optional(v.number()), // Max positions per payload (default 100)
 
     // Filter (optional)
     loadSourceFilter: v.optional(v.string()), // Only deliver for specific externalSource
 
     // Status
     status: v.union(v.literal('ACTIVE'), v.literal('PAUSED'), v.literal('DISABLED')),
-    consecutiveFailures: v.number(),         // Auto-disable after 50
+    consecutiveFailures: v.number(), // Auto-disable after 50
     lastDeliveredAt: v.optional(v.number()),
     lastFailureReason: v.optional(v.string()),
 
@@ -1917,13 +1963,13 @@ export default defineSchema({
     workosOrgId: v.string(),
 
     // Idempotency (partner uses this to deduplicate)
-    deliveryId: v.string(),              // Unique per delivery: "dlv_<ulid>"
+    deliveryId: v.string(), // Unique per delivery: "dlv_<ulid>"
 
     // Payload reference
     loadId: v.id('loadInformation'),
-    eventType: v.string(),               // "position.update" | "status.changed" | ...
+    eventType: v.string(), // "position.update" | "status.changed" | ...
     positionsFrom: v.optional(v.number()), // recordedAt range start
-    positionsTo: v.optional(v.number()),   // recordedAt range end
+    positionsTo: v.optional(v.number()), // recordedAt range end
 
     // Delivery status
     status: v.union(
@@ -1931,10 +1977,10 @@ export default defineSchema({
       v.literal('DELIVERING'),
       v.literal('DELIVERED'),
       v.literal('FAILED'),
-      v.literal('DEAD_LETTER')
+      v.literal('DEAD_LETTER'),
     ),
     attempts: v.number(),
-    maxAttempts: v.number(),             // Default 5
+    maxAttempts: v.number(), // Default 5
     nextAttemptAt: v.optional(v.number()), // Exponential backoff with jitter
 
     // Response tracking
@@ -1953,7 +1999,7 @@ export default defineSchema({
     partnerKeyId: v.id('partnerApiKeys'),
 
     // Request identification
-    requestId: v.string(),               // "req_<random>" - propagated in X-Request-Id header
+    requestId: v.string(), // "req_<random>" - propagated in X-Request-Id header
 
     // Request info
     endpoint: v.string(),
@@ -1985,27 +2031,25 @@ export default defineSchema({
     internalId: v.string(),
     orderNumber: v.string(),
     externalLoadId: v.optional(v.string()),
-    trackingStatus: v.union(
-      v.literal('Pending'),
-      v.literal('In Transit'),
-      v.literal('Completed'),
-    ),
+    trackingStatus: v.union(v.literal('Pending'), v.literal('In Transit'), v.literal('Completed')),
     stopCount: v.number(),
     firstStopDate: v.optional(v.string()),
     // Simplified stop data for sandbox
-    stops: v.array(v.object({
-      sequenceNumber: v.number(),
-      stopType: v.union(v.literal('PICKUP'), v.literal('DELIVERY')),
-      city: v.string(),
-      state: v.string(),
-      latitude: v.number(),
-      longitude: v.number(),
-      status: v.union(v.literal('Pending'), v.literal('Completed')),
-      scheduledWindowBegin: v.string(),
-      scheduledWindowEnd: v.string(),
-      checkedInAt: v.optional(v.string()),
-      checkedOutAt: v.optional(v.string()),
-    })),
+    stops: v.array(
+      v.object({
+        sequenceNumber: v.number(),
+        stopType: v.union(v.literal('PICKUP'), v.literal('DELIVERY')),
+        city: v.string(),
+        state: v.string(),
+        latitude: v.number(),
+        longitude: v.number(),
+        status: v.union(v.literal('Pending'), v.literal('Completed')),
+        scheduledWindowBegin: v.string(),
+        scheduledWindowEnd: v.string(),
+        checkedInAt: v.optional(v.string()),
+        checkedOutAt: v.optional(v.string()),
+      }),
+    ),
     createdAt: v.number(),
   })
     .index('by_org', ['workosOrgId'])
@@ -2064,21 +2108,25 @@ export default defineSchema({
     pricePerGallon: v.number(),
     totalCost: v.number(),
     odometerReading: v.optional(v.number()),
-    location: v.optional(v.object({
-      city: v.string(),
-      state: v.string(),
-    })),
+    location: v.optional(
+      v.object({
+        city: v.string(),
+        state: v.string(),
+      }),
+    ),
     fuelCardNumber: v.optional(v.string()),
     receiptNumber: v.optional(v.string()),
     loadId: v.optional(v.id('loadInformation')),
-    paymentMethod: v.optional(v.union(
-      v.literal('FUEL_CARD'),
-      v.literal('CASH'),
-      v.literal('CHECK'),
-      v.literal('CREDIT_CARD'),
-      v.literal('EFS'),
-      v.literal('COMDATA'),
-    )),
+    paymentMethod: v.optional(
+      v.union(
+        v.literal('FUEL_CARD'),
+        v.literal('CASH'),
+        v.literal('CHECK'),
+        v.literal('CREDIT_CARD'),
+        v.literal('EFS'),
+        v.literal('COMDATA'),
+      ),
+    ),
     notes: v.optional(v.string()),
     receiptStorageId: v.optional(v.id('_storage')),
     createdAt: v.number(),
@@ -2091,7 +2139,9 @@ export default defineSchema({
     .index('by_carrier', ['carrierId'])
     .index('by_truck', ['truckId'])
     .index('by_vendor', ['vendorId'])
-    .index('by_load', ['loadId']),
+    .index('by_load', ['loadId'])
+    .index('by_truck_date', ['truckId', 'entryDate'])
+    .index('by_driver_date', ['driverId', 'entryDate']),
 
   defEntries: defineTable({
     organizationId: v.string(),
@@ -2104,21 +2154,25 @@ export default defineSchema({
     pricePerGallon: v.number(),
     totalCost: v.number(),
     odometerReading: v.optional(v.number()),
-    location: v.optional(v.object({
-      city: v.string(),
-      state: v.string(),
-    })),
+    location: v.optional(
+      v.object({
+        city: v.string(),
+        state: v.string(),
+      }),
+    ),
     fuelCardNumber: v.optional(v.string()),
     receiptNumber: v.optional(v.string()),
     loadId: v.optional(v.id('loadInformation')),
-    paymentMethod: v.optional(v.union(
-      v.literal('FUEL_CARD'),
-      v.literal('CASH'),
-      v.literal('CHECK'),
-      v.literal('CREDIT_CARD'),
-      v.literal('EFS'),
-      v.literal('COMDATA'),
-    )),
+    paymentMethod: v.optional(
+      v.union(
+        v.literal('FUEL_CARD'),
+        v.literal('CASH'),
+        v.literal('CHECK'),
+        v.literal('CREDIT_CARD'),
+        v.literal('EFS'),
+        v.literal('COMDATA'),
+      ),
+    ),
     notes: v.optional(v.string()),
     receiptStorageId: v.optional(v.id('_storage')),
     createdAt: v.number(),

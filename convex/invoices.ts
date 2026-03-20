@@ -1,29 +1,32 @@
 /**
  * Invoice Queries
  * Fetch invoice and line item data for accounting dashboard
- * 
+ *
  * Invoices are calculated dynamically based on load + contract lane data.
  * Amounts are only stored for BILLED/PAID/VOID status (frozen snapshot).
  */
 
-import { query, mutation, internalMutation, action } from "./_generated/server";
-import { paginationOptsValidator } from "convex/server";
-import { v } from "convex/values";
-import { internal } from "./_generated/api";
-import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from "./invoiceCalculations";
-import { Doc } from "./_generated/dataModel";
-import { updateInvoiceCount } from "./stats_helpers";
+import { query, mutation, internalMutation, action } from './_generated/server';
+import { paginationOptsValidator } from 'convex/server';
+import { v } from 'convex/values';
+import { internal } from './_generated/api';
+import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from './invoiceCalculations';
+import { Doc } from './_generated/dataModel';
+import { updateInvoiceCount } from './stats_helpers';
+import {
+  recordInvoiceFinalized,
+  recordPaymentCollected,
+  reverseInvoice,
+  reversePaymentAndInvoice,
+} from './accountingStatsHelpers';
 
 /**
  * Helper: Calculate invoice amounts dynamically
  */
-async function enrichInvoiceWithCalculatedAmounts(
-  ctx: any,
-  invoice: Doc<"loadInvoices">
-) {
+async function enrichInvoiceWithCalculatedAmounts(ctx: any, invoice: Doc<'loadInvoices'>) {
   // For finalized invoices (BILLED/PENDING_PAYMENT/PAID), use stored amounts
   const isFinalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(invoice.status);
-  
+
   if (isFinalized && invoice.totalAmount !== undefined) {
     return {
       subtotal: invoice.subtotal ?? 0,
@@ -36,7 +39,7 @@ async function enrichInvoiceWithCalculatedAmounts(
 
   // For DRAFT/MISSING_DATA: calculate dynamically
   const load = await ctx.db.get(invoice.loadId);
-  
+
   // MISSING_DATA or no contract lane: return $0
   if (!invoice.contractLaneId || !load) {
     const zero = getZeroInvoiceAmounts();
@@ -64,7 +67,7 @@ async function enrichInvoiceWithCalculatedAmounts(
 
   const calculated = calculateInvoiceAmounts(
     { effectiveMiles: load.effectiveMiles, stopCount: load.stopCount },
-    contractLane
+    contractLane,
   );
 
   return {
@@ -82,30 +85,30 @@ async function enrichInvoiceWithCalculatedAmounts(
 export const getInvoices = query({
   args: {
     workosOrgId: v.string(),
-    status: v.optional(v.union(
-      v.literal("MISSING_DATA"),
-      v.literal("DRAFT"),
-      v.literal("BILLED"),
-      v.literal("PENDING_PAYMENT"),
-      v.literal("PAID"),
-      v.literal("VOID")
-    )),
-    customerId: v.optional(v.id("customers")),
+    status: v.optional(
+      v.union(
+        v.literal('MISSING_DATA'),
+        v.literal('DRAFT'),
+        v.literal('BILLED'),
+        v.literal('PENDING_PAYMENT'),
+        v.literal('PAID'),
+        v.literal('VOID'),
+      ),
+    ),
+    customerId: v.optional(v.id('customers')),
   },
   handler: async (ctx, args) => {
-    let query = ctx.db
-      .query("loadInvoices")
-      .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId));
+    let query = ctx.db.query('loadInvoices').withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId));
 
     if (args.status) {
-      query = query.filter((q) => q.eq(q.field("status"), args.status));
+      query = query.filter((q) => q.eq(q.field('status'), args.status));
     }
 
     if (args.customerId) {
-      query = query.filter((q) => q.eq(q.field("customerId"), args.customerId));
+      query = query.filter((q) => q.eq(q.field('customerId'), args.customerId));
     }
 
-    const invoices = await query.order("desc").collect();
+    const invoices = await query.order('desc').collect();
 
     // Enrich with load, customer info, and calculated amounts
     const enriched = await Promise.all(
@@ -117,19 +120,23 @@ export const getInvoices = query({
         return {
           ...invoice,
           ...amounts, // Add calculated amounts
-          load: load ? {
-            _id: load._id,
-            internalId: load.internalId,
-            orderNumber: load.orderNumber,
-            status: load.status,
-            loadType: load.loadType,
-          } : null,
-          customer: customer ? {
-            _id: customer._id,
-            name: customer.name,
-          } : null,
+          load: load
+            ? {
+                _id: load._id,
+                internalId: load.internalId,
+                orderNumber: load.orderNumber,
+                status: load.status,
+                loadType: load.loadType,
+              }
+            : null,
+          customer: customer
+            ? {
+                _id: customer._id,
+                name: customer.name,
+              }
+            : null,
         };
-      })
+      }),
     );
 
     return enriched;
@@ -141,7 +148,7 @@ export const getInvoices = query({
  */
 export const getInvoice = query({
   args: {
-    invoiceId: v.id("loadInvoices"),
+    invoiceId: v.id('loadInvoices'),
   },
   handler: async (ctx, args) => {
     const invoice = await ctx.db.get(args.invoiceId);
@@ -153,32 +160,34 @@ export const getInvoice = query({
     // Get load, customer, and contract lane info
     const load = await ctx.db.get(invoice.loadId);
     const customer = await ctx.db.get(invoice.customerId);
-    const contractLane = invoice.contractLaneId
-      ? await ctx.db.get(invoice.contractLaneId)
-      : null;
+    const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
 
     return {
       ...invoice,
       ...amounts,
-      load: load ? {
-        _id: load._id,
-        internalId: load.internalId,
-        orderNumber: load.orderNumber,
-        status: load.status,
-        loadType: load.loadType,
-        parsedHcr: load.parsedHcr,
-        parsedTripNumber: load.parsedTripNumber,
-        effectiveMiles: load.effectiveMiles,
-        contractMiles: load.contractMiles,
-        googleMiles: load.googleMiles,
-        importedMiles: load.importedMiles,
-        manualMiles: load.manualMiles,
-        stopCount: load.stopCount,
-      } : null,
-      customer: customer ? {
-        _id: customer._id,
-        name: customer.name,
-      } : null,
+      load: load
+        ? {
+            _id: load._id,
+            internalId: load.internalId,
+            orderNumber: load.orderNumber,
+            status: load.status,
+            loadType: load.loadType,
+            parsedHcr: load.parsedHcr,
+            parsedTripNumber: load.parsedTripNumber,
+            effectiveMiles: load.effectiveMiles,
+            contractMiles: load.contractMiles,
+            googleMiles: load.googleMiles,
+            importedMiles: load.importedMiles,
+            manualMiles: load.manualMiles,
+            stopCount: load.stopCount,
+          }
+        : null,
+      customer: customer
+        ? {
+            _id: customer._id,
+            name: customer.name,
+          }
+        : null,
       contractLaneMiles: contractLane?.miles ?? null,
     };
   },
@@ -189,12 +198,12 @@ export const getInvoice = query({
  */
 export const getInvoiceByLoad = query({
   args: {
-    loadId: v.id("loadInformation"),
+    loadId: v.id('loadInformation'),
   },
   handler: async (ctx, args) => {
     const invoice = await ctx.db
-      .query("loadInvoices")
-      .withIndex("by_load", (q) => q.eq("loadId", args.loadId))
+      .query('loadInvoices')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .first();
 
     if (!invoice) return null;
@@ -229,8 +238,8 @@ export const countInvoicesByStatus = query({
   handler: async (ctx, args) => {
     // Read from organizationStats aggregate table (1 read)
     const stats = await ctx.db
-      .query("organizationStats")
-      .withIndex("by_org", (q) => q.eq("workosOrgId", args.workosOrgId))
+      .query('organizationStats')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
       .first();
 
     if (!stats) {
@@ -265,7 +274,7 @@ export const countInvoicesByStatus = query({
  * Get invoice by ID (simple version for preview)
  */
 export const getById = query({
-  args: { invoiceId: v.id("loadInvoices") },
+  args: { invoiceId: v.id('loadInvoices') },
   handler: async (ctx, args) => {
     return await ctx.db.get(args.invoiceId);
   },
@@ -275,7 +284,7 @@ export const getById = query({
  * Get line items for an invoice - generated dynamically for DRAFT invoices
  */
 export const getLineItems = query({
-  args: { invoiceId: v.id("loadInvoices") },
+  args: { invoiceId: v.id('loadInvoices') },
   handler: async (ctx, args) => {
     const invoice = await ctx.db.get(args.invoiceId);
     if (!invoice) return [];
@@ -284,8 +293,8 @@ export const getLineItems = query({
     const isFinalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(invoice.status);
     if (isFinalized) {
       const stored = await ctx.db
-        .query("invoiceLineItems")
-        .withIndex("by_invoice", (q) => q.eq("invoiceId", args.invoiceId))
+        .query('invoiceLineItems')
+        .withIndex('by_invoice', (q) => q.eq('invoiceId', args.invoiceId))
         .collect();
       if (stored.length > 0) return stored;
       // Fall through to dynamic generation if no stored line items exist
@@ -295,9 +304,7 @@ export const getLineItems = query({
     const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
 
     const load = await ctx.db.get(invoice.loadId);
-    const contractLane = invoice.contractLaneId
-      ? await ctx.db.get(invoice.contractLaneId)
-      : null;
+    const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
 
     const lineItems: any[] = [];
 
@@ -308,7 +315,8 @@ export const getLineItems = query({
       if (isWildcard) {
         description = `Extra Trips - ${load.parsedHcr || 'Unknown HCR'} ${load.parsedTripNumber || 'Unknown Trip'}`;
       } else {
-        description = contractLane.contractName ||
+        description =
+          contractLane.contractName ||
           `${load.parsedHcr || 'Unknown HCR'} - ${load.parsedTripNumber || 'Unknown Trip'}`;
       }
 
@@ -368,31 +376,25 @@ export const listInvoices = query({
   args: {
     workosOrgId: v.string(),
     status: v.union(
-      v.literal("DRAFT"),
-      v.literal("BILLED"),
-      v.literal("PENDING_PAYMENT"),
-      v.literal("PAID"),
-      v.literal("VOID")
+      v.literal('DRAFT'),
+      v.literal('BILLED'),
+      v.literal('PENDING_PAYMENT'),
+      v.literal('PAID'),
+      v.literal('VOID'),
     ),
     paginationOpts: paginationOptsValidator,
     search: v.optional(v.string()),
     hcr: v.optional(v.string()),
     trip: v.optional(v.string()),
-    loadType: v.optional(v.union(
-      v.literal("CONTRACT"),
-      v.literal("SPOT"),
-      v.literal("UNMAPPED")
-    )),
+    loadType: v.optional(v.union(v.literal('CONTRACT'), v.literal('SPOT'), v.literal('UNMAPPED'))),
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const result = await ctx.db
-      .query("loadInvoices")
-      .withIndex("by_status", (q) =>
-        q.eq("workosOrgId", args.workosOrgId).eq("status", args.status)
-      )
-      .order("desc")
+      .query('loadInvoices')
+      .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status))
+      .order('desc')
       .paginate(args.paginationOpts);
 
     const enriched = await Promise.all(
@@ -404,21 +406,25 @@ export const listInvoices = query({
         return {
           ...invoice,
           ...amounts,
-          load: load ? {
-            _id: load._id,
-            internalId: load.internalId,
-            orderNumber: load.orderNumber,
-            status: load.status,
-            loadType: load.loadType,
-            parsedHcr: load.parsedHcr,
-            parsedTripNumber: load.parsedTripNumber,
-          } : null,
-          customer: customer ? {
-            _id: customer._id,
-            name: customer.name,
-          } : null,
+          load: load
+            ? {
+                _id: load._id,
+                internalId: load.internalId,
+                orderNumber: load.orderNumber,
+                status: load.status,
+                loadType: load.loadType,
+                parsedHcr: load.parsedHcr,
+                parsedTripNumber: load.parsedTripNumber,
+              }
+            : null,
+          customer: customer
+            ? {
+                _id: customer._id,
+                name: customer.name,
+              }
+            : null,
         };
-      })
+      }),
     );
 
     // Apply post-fetch filters (search, hcr, trip, loadType, dateRange)
@@ -431,10 +437,12 @@ export const listInvoices = query({
         const customerName = inv.customer?.name?.toLowerCase() || '';
         const invoiceNumber = inv.invoiceNumber?.toLowerCase() || '';
         const amount = inv.totalAmount?.toString() || '';
-        return orderNumber.includes(searchLower) ||
-               customerName.includes(searchLower) ||
-               invoiceNumber.includes(searchLower) ||
-               amount.includes(searchLower);
+        return (
+          orderNumber.includes(searchLower) ||
+          customerName.includes(searchLower) ||
+          invoiceNumber.includes(searchLower) ||
+          amount.includes(searchLower)
+        );
       });
     }
 
@@ -469,19 +477,17 @@ export const getFilterOptions = query({
   args: {
     workosOrgId: v.string(),
     status: v.union(
-      v.literal("DRAFT"),
-      v.literal("BILLED"),
-      v.literal("PENDING_PAYMENT"),
-      v.literal("PAID"),
-      v.literal("VOID")
+      v.literal('DRAFT'),
+      v.literal('BILLED'),
+      v.literal('PENDING_PAYMENT'),
+      v.literal('PAID'),
+      v.literal('VOID'),
     ),
   },
   handler: async (ctx, args) => {
     const invoices = await ctx.db
-      .query("loadInvoices")
-      .withIndex("by_status", (q) =>
-        q.eq("workosOrgId", args.workosOrgId).eq("status", args.status)
-      )
+      .query('loadInvoices')
+      .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status))
       .take(500);
 
     const hcrs = new Set<string>();
@@ -492,7 +498,7 @@ export const getFilterOptions = query({
         const load = await ctx.db.get(invoice.loadId);
         if (load?.parsedHcr) hcrs.add(load.parsedHcr);
         if (load?.parsedTripNumber) trips.add(load.parsedTripNumber);
-      })
+      }),
     );
 
     return {
@@ -508,14 +514,14 @@ export const getFilterOptions = query({
  */
 export const bulkUpdateStatus = mutation({
   args: {
-    invoiceIds: v.array(v.id("loadInvoices")),
+    invoiceIds: v.array(v.id('loadInvoices')),
     workosOrgId: v.string(),
     newStatus: v.union(
-      v.literal("DRAFT"),
-      v.literal("BILLED"),
-      v.literal("PENDING_PAYMENT"),
-      v.literal("PAID"),
-      v.literal("VOID")
+      v.literal('DRAFT'),
+      v.literal('BILLED'),
+      v.literal('PENDING_PAYMENT'),
+      v.literal('PAID'),
+      v.literal('VOID'),
     ),
     updatedBy: v.string(), // WorkOS user ID
   },
@@ -544,15 +550,13 @@ export const bulkUpdateStatus = mutation({
 
           // Store line items if none exist
           const existingItems = await ctx.db
-            .query("invoiceLineItems")
-            .withIndex("by_invoice", (q) => q.eq("invoiceId", invoiceId))
+            .query('invoiceLineItems')
+            .withIndex('by_invoice', (q) => q.eq('invoiceId', invoiceId))
             .take(1);
 
           if (existingItems.length === 0) {
             const load = await ctx.db.get(invoice.loadId);
-            const contractLane = invoice.contractLaneId
-              ? await ctx.db.get(invoice.contractLaneId)
-              : null;
+            const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
 
             if (amounts.subtotal > 0 && contractLane && load) {
               const isWildcard = (contractLane as any).tripNumber === '*';
@@ -561,9 +565,9 @@ export const bulkUpdateStatus = mutation({
                 : (contractLane as any).contractName ||
                   `${(load as any).parsedHcr || 'Unknown HCR'} - ${(load as any).parsedTripNumber || 'Unknown Trip'}`;
 
-              await ctx.db.insert("invoiceLineItems", {
+              await ctx.db.insert('invoiceLineItems', {
                 invoiceId,
-                type: "FREIGHT",
+                type: 'FREIGHT',
                 description: desc,
                 quantity: 1,
                 rate: amounts.subtotal,
@@ -573,9 +577,9 @@ export const bulkUpdateStatus = mutation({
             }
 
             if (amounts.fuelSurcharge > 0 && contractLane) {
-              await ctx.db.insert("invoiceLineItems", {
+              await ctx.db.insert('invoiceLineItems', {
                 invoiceId,
-                type: "FUEL",
+                type: 'FUEL',
                 description: `Fuel Surcharge (${(contractLane as any).fuelSurchargeType || 'N/A'})`,
                 quantity: 1,
                 rate: amounts.fuelSurcharge,
@@ -587,9 +591,9 @@ export const bulkUpdateStatus = mutation({
             if (amounts.accessorialsTotal > 0 && load && contractLane) {
               const includedStops = (contractLane as any).includedStops || 2;
               const extraStops = Math.max(0, ((load as any).stopCount || 0) - includedStops);
-              await ctx.db.insert("invoiceLineItems", {
+              await ctx.db.insert('invoiceLineItems', {
                 invoiceId,
-                type: "ACCESSORIAL",
+                type: 'ACCESSORIAL',
                 description: `Stop-off charges (${extraStops} extra stops)`,
                 quantity: extraStops,
                 rate: (contractLane as any).stopOffRate || 0,
@@ -606,16 +610,29 @@ export const bulkUpdateStatus = mutation({
             accessorialsTotal: amounts.accessorialsTotal,
             taxAmount: amounts.taxAmount,
             totalAmount: amounts.totalAmount,
+            invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Set on first finalization only
             updatedAt: now,
           });
         } else {
           await ctx.db.patch(invoiceId, {
             status: args.newStatus,
+            invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Set if missing (e.g., legacy data)
             updatedAt: now,
           });
         }
 
         await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, args.newStatus);
+
+        // Update accounting period stats when invoice is finalized
+        if (!wasFinalized && willBeFinalized) {
+          const updatedInvoice = await ctx.db.get(invoiceId);
+          const frozenAmount = updatedInvoice?.totalAmount ?? 0;
+          const dateAnchor = updatedInvoice?.invoiceDateNumeric ?? now;
+          if (frozenAmount > 0) {
+            await recordInvoiceFinalized(ctx, invoice.workosOrgId, frozenAmount, dateAnchor);
+          }
+        }
+
         results.success++;
       } catch (error) {
         results.failed++;
@@ -633,7 +650,7 @@ export const bulkUpdateStatus = mutation({
  */
 export const bulkVoidInvoices = mutation({
   args: {
-    invoiceIds: v.array(v.id("loadInvoices")),
+    invoiceIds: v.array(v.id('loadInvoices')),
     workosOrgId: v.string(),
     reason: v.optional(v.string()),
     updatedBy: v.string(), // WorkOS user ID
@@ -645,7 +662,7 @@ export const bulkVoidInvoices = mutation({
     for (const invoiceId of args.invoiceIds) {
       try {
         const invoice = await ctx.db.get(invoiceId);
-        
+
         // Security check: verify invoice belongs to organization
         if (!invoice || invoice.workosOrgId !== args.workosOrgId) {
           results.failed++;
@@ -656,13 +673,27 @@ export const bulkVoidInvoices = mutation({
         const oldStatus = invoice.status;
 
         await ctx.db.patch(invoiceId, {
-          status: "VOID",
+          status: 'VOID',
           missingDataReason: args.reason,
           updatedAt: now,
         });
 
         // ✅ Update organization stats (aggregate table pattern)
-        await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, "VOID");
+        await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, 'VOID');
+
+        // Reverse accounting stats if voiding from a finalized state
+        const finalizedStatuses = ['BILLED', 'PENDING_PAYMENT', 'PAID'];
+        if (finalizedStatuses.includes(oldStatus) && (invoice.totalAmount ?? 0) > 0) {
+          const wasPaid = oldStatus === 'PAID';
+          await reverseInvoice(
+            ctx,
+            invoice.workosOrgId,
+            invoice.totalAmount ?? 0,
+            wasPaid,
+            invoice.paidAmount ?? 0,
+            invoice.invoiceDateNumeric ?? invoice.createdAt,
+          );
+        }
 
         results.success++;
       } catch (error) {
@@ -679,7 +710,7 @@ const PAYMENT_BATCH_SIZE = 25;
 
 const paymentBatchArgs = {
   workosOrgId: v.string(),
-  matchType: v.union(v.literal("invoiceNumber"), v.literal("orderNumber")),
+  matchType: v.union(v.literal('invoiceNumber'), v.literal('orderNumber')),
   payments: v.array(
     v.object({
       matchKey: v.string(),
@@ -687,7 +718,7 @@ const paymentBatchArgs = {
       paymentDate: v.optional(v.string()),
       paymentReference: v.optional(v.string()),
       paymentMiles: v.optional(v.number()),
-    })
+    }),
   ),
 };
 
@@ -713,50 +744,46 @@ export const processPaymentChunk = internalMutation({
 
     for (const payment of args.payments) {
       try {
-        let invoice: Doc<"loadInvoices"> | null = null;
+        let invoice: Doc<'loadInvoices'> | null = null;
 
-        if (args.matchType === "invoiceNumber") {
+        if (args.matchType === 'invoiceNumber') {
           const candidates = await ctx.db
-            .query("loadInvoices")
-            .withIndex("by_organization", (q) =>
-              q.eq("workosOrgId", args.workosOrgId)
-            )
-            .filter((q) =>
-              q.eq(q.field("invoiceNumber"), payment.matchKey)
-            )
+            .query('loadInvoices')
+            .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
+            .filter((q) => q.eq(q.field('invoiceNumber'), payment.matchKey))
             .take(1);
           invoice = candidates[0] ?? null;
         } else {
           // Try orderNumber first, then internalId, then FK-prefixed internalId
           let load = await ctx.db
-            .query("loadInformation")
-            .withIndex("by_order_number", (q) =>
-              q.eq("workosOrgId", args.workosOrgId).eq("orderNumber", payment.matchKey)
+            .query('loadInformation')
+            .withIndex('by_order_number', (q) =>
+              q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', payment.matchKey),
             )
             .first();
 
           if (!load) {
             load = await ctx.db
-              .query("loadInformation")
-              .withIndex("by_internal_id", (q) =>
-                q.eq("workosOrgId", args.workosOrgId).eq("internalId", payment.matchKey)
+              .query('loadInformation')
+              .withIndex('by_internal_id', (q) =>
+                q.eq('workosOrgId', args.workosOrgId).eq('internalId', payment.matchKey),
               )
               .first();
           }
 
           if (!load) {
             load = await ctx.db
-              .query("loadInformation")
-              .withIndex("by_internal_id", (q) =>
-                q.eq("workosOrgId", args.workosOrgId).eq("internalId", `FK-${payment.matchKey}`)
+              .query('loadInformation')
+              .withIndex('by_internal_id', (q) =>
+                q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${payment.matchKey}`),
               )
               .first();
           }
 
           if (load) {
             invoice = await ctx.db
-              .query("loadInvoices")
-              .withIndex("by_load", (q) => q.eq("loadId", load._id))
+              .query('loadInvoices')
+              .withIndex('by_load', (q) => q.eq('loadId', load._id))
               .first();
           }
         }
@@ -778,7 +805,7 @@ export const processPaymentChunk = internalMutation({
         const oldStatus = invoice.status;
 
         await ctx.db.patch(invoice._id, {
-          status: "PAID",
+          status: 'PAID',
           paidAmount: payment.paidAmount,
           paymentDate: payment.paymentDate,
           paymentReference: payment.paymentReference,
@@ -786,8 +813,8 @@ export const processPaymentChunk = internalMutation({
           updatedAt: now,
         });
 
-        if (oldStatus !== "PAID") {
-          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, "PAID");
+        if (oldStatus !== 'PAID') {
+          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, 'PAID');
         }
 
         if (Math.abs(difference) > 0.005) {
@@ -833,45 +860,37 @@ export const confirmPaymentChunk = mutation({
 
     for (const payment of args.payments) {
       try {
-        let invoice: Doc<"loadInvoices"> | null = null;
+        let invoice: Doc<'loadInvoices'> | null = null;
         const matchKey = payment.matchKey.trim();
 
-        if (args.matchType === "invoiceNumber") {
+        if (args.matchType === 'invoiceNumber') {
           const candidates = await ctx.db
-            .query("loadInvoices")
-            .withIndex("by_organization", (q) =>
-              q.eq("workosOrgId", args.workosOrgId)
-            )
-            .filter((q) =>
-              q.eq(q.field("invoiceNumber"), matchKey)
-            )
+            .query('loadInvoices')
+            .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
+            .filter((q) => q.eq(q.field('invoiceNumber'), matchKey))
             .take(1);
           invoice = candidates[0] ?? null;
         } else {
           // 1. Try orderNumber (e.g. "96073365")
           let load = await ctx.db
-            .query("loadInformation")
-            .withIndex("by_order_number", (q) =>
-              q.eq("workosOrgId", args.workosOrgId).eq("orderNumber", matchKey)
-            )
+            .query('loadInformation')
+            .withIndex('by_order_number', (q) => q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', matchKey))
             .first();
 
           // 2. Try internalId directly (e.g. "96073365")
           if (!load) {
             load = await ctx.db
-              .query("loadInformation")
-              .withIndex("by_internal_id", (q) =>
-                q.eq("workosOrgId", args.workosOrgId).eq("internalId", matchKey)
-              )
+              .query('loadInformation')
+              .withIndex('by_internal_id', (q) => q.eq('workosOrgId', args.workosOrgId).eq('internalId', matchKey))
               .first();
           }
 
           // 3. Try internalId with FK- prefix (e.g. "FK-96073365")
           if (!load) {
             load = await ctx.db
-              .query("loadInformation")
-              .withIndex("by_internal_id", (q) =>
-                q.eq("workosOrgId", args.workosOrgId).eq("internalId", `FK-${matchKey}`)
+              .query('loadInformation')
+              .withIndex('by_internal_id', (q) =>
+                q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${matchKey}`),
               )
               .first();
           }
@@ -879,17 +898,13 @@ export const confirmPaymentChunk = mutation({
           // 4. Try externalLoadId (FourKites shipment ID) — both casing variants
           if (!load) {
             load = await ctx.db
-              .query("loadInformation")
-              .withIndex("by_external_id", (q) =>
-                q.eq("externalSource", "FourKites").eq("externalLoadId", matchKey)
-              )
+              .query('loadInformation')
+              .withIndex('by_external_id', (q) => q.eq('externalSource', 'FourKites').eq('externalLoadId', matchKey))
               .first();
             if (!load) {
               load = await ctx.db
-                .query("loadInformation")
-                .withIndex("by_external_id", (q) =>
-                  q.eq("externalSource", "FOURKITES").eq("externalLoadId", matchKey)
-                )
+                .query('loadInformation')
+                .withIndex('by_external_id', (q) => q.eq('externalSource', 'FOURKITES').eq('externalLoadId', matchKey))
                 .first();
             }
             if (load && load.workosOrgId !== args.workosOrgId) {
@@ -900,8 +915,8 @@ export const confirmPaymentChunk = mutation({
           // Load found but no invoice exists for it
           if (load && !invoice) {
             invoice = await ctx.db
-              .query("loadInvoices")
-              .withIndex("by_load", (q) => q.eq("loadId", load!._id))
+              .query('loadInvoices')
+              .withIndex('by_load', (q) => q.eq('loadId', load!._id))
               .first();
             if (!invoice) {
               results.noInvoice.push(matchKey);
@@ -925,7 +940,7 @@ export const confirmPaymentChunk = mutation({
 
         // Duplicate protection: skip if already PAID with the same amount
         if (
-          invoice.status === "PAID" &&
+          invoice.status === 'PAID' &&
           invoice.paidAmount !== undefined &&
           Math.abs(invoice.paidAmount - payment.paidAmount) < 0.005
         ) {
@@ -934,8 +949,8 @@ export const confirmPaymentChunk = mutation({
         }
 
         const oldStatus = invoice.status;
-        const needsFreeze = !['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(oldStatus) ||
-          invoice.totalAmount === undefined;
+        const needsFreeze =
+          !['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(oldStatus) || invoice.totalAmount === undefined;
 
         let invoicedAmount = invoice.totalAmount ?? 0;
         if (needsFreeze) {
@@ -943,9 +958,7 @@ export const confirmPaymentChunk = mutation({
           invoicedAmount = amounts.totalAmount;
 
           const load = await ctx.db.get(invoice.loadId);
-          const contractLane = invoice.contractLaneId
-            ? await ctx.db.get(invoice.contractLaneId)
-            : null;
+          const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
 
           if (amounts.subtotal > 0 && contractLane && load) {
             const isWildcard = (contractLane as any).tripNumber === '*';
@@ -954,9 +967,9 @@ export const confirmPaymentChunk = mutation({
               : (contractLane as any).contractName ||
                 `${(load as any).parsedHcr || 'Unknown HCR'} - ${(load as any).parsedTripNumber || 'Unknown Trip'}`;
 
-            await ctx.db.insert("invoiceLineItems", {
+            await ctx.db.insert('invoiceLineItems', {
               invoiceId: invoice._id,
-              type: "FREIGHT",
+              type: 'FREIGHT',
               description: desc,
               quantity: 1,
               rate: amounts.subtotal,
@@ -966,9 +979,9 @@ export const confirmPaymentChunk = mutation({
           }
 
           if (amounts.fuelSurcharge > 0 && contractLane) {
-            await ctx.db.insert("invoiceLineItems", {
+            await ctx.db.insert('invoiceLineItems', {
               invoiceId: invoice._id,
-              type: "FUEL",
+              type: 'FUEL',
               description: `Fuel Surcharge (${(contractLane as any).fuelSurchargeType || 'N/A'})`,
               quantity: 1,
               rate: amounts.fuelSurcharge,
@@ -980,9 +993,9 @@ export const confirmPaymentChunk = mutation({
           if (amounts.accessorialsTotal > 0 && load && contractLane) {
             const includedStops = (contractLane as any).includedStops || 2;
             const extraStops = Math.max(0, ((load as any).stopCount || 0) - includedStops);
-            await ctx.db.insert("invoiceLineItems", {
+            await ctx.db.insert('invoiceLineItems', {
               invoiceId: invoice._id,
-              type: "ACCESSORIAL",
+              type: 'ACCESSORIAL',
               description: `Stop-off charges (${extraStops} extra stops)`,
               quantity: extraStops,
               rate: (contractLane as any).stopOffRate || 0,
@@ -997,24 +1010,35 @@ export const confirmPaymentChunk = mutation({
             accessorialsTotal: amounts.accessorialsTotal,
             taxAmount: amounts.taxAmount,
             totalAmount: amounts.totalAmount,
+            invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Set on first finalization
           });
         }
 
         const difference = payment.paidAmount - invoicedAmount;
 
         await ctx.db.patch(invoice._id, {
-          status: "PAID",
+          status: 'PAID',
           paidAmount: payment.paidAmount,
           paymentDate: payment.paymentDate,
           paymentReference: payment.paymentReference,
           paymentMiles: payment.paymentMiles,
           paymentDifference: difference,
+          invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Ensure set even if skipping freeze
           updatedAt: now,
         });
 
-        if (oldStatus !== "PAID") {
-          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, "PAID");
+        if (oldStatus !== 'PAID') {
+          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, 'PAID');
         }
+
+        // Update accounting period stats
+        const dateAnchor = invoice.invoiceDateNumeric ?? now;
+        if (needsFreeze && invoicedAmount > 0) {
+          // Invoice was finalized AND paid in one step (DRAFT->PAID skip of BILLED)
+          await recordInvoiceFinalized(ctx, invoice.workosOrgId, invoicedAmount, dateAnchor);
+        }
+        const previousPaidAmount = oldStatus === 'PAID' ? (invoice.paidAmount ?? 0) : 0;
+        await recordPaymentCollected(ctx, invoice.workosOrgId, payment.paidAmount, previousPaidAmount, dateAnchor);
 
         if (Math.abs(difference) > 0.005) {
           results.discrepancies.push({
@@ -1041,13 +1065,9 @@ export const confirmPaymentChunk = mutation({
  */
 export const bulkUpdateLoadType = mutation({
   args: {
-    invoiceIds: v.array(v.id("loadInvoices")),
+    invoiceIds: v.array(v.id('loadInvoices')),
     workosOrgId: v.string(),
-    newLoadType: v.union(
-      v.literal("CONTRACT"),
-      v.literal("SPOT"),
-      v.literal("UNMAPPED")
-    ),
+    newLoadType: v.union(v.literal('CONTRACT'), v.literal('SPOT'), v.literal('UNMAPPED')),
     updatedBy: v.string(), // WorkOS user ID
   },
   handler: async (ctx, args) => {
@@ -1057,7 +1077,7 @@ export const bulkUpdateLoadType = mutation({
     for (const invoiceId of args.invoiceIds) {
       try {
         const invoice = await ctx.db.get(invoiceId);
-        
+
         // Security check: verify invoice belongs to organization
         if (!invoice || invoice.workosOrgId !== args.workosOrgId) {
           results.failed++;
@@ -1105,21 +1125,23 @@ export const debugLoadLookup = query({
 
     // 1. orderNumber exact match
     const byOrder = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_order_number", (q) =>
-        q.eq("workosOrgId", args.workosOrgId).eq("orderNumber", val)
-      )
+      .query('loadInformation')
+      .withIndex('by_order_number', (q) => q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', val))
       .first();
     results.byOrderNumber = byOrder
-      ? { _id: byOrder._id, orderNumber: byOrder.orderNumber, internalId: byOrder.internalId, externalLoadId: byOrder.externalLoadId, externalSource: byOrder.externalSource }
+      ? {
+          _id: byOrder._id,
+          orderNumber: byOrder.orderNumber,
+          internalId: byOrder.internalId,
+          externalLoadId: byOrder.externalLoadId,
+          externalSource: byOrder.externalSource,
+        }
       : null;
 
     // 2. internalId exact match
     const byInternal = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_internal_id", (q) =>
-        q.eq("workosOrgId", args.workosOrgId).eq("internalId", val)
-      )
+      .query('loadInformation')
+      .withIndex('by_internal_id', (q) => q.eq('workosOrgId', args.workosOrgId).eq('internalId', val))
       .first();
     results.byInternalId = byInternal
       ? { _id: byInternal._id, orderNumber: byInternal.orderNumber, internalId: byInternal.internalId }
@@ -1127,41 +1149,37 @@ export const debugLoadLookup = query({
 
     // 3. internalId with FK- prefix
     const byFk = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_internal_id", (q) =>
-        q.eq("workosOrgId", args.workosOrgId).eq("internalId", `FK-${val}`)
-      )
+      .query('loadInformation')
+      .withIndex('by_internal_id', (q) => q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${val}`))
       .first();
-    results.byFkPrefix = byFk
-      ? { _id: byFk._id, orderNumber: byFk.orderNumber, internalId: byFk.internalId }
-      : null;
+    results.byFkPrefix = byFk ? { _id: byFk._id, orderNumber: byFk.orderNumber, internalId: byFk.internalId } : null;
 
     // 4. externalLoadId
     const byExt1 = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_external_id", (q) =>
-        q.eq("externalSource", "FourKites").eq("externalLoadId", val)
-      )
+      .query('loadInformation')
+      .withIndex('by_external_id', (q) => q.eq('externalSource', 'FourKites').eq('externalLoadId', val))
       .first();
     const byExt2 = !byExt1
       ? await ctx.db
-          .query("loadInformation")
-          .withIndex("by_external_id", (q) =>
-            q.eq("externalSource", "FOURKITES").eq("externalLoadId", val)
-          )
+          .query('loadInformation')
+          .withIndex('by_external_id', (q) => q.eq('externalSource', 'FOURKITES').eq('externalLoadId', val))
           .first()
       : null;
     const byExt = byExt1 ?? byExt2;
     results.byExternalLoadId = byExt
-      ? { _id: byExt._id, orderNumber: byExt.orderNumber, internalId: byExt.internalId, externalLoadId: byExt.externalLoadId, workosOrgId: byExt.workosOrgId }
+      ? {
+          _id: byExt._id,
+          orderNumber: byExt.orderNumber,
+          internalId: byExt.internalId,
+          externalLoadId: byExt.externalLoadId,
+          workosOrgId: byExt.workosOrgId,
+        }
       : null;
 
     // 5. Brute-force: scan a sample of loads to find any containing this value
     const sampleLoads = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_organization", (q) =>
-        q.eq("workosOrgId", args.workosOrgId)
-      )
+      .query('loadInformation')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
       .take(500);
 
     const fuzzyMatch = sampleLoads.find(
@@ -1169,10 +1187,16 @@ export const debugLoadLookup = query({
         l.orderNumber?.includes(val) ||
         l.internalId?.includes(val) ||
         l.externalLoadId?.includes(val) ||
-        l.poNumber?.includes(val)
+        l.poNumber?.includes(val),
     );
     results.fuzzyMatchInFirst500 = fuzzyMatch
-      ? { _id: fuzzyMatch._id, orderNumber: fuzzyMatch.orderNumber, internalId: fuzzyMatch.internalId, externalLoadId: fuzzyMatch.externalLoadId, poNumber: fuzzyMatch.poNumber }
+      ? {
+          _id: fuzzyMatch._id,
+          orderNumber: fuzzyMatch.orderNumber,
+          internalId: fuzzyMatch.internalId,
+          externalLoadId: fuzzyMatch.externalLoadId,
+          poNumber: fuzzyMatch.poNumber,
+        }
       : null;
 
     // 6. Sample of what identifiers look like in the org
@@ -1189,8 +1213,8 @@ export const debugLoadLookup = query({
     const foundLoad = byOrder ?? byInternal ?? byFk ?? byExt ?? fuzzyMatch;
     if (foundLoad) {
       const invoice = await ctx.db
-        .query("loadInvoices")
-        .withIndex("by_load", (q) => q.eq("loadId", foundLoad._id))
+        .query('loadInvoices')
+        .withIndex('by_load', (q) => q.eq('loadId', foundLoad._id))
         .first();
       results.hasInvoice = !!invoice;
       results.invoiceStatus = invoice?.status ?? null;
@@ -1215,10 +1239,8 @@ export const resetPaidToDraft = mutation({
     const now = Date.now();
 
     const paidInvoices = await ctx.db
-      .query("loadInvoices")
-      .withIndex("by_status", (q) =>
-        q.eq("workosOrgId", args.workosOrgId).eq("status", "PAID")
-      )
+      .query('loadInvoices')
+      .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID'))
       .take(limit);
 
     let reset = 0;
@@ -1226,8 +1248,8 @@ export const resetPaidToDraft = mutation({
 
     for (const invoice of paidInvoices) {
       const existingItems = await ctx.db
-        .query("invoiceLineItems")
-        .withIndex("by_invoice", (q) => q.eq("invoiceId", invoice._id))
+        .query('invoiceLineItems')
+        .withIndex('by_invoice', (q) => q.eq('invoiceId', invoice._id))
         .collect();
 
       for (const item of existingItems) {
@@ -1236,7 +1258,7 @@ export const resetPaidToDraft = mutation({
       }
 
       await ctx.db.patch(invoice._id, {
-        status: "DRAFT",
+        status: 'DRAFT',
         paidAmount: undefined,
         paymentDate: undefined,
         paymentReference: undefined,
@@ -1247,18 +1269,29 @@ export const resetPaidToDraft = mutation({
         accessorialsTotal: undefined,
         taxAmount: undefined,
         totalAmount: undefined,
+        invoiceDateNumeric: undefined, // Clear so it gets a fresh date on re-finalization
         updatedAt: now,
       });
 
-      await updateInvoiceCount(ctx, invoice.workosOrgId, "PAID", "DRAFT");
+      await updateInvoiceCount(ctx, invoice.workosOrgId, 'PAID', 'DRAFT');
+
+      // Reverse accounting stats for this paid invoice
+      if ((invoice.paidAmount ?? 0) > 0 || (invoice.totalAmount ?? 0) > 0) {
+        await reversePaymentAndInvoice(
+          ctx,
+          invoice.workosOrgId,
+          invoice.paidAmount ?? 0,
+          invoice.totalAmount ?? 0,
+          invoice.invoiceDateNumeric ?? invoice.createdAt,
+        );
+      }
+
       reset++;
     }
 
     const remaining = await ctx.db
-      .query("loadInvoices")
-      .withIndex("by_status", (q) =>
-        q.eq("workosOrgId", args.workosOrgId).eq("status", "PAID")
-      )
+      .query('loadInvoices')
+      .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID'))
       .take(1);
 
     return {

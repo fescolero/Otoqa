@@ -213,7 +213,14 @@ export const createFromLoad = mutation({
     const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
     // 3. Extract time of day from each stop's windowBeginTime
-    const stopTemplates = sortedStops.map((stop) => {
+    //    Filter out DETOUR stops — they're ad-hoc and shouldn't be in templates
+    const scheduledStops = sortedStops.filter(
+      (s): s is typeof s & { stopType: 'PICKUP' | 'DELIVERY' } => s.stopType !== 'DETOUR'
+    );
+    if (scheduledStops.length === 0) {
+      throw new Error('Source load has no scheduled stops (only detours)');
+    }
+    const stopTemplates = scheduledStops.map((stop) => {
       // Extract HH:mm from the time string
       let timeOfDay = '08:00'; // Default
       if (stop.windowBeginTime) {

@@ -6,6 +6,8 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useDriver, useAppMode } from '../_layout';
 import { useState } from 'react';
 import { useLanguage } from '../../../lib/LanguageContext';
+import * as Application from 'expo-application';
+import * as Updates from 'expo-updates';
 
 // ============================================
 // DESIGN SYSTEM
@@ -26,20 +28,20 @@ const colors = {
 };
 
 const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 20,
+  'xs': 4,
+  'sm': 8,
+  'md': 12,
+  'lg': 16,
+  'xl': 20,
   '2xl': 24,
 };
 
 const borderRadius = {
-  md: 8,
-  lg: 12,
-  xl: 16,
+  'md': 8,
+  'lg': 12,
+  'xl': 16,
   '2xl': 20,
-  full: 9999,
+  'full': 9999,
 };
 
 // ============================================
@@ -55,6 +57,13 @@ export default function SettingsScreen() {
   const { currentLanguage, t } = useLanguage();
 
   const [lastSynced] = useState<string>('2 minutes ago');
+
+  // Dynamic version: native version + OTA update indicator
+  const appVersion = Application.nativeApplicationVersion ?? '1.0.0';
+  const buildNumber = Application.nativeBuildVersion ?? '?';
+  const otaUpdateId = Updates.updateId;
+  const isEmbeddedLaunch = Updates.isEmbeddedLaunch;
+  const otaShortId = otaUpdateId ? otaUpdateId.slice(0, 8) : null;
 
   // Get display name for current language
   const getLanguageDisplayName = () => {
@@ -72,21 +81,17 @@ export default function SettingsScreen() {
 
   // Handle sign out
   const handleSignOut = () => {
-    Alert.alert(
-      t('profile.signOut'),
-      t('profile.signOutConfirm'),
-      [
-        { text: t('common.cancel'), style: 'cancel' },
-        {
-          text: t('profile.signOut'),
-          style: 'destructive',
-          onPress: async () => {
-            await signOut();
-            router.replace('/(auth)/sign-in');
-          },
+    Alert.alert(t('profile.signOut'), t('profile.signOutConfirm'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      {
+        text: t('profile.signOut'),
+        style: 'destructive',
+        onPress: async () => {
+          await signOut();
+          router.replace('/(auth)/sign-in');
         },
-      ]
-    );
+      },
+    ]);
   };
 
   // Generate driver ID from actual ID or fallback
@@ -106,7 +111,7 @@ export default function SettingsScreen() {
         <Text style={styles.headerTitle}>{t('profile.title')}</Text>
       </View>
 
-      <ScrollView 
+      <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
@@ -127,10 +132,7 @@ export default function SettingsScreen() {
           <>
             <Text style={styles.sectionTitle}>{t('profile.role')}</Text>
             <View style={styles.menuSection}>
-              <Pressable 
-                style={[styles.menuRow, styles.menuRowLast]}
-                onPress={() => setMode('owner')}
-              >
+              <Pressable style={[styles.menuRow, styles.menuRowLast]} onPress={() => setMode('owner')}>
                 <View style={[styles.menuIconContainer, styles.menuIconOrange]}>
                   <MaterialCommunityIcons name="monitor-dashboard" size={20} color={colors.primary} />
                 </View>
@@ -147,10 +149,7 @@ export default function SettingsScreen() {
         {/* Settings Section */}
         <Text style={styles.sectionTitle}>{t('profile.settings')}</Text>
         <View style={styles.menuSection}>
-          <Pressable 
-            style={styles.menuRow}
-            onPress={() => router.push('/notifications')}
-          >
+          <Pressable style={styles.menuRow} onPress={() => router.push('/notifications')}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="notifications" size={20} color={colors.foregroundMuted} />
             </View>
@@ -158,10 +157,7 @@ export default function SettingsScreen() {
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </Pressable>
 
-          <Pressable 
-            style={styles.menuRow}
-            onPress={() => router.push('/language')}
-          >
+          <Pressable style={styles.menuRow} onPress={() => router.push('/language')}>
             <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
               <Ionicons name="globe" size={20} color={colors.foregroundMuted} />
             </View>
@@ -170,10 +166,7 @@ export default function SettingsScreen() {
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </Pressable>
 
-          <Pressable 
-            style={[styles.menuRow, styles.menuRowLast]}
-            onPress={() => router.push('/permissions')}
-          >
+          <Pressable style={[styles.menuRow, styles.menuRowLast]} onPress={() => router.push('/permissions')}>
             <View style={[styles.menuIconContainer, styles.menuIconBlue]}>
               <Ionicons name="shield-checkmark" size={20} color="#3b82f6" />
             </View>
@@ -191,9 +184,13 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.menuTextContainer}>
               <Text style={styles.menuLabel}>{t('profile.appVersion')}</Text>
-              <Text style={styles.menuSubtitle}>{t('profile.currentVersion')}</Text>
+              <Text style={styles.menuSubtitle}>
+                {isEmbeddedLaunch ? t('profile.currentVersion') : `OTA: ${otaShortId ?? 'unknown'}`}
+              </Text>
             </View>
-            <Text style={styles.menuValueBold}>v2.4.0</Text>
+            <Text style={styles.menuValueBold}>
+              v{appVersion} ({buildNumber})
+            </Text>
           </View>
 
           <View style={[styles.menuRow, styles.menuRowLast]}>
@@ -206,7 +203,9 @@ export default function SettingsScreen() {
             </View>
             <View style={styles.activeBadge}>
               <View style={styles.activeDot} />
-              <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>ACTIVE</Text>
+              <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>
+                ACTIVE
+              </Text>
             </View>
           </View>
         </View>
@@ -228,7 +227,9 @@ export default function SettingsScreen() {
             </View>
             <Text style={styles.menuLabel}>{t('profile.contactDispatch')}</Text>
             <View style={styles.availableBadge}>
-              <Text style={styles.availableBadgeText} maxFontSizeMultiplier={1.2}>{t('profile.available')}</Text>
+              <Text style={styles.availableBadgeText} maxFontSizeMultiplier={1.2}>
+                {t('profile.available')}
+              </Text>
             </View>
           </Pressable>
         </View>
@@ -257,7 +258,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: spacing.lg,
   },
-  
+
   // Header
   header: {
     paddingHorizontal: spacing.lg,
@@ -268,7 +269,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.foreground,
   },
-  
+
   // Profile Card
   profileCard: {
     backgroundColor: colors.card,
@@ -302,7 +303,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.foregroundMuted,
   },
-  
+
   // Section Title
   sectionTitle: {
     fontSize: 18,
@@ -311,7 +312,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     marginTop: spacing.md,
   },
-  
+
   // Menu Section
   menuSection: {
     backgroundColor: colors.card,
@@ -371,7 +372,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.foreground,
   },
-  
+
   // Badges
   activeBadge: {
     flexDirection: 'row',
@@ -404,7 +405,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.success,
   },
-  
+
   // Sign Out
   signOutButton: {
     flexDirection: 'row',

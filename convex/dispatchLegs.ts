@@ -1254,8 +1254,8 @@ export const getDriverSchedule = query({
                 address: startStop.address,
                 city: startStop.city,
                 state: startStop.state,
-                windowBeginDate: startStop.windowBeginDate,
-                windowBeginTime: startStop.windowBeginTime,
+                windowBeginDate: startStop.windowBeginDate ?? undefined,
+                windowBeginTime: startStop.windowBeginTime ?? undefined,
               }
             : null,
           endStop: endStop
@@ -1264,8 +1264,8 @@ export const getDriverSchedule = query({
                 address: endStop.address,
                 city: endStop.city,
                 state: endStop.state,
-                windowEndDate: endStop.windowEndDate,
-                windowEndTime: endStop.windowEndTime,
+                windowEndDate: endStop.windowEndDate ?? undefined,
+                windowEndTime: endStop.windowEndTime ?? undefined,
               }
             : null,
           truck: truck

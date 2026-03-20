@@ -331,8 +331,8 @@ export const getWithDetails = query({
         ? {
             city: pickupStop.city || 'Unknown',
             state: pickupStop.state || '',
-            date: pickupStop.windowBeginDate,
-            time: pickupStop.windowBeginTime,
+            date: pickupStop.windowBeginDate ?? '',
+            time: pickupStop.windowBeginTime ?? '',
             address: pickupStop.address,
           }
         : null,
@@ -340,8 +340,8 @@ export const getWithDetails = query({
         ? {
             city: deliveryStop.city || 'Unknown',
             state: deliveryStop.state || '',
-            date: deliveryStop.windowBeginDate,
-            time: deliveryStop.windowBeginTime,
+            date: deliveryStop.windowBeginDate ?? '',
+            time: deliveryStop.windowBeginTime ?? '',
             address: deliveryStop.address,
           }
         : null,

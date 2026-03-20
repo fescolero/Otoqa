@@ -37,6 +37,8 @@ import {
 } from '../../../lib/pending-actions';
 import { getTrackingState, getBufferedLocationCount, isTracking, startLocationTracking } from '../../../lib/location-tracking';
 import { getTotalCountForLoad, getUnsyncedCountForLoad } from '../../../lib/location-db';
+import { useMutation } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
 import { AppState } from 'react-native';
 
 // ============================================
@@ -107,6 +109,10 @@ export default function TripDetailScreen() {
   const [showQuickActions, setShowQuickActions] = useState(false);
   const [showDetourModal, setShowDetourModal] = useState(false);
   const [detourStops, setDetourStops] = useState(1);
+  const [detourReason, setDetourReason] = useState<'FUEL' | 'REST' | 'FOOD' | 'SCALE' | 'REPAIR' | 'REDIRECT' | 'CUSTOMER' | 'OTHER'>('FUEL');
+  const [detourNotes, setDetourNotes] = useState('');
+  const [isAddingDetour, setIsAddingDetour] = useState(false);
+  const addDetourStopsMutation = useMutation(api.driverMobile.addDetourStops);
 
   // Optimistic pending actions (persisted across restarts)
   const [pendingActions, setPendingActions] = useState<PendingActionsMap>({});
@@ -1035,21 +1041,23 @@ export default function TripDetailScreen() {
           transparent
           onRequestClose={() => setShowDetourModal(false)}
         >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <View style={styles.detourModalOverlay}>
-            <Pressable 
+            <Pressable
               style={styles.detourModalBackdrop}
               onPress={() => setShowDetourModal(false)}
             />
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
             <View style={styles.detourModalSheet}>
               <View style={styles.sheetHandle} />
-              
+
               {/* Header */}
               <View style={styles.detourModalHeader}>
                 <View>
-                  <Text style={styles.detourModalTitle}>Add Detour Stops</Text>
-                  <Text style={styles.detourModalSubtitle}>Plan additional stops on your current route</Text>
+                  <Text style={styles.detourModalTitle}>Add Detour</Text>
+                  <Text style={styles.detourModalSubtitle}>Log an unplanned stop on your route</Text>
                 </View>
-                <Pressable 
+                <Pressable
                   style={styles.detourModalCloseBtn}
                   onPress={() => setShowDetourModal(false)}
                 >
@@ -1057,11 +1065,51 @@ export default function TripDetailScreen() {
                 </Pressable>
               </View>
 
+              {/* Reason Picker */}
+              <View style={styles.detourStopsCard}>
+                <Text style={styles.detourStopsLabel}>REASON</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginHorizontal: -spacing.sm }}>
+                  <View style={styles.detourReasonRow}>
+                    {([
+                      { key: 'FUEL', icon: 'flame-outline' as const, label: 'Fuel' },
+                      { key: 'REST', icon: 'bed-outline' as const, label: 'Rest' },
+                      { key: 'FOOD', icon: 'restaurant-outline' as const, label: 'Food' },
+                      { key: 'SCALE', icon: 'speedometer-outline' as const, label: 'Scale' },
+                      { key: 'REPAIR', icon: 'build-outline' as const, label: 'Repair' },
+                      { key: 'REDIRECT', icon: 'swap-horizontal-outline' as const, label: 'Redirect' },
+                      { key: 'CUSTOMER', icon: 'people-outline' as const, label: 'Customer' },
+                      { key: 'OTHER', icon: 'ellipsis-horizontal-outline' as const, label: 'Other' },
+                    ] as const).map((item) => (
+                      <Pressable
+                        key={item.key}
+                        style={[
+                          styles.detourReasonChip,
+                          detourReason === item.key && styles.detourReasonChipActive,
+                        ]}
+                        onPress={() => setDetourReason(item.key)}
+                      >
+                        <Ionicons
+                          name={item.icon}
+                          size={18}
+                          color={detourReason === item.key ? colors.primaryForeground : colors.foregroundMuted}
+                        />
+                        <Text style={[
+                          styles.detourReasonChipText,
+                          detourReason === item.key && styles.detourReasonChipTextActive,
+                        ]}>
+                          {item.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </ScrollView>
+              </View>
+
               {/* Number of Stops Selector */}
               <View style={styles.detourStopsCard}>
                 <Text style={styles.detourStopsLabel}>NUMBER OF STOPS</Text>
                 <View style={styles.detourStopsRow}>
-                  <Pressable 
+                  <Pressable
                     style={[
                       styles.detourStopsButton,
                       detourStops <= 1 && styles.detourStopsButtonDisabled
@@ -1069,21 +1117,21 @@ export default function TripDetailScreen() {
                     onPress={() => setDetourStops(Math.max(1, detourStops - 1))}
                     disabled={detourStops <= 1}
                   >
-                    <Ionicons 
-                      name="remove" 
-                      size={24} 
-                      color={detourStops <= 1 ? colors.foregroundMuted : colors.foreground} 
+                    <Ionicons
+                      name="remove"
+                      size={24}
+                      color={detourStops <= 1 ? colors.foregroundMuted : colors.foreground}
                     />
                   </Pressable>
-                  
+
                   <View style={styles.detourStopsCountContainer}>
                     <Text style={styles.detourStopsCount}>
                       {detourStops.toString().padStart(2, '0')}
                     </Text>
-                    <Text style={styles.detourStopsTotalLabel}>STOPS TOTAL</Text>
+                    <Text style={styles.detourStopsTotalLabel}>STOPS</Text>
                   </View>
-                  
-                  <Pressable 
+
+                  <Pressable
                     style={styles.detourStopsButton}
                     onPress={() => setDetourStops(detourStops + 1)}
                   >
@@ -1092,50 +1140,99 @@ export default function TripDetailScreen() {
                 </View>
               </View>
 
-              {/* GPS Logging Info Card */}
+              {/* Notes (optional) */}
+              <TextInput
+                style={styles.detourNotesInput}
+                placeholder="Add notes (optional)"
+                placeholderTextColor={colors.foregroundMuted}
+                value={detourNotes}
+                onChangeText={setDetourNotes}
+                multiline
+                numberOfLines={2}
+                maxLength={200}
+              />
+
+              {/* GPS Info */}
               <View style={styles.detourGpsCard}>
                 <View style={styles.detourGpsIconContainer}>
                   <Ionicons name="locate" size={22} color={colors.primary} />
                 </View>
                 <View style={styles.detourGpsTextContainer}>
-                  <Text style={styles.detourGpsTitle}>Automatic GPS Logging</Text>
+                  <Text style={styles.detourGpsTitle}>GPS Auto-Logged</Text>
                   <Text style={styles.detourGpsDescription}>
-                    Our system will automatically record your{' '}
-                    <Text style={styles.detourGpsBold}>check-in</Text> and{' '}
-                    <Text style={styles.detourGpsBold}>check-out</Text> times and locations for each detour stop.
+                    Your current location and{' '}
+                    <Text style={styles.detourGpsBold}>check-in/out</Text> times will be recorded automatically.
                   </Text>
-                  <View style={styles.detourGpsBadgesRow}>
-                    <View style={styles.detourGpsBadge}>
-                      <View style={[styles.detourGpsBadgeDot, styles.detourGpsBadgeDotGreen]} />
-                      <Text style={styles.detourGpsBadgeText} maxFontSizeMultiplier={1.2}>Auto Check-in</Text>
-                    </View>
-                    <View style={styles.detourGpsBadge}>
-                      <View style={[styles.detourGpsBadgeDot, styles.detourGpsBadgeDotBlue]} />
-                      <Text style={styles.detourGpsBadgeText} maxFontSizeMultiplier={1.2}>Auto Check-out</Text>
-                    </View>
-                  </View>
                 </View>
               </View>
 
               {/* Confirm Button */}
               <Pressable
-                style={({ pressed }) => [styles.detourConfirmButton, pressed && { opacity: 0.8 }]}
-                onPress={() => {
-                  posthog?.capture('detour_confirmed', { 
-                    loadId: id, 
-                    numberOfStops: detourStops 
-                  });
-                  setShowDetourModal(false);
-                  Alert.alert(
-                    'Detour Added',
-                    `${detourStops} detour stop${detourStops > 1 ? 's' : ''} will be added to your route.`,
-                    [{ text: 'OK' }]
-                  );
-                  setDetourStops(1);
+                style={({ pressed }) => [
+                  styles.detourConfirmButton,
+                  pressed && { opacity: 0.8 },
+                  isAddingDetour && { opacity: 0.6 },
+                ]}
+                disabled={isAddingDetour}
+                onPress={async () => {
+                  setIsAddingDetour(true);
+                  try {
+                    // Get fresh GPS for the detour location
+                    const loc = await getFreshLocation();
+                    if (!loc) {
+                      Alert.alert('GPS Unavailable', 'Could not get your current location. Please try again.');
+                      setIsAddingDetour(false);
+                      return;
+                    }
+
+                    const result = await addDetourStopsMutation({
+                      loadId: id as Id<'loadInformation'>,
+                      driverId,
+                      numberOfStops: detourStops,
+                      reason: detourReason,
+                      notes: detourNotes || undefined,
+                      latitude: loc.coords.latitude,
+                      longitude: loc.coords.longitude,
+                      driverTimestamp: new Date().toISOString(),
+                    });
+
+                    posthog?.capture('detour_confirmed', {
+                      loadId: id,
+                      numberOfStops: detourStops,
+                      reason: detourReason,
+                      success: result.success,
+                    });
+
+                    setShowDetourModal(false);
+
+                    if (result.success) {
+                      Alert.alert(
+                        'Detour Added',
+                        result.message,
+                        [{ text: 'OK' }]
+                      );
+                    } else {
+                      Alert.alert('Error', result.message);
+                    }
+                  } catch (err) {
+                    const msg = err instanceof Error ? err.message : 'Something went wrong';
+                    Alert.alert('Error', msg);
+                  } finally {
+                    setIsAddingDetour(false);
+                    setDetourStops(1);
+                    setDetourReason('FUEL');
+                    setDetourNotes('');
+                  }
                 }}
               >
-                <Ionicons name="navigate" size={22} color={colors.primaryForeground} />
-                <Text style={styles.detourConfirmButtonText}>Confirm Detour</Text>
+                {isAddingDetour ? (
+                  <ActivityIndicator color={colors.primaryForeground} size="small" />
+                ) : (
+                  <>
+                    <Ionicons name="navigate" size={22} color={colors.primaryForeground} />
+                    <Text style={styles.detourConfirmButtonText}>Confirm Detour</Text>
+                  </>
+                )}
               </Pressable>
 
               {/* Cancel Button */}
@@ -1144,12 +1241,16 @@ export default function TripDetailScreen() {
                 onPress={() => {
                   setShowDetourModal(false);
                   setDetourStops(1);
+                  setDetourReason('FUEL');
+                  setDetourNotes('');
                 }}
               >
                 <Text style={styles.detourCancelButtonText}>Cancel</Text>
               </Pressable>
             </View>
+            </KeyboardAvoidingView>
           </View>
+          </TouchableWithoutFeedback>
         </Modal>
       </View>
     </>
@@ -2053,6 +2154,46 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.foregroundMuted,
     letterSpacing: 0.5,
+  },
+  detourReasonRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.sm,
+  },
+  detourReasonChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.muted,
+    borderWidth: 1,
+    borderColor: `${colors.border}30`,
+  },
+  detourReasonChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  detourReasonChipText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.foregroundMuted,
+  },
+  detourReasonChipTextActive: {
+    color: colors.primaryForeground,
+  },
+  detourNotesInput: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius['2xl'],
+    padding: spacing.lg,
+    fontSize: 15,
+    color: colors.foreground,
+    borderWidth: 1,
+    borderColor: `${colors.border}30`,
+    marginBottom: spacing.lg,
+    minHeight: 56,
+    textAlignVertical: 'top',
   },
   detourGpsCard: {
     backgroundColor: colors.background,
