@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   ColumnDef,
   SortingState,
@@ -139,6 +139,26 @@ export function ReportDataTable<TData>({
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState({});
   const [density, setDensity] = useState<TableDensity>('compact');
+  const [responsivePageSize, setResponsivePageSize] = useState(pageSize);
+
+  useEffect(() => {
+    const updatePageSize = () => {
+      const viewportHeight = window.innerHeight;
+
+      // Estimate available space after app chrome, page header, filters, and pagination.
+      const reservedHeight = 360;
+      const rowHeight = density === 'compact' ? 39 : 51;
+      const availableHeight = Math.max(0, viewportHeight - reservedHeight);
+      const rowsThatFit = Math.floor(availableHeight / rowHeight);
+
+      // Keep a sensible floor while letting tall screens show more.
+      setResponsivePageSize(Math.max(pageSize, rowsThatFit));
+    };
+
+    updatePageSize();
+    window.addEventListener('resize', updatePageSize);
+    return () => window.removeEventListener('resize', updatePageSize);
+  }, [density, pageSize]);
 
   const table = useReactTable({
     data,
@@ -155,16 +175,21 @@ export function ReportDataTable<TData>({
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
+    autoResetPageIndex: false,
     initialState: {
-      pagination: { pageSize },
+      pagination: { pageSize: responsivePageSize },
     },
   });
+
+  useEffect(() => {
+    table.setPageSize(responsivePageSize);
+  }, [responsivePageSize, table]);
 
   const totalRows = table.getFilteredRowModel().rows.length;
   const currentPage = table.getState().pagination.pageIndex;
   const totalPages = table.getPageCount();
-  const startRow = currentPage * pageSize + 1;
-  const endRow = Math.min((currentPage + 1) * pageSize, totalRows);
+  const startRow = currentPage * table.getState().pagination.pageSize + 1;
+  const endRow = Math.min((currentPage + 1) * table.getState().pagination.pageSize, totalRows);
   const isOnLastPage = totalPages <= 1 || currentPage === totalPages - 1;
 
   // Generate page numbers for pagination
