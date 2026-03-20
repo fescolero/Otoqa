@@ -10,7 +10,8 @@
  * cap results with .take(), and avoid unbounded .collect() where possible.
  */
 
-import { query } from './_generated/server';
+import { action, internalQuery, query } from './_generated/server';
+import { internal } from './_generated/api';
 import { paginationOptsValidator } from 'convex/server';
 import { v } from 'convex/values';
 import { Id, Doc } from './_generated/dataModel';
@@ -274,7 +275,7 @@ export const getReceivablesDetail = query({
 
 /**
  * Get payment discrepancy summary (lightweight — no enrichment).
- * Summary is computed from invoice fields alone (no db.get() calls for customers/loads).
+ * Summary is computed from invoice fields alone.
  */
 export const getDiscrepancySummary = query({
   args: {
@@ -282,6 +283,7 @@ export const getDiscrepancySummary = query({
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
     customerId: v.optional(v.id('customers')),
+    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
   },
   handler: async (ctx, args) => {
     const paidInvoices = await ctx.db
@@ -301,9 +303,16 @@ export const getDiscrepancySummary = query({
       filtered = filtered.filter((inv) => inv.customerId === args.customerId);
     }
 
-    const discrepant = filtered.filter(
+    const discrepantBase = filtered.filter(
       (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
     );
+
+    const discrepant =
+      args.direction === 'underpaid'
+        ? discrepantBase.filter((inv) => (inv.paymentDifference ?? 0) < 0)
+        : args.direction === 'overpaid'
+          ? discrepantBase.filter((inv) => (inv.paymentDifference ?? 0) > 0)
+          : discrepantBase;
 
     // Pure in-memory aggregation — no db.get() calls
     let totalDiscrepancy = 0;
@@ -328,14 +337,134 @@ export const getDiscrepancySummary = query({
       byCustomerId[key].count++;
     }
 
-    // Batch-fetch only the unique customers for chart labels
-    const uniqueCustomerIds = Object.keys(byCustomerId);
-    const byCustomer: Array<{ name: string; netDiscrepancy: number; count: number }> = [];
-    for (const cid of uniqueCustomerIds) {
-      const customer = await ctx.db.get(cid as Id<'customers'>);
-      const data = byCustomerId[cid];
-      byCustomer.push({
-        name: customer?.name ?? 'Unknown',
+    return {
+      summary: {
+        netDiscrepancy: Math.round(totalDiscrepancy * 100) / 100,
+        underpaidCount,
+        overpaidCount,
+        largestUnderpayment: Math.round(largestUnderpayment * 100) / 100,
+        totalDiscrepantInvoices: discrepant.length,
+      },
+    };
+  },
+});
+
+/**
+ * Internal paginated discrepancy scan for accurate sidebar intelligence.
+ * Returns raw invoice docs for one cursor page after applying discrepancy filters.
+ */
+export const getDiscrepancySummaryPage = internalQuery({
+  args: {
+    paginationOpts: paginationOptsValidator,
+    workosOrgId: v.string(),
+    dateRangeStart: v.optional(v.number()),
+    dateRangeEnd: v.optional(v.number()),
+    customerId: v.optional(v.id('customers')),
+    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+  },
+  handler: async (ctx, args) => {
+    const results = await ctx.db
+      .query('loadInvoices')
+      .withIndex('by_org_status_created', (q) => {
+        const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID');
+        if (args.dateRangeStart && args.dateRangeEnd)
+          return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
+        if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
+        if (args.dateRangeEnd) return base.lte('createdAt', args.dateRangeEnd);
+        return base;
+      })
+      .order('desc')
+      .paginate(args.paginationOpts);
+
+    const discrepantBase = results.page.filter(
+      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+    );
+
+    let filtered = args.customerId
+      ? discrepantBase.filter((inv) => inv.customerId === args.customerId)
+      : discrepantBase;
+
+    if (args.direction === 'underpaid') {
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) < 0);
+    } else if (args.direction === 'overpaid') {
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) > 0);
+    }
+
+    return {
+      ...results,
+      page: filtered,
+    };
+  },
+});
+
+/**
+ * Accurate discrepancy intelligence for the full filtered date range.
+ * Uses an action to iterate all pages so sidebar metrics are not limited by table loads.
+ */
+export const getDiscrepancyIntelligence = action({
+  args: {
+    workosOrgId: v.string(),
+    dateRangeStart: v.optional(v.number()),
+    dateRangeEnd: v.optional(v.number()),
+    customerId: v.optional(v.id('customers')),
+    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+  },
+  handler: async (ctx, args) => {
+    let cursor: string | null = null;
+    let isDone = false;
+
+    let totalDiscrepancy = 0;
+    let underpaidCount = 0;
+    let overpaidCount = 0;
+    let largestUnderpayment = 0;
+    let totalDiscrepantInvoices = 0;
+    const byHcr: Record<string, { netDiscrepancy: number; count: number }> = {};
+
+    while (!isDone) {
+      const pageResult: {
+        page: Array<Doc<'loadInvoices'>>;
+        continueCursor: string;
+        isDone: boolean;
+      } = await ctx.runQuery(internal.accountingReports.getDiscrepancySummaryPage, {
+        ...args,
+        paginationOpts: {
+          cursor,
+          numItems: 500,
+          maximumRowsRead: 1000,
+          maximumBytesRead: 1024 * 1024 * 2,
+        },
+      });
+
+      const loadHcrMap = await ctx.runQuery(internal.accountingReports.getLoadHcrMap, {
+        loadIds: pageResult.page.map((inv) => inv.loadId),
+      });
+
+      for (const inv of pageResult.page) {
+        const diff = inv.paymentDifference ?? 0;
+        totalDiscrepancy += diff;
+        totalDiscrepantInvoices += 1;
+
+        if (diff < 0) {
+          underpaidCount += 1;
+          if (diff < largestUnderpayment) largestUnderpayment = diff;
+        } else {
+          overpaidCount += 1;
+        }
+
+        const key = loadHcrMap[inv.loadId.toString()] ?? 'Unknown HCR';
+        if (!byHcr[key]) byHcr[key] = { netDiscrepancy: 0, count: 0 };
+        byHcr[key].netDiscrepancy += diff;
+        byHcr[key].count += 1;
+      }
+
+      cursor = pageResult.continueCursor;
+      isDone = pageResult.isDone;
+    }
+
+    const byHcrRows = [] as Array<{ name: string; netDiscrepancy: number; count: number }>;
+    for (const [hcr, data] of Object.entries(byHcr)) {
+      byHcrRows.push({
+        name: hcr,
         netDiscrepancy: Math.round(data.netDiscrepancy * 100) / 100,
         count: data.count,
       });
@@ -347,9 +476,209 @@ export const getDiscrepancySummary = query({
         underpaidCount,
         overpaidCount,
         largestUnderpayment: Math.round(largestUnderpayment * 100) / 100,
-        totalDiscrepantInvoices: discrepant.length,
+        totalDiscrepantInvoices,
       },
-      byCustomer: byCustomer.sort((a, b) => a.netDiscrepancy - b.netDiscrepancy),
+      byHcr: byHcrRows.sort((a, b) => a.netDiscrepancy - b.netDiscrepancy),
+    };
+  },
+});
+
+export const getLoadHcrMap = internalQuery({
+  args: { loadIds: v.array(v.id('loadInformation')) },
+  handler: async (ctx, args) => {
+    const entries = await Promise.all(
+      args.loadIds.map(async (loadId) => {
+        const load = await ctx.db.get(loadId);
+        return [loadId.toString(), load?.parsedHcr ?? 'Unknown HCR'] as const;
+      }),
+    );
+    return Object.fromEntries(entries);
+  },
+});
+
+export const getCustomerNameMap = internalQuery({
+  args: { customerIds: v.array(v.id('customers')) },
+  handler: async (ctx, args) => {
+    const entries = await Promise.all(
+      args.customerIds.map(async (customerId) => {
+        const customer = await ctx.db.get(customerId);
+        return [customerId.toString(), customer?.name ?? 'Unknown'] as const;
+      }),
+    );
+    return Object.fromEntries(entries);
+  },
+});
+
+export const getLoadDetailsMap = internalQuery({
+  args: { loadIds: v.array(v.id('loadInformation')) },
+  handler: async (ctx, args) => {
+    const entries = await Promise.all(
+      args.loadIds.map(async (loadId) => {
+        const load = await ctx.db.get(loadId);
+        return [
+          loadId.toString(),
+          {
+            orderNumber: load?.orderNumber ?? 'N/A',
+            hcr: load?.parsedHcr ?? 'Unknown HCR',
+          },
+        ] as const;
+      }),
+    );
+    return Object.fromEntries(entries);
+  },
+});
+
+type DiscrepancyDetailRow = {
+  _id: Id<'loadInvoices'>;
+  invoiceNumber: string | null | undefined;
+  customerName: string;
+  hcr: string;
+  loadOrderNumber: string;
+  invoicedAmount: number;
+  paidAmount: number;
+  difference: number;
+  percentDiff: number;
+  paymentDate: string | undefined;
+  paymentReference: string | undefined;
+};
+
+export const getDiscrepancyDetailSorted = action({
+  args: {
+    workosOrgId: v.string(),
+    dateRangeStart: v.optional(v.number()),
+    dateRangeEnd: v.optional(v.number()),
+    customerId: v.optional(v.id('customers')),
+    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+    limit: v.number(),
+    sortBy: v.optional(
+      v.union(
+        v.literal('invoiceNumber'),
+        v.literal('invoicedAmount'),
+        v.literal('paidAmount'),
+        v.literal('difference'),
+        v.literal('percentDiff'),
+        v.literal('paymentReference'),
+      ),
+    ),
+    sortDir: v.optional(v.union(v.literal('asc'), v.literal('desc'))),
+  },
+  handler: async (ctx, args): Promise<{ rows: DiscrepancyDetailRow[]; total: number; hasMore: boolean }> => {
+    let cursor: string | null = null;
+    let isDone = false;
+    const invoices: Array<Doc<'loadInvoices'>> = [];
+
+    while (!isDone) {
+      const pageResult: {
+        page: Array<Doc<'loadInvoices'>>;
+        continueCursor: string;
+        isDone: boolean;
+      } = await ctx.runQuery(internal.accountingReports.getDiscrepancySummaryPage, {
+        workosOrgId: args.workosOrgId,
+        dateRangeStart: args.dateRangeStart,
+        dateRangeEnd: args.dateRangeEnd,
+        customerId: args.customerId,
+        direction: args.direction,
+        paginationOpts: {
+          cursor,
+          numItems: 500,
+          maximumRowsRead: 1000,
+          maximumBytesRead: 1024 * 1024 * 2,
+        },
+      });
+
+      invoices.push(...pageResult.page);
+      cursor = pageResult.continueCursor;
+      isDone = pageResult.isDone;
+    }
+
+    const sortBy = args.sortBy ?? 'difference';
+    const sortDir = args.sortDir ?? 'desc';
+    const dir = sortDir === 'asc' ? 1 : -1;
+
+    const sortedInvoices = [...invoices].sort((a, b) => {
+      const aPercentDiff =
+        (a.totalAmount ?? 0) > 0
+          ? Math.round(((a.paymentDifference ?? 0) / (a.totalAmount ?? 1)) * 100 * 100) / 100
+          : 0;
+      const bPercentDiff =
+        (b.totalAmount ?? 0) > 0
+          ? Math.round(((b.paymentDifference ?? 0) / (b.totalAmount ?? 1)) * 100 * 100) / 100
+          : 0;
+
+      const av =
+        sortBy === 'invoicedAmount'
+          ? (a.totalAmount ?? 0)
+          : sortBy === 'paidAmount'
+            ? (a.paidAmount ?? 0)
+            : sortBy === 'difference'
+              ? (a.paymentDifference ?? 0)
+              : sortBy === 'percentDiff'
+                ? aPercentDiff
+                : sortBy === 'paymentReference'
+                  ? (a.paymentReference ?? '')
+                  : (a.invoiceNumber ?? '');
+
+      const bv =
+        sortBy === 'invoicedAmount'
+          ? (b.totalAmount ?? 0)
+          : sortBy === 'paidAmount'
+            ? (b.paidAmount ?? 0)
+            : sortBy === 'difference'
+              ? (b.paymentDifference ?? 0)
+              : sortBy === 'percentDiff'
+                ? bPercentDiff
+                : sortBy === 'paymentReference'
+                  ? (b.paymentReference ?? '')
+                  : (b.invoiceNumber ?? '');
+
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return (av - bv) * dir;
+      }
+
+      const as = String(av ?? '');
+      const bs = String(bv ?? '');
+      return as.localeCompare(bs, undefined, { numeric: true, sensitivity: 'base' }) * dir;
+    });
+
+    const visibleInvoices = sortedInvoices.slice(0, args.limit);
+
+    const customerNameMap: Record<string, string> = await ctx.runQuery(internal.accountingReports.getCustomerNameMap, {
+      customerIds: [...new Set(visibleInvoices.map((inv) => inv.customerId))],
+    });
+    const loadDetailsMap: Record<string, { orderNumber: string; hcr: string }> = await ctx.runQuery(
+      internal.accountingReports.getLoadDetailsMap,
+      {
+        loadIds: [...new Set(visibleInvoices.map((inv) => inv.loadId))],
+      },
+    );
+
+    const rows: DiscrepancyDetailRow[] = visibleInvoices.map((inv) => {
+      const loadDetails: { orderNumber: string; hcr: string } = loadDetailsMap[inv.loadId.toString()] ?? {
+        orderNumber: 'N/A',
+        hcr: 'Unknown HCR',
+      };
+      return {
+        _id: inv._id,
+        invoiceNumber: inv.invoiceNumber,
+        customerName: customerNameMap[inv.customerId.toString()] ?? 'Unknown',
+        hcr: loadDetails.hcr,
+        loadOrderNumber: loadDetails.orderNumber,
+        invoicedAmount: inv.totalAmount ?? 0,
+        paidAmount: inv.paidAmount ?? 0,
+        difference: inv.paymentDifference ?? 0,
+        percentDiff:
+          (inv.totalAmount ?? 0) > 0
+            ? Math.round(((inv.paymentDifference ?? 0) / (inv.totalAmount ?? 1)) * 10000) / 100
+            : 0,
+        paymentDate: inv.paymentDate,
+        paymentReference: inv.paymentReference,
+      };
+    });
+
+    return {
+      rows,
+      total: sortedInvoices.length,
+      hasMore: args.limit < sortedInvoices.length,
     };
   },
 });
@@ -366,6 +695,7 @@ export const getDiscrepancyDetail = query({
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
     customerId: v.optional(v.id('customers')),
+    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
   },
   handler: async (ctx, args) => {
     const results = await ctx.db
@@ -387,9 +717,15 @@ export const getDiscrepancyDetail = query({
     );
 
     // Apply customer filter
-    const filtered = args.customerId
+    let filtered = args.customerId
       ? discrepantPage.filter((inv) => inv.customerId === args.customerId)
       : discrepantPage;
+
+    if (args.direction === 'underpaid') {
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) < 0);
+    } else if (args.direction === 'overpaid') {
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) > 0);
+    }
 
     // Batch-fetch customers and loads for this page
     const customerMap = await batchFetchCustomers(
@@ -409,6 +745,7 @@ export const getDiscrepancyDetail = query({
         _id: inv._id,
         invoiceNumber: inv.invoiceNumber,
         customerName: customer?.name ?? 'Unknown',
+        hcr: load?.parsedHcr ?? 'Unknown HCR',
         loadOrderNumber: load?.orderNumber ?? 'N/A',
         invoicedAmount: inv.totalAmount ?? 0,
         paidAmount: inv.paidAmount ?? 0,

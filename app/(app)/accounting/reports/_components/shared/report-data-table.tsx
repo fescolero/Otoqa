@@ -4,6 +4,8 @@ import { useState, useMemo, useEffect } from 'react';
 import {
   ColumnDef,
   SortingState,
+  type OnChangeFn,
+  type Updater,
   flexRender,
   getCoreRowModel,
   getFilteredRowModel,
@@ -16,6 +18,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Loader2, ChevronLeft, ChevronRight, ListFilter } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TableDensity, QuickFilter } from './types';
@@ -49,6 +52,7 @@ interface ReportDataTableProps<TData> {
   activeQuickFilter?: string;
   onQuickFilterChange?: (value: string) => void;
   isLoading?: boolean;
+  isRefreshing?: boolean;
   emptyMessage?: string;
   pageSize?: number;
   /** Callback to load more server-side data (Convex pagination). */
@@ -57,6 +61,9 @@ interface ReportDataTableProps<TData> {
   loadMoreStatus?: LoadMoreStatus;
   /** Total count from the server for display purposes. */
   serverTotal?: number;
+  manualSorting?: boolean;
+  sorting?: SortingState;
+  onSortingChange?: (sorting: SortingState) => void;
 }
 
 // ============================================
@@ -130,16 +137,29 @@ export function ReportDataTable<TData>({
   activeQuickFilter = 'all',
   onQuickFilterChange,
   isLoading = false,
+  isRefreshing = false,
   emptyMessage = 'No data found for the selected date range.',
   pageSize = 20,
   onLoadMore,
   loadMoreStatus = 'idle',
   serverTotal,
+  manualSorting = false,
+  sorting: controlledSorting,
+  onSortingChange: controlledOnSortingChange,
 }: ReportDataTableProps<TData>) {
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [uncontrolledSorting, setUncontrolledSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState({});
   const [density, setDensity] = useState<TableDensity>('compact');
   const [responsivePageSize, setResponsivePageSize] = useState(pageSize);
+  const sorting = controlledSorting ?? uncontrolledSorting;
+  const setSorting: OnChangeFn<SortingState> = (updaterOrValue: Updater<SortingState>) => {
+    const next = typeof updaterOrValue === 'function' ? updaterOrValue(sorting) : updaterOrValue;
+    if (controlledOnSortingChange) {
+      controlledOnSortingChange(next);
+    } else {
+      setUncontrolledSorting(next);
+    }
+  };
 
   useEffect(() => {
     const updatePageSize = () => {
@@ -172,9 +192,10 @@ export function ReportDataTable<TData>({
     onRowSelectionChange: setRowSelection,
     globalFilterFn,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
+    getSortedRowModel: manualSorting ? undefined : getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
+    manualSorting,
     autoResetPageIndex: false,
     initialState: {
       pagination: { pageSize: responsivePageSize },
@@ -191,6 +212,7 @@ export function ReportDataTable<TData>({
   const startRow = currentPage * table.getState().pagination.pageSize + 1;
   const endRow = Math.min((currentPage + 1) * table.getState().pagination.pageSize, totalRows);
   const isOnLastPage = totalPages <= 1 || currentPage === totalPages - 1;
+  const skeletonRowCount = Math.max(6, Math.min(table.getState().pagination.pageSize, 20));
 
   // Generate page numbers for pagination
   const pageNumbers = useMemo(() => {
@@ -305,7 +327,20 @@ export function ReportDataTable<TData>({
             ))}
           </TableHeader>
           <TableBody>
-            {table.getRowModel().rows?.length ? (
+            {isRefreshing ? (
+              Array.from({ length: skeletonRowCount }).map((_, rowIndex) => (
+                <TableRow key={`skeleton-${rowIndex}`}>
+                  {columns.map((_, cellIndex) => (
+                    <TableCell
+                      key={`skeleton-${rowIndex}-${cellIndex}`}
+                      className={cn(density === 'compact' ? 'py-1.5 px-2' : 'py-3 px-3')}
+                    >
+                      <Skeleton className={cn('h-4', cellIndex === 0 ? 'w-4' : cellIndex <= 3 ? 'w-20' : 'w-16')} />
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))
+            ) : table.getRowModel().rows?.length ? (
               table.getRowModel().rows.map((row) => (
                 <TableRow key={row.id} data-state={row.getIsSelected() && 'selected'}>
                   {row.getVisibleCells().map((cell) => (
@@ -381,7 +416,7 @@ export function ReportDataTable<TData>({
                 Load More
               </Button>
             )}
-            {isOnLastPage && loadMoreStatus === 'loading' && (
+            {isOnLastPage && loadMoreStatus === 'loading' && !isRefreshing && (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground ml-1" />
             )}
           </div>

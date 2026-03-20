@@ -1,10 +1,9 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { ColumnDef } from '@tanstack/react-table';
+import { useEffect, useMemo, useState } from 'react';
+import { ColumnDef, type SortingState } from '@tanstack/react-table';
 import { api } from '@/convex/_generated/api';
-import { useAuthQuery } from '@/hooks/use-auth-query';
-import { usePaginatedQuery } from 'convex/react';
+import { useAction } from 'convex/react';
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { formatCurrency, formatNumber, formatPercent } from '@/lib/utils/format';
@@ -26,6 +25,7 @@ interface DiscrepancyRow {
   _id: string;
   invoiceNumber: string | null;
   customerName: string;
+  hcr: string;
   loadOrderNumber: string;
   invoicedAmount: number;
   paidAmount: number;
@@ -62,6 +62,10 @@ const columns: ColumnDef<DiscrepancyRow, unknown>[] = [
   {
     accessorKey: 'customerName',
     header: 'Customer',
+  },
+  {
+    accessorKey: 'hcr',
+    header: 'HCR',
   },
   {
     accessorKey: 'loadOrderNumber',
@@ -121,44 +125,125 @@ const columns: ColumnDef<DiscrepancyRow, unknown>[] = [
 
 export function DiscrepanciesTab({ organizationId, dateRange, searchQuery }: TabComponentProps) {
   const [quickFilter, setQuickFilter] = useState('all');
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'difference', desc: true }]);
+  const [detailData, setDetailData] = useState<{ rows: DiscrepancyRow[]; total: number; hasMore: boolean }>();
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailLimit, setDetailLimit] = useState(PAGE_SIZE);
+  const [summaryData, setSummaryData] = useState<
+    | {
+        summary: {
+          netDiscrepancy: number;
+          underpaidCount: number;
+          overpaidCount: number;
+          largestUnderpayment: number;
+          totalDiscrepantInvoices: number;
+        };
+        byHcr: Array<{ name: string; netDiscrepancy: number; count: number }>;
+      }
+    | undefined
+  >();
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const getDiscrepancyIntelligence = useAction(api.accountingReports.getDiscrepancyIntelligence);
+  const getDiscrepancyDetailSorted = useAction(api.accountingReports.getDiscrepancyDetailSorted);
+  const direction = quickFilter === 'all' ? undefined : (quickFilter as 'underpaid' | 'overpaid');
 
-  // Summary query (lightweight, no enrichment)
-  const summaryData = useAuthQuery(api.accountingReports.getDiscrepancySummary, {
-    workosOrgId: organizationId,
-    dateRangeStart: dateRange.start,
-    dateRangeEnd: dateRange.end,
-  });
+  const sortableServerFields = new Set([
+    'invoiceNumber',
+    'invoicedAmount',
+    'paidAmount',
+    'difference',
+    'percentDiff',
+    'paymentReference',
+  ] as const);
+  const sortBy = sortableServerFields.has(sorting[0]?.id as never)
+    ? (sorting[0]?.id as
+        | 'invoiceNumber'
+        | 'invoicedAmount'
+        | 'paidAmount'
+        | 'difference'
+        | 'percentDiff'
+        | 'paymentReference')
+    : undefined;
+  const sortDir = sorting[0]?.desc ? 'desc' : 'asc';
 
-  // Paginated detail query using Convex cursor-based pagination
-  const {
-    results: paginatedResults,
-    status: paginationStatus,
-    loadMore,
-    isLoading: isPaginationLoading,
-  } = usePaginatedQuery(
-    api.accountingReports.getDiscrepancyDetail,
-    {
-      workosOrgId: organizationId,
-      dateRangeStart: dateRange.start,
-      dateRangeEnd: dateRange.end,
-    },
-    { initialNumItems: PAGE_SIZE },
-  );
+  useEffect(() => {
+    let cancelled = false;
 
-  const isLoading = !summaryData || isPaginationLoading;
-
-  // Apply quick filter client-side on the paginated results
-  const filteredData = useMemo(() => {
-    const data = (paginatedResults ?? []) as DiscrepancyRow[];
-    switch (quickFilter) {
-      case 'underpaid':
-        return data.filter((r) => r.difference < 0);
-      case 'overpaid':
-        return data.filter((r) => r.difference > 0);
-      default:
-        return data;
+    async function loadSummary() {
+      setSummaryLoading(true);
+      try {
+        const result = await getDiscrepancyIntelligence({
+          workosOrgId: organizationId,
+          dateRangeStart: dateRange.start,
+          dateRangeEnd: dateRange.end,
+          direction,
+        });
+        if (!cancelled) {
+          setSummaryData(result);
+        }
+      } finally {
+        if (!cancelled) {
+          setSummaryLoading(false);
+        }
+      }
     }
-  }, [paginatedResults, quickFilter]);
+
+    void loadSummary();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [organizationId, dateRange.start, dateRange.end, direction, getDiscrepancyIntelligence]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadDetail() {
+      setDetailLoading(true);
+      try {
+        const result = await getDiscrepancyDetailSorted({
+          workosOrgId: organizationId,
+          dateRangeStart: dateRange.start,
+          dateRangeEnd: dateRange.end,
+          direction,
+          limit: detailLimit,
+          sortBy,
+          sortDir,
+        });
+        if (!cancelled) {
+          setDetailData(result as { rows: DiscrepancyRow[]; total: number; hasMore: boolean });
+        }
+      } finally {
+        if (!cancelled) {
+          setDetailLoading(false);
+        }
+      }
+    }
+
+    void loadDetail();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    organizationId,
+    dateRange.start,
+    dateRange.end,
+    direction,
+    detailLimit,
+    sortBy,
+    sortDir,
+    getDiscrepancyDetailSorted,
+  ]);
+
+  useEffect(() => {
+    setDetailLimit(PAGE_SIZE);
+  }, [dateRange.start, dateRange.end, direction, sortBy, sortDir]);
+
+  const isInitialTableLoading = !detailData && detailLoading;
+  const isTableRefreshing = !!detailData && detailLoading;
+
+  const filteredData = useMemo(() => (detailData?.rows ?? []) as DiscrepancyRow[], [detailData]);
 
   const handleExport = () => {
     if (filteredData.length === 0) return;
@@ -167,6 +252,7 @@ export function DiscrepanciesTab({ organizationId, dateRange, searchQuery }: Tab
       [
         { header: 'Invoice #', accessor: (r) => r.invoiceNumber ?? '' },
         { header: 'Customer', accessor: (r) => r.customerName },
+        { header: 'HCR', accessor: (r) => r.hcr },
         { header: 'Load #', accessor: (r) => r.loadOrderNumber },
         { header: 'Invoiced', accessor: (r) => r.invoicedAmount },
         { header: 'Paid', accessor: (r) => r.paidAmount },
@@ -206,17 +292,17 @@ export function DiscrepanciesTab({ organizationId, dateRange, searchQuery }: Tab
             <SummaryStat label="Largest Underpayment" value={formatCurrency(summaryData.summary.largestUnderpayment)} />
           </div>
 
-          {/* Discrepancy by Customer Chart */}
-          {summaryData.byCustomer.length > 0 && (
+          {/* Discrepancy by HCR Chart */}
+          {summaryData.byHcr.length > 0 && (
             <div>
-              <h4 className="text-sm font-semibold mb-3">Discrepancy by Customer</h4>
+              <h4 className="text-sm font-semibold mb-3">Discrepancy by HCR</h4>
               <ChartContainer
                 config={{
                   netDiscrepancy: { label: 'Net Discrepancy', color: CHART_COLORS[0] },
                 }}
                 className="h-[180px] w-full"
               >
-                <BarChart data={summaryData.byCustomer.slice(0, 5)} layout="vertical" margin={{ left: -10 }}>
+                <BarChart data={summaryData.byHcr.slice(0, 5)} layout="vertical" margin={{ left: -10 }}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis type="number" tickFormatter={(v) => `$${(v / 1000).toFixed(0)}K`} tick={{ fontSize: 10 }} />
                   <YAxis type="category" dataKey="name" width={70} tick={{ fontSize: 10 }} />
@@ -266,19 +352,15 @@ export function DiscrepanciesTab({ organizationId, dateRange, searchQuery }: Tab
         quickFilters={QUICK_FILTERS}
         activeQuickFilter={quickFilter}
         onQuickFilterChange={setQuickFilter}
-        isLoading={isLoading}
+        isLoading={isInitialTableLoading}
+        isRefreshing={isTableRefreshing}
         emptyMessage="No discrepancy data found for the selected date range."
-        onLoadMore={() => loadMore(PAGE_SIZE)}
-        loadMoreStatus={
-          paginationStatus === 'CanLoadMore'
-            ? 'can-load'
-            : paginationStatus === 'LoadingMore'
-              ? 'loading'
-              : paginationStatus === 'Exhausted'
-                ? 'exhausted'
-                : 'idle'
-        }
-        serverTotal={summaryData?.summary.totalDiscrepantInvoices}
+        onLoadMore={() => setDetailLimit((prev) => prev + PAGE_SIZE)}
+        loadMoreStatus={detailLoading ? 'loading' : detailData?.hasMore ? 'can-load' : 'exhausted'}
+        serverTotal={summaryData?.summary.totalDiscrepantInvoices ?? detailData?.total}
+        manualSorting
+        sorting={sorting}
+        onSortingChange={setSorting}
       />
     </ReportTableLayout>
   );
