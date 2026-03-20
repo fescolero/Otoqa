@@ -14,10 +14,10 @@ import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsListLine, TabsTriggerLine } from '@/components/ui/tabs';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useRouter } from 'next/navigation';
-import { Edit, ArrowLeft, Link2, Building2, User, Phone, Mail, IdCard, Calendar, DollarSign, Package } from 'lucide-react';
+import { Edit, ArrowLeft, Link2, Building2, User, Phone, Mail, IdCard, Calendar, DollarSign, Package, Send } from 'lucide-react';
 import { Id } from '@/convex/_generated/dataModel';
 import { CarrierPaySettingsSection } from '@/components/carrier-pay';
 import { AssignedLoadsTable, type AssignedLoadStatus, type AssignedLoad } from '@/components/loads/assigned-loads-table';
@@ -33,6 +33,21 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
 
   // Fetch carrier partnership data using new API
   const partnership = useQuery(api.carrierPartnerships.get, { partnershipId });
+
+  // Invite mutation
+  const sendInvite = useMutation(api.carrierPartnerships.sendInvite);
+  const [isInviting, setIsInviting] = useState(false);
+
+  const handleInvite = async () => {
+    setIsInviting(true);
+    try {
+      await sendInvite({ partnershipId });
+    } catch (error) {
+      console.error('Failed to send invite:', error);
+    } finally {
+      setIsInviting(false);
+    }
+  };
 
   // Assigned Loads state
   const [loadStatusFilter, setLoadStatusFilter] = useState<AssignedLoadStatus>('Assigned');
@@ -174,10 +189,22 @@ export function CarrierDetailContent({ carrierId }: { carrierId: string }) {
               {partnership.status}
             </Badge>
           </div>
-          <Button onClick={() => router.push(`/operations/carriers/${partnershipId}/edit`)}>
-            <Edit className="mr-2 h-4 w-4" />
-            Edit
-          </Button>
+          <div className="flex items-center gap-2">
+            {!isLinkedCarrier && partnership.status !== 'INVITED' && partnership.contactPhone && (
+              <Button
+                variant="outline"
+                onClick={handleInvite}
+                disabled={isInviting}
+              >
+                <Send className="mr-2 h-4 w-4" />
+                {isInviting ? 'Sending...' : 'Invite to Platform'}
+              </Button>
+            )}
+            <Button onClick={() => router.push(`/operations/carriers/${partnershipId}/edit`)}>
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </Button>
+          </div>
         </div>
 
         {/* Tabbed Layout */}

@@ -379,62 +379,9 @@ export const create = mutation({
       linkedAt = now;
     }
     // If no carrier org, status stays ACTIVE (reference-only mode)
-
-    // If no carrier org exists and we have contact info, create one for mobile access
-    let newCarrierOrgId: Id<'organizations'> | undefined = undefined;
-    let clerkUserCreated = false;
-
-    if (!carrierOrg && args.contactPhone) {
-      // Create a carrier organization for this carrier
-      newCarrierOrgId = await ctx.db.insert('organizations', {
-        orgType: 'CARRIER',
-        name: args.carrierName,
-        mcNumber: args.mcNumber,
-        usdotNumber: args.usdotNumber,
-        billingEmail: args.contactEmail || `${args.mcNumber}@placeholder.carrier`,
-        billingPhone: args.contactPhone,
-        billingAddress: {
-          addressLine1: args.addressLine || '',
-          addressLine2: args.addressLine2,
-          city: args.city || '',
-          state: args.state || '',
-          zip: args.zip || '',
-          country: args.country || 'USA',
-        },
-        insuranceProvider: args.insuranceProvider,
-        insuranceExpiration: args.insuranceExpiration,
-        subscriptionPlan: 'Free',
-        subscriptionStatus: 'Active',
-        billingCycle: 'N/A',
-        createdAt: now,
-        updatedAt: now,
-      });
-
-      // Use the new org ID as the carrier org identifier
-      carrierOrgId = newCarrierOrgId;
-      linkedAt = now;
-
-      // Create userIdentityLinks for the carrier owner
-      // We'll use a placeholder clerkUserId until they actually sign in
-      // The phone-based matching in getUserRoles will find them
-      await ctx.db.insert('userIdentityLinks', {
-        clerkUserId: `pending_${args.contactPhone.replace(/\D/g, '')}`,
-        organizationId: newCarrierOrgId,
-        role: 'OWNER',
-        phone: args.contactPhone,
-        createdAt: now,
-        updatedAt: now,
-      });
-
-      // Schedule Clerk user creation for mobile app access (uses syncSingleCarrierOwnerToClerk which updates the userIdentityLinks record)
-      await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
-        organizationId: newCarrierOrgId,
-        phone: args.contactPhone,
-        firstName: args.contactFirstName || args.carrierName.split(' ')[0] || 'Owner',
-        lastName: args.contactLastName || args.carrierName.split(' ').slice(1).join(' ') || '',
-      });
-      clerkUserCreated = true;
-    }
+    // Contact info is stored on the partnership record itself.
+    // Carrier org creation + linking only happens when the carrier signs up
+    // or when the broker explicitly invites them via sendInvite + syncPartnershipForMobileAccess.
 
     const partnershipId = await ctx.db.insert('carrierPartnerships', {
       brokerOrgId: args.brokerOrgId,
@@ -469,8 +416,6 @@ export const create = mutation({
       partnershipId,
       status,
       isLinked: !!carrierOrgId,
-      carrierOrgCreated: !!newCarrierOrgId,
-      clerkUserCreated,
     };
   },
 });
@@ -1975,14 +1920,9 @@ export const syncPartnershipForMobileAccess = mutation({
       });
     }
 
-    // Update partnership with carrier org ID if newly created
-    if (newCarrierOrgId && !partnership.carrierOrgId) {
-      await ctx.db.patch(args.partnershipId, {
-        carrierOrgId: newCarrierOrgId,
-        linkedAt: now,
-        updatedAt: now,
-      });
-    }
+    // Do NOT set carrierOrgId on the partnership here.
+    // Linking only happens when the carrier actually signs up and accepts
+    // via linkToCarrierOrg + accept flow. This just prepares the org for mobile access.
 
     // Schedule Clerk user creation (uses syncSingleCarrierOwnerToClerk which updates the userIdentityLinks record)
     if (carrierOrg) {
