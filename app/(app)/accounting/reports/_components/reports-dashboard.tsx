@@ -45,7 +45,7 @@ export function ReportsDashboard({ organizationId }: ReportsDashboardProps) {
   const tabProps = { organizationId, dateRange, searchQuery };
 
   return (
-    <div className="flex min-h-full flex-col gap-4 p-6">
+    <div className="flex h-full min-h-0 flex-col gap-4 p-6 overflow-hidden">
       {/* Page header */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Accounting Reports</h1>
@@ -117,7 +117,7 @@ export function ReportsDashboard({ organizationId }: ReportsDashboardProps) {
         </div>
 
         {/* Tab content */}
-        <div className="mt-4 flex min-h-0 flex-1 flex-col">
+        <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden">
           <TabsContent value="receivables" className="min-h-0">
             <ReceivablesTab {...tabProps} />
           </TabsContent>
