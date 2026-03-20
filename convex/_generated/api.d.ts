@@ -82,6 +82,7 @@ import type * as migrations_backfillDispatchLegs from "../migrations/backfillDis
 import type * as migrations_backfillFirstStopDate from "../migrations/backfillFirstStopDate.js";
 import type * as migrations_backfillOrgType from "../migrations/backfillOrgType.js";
 import type * as migrations_initializeOrgStats from "../migrations/initializeOrgStats.js";
+import type * as migrations_unlinkFalselyLinkedCarriers from "../migrations/unlinkFalselyLinkedCarriers.js";
 import type * as payPlans from "../payPlans.js";
 import type * as rateProfiles from "../rateProfiles.js";
 import type * as rateRules from "../rateRules.js";
@@ -179,6 +180,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/backfillFirstStopDate": typeof migrations_backfillFirstStopDate;
   "migrations/backfillOrgType": typeof migrations_backfillOrgType;
   "migrations/initializeOrgStats": typeof migrations_initializeOrgStats;
+  "migrations/unlinkFalselyLinkedCarriers": typeof migrations_unlinkFalselyLinkedCarriers;
   payPlans: typeof payPlans;
   rateProfiles: typeof rateProfiles;
   rateRules: typeof rateRules;

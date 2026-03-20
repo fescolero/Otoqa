@@ -221,6 +221,7 @@ interface TrackingState {
 // ============================================
 
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const TRACKING_SESSION_MAX_AGE_MS = 18 * 60 * 60 * 1000; // 18 hours
 const LAST_HEARTBEAT_KEY = 'location_last_heartbeat';
 const BG_TASK_ALIVE_KEY = 'bg_task_last_alive';
 const BG_FALLBACK_LOCATIONS_KEY = 'bg_fallback_locations';
@@ -804,6 +805,78 @@ export async function getTrackingState(): Promise<TrackingState | null> {
 export async function isTracking(): Promise<boolean> {
   const state = await getTrackingState();
   return state?.isActive ?? false;
+}
+
+export async function shouldStartTrackingForLoad(loadId: string): Promise<boolean> {
+  const state = await getTrackingState();
+  if (!state?.isActive) return true;
+  if (state.loadId === loadId) return false;
+
+  const startedAt = typeof state.startedAt === 'number' ? state.startedAt : 0;
+  const ageMs = startedAt > 0 ? Date.now() - startedAt : Infinity;
+  if (ageMs > TRACKING_SESSION_MAX_AGE_MS) {
+    console.warn(
+      `[LocationTracking] Active tracking session is stale ` +
+        `(load=${state.loadId.slice(0, 12)}..., age=${Math.round(ageMs / 3600000)}h) — allowing new load ${loadId.slice(0, 12)}... to start`,
+    );
+    return true;
+  }
+
+  return false;
+}
+
+export async function ensureTrackingForLoad(params: {
+  driverId: Id<'drivers'>;
+  loadId: Id<'loadInformation'>;
+  organizationId: string;
+}): Promise<{
+  success: boolean;
+  action: 'started' | 'continued' | 'handoff';
+  message: string;
+  previousLoadId?: string;
+}> {
+  const state = await getTrackingState();
+  if (!state?.isActive) {
+    const result = await startLocationTracking(params);
+    return { success: result.success, action: 'started', message: result.message };
+  }
+
+  if (state.loadId === params.loadId) {
+    return { success: true, action: 'continued', message: 'Tracking already active for this load' };
+  }
+
+  const startedAt = typeof state.startedAt === 'number' ? state.startedAt : 0;
+  const ageMs = startedAt > 0 ? Date.now() - startedAt : Infinity;
+  const isStale = ageMs > TRACKING_SESSION_MAX_AGE_MS;
+
+  console.warn(
+    `[LocationTracking] Handing off tracking from load=${state.loadId.slice(0, 12)}... ` +
+      `to load=${params.loadId.slice(0, 12)}... (age=${Math.round(ageMs / 60000)}m, stale=${isStale})`,
+  );
+
+  try {
+    await forceFlush();
+  } catch (err) {
+    console.warn('[LocationTracking] Handoff flush failed, continuing with switch:', err);
+  }
+
+  const stopResult = await stopLocationTracking();
+  if (!stopResult.success) {
+    return {
+      success: false,
+      action: 'handoff',
+      message: stopResult.message,
+      previousLoadId: state.loadId,
+    };
+  }
+
+  const startResult = await startLocationTracking(params);
+  return {
+    success: startResult.success,
+    action: 'handoff',
+    message: startResult.message,
+    previousLoadId: state.loadId,
+  };
 }
 
 /**

@@ -45,14 +45,14 @@ export function ReportsDashboard({ organizationId }: ReportsDashboardProps) {
   const tabProps = { organizationId, dateRange, searchQuery };
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex min-h-full flex-col gap-4 p-6">
       {/* Page header */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Accounting Reports</h1>
       </div>
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col">
         <TabsListLine className="w-full">
           <TabsTriggerLine value="receivables">Receivables</TabsTriggerLine>
           <TabsTriggerLine value="discrepancies">Discrepancies</TabsTriggerLine>
@@ -117,24 +117,24 @@ export function ReportsDashboard({ organizationId }: ReportsDashboardProps) {
         </div>
 
         {/* Tab content */}
-        <div className="mt-4">
-          <TabsContent value="receivables">
+        <div className="mt-4 flex min-h-0 flex-1 flex-col">
+          <TabsContent value="receivables" className="min-h-0">
             <ReceivablesTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="discrepancies">
+          <TabsContent value="discrepancies" className="min-h-0">
             <DiscrepanciesTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="revenue">
+          <TabsContent value="revenue" className="min-h-0">
             <RevenueTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="profitability">
+          <TabsContent value="profitability" className="min-h-0">
             <ProfitabilityTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="costs">
+          <TabsContent value="costs" className="min-h-0">
             <CostsTab {...tabProps} />
           </TabsContent>
         </div>

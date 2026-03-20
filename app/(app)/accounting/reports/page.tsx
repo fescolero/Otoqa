@@ -47,7 +47,7 @@ export default async function AccountingReportsPage() {
   );
 
   return (
-    <>
+    <div className="flex h-full min-h-0 flex-col">
       <header className="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b">
         <div className="flex items-center gap-2 px-4">
           <SidebarTrigger className="-ml-1" />
@@ -70,9 +70,9 @@ export default async function AccountingReportsPage() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex min-h-0 flex-1 overflow-auto">
         {organization && <ReportsDashboard organizationId={organization.id} userId={userData.id} />}
       </div>
-    </>
+    </div>
   );
 }
