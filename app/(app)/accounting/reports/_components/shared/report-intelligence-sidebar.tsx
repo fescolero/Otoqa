@@ -18,8 +18,8 @@ export function ReportIntelligenceSidebar({ subtitle, dateRange, onExport, child
   const dateLabel = `${format(new Date(dateRange.start), 'MMM d')} - ${format(new Date(dateRange.end), 'MMM d, yyyy')}`;
 
   return (
-    <Card className="sticky top-6 h-fit">
-      <ScrollArea className="max-h-[calc(100svh-10rem)]">
+    <Card className="sticky top-0 flex h-full min-h-0 flex-col overflow-hidden">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4 space-y-5">
           {/* Header */}
           <div>
