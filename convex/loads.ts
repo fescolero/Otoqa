@@ -1970,15 +1970,19 @@ export const autoExpireStaleLoads = internalMutation({
   args: {
     orgId: v.optional(v.string()),
     statusIndex: v.optional(v.number()),
+    phase: v.optional(v.union(v.literal('pending'), v.literal('in-transit'))),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const now = Date.now();
     const today = new Date();
     const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
     const BATCH_SIZE = 200;
-    const statusesToCheck = ['Open', 'Assigned'] as const;
+    const STALE_IN_TRANSIT_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+    const phase = args.phase ?? 'pending';
 
+    // Dispatch phase: fan out to all orgs
     if (!args.orgId) {
       const orgs = await ctx.db.query('organizations').take(500);
       for (const org of orgs) {
@@ -1986,53 +1990,107 @@ export const autoExpireStaleLoads = internalMutation({
         await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
           orgId: org.workosOrgId,
           statusIndex: 0,
+          phase: 'pending',
         });
       }
       return null;
     }
 
-    const statusIdx = args.statusIndex ?? 0;
-    if (statusIdx >= statusesToCheck.length) return null;
-
-    const status = statusesToCheck[statusIdx];
-    let expired = 0;
-
-    const loads = await ctx.db
-      .query('loadInformation')
-      .withIndex('by_status', (q) => q.eq('workosOrgId', args.orgId!).eq('status', status))
-      .take(BATCH_SIZE * 5);
-
-    for (const load of loads) {
-      if (!load.firstStopDate || load.firstStopDate >= todayStr) continue;
-      if (load.trackingStatus !== 'Pending') continue;
-
-      await ctx.db.patch(load._id, {
-        status: 'Expired',
-        trackingStatus: 'Canceled',
-        updatedAt: Date.now(),
-      });
-
-      await updateLoadCount(ctx, load.workosOrgId, status, 'Expired');
-      expired++;
-
-      if (expired >= BATCH_SIZE) break;
-    }
-
-    if (expired > 0) {
-      console.log(`⏰ Auto-expired ${expired} stale ${status} loads for org ${args.orgId}`);
-    }
-
-    if (expired >= BATCH_SIZE) {
-      await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
-        orgId: args.orgId,
-        statusIndex: statusIdx,
-      });
-    } else {
-      const nextIdx = statusIdx + 1;
-      if (nextIdx < statusesToCheck.length) {
+    // Phase 1: Expire Open/Assigned loads with trackingStatus 'Pending' and past firstStopDate
+    if (phase === 'pending') {
+      const statusesToCheck = ['Open', 'Assigned'] as const;
+      const statusIdx = args.statusIndex ?? 0;
+      if (statusIdx >= statusesToCheck.length) {
+        // Pending phase done — move to in-transit phase
         await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
           orgId: args.orgId,
-          statusIndex: nextIdx,
+          phase: 'in-transit',
+        });
+        return null;
+      }
+
+      const status = statusesToCheck[statusIdx];
+      let expired = 0;
+
+      const loads = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_status', (q) => q.eq('workosOrgId', args.orgId!).eq('status', status))
+        .take(BATCH_SIZE * 5);
+
+      for (const load of loads) {
+        if (!load.firstStopDate || load.firstStopDate >= todayStr) continue;
+        if (load.trackingStatus !== 'Pending') continue;
+
+        await ctx.db.patch(load._id, {
+          status: 'Expired',
+          trackingStatus: 'Canceled',
+          updatedAt: now,
+        });
+
+        await updateLoadCount(ctx, load.workosOrgId, status, 'Expired');
+        expired++;
+
+        if (expired >= BATCH_SIZE) break;
+      }
+
+      if (expired > 0) {
+        console.log(`⏰ Auto-expired ${expired} stale ${status} loads for org ${args.orgId}`);
+      }
+
+      if (expired >= BATCH_SIZE) {
+        await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
+          orgId: args.orgId,
+          statusIndex: statusIdx,
+          phase: 'pending',
+        });
+      } else {
+        await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
+          orgId: args.orgId,
+          statusIndex: (args.statusIndex ?? 0) + 1,
+          phase: 'pending',
+        });
+      }
+
+      return null;
+    }
+
+    // Phase 2: Expire In Transit loads with no activity for 3+ days
+    if (phase === 'in-transit') {
+      let expired = 0;
+      const cutoff = now - STALE_IN_TRANSIT_THRESHOLD_MS;
+
+      const loads = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_org_tracking_status', (q) =>
+          q.eq('workosOrgId', args.orgId!).eq('trackingStatus', 'In Transit')
+        )
+        .take(BATCH_SIZE * 5);
+
+      for (const load of loads) {
+        if (!load.updatedAt || load.updatedAt >= cutoff) continue;
+
+        const previousStatus = load.status;
+        await ctx.db.patch(load._id, {
+          status: 'Expired',
+          trackingStatus: 'Canceled',
+          updatedAt: now,
+        });
+
+        await updateLoadCount(ctx, load.workosOrgId, previousStatus, 'Expired');
+        expired++;
+
+        if (expired >= BATCH_SIZE) break;
+      }
+
+      if (expired > 0) {
+        console.log(`⏰ Auto-expired ${expired} stale In Transit loads for org ${args.orgId}`);
+      }
+
+      // Re-schedule if there are more to process
+      if (expired >= BATCH_SIZE) {
+        await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
+          orgId: args.orgId,
+          phase: 'in-transit',
         });
       }
     }

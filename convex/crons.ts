@@ -93,8 +93,9 @@ crons.cron('external-tracking-sandbox-refresh', '0 4 * * *', internal.sandboxDat
 // ==========================================
 
 // ✅ Auto-expire stale loads (daily at 1 AM UTC)
-// Marks Open/Assigned loads as Expired when the pickup date has passed
-// and no tracking data was received (trackingStatus still 'Pending')
+// Phase 1: Marks Open/Assigned loads as Expired when the pickup date has passed
+//          and no tracking data was received (trackingStatus still 'Pending')
+// Phase 2: Marks In Transit loads as Expired when no activity for 3+ days
 crons.cron('auto-expire-stale-loads', '0 1 * * *', internal.loads.autoExpireStaleLoads, {});
 
 export default crons;
