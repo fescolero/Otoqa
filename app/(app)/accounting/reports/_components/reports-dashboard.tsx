@@ -45,14 +45,14 @@ export function ReportsDashboard({ organizationId }: ReportsDashboardProps) {
   const tabProps = { organizationId, dateRange, searchQuery };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 p-6 overflow-hidden">
+    <div className="flex h-full min-h-0 w-full flex-col gap-4 p-6 overflow-hidden">
       {/* Page header */}
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Accounting Reports</h1>
       </div>
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 w-full flex-1 flex-col">
         <TabsListLine className="w-full">
           <TabsTriggerLine value="receivables">Receivables</TabsTriggerLine>
           <TabsTriggerLine value="discrepancies">Discrepancies</TabsTriggerLine>
@@ -62,7 +62,7 @@ export function ReportsDashboard({ organizationId }: ReportsDashboardProps) {
         </TabsListLine>
 
         {/* Date range filter + Search */}
-        <div className="flex items-center gap-3 mt-4">
+        <div className="mt-4 flex w-full items-center gap-3">
           <div className="flex items-center gap-2 flex-1 min-w-0">
             {DATE_PRESETS.map((preset) => (
               <Button
@@ -117,24 +117,24 @@ export function ReportsDashboard({ organizationId }: ReportsDashboardProps) {
         </div>
 
         {/* Tab content */}
-        <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden">
-          <TabsContent value="receivables" className="min-h-0">
+        <div className="mt-4 flex min-h-0 w-full flex-1 flex-col overflow-hidden">
+          <TabsContent value="receivables" className="min-h-0 w-full">
             <ReceivablesTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="discrepancies" className="min-h-0">
+          <TabsContent value="discrepancies" className="min-h-0 w-full">
             <DiscrepanciesTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="revenue" className="min-h-0">
+          <TabsContent value="revenue" className="min-h-0 w-full">
             <RevenueTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="profitability" className="min-h-0">
+          <TabsContent value="profitability" className="min-h-0 w-full">
             <ProfitabilityTab {...tabProps} />
           </TabsContent>
 
-          <TabsContent value="costs" className="min-h-0">
+          <TabsContent value="costs" className="min-h-0 w-full">
             <CostsTab {...tabProps} />
           </TabsContent>
         </div>

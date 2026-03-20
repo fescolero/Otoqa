@@ -70,7 +70,7 @@ export default async function AccountingReportsPage() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden w-full">
         {organization && <ReportsDashboard organizationId={organization.id} userId={userData.id} />}
       </div>
     </div>
