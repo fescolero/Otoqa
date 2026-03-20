@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { query, mutation } from './_generated/server';
+import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 
 // ============================================
@@ -57,21 +58,13 @@ function isDriverToken(identity: { issuer?: string }): boolean {
  * Calculate distance between two GPS coordinates using Haversine formula
  * Returns distance in meters
  */
-function calculateDistanceMeters(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
+function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000; // Earth's radius in meters
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
@@ -101,10 +94,10 @@ export const getMyProfile = query({
           unitId: v.string(),
           make: v.optional(v.string()),
           model: v.optional(v.string()),
-        })
+        }),
       ),
     }),
-    v.null()
+    v.null(),
   ),
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -129,11 +122,7 @@ export const getMyProfile = query({
       }
 
       const normalizedPhone = normalizePhoneForMatch(phone);
-      const phoneVariants = [
-        normalizedPhone,
-        `+1${normalizedPhone}`,
-        `1${normalizedPhone}`,
-      ];
+      const phoneVariants = [normalizedPhone, `+1${normalizedPhone}`, `1${normalizedPhone}`];
 
       for (const variant of phoneVariants) {
         const match = await ctx.db
@@ -210,7 +199,7 @@ export const getMyAssignedLoads = query({
           state: v.optional(v.string()),
           windowBeginDate: v.optional(v.string()),
           windowBeginTime: v.optional(v.string()),
-        })
+        }),
       ),
       // Last delivery info
       lastDelivery: v.optional(
@@ -219,9 +208,9 @@ export const getMyAssignedLoads = query({
           state: v.optional(v.string()),
           windowBeginDate: v.optional(v.string()),
           windowEndTime: v.optional(v.string()),
-        })
+        }),
       ),
-    })
+    }),
   ),
   handler: async (ctx, args) => {
     // Verify the driver is authenticated and matches
@@ -251,21 +240,15 @@ export const getMyAssignedLoads = query({
     const [openLoads, assignedLoads, completedLoads] = await Promise.all([
       ctx.db
         .query('loadInformation')
-        .withIndex('by_primary_driver_status', (q) =>
-          q.eq('primaryDriverId', args.driverId).eq('status', 'Open')
-        )
+        .withIndex('by_primary_driver_status', (q) => q.eq('primaryDriverId', args.driverId).eq('status', 'Open'))
         .collect(),
       ctx.db
         .query('loadInformation')
-        .withIndex('by_primary_driver_status', (q) =>
-          q.eq('primaryDriverId', args.driverId).eq('status', 'Assigned')
-        )
+        .withIndex('by_primary_driver_status', (q) => q.eq('primaryDriverId', args.driverId).eq('status', 'Assigned'))
         .collect(),
       ctx.db
         .query('loadInformation')
-        .withIndex('by_primary_driver_status', (q) =>
-          q.eq('primaryDriverId', args.driverId).eq('status', 'Completed')
-        )
+        .withIndex('by_primary_driver_status', (q) => q.eq('primaryDriverId', args.driverId).eq('status', 'Completed'))
         .collect(),
     ]);
 
@@ -288,21 +271,15 @@ export const getMyAssignedLoads = query({
     const [awardedAssignments, inProgressAssignments, completedAssignments] = await Promise.all([
       ctx.db
         .query('loadCarrierAssignments')
-        .withIndex('by_assigned_driver', (q) => 
-          q.eq('assignedDriverId', args.driverId).eq('status', 'AWARDED')
-        )
+        .withIndex('by_assigned_driver', (q) => q.eq('assignedDriverId', args.driverId).eq('status', 'AWARDED'))
         .collect(),
       ctx.db
         .query('loadCarrierAssignments')
-        .withIndex('by_assigned_driver', (q) => 
-          q.eq('assignedDriverId', args.driverId).eq('status', 'IN_PROGRESS')
-        )
+        .withIndex('by_assigned_driver', (q) => q.eq('assignedDriverId', args.driverId).eq('status', 'IN_PROGRESS'))
         .collect(),
       ctx.db
         .query('loadCarrierAssignments')
-        .withIndex('by_assigned_driver', (q) => 
-          q.eq('assignedDriverId', args.driverId).eq('status', 'COMPLETED')
-        )
+        .withIndex('by_assigned_driver', (q) => q.eq('assignedDriverId', args.driverId).eq('status', 'COMPLETED'))
         .collect(),
     ]);
 
@@ -334,7 +311,7 @@ export const getMyAssignedLoads = query({
     const resultWithNulls = await Promise.all(
       driverLoads.map(async (load) => {
         if (!load) return null;
-        
+
         const stops = await ctx.db
           .query('loadStops')
           .withIndex('by_load', (q) => q.eq('loadId', load._id))
@@ -380,7 +357,7 @@ export const getMyAssignedLoads = query({
               }
             : undefined,
         };
-      })
+      }),
     );
 
     // Filter out nulls
@@ -453,10 +430,10 @@ export const getLoadWithStops = query({
           isDetour: v.optional(v.boolean()),
           detourReason: v.optional(v.string()),
           detourNotes: v.optional(v.string()),
-        })
+        }),
       ),
     }),
-    v.null()
+    v.null(),
   ),
   handler: async (ctx, args) => {
     // Verify authentication
@@ -487,7 +464,7 @@ export const getLoadWithStops = query({
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
         .first();
-      
+
       if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
         hasAccess = true;
       }
@@ -634,12 +611,7 @@ export const checkInAtStop = mutation({
     const skipGeofence = args.skipDistanceCheck || args.isRedirected;
     let distanceFromStop: number | undefined;
     if (stop.latitude && stop.longitude && !skipGeofence) {
-      distanceFromStop = calculateDistanceMeters(
-        args.latitude,
-        args.longitude,
-        stop.latitude,
-        stop.longitude
-      );
+      distanceFromStop = calculateDistanceMeters(args.latitude, args.longitude, stop.latitude, stop.longitude);
 
       if (distanceFromStop > MAX_CHECKIN_DISTANCE_METERS) {
         return {
@@ -760,14 +732,17 @@ export const checkOutFromStop = mutation({
     });
 
     // #region agent log
-    console.log('[DEBUG-ec49a3] checkOutFromStop POD:', JSON.stringify({
-      hasPodPhotoUrl: !!args.podPhotoUrl,
-      podPhotoUrlPrefix: args.podPhotoUrl?.substring(0, 80),
-      stopType: stop.stopType,
-      willStore: !!(args.podPhotoUrl && stop.stopType === 'DELIVERY'),
-      stopId: args.stopId,
-      loadId: stop.loadId,
-    }));
+    console.log(
+      '[DEBUG-ec49a3] checkOutFromStop POD:',
+      JSON.stringify({
+        hasPodPhotoUrl: !!args.podPhotoUrl,
+        podPhotoUrlPrefix: args.podPhotoUrl?.substring(0, 80),
+        stopType: stop.stopType,
+        willStore: !!(args.podPhotoUrl && stop.stopType === 'DELIVERY'),
+        stopId: args.stopId,
+        loadId: stop.loadId,
+      }),
+    );
     // #endregion
 
     // If POD photo provided, store it
@@ -786,15 +761,14 @@ export const checkOutFromStop = mutation({
       .collect();
 
     const lastStop = allStops.reduce((prev, current) =>
-      prev.sequenceNumber > current.sequenceNumber ? prev : current
+      prev.sequenceNumber > current.sequenceNumber ? prev : current,
     );
 
     if (stop._id === lastStop._id) {
-      // This is the last stop, mark load as completed
-      await ctx.db.patch(stop.loadId, {
+      // This is the last stop, mark load as completed through shared logic
+      await ctx.runMutation(internal.loads.updateLoadStatusInternal, {
+        loadId: stop.loadId,
         status: 'Completed',
-        trackingStatus: 'Completed',
-        updatedAt: Date.now(),
       });
     }
 
@@ -814,7 +788,7 @@ export const updateStopStatus = mutation({
       v.literal('In Transit'),
       v.literal('Completed'),
       v.literal('Delayed'),
-      v.literal('Canceled')
+      v.literal('Canceled'),
     ),
     driverTimestamp: v.string(), // ISO 8601 string
     notes: v.optional(v.string()),
@@ -1017,7 +991,7 @@ export const switchTruck = mutation({
         make: v.optional(v.string()),
         model: v.optional(v.string()),
         year: v.optional(v.number()),
-      })
+      }),
     ),
   }),
   handler: async (ctx, args) => {
@@ -1057,9 +1031,9 @@ export const switchTruck = mutation({
 
     // Check truck status - warn if not active
     if (truck.status !== 'Active') {
-      return { 
-        success: false, 
-        message: `This truck is currently ${truck.status.toLowerCase()}. Please select an active truck.` 
+      return {
+        success: false,
+        message: `This truck is currently ${truck.status.toLowerCase()}. Please select an active truck.`,
       };
     }
 
@@ -1118,7 +1092,7 @@ export const getTruckForSwitch = query({
       canSwitch: v.boolean(),
       reason: v.optional(v.string()),
     }),
-    v.null()
+    v.null(),
   ),
   handler: async (ctx, args) => {
     // Verify authentication
@@ -1249,12 +1223,8 @@ export const addDetourStops = mutation({
 
     // Find the current active stop (checked in but not checked out),
     // or the last completed stop, to insert detours after
-    const activeStop = existingStops.find(
-      (s) => s.checkedInAt && !s.checkedOutAt && s.stopType !== 'DETOUR'
-    );
-    const lastCompletedStop = [...existingStops]
-      .reverse()
-      .find((s) => s.status === 'Completed');
+    const activeStop = existingStops.find((s) => s.checkedInAt && !s.checkedOutAt && s.stopType !== 'DETOUR');
+    const lastCompletedStop = [...existingStops].reverse().find((s) => s.status === 'Completed');
 
     const afterStop = activeStop || lastCompletedStop || existingStops[existingStops.length - 1];
     const afterStopId = afterStop?._id;
@@ -1328,4 +1298,3 @@ export const addDetourStops = mutation({
     };
   },
 });
-

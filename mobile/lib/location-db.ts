@@ -15,6 +15,22 @@ const DB_NAME = 'otoqa_locations.db';
 
 let db: SQLite.SQLiteDatabase | null = null;
 
+function isRecoverableDbError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('NativeDatabase.execAsync') || message.includes('NullPointerException');
+}
+
+async function resetDbHandle(): Promise<void> {
+  if (db) {
+    try {
+      await db.closeAsync();
+    } catch {
+      // ignore dead native handles
+    }
+    db = null;
+  }
+}
+
 export interface LocationRow {
   id: number;
   driverId: string;
@@ -66,7 +82,11 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
       return db;
     } catch {
       console.warn('[LocationDB] Stale DB handle detected, reopening...');
-      try { await db.closeAsync(); } catch { /* already dead */ }
+      try {
+        await db.closeAsync();
+      } catch {
+        /* already dead */
+      }
       db = null;
     }
   }
@@ -81,10 +101,7 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
  * may have invalidated while the app was backgrounded.
  */
 export async function reopenDb(): Promise<void> {
-  if (db) {
-    try { await db.closeAsync(); } catch { /* may already be dead */ }
-    db = null;
-  }
+  await resetDbHandle();
   db = await openAndInit();
   console.log('[LocationDB] Database connection refreshed');
 }
@@ -104,10 +121,7 @@ export async function insertLocation(loc: {
   heading: number | null;
   recordedAt: number;
 }): Promise<number> {
-  const database = await getDb();
-  const result = await database.runAsync(
-    `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+  const args = [
     loc.driverId,
     loc.loadId,
     loc.organizationId,
@@ -117,22 +131,45 @@ export async function insertLocation(loc: {
     loc.speed,
     loc.heading,
     loc.recordedAt,
-    Date.now()
-  );
-  return result.lastInsertRowId;
+    Date.now(),
+  ] as const;
+
+  try {
+    const database = await getDb();
+    const result = await database.runAsync(
+      `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      ...args,
+    );
+    return result.lastInsertRowId;
+  } catch (error) {
+    if (!isRecoverableDbError(error)) throw error;
+
+    console.warn('[LocationDB] Insert failed with stale handle, reopening and retrying once');
+    await resetDbHandle();
+    const database = await getDb();
+    const result = await database.runAsync(
+      `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      ...args,
+    );
+    return result.lastInsertRowId;
+  }
 }
 
-export async function insertLocationBatch(locations: Array<{
-  driverId: string;
-  loadId: string;
-  organizationId: string;
-  latitude: number;
-  longitude: number;
-  accuracy: number | null;
-  speed: number | null;
-  heading: number | null;
-  recordedAt: number;
-}>): Promise<number> {
+export async function insertLocationBatch(
+  locations: Array<{
+    driverId: string;
+    loadId: string;
+    organizationId: string;
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+    speed: number | null;
+    heading: number | null;
+    recordedAt: number;
+  }>,
+): Promise<number> {
   if (locations.length === 0) return 0;
 
   const database = await getDb();
@@ -141,7 +178,7 @@ export async function insertLocationBatch(locations: Array<{
 
   const stmt = await database.prepareAsync(
     `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
-     VALUES ($driverId, $loadId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`
+     VALUES ($driverId, $loadId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`,
   );
 
   try {
@@ -171,32 +208,27 @@ export async function insertLocationBatch(locations: Array<{
 // READ OPERATIONS
 // ============================================
 
-export async function getUnsyncedLocations(
-  limit = 100
-): Promise<LocationRow[]> {
+export async function getUnsyncedLocations(limit = 100): Promise<LocationRow[]> {
   const database = await getDb();
   return await database.getAllAsync<LocationRow>(
     'SELECT * FROM locations WHERE synced = 0 ORDER BY recordedAt ASC LIMIT ?',
-    limit
+    limit,
   );
 }
 
-export async function getUnsyncedForLoad(
-  loadId: string,
-  limit = 500
-): Promise<LocationRow[]> {
+export async function getUnsyncedForLoad(loadId: string, limit = 500): Promise<LocationRow[]> {
   const database = await getDb();
   return await database.getAllAsync<LocationRow>(
     'SELECT * FROM locations WHERE loadId = ? AND synced = 0 ORDER BY recordedAt ASC LIMIT ?',
     loadId,
-    limit
+    limit,
   );
 }
 
 export async function getUnsyncedCount(): Promise<number> {
   const database = await getDb();
   const row = await database.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM locations WHERE synced = 0'
+    'SELECT COUNT(*) as count FROM locations WHERE synced = 0',
   );
   return row?.count ?? 0;
 }
@@ -205,7 +237,7 @@ export async function getUnsyncedCountForLoad(loadId: string): Promise<number> {
   const database = await getDb();
   const row = await database.getFirstAsync<{ count: number }>(
     'SELECT COUNT(*) as count FROM locations WHERE loadId = ? AND synced = 0',
-    loadId
+    loadId,
   );
   return row?.count ?? 0;
 }
@@ -214,7 +246,7 @@ export async function getTotalCountForLoad(loadId: string): Promise<number> {
   const database = await getDb();
   const row = await database.getFirstAsync<{ count: number }>(
     'SELECT COUNT(*) as count FROM locations WHERE loadId = ?',
-    loadId
+    loadId,
   );
   return row?.count ?? 0;
 }
@@ -227,21 +259,13 @@ export async function markAsSynced(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
   const database = await getDb();
   const placeholders = ids.map(() => '?').join(',');
-  await database.runAsync(
-    `UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`,
-    ...ids
-  );
+  await database.runAsync(`UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
 }
 
-export async function deleteOldSyncedLocations(
-  olderThanMs: number = 7 * 24 * 60 * 60 * 1000
-): Promise<number> {
+export async function deleteOldSyncedLocations(olderThanMs: number = 7 * 24 * 60 * 60 * 1000): Promise<number> {
   const database = await getDb();
   const cutoff = Date.now() - olderThanMs;
-  const result = await database.runAsync(
-    'DELETE FROM locations WHERE synced = 1 AND createdAt < ?',
-    cutoff
-  );
+  const result = await database.runAsync('DELETE FROM locations WHERE synced = 1 AND createdAt < ?', cutoff);
   return result.changes;
 }
 
@@ -250,17 +274,14 @@ export async function deleteOldSyncedLocations(
 // ============================================
 
 export async function getLastLocationForLoad(
-  loadId: string
+  loadId: string,
 ): Promise<{ latitude: number; longitude: number; recordedAt: number } | null> {
   const database = await getDb();
   const row = await database.getFirstAsync<{
     latitude: number;
     longitude: number;
     recordedAt: number;
-  }>(
-    'SELECT latitude, longitude, recordedAt FROM locations WHERE loadId = ? ORDER BY recordedAt DESC LIMIT 1',
-    loadId
-  );
+  }>('SELECT latitude, longitude, recordedAt FROM locations WHERE loadId = ? ORDER BY recordedAt DESC LIMIT 1', loadId);
   return row ?? null;
 }
 
@@ -270,10 +291,7 @@ export async function getLastLocationForLoad(
 
 export async function deleteAllForLoad(loadId: string): Promise<number> {
   const database = await getDb();
-  const result = await database.runAsync(
-    'DELETE FROM locations WHERE loadId = ?',
-    loadId
-  );
+  const result = await database.runAsync('DELETE FROM locations WHERE loadId = ?', loadId);
   return result.changes;
 }
 

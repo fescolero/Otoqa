@@ -520,6 +520,7 @@ export const getLoadDetailsMap = internalQuery({
           {
             orderNumber: load?.orderNumber ?? 'N/A',
             hcr: load?.parsedHcr ?? 'Unknown HCR',
+            effectiveMiles: load?.effectiveMiles,
           },
         ] as const;
       }),
@@ -534,6 +535,9 @@ type DiscrepancyDetailRow = {
   customerName: string;
   hcr: string;
   loadOrderNumber: string;
+  effectiveMiles: number | null;
+  paymentMiles: number | null;
+  milesDifference: number | null;
   invoicedAmount: number;
   paidAmount: number;
   difference: number;
@@ -645,24 +649,33 @@ export const getDiscrepancyDetailSorted = action({
     const customerNameMap: Record<string, string> = await ctx.runQuery(internal.accountingReports.getCustomerNameMap, {
       customerIds: [...new Set(visibleInvoices.map((inv) => inv.customerId))],
     });
-    const loadDetailsMap: Record<string, { orderNumber: string; hcr: string }> = await ctx.runQuery(
-      internal.accountingReports.getLoadDetailsMap,
-      {
+    const loadDetailsMap: Record<string, { orderNumber: string; hcr: string; effectiveMiles?: number }> =
+      await ctx.runQuery(internal.accountingReports.getLoadDetailsMap, {
         loadIds: [...new Set(visibleInvoices.map((inv) => inv.loadId))],
-      },
-    );
+      });
 
     const rows: DiscrepancyDetailRow[] = visibleInvoices.map((inv) => {
-      const loadDetails: { orderNumber: string; hcr: string } = loadDetailsMap[inv.loadId.toString()] ?? {
+      const loadDetails: { orderNumber: string; hcr: string; effectiveMiles?: number } = loadDetailsMap[
+        inv.loadId.toString()
+      ] ?? {
         orderNumber: 'N/A',
         hcr: 'Unknown HCR',
       };
+      const effectiveMiles = typeof loadDetails.effectiveMiles === 'number' ? loadDetails.effectiveMiles : null;
+      const paymentMiles = typeof inv.paymentMiles === 'number' ? inv.paymentMiles : null;
+      const milesDifference =
+        effectiveMiles !== null && paymentMiles !== null
+          ? Math.round((paymentMiles - effectiveMiles) * 100) / 100
+          : null;
       return {
         _id: inv._id,
         invoiceNumber: inv.invoiceNumber,
         customerName: customerNameMap[inv.customerId.toString()] ?? 'Unknown',
         hcr: loadDetails.hcr,
         loadOrderNumber: loadDetails.orderNumber,
+        effectiveMiles,
+        paymentMiles,
+        milesDifference,
         invoicedAmount: inv.totalAmount ?? 0,
         paidAmount: inv.paidAmount ?? 0,
         difference: inv.paymentDifference ?? 0,

@@ -22,6 +22,10 @@ import {
   trackBGTaskError,
   trackBGTaskReregistered,
   trackForegroundResume,
+  trackWatchLocationReceived,
+  trackWatchLocationFiltered,
+  trackWatchLocationSaved,
+  trackWatchLocationError,
 } from './analytics';
 
 // ============================================
@@ -738,6 +742,12 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
   try {
     console.log('[LocationTracking] Stopping tracking...');
 
+    try {
+      await reopenDb();
+    } catch (err) {
+      console.warn('[LocationTracking] stop: DB reopen failed, continuing best-effort:', err);
+    }
+
     // Stop sync interval and foreground polling
     stopSyncInterval();
     await stopForegroundPolling();
@@ -747,10 +757,17 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
     if (state?.isActive) {
       try {
         await syncUnsyncedToConvex(state.organizationId);
-      } catch (err) {
-        const unsyncedRemaining = await getUnsyncedCount();
+      } catch {
+        let unsyncedRemaining = -1;
+        try {
+          unsyncedRemaining = await getUnsyncedCount();
+        } catch {
+          // Ignore stale DB errors during best-effort shutdown
+        }
         console.warn(
-          `[LocationTracking] Final sync incomplete, ${unsyncedRemaining} points retained in SQLite for later upload`,
+          unsyncedRemaining >= 0
+            ? `[LocationTracking] Final sync incomplete, ${unsyncedRemaining} points retained in SQLite for later upload`
+            : '[LocationTracking] Final sync incomplete, unsynced points retained in SQLite for later upload',
         );
       }
     }
@@ -855,6 +872,12 @@ export async function ensureTrackingForLoad(params: {
   );
 
   try {
+    await reopenDb();
+  } catch (err) {
+    console.warn('[LocationTracking] Handoff DB reopen failed, continuing best-effort:', err);
+  }
+
+  try {
     await forceFlush();
   } catch (err) {
     console.warn('[LocationTracking] Handoff flush failed, continuing with switch:', err);
@@ -862,12 +885,29 @@ export async function ensureTrackingForLoad(params: {
 
   const stopResult = await stopLocationTracking();
   if (!stopResult.success) {
-    return {
-      success: false,
-      action: 'handoff',
-      message: stopResult.message,
-      previousLoadId: state.loadId,
-    };
+    console.warn('[LocationTracking] Handoff stop failed, forcing local reset before restart:', stopResult.message);
+    try {
+      stopSyncInterval();
+      await stopForegroundPolling();
+    } catch {
+      // Best-effort only
+    }
+    try {
+      await storage.set(TRACKING_STATE_KEY, JSON.stringify({ isActive: false }));
+      await storage.delete(LAST_HEARTBEAT_KEY);
+    } catch {
+      // Best-effort only
+    }
+    if (!isExpoGo) {
+      try {
+        const isRegistered = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
+        if (isRegistered) {
+          await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
+        }
+      } catch {
+        // Best-effort only
+      }
+    }
   }
 
   const startResult = await startLocationTracking(params);
@@ -1081,17 +1121,35 @@ async function startForegroundPolling(organizationId: string) {
       },
       async (location) => {
         try {
+          const now = Date.now();
+          const ageMs = now - location.timestamp;
+          trackWatchLocationReceived({
+            accuracy_m: location.coords.accuracy ?? null,
+            age_ms: ageMs,
+            speed_mps: location.coords.speed ?? null,
+            heading_deg: location.coords.heading ?? null,
+          });
+
           const state = await getTrackingState();
           if (!state?.isActive) {
+            trackWatchLocationFiltered({
+              reason: 'inactive',
+              accuracy_m: location.coords.accuracy ?? null,
+              age_ms: ageMs,
+            });
             await stopForegroundPolling();
             return;
           }
 
           if (location.coords.accuracy && location.coords.accuracy > MAX_ACCURACY_METERS) {
+            trackWatchLocationFiltered({
+              reason: 'accuracy',
+              accuracy_m: location.coords.accuracy,
+              age_ms: ageMs,
+            });
             return;
           }
 
-          const now = Date.now();
           const timeSinceLast = lastForegroundLocation ? now - lastForegroundLocation.time : Infinity;
 
           let distance = Infinity;
@@ -1107,6 +1165,13 @@ async function startForegroundPolling(organizationId: string) {
           // Hard floor: never save more often than MIN_TIME_BETWEEN_SAVES_MS
           // regardless of distance. Prevents flooding at highway speeds.
           if (timeSinceLast < MIN_TIME_BETWEEN_SAVES_MS) {
+            trackWatchLocationFiltered({
+              reason: 'time_floor',
+              accuracy_m: location.coords.accuracy ?? null,
+              age_ms: ageMs,
+              distance_m: Number.isFinite(distance) ? distance : null,
+              gap_ms: Number.isFinite(timeSinceLast) ? timeSinceLast : null,
+            });
             return;
           }
 
@@ -1116,10 +1181,17 @@ async function startForegroundPolling(organizationId: string) {
           const needsHeartbeat = timeSinceLast >= HEARTBEAT_INTERVAL_MS;
 
           if (!enoughTime && !enoughDistance && !needsHeartbeat) {
+            trackWatchLocationFiltered({
+              reason: 'distance_time_gate',
+              accuracy_m: location.coords.accuracy ?? null,
+              age_ms: ageMs,
+              distance_m: Number.isFinite(distance) ? distance : null,
+              gap_ms: Number.isFinite(timeSinceLast) ? timeSinceLast : null,
+            });
             return;
           }
 
-          await insertLocation({
+          const locationRecord = {
             driverId: state.driverId,
             loadId: state.loadId,
             organizationId: state.organizationId,
@@ -1129,7 +1201,23 @@ async function startForegroundPolling(organizationId: string) {
             speed: location.coords.speed,
             heading: location.coords.heading,
             recordedAt: location.timestamp,
-          });
+          };
+
+          let usedFallback = false;
+          try {
+            await insertLocation(locationRecord);
+          } catch (insertError) {
+            console.warn(
+              '[LocationTracking] Watch: SQLite insert failed after retry, buffering fallback location:',
+              insertError instanceof Error ? insertError.message : insertError,
+            );
+            trackWatchLocationError({
+              step: 'insert',
+              error: insertError instanceof Error ? insertError.message : String(insertError),
+            });
+            await saveFallbackLocations([locationRecord]);
+            usedFallback = true;
+          }
 
           lastForegroundLocation = {
             latitude: location.coords.latitude,
@@ -1138,6 +1226,13 @@ async function startForegroundPolling(organizationId: string) {
           };
 
           const reason = enoughDistance ? 'distance' : enoughTime ? 'time' : 'heartbeat';
+          trackWatchLocationSaved({
+            reason,
+            accuracy_m: location.coords.accuracy ?? null,
+            distance_m: Number.isFinite(distance) ? distance : null,
+            gap_ms: Number.isFinite(timeSinceLast) ? timeSinceLast : null,
+            used_fallback: usedFallback,
+          });
           console.log(
             `[LocationTracking] Watch: saved (acc=${location.coords.accuracy?.toFixed(0)}m, dist=${distance.toFixed(0)}m, gap=${(timeSinceLast / 1000).toFixed(0)}s, reason=${reason})`,
           );
@@ -1148,6 +1243,10 @@ async function startForegroundPolling(organizationId: string) {
             try {
               await syncUnsyncedToConvex(organizationId);
             } catch (syncErr) {
+              trackWatchLocationError({
+                step: 'sync',
+                error: syncErr instanceof Error ? syncErr.message : String(syncErr),
+              });
               console.warn(
                 '[LocationTracking] Watch: sync failed, will retry:',
                 syncErr instanceof Error ? syncErr.message : syncErr,
@@ -1157,6 +1256,10 @@ async function startForegroundPolling(organizationId: string) {
             }
           }
         } catch (error) {
+          trackWatchLocationError({
+            step: 'callback',
+            error: error instanceof Error ? error.message : String(error),
+          });
           console.error('[LocationTracking] Watch callback error:', error);
         }
       },

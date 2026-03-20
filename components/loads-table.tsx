@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useMutation, useQuery, usePaginatedQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthQuery } from '@/hooks/use-auth-query';
@@ -11,16 +11,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import Link from 'next/link';
 import { Id } from '@/convex/_generated/dataModel';
 import { trackError } from '@/lib/posthog';
-import { 
-  Plus, 
-  Package,
-  Clock,
-  Truck,
-  CheckCircle2,
-  Ban,
-  TimerOff,
-  Columns3,
-} from 'lucide-react';
+import { Plus, Package, Clock, Truck, CheckCircle2, Ban, TimerOff, Columns3 } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -55,7 +46,9 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // Bulk action modal state
   const [showResolutionModal, setShowResolutionModal] = useState(false);
   const [showCancellationModal, setShowCancellationModal] = useState(false);
-  const [pendingTargetStatus, setPendingTargetStatus] = useState<'Open' | 'Assigned' | 'Delivered' | 'Canceled' | 'Expired' | null>(null);
+  const [pendingTargetStatus, setPendingTargetStatus] = useState<
+    'Open' | 'Assigned' | 'Delivered' | 'Canceled' | 'Expired' | null
+  >(null);
   const [validationResult, setValidationResult] = useState<any>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [cancellationLoads, setCancellationLoads] = useState<{ id: string; orderNumber?: string }[]>([]);
@@ -65,8 +58,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   });
 
   // Determine status filter from tab (map UI 'Delivered' back to DB 'Completed')
-  const statusFilter = activeTab === 'all' ? undefined : 
-    activeTab === 'Delivered' ? 'Completed' : activeTab;
+  const statusFilter = activeTab === 'all' ? undefined : activeTab === 'Delivered' ? 'Completed' : activeTab;
 
   // ✅ Debounce search input to prevent excessive queries (300ms delay)
   const debouncedSearch = useDebounce(filters.search, 300);
@@ -88,23 +80,28 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
 
   // Fetch loads with infinite scroll via usePaginatedQuery.
   // The hook manages cursor state internally and resets when args change.
-  const { results, status: paginationStatus, loadMore } = usePaginatedQuery(
+  const {
+    results,
+    status: paginationStatus,
+    loadMore,
+  } = usePaginatedQuery(
     api.loads.getLoads,
-    skipQuery ? "skip" : {
-      workosOrgId: organizationId,
-      status: statusFilter as any,
-      hcr: filters.hcr,
-      tripNumber: filters.trip,
-      search: debouncedSearch || undefined,
-      mileRange: filters.mileRange,
-      startDate: formatDateForQuery(filters.dateRange?.start),
-      endDate: formatDateForQuery(filters.dateRange?.end),
-    },
+    skipQuery
+      ? 'skip'
+      : {
+          workosOrgId: organizationId,
+          status: statusFilter as any,
+          hcr: filters.hcr,
+          tripNumber: filters.trip,
+          search: debouncedSearch || undefined,
+          mileRange: filters.mileRange,
+          startDate: formatDateForQuery(filters.dateRange?.start),
+          endDate: formatDateForQuery(filters.dateRange?.end),
+        },
     { initialNumItems: 50 },
   );
 
   // Mutations
-  const updateLoadStatus = useMutation(api.loads.updateLoadStatus);
   const bulkUpdateLoadStatus = useMutation(api.loads.bulkUpdateLoadStatus);
   const deleteLoad = useMutation(api.loads.deleteLoad);
 
@@ -116,7 +113,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
           loadIds: Array.from(selectedLoadIds),
           targetStatus: pendingTargetStatus === 'Delivered' ? 'Completed' : pendingTargetStatus,
         }
-      : 'skip'
+      : 'skip',
   );
 
   const currentLoads = results ?? [];
@@ -124,7 +121,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // Extract unique HCRs and Trips from current loads
   const availableHCRs = useMemo(() => {
     const hcrs = new Set<string>();
-    currentLoads.forEach(load => {
+    currentLoads.forEach((load) => {
       if (load.parsedHcr) hcrs.add(load.parsedHcr);
     });
     return Array.from(hcrs).sort();
@@ -132,7 +129,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
 
   const availableTrips = useMemo(() => {
     const trips = new Set<string>();
-    currentLoads.forEach(load => {
+    currentLoads.forEach((load) => {
       if (load.parsedTripNumber) trips.add(load.parsedTripNumber);
     });
     return Array.from(trips).sort();
@@ -148,7 +145,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // Selection handlers
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
-      setSelectedLoadIds(new Set(currentLoads.map(load => load._id)));
+      setSelectedLoadIds(new Set(currentLoads.map((load) => load._id)));
     } else {
       setSelectedLoadIds(new Set());
     }
@@ -217,7 +214,14 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
     if (validateBulkChange && isValidating) {
       setValidationResult(validateBulkChange);
       setIsValidating(false);
-      
+
+      const hasResolutionItems =
+        validateBulkChange.safe.length > 0 ||
+        validateBulkChange.imminent.length > 0 ||
+        validateBulkChange.active.length > 0 ||
+        validateBulkChange.finalized.length > 0 ||
+        validateBulkChange.blocked.length > 0;
+
       // Check for blocked transitions first
       if (validateBulkChange.blocked && validateBulkChange.blocked.length > 0) {
         const blockedReasons = validateBulkChange.blocked.map((l: any) => l.orderNumber || l.id.slice(-6)).join(', ');
@@ -225,8 +229,8 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
           description: `Affected loads: ${blockedReasons}`,
           duration: 5000,
         });
-        // Still show modal for any safe/imminent loads
-        if (validateBulkChange.safe.length > 0 || validateBulkChange.imminent.length > 0) {
+
+        if (hasResolutionItems) {
           setShowResolutionModal(true);
         } else {
           setPendingTargetStatus(null);
@@ -240,13 +244,12 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
         setShowCancellationModal(true);
         return;
       }
-      
+
       // If all safe, proceed directly; otherwise show modal
       if (validateBulkChange.summary.canProceedSafely && validateBulkChange.safe.length > 0) {
         // All clear - proceed without modal
         executeBulkStatusUpdate(validateBulkChange.safe.map((l: any) => l.id));
-      } else if (validateBulkChange.safe.length > 0 || validateBulkChange.imminent.length > 0) {
-        // Show resolution modal
+      } else if (hasResolutionItems) {
         setShowResolutionModal(true);
       } else {
         // Nothing to update
@@ -266,21 +269,23 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // Execute the actual status update
   const executeBulkStatusUpdate = async (loadIds: string[]) => {
     if (!pendingTargetStatus || loadIds.length === 0) return;
-    
+
     try {
       const dbStatus = pendingTargetStatus === 'Delivered' ? 'Completed' : pendingTargetStatus;
-      const result = await bulkUpdateLoadStatus({ 
-        loadIds: loadIds as Id<'loadInformation'>[], 
-        status: dbStatus as any 
+      const result = await bulkUpdateLoadStatus({
+        loadIds: loadIds as Id<'loadInformation'>[],
+        status: dbStatus as any,
       });
-      
+
       if (result.failed > 0) {
-        toast.warning(`Updated ${result.success} load${result.success !== 1 ? 's' : ''} to ${pendingTargetStatus}. ${result.failed} failed.`);
+        toast.warning(
+          `Updated ${result.success} load${result.success !== 1 ? 's' : ''} to ${pendingTargetStatus}. ${result.failed} failed.`,
+        );
       } else {
         toast.success(`Updated ${result.success} load${result.success !== 1 ? 's' : ''} to ${pendingTargetStatus}`);
       }
       setSelectedLoadIds(new Set());
-      
+
       setSkipQuery(true);
       setTimeout(() => setSkipQuery(false), 0);
     } catch (error) {
@@ -295,10 +300,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
 
   // Initiate bulk status update with validation
   const handleUpdateStatus = async (status: 'Open' | 'Assigned' | 'Delivered' | 'Canceled' | 'Expired') => {
-    const needsValidation = 
-      status === 'Open' || 
-      status === 'Delivered' || 
-      status === 'Canceled';
+    const needsValidation = status === 'Open' || status === 'Delivered' || status === 'Canceled';
 
     if (needsValidation) {
       setPendingTargetStatus(status);
@@ -311,14 +313,16 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
           loadIds: Array.from(selectedLoadIds),
           status: dbStatus as any,
         });
-        
+
         if (result.failed > 0) {
-          toast.warning(`Updated ${result.success} load${result.success !== 1 ? 's' : ''} to ${status}. ${result.failed} failed.`);
+          toast.warning(
+            `Updated ${result.success} load${result.success !== 1 ? 's' : ''} to ${status}. ${result.failed} failed.`,
+          );
         } else {
           toast.success(`Updated ${result.success} load${result.success !== 1 ? 's' : ''} to ${status}`);
         }
         setSelectedLoadIds(new Set());
-        
+
         setSkipQuery(true);
         setTimeout(() => setSkipQuery(false), 0);
       } catch (error) {
@@ -341,14 +345,14 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
         cancellationNotes: notes,
         canceledBy: userId,
       });
-      
+
       if (result.failed > 0) {
         toast.warning(`Canceled ${result.success} load${result.success !== 1 ? 's' : ''}. ${result.failed} failed.`);
       } else {
         toast.success(`Canceled ${result.success} load${result.success !== 1 ? 's' : ''}`);
       }
       setSelectedLoadIds(new Set());
-      
+
       setSkipQuery(true);
       setTimeout(() => setSkipQuery(false), 0);
     } catch (error) {
@@ -390,7 +394,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
 
   const handleExport = () => {
     // TODO: Implement CSV export
-    const selectedLoads = currentLoads.filter(load => selectedLoadIds.has(load._id));
+    const selectedLoads = currentLoads.filter((load) => selectedLoadIds.has(load._id));
     console.log('Export loads:', selectedLoads);
     toast.info('Export feature coming soon!');
   };
@@ -400,9 +404,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       return;
     }
     try {
-      await Promise.all(
-        Array.from(selectedLoadIds).map(loadId => deleteLoad({ loadId }))
-      );
+      await Promise.all(Array.from(selectedLoadIds).map((loadId) => deleteLoad({ loadId })));
       toast.success(`Deleted ${selectedLoadIds.size} load${selectedLoadIds.size !== 1 ? 's' : ''}`);
       setSelectedLoadIds(new Set());
     } catch (error) {
@@ -413,7 +415,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   };
 
   // Map load status for display in table
-  const loadsWithMappedStatus = currentLoads.map(load => ({
+  const loadsWithMappedStatus = currentLoads.map((load) => ({
     ...load,
     status: load.status === 'Completed' ? 'Delivered' : load.status,
   }));
@@ -437,23 +439,23 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
             <DropdownMenuContent align="end">
               <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              {([
-                { key: 'orderNumber', label: 'Order #' },
-                { key: 'customer', label: 'Customer' },
-                { key: 'route', label: 'Route' },
-                { key: 'stops', label: 'Stops' },
-                { key: 'status', label: 'Status' },
-                { key: 'tracking', label: 'Tracking' },
-                { key: 'hcr', label: 'HCR' },
-                { key: 'tripNumber', label: 'Trip #' },
-                { key: 'loadDate', label: 'Load Date' },
-              ] as { key: keyof ColumnVisibility; label: string }[]).map(({ key, label }) => (
+              {(
+                [
+                  { key: 'orderNumber', label: 'Order #' },
+                  { key: 'customer', label: 'Customer' },
+                  { key: 'route', label: 'Route' },
+                  { key: 'stops', label: 'Stops' },
+                  { key: 'status', label: 'Status' },
+                  { key: 'tracking', label: 'Tracking' },
+                  { key: 'hcr', label: 'HCR' },
+                  { key: 'tripNumber', label: 'Trip #' },
+                  { key: 'loadDate', label: 'Load Date' },
+                ] as { key: keyof ColumnVisibility; label: string }[]
+              ).map(({ key, label }) => (
                 <DropdownMenuCheckboxItem
                   key={key}
                   checked={columnVisibility[key]}
-                  onCheckedChange={(checked) =>
-                    setColumnVisibility((prev) => ({ ...prev, [key]: !!checked }))
-                  }
+                  onCheckedChange={(checked) => setColumnVisibility((prev) => ({ ...prev, [key]: !!checked }))}
                 >
                   {label}
                 </DropdownMenuCheckboxItem>
@@ -474,15 +476,15 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
         <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full flex-1 flex flex-col gap-0 min-h-0">
           <div className="flex-shrink-0 px-4">
             <TabsList className="h-auto p-0 bg-transparent border-0">
-              <TabsTrigger 
-                value="all" 
+              <TabsTrigger
+                value="all"
                 className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
               >
                 <Package className="mr-2 h-4 w-4" />
                 All
               </TabsTrigger>
-              <TabsTrigger 
-                value="Open" 
+              <TabsTrigger
+                value="Open"
                 className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
               >
                 <Clock className="mr-2 h-4 w-4" />
@@ -493,8 +495,8 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger 
-                value="Assigned" 
+              <TabsTrigger
+                value="Assigned"
                 className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
               >
                 <Truck className="mr-2 h-4 w-4" />
@@ -505,8 +507,8 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger 
-                value="Delivered" 
+              <TabsTrigger
+                value="Delivered"
                 className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
               >
                 <CheckCircle2 className="mr-2 h-4 w-4" />
@@ -517,8 +519,8 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger 
-                value="Canceled" 
+              <TabsTrigger
+                value="Canceled"
                 className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
               >
                 <Ban className="mr-2 h-4 w-4" />
@@ -529,8 +531,8 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger 
-                value="Expired" 
+              <TabsTrigger
+                value="Expired"
                 className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
               >
                 <TimerOff className="mr-2 h-4 w-4" />
@@ -547,13 +549,13 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
           {/* Tab Content */}
           <div className="flex-1 flex flex-col overflow-hidden min-h-0">
             {/* Filter Bar */}
-            <LoadFilterBar 
+            <LoadFilterBar
               filters={filters}
               onFiltersChange={setFilters}
               availableHCRs={availableHCRs}
               availableTrips={availableTrips}
             />
-            
+
             <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
               <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
                 {/* Floating Action Bar */}
@@ -567,7 +569,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
                     onClearSelection={() => setSelectedLoadIds(new Set())}
                   />
                 )}
-                
+
                 {/* Virtualized Table */}
                 <VirtualizedLoadsTable
                   loads={loadsWithMappedStatus as any}

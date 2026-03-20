@@ -27,6 +27,9 @@ interface DiscrepancyRow {
   customerName: string;
   hcr: string;
   loadOrderNumber: string;
+  effectiveMiles: number | null;
+  paymentMiles: number | null;
+  milesDifference: number | null;
   invoicedAmount: number;
   paidAmount: number;
   difference: number;
@@ -70,6 +73,39 @@ const columns: ColumnDef<DiscrepancyRow, unknown>[] = [
   {
     accessorKey: 'loadOrderNumber',
     header: 'Load #',
+  },
+  {
+    accessorKey: 'effectiveMiles',
+    header: 'Eff. Miles',
+    cell: ({ row }) => <span className="text-right block">{row.original.effectiveMiles ?? '-'}</span>,
+  },
+  {
+    accessorKey: 'paymentMiles',
+    header: 'Paid Miles',
+    cell: ({ row }) => <span className="text-right block">{row.original.paymentMiles ?? '-'}</span>,
+  },
+  {
+    accessorKey: 'milesDifference',
+    header: 'Miles Diff',
+    cell: ({ row }) => {
+      const value = row.original.milesDifference;
+      return (
+        <span
+          className={cn(
+            'text-right block font-medium',
+            value == null
+              ? 'text-muted-foreground'
+              : value < 0
+                ? 'text-red-600'
+                : value > 0
+                  ? 'text-green-600'
+                  : 'text-foreground',
+          )}
+        >
+          {value == null ? '-' : value}
+        </span>
+      );
+    },
   },
   {
     accessorKey: 'invoicedAmount',
@@ -254,6 +290,9 @@ export function DiscrepanciesTab({ organizationId, dateRange, searchQuery }: Tab
         { header: 'Customer', accessor: (r) => r.customerName },
         { header: 'HCR', accessor: (r) => r.hcr },
         { header: 'Load #', accessor: (r) => r.loadOrderNumber },
+        { header: 'Effective Miles', accessor: (r) => r.effectiveMiles ?? '' },
+        { header: 'Paid Miles', accessor: (r) => r.paymentMiles ?? '' },
+        { header: 'Miles Diff', accessor: (r) => r.milesDifference ?? '' },
         { header: 'Invoiced', accessor: (r) => r.invoicedAmount },
         { header: 'Paid', accessor: (r) => r.paidAmount },
         { header: 'Difference', accessor: (r) => r.difference },

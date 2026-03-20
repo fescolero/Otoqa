@@ -1,10 +1,167 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
+import type { MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
 import { parseStopDateTime } from './_helpers/timeUtils';
 import { updateLoadCount } from './stats_helpers';
+
+const loadStatusValidator = v.union(
+  v.literal('Open'),
+  v.literal('Assigned'),
+  v.literal('Canceled'),
+  v.literal('Completed'),
+  v.literal('Expired'),
+);
+
+const cancellationReasonValidator = v.union(
+  v.literal('DRIVER_BREAKDOWN'),
+  v.literal('CUSTOMER_CANCELLED'),
+  v.literal('EQUIPMENT_ISSUE'),
+  v.literal('RATE_DISPUTE'),
+  v.literal('WEATHER_CONDITIONS'),
+  v.literal('CAPACITY_ISSUE'),
+  v.literal('SCHEDULING_CONFLICT'),
+  v.literal('OTHER'),
+);
+
+async function applyLoadStatusUpdate(
+  ctx: MutationCtx,
+  args: {
+    loadId: Id<'loadInformation'>;
+    status: 'Open' | 'Assigned' | 'Canceled' | 'Completed' | 'Expired';
+    cancellationReason?:
+      | 'DRIVER_BREAKDOWN'
+      | 'CUSTOMER_CANCELLED'
+      | 'EQUIPMENT_ISSUE'
+      | 'RATE_DISPUTE'
+      | 'WEATHER_CONDITIONS'
+      | 'CAPACITY_ISSUE'
+      | 'SCHEDULING_CONFLICT'
+      | 'OTHER';
+    cancellationNotes?: string;
+    canceledBy?: string;
+  },
+) {
+  const load = await ctx.db.get(args.loadId);
+  if (!load) throw new Error('Load not found');
+
+  const now = Date.now();
+  const updates: Record<string, unknown> = {
+    status: args.status,
+    updatedAt: now,
+  };
+
+  if (args.status === 'Completed') {
+    updates.trackingStatus = 'Completed';
+    updates.deliveredAt = now;
+
+    const carrierAssignments = await ctx.db
+      .query('loadCarrierAssignments')
+      .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
+      .collect();
+    for (const ca of carrierAssignments) {
+      if (ca.status === 'AWARDED' || ca.status === 'IN_PROGRESS') {
+        await ctx.db.patch(ca._id, {
+          status: 'COMPLETED' as const,
+          completedAt: now,
+          paymentStatus: ca.paymentStatus ?? ('PENDING' as const),
+        });
+      }
+    }
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
+      .collect();
+    for (const leg of legs) {
+      if (leg.status !== 'COMPLETED' && leg.status !== 'CANCELED') {
+        await ctx.db.patch(leg._id, {
+          status: 'COMPLETED' as const,
+          updatedAt: now,
+        });
+      }
+    }
+  } else if (args.status === 'Assigned') {
+    if (load.trackingStatus === 'Pending') {
+      updates.trackingStatus = 'In Transit';
+    }
+  } else if (args.status === 'Canceled') {
+    updates.trackingStatus = 'Canceled';
+
+    if (args.cancellationReason) {
+      updates.cancellationReason = args.cancellationReason;
+      updates.cancellationNotes = args.cancellationNotes;
+      updates.canceledAt = now;
+      updates.canceledBy = args.canceledBy;
+    }
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
+      .collect();
+
+    for (const leg of legs) {
+      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+        await ctx.db.patch(leg._id, {
+          status: 'CANCELED',
+          updatedAt: now,
+        });
+
+        const payables = await ctx.db
+          .query('loadPayables')
+          .withIndex('by_leg', (q: any) => q.eq('legId', leg._id))
+          .collect();
+
+        for (const payable of payables) {
+          if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
+            await ctx.db.delete(payable._id);
+          }
+        }
+      }
+    }
+  } else if (args.status === 'Expired') {
+    updates.trackingStatus = 'Canceled';
+  } else if (args.status === 'Open') {
+    updates.primaryDriverId = undefined;
+    updates.primaryCarrierPartnershipId = undefined;
+    updates.trackingStatus = 'Pending';
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
+      .collect();
+
+    for (const leg of legs) {
+      if (leg.status === 'PENDING') {
+        await ctx.db.patch(leg._id, {
+          driverId: undefined,
+          truckId: undefined,
+          trailerId: undefined,
+          carrierPartnershipId: undefined,
+          status: 'CANCELED',
+          updatedAt: now,
+        });
+
+        const payables = await ctx.db
+          .query('loadPayables')
+          .withIndex('by_leg', (q: any) => q.eq('legId', leg._id))
+          .collect();
+
+        for (const payable of payables) {
+          if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
+            await ctx.db.delete(payable._id);
+          }
+        }
+      }
+    }
+  }
+
+  await ctx.db.patch(args.loadId, updates);
+
+  return { load, previousStatus: load.status, nextStatus: args.status };
+}
 
 // Count loads by status for tab badges
 // ✅ Optimized: Reads from aggregate table (1 read instead of 10,000+)
@@ -895,146 +1052,31 @@ export const createLoad = mutation({
 export const updateLoadStatus = mutation({
   args: {
     loadId: v.id('loadInformation'),
-    status: v.union(
-      v.literal('Open'),
-      v.literal('Assigned'),
-      v.literal('Canceled'),
-      v.literal('Completed'),
-      v.literal('Expired'),
-    ),
+    status: loadStatusValidator,
     // Cancellation tracking (required when status = 'Canceled' and was 'Assigned')
-    cancellationReason: v.optional(
-      v.union(
-        v.literal('DRIVER_BREAKDOWN'),
-        v.literal('CUSTOMER_CANCELLED'),
-        v.literal('EQUIPMENT_ISSUE'),
-        v.literal('RATE_DISPUTE'),
-        v.literal('WEATHER_CONDITIONS'),
-        v.literal('CAPACITY_ISSUE'),
-        v.literal('SCHEDULING_CONFLICT'),
-        v.literal('OTHER'),
-      ),
-    ),
+    cancellationReason: v.optional(cancellationReasonValidator),
     cancellationNotes: v.optional(v.string()),
     canceledBy: v.optional(v.string()), // WorkOS user ID
   },
   handler: async (ctx, args) => {
-    const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
+    const result = await applyLoadStatusUpdate(ctx, args);
 
-    const now = Date.now();
-    const updates: Record<string, unknown> = {
-      status: args.status,
-      updatedAt: now,
-    };
+    await updateLoadCount(ctx, result.load.workosOrgId, result.previousStatus, result.nextStatus);
+  },
+});
 
-    // Auto-update tracking status based on workflow status
-    if (args.status === 'Completed') {
-      updates.trackingStatus = 'Completed';
-      updates.deliveredAt = now; // Set delivery timestamp for accounting reports
+export const updateLoadStatusInternal = internalMutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    status: loadStatusValidator,
+    cancellationReason: v.optional(cancellationReasonValidator),
+    cancellationNotes: v.optional(v.string()),
+    canceledBy: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const result = await applyLoadStatusUpdate(ctx, args);
 
-      // Sync carrier assignment status to COMPLETED
-      const carrierAssignments = await ctx.db
-        .query('loadCarrierAssignments')
-        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-        .collect();
-      for (const ca of carrierAssignments) {
-        if (ca.status === 'AWARDED' || ca.status === 'IN_PROGRESS') {
-          await ctx.db.patch(ca._id, {
-            status: 'COMPLETED' as const,
-            completedAt: now,
-            paymentStatus: ca.paymentStatus ?? ('PENDING' as const),
-          });
-        }
-      }
-    } else if (args.status === 'Assigned') {
-      if (load.trackingStatus === 'Pending') {
-        updates.trackingStatus = 'In Transit';
-      }
-    } else if (args.status === 'Canceled') {
-      // CANCEL: Store cancellation metadata
-      updates.trackingStatus = 'Canceled';
-
-      // Store cancellation reason if provided (required for Assigned -> Canceled)
-      if (args.cancellationReason) {
-        updates.cancellationReason = args.cancellationReason;
-        updates.cancellationNotes = args.cancellationNotes;
-        updates.canceledAt = now;
-        updates.canceledBy = args.canceledBy;
-      }
-
-      // Cancel all PENDING and ACTIVE dispatch legs for this load
-      const legs = await ctx.db
-        .query('dispatchLegs')
-        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-        .collect();
-
-      for (const leg of legs) {
-        if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-          await ctx.db.patch(leg._id, {
-            status: 'CANCELED',
-            updatedAt: now,
-          });
-
-          // Delete associated SYSTEM payables (non-locked)
-          const payables = await ctx.db
-            .query('loadPayables')
-            .withIndex('by_leg', (q) => q.eq('legId', leg._id))
-            .collect();
-
-          for (const payable of payables) {
-            if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
-              await ctx.db.delete(payable._id);
-            }
-          }
-        }
-      }
-    } else if (args.status === 'Expired') {
-      // EXPIRED: Pickup date passed with no tracking data
-      updates.trackingStatus = 'Canceled';
-    } else if (args.status === 'Open') {
-      // UNASSIGN: Clear assignment data when reverting to Open
-      updates.primaryDriverId = undefined;
-      updates.primaryCarrierPartnershipId = undefined;
-      updates.trackingStatus = 'Pending';
-
-      // Cancel all PENDING dispatch legs for this load
-      const legs = await ctx.db
-        .query('dispatchLegs')
-        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-        .collect();
-
-      for (const leg of legs) {
-        if (leg.status === 'PENDING') {
-          // Clear assignment from leg
-          await ctx.db.patch(leg._id, {
-            driverId: undefined,
-            truckId: undefined,
-            trailerId: undefined,
-            carrierPartnershipId: undefined,
-            status: 'CANCELED',
-            updatedAt: now,
-          });
-
-          // Delete associated SYSTEM payables (non-locked)
-          const payables = await ctx.db
-            .query('loadPayables')
-            .withIndex('by_leg', (q) => q.eq('legId', leg._id))
-            .collect();
-
-          for (const payable of payables) {
-            if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
-              await ctx.db.delete(payable._id);
-            }
-          }
-        }
-      }
-    }
-
-    await ctx.db.patch(args.loadId, updates);
-
-    // ✅ Update organization stats (aggregate table pattern)
-    await updateLoadCount(ctx, load.workosOrgId, load.status, args.status);
+    await updateLoadCount(ctx, result.load.workosOrgId, result.previousStatus, result.nextStatus);
   },
 });
 
@@ -1042,25 +1084,8 @@ export const updateLoadStatus = mutation({
 export const bulkUpdateLoadStatus = mutation({
   args: {
     loadIds: v.array(v.id('loadInformation')),
-    status: v.union(
-      v.literal('Open'),
-      v.literal('Assigned'),
-      v.literal('Canceled'),
-      v.literal('Completed'),
-      v.literal('Expired'),
-    ),
-    cancellationReason: v.optional(
-      v.union(
-        v.literal('DRIVER_BREAKDOWN'),
-        v.literal('CUSTOMER_CANCELLED'),
-        v.literal('EQUIPMENT_ISSUE'),
-        v.literal('RATE_DISPUTE'),
-        v.literal('WEATHER_CONDITIONS'),
-        v.literal('CAPACITY_ISSUE'),
-        v.literal('SCHEDULING_CONFLICT'),
-        v.literal('OTHER'),
-      ),
-    ),
+    status: loadStatusValidator,
+    cancellationReason: v.optional(cancellationReasonValidator),
     cancellationNotes: v.optional(v.string()),
     canceledBy: v.optional(v.string()),
   },
@@ -1077,7 +1102,6 @@ export const bulkUpdateLoadStatus = mutation({
     // First pass: validate and collect all loads
     const loadsToUpdate: Array<{
       id: Id<'loadInformation'>;
-      load: any;
       orgId: string;
     }> = [];
 
@@ -1088,115 +1112,22 @@ export const bulkUpdateLoadStatus = mutation({
           failed++;
           continue;
         }
-        loadsToUpdate.push({ id: loadId, load, orgId: load.workosOrgId });
-      } catch (error) {
+        loadsToUpdate.push({ id: loadId, orgId: load.workosOrgId });
+      } catch {
         failed++;
       }
     }
 
     // Second pass: perform all updates and track status changes
-    for (const { id, load, orgId } of loadsToUpdate) {
+    for (const { id, orgId } of loadsToUpdate) {
       try {
-        const oldStatus = load.status;
-
-        // Build updates object (same logic as updateLoadStatus)
-        const updates: Record<string, unknown> = {
+        const result = await applyLoadStatusUpdate(ctx, {
+          loadId: id,
           status: args.status,
-          updatedAt: now,
-        };
-
-        if (args.status === 'Completed') {
-          updates.trackingStatus = 'Completed';
-
-          const carrierAssignments = await ctx.db
-            .query('loadCarrierAssignments')
-            .withIndex('by_load', (q) => q.eq('loadId', id))
-            .collect();
-          for (const ca of carrierAssignments) {
-            if (ca.status === 'AWARDED' || ca.status === 'IN_PROGRESS') {
-              await ctx.db.patch(ca._id, {
-                status: 'COMPLETED' as const,
-                completedAt: now,
-                paymentStatus: ca.paymentStatus ?? ('PENDING' as const),
-              });
-            }
-          }
-        } else if (args.status === 'Assigned') {
-          if (load.trackingStatus === 'Pending') {
-            updates.trackingStatus = 'In Transit';
-          }
-        } else if (args.status === 'Canceled') {
-          updates.trackingStatus = 'Canceled';
-          if (args.cancellationReason) {
-            updates.cancellationReason = args.cancellationReason;
-            updates.cancellationNotes = args.cancellationNotes;
-            updates.canceledAt = now;
-            updates.canceledBy = args.canceledBy;
-          }
-
-          // Cancel dispatch legs
-          const legs = await ctx.db
-            .query('dispatchLegs')
-            .withIndex('by_load', (q) => q.eq('loadId', id))
-            .collect();
-
-          for (const leg of legs) {
-            if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
-              await ctx.db.patch(leg._id, {
-                status: 'CANCELED',
-                updatedAt: now,
-              });
-
-              const payables = await ctx.db
-                .query('loadPayables')
-                .withIndex('by_leg', (q) => q.eq('legId', leg._id))
-                .collect();
-
-              for (const payable of payables) {
-                if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
-                  await ctx.db.delete(payable._id);
-                }
-              }
-            }
-          }
-        } else if (args.status === 'Expired') {
-          updates.trackingStatus = 'Canceled';
-        } else if (args.status === 'Open') {
-          updates.primaryDriverId = undefined;
-          updates.primaryCarrierPartnershipId = undefined;
-          updates.trackingStatus = 'Pending';
-
-          const legs = await ctx.db
-            .query('dispatchLegs')
-            .withIndex('by_load', (q) => q.eq('loadId', id))
-            .collect();
-
-          for (const leg of legs) {
-            if (leg.status === 'PENDING') {
-              await ctx.db.patch(leg._id, {
-                driverId: undefined,
-                truckId: undefined,
-                trailerId: undefined,
-                carrierPartnershipId: undefined,
-                status: 'CANCELED',
-                updatedAt: now,
-              });
-
-              const payables = await ctx.db
-                .query('loadPayables')
-                .withIndex('by_leg', (q) => q.eq('legId', leg._id))
-                .collect();
-
-              for (const payable of payables) {
-                if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
-                  await ctx.db.delete(payable._id);
-                }
-              }
-            }
-          }
-        }
-
-        await ctx.db.patch(id, updates);
+          cancellationReason: args.cancellationReason,
+          cancellationNotes: args.cancellationNotes,
+          canceledBy: args.canceledBy,
+        });
 
         // Track status changes by organization
         if (!orgStatusChanges.has(orgId)) {
@@ -1205,9 +1136,9 @@ export const bulkUpdateLoadStatus = mutation({
         const orgChanges = orgStatusChanges.get(orgId)!;
 
         // Decrement old status
-        orgChanges.set(oldStatus, (orgChanges.get(oldStatus) || 0) - 1);
+        orgChanges.set(result.previousStatus, (orgChanges.get(result.previousStatus) || 0) - 1);
         // Increment new status
-        orgChanges.set(args.status, (orgChanges.get(args.status) || 0) + 1);
+        orgChanges.set(result.nextStatus, (orgChanges.get(result.nextStatus) || 0) + 1);
 
         success++;
       } catch (error) {
@@ -1357,7 +1288,7 @@ export const updateStopTimes = mutation({
 // ✅ 8. VALIDATE BULK STATUS CHANGE (Query) - Dispatch Protection
 // Full transition matrix:
 // - Assigned → Open: Warn (dispatcher work lost), check imminent/active
-// - Assigned → Delivered: Block (must complete legs first)
+// - Assigned → Delivered: Allow manual completion from the loads UI
 // - Assigned → Canceled: Require reason code for imminent/active
 // - Open → Delivered: Block (impossible - must be assigned first)
 // - Open → Canceled: Allow (dead-wood cleanup)
@@ -1424,20 +1355,9 @@ export const validateBulkStatusChange = query({
         .collect();
 
       const hasActiveLeg = legs.some((leg) => leg.status === 'ACTIVE');
-      const hasCompletedLeg = legs.some((leg) => leg.status === 'COMPLETED');
-      const allLegsCompleted = legs.length > 0 && legs.every((leg) => leg.status === 'COMPLETED');
 
-      // 4. BLOCK: Assigned → Delivered without completed legs
+      // 4. Assigned → Delivered: allow manual completion from the loads UI
       if (load.status === 'Assigned' && args.targetStatus === 'Completed') {
-        if (!allLegsCompleted) {
-          results.blocked.push({
-            id: loadId,
-            orderNumber: load.orderNumber,
-            reason: 'Cannot mark as Delivered - dispatch legs must be completed first',
-          });
-          continue;
-        }
-        // If all legs completed, it's safe
         results.safe.push({
           id: loadId,
           orderNumber: load.orderNumber,
@@ -1457,26 +1377,6 @@ export const validateBulkStatusChange = query({
 
       // 6. Assigned → Canceled: Check if requires reason (imminent loads)
       if (load.status === 'Assigned' && args.targetStatus === 'Canceled') {
-        // Get first pickup stop for imminent check
-        const stops = await ctx.db
-          .query('loadStops')
-          .withIndex('by_load', (q) => q.eq('loadId', loadId))
-          .collect();
-
-        const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-        const firstPickup = sortedStops.find((s) => s.stopType === 'PICKUP') || sortedStops[0];
-
-        let isImminent = false;
-        if (firstPickup?.windowBeginDate && firstPickup?.windowBeginTime) {
-          try {
-            const pickupTime = new Date(`${firstPickup.windowBeginDate}T${firstPickup.windowBeginTime}`).getTime();
-            const timeUntilPickup = pickupTime - now;
-            isImminent = timeUntilPickup > 0 && timeUntilPickup < bufferMs;
-          } catch {
-            // If date parsing fails, not imminent
-          }
-        }
-
         // All Assigned → Canceled require reason code
         results.requiresReason.push({
           id: loadId,
@@ -2061,9 +1961,7 @@ export const autoExpireStaleLoads = internalMutation({
 
       const loads = await ctx.db
         .query('loadInformation')
-        .withIndex('by_org_tracking_status', (q) =>
-          q.eq('workosOrgId', args.orgId!).eq('trackingStatus', 'In Transit')
-        )
+        .withIndex('by_org_tracking_status', (q) => q.eq('workosOrgId', args.orgId!).eq('trackingStatus', 'In Transit'))
         .take(BATCH_SIZE * 5);
 
       for (const load of loads) {

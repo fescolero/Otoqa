@@ -13,27 +13,21 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import {
-  CheckCircle2,
-  AlertTriangle,
-  XCircle,
-  Clock,
-  Truck,
-  Ban,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { CheckCircle2, AlertTriangle, XCircle, Clock, Truck, Ban } from 'lucide-react';
 
 interface ValidationResult {
   safe: { id: string; orderNumber?: string }[];
   imminent: { id: string; orderNumber?: string; pickupTime: string; hoursUntilPickup: number }[];
   active: { id: string; orderNumber?: string }[];
   finalized: { id: string; orderNumber?: string; status: string }[];
+  blocked: { id: string; orderNumber?: string; reason: string }[];
   summary: {
     total: number;
     safeCount: number;
     imminentCount: number;
     activeCount: number;
     finalizedCount: number;
+    blockedCount: number;
     canProceedSafely: boolean;
   };
 }
@@ -63,14 +57,16 @@ export function BulkActionResolutionModal({
 
   if (!validationResult) return null;
 
-  const { safe, imminent, active, finalized, summary } = validationResult;
+  const { safe, imminent, active, finalized, blocked, summary } = validationResult;
   const hasImminent = imminent.length > 0;
   const hasActive = active.length > 0;
   const hasFinalized = finalized.length > 0;
+  const hasBlocked = blocked.length > 0;
   const hasSafe = safe.length > 0;
 
   // Determine action text based on target status
-  const actionVerb = targetStatus === 'Open' ? 'Unassign' : `Mark as ${targetStatus}`;
+  const actionLabel = targetStatus === 'Open' ? 'Unassign' : `Mark as ${targetStatus}`;
+  const actionText = targetStatus === 'Open' ? 'unassign' : `mark as ${targetStatus.toLowerCase()}`;
 
   const handleClose = () => {
     setForceConfirmed(false);
@@ -86,7 +82,7 @@ export function BulkActionResolutionModal({
             Bulk Action Impact Analysis
           </DialogTitle>
           <DialogDescription>
-            Review the impact of {actionVerb.toLowerCase()}ing {summary.total} load
+            Review the impact of attempting to {actionText} {summary.total} load
             {summary.total !== 1 ? 's' : ''} before proceeding.
           </DialogDescription>
         </DialogHeader>
@@ -99,7 +95,7 @@ export function BulkActionResolutionModal({
                 <div className="flex items-center gap-2 mb-2">
                   <CheckCircle2 className="h-4 w-4 text-green-600" />
                   <span className="font-semibold text-green-800">
-                    {safe.length} Load{safe.length !== 1 ? 's' : ''} Safe to {actionVerb}
+                    {safe.length} Load{safe.length !== 1 ? 's' : ''} Safe to {actionLabel}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-1">
@@ -117,6 +113,29 @@ export function BulkActionResolutionModal({
               </div>
             )}
 
+            {hasBlocked && (
+              <div className="rounded-lg border border-rose-200 bg-rose-50 p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <XCircle className="h-4 w-4 text-rose-600" />
+                  <span className="font-semibold text-rose-800">
+                    {blocked.length} Load{blocked.length !== 1 ? 's' : ''} Blocked
+                  </span>
+                </div>
+                <p className="text-xs text-rose-700 mb-2">
+                  These loads cannot be updated to {targetStatus} from their current state.
+                </p>
+                <div className="space-y-1">
+                  {blocked.map((load) => (
+                    <div key={load.id} className="rounded bg-white px-2 py-1 text-xs text-rose-900">
+                      <span className="font-medium">{load.orderNumber || load.id.slice(-6)}</span>
+                      {' - '}
+                      <span>{load.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Imminent Section */}
             {hasImminent && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
@@ -127,20 +146,13 @@ export function BulkActionResolutionModal({
                   </span>
                 </div>
                 <p className="text-xs text-amber-700 mb-2">
-                  {actionVerb}ing these loads may cause service failures.
+                  Choosing to {actionText} these loads may cause service failures.
                 </p>
                 <div className="space-y-1">
                   {imminent.map((load) => (
-                    <div
-                      key={load.id}
-                      className="flex items-center justify-between bg-white rounded px-2 py-1 text-xs"
-                    >
-                      <span className="font-medium">
-                        {load.orderNumber || load.id.slice(-6)}
-                      </span>
-                      <span className="text-amber-600 font-semibold">
-                        {load.hoursUntilPickup}h until pickup
-                      </span>
+                    <div key={load.id} className="flex items-center justify-between bg-white rounded px-2 py-1 text-xs">
+                      <span className="font-medium">{load.orderNumber || load.id.slice(-6)}</span>
+                      <span className="text-amber-600 font-semibold">{load.hoursUntilPickup}h until pickup</span>
                     </div>
                   ))}
                 </div>
@@ -156,16 +168,10 @@ export function BulkActionResolutionModal({
                     {active.length} Load{active.length !== 1 ? 's' : ''} Currently In Transit
                   </span>
                 </div>
-                <p className="text-xs text-red-700 mb-2">
-                  These loads cannot be modified while in transit.
-                </p>
+                <p className="text-xs text-red-700 mb-2">These loads cannot be modified while in transit.</p>
                 <div className="flex flex-wrap gap-1">
                   {active.map((load) => (
-                    <Badge
-                      key={load.id}
-                      variant="outline"
-                      className="text-xs bg-white text-red-700 border-red-300"
-                    >
+                    <Badge key={load.id} variant="outline" className="text-xs bg-white text-red-700 border-red-300">
                       <XCircle className="h-3 w-3 mr-1" />
                       {load.orderNumber || load.id.slice(-6)}
                     </Badge>
@@ -209,12 +215,9 @@ export function BulkActionResolutionModal({
                   checked={forceConfirmed}
                   onCheckedChange={(checked) => setForceConfirmed(checked === true)}
                 />
-                <label
-                  htmlFor="force-confirm"
-                  className="text-xs text-slate-600 cursor-pointer leading-tight"
-                >
-                  I understand that {actionVerb.toLowerCase()}ing imminent loads may cause
-                  service failures and want to proceed anyway.
+                <label htmlFor="force-confirm" className="text-xs text-slate-600 cursor-pointer leading-tight">
+                  I understand that choosing to {actionText} imminent loads may cause service failures and want to
+                  proceed anyway.
                 </label>
               </div>
             )}
@@ -235,7 +238,7 @@ export function BulkActionResolutionModal({
               }}
               disabled={isProcessing}
             >
-              {actionVerb} Safe Only ({safe.length})
+              {actionLabel} Safe Only ({safe.length})
             </Button>
           )}
 
@@ -248,7 +251,7 @@ export function BulkActionResolutionModal({
               }}
               disabled={isProcessing || !forceConfirmed}
             >
-              {actionVerb} All ({safe.length + imminent.length})
+              {actionLabel} All ({safe.length + imminent.length})
             </Button>
           )}
 
@@ -261,7 +264,7 @@ export function BulkActionResolutionModal({
               }}
               disabled={isProcessing}
             >
-              {actionVerb} ({safe.length})
+              {actionLabel} ({safe.length})
             </Button>
           )}
         </DialogFooter>

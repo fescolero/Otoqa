@@ -32,7 +32,10 @@ export default function CreateFuelEntryPage() {
   const drivers = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
   const trucks = useAuthQuery(api.trucks.list, organizationId ? { organizationId } : 'skip');
   const vendors = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId, activeOnly: true } : 'skip');
-  const carriersRaw = useAuthQuery(api.carrierPartnerships.listForBroker, organizationId ? { brokerOrgId: organizationId } : 'skip');
+  const carriersRaw = useAuthQuery(
+    api.carrierPartnerships.listForBroker,
+    organizationId ? { brokerOrgId: organizationId } : 'skip',
+  );
 
   const carriers = (carriersRaw ?? []).map((c) => ({
     _id: c._id,
@@ -40,7 +43,7 @@ export default function CreateFuelEntryPage() {
     trackFuelConsumption: c.trackFuelConsumption ?? false,
   }));
 
-  const handleSubmit = async (data: FuelEntryFormData) => {
+  const handleSubmit = async (data: FuelEntryFormData, options?: { continueAdding?: boolean }) => {
     if (!organizationId || !user) return;
 
     setIsSubmitting(true);
@@ -59,14 +62,21 @@ export default function CreateFuelEntryPage() {
         ...(data.fuelCardNumber && { fuelCardNumber: data.fuelCardNumber }),
         ...(data.receiptNumber && { receiptNumber: data.receiptNumber }),
         ...(data.loadId && { loadId: data.loadId as Id<'loadInformation'> }),
-        ...(data.paymentMethod && { paymentMethod: data.paymentMethod as 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA' }),
+        ...(data.paymentMethod && {
+          paymentMethod: data.paymentMethod as 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA',
+        }),
         ...(data.notes && { notes: data.notes }),
         ...(data.receiptStorageId && { receiptStorageId: data.receiptStorageId as Id<'_storage'> }),
         createdBy: user.id,
       });
 
-      toast.success('Fuel entry created successfully');
-      router.push('/operations/diesel');
+      toast.success(
+        options?.continueAdding ? 'Fuel entry created. Ready for the next one.' : 'Fuel entry created successfully',
+      );
+
+      if (!options?.continueAdding) {
+        router.push('/operations/diesel');
+      }
     } catch (error) {
       console.error('Failed to create fuel entry:', error);
       toast.error('Failed to create fuel entry. Please try again.');

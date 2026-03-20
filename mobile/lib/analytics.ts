@@ -284,6 +284,39 @@ export function trackGPSPermissionDenied() {
   capture('gps_permission_denied');
 }
 
+export function trackWatchLocationReceived(context: {
+  accuracy_m: number | null;
+  age_ms: number;
+  speed_mps: number | null;
+  heading_deg: number | null;
+}) {
+  capture('watch_location_received', context);
+}
+
+export function trackWatchLocationFiltered(context: {
+  reason: 'inactive' | 'accuracy' | 'time_floor' | 'distance_time_gate';
+  accuracy_m: number | null;
+  age_ms: number;
+  distance_m?: number | null;
+  gap_ms?: number | null;
+}) {
+  capture('watch_location_filtered', context);
+}
+
+export function trackWatchLocationSaved(context: {
+  reason: 'distance' | 'time' | 'heartbeat';
+  accuracy_m: number | null;
+  distance_m: number | null;
+  gap_ms: number | null;
+  used_fallback: boolean;
+}) {
+  capture('watch_location_saved', context);
+}
+
+export function trackWatchLocationError(context: { step: 'callback' | 'insert' | 'sync'; error: string }) {
+  capture('watch_location_error', context);
+}
+
 // ============================================
 // BACKGROUND LOCATION TASK DIAGNOSTICS
 // ============================================
