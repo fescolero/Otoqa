@@ -201,8 +201,10 @@ export function ReportDataTable<TData>({
   // RENDER
   // ============================================
 
+  const workspaceMinHeight = 'min-h-[clamp(420px,calc(100svh-22rem),760px)]';
+
   return (
-    <div className="space-y-0">
+    <div className={cn('flex flex-col space-y-0', workspaceMinHeight)}>
       {/* Toolbar */}
       <div className="flex items-center justify-between border rounded-t-md border-b-0 px-3 py-2 bg-muted/30 gap-2">
         {/* Left: quick filters */}
@@ -262,7 +264,7 @@ export function ReportDataTable<TData>({
       </div>
 
       {/* Table */}
-      <div className="rounded-b-md border">
+      <div className="flex-1 rounded-b-md border">
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
@@ -292,7 +294,7 @@ export function ReportDataTable<TData>({
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={columns.length} className="h-24 text-center">
+                <TableCell colSpan={columns.length} className="h-[clamp(260px,32vh,420px)] text-center align-middle">
                   <p className="text-sm text-muted-foreground">{emptyMessage}</p>
                 </TableCell>
               </TableRow>
