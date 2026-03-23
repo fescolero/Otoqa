@@ -13,37 +13,17 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { useState, useCallback, useRef } from 'react';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { useAuthQuery } from '@/hooks/use-auth-query';
-import {
-  Upload,
-  Download,
-  CheckCircle,
-  AlertCircle,
-  Loader2,
-  ArrowLeft,
-  ArrowRight,
-} from 'lucide-react';
+import { Upload, Download, CheckCircle, AlertCircle, Loader2, ArrowLeft, ArrowRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { generateCSVTemplate } from '@/lib/csv-export';
 import { Id } from '@/convex/_generated/dataModel';
@@ -70,6 +50,8 @@ interface FieldDef {
   required: boolean;
 }
 
+type FuelPaymentMethod = 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA';
+
 const FUEL_FIELDS: Array<FieldDef> = [
   { key: 'date', label: 'Date', required: true },
   { key: 'driverName', label: 'Driver Name', required: false },
@@ -90,70 +72,70 @@ const FUEL_FIELDS: Array<FieldDef> = [
 const TEMPLATE_COLUMNS = FUEL_FIELDS.map((f) => f.label);
 
 const AUTO_MAP: Record<string, FuelField> = {
-  date: 'date',
+  'date': 'date',
   'entry date': 'date',
   'transaction date': 'date',
   'trans date': 'date',
-  driver: 'driverName',
+  'driver': 'driverName',
   'driver name': 'driverName',
   'driver_name': 'driverName',
-  truck: 'truckUnit',
+  'truck': 'truckUnit',
   'truck unit': 'truckUnit',
   'unit id': 'truckUnit',
-  unit: 'truckUnit',
+  'unit': 'truckUnit',
   'truck_unit': 'truckUnit',
-  vendor: 'vendorName',
+  'vendor': 'vendorName',
   'vendor name': 'vendorName',
   'vendor_name': 'vendorName',
-  station: 'vendorName',
+  'station': 'vendorName',
   'fuel station': 'vendorName',
-  merchant: 'vendorName',
-  gallons: 'gallons',
-  quantity: 'gallons',
-  gal: 'gallons',
-  price: 'pricePerGallon',
+  'merchant': 'vendorName',
+  'gallons': 'gallons',
+  'quantity': 'gallons',
+  'gal': 'gallons',
+  'price': 'pricePerGallon',
   'price per gallon': 'pricePerGallon',
   'price/gallon': 'pricePerGallon',
-  ppg: 'pricePerGallon',
+  'ppg': 'pricePerGallon',
   'unit price': 'pricePerGallon',
-  rate: 'pricePerGallon',
-  total: 'total',
-  amount: 'total',
+  'rate': 'pricePerGallon',
+  'total': 'total',
+  'amount': 'total',
   'total cost': 'total',
   'total amount': 'total',
-  odometer: 'odometer',
+  'odometer': 'odometer',
   'odometer reading': 'odometer',
-  mileage: 'odometer',
-  miles: 'odometer',
-  city: 'city',
-  state: 'state',
+  'mileage': 'odometer',
+  'miles': 'odometer',
+  'city': 'city',
+  'state': 'state',
   'fuel card': 'fuelCardNumber',
   'fuel card number': 'fuelCardNumber',
   'card number': 'fuelCardNumber',
   'card #': 'fuelCardNumber',
-  receipt: 'receiptNumber',
+  'receipt': 'receiptNumber',
   'receipt number': 'receiptNumber',
   'receipt #': 'receiptNumber',
   'receipt no': 'receiptNumber',
   'payment method': 'paymentMethod',
-  payment: 'paymentMethod',
+  'payment': 'paymentMethod',
   'payment type': 'paymentMethod',
-  notes: 'notes',
-  comments: 'notes',
-  memo: 'notes',
+  'notes': 'notes',
+  'comments': 'notes',
+  'memo': 'notes',
 };
 
-const PAYMENT_METHOD_MAP: Record<string, string> = {
-  fuel_card: 'FUEL_CARD',
+const PAYMENT_METHOD_MAP: Record<string, FuelPaymentMethod> = {
+  'fuel_card': 'FUEL_CARD',
   'fuel card': 'FUEL_CARD',
-  fuelcard: 'FUEL_CARD',
-  cash: 'CASH',
-  check: 'CHECK',
+  'fuelcard': 'FUEL_CARD',
+  'cash': 'CASH',
+  'check': 'CHECK',
   'credit card': 'CREDIT_CARD',
-  credit_card: 'CREDIT_CARD',
-  cc: 'CREDIT_CARD',
-  efs: 'EFS',
-  comdata: 'COMDATA',
+  'credit_card': 'CREDIT_CARD',
+  'cc': 'CREDIT_CARD',
+  'efs': 'EFS',
+  'comdata': 'COMDATA',
 };
 
 const VALID_PAYMENT_METHODS = ['FUEL_CARD', 'CASH', 'CHECK', 'CREDIT_CARD', 'EFS', 'COMDATA'];
@@ -167,6 +149,23 @@ interface ParsedRow {
   resolvedDriverId?: Id<'drivers'>;
   resolvedTruckId?: Id<'trucks'>;
   resolvedVendorId?: Id<'fuelVendors'>;
+}
+
+interface BulkFuelEntryInput {
+  entryDate: number;
+  driverId?: Id<'drivers'>;
+  carrierId?: Id<'carrierPartnerships'>;
+  truckId?: Id<'trucks'>;
+  vendorId: Id<'fuelVendors'>;
+  gallons: number;
+  pricePerGallon: number;
+  odometerReading?: number;
+  location?: { city: string; state: string };
+  fuelCardNumber?: string;
+  receiptNumber?: string;
+  loadId?: Id<'loadInformation'>;
+  paymentMethod?: FuelPaymentMethod;
+  notes?: string;
 }
 
 function parseCSV(text: string): { headers: Array<string>; rows: Array<Array<string>> } {
@@ -251,7 +250,7 @@ function tryParseDate(value: string): number | null {
 
 function fuzzyMatchName(
   fullName: string,
-  drivers: Array<{ _id: Id<'drivers'>; firstName: string; lastName: string }>
+  drivers: Array<{ _id: Id<'drivers'>; firstName: string; lastName: string }>,
 ): Id<'drivers'> | undefined {
   const normalized = fullName.toLowerCase().trim();
   if (!normalized) return undefined;
@@ -286,10 +285,7 @@ export default function ImportFuelEntriesPage() {
 
   const drivers = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
   const trucks = useAuthQuery(api.trucks.list, organizationId ? { organizationId } : 'skip');
-  const vendors = useAuthQuery(
-    api.fuelVendors.list,
-    organizationId ? { organizationId, activeOnly: true } : 'skip'
-  );
+  const vendors = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId, activeOnly: true } : 'skip');
 
   const [currentStep, setCurrentStep] = useState(1);
   const [csvHeaders, setCsvHeaders] = useState<Array<string>>([]);
@@ -336,7 +332,7 @@ export default function ImportFuelEntriesPage() {
         toast.error('Please upload a CSV file.');
       }
     },
-    [handleFile]
+    [handleFile],
   );
 
   const handleFileSelect = useCallback(
@@ -344,7 +340,7 @@ export default function ImportFuelEntriesPage() {
       const file = e.target.files?.[0];
       if (file) handleFile(file);
     },
-    [handleFile]
+    [handleFile],
   );
 
   const handleDownloadTemplate = () => {
@@ -411,9 +407,7 @@ export default function ImportFuelEntriesPage() {
       if (!vendorName) {
         errors.push('Vendor name is required');
       } else {
-        const match = vendorList.find(
-          (v) => v.name.toLowerCase() === vendorName.toLowerCase()
-        );
+        const match = vendorList.find((v) => v.name.toLowerCase() === vendorName.toLowerCase());
         if (match) {
           resolvedVendorId = match._id;
         } else {
@@ -433,9 +427,7 @@ export default function ImportFuelEntriesPage() {
       let resolvedTruckId: Id<'trucks'> | undefined;
       const truckUnit = mapped.truckUnit;
       if (truckUnit) {
-        const match = truckList.find(
-          (t) => t.unitId.toLowerCase() === truckUnit.toLowerCase()
-        );
+        const match = truckList.find((t) => t.unitId.toLowerCase() === truckUnit.toLowerCase());
         if (match) {
           resolvedTruckId = match._id;
         } else {
@@ -480,17 +472,13 @@ export default function ImportFuelEntriesPage() {
   };
 
   const toggleSkip = (index: number) => {
-    setParsedRows((prev) =>
-      prev.map((r, i) => (i === index ? { ...r, skip: !r.skip } : r))
-    );
+    setParsedRows((prev) => prev.map((r, i) => (i === index ? { ...r, skip: !r.skip } : r)));
   };
 
   const handleImport = async () => {
     if (!organizationId || !user) return;
 
-    const validRows = parsedRows.filter(
-      (r) => !r.skip && r.errors.length === 0 && r.resolvedVendorId
-    );
+    const validRows = parsedRows.filter((r) => !r.skip && r.errors.length === 0 && r.resolvedVendorId);
 
     if (validRows.length === 0) {
       toast.error('No valid rows to import.');
@@ -499,13 +487,13 @@ export default function ImportFuelEntriesPage() {
 
     setImporting(true);
     let imported = 0;
-    let skipped = parsedRows.length - validRows.length;
+    const skipped = parsedRows.length - validRows.length;
 
     try {
       const BATCH_SIZE = 50;
       for (let i = 0; i < validRows.length; i += BATCH_SIZE) {
         const batch = validRows.slice(i, i + BATCH_SIZE);
-        const entries = batch.map((row) => {
+        const entries: BulkFuelEntryInput[] = batch.map((row) => {
           const dateVal = tryParseDate(row.mapped.date)!;
           const gallons = parseFloat(row.mapped.gallons);
           const ppg = parseFloat(row.mapped.pricePerGallon.replace(/^\$/, ''));
@@ -514,14 +502,15 @@ export default function ImportFuelEntriesPage() {
           const city = row.mapped.city;
           const state = row.mapped.state;
           const pmStr = row.mapped.paymentMethod;
-          let paymentMethod: string | undefined;
+          let paymentMethod: FuelPaymentMethod | undefined;
           if (pmStr) {
-            paymentMethod =
-              PAYMENT_METHOD_MAP[pmStr.toLowerCase()] ||
-              (VALID_PAYMENT_METHODS.includes(pmStr.toUpperCase()) ? pmStr.toUpperCase() : undefined);
+            paymentMethod = (PAYMENT_METHOD_MAP[pmStr.toLowerCase()] ||
+              (VALID_PAYMENT_METHODS.includes(pmStr.toUpperCase()) ? pmStr.toUpperCase() : undefined)) as
+              | FuelPaymentMethod
+              | undefined;
           }
 
-          const entry: Record<string, unknown> = {
+          const entry: BulkFuelEntryInput = {
             entryDate: dateVal,
             vendorId: row.resolvedVendorId!,
             gallons,
@@ -544,10 +533,9 @@ export default function ImportFuelEntriesPage() {
           return entry;
         });
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await bulkCreate({
           organizationId,
-          entries: entries as any,
+          entries,
           createdBy: user.id,
         });
 
@@ -604,6 +592,15 @@ export default function ImportFuelEntriesPage() {
       </header>
 
       <div className="flex flex-1 flex-col gap-6 p-6">
+        <div className="flex justify-end">
+          <Button variant="outline" asChild>
+            <Link href="/operations/diesel/import/ocr">
+              <Upload className="mr-2 h-4 w-4" />
+              Use OCR Import Instead
+            </Link>
+          </Button>
+        </div>
+
         {/* Step Indicator */}
         <div className="flex items-center justify-center gap-2">
           {steps.map((step, i) => (
@@ -627,11 +624,7 @@ export default function ImportFuelEntriesPage() {
                 <span className="hidden sm:inline">{step.label}</span>
               </div>
               {i < steps.length - 1 && (
-                <div
-                  className={`h-px w-8 ${
-                    currentStep > step.num ? 'bg-primary' : 'bg-muted'
-                  }`}
-                />
+                <div className={`h-px w-8 ${currentStep > step.num ? 'bg-primary' : 'bg-muted'}`} />
               )}
             </div>
           ))}
@@ -674,9 +667,7 @@ export default function ImportFuelEntriesPage() {
                 <>
                   <CheckCircle className="h-10 w-10 text-green-500" />
                   <div className="text-center">
-                    <p className="font-medium text-green-700 dark:text-green-400">
-                      File loaded successfully
-                    </p>
+                    <p className="font-medium text-green-700 dark:text-green-400">File loaded successfully</p>
                     <p className="text-sm text-muted-foreground">
                       {csvHeaders.length} columns, {csvRows.length} data rows
                     </p>
@@ -686,12 +677,8 @@ export default function ImportFuelEntriesPage() {
                 <>
                   <Upload className="h-10 w-10 text-muted-foreground" />
                   <div className="text-center">
-                    <p className="font-medium">
-                      Drag & drop your CSV file here
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      or click to browse
-                    </p>
+                    <p className="font-medium">Drag & drop your CSV file here</p>
+                    <p className="text-sm text-muted-foreground">or click to browse</p>
                   </div>
                 </>
               )}
@@ -737,10 +724,7 @@ export default function ImportFuelEntriesPage() {
             )}
 
             <div className="flex justify-end">
-              <Button
-                onClick={() => setCurrentStep(2)}
-                disabled={csvHeaders.length === 0 || csvRows.length === 0}
-              >
+              <Button onClick={() => setCurrentStep(2)} disabled={csvHeaders.length === 0 || csvRows.length === 0}>
                 Next
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
@@ -763,19 +747,14 @@ export default function ImportFuelEntriesPage() {
                 <AlertCircle className="mt-0.5 h-4 w-4 text-destructive shrink-0" />
                 <p className="text-sm text-destructive">
                   Missing required mappings:{' '}
-                  {missingRequired
-                    .map((f) => FUEL_FIELDS.find((ff) => ff.key === f)?.label)
-                    .join(', ')}
+                  {missingRequired.map((f) => FUEL_FIELDS.find((ff) => ff.key === f)?.label).join(', ')}
                 </p>
               </div>
             )}
 
             <Card className="divide-y">
               {csvHeaders.map((header, colIdx) => (
-                <div
-                  key={colIdx}
-                  className="flex items-center justify-between gap-4 px-4 py-3"
-                >
+                <div key={colIdx} className="flex items-center justify-between gap-4 px-4 py-3">
                   <div className="min-w-0 flex-1">
                     <p className="truncate font-medium text-sm">{header}</p>
                     <p className="truncate text-xs text-muted-foreground">
@@ -807,14 +786,10 @@ export default function ImportFuelEntriesPage() {
                         <SelectItem value="skip">Skip this column</SelectItem>
                         {FUEL_FIELDS.map((field) => {
                           const alreadyMapped = Object.entries(columnMap).some(
-                            ([idx, val]) => val === field.key && parseInt(idx) !== colIdx
+                            ([idx, val]) => val === field.key && parseInt(idx) !== colIdx,
                           );
                           return (
-                            <SelectItem
-                              key={field.key}
-                              value={field.key}
-                              disabled={alreadyMapped}
-                            >
+                            <SelectItem key={field.key} value={field.key} disabled={alreadyMapped}>
                               {field.label}
                               {field.required ? ' *' : ''}
                               {alreadyMapped ? ' (already mapped)' : ''}
@@ -833,10 +808,7 @@ export default function ImportFuelEntriesPage() {
                 <ArrowLeft className="mr-2 h-4 w-4" />
                 Back
               </Button>
-              <Button
-                onClick={handleGoToReview}
-                disabled={missingRequired.length > 0}
-              >
+              <Button onClick={handleGoToReview} disabled={missingRequired.length > 0}>
                 Next
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
@@ -868,10 +840,7 @@ export default function ImportFuelEntriesPage() {
                     <p className="text-xs text-muted-foreground">Skipped</p>
                   </div>
                 </div>
-                <Button
-                  className="mt-4"
-                  onClick={() => router.push('/operations/diesel')}
-                >
+                <Button className="mt-4" onClick={() => router.push('/operations/diesel')}>
                   Go to Fuel Entries
                 </Button>
               </Card>
@@ -919,41 +888,43 @@ export default function ImportFuelEntriesPage() {
                         {parsedRows.map((row, idx) => {
                           const gallons = parseFloat(row.mapped.gallons);
                           const ppg = parseFloat(row.mapped.pricePerGallon?.replace(/^\$/, '') ?? '');
-                          const total = !isNaN(gallons) && !isNaN(ppg)
-                            ? (gallons * ppg).toFixed(2)
-                            : row.mapped.total || '—';
+                          const total =
+                            !isNaN(gallons) && !isNaN(ppg) ? (gallons * ppg).toFixed(2) : row.mapped.total || '—';
 
                           return (
-                            <TableRow
-                              key={idx}
-                              className={row.skip ? 'opacity-40' : ''}
-                            >
-                              <TableCell className="text-xs text-muted-foreground">
-                                {idx + 1}
-                              </TableCell>
+                            <TableRow key={idx} className={row.skip ? 'opacity-40' : ''}>
+                              <TableCell className="text-xs text-muted-foreground">{idx + 1}</TableCell>
                               <TableCell>
                                 {row.skip ? (
-                                  <Badge variant="secondary" className="text-xs">Skipped</Badge>
+                                  <Badge variant="secondary" className="text-xs">
+                                    Skipped
+                                  </Badge>
                                 ) : row.errors.length > 0 || !row.resolvedVendorId ? (
-                                  <Badge variant="destructive" className="text-xs">Error</Badge>
+                                  <Badge variant="destructive" className="text-xs">
+                                    Error
+                                  </Badge>
                                 ) : row.warnings.length > 0 ? (
                                   <Badge variant="outline" className="border-yellow-500 text-yellow-600 text-xs">
                                     Warning
                                   </Badge>
                                 ) : (
-                                  <Badge variant="default" className="text-xs">Valid</Badge>
+                                  <Badge variant="default" className="text-xs">
+                                    Valid
+                                  </Badge>
                                 )}
                               </TableCell>
-                              <TableCell className="whitespace-nowrap text-sm">
-                                {row.mapped.date || '—'}
-                              </TableCell>
+                              <TableCell className="whitespace-nowrap text-sm">{row.mapped.date || '—'}</TableCell>
                               <TableCell className="text-sm">
-                                <span className={!row.resolvedVendorId && row.mapped.vendorName ? 'text-destructive' : ''}>
+                                <span
+                                  className={!row.resolvedVendorId && row.mapped.vendorName ? 'text-destructive' : ''}
+                                >
                                   {row.mapped.vendorName || '—'}
                                 </span>
                               </TableCell>
                               <TableCell className="text-sm">
-                                <span className={row.mapped.driverName && !row.resolvedDriverId ? 'text-yellow-600' : ''}>
+                                <span
+                                  className={row.mapped.driverName && !row.resolvedDriverId ? 'text-yellow-600' : ''}
+                                >
                                   {row.mapped.driverName || '—'}
                                 </span>
                               </TableCell>
@@ -962,15 +933,9 @@ export default function ImportFuelEntriesPage() {
                                   {row.mapped.truckUnit || '—'}
                                 </span>
                               </TableCell>
-                              <TableCell className="text-right text-sm">
-                                {row.mapped.gallons || '—'}
-                              </TableCell>
-                              <TableCell className="text-right text-sm">
-                                {row.mapped.pricePerGallon || '—'}
-                              </TableCell>
-                              <TableCell className="text-right text-sm">
-                                ${total}
-                              </TableCell>
+                              <TableCell className="text-right text-sm">{row.mapped.gallons || '—'}</TableCell>
+                              <TableCell className="text-right text-sm">{row.mapped.pricePerGallon || '—'}</TableCell>
+                              <TableCell className="text-right text-sm">${total}</TableCell>
                               <TableCell className="max-w-[200px]">
                                 {(row.errors.length > 0 || row.warnings.length > 0) && (
                                   <div className="space-y-0.5">
@@ -988,12 +953,7 @@ export default function ImportFuelEntriesPage() {
                                 )}
                               </TableCell>
                               <TableCell>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="text-xs"
-                                  onClick={() => toggleSkip(idx)}
-                                >
+                                <Button variant="ghost" size="sm" className="text-xs" onClick={() => toggleSkip(idx)}>
                                   {row.skip ? 'Include' : 'Skip'}
                                 </Button>
                               </TableCell>
@@ -1010,10 +970,7 @@ export default function ImportFuelEntriesPage() {
                     <ArrowLeft className="mr-2 h-4 w-4" />
                     Back
                   </Button>
-                  <Button
-                    onClick={handleImport}
-                    disabled={importing || validCount === 0}
-                  >
+                  <Button onClick={handleImport} disabled={importing || validCount === 0}>
                     {importing ? (
                       <>
                         <Loader2 className="mr-2 h-4 w-4 animate-spin" />

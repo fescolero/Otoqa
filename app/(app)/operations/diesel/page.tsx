@@ -76,21 +76,12 @@ export default function DieselPage() {
   const fuelResult = useAuthQuery(api.fuelEntries.list, queryArgs as never);
   const defResult = useAuthQuery(api.defEntries.list, queryArgs as never);
 
-  const driversData = useAuthQuery(
-    api.drivers.list,
-    organizationId ? { organizationId } : 'skip'
-  );
-  const trucksData = useAuthQuery(
-    api.trucks.list,
-    organizationId ? { organizationId } : 'skip'
-  );
-  const vendorsData = useAuthQuery(
-    api.fuelVendors.list,
-    organizationId ? { organizationId } : 'skip'
-  );
+  const driversData = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
+  const trucksData = useAuthQuery(api.trucks.list, organizationId ? { organizationId } : 'skip');
+  const vendorsData = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId } : 'skip');
   const carriersData = useAuthQuery(
     api.carrierPartnerships.listForBroker,
-    organizationId ? { brokerOrgId: organizationId } : 'skip'
+    organizationId ? { brokerOrgId: organizationId } : 'skip',
   );
 
   const removeFuelEntry = useMutation(api.fuelEntries.remove);
@@ -143,16 +134,14 @@ export default function DieselPage() {
   const displayEntries = useMemo(() => {
     if (activeTab === 'fuel') return fuelEntries;
     if (activeTab === 'def') return defEntries;
-    return [...fuelEntries, ...defEntries].sort(
-      (a, b) => b.entryDate - a.entryDate
-    );
+    return [...fuelEntries, ...defEntries].sort((a, b) => b.entryDate - a.entryDate);
   }, [activeTab, fuelEntries, defEntries]);
 
   const handleRowClick = useCallback(
     (id: string, type: 'fuel' | 'def') => {
       router.push(`/operations/diesel/${id}?type=${type}`);
     },
-    [router]
+    [router],
   );
 
   const handleSelectRow = useCallback((id: string) => {
@@ -184,9 +173,7 @@ export default function DieselPage() {
     if (selectedIds.size === 0 || !user) return;
 
     const userId = user.id;
-    const entriesToDelete = displayEntries.filter((e) =>
-      selectedIds.has(e._id)
-    );
+    const entriesToDelete = displayEntries.filter((e) => selectedIds.has(e._id));
 
     await Promise.all(
       entriesToDelete.map((entry) => {
@@ -200,7 +187,7 @@ export default function DieselPage() {
           entryId: entry._id as never,
           deletedBy: userId,
         });
-      })
+      }),
     );
 
     setSelectedIds(new Set());
@@ -222,10 +209,7 @@ export default function DieselPage() {
         { header: 'Vendor', accessor: (row) => row.vendorName },
         {
           header: 'Location',
-          accessor: (row) =>
-            row.location
-              ? `${row.location.city}, ${row.location.state}`
-              : '',
+          accessor: (row) => (row.location ? `${row.location.city}, ${row.location.state}` : ''),
         },
         { header: 'Gallons', accessor: (row) => row.gallons },
         { header: 'Price/Gal', accessor: (row) => row.pricePerGallon },
@@ -233,7 +217,7 @@ export default function DieselPage() {
         { header: 'Type', accessor: (row) => (row.type === 'def' ? 'DEF' : 'Fuel') },
         { header: 'Payment Method', accessor: (row) => row.paymentMethod ?? '' },
       ],
-      `diesel-entries-${format(new Date(), 'yyyy-MM-dd')}`
+      `diesel-entries-${format(new Date(), 'yyyy-MM-dd')}`,
     );
   }, [displayEntries]);
 
@@ -269,10 +253,7 @@ export default function DieselPage() {
       <header className="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b">
         <div className="flex items-center gap-2 px-4">
           <SidebarTrigger className="-ml-1" />
-          <Separator
-            orientation="vertical"
-            className="mr-2 data-[orientation=vertical]:h-4"
-          />
+          <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
           <Breadcrumb>
             <BreadcrumbList>
               <BreadcrumbItem className="hidden md:block">
@@ -296,14 +277,16 @@ export default function DieselPage() {
           {/* Title + Actions */}
           <div className="flex-shrink-0 flex items-center justify-between p-6 pb-4">
             <div>
-              <h1 className="text-3xl font-bold tracking-tight">
-                Diesel / Fuel Tracking
-              </h1>
-              <p className="text-muted-foreground">
-                Track fuel and DEF purchases across your fleet
-              </p>
+              <h1 className="text-3xl font-bold tracking-tight">Diesel / Fuel Tracking</h1>
+              <p className="text-muted-foreground">Track fuel and DEF purchases across your fleet</p>
             </div>
             <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <Link href="/operations/diesel/import/ocr">
+                  <Upload className="mr-2 h-4 w-4" />
+                  Import OCR
+                </Link>
+              </Button>
               <Button variant="outline" size="sm" asChild>
                 <Link href="/operations/diesel/import">
                   <Upload className="mr-2 h-4 w-4" />
@@ -384,8 +367,7 @@ export default function DieselPage() {
                   <X className="h-4 w-4" strokeWidth={2} />
                 </Button>
                 <span className="text-sm font-semibold text-slate-900">
-                  {selectedIds.size}{' '}
-                  {selectedIds.size === 1 ? 'Entry' : 'Entries'} Selected
+                  {selectedIds.size} {selectedIds.size === 1 ? 'Entry' : 'Entries'} Selected
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -415,10 +397,7 @@ export default function DieselPage() {
                 selectedIds={selectedIds}
                 onSelectRow={handleSelectRow}
                 onSelectAll={handleSelectAll}
-                isAllSelected={
-                  selectedIds.size === displayEntries.length &&
-                  displayEntries.length > 0
-                }
+                isAllSelected={selectedIds.size === displayEntries.length && displayEntries.length > 0}
               />
             )}
           </div>

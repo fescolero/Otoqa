@@ -8,6 +8,141 @@ import { internal } from './_generated/api';
  * Manages broker-carrier relationships in the marketplace model
  */
 
+function normalizeWhitespace(value?: string | null): string {
+  return (value ?? '').trim().replace(/\s+/g, ' ');
+}
+
+function normalizeCarrierName(value?: string | null): string {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function normalizeMcNumber(value?: string | null): string {
+  const compact = normalizeWhitespace(value).toUpperCase().replace(/\s+/g, '');
+  if (!compact) return '';
+
+  if (compact.startsWith('MC')) {
+    return `MC${compact.slice(2).replace(/^[^A-Z0-9]+/, '')}`;
+  }
+
+  return compact;
+}
+
+function normalizePhone(value?: string | null): string {
+  const digits = (value ?? '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1);
+  }
+  return digits;
+}
+
+function normalizeAddressPart(value?: string | null): string {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function buildLocationKey(city?: string | null, state?: string | null): string {
+  const normalizedCity = normalizeAddressPart(city);
+  const normalizedState = normalizeAddressPart(state);
+  return normalizedCity && normalizedState ? `${normalizedCity}|${normalizedState}` : '';
+}
+
+function buildAddressKey(
+  addressLine?: string | null,
+  city?: string | null,
+  state?: string | null,
+  zip?: string | null,
+): string {
+  const normalizedAddress = normalizeAddressPart(addressLine);
+  const normalizedCity = normalizeAddressPart(city);
+  const normalizedState = normalizeAddressPart(state);
+  const normalizedZip = normalizeWhitespace(zip);
+  return [normalizedAddress, normalizedCity, normalizedState, normalizedZip].filter(Boolean).join('|');
+}
+
+function formatDuplicateError(partnership: {
+  _id: Id<'carrierPartnerships'>;
+  carrierName: string;
+  mcNumber: string;
+}): string {
+  return `Possible duplicate carrier found: ${partnership.carrierName} (${partnership.mcNumber}) [${partnership._id}]. Update the existing carrier instead of creating a new one.`;
+}
+
+async function findDuplicateCarrierPartnership(
+  ctx: any,
+  args: {
+    brokerOrgId: string;
+    mcNumber: string;
+    carrierName?: string;
+    carrierDba?: string;
+    contactPhone?: string;
+    addressLine?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    excludePartnershipId?: Id<'carrierPartnerships'>;
+  },
+) {
+  const partnerships = await ctx.db
+    .query('carrierPartnerships')
+    .withIndex('by_broker', (q: any) => q.eq('brokerOrgId', args.brokerOrgId))
+    .collect();
+
+  const normalizedMc = normalizeMcNumber(args.mcNumber);
+  const normalizedName = normalizeCarrierName(args.carrierName);
+  const normalizedDba = normalizeCarrierName(args.carrierDba);
+  const normalizedPhone = normalizePhone(args.contactPhone);
+  const locationKey = buildLocationKey(args.city, args.state);
+  const addressKey = buildAddressKey(args.addressLine, args.city, args.state, args.zip);
+
+  return partnerships.find((partnership: any) => {
+    if (partnership.status === 'TERMINATED') return false;
+    if (args.excludePartnershipId && partnership._id === args.excludePartnershipId) return false;
+
+    const existingMc = normalizeMcNumber(partnership.mcNumber);
+    if (normalizedMc && existingMc && normalizedMc === existingMc) {
+      return true;
+    }
+
+    const existingNames = [
+      normalizeCarrierName(partnership.carrierName),
+      normalizeCarrierName(partnership.carrierDba),
+    ].filter(Boolean);
+    const incomingNames = [normalizedName, normalizedDba].filter(Boolean);
+
+    if (incomingNames.length === 0 || existingNames.length === 0) {
+      return false;
+    }
+
+    const nameMatches = incomingNames.some((incomingName) => existingNames.includes(incomingName));
+    if (!nameMatches) {
+      return false;
+    }
+
+    const existingPhone = normalizePhone(partnership.contactPhone);
+    if (normalizedPhone && existingPhone && normalizedPhone === existingPhone) {
+      return true;
+    }
+
+    const existingLocationKey = buildLocationKey(partnership.city, partnership.state);
+    if (locationKey && existingLocationKey && locationKey === existingLocationKey) {
+      return true;
+    }
+
+    const existingAddressKey = buildAddressKey(
+      partnership.addressLine,
+      partnership.city,
+      partnership.state,
+      partnership.zip,
+    );
+    return !!addressKey && !!existingAddressKey && addressKey === existingAddressKey;
+  });
+}
+
 // ==========================================
 // QUERIES
 // ==========================================
@@ -24,27 +159,23 @@ export const listForBroker = query({
         v.literal('INVITED'),
         v.literal('PENDING'),
         v.literal('SUSPENDED'),
-        v.literal('TERMINATED')
-      )
+        v.literal('TERMINATED'),
+      ),
     ),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    let query = ctx.db
-      .query('carrierPartnerships')
-      .withIndex('by_broker', (q) => {
-        if (args.status) {
-          return q.eq('brokerOrgId', args.brokerOrgId).eq('status', args.status);
-        }
-        return q.eq('brokerOrgId', args.brokerOrgId);
-      });
+    let query = ctx.db.query('carrierPartnerships').withIndex('by_broker', (q) => {
+      if (args.status) {
+        return q.eq('brokerOrgId', args.brokerOrgId).eq('status', args.status);
+      }
+      return q.eq('brokerOrgId', args.brokerOrgId);
+    });
 
     const partnerships = await query.collect();
 
     // If status wasn't specified in index, filter for non-terminated by default
-    const filtered = args.status
-      ? partnerships
-      : partnerships.filter((p) => p.status !== 'TERMINATED');
+    const filtered = args.status ? partnerships : partnerships.filter((p) => p.status !== 'TERMINATED');
 
     // Apply limit
     const limited = args.limit ? filtered.slice(0, args.limit) : filtered;
@@ -59,26 +190,26 @@ export const listForBroker = query({
             .query('organizations')
             .withIndex('by_clerk_org', (q) => q.eq('clerkOrgId', partnership.carrierOrgId!))
             .first();
-          
+
           if (!carrierOrg) {
             carrierOrg = await ctx.db
               .query('organizations')
-              .withIndex('by_organization', (q) =>
-                q.eq('workosOrgId', partnership.carrierOrgId!)
-              )
+              .withIndex('by_organization', (q) => q.eq('workosOrgId', partnership.carrierOrgId!))
               .first();
           }
         }
         return {
           ...partnership,
-          carrierOrg: carrierOrg ? {
-            _id: carrierOrg._id,
-            name: carrierOrg.name,
-            orgType: carrierOrg.orgType,
-            isOwnerOperator: carrierOrg.isOwnerOperator,
-          } : null,
+          carrierOrg: carrierOrg
+            ? {
+                _id: carrierOrg._id,
+                name: carrierOrg.name,
+                orgType: carrierOrg.orgType,
+                isOwnerOperator: carrierOrg.isOwnerOperator,
+              }
+            : null,
         };
-      })
+      }),
     );
   },
 });
@@ -141,9 +272,7 @@ export const getActiveForDispatch = query({
   handler: async (ctx, args) => {
     const partnerships = await ctx.db
       .query('carrierPartnerships')
-      .withIndex('by_broker', (q) =>
-        q.eq('brokerOrgId', args.brokerOrgId).eq('status', 'ACTIVE')
-      )
+      .withIndex('by_broker', (q) => q.eq('brokerOrgId', args.brokerOrgId).eq('status', 'ACTIVE'))
       .collect();
 
     // Return minimal data needed for dispatch planner carrier selection
@@ -185,8 +314,8 @@ export const listForCarrier = query({
         v.literal('INVITED'),
         v.literal('PENDING'),
         v.literal('SUSPENDED'),
-        v.literal('TERMINATED')
-      )
+        v.literal('TERMINATED'),
+      ),
     ),
   },
   handler: async (ctx, args) => {
@@ -205,15 +334,13 @@ export const listForCarrier = query({
       filtered.map(async (partnership) => {
         const brokerOrg = await ctx.db
           .query('organizations')
-          .withIndex('by_organization', (q) =>
-            q.eq('workosOrgId', partnership.brokerOrgId)
-          )
+          .withIndex('by_organization', (q) => q.eq('workosOrgId', partnership.brokerOrgId))
           .first();
         return {
           ...partnership,
           brokerOrg,
         };
-      })
+      }),
     );
   },
 });
@@ -233,14 +360,14 @@ export const get = query({
     // Enrich with carrier org info if linked
     let carrierOrg = null;
     let ownerDriver = null;
-    
+
     if (partnership.carrierOrgId) {
       // Try finding by clerkOrgId first (mobile carriers), then workosOrgId
       carrierOrg = await ctx.db
         .query('organizations')
         .withIndex('by_clerk_org', (q) => q.eq('clerkOrgId', partnership.carrierOrgId!))
         .first();
-      
+
       if (!carrierOrg) {
         carrierOrg = await ctx.db
           .query('organizations')
@@ -256,24 +383,28 @@ export const get = query({
 
     return {
       ...partnership,
-      carrierOrg: carrierOrg ? {
-        _id: carrierOrg._id,
-        name: carrierOrg.name,
-        orgType: carrierOrg.orgType,
-        isOwnerOperator: carrierOrg.isOwnerOperator,
-        ownerDriverId: carrierOrg.ownerDriverId,
-      } : null,
-      ownerDriver: ownerDriver ? {
-        _id: ownerDriver._id,
-        firstName: ownerDriver.firstName,
-        lastName: ownerDriver.lastName,
-        phone: ownerDriver.phone,
-        email: ownerDriver.email,
-        employmentStatus: ownerDriver.employmentStatus,
-        licenseState: ownerDriver.licenseState,
-        licenseExpiration: ownerDriver.licenseExpiration,
-        licenseClass: ownerDriver.licenseClass,
-      } : null,
+      carrierOrg: carrierOrg
+        ? {
+            _id: carrierOrg._id,
+            name: carrierOrg.name,
+            orgType: carrierOrg.orgType,
+            isOwnerOperator: carrierOrg.isOwnerOperator,
+            ownerDriverId: carrierOrg.ownerDriverId,
+          }
+        : null,
+      ownerDriver: ownerDriver
+        ? {
+            _id: ownerDriver._id,
+            firstName: ownerDriver.firstName,
+            lastName: ownerDriver.lastName,
+            phone: ownerDriver.phone,
+            email: ownerDriver.email,
+            employmentStatus: ownerDriver.employmentStatus,
+            licenseState: ownerDriver.licenseState,
+            licenseExpiration: ownerDriver.licenseExpiration,
+            licenseClass: ownerDriver.licenseClass,
+          }
+        : null,
     };
   },
 });
@@ -287,11 +418,10 @@ export const getByBrokerAndMc = query({
     mcNumber: v.string(),
   },
   handler: async (ctx, args) => {
+    const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
     return ctx.db
       .query('carrierPartnerships')
-      .withIndex('by_broker_mc', (q) =>
-        q.eq('brokerOrgId', args.brokerOrgId).eq('mcNumber', args.mcNumber)
-      )
+      .withIndex('by_broker_mc', (q) => q.eq('brokerOrgId', args.brokerOrgId).eq('mcNumber', normalizedMcNumber))
       .first();
   },
 });
@@ -305,9 +435,10 @@ export const findByMcNumber = query({
     mcNumber: v.string(),
   },
   handler: async (ctx, args) => {
+    const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
     return ctx.db
       .query('carrierPartnerships')
-      .withIndex('by_mc', (q) => q.eq('mcNumber', args.mcNumber))
+      .withIndex('by_mc', (q) => q.eq('mcNumber', normalizedMcNumber))
       .collect();
   },
 });
@@ -346,25 +477,44 @@ export const create = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
+    const normalizedCarrierName = normalizeWhitespace(args.carrierName);
+    const normalizedCarrierDba = normalizeWhitespace(args.carrierDba);
+    const normalizedContactFirstName = normalizeWhitespace(args.contactFirstName);
+    const normalizedContactLastName = normalizeWhitespace(args.contactLastName);
+    const normalizedContactEmail = normalizeWhitespace(args.contactEmail).toLowerCase();
+    const normalizedContactPhone = normalizeWhitespace(args.contactPhone);
 
     // Check if partnership already exists for this broker + MC#
     const existing = await ctx.db
       .query('carrierPartnerships')
-      .withIndex('by_broker_mc', (q) =>
-        q.eq('brokerOrgId', args.brokerOrgId).eq('mcNumber', args.mcNumber)
-      )
+      .withIndex('by_broker_mc', (q) => q.eq('brokerOrgId', args.brokerOrgId).eq('mcNumber', normalizedMcNumber))
       .first();
 
     if (existing) {
-      throw new Error(
-        `Partnership already exists for MC# ${args.mcNumber}. Use update instead.`
-      );
+      throw new Error(`Partnership already exists for MC# ${normalizedMcNumber}. Use update instead.`);
+    }
+
+    const duplicate = await findDuplicateCarrierPartnership(ctx, {
+      brokerOrgId: args.brokerOrgId,
+      mcNumber: normalizedMcNumber,
+      carrierName: normalizedCarrierName,
+      carrierDba: normalizedCarrierDba,
+      contactPhone: normalizedContactPhone,
+      addressLine: args.addressLine,
+      city: args.city,
+      state: args.state,
+      zip: args.zip,
+    });
+
+    if (duplicate) {
+      throw new Error(formatDuplicateError(duplicate));
     }
 
     // Check if carrier org exists with this MC#
     const carrierOrg = await ctx.db
       .query('organizations')
-      .withIndex('by_mc', (q) => q.eq('mcNumber', args.mcNumber))
+      .withIndex('by_mc', (q) => q.eq('mcNumber', normalizedMcNumber))
       .first();
 
     // Determine initial status and carrierOrgId
@@ -388,11 +538,11 @@ export const create = mutation({
       // Create a carrier organization for this carrier
       newCarrierOrgId = await ctx.db.insert('organizations', {
         orgType: 'CARRIER',
-        name: args.carrierName,
-        mcNumber: args.mcNumber,
+        name: normalizedCarrierName,
+        mcNumber: normalizedMcNumber,
         usdotNumber: args.usdotNumber,
-        billingEmail: args.contactEmail || `${args.mcNumber}@placeholder.carrier`,
-        billingPhone: args.contactPhone,
+        billingEmail: normalizedContactEmail || `${normalizedMcNumber}@placeholder.carrier`,
+        billingPhone: normalizedContactPhone,
         billingAddress: {
           addressLine1: args.addressLine || '',
           addressLine2: args.addressLine2,
@@ -421,7 +571,7 @@ export const create = mutation({
         clerkUserId: `pending_${args.contactPhone.replace(/\D/g, '')}`,
         organizationId: newCarrierOrgId,
         role: 'OWNER',
-        phone: args.contactPhone,
+        phone: normalizedContactPhone,
         createdAt: now,
         updatedAt: now,
       });
@@ -429,9 +579,9 @@ export const create = mutation({
       // Schedule Clerk user creation for mobile app access (uses syncSingleCarrierOwnerToClerk which updates the userIdentityLinks record)
       await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
         organizationId: newCarrierOrgId,
-        phone: args.contactPhone,
-        firstName: args.contactFirstName || args.carrierName.split(' ')[0] || 'Owner',
-        lastName: args.contactLastName || args.carrierName.split(' ').slice(1).join(' ') || '',
+        phone: normalizedContactPhone,
+        firstName: normalizedContactFirstName || normalizedCarrierName.split(' ')[0] || 'Owner',
+        lastName: normalizedContactLastName || normalizedCarrierName.split(' ').slice(1).join(' ') || '',
       });
       clerkUserCreated = true;
     }
@@ -439,22 +589,22 @@ export const create = mutation({
     const partnershipId = await ctx.db.insert('carrierPartnerships', {
       brokerOrgId: args.brokerOrgId,
       carrierOrgId,
-      mcNumber: args.mcNumber,
+      mcNumber: normalizedMcNumber,
       usdotNumber: args.usdotNumber,
-      carrierName: args.carrierName,
-      carrierDba: args.carrierDba,
-      contactFirstName: args.contactFirstName,
-      contactLastName: args.contactLastName,
-      contactEmail: args.contactEmail,
-      contactPhone: args.contactPhone,
+      carrierName: normalizedCarrierName,
+      carrierDba: normalizedCarrierDba || undefined,
+      contactFirstName: normalizedContactFirstName || undefined,
+      contactLastName: normalizedContactLastName || undefined,
+      contactEmail: normalizedContactEmail || undefined,
+      contactPhone: normalizedContactPhone || undefined,
       insuranceProvider: args.insuranceProvider,
       insuranceExpiration: args.insuranceExpiration,
-      addressLine: args.addressLine,
-      addressLine2: args.addressLine2,
-      city: args.city,
-      state: args.state,
-      zip: args.zip,
-      country: args.country,
+      addressLine: normalizeWhitespace(args.addressLine) || undefined,
+      addressLine2: normalizeWhitespace(args.addressLine2) || undefined,
+      city: normalizeWhitespace(args.city) || undefined,
+      state: normalizeWhitespace(args.state) || undefined,
+      zip: normalizeWhitespace(args.zip) || undefined,
+      country: normalizeWhitespace(args.country) || undefined,
       status,
       defaultPaymentTerms: args.defaultPaymentTerms,
       internalNotes: args.internalNotes,
@@ -532,11 +682,69 @@ export const update = mutation({
     const now = Date.now();
     const previousOwnerPhone = partnership.ownerDriverPhone || partnership.contactPhone || null;
 
+    const mergedValues = {
+      mcNumber: updates.mcNumber ?? partnership.mcNumber,
+      carrierName: updates.carrierName ?? partnership.carrierName,
+      carrierDba: updates.carrierDba ?? partnership.carrierDba,
+      contactPhone: updates.contactPhone ?? partnership.contactPhone,
+      addressLine: updates.addressLine ?? partnership.addressLine,
+      city: updates.city ?? partnership.city,
+      state: updates.state ?? partnership.state,
+      zip: updates.zip ?? partnership.zip,
+    };
+
+    const duplicate = await findDuplicateCarrierPartnership(ctx, {
+      brokerOrgId: partnership.brokerOrgId,
+      mcNumber: mergedValues.mcNumber,
+      carrierName: mergedValues.carrierName,
+      carrierDba: mergedValues.carrierDba,
+      contactPhone: mergedValues.contactPhone,
+      addressLine: mergedValues.addressLine,
+      city: mergedValues.city,
+      state: mergedValues.state,
+      zip: mergedValues.zip,
+      excludePartnershipId: partnershipId,
+    });
+
+    if (duplicate) {
+      throw new Error(formatDuplicateError(duplicate));
+    }
+
     // Remove undefined values
     const cleanUpdates: Record<string, unknown> = { updatedAt: now };
     for (const [key, value] of Object.entries(updates)) {
       if (value !== undefined) {
-        cleanUpdates[key] = value;
+        switch (key) {
+          case 'mcNumber':
+            cleanUpdates[key] = normalizeMcNumber(value as string);
+            break;
+          case 'carrierName':
+          case 'carrierDba':
+          case 'contactFirstName':
+          case 'contactLastName':
+          case 'contactPhone':
+          case 'addressLine':
+          case 'addressLine2':
+          case 'city':
+          case 'state':
+          case 'zip':
+          case 'country':
+          case 'ownerDriverFirstName':
+          case 'ownerDriverLastName':
+          case 'ownerDriverPhone':
+          case 'ownerDriverEmail':
+          case 'ownerDriverLicenseNumber':
+          case 'ownerDriverLicenseState':
+          case 'ownerDriverLicenseClass':
+            cleanUpdates[key] = normalizeWhitespace(value as string) || undefined;
+            break;
+          case 'contactEmail':
+            cleanUpdates[key] = normalizeWhitespace(value as string).toLowerCase() || undefined;
+            break;
+          default:
+            cleanUpdates[key] = value;
+            break;
+        }
       }
     }
 
@@ -545,45 +753,55 @@ export const update = mutation({
     // If marking as owner-operator and there's a linked carrier org, create/link driver record
     const isNowOwnerOperator = updates.isOwnerOperator === true;
     const hasDriverInfo = updates.ownerDriverFirstName || updates.ownerDriverPhone;
-    
+
     if (isNowOwnerOperator && partnership.carrierOrgId && (hasDriverInfo || partnership.ownerDriverFirstName)) {
       const carrierOrgId = partnership.carrierOrgId as Id<'organizations'>;
       const carrierOrg = await ctx.db.get(carrierOrgId);
-      
+
       if (carrierOrg && !carrierOrg.ownerDriverId) {
         // Get phone for driver
-        const driverPhone = (updates.ownerDriverPhone as string) || partnership.ownerDriverPhone || partnership.contactPhone;
-        
+        const driverPhone =
+          (updates.ownerDriverPhone as string) || partnership.ownerDriverPhone || partnership.contactPhone;
+
         if (driverPhone) {
           // Check if driver already exists with this phone
-          const existingDrivers = await ctx.db
-            .query('drivers')
-            .collect();
-          
+          const existingDrivers = await ctx.db.query('drivers').collect();
+
           const normalizedPhone = driverPhone.replace(/\D/g, '');
-          const existingDriver = existingDrivers.find(d => {
+          const existingDriver = existingDrivers.find((d) => {
             if (d.isDeleted) return false;
             const dPhone = d.phone.replace(/\D/g, '');
-            return dPhone === normalizedPhone || 
-                   dPhone.endsWith(normalizedPhone) || 
-                   normalizedPhone.endsWith(dPhone);
+            return dPhone === normalizedPhone || dPhone.endsWith(normalizedPhone) || normalizedPhone.endsWith(dPhone);
           });
 
           if (!existingDriver) {
             // Create new driver record
             const driverId = await ctx.db.insert('drivers', {
               organizationId: carrierOrgId,
-              firstName: (updates.ownerDriverFirstName as string) || partnership.ownerDriverFirstName || partnership.contactFirstName || 'Owner',
-              lastName: (updates.ownerDriverLastName as string) || partnership.ownerDriverLastName || partnership.contactLastName || 'Operator',
-              email: (updates.ownerDriverEmail as string) || partnership.ownerDriverEmail || partnership.contactEmail || '',
+              firstName:
+                (updates.ownerDriverFirstName as string) ||
+                partnership.ownerDriverFirstName ||
+                partnership.contactFirstName ||
+                'Owner',
+              lastName:
+                (updates.ownerDriverLastName as string) ||
+                partnership.ownerDriverLastName ||
+                partnership.contactLastName ||
+                'Operator',
+              email:
+                (updates.ownerDriverEmail as string) || partnership.ownerDriverEmail || partnership.contactEmail || '',
               phone: driverPhone,
               dateOfBirth: (updates.ownerDriverDOB as string) || partnership.ownerDriverDOB,
               employmentStatus: 'Active',
               employmentType: 'Owner-Operator',
               licenseNumber: (updates.ownerDriverLicenseNumber as string) || partnership.ownerDriverLicenseNumber,
               licenseState: (updates.ownerDriverLicenseState as string) || partnership.ownerDriverLicenseState || 'N/A',
-              licenseClass: (updates.ownerDriverLicenseClass as string) || partnership.ownerDriverLicenseClass || 'Class A',
-              licenseExpiration: (updates.ownerDriverLicenseExpiration as string) || partnership.ownerDriverLicenseExpiration || '2030-12-31',
+              licenseClass:
+                (updates.ownerDriverLicenseClass as string) || partnership.ownerDriverLicenseClass || 'Class A',
+              licenseExpiration:
+                (updates.ownerDriverLicenseExpiration as string) ||
+                partnership.ownerDriverLicenseExpiration ||
+                '2030-12-31',
               hireDate: new Date().toISOString().split('T')[0],
               createdBy: 'system',
               isDeleted: false,
@@ -613,24 +831,28 @@ export const update = mutation({
       const carrierOrgId = partnership.carrierOrgId as Id<'organizations'>;
       const carrierOrg = await ctx.db.get(carrierOrgId);
       const nextOwnerPhone = updates.ownerDriverPhone ?? updates.contactPhone ?? previousOwnerPhone;
-      
+
       // If org has a linked owner-driver, sync the updated fields
       if (carrierOrg?.ownerDriverId) {
         const ownerDriver = await ctx.db.get(carrierOrg.ownerDriverId);
         if (ownerDriver && !ownerDriver.isDeleted) {
           // Build driver updates from partnership changes
           const driverUpdates: Record<string, unknown> = { updatedAt: now };
-          
+
           if (updates.ownerDriverFirstName !== undefined) driverUpdates.firstName = updates.ownerDriverFirstName;
           if (updates.ownerDriverLastName !== undefined) driverUpdates.lastName = updates.ownerDriverLastName;
           if (updates.ownerDriverPhone !== undefined) driverUpdates.phone = updates.ownerDriverPhone;
           if (updates.ownerDriverEmail !== undefined) driverUpdates.email = updates.ownerDriverEmail;
           if (updates.ownerDriverDOB !== undefined) driverUpdates.dateOfBirth = updates.ownerDriverDOB;
-          if (updates.ownerDriverLicenseNumber !== undefined) driverUpdates.licenseNumber = updates.ownerDriverLicenseNumber;
-          if (updates.ownerDriverLicenseState !== undefined) driverUpdates.licenseState = updates.ownerDriverLicenseState;
-          if (updates.ownerDriverLicenseClass !== undefined) driverUpdates.licenseClass = updates.ownerDriverLicenseClass;
-          if (updates.ownerDriverLicenseExpiration !== undefined) driverUpdates.licenseExpiration = updates.ownerDriverLicenseExpiration;
-          
+          if (updates.ownerDriverLicenseNumber !== undefined)
+            driverUpdates.licenseNumber = updates.ownerDriverLicenseNumber;
+          if (updates.ownerDriverLicenseState !== undefined)
+            driverUpdates.licenseState = updates.ownerDriverLicenseState;
+          if (updates.ownerDriverLicenseClass !== undefined)
+            driverUpdates.licenseClass = updates.ownerDriverLicenseClass;
+          if (updates.ownerDriverLicenseExpiration !== undefined)
+            driverUpdates.licenseExpiration = updates.ownerDriverLicenseExpiration;
+
           // Only patch if there are actual driver field updates
           if (Object.keys(driverUpdates).length > 1) {
             await ctx.db.patch(carrierOrg.ownerDriverId, driverUpdates);
@@ -654,7 +876,7 @@ export const update = mutation({
               (link) =>
                 (link.role === 'OWNER' || link.role === 'ADMIN') &&
                 !!link.clerkUserId &&
-                !link.clerkUserId.startsWith('pending_')
+                !link.clerkUserId.startsWith('pending_'),
             );
             const targetIdentityLink =
               ownerAdminLinks.find((link) => normalizePhone(link.phone) === oldOwnerPhoneNormalized) ||
@@ -705,7 +927,7 @@ export const updateStatus = mutation({
       v.literal('INVITED'),
       v.literal('PENDING'),
       v.literal('SUSPENDED'),
-      v.literal('TERMINATED')
+      v.literal('TERMINATED'),
     ),
   },
   handler: async (ctx, args) => {
@@ -722,7 +944,7 @@ export const updateStatus = mutation({
     if (args.status === 'ACTIVE' && !partnership.carrierOrgId) {
       // Get phone from owner-operator fields or contact info
       const phone = partnership.ownerDriverPhone || partnership.contactPhone;
-      
+
       if (phone) {
         // Check if org already exists by MC#
         const existingOrg = await ctx.db
@@ -731,7 +953,7 @@ export const updateStatus = mutation({
           .first();
 
         let newCarrierOrgId: Id<'organizations'>;
-        
+
         if (existingOrg) {
           // Link to existing org
           newCarrierOrgId = existingOrg._id;
@@ -790,9 +1012,17 @@ export const updateStatus = mutation({
         });
 
         // Schedule Clerk user creation for mobile app access
-        const firstName = partnership.ownerDriverFirstName || partnership.contactFirstName || partnership.carrierName.split(' ')[0] || 'Owner';
-        const lastName = partnership.ownerDriverLastName || partnership.contactLastName || partnership.carrierName.split(' ').slice(1).join(' ') || '';
-        
+        const firstName =
+          partnership.ownerDriverFirstName ||
+          partnership.contactFirstName ||
+          partnership.carrierName.split(' ')[0] ||
+          'Owner';
+        const lastName =
+          partnership.ownerDriverLastName ||
+          partnership.contactLastName ||
+          partnership.carrierName.split(' ').slice(1).join(' ') ||
+          '';
+
         await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
           organizationId: newCarrierOrgId,
           phone: phone,
@@ -805,17 +1035,17 @@ export const updateStatus = mutation({
         // Create driver record for owner-operators
         if (partnership.isOwnerOperator) {
           // Check if driver already exists with this phone
-          const existingDrivers = await ctx.db
-            .query('drivers')
-            .collect();
-          
+          const existingDrivers = await ctx.db.query('drivers').collect();
+
           const normalizedPhone = phone.replace(/\D/g, '');
-          const existingDriver = existingDrivers.find(d => {
+          const existingDriver = existingDrivers.find((d) => {
             if (d.isDeleted) return false;
             const driverPhone = d.phone.replace(/\D/g, '');
-            return driverPhone === normalizedPhone || 
-                   driverPhone.endsWith(normalizedPhone) || 
-                   normalizedPhone.endsWith(driverPhone);
+            return (
+              driverPhone === normalizedPhone ||
+              driverPhone.endsWith(normalizedPhone) ||
+              normalizedPhone.endsWith(driverPhone)
+            );
           });
 
           if (!existingDriver) {
@@ -866,7 +1096,7 @@ export const updateStatus = mutation({
         ctx,
         partnership,
         'system',
-        'System - Partnership Terminated'
+        'System - Partnership Terminated',
       );
       releasedAssignments = releaseResult.releasedCount;
       loadsReopened = releaseResult.loadsReopened;
@@ -888,7 +1118,7 @@ export const updateStatus = mutation({
           .query('organizations')
           .withIndex('by_mc', (q) => q.eq('mcNumber', partnership.mcNumber))
           .first();
-        
+
         if (linkedOrg && !linkedOrg.isDeleted) {
           patchData.carrierOrgId = linkedOrg._id;
           patchData.linkedAt = now;
@@ -898,7 +1128,7 @@ export const updateStatus = mutation({
 
     await ctx.db.patch(args.partnershipId, patchData);
 
-    return { 
+    return {
       success: true,
       carrierOrgCreated,
       clerkSyncScheduled,
@@ -938,8 +1168,16 @@ export const retryClerkSync = mutation({
       throw new Error('No phone number available for Clerk sync');
     }
 
-    const firstName = partnership.ownerDriverFirstName || partnership.contactFirstName || partnership.carrierName.split(' ')[0] || 'Owner';
-    const lastName = partnership.ownerDriverLastName || partnership.contactLastName || partnership.carrierName.split(' ').slice(1).join(' ') || '';
+    const firstName =
+      partnership.ownerDriverFirstName ||
+      partnership.contactFirstName ||
+      partnership.carrierName.split(' ')[0] ||
+      'Owner';
+    const lastName =
+      partnership.ownerDriverLastName ||
+      partnership.contactLastName ||
+      partnership.carrierName.split(' ').slice(1).join(' ') ||
+      '';
 
     // Schedule Clerk user creation
     await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
@@ -990,7 +1228,7 @@ export const createOwnerDriverRecord = mutation({
 
     const now = Date.now();
     const phone = partnership.ownerDriverPhone || partnership.contactPhone;
-    
+
     if (!phone) {
       throw new Error('No phone number available for driver record');
     }
@@ -998,12 +1236,14 @@ export const createOwnerDriverRecord = mutation({
     // Check if driver already exists with this phone
     const existingDrivers = await ctx.db.query('drivers').collect();
     const normalizedPhone = phone.replace(/\D/g, '');
-    const existingDriver = existingDrivers.find(d => {
+    const existingDriver = existingDrivers.find((d) => {
       if (d.isDeleted) return false;
       const driverPhone = d.phone.replace(/\D/g, '');
-      return driverPhone === normalizedPhone || 
-             driverPhone.endsWith(normalizedPhone) || 
-             normalizedPhone.endsWith(driverPhone);
+      return (
+        driverPhone === normalizedPhone ||
+        driverPhone.endsWith(normalizedPhone) ||
+        normalizedPhone.endsWith(driverPhone)
+      );
     });
 
     let driverId: Id<'drivers'>;
@@ -1211,7 +1451,7 @@ async function releasePartnershipAssignments(
   ctx: { db: any; runMutation: any },
   partnership: { brokerOrgId: string; carrierOrgId?: string; carrierName: string; mcNumber: string; _id?: any },
   userId: string,
-  userName?: string
+  userName?: string,
 ): Promise<{ releasedCount: number; loadsReopened: number }> {
   if (!partnership.carrierOrgId) {
     return { releasedCount: 0, loadsReopened: 0 };
@@ -1224,31 +1464,25 @@ async function releasePartnershipAssignments(
   // Find all active assignments for this partnership
   // Try TWO approaches: by carrierOrgId AND by partnershipId
   const activeStatuses = ['OFFERED', 'ACCEPTED', 'AWARDED', 'IN_PROGRESS'] as const;
-  
+
   for (const status of activeStatuses) {
     // Method 1: Query by carrierOrgId (original)
     let assignments = await ctx.db
       .query('loadCarrierAssignments')
-      .withIndex('by_carrier', (q: any) => 
-        q.eq('carrierOrgId', partnership.carrierOrgId).eq('status', status)
-      )
+      .withIndex('by_carrier', (q: any) => q.eq('carrierOrgId', partnership.carrierOrgId).eq('status', status))
       .collect();
 
     // Filter to only assignments from this broker
-    let brokerAssignments = assignments.filter(
-      (a: any) => a.brokerOrgId === partnership.brokerOrgId
-    );
-    
+    let brokerAssignments = assignments.filter((a: any) => a.brokerOrgId === partnership.brokerOrgId);
+
     // Method 2: If no results, try finding by partnershipId (scan all broker assignments)
     if (brokerAssignments.length === 0 && partnership._id) {
       const allBrokerAssignments = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_broker', (q: any) => q.eq('brokerOrgId', partnership.brokerOrgId).eq('status', status))
         .collect();
-      
-      brokerAssignments = allBrokerAssignments.filter(
-        (a: any) => String(a.partnershipId) === String(partnership._id)
-      );
+
+      brokerAssignments = allBrokerAssignments.filter((a: any) => String(a.partnershipId) === String(partnership._id));
     }
 
     for (const assignment of brokerAssignments) {
@@ -1294,7 +1528,13 @@ export const bulkTerminate = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    const results: { id: string; success: boolean; error?: string; releasedAssignments?: number; loadsReopened?: number }[] = [];
+    const results: {
+      id: string;
+      success: boolean;
+      error?: string;
+      releasedAssignments?: number;
+      loadsReopened?: number;
+    }[] = [];
     let totalReleasedAssignments = 0;
     let totalLoadsReopened = 0;
 
@@ -1316,7 +1556,7 @@ export const bulkTerminate = mutation({
           ctx,
           { ...partnership, _id: partnershipId },
           args.userId,
-          args.userName
+          args.userName,
         );
         totalReleasedAssignments += releasedCount;
         totalLoadsReopened += loadsReopened;
@@ -1326,16 +1566,16 @@ export const bulkTerminate = mutation({
           status: 'TERMINATED',
           updatedAt: now,
         });
-        
+
         // === CASCADE: Soft-delete carrier organization and drivers ===
         let driversDeactivated = 0;
         let orgDeactivated = false;
-        
+
         if (partnership.carrierOrgId) {
           // Try to find the carrier organization by the carrierOrgId
           // It could be a Convex ID, clerkOrgId, or workosOrgId
           let carrierOrg = null;
-          
+
           // Try as Convex ID first
           try {
             carrierOrg = await ctx.db.get(partnership.carrierOrgId as Id<'organizations'>);
@@ -1346,14 +1586,14 @@ export const bulkTerminate = mutation({
               .withIndex('by_clerk_org', (q) => q.eq('clerkOrgId', partnership.carrierOrgId!))
               .first();
           }
-          
+
           if (carrierOrg && !carrierOrg.isDeleted) {
             // Soft-delete all drivers in this organization
             const drivers = await ctx.db
               .query('drivers')
               .withIndex('by_organization', (q) => q.eq('organizationId', carrierOrg!._id))
               .collect();
-            
+
             for (const driver of drivers) {
               if (!driver.isDeleted) {
                 await ctx.db.patch(driver._id, {
@@ -1366,7 +1606,7 @@ export const bulkTerminate = mutation({
                 driversDeactivated++;
               }
             }
-            
+
             // Soft-delete the organization itself
             await ctx.db.patch(carrierOrg._id, {
               isDeleted: true,
@@ -1376,14 +1616,14 @@ export const bulkTerminate = mutation({
               updatedAt: now,
             });
             orgDeactivated = true;
-            
+
             // Delete user identity links for this org (blocks mobile access)
             // Also capture Clerk user ID or phone to delete
             const identityLinks = await ctx.db
               .query('userIdentityLinks')
               .withIndex('by_org', (q) => q.eq('organizationId', carrierOrg!._id))
               .collect();
-            
+
             for (const link of identityLinks) {
               // Schedule Clerk user deletion to free up phone number
               if (link.clerkUserId && !link.clerkUserId.startsWith('pending_')) {
@@ -1444,7 +1684,14 @@ export const bulkReactivate = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
-    const results: { id: string; success: boolean; error?: string; carrierOrgCreated?: boolean; carrierOrgRestored?: boolean; clerkSyncScheduled?: boolean }[] = [];
+    const results: {
+      id: string;
+      success: boolean;
+      error?: string;
+      carrierOrgCreated?: boolean;
+      carrierOrgRestored?: boolean;
+      clerkSyncScheduled?: boolean;
+    }[] = [];
 
     for (const partnershipId of args.partnershipIds) {
       try {
@@ -1477,7 +1724,7 @@ export const bulkReactivate = mutation({
               .withIndex('by_clerk_org', (q) => q.eq('clerkOrgId', partnership.carrierOrgId!))
               .first();
           }
-          
+
           if (carrierOrg) {
             // Org exists - restore it if deleted
             if (carrierOrg.isDeleted) {
@@ -1489,13 +1736,13 @@ export const bulkReactivate = mutation({
                 updatedAt: now,
               });
               carrierOrgRestored = true;
-              
+
               // Also restore any soft-deleted drivers
               const deletedDrivers = await ctx.db
                 .query('drivers')
                 .withIndex('by_organization', (q) => q.eq('organizationId', carrierOrg!._id))
                 .collect();
-              
+
               for (const driver of deletedDrivers) {
                 if (driver.isDeleted) {
                   await ctx.db.patch(driver._id, {
@@ -1508,13 +1755,13 @@ export const bulkReactivate = mutation({
                 }
               }
             }
-            
+
             // Check if identity link exists - recreate if missing
             const existingLink = await ctx.db
               .query('userIdentityLinks')
               .withIndex('by_org', (q) => q.eq('organizationId', carrierOrg._id))
               .first();
-            
+
             if (!existingLink && phone) {
               await ctx.db.insert('userIdentityLinks', {
                 clerkUserId: `pending_${phone.replace(/\D/g, '')}`,
@@ -1524,11 +1771,19 @@ export const bulkReactivate = mutation({
                 createdAt: now,
                 updatedAt: now,
               });
-              
+
               // Schedule Clerk user creation
-              const firstName = partnership.ownerDriverFirstName || partnership.contactFirstName || partnership.carrierName.split(' ')[0] || 'Owner';
-              const lastName = partnership.ownerDriverLastName || partnership.contactLastName || partnership.carrierName.split(' ').slice(1).join(' ') || '';
-              
+              const firstName =
+                partnership.ownerDriverFirstName ||
+                partnership.contactFirstName ||
+                partnership.carrierName.split(' ')[0] ||
+                'Owner';
+              const lastName =
+                partnership.ownerDriverLastName ||
+                partnership.contactLastName ||
+                partnership.carrierName.split(' ').slice(1).join(' ') ||
+                '';
+
               await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
                 organizationId: carrierOrg._id,
                 phone: phone,
@@ -1539,7 +1794,7 @@ export const bulkReactivate = mutation({
             }
           }
         }
-        
+
         // If no carrierOrgId exists, create org and sync to Clerk
         if (!partnership.carrierOrgId && phone) {
           // Check if org already exists by MC#
@@ -1549,7 +1804,7 @@ export const bulkReactivate = mutation({
             .first();
 
           let newCarrierOrgId: Id<'organizations'>;
-          
+
           if (existingOrg) {
             newCarrierOrgId = existingOrg._id;
             // Restore if deleted
@@ -1616,9 +1871,17 @@ export const bulkReactivate = mutation({
           });
 
           // Schedule Clerk user creation
-          const firstName = partnership.ownerDriverFirstName || partnership.contactFirstName || partnership.carrierName.split(' ')[0] || 'Owner';
-          const lastName = partnership.ownerDriverLastName || partnership.contactLastName || partnership.carrierName.split(' ').slice(1).join(' ') || '';
-          
+          const firstName =
+            partnership.ownerDriverFirstName ||
+            partnership.contactFirstName ||
+            partnership.carrierName.split(' ')[0] ||
+            'Owner';
+          const lastName =
+            partnership.ownerDriverLastName ||
+            partnership.contactLastName ||
+            partnership.carrierName.split(' ').slice(1).join(' ') ||
+            '';
+
           await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
             organizationId: newCarrierOrgId,
             phone: phone,
@@ -1672,7 +1935,7 @@ export const bulkReactivate = mutation({
  * - User identity links
  * - Rate profiles and contracts
  * - Schedules Clerk user deletion
- * 
+ *
  * Only works for TERMINATED partnerships to prevent accidental data loss
  */
 export const permanentlyDelete = mutation({
@@ -1682,9 +1945,9 @@ export const permanentlyDelete = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const results: { 
-      id: string; 
-      success: boolean; 
+    const results: {
+      id: string;
+      success: boolean;
       error?: string;
       deletedOrg?: boolean;
       deletedDrivers?: number;
@@ -1702,10 +1965,10 @@ export const permanentlyDelete = mutation({
 
         // Only allow permanent deletion of TERMINATED partnerships
         if (partnership.status !== 'TERMINATED') {
-          results.push({ 
-            id: partnershipId, 
-            success: false, 
-            error: `Cannot permanently delete partnership with status "${partnership.status}". Must be TERMINATED first.` 
+          results.push({
+            id: partnershipId,
+            success: false,
+            error: `Cannot permanently delete partnership with status "${partnership.status}". Must be TERMINATED first.`,
           });
           continue;
         }
@@ -1720,7 +1983,7 @@ export const permanentlyDelete = mutation({
         // === 1. Find and delete carrier organization ===
         if (partnership.carrierOrgId) {
           let carrierOrg = null;
-          
+
           // Try as Convex ID first
           try {
             carrierOrg = await ctx.db.get(partnership.carrierOrgId as Id<'organizations'>);
@@ -1731,14 +1994,14 @@ export const permanentlyDelete = mutation({
               .withIndex('by_clerk_org', (q) => q.eq('clerkOrgId', partnership.carrierOrgId!))
               .first();
           }
-          
+
           if (carrierOrg) {
             // === 2. Delete all drivers in this organization ===
             const drivers = await ctx.db
               .query('drivers')
               .withIndex('by_organization', (q) => q.eq('organizationId', carrierOrg!._id))
               .collect();
-            
+
             for (const driver of drivers) {
               // Delete driver locations
               const driverLocations = await ctx.db
@@ -1748,18 +2011,18 @@ export const permanentlyDelete = mutation({
               for (const loc of driverLocations) {
                 await ctx.db.delete(loc._id);
               }
-              
+
               // Delete the driver
               await ctx.db.delete(driver._id);
               deletedDrivers++;
             }
-            
+
             // === 3. Delete user identity links and get Clerk user ID ===
             const identityLinks = await ctx.db
               .query('userIdentityLinks')
               .withIndex('by_org', (q) => q.eq('organizationId', carrierOrg!._id))
               .collect();
-            
+
             for (const link of identityLinks) {
               // Capture the Clerk user ID for deletion
               if (link.clerkUserId && !link.clerkUserId.startsWith('pending_')) {
@@ -1771,7 +2034,7 @@ export const permanentlyDelete = mutation({
               }
               await ctx.db.delete(link._id);
             }
-            
+
             // === 4. Delete notification preferences ===
             const notifPrefs = await ctx.db
               .query('notificationPreferences')
@@ -1780,25 +2043,26 @@ export const permanentlyDelete = mutation({
             for (const pref of notifPrefs) {
               await ctx.db.delete(pref._id);
             }
-            
+
             // === 5. Hard delete the organization ===
             await ctx.db.delete(carrierOrg._id);
             deletedOrg = true;
           }
         }
-        
+
         // === 7. Delete all load assignments for this partnership ===
         // Get all assignments (any status) for this partnership
         const allAssignments = await ctx.db
           .query('loadCarrierAssignments')
           .withIndex('by_broker', (q) => q.eq('brokerOrgId', partnership.brokerOrgId))
           .collect();
-        
+
         const partnershipAssignments = allAssignments.filter(
-          (a) => String(a.partnershipId) === String(partnershipId) ||
-                 (partnership.carrierOrgId && a.carrierOrgId === partnership.carrierOrgId)
+          (a) =>
+            String(a.partnershipId) === String(partnershipId) ||
+            (partnership.carrierOrgId && a.carrierOrgId === partnership.carrierOrgId),
         );
-        
+
         for (const assignment of partnershipAssignments) {
           // Only delete COMPLETED, CANCELED, DECLINED, or WITHDRAWN assignments
           // For safety, don't delete active assignments
@@ -1807,10 +2071,10 @@ export const permanentlyDelete = mutation({
             deletedAssignments++;
           }
         }
-        
+
         // === 8. Delete the partnership itself ===
         await ctx.db.delete(partnershipId);
-        
+
         // === 9. Schedule Clerk user deletion ===
         if (clerkUserIdToDelete) {
           // Have actual Clerk user ID - delete by ID
@@ -1826,7 +2090,7 @@ export const permanentlyDelete = mutation({
           });
           clerkUserDeleted = true;
         }
-        
+
         // Log to audit
         await ctx.runMutation(internal.auditLog.logAction, {
           organizationId: partnership.brokerOrgId,
@@ -1839,11 +2103,11 @@ export const permanentlyDelete = mutation({
           description: `Permanently deleted carrier ${partnership.carrierName} (MC# ${partnership.mcNumber}). Deleted: org=${deletedOrg}, drivers=${deletedDrivers}, assignments=${deletedAssignments}, clerkUser=${clerkUserDeleted}`,
         });
 
-        results.push({ 
-          id: partnershipId, 
-          success: true, 
-          deletedOrg, 
-          deletedDrivers, 
+        results.push({
+          id: partnershipId,
+          success: true,
+          deletedOrg,
+          deletedDrivers,
           deletedAssignments,
           clerkUserDeleted,
         });
@@ -1954,10 +2218,8 @@ export const syncPartnershipForMobileAccess = mutation({
 
     // Check if userIdentityLinks exists for this phone
     const normalizedPhone = partnership.contactPhone.replace(/\D/g, '');
-    const existingLinks = await ctx.db
-      .query('userIdentityLinks')
-      .collect();
-    
+    const existingLinks = await ctx.db.query('userIdentityLinks').collect();
+
     const existingLink = existingLinks.find((link) => {
       if (!link.phone) return false;
       return link.phone.replace(/\D/g, '') === normalizedPhone;
