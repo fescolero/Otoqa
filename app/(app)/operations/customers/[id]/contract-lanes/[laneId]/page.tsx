@@ -17,7 +17,7 @@ import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useRouter, useParams } from 'next/navigation';
-import { ArrowLeft, Pencil } from 'lucide-react';
+import { ArrowLeft, ChartBarStacked, Pencil } from 'lucide-react';
 import { Id } from '@/convex/_generated/dataModel';
 
 export default function ContractLaneDetailPage() {
@@ -125,14 +125,25 @@ export default function ContractLaneDetailPage() {
                 Back
               </Button>
             </div>
-            <Button
-              onClick={() =>
-                router.push(`/operations/customers/${customerId}/contract-lanes/${laneId}/edit`)
-              }
-            >
-              <Pencil className="h-4 w-4 mr-2" />
-              Edit
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() =>
+                  router.push(`/lane-analyzer?importLane=${laneId}`)
+                }
+              >
+                <ChartBarStacked className="h-4 w-4 mr-2" />
+                Analyze
+              </Button>
+              <Button
+                onClick={() =>
+                  router.push(`/operations/customers/${customerId}/contract-lanes/${laneId}/edit`)
+                }
+              >
+                <Pencil className="h-4 w-4 mr-2" />
+                Edit
+              </Button>
+            </div>
           </div>
 
           <div className="flex items-center gap-4">

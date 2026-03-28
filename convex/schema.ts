@@ -2186,4 +2186,286 @@ export default defineSchema({
     .index('by_truck', ['truckId'])
     .index('by_vendor', ['vendorId'])
     .index('by_load', ['loadId']),
+
+  // ==========================================
+  // LANE ANALYZER / BID CALCULATOR
+  // Sessions contain lane entries for bidding on new contracts
+  // or optimizing existing contracted lanes.
+  // ==========================================
+
+  laneAnalysisSessions: defineTable({
+    workosOrgId: v.string(),
+    name: v.string(), // e.g. "Q1 2027 Amazon Bid"
+    description: v.optional(v.string()),
+    status: v.union(v.literal('DRAFT'), v.literal('ACTIVE'), v.literal('ARCHIVED')),
+    analysisType: v.union(v.literal('BID'), v.literal('OPTIMIZATION')),
+
+    // Default cost parameters
+    defaultMpgHighway: v.number(), // default 6.0
+    defaultMpgCity: v.number(), // default 10.0
+    defaultFuelPricePerGallon: v.optional(v.number()), // manual override
+
+    // Default driver pay
+    defaultDriverPayType: v.union(
+      v.literal('PER_MILE'),
+      v.literal('PER_HOUR'),
+      v.literal('FLAT_PER_RUN'),
+    ),
+    defaultDriverPayRate: v.number(), // rate for the selected pay type
+
+    // Driver schedule pattern
+    driverSchedulePattern: v.union(
+      v.literal('5on2off'),
+      v.literal('6on1off'),
+      v.literal('7on'),
+      v.literal('custom'),
+    ),
+    customScheduleOnDays: v.optional(v.number()),
+    customScheduleOffDays: v.optional(v.number()),
+
+    // Operational settings (configurable per session)
+    prePostTripMinutes: v.optional(v.number()), // pre/post-trip inspection time in minutes (default 60)
+    dwellTimeApptMinutes: v.optional(v.number()), // dwell time for APPT stops in minutes (default 30)
+    dwellTimeLiveMinutes: v.optional(v.number()), // dwell time for Live load/unload (default 60)
+    dwellTimeFcfsMinutes: v.optional(v.number()), // dwell time for FCFS (default 90)
+    useApptWindowsForDwell: v.optional(v.boolean()), // use actual appointment time windows for dwell calc
+    maxChainingLegs: v.optional(v.number()), // max legs per driver shift (default 8)
+    maxDeadheadMiles: v.optional(v.number()), // max deadhead between chained legs (default 75)
+    maxWaitHours: v.optional(v.number()), // max idle wait between legs (default 3.0)
+    weeklyHosMode: v.optional(v.union(
+      v.literal('uniform'),  // distribute 70h evenly across on-days (conservative)
+      v.literal('flexible'), // allow up to 14h/day, manage 70h across the week (realistic)
+    )),
+    allowSameLaneRepeat: v.optional(v.boolean()), // allow same lane to run multiple times per driver shift
+
+    // Analysis scope
+    analysisYear: v.number(), // e.g. 2026
+
+    // Metadata
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    isDeleted: v.boolean(),
+    deletedAt: v.optional(v.number()),
+    deletedBy: v.optional(v.string()),
+  })
+    .index('by_organization', ['workosOrgId'])
+    .index('by_org_status', ['workosOrgId', 'status']),
+
+  laneAnalysisEntries: defineTable({
+    sessionId: v.id('laneAnalysisSessions'),
+    workosOrgId: v.string(),
+    contractLaneId: v.optional(v.id('contractLanes')), // link to existing lane
+
+    name: v.string(), // e.g. "Detroit → Chicago Daily"
+
+    // Origin
+    originAddress: v.string(),
+    originCity: v.string(),
+    originState: v.string(),
+    originZip: v.string(),
+    originLat: v.optional(v.number()),
+    originLng: v.optional(v.number()),
+    originStopType: v.optional(v.union(v.literal('Pickup'), v.literal('Delivery'))),
+    originAppointmentType: v.optional(v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live'))),
+    originScheduledTime: v.optional(v.string()), // HH:MM format
+    originScheduledEndTime: v.optional(v.string()), // HH:MM format (window end)
+
+    // Destination
+    destinationAddress: v.string(),
+    destinationCity: v.string(),
+    destinationState: v.string(),
+    destinationZip: v.string(),
+    destinationLat: v.optional(v.number()),
+    destinationLng: v.optional(v.number()),
+    destinationStopType: v.optional(v.union(v.literal('Pickup'), v.literal('Delivery'))),
+    destinationAppointmentType: v.optional(v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live'))),
+    destinationScheduledTime: v.optional(v.string()), // HH:MM format
+    destinationScheduledEndTime: v.optional(v.string()), // HH:MM format (window end)
+
+    // Intermediate stops
+    intermediateStops: v.optional(
+      v.array(
+        v.object({
+          address: v.string(),
+          city: v.string(),
+          state: v.string(),
+          zip: v.string(),
+          lat: v.optional(v.number()),
+          lng: v.optional(v.number()),
+          stopOrder: v.number(),
+          stopType: v.union(v.literal('Pickup'), v.literal('Delivery')),
+          type: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
+          arrivalTime: v.optional(v.string()), // HH:MM format
+          arrivalEndTime: v.optional(v.string()), // HH:MM format (window end)
+        }),
+      ),
+    ),
+
+    // Route metrics (populated by Google Maps or manual entry)
+    routeMiles: v.optional(v.number()),
+    routeDurationHours: v.optional(v.number()),
+    isRoundTrip: v.boolean(),
+    isCityRoute: v.boolean(), // toggles MPG: city (10) vs highway (6)
+
+    // Schedule rule (mirrors recurringLoadTemplates pattern)
+    scheduleRule: v.object({
+      activeDays: v.array(v.number()), // 0=Sun, 1=Mon, ..., 6=Sat
+      excludeFederalHolidays: v.boolean(),
+      customExclusions: v.array(v.string()), // YYYY-MM-DD dates to skip
+    }),
+
+    // Contract period (limits schedule expansion)
+    contractPeriodStart: v.optional(v.string()), // YYYY-MM-DD
+    contractPeriodEnd: v.optional(v.string()), // YYYY-MM-DD
+
+    // Rate (what customer pays)
+    ratePerRun: v.optional(v.number()),
+    rateType: v.optional(
+      v.union(v.literal('Per Mile'), v.literal('Flat Rate'), v.literal('Per Stop')),
+    ),
+    ratePerMile: v.optional(v.number()),
+    minimumRate: v.optional(v.number()),
+
+    // Fuel surcharge (revenue side)
+    fuelSurchargeType: v.optional(
+      v.union(v.literal('PERCENTAGE'), v.literal('FLAT'), v.literal('DOE_INDEX')),
+    ),
+    fuelSurchargeValue: v.optional(v.number()),
+
+    // Accessorials
+    stopOffRate: v.optional(v.number()), // per extra stop beyond included
+    includedStops: v.optional(v.number()), // default 2
+
+    // Equipment
+    equipmentClass: v.optional(
+      v.union(
+        v.literal('Bobtail'),
+        v.literal('Dry Van'),
+        v.literal('Refrigerated'),
+        v.literal('Flatbed'),
+        v.literal('Tanker'),
+      ),
+    ),
+    equipmentSize: v.optional(v.union(v.literal('53ft'), v.literal('48ft'), v.literal('45ft'))),
+
+    // HOS / driver configuration
+    requiresTeamDrivers: v.optional(v.boolean()), // computed or manual override
+    mpgOverride: v.optional(v.number()), // overrides session default
+
+    // Driver pay override (per-lane override of session default)
+    driverPayTypeOverride: v.optional(
+      v.union(v.literal('PER_MILE'), v.literal('PER_HOUR'), v.literal('FLAT_PER_RUN')),
+    ),
+    driverPayRateOverride: v.optional(v.number()),
+
+    // Base assignment
+    baseId: v.optional(v.id('laneAnalysisBases')),
+
+    // Metadata
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_session', ['sessionId'])
+    .index('by_org', ['workosOrgId']),
+
+  laneAnalysisBases: defineTable({
+    workosOrgId: v.string(),
+    sessionId: v.optional(v.id('laneAnalysisSessions')), // null = org-wide base
+    name: v.string(), // e.g. "Chicago Yard", "Nashville Relay Point"
+
+    address: v.string(),
+    city: v.string(),
+    state: v.string(),
+    zip: v.string(),
+    latitude: v.optional(v.number()),
+    longitude: v.optional(v.number()),
+
+    baseType: v.union(v.literal('YARD'), v.literal('RELAY_POINT'), v.literal('PARKING')),
+    capacity: v.optional(v.number()), // how many trucks can park
+    monthlyParkingCost: v.optional(v.number()),
+    isActive: v.boolean(),
+
+    // Metadata
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_organization', ['workosOrgId'])
+    .index('by_session', ['sessionId']),
+
+  laneAnalysisResults: defineTable({
+    sessionId: v.id('laneAnalysisSessions'),
+    workosOrgId: v.string(),
+    entryId: v.optional(v.id('laneAnalysisEntries')), // null = aggregate result
+    resultType: v.union(
+      v.literal('PER_LANE'),
+      v.literal('AGGREGATE'),
+      v.literal('OPTIMIZATION_SUGGESTION'),
+    ),
+    computedAt: v.number(),
+
+    // Per-lane cost metrics
+    annualRunCount: v.optional(v.number()),
+    fuelCostPerRun: v.optional(v.number()),
+    tollCostPerRun: v.optional(v.number()),
+    driverPayPerRun: v.optional(v.number()),
+    totalCostPerRun: v.optional(v.number()),
+    revenuePerRun: v.optional(v.number()),
+    marginPerRun: v.optional(v.number()),
+    marginPercent: v.optional(v.number()),
+
+    // Aggregated cost periods
+    costPerWeek: v.optional(v.number()),
+    costPerMonth: v.optional(v.number()),
+    costPerYear: v.optional(v.number()),
+    revenuePerYear: v.optional(v.number()),
+
+    // Driver/truck count
+    minDriverCount: v.optional(v.number()),
+    realisticDriverCount: v.optional(v.number()),
+    minTruckCount: v.optional(v.number()),
+    realisticTruckCount: v.optional(v.number()),
+    requiresTeamDrivers: v.optional(v.boolean()),
+    hosAnalysis: v.optional(v.string()), // JSON blob with detailed HOS breakdown
+
+    // Deadhead analysis
+    deadheadMilesToOrigin: v.optional(v.number()),
+    deadheadMilesFromDestination: v.optional(v.number()),
+    totalDeadheadMiles: v.optional(v.number()),
+    deadheadCost: v.optional(v.number()),
+
+    // Optimization suggestions (when resultType = OPTIMIZATION_SUGGESTION)
+    suggestionType: v.optional(
+      v.union(
+        v.literal('COMBINE_LANES'),
+        v.literal('CHANGE_BASE'),
+        v.literal('UNDERPERFORMING'),
+        v.literal('HIGH_DEADHEAD'),
+        v.literal('RATE_MISMATCH'),
+      ),
+    ),
+    suggestionDetails: v.optional(v.string()), // JSON
+    estimatedSavings: v.optional(v.number()),
+  })
+    .index('by_session', ['sessionId'])
+    .index('by_entry', ['entryId']),
+
+  fuelPriceCache: defineTable({
+    region: v.string(), // PADD1, PADD2, PADD3, PADD4, PADD5, US_AVERAGE
+    pricePerGallon: v.number(),
+    fetchedAt: v.number(),
+    source: v.union(v.literal('EIA'), v.literal('MANUAL')),
+    workosOrgId: v.optional(v.string()), // null = system-wide
+  }).index('by_region', ['region']),
+
+  tollEstimateCache: defineTable({
+    originHash: v.string(), // hash of origin coordinates
+    destinationHash: v.string(), // hash of destination coordinates
+    tollCost: v.number(),
+    provider: v.union(v.literal('TOLLGURU'), v.literal('MANUAL')),
+    vehicleType: v.string(), // e.g. "CLASS_8_TRUCK"
+    fetchedAt: v.number(),
+    expiresAt: v.number(),
+  }).index('by_route', ['originHash', 'destinationHash']),
 });

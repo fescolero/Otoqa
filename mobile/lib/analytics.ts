@@ -189,7 +189,7 @@ export function trackConvexAuthEvent(
     | 'debouncing_false'
     | 'auth_false_propagated'
     | 'foreground_return',
-  context?: Record<string, unknown>,
+  context?: PostHogEventProperties,
 ) {
   capture(`convex_auth_${event}`, context);
 }

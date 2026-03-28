@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import {
   Building2,
   Calculator,
+  ChartBarStacked,
   LayoutDashboard,
   Package,
   Route,
@@ -97,6 +98,12 @@ const getNavData = (pathname: string) => ({
       url: '/route-assignments',
       icon: Route,
       isActive: pathname.startsWith('/route-assignments'),
+    },
+    {
+      title: 'Lane Analyzer',
+      url: '/lane-analyzer',
+      icon: ChartBarStacked,
+      isActive: pathname.startsWith('/lane-analyzer'),
     },
     {
       title: 'Accounting',

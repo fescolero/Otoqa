@@ -20,6 +20,44 @@ function formatDate(date: Date | undefined) {
   return `${year}-${month}-${day}`;
 }
 
+function parseDateInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    const parsed = new Date(Number(year), Number(month) - 1, Number(day));
+    if (
+      parsed.getFullYear() === Number(year) &&
+      parsed.getMonth() === Number(month) - 1 &&
+      parsed.getDate() === Number(day)
+    ) {
+      return parsed;
+    }
+    return undefined;
+  }
+
+  const usMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (usMatch) {
+    const [, month, day, year] = usMatch;
+    const parsed = new Date(Number(year), Number(month) - 1, Number(day));
+    if (
+      parsed.getFullYear() === Number(year) &&
+      parsed.getMonth() === Number(month) - 1 &&
+      parsed.getDate() === Number(day)
+    ) {
+      return parsed;
+    }
+    return undefined;
+  }
+
+  const parsed = new Date(trimmed);
+  return isValidDate(parsed) ? parsed : undefined;
+}
+
 function isValidDate(date: Date | undefined) {
   if (!date) {
     return false;
@@ -63,10 +101,16 @@ export function DatePicker({
   const [month, setMonth] = React.useState<Date | undefined>(initialDate);
   const [inputValue, setInputValue] = React.useState(formatDate(initialDate));
 
+  React.useEffect(() => {
+    setDate(initialDate);
+    setMonth(initialDate);
+    setInputValue(formatDate(initialDate));
+  }, [initialDate]);
+
   // Dynamic year range based on current year
   const currentYear = new Date().getFullYear();
   const fromYear = currentYear - 100; // 100 years back for birthdates
-  const toYear = currentYear + 50;    // 50 years ahead for expiration dates
+  const toYear = currentYear + 50; // 50 years ahead for expiration dates
 
   const handleDateSelect = (selectedDate: Date | undefined) => {
     setDate(selectedDate);
@@ -79,8 +123,8 @@ export function DatePicker({
     const newValue = e.target.value;
     setInputValue(newValue);
 
-    const parsedDate = new Date(newValue);
-    if (isValidDate(parsedDate)) {
+    const parsedDate = parseDateInput(newValue);
+    if (parsedDate) {
       setDate(parsedDate);
       setMonth(parsedDate);
       onChange?.(parsedDate);
@@ -131,7 +175,16 @@ export function DatePicker({
         </Popover>
       </div>
       {/* Hidden input to submit the date value with the form */}
-      <input type="hidden" name={name} value={date ? `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}` : ''} required={required} />
+      <input
+        type="hidden"
+        name={name}
+        value={
+          date
+            ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+            : ''
+        }
+        required={required}
+      />
     </>
   );
 }

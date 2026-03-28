@@ -35,7 +35,12 @@ import {
   addPendingAction,
   reconcilePendingActions,
 } from '../../../lib/pending-actions';
-import { getTrackingState, getBufferedLocationCount, isTracking, startLocationTracking } from '../../../lib/location-tracking';
+import {
+  getTrackingState,
+  getBufferedLocationCount,
+  isTracking,
+  startLocationTracking,
+} from '../../../lib/location-tracking';
 import { getTotalCountForLoad, getUnsyncedCountForLoad } from '../../../lib/location-db';
 import { useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
@@ -60,21 +65,21 @@ const colors = {
 };
 
 const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 20,
+  'xs': 4,
+  'sm': 8,
+  'md': 12,
+  'lg': 16,
+  'xl': 20,
   '2xl': 24,
 };
 
 const borderRadius = {
-  md: 8,
-  lg: 12,
-  xl: 16,
+  'md': 8,
+  'lg': 12,
+  'xl': 16,
   '2xl': 20,
   '3xl': 24,
-  full: 9999,
+  'full': 9999,
 };
 
 // ============================================
@@ -91,10 +96,7 @@ export default function TripDetailScreen() {
   const { pendingCount } = useOfflineQueue();
   const posthog = usePostHog();
 
-  const { load, stops, isLoading, hasNoData } = useLoadDetail(
-    id as Id<'loadInformation'>,
-    driverId
-  );
+  const { load, stops, isLoading, hasNoData } = useLoadDetail(id as Id<'loadInformation'>, driverId);
 
   // Check-in modal state
   const [checkInModal, setCheckInModal] = useState<{
@@ -109,7 +111,9 @@ export default function TripDetailScreen() {
   const [showQuickActions, setShowQuickActions] = useState(false);
   const [showDetourModal, setShowDetourModal] = useState(false);
   const [detourStops, setDetourStops] = useState(1);
-  const [detourReason, setDetourReason] = useState<'FUEL' | 'REST' | 'FOOD' | 'SCALE' | 'REPAIR' | 'REDIRECT' | 'CUSTOMER' | 'OTHER'>('FUEL');
+  const [detourReason, setDetourReason] = useState<
+    'FUEL' | 'REST' | 'FOOD' | 'SCALE' | 'REPAIR' | 'REDIRECT' | 'CUSTOMER' | 'OTHER'
+  >('FUEL');
   const [detourNotes, setDetourNotes] = useState('');
   const [isAddingDetour, setIsAddingDetour] = useState(false);
   const addDetourStopsMutation = useMutation(api.driverMobile.addDetourStops);
@@ -145,11 +149,16 @@ export default function TripDetailScreen() {
             loadId: state?.loadId ?? null,
           });
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     };
     refresh();
     const interval = setInterval(refresh, 10000);
-    return () => { cancelled = true; clearInterval(interval); };
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [id]);
 
   // When the app returns from Settings, retry starting tracking if it
@@ -176,7 +185,6 @@ export default function TripDetailScreen() {
     });
     return () => sub.remove();
   }, [id, driverId, organizationId]);
-
 
   // Load persisted pending actions on mount
   useEffect(() => {
@@ -213,7 +221,7 @@ export default function TripDetailScreen() {
       setPendingActions((prev) => ({ ...prev, [stopId]: action }));
       await addPendingAction(id, stopId, action);
     },
-    [id]
+    [id],
   );
 
   // Open maps for navigation
@@ -261,7 +269,7 @@ export default function TripDetailScreen() {
 
     setIsSubmitting(true);
     const actionType = checkInModal.type === 'in' ? 'check_in' : 'check_out';
-    
+
     posthog?.capture(`${actionType}_started`, {
       loadId: id,
       stopId: checkInModal.stopId,
@@ -270,13 +278,28 @@ export default function TripDetailScreen() {
     });
 
     try {
-      const currentStop = displayStops.find((s: any) => s._id === checkInModal.stopId);
+      const resolvedStopId =
+        checkInModal.type === 'out' ? (activeCheckedInStop?._id ?? checkInModal.stopId) : checkInModal.stopId;
+      const currentStop = displayStops.find((s: any) => s._id === resolvedStopId);
       const totalStops = displayStops.length;
 
-      console.log(`[TripDetail] ${actionType}: stopId=${checkInModal.stopId}, seq=${currentStop?.sequenceNumber}, total=${totalStops}, driverId=${driverId ? 'yes' : 'NULL'}, orgId=${organizationId ? organizationId.substring(0, 12) + '...' : 'NULL'}`);
+      if (checkInModal.type === 'out' && activeCheckedInStop && activeCheckedInStop._id !== checkInModal.stopId) {
+        console.warn(
+          `[TripDetail] check_out modal stopId=${checkInModal.stopId} is stale, redirecting to active checked-in stopId=${activeCheckedInStop._id}`,
+        );
+        posthog?.capture('checkout_stop_corrected', {
+          loadId: id,
+          requestedStopId: checkInModal.stopId,
+          resolvedStopId,
+        });
+      }
+
+      console.log(
+        `[TripDetail] ${actionType}: stopId=${resolvedStopId}, seq=${currentStop?.sequenceNumber}, total=${totalStops}, driverId=${driverId ? 'yes' : 'NULL'}, orgId=${organizationId ? organizationId.substring(0, 12) + '...' : 'NULL'}`,
+      );
       posthog?.capture('tracking_params_debug', {
         loadId: id,
-        stopId: checkInModal.stopId,
+        stopId: resolvedStopId,
         action: actionType,
         stopSequence: currentStop?.sequenceNumber ?? null,
         totalStops,
@@ -285,43 +308,41 @@ export default function TripDetailScreen() {
         orgId: organizationId ?? null,
       });
 
-      const result = checkInModal.type === 'in'
-        ? await checkIn({
-            stopId: checkInModal.stopId,
-            driverId,
-            loadId: id as Id<'loadInformation'>,
-            notes: notes || undefined,
-            stopSequence: currentStop?.sequenceNumber,
-            totalStops,
-            organizationId: organizationId || undefined,
-            ...(isRedirected ? { isRedirected: true } : {}),
-          })
-        : await checkOut({
-            stopId: checkInModal.stopId,
-            driverId,
-            loadId: id as Id<'loadInformation'>,
-            notes: notes || undefined,
-            photoUri: photoUri || undefined,
-            // Location tracking parameters
-            stopSequence: currentStop?.sequenceNumber,
-            totalStops,
-            organizationId: organizationId || undefined,
-          });
+      const result =
+        checkInModal.type === 'in'
+          ? await checkIn({
+              stopId: resolvedStopId,
+              driverId,
+              loadId: id as Id<'loadInformation'>,
+              notes: notes || undefined,
+              stopSequence: currentStop?.sequenceNumber,
+              totalStops,
+              organizationId: organizationId || undefined,
+              ...(isRedirected ? { isRedirected: true } : {}),
+            })
+          : await checkOut({
+              stopId: resolvedStopId,
+              driverId,
+              loadId: id as Id<'loadInformation'>,
+              notes: notes || undefined,
+              photoUri: photoUri || undefined,
+              // Location tracking parameters
+              stopSequence: currentStop?.sequenceNumber,
+              totalStops,
+              organizationId: organizationId || undefined,
+            });
 
       posthog?.capture(`${actionType}_result`, {
         loadId: id,
-        stopId: checkInModal.stopId || null,
+        stopId: resolvedStopId || null,
         success: result.success,
         queued: result.queued ?? false,
         message: result.message,
       });
-      
+
       if (result.success) {
         // Optimistic UI update -- immediately reflect in stop state
-        await recordPendingAction(
-          checkInModal.stopId as string,
-          checkInModal.type
-        );
+        await recordPendingAction(resolvedStopId as string, checkInModal.type);
 
         if (result.trackingFailed) {
           closeModal();
@@ -338,14 +359,11 @@ export default function TripDetailScreen() {
                     Linking.openSettings();
                   },
                 },
-              ]
+              ],
             );
           }, 500);
         } else {
-          Alert.alert(
-            result.queued ? 'Queued' : 'Success',
-            result.message
-          );
+          Alert.alert(result.queued ? 'Queued' : 'Success', result.message);
           closeModal();
         }
       } else {
@@ -355,7 +373,7 @@ export default function TripDetailScreen() {
       const errorMessage = error?.message || 'Unknown error';
       posthog?.capture(`${actionType}_exception`, {
         loadId: id,
-        stopId: checkInModal.stopId,
+        stopId: checkInModal.type === 'out' ? (activeCheckedInStop?._id ?? checkInModal.stopId) : checkInModal.stopId,
         error: errorMessage,
         stack: error?.stack,
       });
@@ -380,19 +398,21 @@ export default function TripDetailScreen() {
     try {
       const dateObj = dateStr ? new Date(dateStr) : null;
       const timeObj = timeStr ? new Date(timeStr) : null;
-      
+
       // Format date part (e.g., "Jan 15")
-      const datePart = dateObj && !isNaN(dateObj.getTime())
-        ? dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-        : null;
-      
+      const datePart =
+        dateObj && !isNaN(dateObj.getTime())
+          ? dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+          : null;
+
       // Format time part
-      const timePart = timeObj && !isNaN(timeObj.getTime())
-        ? timeObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-        : (dateObj && !isNaN(dateObj.getTime()) 
+      const timePart =
+        timeObj && !isNaN(timeObj.getTime())
+          ? timeObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+          : dateObj && !isNaN(dateObj.getTime())
             ? dateObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-            : null);
-      
+            : null;
+
       if (datePart && timePart) {
         return `${datePart}, ${timePart}`;
       }
@@ -412,7 +432,7 @@ export default function TripDetailScreen() {
   // Get load status display
   const getStatusDisplay = () => {
     if (!load) return { text: 'Unknown', color: colors.muted };
-    
+
     const status = load.trackingStatus || load.status;
     switch (status) {
       case 'In Transit':
@@ -474,25 +494,23 @@ export default function TripDetailScreen() {
 
   const statusDisplay = getStatusDisplay();
   const currentStopIndex = getCurrentStopIndex();
+  const activeCheckedInStop = displayStops.find((stop: any) => !!stop.checkedInAt && !stop.checkedOutAt) ?? null;
 
   return (
     <>
       <Stack.Screen options={{ headerShown: false }} />
-      
+
       <View style={[styles.container, { paddingTop: insets.top }]}>
         {/* Header */}
         <View style={styles.header}>
-          <Pressable 
-            style={styles.headerBackButton} 
-            onPress={() => router.back()}
-          >
+          <Pressable style={styles.headerBackButton} onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color={colors.foreground} />
           </Pressable>
           <Text style={styles.headerTitle}>Load Details</Text>
           <View style={styles.headerSpacer} />
         </View>
 
-        <ScrollView 
+        <ScrollView
           style={styles.scrollView}
           contentContainerStyle={[styles.scrollContent, { paddingBottom: spacing.md }]}
           showsVerticalScrollIndicator={false}
@@ -519,23 +537,28 @@ export default function TripDetailScreen() {
 
           {/* GPS Tracking Debug Banner */}
           {trackingDebug && (
-            <View style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              backgroundColor: trackingDebug.isActive ? '#064e3b' : '#1e293b',
-              paddingHorizontal: 12,
-              paddingVertical: 6,
-              borderRadius: 8,
-              marginBottom: 8,
-              gap: 8,
-            }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: trackingDebug.isActive ? '#064e3b' : '#1e293b',
+                paddingHorizontal: 12,
+                paddingVertical: 6,
+                borderRadius: 8,
+                marginBottom: 8,
+                gap: 8,
+              }}
+            >
               <Ionicons
                 name={trackingDebug.isActive ? 'radio' : 'radio-outline'}
                 size={14}
                 color={trackingDebug.isActive ? '#34d399' : '#94a3b8'}
               />
-              <Text style={{ color: '#d1d5db', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>
-                GPS {trackingDebug.isActive ? 'ON' : 'OFF'} · {trackingDebug.totalPoints} pts · {trackingDebug.unsyncedPoints} pending
+              <Text
+                style={{ color: '#d1d5db', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}
+              >
+                GPS {trackingDebug.isActive ? 'ON' : 'OFF'} · {trackingDebug.totalPoints} pts ·{' '}
+                {trackingDebug.unsyncedPoints} pending
               </Text>
             </View>
           )}
@@ -551,9 +574,7 @@ export default function TripDetailScreen() {
                 </View>
               </View>
               <View style={[styles.statusBadge, { backgroundColor: `${statusDisplay.color}20` }]}>
-                <Text style={[styles.statusBadgeText, { color: statusDisplay.color }]}>
-                  {statusDisplay.text}
-                </Text>
+                <Text style={[styles.statusBadgeText, { color: statusDisplay.color }]}>{statusDisplay.text}</Text>
               </View>
             </View>
           </View>
@@ -579,40 +600,42 @@ export default function TripDetailScreen() {
                   <View key={stop._id} style={styles.stopRow}>
                     {/* Timeline indicator */}
                     <View style={styles.timelineContainer}>
-                      <View style={[
-                        styles.timelineDot,
-                        isCompleted && styles.timelineDotCompleted,
-                        isCurrent && styles.timelineDotActive,
-                        isFuture && styles.timelineDotFuture,
-                      ]}>
+                      <View
+                        style={[
+                          styles.timelineDot,
+                          isCompleted && styles.timelineDotCompleted,
+                          isCurrent && styles.timelineDotActive,
+                          isFuture && styles.timelineDotFuture,
+                        ]}
+                      >
                         {isCurrent && <View style={styles.timelineDotRing} />}
                       </View>
-                      {!isLast && (
-                        <View style={[
-                          styles.timelineLine,
-                          isFuture && styles.timelineLineFuture,
-                        ]} />
-                      )}
+                      {!isLast && <View style={[styles.timelineLine, isFuture && styles.timelineLineFuture]} />}
                     </View>
 
                     {/* Stop content */}
                     <View style={[styles.stopContent, isFuture && styles.stopContentFuture]}>
                       <View style={styles.stopHeader}>
-                        <Text style={[
-                          styles.stopLabel,
-                          isCurrent && styles.stopLabelActive,
-                          isFuture && styles.stopLabelFuture,
-                        ]}>
-                          Stop {stop.sequenceNumber} - {isPickup ? 'Pickup' : index === stops.length - 1 ? 'Final Delivery' : 'Delivery'}
+                        <Text
+                          style={[
+                            styles.stopLabel,
+                            isCurrent && styles.stopLabelActive,
+                            isFuture && styles.stopLabelFuture,
+                          ]}
+                        >
+                          Stop {stop.sequenceNumber} -{' '}
+                          {isPickup ? 'Pickup' : index === stops.length - 1 ? 'Final Delivery' : 'Delivery'}
                         </Text>
                       </View>
 
                       <Text style={[styles.stopName, isFuture && styles.stopNameFuture]}>
                         {stop.locationName || `${stop.city}, ${stop.state}`}
                       </Text>
-                      
+
                       <Text style={[styles.stopAddress, isFuture && styles.stopAddressFuture]}>
-                        {stop.address}{stop.city ? `, ${stop.city}` : ''}{stop.state ? `, ${stop.state}` : ''} {stop.postalCode || ''}
+                        {stop.address}
+                        {stop.city ? `, ${stop.city}` : ''}
+                        {stop.state ? `, ${stop.state}` : ''} {stop.postalCode || ''}
                       </Text>
 
                       {/* Checked In/Out badges for completed stops */}
@@ -653,19 +676,13 @@ export default function TripDetailScreen() {
 
                       {/* Target time for current/future stops */}
                       {!isCompleted && (
-                        <View style={[
-                          styles.targetTimeBadge,
-                          isCurrent && styles.targetTimeBadgeActive,
-                        ]}>
-                          <Ionicons 
-                            name="time" 
-                            size={14} 
-                            color={isCurrent ? colors.secondary : colors.foregroundMuted} 
+                        <View style={[styles.targetTimeBadge, isCurrent && styles.targetTimeBadgeActive]}>
+                          <Ionicons
+                            name="time"
+                            size={14}
+                            color={isCurrent ? colors.secondary : colors.foregroundMuted}
                           />
-                          <Text style={[
-                            styles.targetTimeText,
-                            isCurrent && styles.targetTimeTextActive,
-                          ]}>
+                          <Text style={[styles.targetTimeText, isCurrent && styles.targetTimeTextActive]}>
                             Target: {formatDateTime(stop.windowBeginDate, stop.windowBeginTime) || 'TBD'}
                           </Text>
                         </View>
@@ -690,8 +707,8 @@ export default function TripDetailScreen() {
                         </Pressable>
                       )}
 
-                      {/* Check Out button for checked-in stop */}
-                      {isCheckedIn && (
+                      {/* Check Out button only for the active checked-in stop */}
+                      {isCurrent && isCheckedIn && (
                         <Pressable
                           style={({ pressed }) => [styles.checkOutButton, pressed && { opacity: 0.8 }]}
                           onPress={() => {
@@ -747,11 +764,15 @@ export default function TripDetailScreen() {
               </View>
             </View>
           )}
-
         </ScrollView>
 
         {/* Bottom Action Bar — fixed at bottom, outside ScrollView */}
-        <View style={[styles.bottomBar, { paddingBottom: insets.bottom + (Platform.OS === 'ios' ? spacing.sm : spacing.lg) }]}>
+        <View
+          style={[
+            styles.bottomBar,
+            { paddingBottom: insets.bottom + (Platform.OS === 'ios' ? spacing.sm : spacing.lg) },
+          ]}
+        >
           <Pressable
             style={({ pressed }) => [styles.menuButton, pressed && { opacity: 0.8 }]}
             onPress={() => setShowQuickActions(true)}
@@ -772,30 +793,24 @@ export default function TripDetailScreen() {
           onRequestClose={() => setShowQuickActions(false)}
         >
           <View style={styles.quickActionsOverlay}>
-            <Pressable 
-              style={styles.quickActionsBackdrop}
-              onPress={() => setShowQuickActions(false)}
-            />
+            <Pressable style={styles.quickActionsBackdrop} onPress={() => setShowQuickActions(false)} />
             <View style={styles.quickActionsSheet}>
               <View style={styles.sheetHandle} />
-              
+
               {/* Header */}
               <View style={styles.quickActionsHeader}>
                 <View>
                   <Text style={styles.quickActionsTitle}>Quick Actions</Text>
                   <Text style={styles.quickActionsSubtitle}>Available tasks for this load</Text>
                 </View>
-                <Pressable 
-                  style={styles.quickActionsCloseBtn}
-                  onPress={() => setShowQuickActions(false)}
-                >
+                <Pressable style={styles.quickActionsCloseBtn} onPress={() => setShowQuickActions(false)}>
                   <Ionicons name="close" size={18} color={colors.foregroundMuted} />
                 </Pressable>
               </View>
 
               {/* Action Grid */}
               <View style={styles.quickActionsGrid}>
-                <Pressable 
+                <Pressable
                   style={styles.quickActionItem}
                   onPress={() => {
                     setShowQuickActions(false);
@@ -811,10 +826,7 @@ export default function TripDetailScreen() {
                   <Text style={styles.quickActionLabel}>Navigate</Text>
                 </Pressable>
 
-                <Pressable 
-                  style={[styles.quickActionItem, styles.quickActionItemDisabled]}
-                  disabled={true}
-                >
+                <Pressable style={[styles.quickActionItem, styles.quickActionItemDisabled]} disabled={true}>
                   <View style={[styles.quickActionIconContainer, styles.quickActionIconContainerDisabled]}>
                     <Ionicons name="call" size={26} color={colors.foregroundMuted} />
                   </View>
@@ -828,7 +840,7 @@ export default function TripDetailScreen() {
                   <Text style={styles.quickActionLabel}>Documents</Text>
                 </Pressable>
 
-                <Pressable 
+                <Pressable
                   style={styles.quickActionItem}
                   onPress={() => {
                     setShowQuickActions(false);
@@ -849,9 +861,7 @@ export default function TripDetailScreen() {
                     <View style={[styles.quickActionRowIcon, styles.quickActionRowIconRed]}>
                       <Ionicons name="alert-circle" size={20} color={colors.destructive} />
                     </View>
-                    <Text style={[styles.quickActionRowLabel, styles.quickActionRowLabelRed]}>
-                      Report an Issue
-                    </Text>
+                    <Text style={[styles.quickActionRowLabel, styles.quickActionRowLabelRed]}>Report an Issue</Text>
                   </View>
                   <Ionicons name="arrow-forward" size={20} color={colors.destructive} />
                 </Pressable>
@@ -861,9 +871,7 @@ export default function TripDetailScreen() {
                     <View style={[styles.quickActionRowIcon, styles.quickActionRowIconOrange]}>
                       <Ionicons name="share-social" size={20} color={colors.primary} />
                     </View>
-                    <Text style={[styles.quickActionRowLabel, styles.quickActionRowLabelOrange]}>
-                      Share Status
-                    </Text>
+                    <Text style={[styles.quickActionRowLabel, styles.quickActionRowLabelOrange]}>Share Status</Text>
                   </View>
                   <Ionicons name="arrow-forward" size={20} color={colors.primary} />
                 </Pressable>
@@ -873,163 +881,166 @@ export default function TripDetailScreen() {
         </Modal>
 
         {/* Check-in/out Modal */}
-        <Modal
-          visible={checkInModal.visible}
-          animationType="slide"
-          transparent
-          onRequestClose={closeModal}
-        >
-          <KeyboardAvoidingView 
+        <Modal visible={checkInModal.visible} animationType="slide" transparent onRequestClose={closeModal}>
+          <KeyboardAvoidingView
             style={styles.modalOverlay}
             behavior="padding"
             keyboardVerticalOffset={Platform.OS === 'ios' ? -150 : -160}
           >
-            <Pressable 
+            <Pressable
               style={styles.modalBackdrop}
-              onPress={() => { Keyboard.dismiss(); closeModal(); }}
+              onPress={() => {
+                Keyboard.dismiss();
+                closeModal();
+              }}
             />
             <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-            <View style={styles.modalContent}>
-              <View style={styles.sheetHandle} />
-              
-              {/* Header */}
-              <View style={styles.modalHeader}>
-                <View style={styles.modalHeaderText}>
-                  <Text style={styles.modalTitle}>
-                    {checkInModal.type === 'in' ? 'Confirm Check-In' : 'Confirm Check-Out'}
-                  </Text>
-                  <Text style={styles.modalSubtitle}>
-                    Stop {displayStops[currentStopIndex]?.sequenceNumber}: {displayStops[currentStopIndex]?.locationName || `${displayStops[currentStopIndex]?.city}, ${displayStops[currentStopIndex]?.state}`}
-                  </Text>
-                </View>
-                <Pressable style={styles.modalCancelButton} onPress={closeModal}>
-                  <Text style={styles.modalCancelButtonText}>Cancel</Text>
-                </Pressable>
-              </View>
+              <View style={styles.modalContent}>
+                <View style={styles.sheetHandle} />
 
-              {/* Redirected Stop Toggle (check-in only) */}
-              {checkInModal.type === 'in' && (
-                <View style={styles.redirectToggleRow}>
-                  <View style={styles.redirectToggleLeft}>
-                    <Ionicons name="swap-horizontal" size={20} color={colors.secondary} />
-                    <Text style={styles.redirectToggleLabel}>
-                      Redirected {displayStops[currentStopIndex]?.stopType === 'PICKUP' ? 'Pickup' : 'Delivery'}
+                {/* Header */}
+                <View style={styles.modalHeader}>
+                  <View style={styles.modalHeaderText}>
+                    <Text style={styles.modalTitle}>
+                      {checkInModal.type === 'in' ? 'Confirm Check-In' : 'Confirm Check-Out'}
+                    </Text>
+                    <Text style={styles.modalSubtitle}>
+                      Stop {displayStops[currentStopIndex]?.sequenceNumber}:{' '}
+                      {displayStops[currentStopIndex]?.locationName ||
+                        `${displayStops[currentStopIndex]?.city}, ${displayStops[currentStopIndex]?.state}`}
                     </Text>
                   </View>
-                  <Switch
-                    value={isRedirected}
-                    onValueChange={setIsRedirected}
-                    trackColor={{ false: colors.muted, true: `${colors.secondary}80` }}
-                    thumbColor={isRedirected ? colors.secondary : colors.foregroundMuted}
-                  />
+                  <Pressable style={styles.modalCancelButton} onPress={closeModal}>
+                    <Text style={styles.modalCancelButtonText}>Cancel</Text>
+                  </Pressable>
                 </View>
-              )}
-              {isRedirected && (
-                <View style={styles.redirectBanner}>
-                  <Ionicons name="information-circle" size={16} color={colors.secondary} />
-                  <Text style={styles.redirectBannerText}>
-                    You'll check in at your current GPS location. The scheduled address is kept for records.
-                  </Text>
-                </View>
-              )}
 
-              {/* Photo Row — shows camera prompt or attached photo */}
-              {photoUri ? (
-                <View style={[styles.modalPhotoRow, { borderColor: `${colors.success}40` }]}>
-                  <Image source={{ uri: photoUri }} style={styles.modalPhotoThumbnail} />
-                  <View style={styles.modalPhotoTextContainer}>
-                    <View style={styles.modalPhotoAttachedRow}>
-                      <Ionicons name="checkmark-circle" size={18} color={colors.success} />
-                      <Text style={[styles.modalPhotoTitle, { color: colors.success }]}>Photo Attached</Text>
+                {/* Redirected Stop Toggle (check-in only) */}
+                {checkInModal.type === 'in' && (
+                  <View style={styles.redirectToggleRow}>
+                    <View style={styles.redirectToggleLeft}>
+                      <Ionicons name="swap-horizontal" size={20} color={colors.secondary} />
+                      <Text style={styles.redirectToggleLabel}>
+                        Redirected {displayStops[currentStopIndex]?.stopType === 'PICKUP' ? 'Pickup' : 'Delivery'}
+                      </Text>
                     </View>
-                    <Text style={styles.modalPhotoSubtitle}>Ready to upload with {checkInModal.type === 'in' ? 'check-in' : 'check-out'}</Text>
-                  </View>
-                  <Pressable
-                    style={({ pressed }) => [styles.modalPhotoRemoveButton, pressed && { opacity: 0.7 }]}
-                    onPress={() => setPhotoUri(null)}
-                  >
-                    <Ionicons name="close-circle" size={22} color={colors.foregroundMuted} />
-                  </Pressable>
-                </View>
-              ) : (
-                <Pressable 
-                  style={styles.modalPhotoRow}
-                  onPress={launchCamera}
-                >
-                  <View style={styles.modalPhotoIconContainer}>
-                    <Ionicons name="camera" size={24} color={colors.primary} />
-                  </View>
-                  <View style={styles.modalPhotoTextContainer}>
-                    <Text style={styles.modalPhotoTitle}>Take a Photo</Text>
-                    <Text style={styles.modalPhotoSubtitle}>
-                      {checkInModal.type === 'in' ? 'Proof of arrival or cargo status' : 'Proof of delivery'}
-                    </Text>
-                  </View>
-                  <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-                </Pressable>
-              )}
-
-              {/* Add Note Section */}
-              <View style={styles.modalNoteSection}>
-                <View style={styles.modalNoteLabelRow}>
-                  <Ionicons name="chatbubble-ellipses" size={18} color={colors.secondary} />
-                  <Text style={styles.modalNoteLabel}>Add Note or Voice Message</Text>
-                </View>
-                <View style={styles.modalNoteInputRow}>
-                  <TextInput
-                    style={styles.modalNoteInput}
-                    value={notes}
-                    onChangeText={setNotes}
-                    placeholder="Gate info or arrival details..."
-                    placeholderTextColor={colors.foregroundMuted}
-                    multiline
-                    numberOfLines={4}
-                    textAlignVertical="top"
-                    blurOnSubmit
-                    returnKeyType="done"
-                    onSubmitEditing={() => Keyboard.dismiss()}
-                  />
-                  <Pressable 
-                    style={({ pressed }) => [
-                      styles.modalNoteActionButton,
-                      notes.trim() ? styles.modalNoteSendButton : styles.modalNoteVoiceButton,
-                      pressed && { opacity: 0.7 },
-                    ]}
-                    onPress={() => Keyboard.dismiss()}
-                  >
-                    <Ionicons 
-                      name={notes.trim() ? "send" : "mic"} 
-                      size={20} 
-                      color={notes.trim() ? colors.foreground : colors.secondary} 
+                    <Switch
+                      value={isRedirected}
+                      onValueChange={setIsRedirected}
+                      trackColor={{ false: colors.muted, true: `${colors.secondary}80` }}
+                      thumbColor={isRedirected ? colors.secondary : colors.foregroundMuted}
                     />
+                  </View>
+                )}
+                {isRedirected && (
+                  <View style={styles.redirectBanner}>
+                    <Ionicons name="information-circle" size={16} color={colors.secondary} />
+                    <Text style={styles.redirectBannerText}>
+                      You'll check in at your current GPS location. The scheduled address is kept for records.
+                    </Text>
+                  </View>
+                )}
+
+                {/* Photo Row — shows camera prompt or attached photo */}
+                {photoUri ? (
+                  <View style={[styles.modalPhotoRow, { borderColor: `${colors.success}40` }]}>
+                    <Image source={{ uri: photoUri }} style={styles.modalPhotoThumbnail} />
+                    <View style={styles.modalPhotoTextContainer}>
+                      <View style={styles.modalPhotoAttachedRow}>
+                        <Ionicons name="checkmark-circle" size={18} color={colors.success} />
+                        <Text style={[styles.modalPhotoTitle, { color: colors.success }]}>Photo Attached</Text>
+                      </View>
+                      <Text style={styles.modalPhotoSubtitle}>
+                        Ready to upload with {checkInModal.type === 'in' ? 'check-in' : 'check-out'}
+                      </Text>
+                    </View>
+                    <Pressable
+                      style={({ pressed }) => [styles.modalPhotoRemoveButton, pressed && { opacity: 0.7 }]}
+                      onPress={() => setPhotoUri(null)}
+                    >
+                      <Ionicons name="close-circle" size={22} color={colors.foregroundMuted} />
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Pressable style={styles.modalPhotoRow} onPress={launchCamera}>
+                    <View style={styles.modalPhotoIconContainer}>
+                      <Ionicons name="camera" size={24} color={colors.primary} />
+                    </View>
+                    <View style={styles.modalPhotoTextContainer}>
+                      <Text style={styles.modalPhotoTitle}>Take a Photo</Text>
+                      <Text style={styles.modalPhotoSubtitle}>
+                        {checkInModal.type === 'in' ? 'Proof of arrival or cargo status' : 'Proof of delivery'}
+                      </Text>
+                    </View>
+                    <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
                   </Pressable>
+                )}
+
+                {/* Add Note Section */}
+                <View style={styles.modalNoteSection}>
+                  <View style={styles.modalNoteLabelRow}>
+                    <Ionicons name="chatbubble-ellipses" size={18} color={colors.secondary} />
+                    <Text style={styles.modalNoteLabel}>Add Note or Voice Message</Text>
+                  </View>
+                  <View style={styles.modalNoteInputRow}>
+                    <TextInput
+                      style={styles.modalNoteInput}
+                      value={notes}
+                      onChangeText={setNotes}
+                      placeholder="Gate info or arrival details..."
+                      placeholderTextColor={colors.foregroundMuted}
+                      multiline
+                      numberOfLines={4}
+                      textAlignVertical="top"
+                      blurOnSubmit
+                      returnKeyType="done"
+                      onSubmitEditing={() => Keyboard.dismiss()}
+                    />
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.modalNoteActionButton,
+                        notes.trim() ? styles.modalNoteSendButton : styles.modalNoteVoiceButton,
+                        pressed && { opacity: 0.7 },
+                      ]}
+                      onPress={() => Keyboard.dismiss()}
+                    >
+                      <Ionicons
+                        name={notes.trim() ? 'send' : 'mic'}
+                        size={20}
+                        color={notes.trim() ? colors.foreground : colors.secondary}
+                      />
+                    </Pressable>
+                  </View>
+                </View>
+
+                {/* Complete Button */}
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.modalCompleteButton,
+                    isSubmitting && styles.modalCompleteButtonDisabled,
+                    pressed && { opacity: 0.8 },
+                  ]}
+                  onPress={submitCheckIn}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? (
+                    <ActivityIndicator color={colors.primaryForeground} size="small" />
+                  ) : (
+                    <>
+                      <Ionicons name="log-in" size={22} color={colors.primaryForeground} />
+                      <Text style={styles.modalCompleteButtonText}>
+                        Complete {checkInModal.type === 'in' ? 'Check-In' : 'Check-Out'}
+                      </Text>
+                    </>
+                  )}
+                </Pressable>
+
+                {/* GPS Notice */}
+                <View style={styles.modalGpsNotice}>
+                  <Ionicons name="location" size={16} color={colors.foregroundMuted} />
+                  <Text style={styles.modalGpsNoticeText}>Location verified via GPS</Text>
                 </View>
               </View>
-
-              {/* Complete Button */}
-              <Pressable
-                style={({ pressed }) => [styles.modalCompleteButton, isSubmitting && styles.modalCompleteButtonDisabled, pressed && { opacity: 0.8 }]}
-                onPress={submitCheckIn}
-                disabled={isSubmitting}
-              >
-                {isSubmitting ? (
-                  <ActivityIndicator color={colors.primaryForeground} size="small" />
-                ) : (
-                  <>
-                    <Ionicons name="log-in" size={22} color={colors.primaryForeground} />
-                    <Text style={styles.modalCompleteButtonText}>
-                      Complete {checkInModal.type === 'in' ? 'Check-In' : 'Check-Out'}
-                    </Text>
-                  </>
-                )}
-              </Pressable>
-
-              {/* GPS Notice */}
-              <View style={styles.modalGpsNotice}>
-                <Ionicons name="location" size={16} color={colors.foregroundMuted} />
-                <Text style={styles.modalGpsNoticeText}>Location verified via GPS</Text>
-              </View>
-            </View>
             </TouchableWithoutFeedback>
           </KeyboardAvoidingView>
         </Modal>
@@ -1042,214 +1053,212 @@ export default function TripDetailScreen() {
           onRequestClose={() => setShowDetourModal(false)}
         >
           <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <View style={styles.detourModalOverlay}>
-            <Pressable
-              style={styles.detourModalBackdrop}
-              onPress={() => setShowDetourModal(false)}
-            />
-            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-            <View style={styles.detourModalSheet}>
-              <View style={styles.sheetHandle} />
+            <View style={styles.detourModalOverlay}>
+              <Pressable style={styles.detourModalBackdrop} onPress={() => setShowDetourModal(false)} />
+              <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+                <View style={styles.detourModalSheet}>
+                  <View style={styles.sheetHandle} />
 
-              {/* Header */}
-              <View style={styles.detourModalHeader}>
-                <View>
-                  <Text style={styles.detourModalTitle}>Add Detour</Text>
-                  <Text style={styles.detourModalSubtitle}>Log an unplanned stop on your route</Text>
-                </View>
-                <Pressable
-                  style={styles.detourModalCloseBtn}
-                  onPress={() => setShowDetourModal(false)}
-                >
-                  <Ionicons name="close" size={16} color={colors.foreground} />
-                </Pressable>
-              </View>
+                  {/* Header */}
+                  <View style={styles.detourModalHeader}>
+                    <View>
+                      <Text style={styles.detourModalTitle}>Add Detour</Text>
+                      <Text style={styles.detourModalSubtitle}>Log an unplanned stop on your route</Text>
+                    </View>
+                    <Pressable style={styles.detourModalCloseBtn} onPress={() => setShowDetourModal(false)}>
+                      <Ionicons name="close" size={16} color={colors.foreground} />
+                    </Pressable>
+                  </View>
 
-              {/* Reason Picker */}
-              <View style={styles.detourStopsCard}>
-                <Text style={styles.detourStopsLabel}>REASON</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginHorizontal: -spacing.sm }}>
-                  <View style={styles.detourReasonRow}>
-                    {([
-                      { key: 'FUEL', icon: 'flame-outline' as const, label: 'Fuel' },
-                      { key: 'REST', icon: 'bed-outline' as const, label: 'Rest' },
-                      { key: 'FOOD', icon: 'restaurant-outline' as const, label: 'Food' },
-                      { key: 'SCALE', icon: 'speedometer-outline' as const, label: 'Scale' },
-                      { key: 'REPAIR', icon: 'build-outline' as const, label: 'Repair' },
-                      { key: 'REDIRECT', icon: 'swap-horizontal-outline' as const, label: 'Redirect' },
-                      { key: 'CUSTOMER', icon: 'people-outline' as const, label: 'Customer' },
-                      { key: 'OTHER', icon: 'ellipsis-horizontal-outline' as const, label: 'Other' },
-                    ] as const).map((item) => (
+                  {/* Reason Picker */}
+                  <View style={styles.detourStopsCard}>
+                    <Text style={styles.detourStopsLabel}>REASON</Text>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      style={{ marginHorizontal: -spacing.sm }}
+                    >
+                      <View style={styles.detourReasonRow}>
+                        {(
+                          [
+                            { key: 'FUEL', icon: 'flame-outline' as const, label: 'Fuel' },
+                            { key: 'REST', icon: 'bed-outline' as const, label: 'Rest' },
+                            { key: 'FOOD', icon: 'restaurant-outline' as const, label: 'Food' },
+                            { key: 'SCALE', icon: 'speedometer-outline' as const, label: 'Scale' },
+                            { key: 'REPAIR', icon: 'build-outline' as const, label: 'Repair' },
+                            { key: 'REDIRECT', icon: 'swap-horizontal-outline' as const, label: 'Redirect' },
+                            { key: 'CUSTOMER', icon: 'people-outline' as const, label: 'Customer' },
+                            { key: 'OTHER', icon: 'ellipsis-horizontal-outline' as const, label: 'Other' },
+                          ] as const
+                        ).map((item) => (
+                          <Pressable
+                            key={item.key}
+                            style={[
+                              styles.detourReasonChip,
+                              detourReason === item.key && styles.detourReasonChipActive,
+                            ]}
+                            onPress={() => setDetourReason(item.key)}
+                          >
+                            <Ionicons
+                              name={item.icon}
+                              size={18}
+                              color={detourReason === item.key ? colors.primaryForeground : colors.foregroundMuted}
+                            />
+                            <Text
+                              style={[
+                                styles.detourReasonChipText,
+                                detourReason === item.key && styles.detourReasonChipTextActive,
+                              ]}
+                            >
+                              {item.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  </View>
+
+                  {/* Number of Stops Selector */}
+                  <View style={styles.detourStopsCard}>
+                    <Text style={styles.detourStopsLabel}>NUMBER OF STOPS</Text>
+                    <View style={styles.detourStopsRow}>
                       <Pressable
-                        key={item.key}
-                        style={[
-                          styles.detourReasonChip,
-                          detourReason === item.key && styles.detourReasonChipActive,
-                        ]}
-                        onPress={() => setDetourReason(item.key)}
+                        style={[styles.detourStopsButton, detourStops <= 1 && styles.detourStopsButtonDisabled]}
+                        onPress={() => setDetourStops(Math.max(1, detourStops - 1))}
+                        disabled={detourStops <= 1}
                       >
                         <Ionicons
-                          name={item.icon}
-                          size={18}
-                          color={detourReason === item.key ? colors.primaryForeground : colors.foregroundMuted}
+                          name="remove"
+                          size={24}
+                          color={detourStops <= 1 ? colors.foregroundMuted : colors.foreground}
                         />
-                        <Text style={[
-                          styles.detourReasonChipText,
-                          detourReason === item.key && styles.detourReasonChipTextActive,
-                        ]}>
-                          {item.label}
-                        </Text>
                       </Pressable>
-                    ))}
-                  </View>
-                </ScrollView>
-              </View>
 
-              {/* Number of Stops Selector */}
-              <View style={styles.detourStopsCard}>
-                <Text style={styles.detourStopsLabel}>NUMBER OF STOPS</Text>
-                <View style={styles.detourStopsRow}>
+                      <View style={styles.detourStopsCountContainer}>
+                        <Text style={styles.detourStopsCount}>{detourStops.toString().padStart(2, '0')}</Text>
+                        <Text style={styles.detourStopsTotalLabel}>STOPS</Text>
+                      </View>
+
+                      <Pressable style={styles.detourStopsButton} onPress={() => setDetourStops(detourStops + 1)}>
+                        <Ionicons name="add" size={24} color={colors.primaryForeground} />
+                      </Pressable>
+                    </View>
+                  </View>
+
+                  {/* Notes (optional) */}
+                  <TextInput
+                    style={styles.detourNotesInput}
+                    placeholder="Add notes (optional)"
+                    placeholderTextColor={colors.foregroundMuted}
+                    value={detourNotes}
+                    onChangeText={setDetourNotes}
+                    multiline
+                    numberOfLines={2}
+                    maxLength={200}
+                  />
+
+                  {/* GPS Info */}
+                  <View style={styles.detourGpsCard}>
+                    <View style={styles.detourGpsIconContainer}>
+                      <Ionicons name="locate" size={22} color={colors.primary} />
+                    </View>
+                    <View style={styles.detourGpsTextContainer}>
+                      <Text style={styles.detourGpsTitle}>GPS Auto-Logged</Text>
+                      <Text style={styles.detourGpsDescription}>
+                        Your current location and <Text style={styles.detourGpsBold}>check-in/out</Text> times will be
+                        recorded automatically.
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* Confirm Button */}
                   <Pressable
-                    style={[
-                      styles.detourStopsButton,
-                      detourStops <= 1 && styles.detourStopsButtonDisabled
+                    style={({ pressed }) => [
+                      styles.detourConfirmButton,
+                      pressed && { opacity: 0.8 },
+                      isAddingDetour && { opacity: 0.6 },
                     ]}
-                    onPress={() => setDetourStops(Math.max(1, detourStops - 1))}
-                    disabled={detourStops <= 1}
+                    disabled={isAddingDetour}
+                    onPress={async () => {
+                      setIsAddingDetour(true);
+                      try {
+                        // Get fresh GPS for the detour location
+                        const loc = await getFreshLocation();
+                        if (!driverId) {
+                          Alert.alert(
+                            'Driver Unavailable',
+                            'Could not determine the current driver. Please reopen the trip and try again.',
+                          );
+                          setIsAddingDetour(false);
+                          return;
+                        }
+                        if (!loc) {
+                          Alert.alert('GPS Unavailable', 'Could not get your current location. Please try again.');
+                          setIsAddingDetour(false);
+                          return;
+                        }
+
+                        const result = await addDetourStopsMutation({
+                          loadId: id as Id<'loadInformation'>,
+                          driverId,
+                          numberOfStops: detourStops,
+                          reason: detourReason,
+                          notes: detourNotes || undefined,
+                          latitude: loc.latitude,
+                          longitude: loc.longitude,
+                          driverTimestamp: new Date().toISOString(),
+                        });
+
+                        posthog?.capture('detour_confirmed', {
+                          loadId: id,
+                          numberOfStops: detourStops,
+                          reason: detourReason,
+                          success: result.success,
+                        });
+
+                        setShowDetourModal(false);
+
+                        if (result.success) {
+                          Alert.alert('Detour Added', result.message, [{ text: 'OK' }]);
+                        } else {
+                          Alert.alert('Error', result.message);
+                        }
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : 'Something went wrong';
+                        Alert.alert('Error', msg);
+                      } finally {
+                        setIsAddingDetour(false);
+                        setDetourStops(1);
+                        setDetourReason('FUEL');
+                        setDetourNotes('');
+                      }
+                    }}
                   >
-                    <Ionicons
-                      name="remove"
-                      size={24}
-                      color={detourStops <= 1 ? colors.foregroundMuted : colors.foreground}
-                    />
+                    {isAddingDetour ? (
+                      <ActivityIndicator color={colors.primaryForeground} size="small" />
+                    ) : (
+                      <>
+                        <Ionicons name="navigate" size={22} color={colors.primaryForeground} />
+                        <Text style={styles.detourConfirmButtonText}>Confirm Detour</Text>
+                      </>
+                    )}
                   </Pressable>
 
-                  <View style={styles.detourStopsCountContainer}>
-                    <Text style={styles.detourStopsCount}>
-                      {detourStops.toString().padStart(2, '0')}
-                    </Text>
-                    <Text style={styles.detourStopsTotalLabel}>STOPS</Text>
-                  </View>
-
+                  {/* Cancel Button */}
                   <Pressable
-                    style={styles.detourStopsButton}
-                    onPress={() => setDetourStops(detourStops + 1)}
+                    style={styles.detourCancelButton}
+                    onPress={() => {
+                      setShowDetourModal(false);
+                      setDetourStops(1);
+                      setDetourReason('FUEL');
+                      setDetourNotes('');
+                    }}
                   >
-                    <Ionicons name="add" size={24} color={colors.primaryForeground} />
+                    <Text style={styles.detourCancelButtonText}>Cancel</Text>
                   </Pressable>
                 </View>
-              </View>
-
-              {/* Notes (optional) */}
-              <TextInput
-                style={styles.detourNotesInput}
-                placeholder="Add notes (optional)"
-                placeholderTextColor={colors.foregroundMuted}
-                value={detourNotes}
-                onChangeText={setDetourNotes}
-                multiline
-                numberOfLines={2}
-                maxLength={200}
-              />
-
-              {/* GPS Info */}
-              <View style={styles.detourGpsCard}>
-                <View style={styles.detourGpsIconContainer}>
-                  <Ionicons name="locate" size={22} color={colors.primary} />
-                </View>
-                <View style={styles.detourGpsTextContainer}>
-                  <Text style={styles.detourGpsTitle}>GPS Auto-Logged</Text>
-                  <Text style={styles.detourGpsDescription}>
-                    Your current location and{' '}
-                    <Text style={styles.detourGpsBold}>check-in/out</Text> times will be recorded automatically.
-                  </Text>
-                </View>
-              </View>
-
-              {/* Confirm Button */}
-              <Pressable
-                style={({ pressed }) => [
-                  styles.detourConfirmButton,
-                  pressed && { opacity: 0.8 },
-                  isAddingDetour && { opacity: 0.6 },
-                ]}
-                disabled={isAddingDetour}
-                onPress={async () => {
-                  setIsAddingDetour(true);
-                  try {
-                    // Get fresh GPS for the detour location
-                    const loc = await getFreshLocation();
-                    if (!loc) {
-                      Alert.alert('GPS Unavailable', 'Could not get your current location. Please try again.');
-                      setIsAddingDetour(false);
-                      return;
-                    }
-
-                    const result = await addDetourStopsMutation({
-                      loadId: id as Id<'loadInformation'>,
-                      driverId,
-                      numberOfStops: detourStops,
-                      reason: detourReason,
-                      notes: detourNotes || undefined,
-                      latitude: loc.coords.latitude,
-                      longitude: loc.coords.longitude,
-                      driverTimestamp: new Date().toISOString(),
-                    });
-
-                    posthog?.capture('detour_confirmed', {
-                      loadId: id,
-                      numberOfStops: detourStops,
-                      reason: detourReason,
-                      success: result.success,
-                    });
-
-                    setShowDetourModal(false);
-
-                    if (result.success) {
-                      Alert.alert(
-                        'Detour Added',
-                        result.message,
-                        [{ text: 'OK' }]
-                      );
-                    } else {
-                      Alert.alert('Error', result.message);
-                    }
-                  } catch (err) {
-                    const msg = err instanceof Error ? err.message : 'Something went wrong';
-                    Alert.alert('Error', msg);
-                  } finally {
-                    setIsAddingDetour(false);
-                    setDetourStops(1);
-                    setDetourReason('FUEL');
-                    setDetourNotes('');
-                  }
-                }}
-              >
-                {isAddingDetour ? (
-                  <ActivityIndicator color={colors.primaryForeground} size="small" />
-                ) : (
-                  <>
-                    <Ionicons name="navigate" size={22} color={colors.primaryForeground} />
-                    <Text style={styles.detourConfirmButtonText}>Confirm Detour</Text>
-                  </>
-                )}
-              </Pressable>
-
-              {/* Cancel Button */}
-              <Pressable
-                style={styles.detourCancelButton}
-                onPress={() => {
-                  setShowDetourModal(false);
-                  setDetourStops(1);
-                  setDetourReason('FUEL');
-                  setDetourNotes('');
-                }}
-              >
-                <Text style={styles.detourCancelButtonText}>Cancel</Text>
-              </Pressable>
+              </KeyboardAvoidingView>
             </View>
-            </KeyboardAvoidingView>
-          </View>
           </TouchableWithoutFeedback>
         </Modal>
       </View>
