@@ -370,7 +370,7 @@ export const runAnalysisWithExternalData = action({
     }
 
     // 4. Run the full calculation engine (per-lane costs, HOS analysis)
-    await ctx.runAction(internal.laneAnalyzerCalculations.runFullAnalysis, {
+    await ctx.runMutation(internal.laneAnalyzerCalculations.runFullAnalysis, {
       sessionId: args.sessionId,
     });
 

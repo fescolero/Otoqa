@@ -593,7 +593,7 @@ export const getShiftsForDate = query({
 
     // Build shifts using the same engine
     const schedParsed = parseSchedulePattern(session.driverSchedulePattern, session.customScheduleOnDays, session.customScheduleOffDays);
-    const result = buildDriverShifts(shiftEntries, session.maxDeadheadMiles ?? 75, session.maxChainingLegs ?? 8, prePostHours, session.maxWaitHours ?? 3.0, schedParsed.onDays, bases, session.weeklyHosMode ?? 'flexible', false);
+    const result = buildDriverShifts(shiftEntries, session.maxDeadheadMiles ?? 75, session.maxChainingLegs ?? 8, prePostHours, session.maxWaitHours ?? 3.0, schedParsed.onDays, bases, session.weeklyHosMode ?? 'flexible');
     const dayShifts = result.dailyShifts.get(args.date) ?? [];
 
     // Map entry IDs to names for display
@@ -947,7 +947,7 @@ export const getShiftsForWeek = query({
       }
 
       // Run shift builder directly (fast — no solver, shared graph)
-      const dayShifts = buildShiftsForDay(entriesForDay, graph, maxLegs, prePostHours, maxWait, 14, bases, false, false);
+      const dayShifts = buildShiftsForDay(entriesForDay, graph, maxLegs, prePostHours, maxWait, 14, bases, false);
 
       days.push({
         date: dateStr,
