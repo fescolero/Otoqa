@@ -822,6 +822,8 @@ export const runExternalSolver = internalAction({
       constraints?: { offDutyHours: number; maxWeeklyDuty: number; maxDailyDrive: number; maxDailyDuty: number };
       hosViolations?: string[];
       allExact?: boolean;
+      minLegalDriverCount?: number;
+      recommendedDriverCount?: number;
       error?: string;
     };
 
@@ -888,6 +890,8 @@ export const runExternalSolver = internalAction({
       hosCompliant: result.hosCompliant ?? true,
       hosViolations: result.hosViolations ?? [],
       allExact: result.allExact ?? false,
+      minLegalDriverCount: result.minLegalDriverCount ?? result.driverCount,
+      recommendedDriverCount: result.recommendedDriverCount ?? result.driverCount,
       constraints: result.constraints ?? null,
       quality: {
         maxDailyDrive: Math.round(maxDailyDrive * 10) / 10,
@@ -919,6 +923,8 @@ export const storeSolverResults = internalMutation({
     hosCompliant: v.boolean(),
     hosViolations: v.array(v.string()),
     allExact: v.boolean(),
+    minLegalDriverCount: v.number(),
+    recommendedDriverCount: v.number(),
     constraints: v.any(),
     quality: v.object({
       maxDailyDrive: v.number(),
@@ -945,6 +951,8 @@ export const storeSolverResults = internalMutation({
       existing.solver = {
         status: 'success' as const,
         driverCount: args.driverCount,
+        minLegalDriverCount: args.minLegalDriverCount,
+        recommendedDriverCount: args.recommendedDriverCount,
         weeklySchedule: args.weeklySchedule,
         hosCompliant: args.hosCompliant,
         hosViolations: args.hosViolations,
@@ -956,7 +964,8 @@ export const storeSolverResults = internalMutation({
       };
 
       await ctx.db.patch(aggregateResult._id, {
-        minDriverCount: args.driverCount,
+        minDriverCount: args.minLegalDriverCount,
+        realisticDriverCount: args.recommendedDriverCount,
         hosAnalysis: JSON.stringify(existing),
       });
     }
