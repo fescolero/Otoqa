@@ -1316,10 +1316,11 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             return result
 
     # Search upward from theoretical minimum
+    # Only accept results where exact post-solve validation passes (hosCompliant=True)
     print(f"Searching for minimum drivers (starting at {theoretical_min})...")
+    best_non_compliant = None  # fallback if nothing passes exact validation
     for try_drivers in range(theoretical_min, max_lanes_day + 5):
         print(f"  Trying {try_drivers} drivers...")
-        # Use shorter time for search, longer for final
         search_time = 30 if try_drivers < max_lanes_day else 300
         result = _build_and_solve(
             try_drivers, lanes, lane_map, graph, lane_active_days,
@@ -1329,19 +1330,32 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
         )
         if result:
-            # Found minimum! Now re-solve with full time for better optimization
-            if search_time < 300:
-                print(f"  Found feasible at {try_drivers}! Re-solving with full optimization...")
-                final = _build_and_solve(
-                    try_drivers, lanes, lane_map, graph, lane_active_days,
-                    lane_pickup_min, lane_pickup_end_min, lane_finish_min,
-                    lane_drive_min, lane_duty_min, day_lane_ids, working_days,
-                    day_names_map, pre_post_h, max_legs, max_wait_h, solver_time=300, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
-                )
-                if final:
-                    return final
-            return result
+            if result.get('hosCompliant'):
+                # Fully compliant — re-solve with full time for better optimization
+                if search_time < 300:
+                    print(f"  Found compliant at {try_drivers}! Re-solving with full optimization...")
+                    final = _build_and_solve(
+                        try_drivers, lanes, lane_map, graph, lane_active_days,
+                        lane_pickup_min, lane_pickup_end_min, lane_finish_min,
+                        lane_drive_min, lane_duty_min, day_lane_ids, working_days,
+                        day_names_map, pre_post_h, max_legs, max_wait_h, solver_time=300, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
+                        max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
+                    )
+                    if final and final.get('hosCompliant'):
+                        return final
+                    # Re-solve lost compliance (CP-SAT nondeterminism), return original
+                    return result
+                return result
+            else:
+                # Feasible but not fully compliant — keep as fallback, try more drivers
+                v = result.get('hosViolations', [])
+                print(f"  {try_drivers} feasible but {len(v)} HOS violation(s), continuing search...")
+                if best_non_compliant is None:
+                    best_non_compliant = result
 
+    # Nothing fully compliant — return best non-compliant result if any
+    if best_non_compliant:
+        return best_non_compliant
     return {'success': False, 'error': 'Could not find feasible solution', 'driverCount': 0}
 
 
