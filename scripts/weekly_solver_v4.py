@@ -778,7 +778,8 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
                       lane_pickup_end_min, lane_finish_min, lane_drive_min, lane_duty_min,
                       day_lane_ids, working_days, day_names_map, pre_post_h, max_legs, max_wait_h,
-                      solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333):
+                      solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333,
+                      max_gap_hours=3.0, drive_buffer_hours=1.5):
     """Two-phase solver:
     Phase 1: Span-based weekly assignment (fast, finds minimum drivers).
     Phase 2: Exact per-day sequencing for drive/DH metrics.
@@ -877,7 +878,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             # 11h drive constraint: route drive with 1h buffer for deadhead
             # The exact drive (including deadhead) is validated in post-solve sequencing.
             # The buffer ensures the span model doesn't produce assignments right at the edge.
-            drive_buffer_min = 90  # 1.5 hour buffer for deadhead drive
+            drive_buffer_min = int(drive_buffer_hours * MINUTES)
             model.Add(sum(assign[day][lid][d] * lane_drive_min[lid] for lid in lids) <= max_drive_m - drive_buffer_min)
 
             # 14h duty window (span-based)
@@ -935,7 +936,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     # HARD: For every pair of lanes (A, B) on the same driver/day where B starts after A,
     # if the gap (B.pickup - A.finish) > max_gap, forbid them on the same driver.
     # This kills the "park driver all day" anti-pattern.
-    max_gap_min = int(3.0 * MINUTES)  # 3h max gap between any two lanes on same driver
+    max_gap_min = int(max_gap_hours * MINUTES)
     for day in working_days:
         lids = day_lane_ids[day]
         for i, lid_a in enumerate(lids):
@@ -1256,6 +1257,8 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
     max_legs = config.get('max_legs', DEFAULT_MAX_LEGS)
     max_wait_h = config.get('max_wait', 2.0)
     pre_post_h = config.get('pre_post_hours', 1.0)
+    max_gap_h = config.get('max_gap_hours', 3.0)
+    drive_buffer_h = config.get('drive_buffer_hours', 1.5)
     base_city, base_lat, base_lng = _get_base_config(config)
 
     lanes = lanes_from_json(entries)
@@ -1307,6 +1310,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             lane_pickup_min, lane_pickup_end_min, lane_finish_min,
             lane_drive_min, lane_duty_min, day_lane_ids, working_days,
             day_names_map, pre_post_h, max_legs, max_wait_h, solver_time=300, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
+            max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
         )
         if result:
             return result
@@ -1322,6 +1326,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             lane_pickup_min, lane_pickup_end_min, lane_finish_min,
             lane_drive_min, lane_duty_min, day_lane_ids, working_days,
             day_names_map, pre_post_h, max_legs, max_wait_h, solver_time=search_time, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
+            max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
         )
         if result:
             # Found minimum! Now re-solve with full time for better optimization

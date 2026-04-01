@@ -783,6 +783,8 @@ export const runExternalSolver = internalAction({
         mpg_hwy: session?.defaultMpgHighway ?? 6,
         mpg_city: session?.defaultMpgCity ?? 10,
         pre_post_hours: session?.prePostTripMinutes != null ? session.prePostTripMinutes / 60 : 1.0,
+        max_gap_hours: (session as any)?.maxGapHours ?? 3.0,
+        drive_buffer_hours: (session as any)?.driveBufferHours ?? 1.5,
         bases: data.bases,
       },
     });
@@ -818,6 +820,8 @@ export const runExternalSolver = internalAction({
         daysWorked: number;
       }>;
       constraints?: { offDutyHours: number; maxWeeklyDuty: number; maxDailyDrive: number; maxDailyDuty: number };
+      hosViolations?: string[];
+      allExact?: boolean;
       error?: string;
     };
 
@@ -827,8 +831,7 @@ export const runExternalSolver = internalAction({
 
     console.log(`Weekly solver: ${result.driverCount} drivers, HOS compliant: ${result.hosCompliant}`);
 
-    // 4. Store solver results — trim to essential data only
-    // Strip legNames (derivable from nameMap), legCount (legs.length), per-driver totals (derivable from days)
+    // 4. Store solver results — trim schedule + compute quality metrics
     const trimmedSchedule = result.weeklySchedule?.map((driver) => ({
       driverId: driver.driverId,
       days: Object.fromEntries(
@@ -847,12 +850,56 @@ export const runExternalSolver = internalAction({
       ),
     }));
 
+    // Compute quality metrics from the schedule
+    let maxDailyDrive = 0;
+    let maxDailyDuty = 0;
+    let maxDailySpan = 0;
+    let maxDailyDeadhead = 0;
+    let totalDrive = 0;
+    let totalDuty = 0;
+    let totalMiles = 0;
+    let totalDeadheadMiles = 0;
+    let driverDaysUsed = 0;
+    for (const driver of result.weeklySchedule ?? []) {
+      for (const dayData of Object.values(driver.days) as Array<{
+        driveHours: number; dutyHours: number; miles?: number; deadheadMiles?: number;
+        startTime?: number | null; endTime?: number | null;
+      }>) {
+        driverDaysUsed++;
+        if (dayData.driveHours > maxDailyDrive) maxDailyDrive = dayData.driveHours;
+        if (dayData.dutyHours > maxDailyDuty) maxDailyDuty = dayData.dutyHours;
+        const dh = dayData.deadheadMiles ?? 0;
+        if (dh > maxDailyDeadhead) maxDailyDeadhead = dh;
+        totalDrive += dayData.driveHours;
+        totalDuty += dayData.dutyHours;
+        totalMiles += dayData.miles ?? 0;
+        totalDeadheadMiles += dh;
+        if (dayData.startTime != null && dayData.endTime != null) {
+          const span = dayData.endTime - dayData.startTime;
+          if (span > maxDailySpan) maxDailySpan = span;
+        }
+      }
+    }
+
     await ctx.runMutation(internal.laneAnalyzerActions.storeSolverResults, {
       sessionId: args.sessionId,
       driverCount: result.driverCount,
       weeklySchedule: trimmedSchedule ?? [],
       hosCompliant: result.hosCompliant ?? true,
+      hosViolations: result.hosViolations ?? [],
+      allExact: result.allExact ?? false,
       constraints: result.constraints ?? null,
+      quality: {
+        maxDailyDrive: Math.round(maxDailyDrive * 10) / 10,
+        maxDailyDuty: Math.round(maxDailyDuty * 10) / 10,
+        maxDailySpan: Math.round(maxDailySpan * 10) / 10,
+        maxDailyDeadhead: Math.round(maxDailyDeadhead),
+        totalDeadheadMiles: Math.round(totalDeadheadMiles),
+        totalMiles: Math.round(totalMiles),
+        deadheadPercent: totalMiles > 0 ? Math.round(totalDeadheadMiles / totalMiles * 1000) / 10 : 0,
+        avgDriveUtilization: totalDuty > 0 ? Math.round(totalDrive / totalDuty * 100) : 0,
+        driverDaysUsed,
+      },
     });
   },
 });
@@ -870,7 +917,20 @@ export const storeSolverResults = internalMutation({
     driverCount: v.number(),
     weeklySchedule: v.array(v.any()),
     hosCompliant: v.boolean(),
+    hosViolations: v.array(v.string()),
+    allExact: v.boolean(),
     constraints: v.any(),
+    quality: v.object({
+      maxDailyDrive: v.number(),
+      maxDailyDuty: v.number(),
+      maxDailySpan: v.number(),
+      maxDailyDeadhead: v.number(),
+      totalDeadheadMiles: v.number(),
+      totalMiles: v.number(),
+      deadheadPercent: v.number(),
+      avgDriveUtilization: v.number(),
+      driverDaysUsed: v.number(),
+    }),
   },
   handler: async (ctx, args) => {
     const aggregateResult = await ctx.db
@@ -887,7 +947,10 @@ export const storeSolverResults = internalMutation({
         driverCount: args.driverCount,
         weeklySchedule: args.weeklySchedule,
         hosCompliant: args.hosCompliant,
+        hosViolations: args.hosViolations,
+        allExact: args.allExact,
         constraints: args.constraints,
+        quality: args.quality,
         source: 'weekly_solver_v4',
         solvedAt: Date.now(),
       };
