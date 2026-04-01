@@ -1036,12 +1036,90 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     model.AddBoolOr([assign[day][lid_a][d].Not(), assign[day][next_id][d].Not()]).OnlyEnforceIf(both.Not())
                     dh_penalty_terms.append(both * (int(dh_miles_val) // 5))
 
+    # 6. Operational viability penalties
+
+    # Weekly duty over target: penalize each driver's weekly duty exceeding 58h
+    # This pushes the solver toward sustainable schedules without a hard cap
+    target_weekly_min = int(58.0 * MINUTES)
+    weekly_excess_vars = []
+    for d in range(n_drivers):
+        # Reuse dd_vars if available — otherwise recompute
+        dd_list = []
+        for day in working_days:
+            if not day_lane_ids[day] or (day, d) not in driver_works_var:
+                continue
+            dw = driver_works_var[(day, d)]
+            dd = model.NewIntVar(0, max_duty_m, f'wdd_{day}_{d}')
+            model.Add(dd == shift_end_var[(day, d)] - shift_start_var[(day, d)] + pre_post_min).OnlyEnforceIf(dw)
+            model.Add(dd == 0).OnlyEnforceIf(dw.Not())
+            dd_list.append(dd)
+        if dd_list:
+            weekly_total = model.NewIntVar(0, weekly_cap, f'wt_{d}')
+            model.Add(weekly_total == sum(dd_list))
+            excess = model.NewIntVar(0, weekly_cap, f'wxs_{d}')
+            model.AddMaxEquality(excess, [weekly_total - target_weekly_min, model.NewConstant(0)])
+            weekly_excess_vars.append(excess)
+
+    # Heavy day penalty: penalize days with >12h duty span or >7 legs
+    heavy_day_vars = []
+    duty_12h_min = int(12.0 * MINUTES)
+    for day in working_days:
+        lids = day_lane_ids[day]
+        if not lids: continue
+        for d in range(n_drivers):
+            if (day, d) not in driver_works_var: continue
+            dw = driver_works_var[(day, d)]
+            ss = shift_start_var[(day, d)]
+            se = shift_end_var[(day, d)]
+            # Penalty for span > 12h
+            span_for_heavy = model.NewIntVar(0, 30 * MINUTES, f'sfh_{day}_{d}')
+            model.Add(span_for_heavy == se - ss).OnlyEnforceIf(dw)
+            model.Add(span_for_heavy == 0).OnlyEnforceIf(dw.Not())
+            heavy_excess = model.NewIntVar(0, max_duty_m, f'hxs_{day}_{d}')
+            model.AddMaxEquality(heavy_excess, [span_for_heavy - duty_12h_min, model.NewConstant(0)])
+            heavy_day_vars.append(heavy_excess)
+            # Penalty for >7 legs
+            leg_count = sum(assign[day][lid][d] for lid in lids)
+            over7 = model.NewBoolVar(f'o7_{day}_{d}')
+            model.Add(leg_count > 7).OnlyEnforceIf(over7)
+            model.Add(leg_count <= 7).OnlyEnforceIf(over7.Not())
+            heavy_day_vars.append(over7 * 60)  # 60-minute equivalent penalty
+
+    # Shift band consistency: penalize when a driver works in different time bands across the week
+    # A "band" is determined by shift_start: EARLY(<6h), MID(6-12h), LATE(12-18h), NIGHT(>18h)
+    band_penalty_vars = []
+    band_boundaries = [int(6 * MINUTES), int(12 * MINUTES), int(18 * MINUTES)]
+    for d in range(n_drivers):
+        # For each pair of days, penalize if driver's shift start is in a different band
+        driver_day_list = [(day, driver_works_var[(day, d)], shift_start_var[(day, d)])
+                           for day in working_days
+                           if day_lane_ids.get(day) and (day, d) in driver_works_var]
+        for i in range(len(driver_day_list)):
+            for j in range(i + 1, len(driver_day_list)):
+                day_i, dw_i, ss_i = driver_day_list[i]
+                day_j, dw_j, ss_j = driver_day_list[j]
+                # Both must work for band comparison to matter
+                both = model.NewBoolVar(f'bb_{day_i}_{day_j}_{d}')
+                model.AddBoolAnd([dw_i, dw_j]).OnlyEnforceIf(both)
+                model.AddBoolOr([dw_i.Not(), dw_j.Not()]).OnlyEnforceIf(both.Not())
+                # Penalize absolute difference in start times (encourages same band)
+                # Use |ss_i - ss_j| as a proxy for band mismatch
+                diff = model.NewIntVar(0, 24 * MINUTES, f'sd_{day_i}_{day_j}_{d}')
+                abs_diff_pos = model.NewIntVar(-24 * MINUTES, 24 * MINUTES, f'sdp_{day_i}_{day_j}_{d}')
+                model.Add(abs_diff_pos == ss_i - ss_j).OnlyEnforceIf(both)
+                model.Add(abs_diff_pos == 0).OnlyEnforceIf(both.Not())
+                model.AddAbsEquality(diff, abs_diff_pos)
+                band_penalty_vars.append(diff)
+
     # --- Weighted objective ---
-    PAIR_WEIGHT = 10         # reward zero-DH pairings
-    RETURN_WEIGHT = 2        # penalize far-from-base finishes
-    DH_PENALTY_WEIGHT = 3    # penalize deadhead miles
-    IDLE_WEIGHT = 1          # penalize idle time (per minute)
-    SPAN_WEIGHT = 2          # penalize span over 10h (per minute over)
+    PAIR_WEIGHT = 10           # reward zero-DH pairings
+    RETURN_WEIGHT = 2          # penalize far-from-base finishes
+    DH_PENALTY_WEIGHT = 3      # penalize deadhead miles
+    IDLE_WEIGHT = 1            # penalize idle time (per minute)
+    SPAN_WEIGHT = 2            # penalize span over 10h (per minute over)
+    WEEKLY_EXCESS_WEIGHT = 1   # penalize weekly duty over 58h (per minute over)
+    HEAVY_DAY_WEIGHT = 1       # penalize heavy days (>12h or >7 legs)
+    BAND_PENALTY_WEIGHT = 1    # penalize shift band inconsistency (per minute diff)
 
     obj_terms = []
     if reward_terms:
@@ -1054,6 +1132,12 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         obj_terms.extend(-v * IDLE_WEIGHT for v in idle_penalty_vars)
     if span_penalty_vars:
         obj_terms.extend(-v * SPAN_WEIGHT for v in span_penalty_vars)
+    if weekly_excess_vars:
+        obj_terms.extend(-v * WEEKLY_EXCESS_WEIGHT for v in weekly_excess_vars)
+    if heavy_day_vars:
+        obj_terms.extend(-v * HEAVY_DAY_WEIGHT for v in heavy_day_vars)
+    if band_penalty_vars:
+        obj_terms.extend(-v * BAND_PENALTY_WEIGHT for v in band_penalty_vars)
     if obj_terms:
         model.Maximize(sum(obj_terms))
 
@@ -1315,48 +1399,88 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
         if result:
             return result
 
-    # Search upward from theoretical minimum
-    # Only accept results where exact post-solve validation passes (hosCompliant=True)
-    print(f"Searching for minimum drivers (starting at {theoretical_min})...")
-    best_non_compliant = None  # fallback if nothing passes exact validation
+    # Helper: check operational viability of a result
+    def _is_operationally_viable(res):
+        """Check if a result meets operational viability thresholds."""
+        ws = res.get('weeklySchedule', [])
+        if not ws: return False, []
+        concerns = []
+        for dr in ws:
+            wd = sum(d['dutyHours'] for d in dr['days'].values())
+            if wd > 60:
+                concerns.append(f'D{dr["driverId"]}: {wd:.0f}h weekly (>60h)')
+            heavy_days = sum(1 for d in dr['days'].values() if d['dutyHours'] > 12 or len(d.get('legs', [])) > 7)
+            if heavy_days >= 4:
+                concerns.append(f'D{dr["driverId"]}: {heavy_days} heavy days')
+        return len(concerns) == 0, concerns
+
+    # Helper: run build_and_solve with common args
+    def _solve(nd, st=300):
+        return _build_and_solve(
+            nd, lanes, lane_map, graph, lane_active_days,
+            lane_pickup_min, lane_pickup_end_min, lane_finish_min,
+            lane_drive_min, lane_duty_min, day_lane_ids, working_days,
+            day_names_map, pre_post_h, max_legs, max_wait_h, solver_time=st,
+            base_city=base_city, base_lat=base_lat, base_lng=base_lng,
+            max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
+        )
+
+    # Phase 1: Find minimum legal (HOS-compliant) driver count
+    print(f"Searching for minimum legal drivers (starting at {theoretical_min})...")
+    min_legal_result = None
     for try_drivers in range(theoretical_min, max_lanes_day + 5):
         print(f"  Trying {try_drivers} drivers...")
         search_time = 30 if try_drivers < max_lanes_day else 300
-        result = _build_and_solve(
-            try_drivers, lanes, lane_map, graph, lane_active_days,
-            lane_pickup_min, lane_pickup_end_min, lane_finish_min,
-            lane_drive_min, lane_duty_min, day_lane_ids, working_days,
-            day_names_map, pre_post_h, max_legs, max_wait_h, solver_time=search_time, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
-            max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
-        )
-        if result:
-            if result.get('hosCompliant'):
-                # Fully compliant — re-solve with full time for better optimization
-                if search_time < 300:
-                    print(f"  Found compliant at {try_drivers}! Re-solving with full optimization...")
-                    final = _build_and_solve(
-                        try_drivers, lanes, lane_map, graph, lane_active_days,
-                        lane_pickup_min, lane_pickup_end_min, lane_finish_min,
-                        lane_drive_min, lane_duty_min, day_lane_ids, working_days,
-                        day_names_map, pre_post_h, max_legs, max_wait_h, solver_time=300, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
-                        max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
-                    )
-                    if final and final.get('hosCompliant'):
-                        return final
-                    # Re-solve lost compliance (CP-SAT nondeterminism), return original
-                    return result
+        result = _solve(try_drivers, search_time)
+        if result and result.get('hosCompliant'):
+            if search_time < 300:
+                print(f"  Found compliant at {try_drivers}! Re-solving with full optimization...")
+                final = _solve(try_drivers, 300)
+                if final and final.get('hosCompliant'):
+                    min_legal_result = final
+                else:
+                    min_legal_result = result
+            else:
+                min_legal_result = result
+            break
+
+    if not min_legal_result:
+        return {'success': False, 'error': 'Could not find feasible solution', 'driverCount': 0}
+
+    min_legal_count = min_legal_result['driverCount']
+    viable, concerns = _is_operationally_viable(min_legal_result)
+
+    if viable:
+        # Minimum legal is also operationally viable
+        min_legal_result['recommendedDriverCount'] = min_legal_count
+        min_legal_result['minLegalDriverCount'] = min_legal_count
+        print(f"  Minimum legal ({min_legal_count}) is also operationally viable!")
+        return min_legal_result
+
+    # Phase 2: Search for recommended operational count (minimum + viability)
+    print(f"\n  Minimum legal: {min_legal_count} (but not operationally viable)")
+    for c in concerns:
+        print(f"    ⚠ {c}")
+    print(f"  Searching for recommended operational count...")
+
+    for try_drivers in range(min_legal_count + 1, min_legal_count + 6):
+        print(f"  Trying {try_drivers} drivers (operational)...")
+        result = _solve(try_drivers, 300)
+        if result and result.get('hosCompliant'):
+            viable, concerns = _is_operationally_viable(result)
+            if viable:
+                print(f"  Recommended operational: {try_drivers} drivers")
+                result['recommendedDriverCount'] = try_drivers
+                result['minLegalDriverCount'] = min_legal_count
                 return result
             else:
-                # Feasible but not fully compliant — keep as fallback, try more drivers
-                v = result.get('hosViolations', [])
-                print(f"  {try_drivers} feasible but {len(v)} HOS violation(s), continuing search...")
-                if best_non_compliant is None:
-                    best_non_compliant = result
+                print(f"    {try_drivers}: still not viable — {len(concerns)} concern(s)")
 
-    # Nothing fully compliant — return best non-compliant result if any
-    if best_non_compliant:
-        return best_non_compliant
-    return {'success': False, 'error': 'Could not find feasible solution', 'driverCount': 0}
+    # If no viable count found within +5, return the minimum legal with the info
+    print(f"  Could not find viable count within +5 of minimum. Returning minimum legal.")
+    min_legal_result['recommendedDriverCount'] = min_legal_count
+    min_legal_result['minLegalDriverCount'] = min_legal_count
+    return min_legal_result
 
 
 if __name__ == '__main__':
