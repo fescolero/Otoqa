@@ -1301,3 +1301,106 @@ export const resetPaidToDraft = mutation({
     };
   },
 });
+
+export const recalculateInvoiceAmount = mutation({
+  args: {
+    invoiceId: v.id('loadInvoices'),
+  },
+  handler: async (ctx, args) => {
+    const invoice = await ctx.db.get(args.invoiceId);
+    if (!invoice) throw new Error('Invoice not found');
+
+    // Bypass isFinalized check inside enrichInvoiceWithCalculatedAmounts by temporarily treating it as DRAFT
+    const originalStatus = invoice.status;
+    const tempInvoice = { ...invoice, status: 'DRAFT' as any };
+
+    const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, tempInvoice);
+
+    if (amounts.totalAmount === 0 && invoice.totalAmount === 0) {
+      throw new Error('Contract lane is still missing or has a 0 rate.');
+    }
+
+    // Delete existing line items
+    const existingItems = await ctx.db
+      .query('invoiceLineItems')
+      .withIndex('by_invoice', (q) => q.eq('invoiceId', invoice._id))
+      .collect();
+    for (const item of existingItems) {
+      await ctx.db.delete(item._id);
+    }
+
+    // Generate new line items
+    const load = await ctx.db.get(invoice.loadId);
+    const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
+    const now = Date.now();
+
+    if (amounts.subtotal > 0 && contractLane && load) {
+      const isWildcard = (contractLane as any).tripNumber === '*';
+      const desc = isWildcard
+        ? `Extra Trips - ${(load as any).parsedHcr || 'Unknown HCR'} ${(load as any).parsedTripNumber || 'Unknown Trip'}`
+        : (contractLane as any).contractName ||
+          `${(load as any).parsedHcr || 'Unknown HCR'} - ${(load as any).parsedTripNumber || 'Unknown Trip'}`;
+
+      await ctx.db.insert('invoiceLineItems', {
+        invoiceId: invoice._id,
+        type: 'FREIGHT',
+        description: desc,
+        quantity: 1,
+        rate: amounts.subtotal,
+        amount: amounts.subtotal,
+        createdAt: now,
+      });
+    }
+
+    if (amounts.fuelSurcharge > 0 && contractLane) {
+      await ctx.db.insert('invoiceLineItems', {
+        invoiceId: invoice._id,
+        type: 'FUEL',
+        description: `Fuel Surcharge (${(contractLane as any).fuelSurchargeType || 'N/A'})`,
+        quantity: 1,
+        rate: amounts.fuelSurcharge,
+        amount: amounts.fuelSurcharge,
+        createdAt: now,
+      });
+    }
+
+    if (amounts.accessorialsTotal > 0 && load && contractLane) {
+      const includedStops = (contractLane as any).includedStops || 2;
+      const extraStops = Math.max(0, ((load as any).stopCount || 0) - includedStops);
+      await ctx.db.insert('invoiceLineItems', {
+        invoiceId: invoice._id,
+        type: 'ACCESSORIAL',
+        description: `Stop-off charges (${extraStops} extra stops)`,
+        quantity: extraStops,
+        rate: (contractLane as any).stopOffRate || 0,
+        amount: amounts.accessorialsTotal,
+        createdAt: now,
+      });
+    }
+
+    // Calculate new difference if it's PAID
+    const difference =
+      invoice.paidAmount !== undefined ? invoice.paidAmount - amounts.totalAmount : invoice.paymentDifference;
+
+    await ctx.db.patch(invoice._id, {
+      subtotal: amounts.subtotal,
+      fuelSurcharge: amounts.fuelSurcharge,
+      accessorialsTotal: amounts.accessorialsTotal,
+      taxAmount: amounts.taxAmount,
+      totalAmount: amounts.totalAmount,
+      paymentDifference: difference,
+      missingDataReason: undefined,
+      updatedAt: now,
+    });
+
+    // If it was already PAID or BILLED and previously 0, we should adjust the stats to add the new totalAmount
+    if (
+      (originalStatus === 'PAID' || originalStatus === 'BILLED') &&
+      (invoice.totalAmount === 0 || invoice.totalAmount === undefined)
+    ) {
+      await recordInvoiceFinalized(ctx, invoice.workosOrgId, amounts.totalAmount, invoice.invoiceDateNumeric ?? now);
+    }
+
+    return { success: true, newTotal: amounts.totalAmount };
+  },
+});

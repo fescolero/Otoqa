@@ -10,6 +10,9 @@ import { formatCurrency, formatNumber, formatPercent } from '@/lib/utils/format'
 import { exportToCSV } from '@/lib/csv-export';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { AlertTriangle } from 'lucide-react';
+import Link from 'next/link';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 import { ReportTableLayout } from '../shared/report-table-layout';
 import { ReportIntelligenceSidebar } from '../shared/report-intelligence-sidebar';
@@ -46,6 +49,7 @@ const QUICK_FILTERS: QuickFilter[] = [
   { label: 'All', value: 'all' },
   { label: 'Underpaid', value: 'underpaid' },
   { label: 'Overpaid', value: 'overpaid' },
+  { label: 'Missing Rate', value: 'missing-rate' },
 ];
 
 const CHART_COLORS = ['hsl(var(--chart-1))'];
@@ -60,7 +64,20 @@ const columns: ColumnDef<DiscrepancyRow, unknown>[] = [
   {
     accessorKey: 'invoiceNumber',
     header: 'Invoice #',
-    cell: ({ row }) => <span className="font-medium">{row.original.invoiceNumber ?? '-'}</span>,
+    cell: ({ row }) => {
+      const hasInvoiceNum = !!row.original.invoiceNumber;
+      return (
+        <Link
+          href={`/invoices/${row.original._id}`}
+          className={cn(
+            'hover:underline whitespace-nowrap',
+            hasInvoiceNum ? 'font-medium text-blue-600' : 'text-muted-foreground italic text-sm',
+          )}
+        >
+          {hasInvoiceNum ? row.original.invoiceNumber : 'Draft'}
+        </Link>
+      );
+    },
   },
   {
     accessorKey: 'customerName',
@@ -76,17 +93,17 @@ const columns: ColumnDef<DiscrepancyRow, unknown>[] = [
   },
   {
     accessorKey: 'effectiveMiles',
-    header: 'Eff. Miles',
+    header: () => <div className="text-right w-full">Eff. Miles</div>,
     cell: ({ row }) => <span className="text-right block">{row.original.effectiveMiles ?? '-'}</span>,
   },
   {
     accessorKey: 'paymentMiles',
-    header: 'Paid Miles',
+    header: () => <div className="text-right w-full">Paid Miles</div>,
     cell: ({ row }) => <span className="text-right block">{row.original.paymentMiles ?? '-'}</span>,
   },
   {
     accessorKey: 'milesDifference',
-    header: 'Miles Diff',
+    header: () => <div className="text-right w-full">Miles Diff</div>,
     cell: ({ row }) => {
       const value = row.original.milesDifference;
       return (
@@ -110,27 +127,54 @@ const columns: ColumnDef<DiscrepancyRow, unknown>[] = [
   {
     accessorKey: 'invoicedAmount',
     header: ({ column }) => (
-      <SortableHeader column={column} className="justify-end">
-        Invoiced
-      </SortableHeader>
+      <div className="flex justify-end w-full">
+        <SortableHeader column={column} align="right">
+          Invoiced
+        </SortableHeader>
+      </div>
     ),
-    cell: ({ row }) => <span className="text-right block">{formatCurrency(row.original.invoicedAmount)}</span>,
+    cell: ({ row }) => {
+      const isMissingRate = row.original.invoicedAmount === 0;
+      return (
+        <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+          {isMissingRate && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" />
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>Missing contract rate. Please update the invoice.</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          <span className={cn('text-right truncate', isMissingRate && 'text-amber-600 font-medium')}>
+            {formatCurrency(row.original.invoicedAmount)}
+          </span>
+        </div>
+      );
+    },
   },
   {
     accessorKey: 'paidAmount',
     header: ({ column }) => (
-      <SortableHeader column={column} className="justify-end">
-        Paid
-      </SortableHeader>
+      <div className="flex justify-end w-full">
+        <SortableHeader column={column} align="right">
+          Paid
+        </SortableHeader>
+      </div>
     ),
     cell: ({ row }) => <span className="text-right block">{formatCurrency(row.original.paidAmount)}</span>,
   },
   {
     accessorKey: 'difference',
     header: ({ column }) => (
-      <SortableHeader column={column} className="justify-end">
-        Difference
-      </SortableHeader>
+      <div className="flex justify-end w-full">
+        <SortableHeader column={column} align="right">
+          Difference
+        </SortableHeader>
+      </div>
     ),
     cell: ({ row }) => (
       <span
@@ -145,7 +189,13 @@ const columns: ColumnDef<DiscrepancyRow, unknown>[] = [
   },
   {
     accessorKey: 'percentDiff',
-    header: '% Diff',
+    header: ({ column }) => (
+      <div className="flex justify-end w-full">
+        <SortableHeader column={column} align="right">
+          % Diff
+        </SortableHeader>
+      </div>
+    ),
     cell: ({ row }) => <span className="text-right block">{formatPercent(row.original.percentDiff)}</span>,
   },
   {
@@ -181,7 +231,7 @@ export function DiscrepanciesTab({ organizationId, dateRange, searchQuery }: Tab
   const [summaryLoading, setSummaryLoading] = useState(false);
   const getDiscrepancyIntelligence = useAction(api.accountingReports.getDiscrepancyIntelligence);
   const getDiscrepancyDetailSorted = useAction(api.accountingReports.getDiscrepancyDetailSorted);
-  const direction = quickFilter === 'all' ? undefined : (quickFilter as 'underpaid' | 'overpaid');
+  const direction = quickFilter === 'all' ? undefined : (quickFilter as 'underpaid' | 'overpaid' | 'missing-rate');
 
   const sortableServerFields = new Set([
     'invoiceNumber',

@@ -283,7 +283,9 @@ export const getDiscrepancySummary = query({
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
     customerId: v.optional(v.id('customers')),
-    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+    direction: v.optional(
+      v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('missing-rate'), v.literal('all')),
+    ),
   },
   handler: async (ctx, args) => {
     const paidInvoices = await ctx.db
@@ -304,15 +306,19 @@ export const getDiscrepancySummary = query({
     }
 
     const discrepantBase = filtered.filter(
-      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+      (inv) =>
+        (inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005) ||
+        (inv.totalAmount ?? 0) === 0,
     );
 
     const discrepant =
       args.direction === 'underpaid'
-        ? discrepantBase.filter((inv) => (inv.paymentDifference ?? 0) < 0)
+        ? discrepantBase.filter((inv) => (inv.paymentDifference ?? 0) < 0 && (inv.totalAmount ?? 0) !== 0)
         : args.direction === 'overpaid'
-          ? discrepantBase.filter((inv) => (inv.paymentDifference ?? 0) > 0)
-          : discrepantBase;
+          ? discrepantBase.filter((inv) => (inv.paymentDifference ?? 0) > 0 && (inv.totalAmount ?? 0) !== 0)
+          : args.direction === 'missing-rate'
+            ? discrepantBase.filter((inv) => (inv.totalAmount ?? 0) === 0)
+            : discrepantBase;
 
     // Pure in-memory aggregation — no db.get() calls
     let totalDiscrepancy = 0;
@@ -360,7 +366,9 @@ export const getDiscrepancySummaryPage = internalQuery({
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
     customerId: v.optional(v.id('customers')),
-    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+    direction: v.optional(
+      v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('missing-rate'), v.literal('all')),
+    ),
   },
   handler: async (ctx, args) => {
     const results = await ctx.db
@@ -377,7 +385,9 @@ export const getDiscrepancySummaryPage = internalQuery({
       .paginate(args.paginationOpts);
 
     const discrepantBase = results.page.filter(
-      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+      (inv) =>
+        (inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005) ||
+        (inv.totalAmount ?? 0) === 0,
     );
 
     let filtered = args.customerId
@@ -385,9 +395,11 @@ export const getDiscrepancySummaryPage = internalQuery({
       : discrepantBase;
 
     if (args.direction === 'underpaid') {
-      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) < 0);
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) < 0 && (inv.totalAmount ?? 0) !== 0);
     } else if (args.direction === 'overpaid') {
-      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) > 0);
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) > 0 && (inv.totalAmount ?? 0) !== 0);
+    } else if (args.direction === 'missing-rate') {
+      filtered = filtered.filter((inv) => (inv.totalAmount ?? 0) === 0);
     }
 
     return {
@@ -407,7 +419,9 @@ export const getDiscrepancyIntelligence = action({
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
     customerId: v.optional(v.id('customers')),
-    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+    direction: v.optional(
+      v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('missing-rate'), v.literal('all')),
+    ),
   },
   handler: async (ctx, args) => {
     let cursor: string | null = null;
@@ -552,7 +566,9 @@ export const getDiscrepancyDetailSorted = action({
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
     customerId: v.optional(v.id('customers')),
-    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+    direction: v.optional(
+      v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('missing-rate'), v.literal('all')),
+    ),
     limit: v.number(),
     sortBy: v.optional(
       v.union(
@@ -708,7 +724,9 @@ export const getDiscrepancyDetail = query({
     dateRangeStart: v.optional(v.number()),
     dateRangeEnd: v.optional(v.number()),
     customerId: v.optional(v.id('customers')),
-    direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
+    direction: v.optional(
+      v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('missing-rate'), v.literal('all')),
+    ),
   },
   handler: async (ctx, args) => {
     const results = await ctx.db
@@ -726,7 +744,9 @@ export const getDiscrepancyDetail = query({
 
     // Filter page to only discrepancies
     const discrepantPage = results.page.filter(
-      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+      (inv) =>
+        (inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005) ||
+        (inv.totalAmount ?? 0) === 0,
     );
 
     // Apply customer filter
@@ -735,9 +755,11 @@ export const getDiscrepancyDetail = query({
       : discrepantPage;
 
     if (args.direction === 'underpaid') {
-      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) < 0);
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) < 0 && (inv.totalAmount ?? 0) !== 0);
     } else if (args.direction === 'overpaid') {
-      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) > 0);
+      filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) > 0 && (inv.totalAmount ?? 0) !== 0);
+    } else if (args.direction === 'missing-rate') {
+      filtered = filtered.filter((inv) => (inv.totalAmount ?? 0) === 0);
     }
 
     // Batch-fetch customers and loads for this page

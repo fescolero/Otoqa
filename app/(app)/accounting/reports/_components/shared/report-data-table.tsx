@@ -104,17 +104,19 @@ export function SortableHeader({
   column,
   children,
   className,
+  align = 'left',
 }: {
   column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | 'asc' | 'desc' };
   children: React.ReactNode;
   className?: string;
+  align?: 'left' | 'right';
 }) {
   const sorted = column.getIsSorted();
   return (
     <Button
       variant="ghost"
       size="sm"
-      className={cn('-ml-3 h-8 data-[state=open]:bg-accent', className)}
+      className={cn('h-8 data-[state=open]:bg-accent', align === 'right' ? '-mr-3' : '-ml-3', className)}
       onClick={() => column.toggleSorting(sorted === 'asc')}
     >
       {children}

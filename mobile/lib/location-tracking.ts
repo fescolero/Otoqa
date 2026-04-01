@@ -526,34 +526,38 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
       if (unsynced.length > 0) {
         syncAttempted = true;
-        const payload = unsynced.map((loc) => ({
-          driverId: loc.driverId as Id<'drivers'>,
-          loadId: loc.loadId as Id<'loadInformation'>,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-          accuracy: loc.accuracy ?? undefined,
-          speed: loc.speed ?? undefined,
-          heading: loc.heading ?? undefined,
-          trackingType: 'LOAD_ROUTE' as const,
-          recordedAt: loc.recordedAt,
-        }));
-
-        const result = await syncViaHttpEndpoint(payload, state.organizationId);
-        syncSuccess = true;
-        syncCount = result.inserted;
-
-        if (result.inserted > 0) {
-          // Only mark synced if the server actually accepted points.
-          // If inserted === 0, the server rejected everything (org mismatch,
-          // driver deleted, etc.) — retaining as unsynced lets us retry later
-          // or investigate why points are rejected.
-          await markAsSynced(unsynced.map((r) => r.id));
-          console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
-        } else {
-          console.warn(
-            `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
-          );
-          trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+        // Group by each record's stored organizationId to avoid org-mismatch
+        // rejections when records were written during a session with a different org.
+        const byOrg = new Map<string, typeof unsynced>();
+        for (const loc of unsynced) {
+          const orgId = loc.organizationId || state.organizationId;
+          if (!byOrg.has(orgId)) byOrg.set(orgId, []);
+          byOrg.get(orgId)!.push(loc);
+        }
+        for (const [orgId, orgLocs] of byOrg) {
+          const payload = orgLocs.map((loc) => ({
+            driverId: loc.driverId as Id<'drivers'>,
+            loadId: loc.loadId as Id<'loadInformation'>,
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            accuracy: loc.accuracy ?? undefined,
+            speed: loc.speed ?? undefined,
+            heading: loc.heading ?? undefined,
+            trackingType: 'LOAD_ROUTE' as const,
+            recordedAt: loc.recordedAt,
+          }));
+          const result = await syncViaHttpEndpoint(payload, orgId);
+          syncSuccess = true;
+          syncCount += result.inserted;
+          if (result.inserted > 0) {
+            await markAsSynced(orgLocs.map((r) => r.id));
+            console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted for org ${orgId.substring(0, 8)}..., ${orgLocs.length} marked synced`);
+          } else {
+            console.warn(
+              `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${orgLocs.length} points (org ${orgId.substring(0, 8)}...) — NOT marking synced (will retry)`,
+            );
+            trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${orgLocs.length}` });
+          }
         }
       }
     } catch (flushError) {
@@ -1350,52 +1354,65 @@ async function syncUnsyncedToConvex(
       `[LocationTracking] Syncing ${unsynced.length} unsynced points to Convex (orgId=${organizationId.substring(0, 12)}..., attempt=${retryAttempt})`,
     );
 
-    const locations = unsynced.map((loc) => ({
-      driverId: loc.driverId as Id<'drivers'>,
-      loadId: loc.loadId as Id<'loadInformation'>,
-      latitude: loc.latitude,
-      longitude: loc.longitude,
-      accuracy: loc.accuracy ?? undefined,
-      speed: loc.speed ?? undefined,
-      heading: loc.heading ?? undefined,
-      trackingType: 'LOAD_ROUTE' as const,
-      recordedAt: loc.recordedAt,
-    }));
+    // Group by each record's stored organizationId so cross-session records
+    // don't get rejected when the current org differs from the stored org.
+    const byOrg = new Map<string, typeof unsynced>();
+    for (const loc of unsynced) {
+      const orgId = loc.organizationId || organizationId;
+      if (!byOrg.has(orgId)) byOrg.set(orgId, []);
+      byOrg.get(orgId)!.push(loc);
+    }
 
-    const result = await authedMutation<{ inserted: number }>(api.driverLocations.batchInsertLocations, {
-      locations,
-      organizationId,
-    });
+    let totalInserted = 0;
+    for (const [orgId, orgLocs] of byOrg) {
+      const locations = orgLocs.map((loc) => ({
+        driverId: loc.driverId as Id<'drivers'>,
+        loadId: loc.loadId as Id<'loadInformation'>,
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy: loc.accuracy ?? undefined,
+        speed: loc.speed ?? undefined,
+        heading: loc.heading ?? undefined,
+        trackingType: 'LOAD_ROUTE' as const,
+        recordedAt: loc.recordedAt,
+      }));
 
-    const syncedIds = unsynced.map((r) => r.id);
+      const result = await authedMutation<{ inserted: number }>(api.driverLocations.batchInsertLocations, {
+        locations,
+        organizationId: orgId,
+      });
 
-    if (result.inserted > 0) {
-      // Only mark synced if the server actually accepted some/all points.
-      // This prevents permanent data loss when the server rejects everything
-      // (e.g. org mismatch, deleted driver, missing load).
-      await markAsSynced(syncedIds);
-      console.log(`[LocationTracking] Synced ${result.inserted} locations, marked ${syncedIds.length} rows`);
+      const syncedIds = orgLocs.map((r) => r.id);
+      totalInserted += result.inserted;
 
-      if (result.inserted < syncedIds.length) {
+      if (result.inserted > 0) {
+        // Only mark synced if the server actually accepted some/all points.
+        // This prevents permanent data loss when the server rejects everything
+        // (e.g. org mismatch, deleted driver, missing load).
+        await markAsSynced(syncedIds);
+        console.log(`[LocationTracking] Synced ${result.inserted} locations for org ${orgId.substring(0, 8)}..., marked ${syncedIds.length} rows`);
+
+        if (result.inserted < syncedIds.length) {
+          console.warn(
+            `[LocationTracking] Server accepted ${result.inserted}/${syncedIds.length} — some points may have been rejected (org mismatch or invalid driver/load)`,
+          );
+        }
+      } else {
         console.warn(
-          `[LocationTracking] Server accepted ${result.inserted}/${syncedIds.length} — some points may have been rejected (org mismatch or invalid driver/load)`,
+          `[LocationTracking] Server rejected all ${syncedIds.length} points for org ${orgId.substring(0, 8)}... (inserted=0) — NOT marking synced, will retry`,
         );
+        trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
       }
-    } else {
-      console.warn(
-        `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — NOT marking synced, will retry`,
-      );
-      trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
     }
 
     const remaining = await getUnsyncedCount();
     if (remaining > 0) {
       console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
       const nextResult = await syncUnsyncedToConvex(organizationId);
-      return { success: true, synced: result.inserted + nextResult.synced };
+      return { success: true, synced: totalInserted + nextResult.synced };
     }
 
-    return { success: true, synced: result.inserted };
+    return { success: true, synced: totalInserted };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     const isAuthError =

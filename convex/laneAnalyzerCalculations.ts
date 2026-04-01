@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
-import { internalMutation, internalQuery } from './_generated/server';
+import { internalMutation, internalQuery, internalAction } from './_generated/server';
+import { internal } from './_generated/api';
 import { getFederalHolidaysForYear } from './holidays';
 import { Doc, Id } from './_generated/dataModel';
 
@@ -814,7 +815,6 @@ function canAddLeg(
  * 5. A lane is only chained if it's genuinely efficient — otherwise
  *    it becomes a separate shift for a different driver
  */
-/** Minimum duty hours before a shift is considered "underutilized" and eligible for merging */
 const MIN_EFFICIENT_DUTY_HOURS = 8.0;
 
 // ---- SHIFT STATE for the optimizer ----
@@ -895,7 +895,288 @@ interface BaseLocation {
 /** Max distance (miles) the last leg's destination can be from the base for return-to-base check */
 const MAX_RETURN_TO_BASE_MILES = 80;
 
-function buildShiftsForDay(
+/** Get the finish time for a lane (delivery end or computed arrival) */
+function getFinishTime(entry: ShiftBuilderEntry): number | null {
+  const deliveryEnd = entry.destScheduledEndTime
+    ? parseTimeToHours(entry.destScheduledEndTime)
+    : (entry.destScheduledTime ? parseTimeToHours(entry.destScheduledTime) : null);
+  const pickup = entry.originScheduledTime ? parseTimeToHours(entry.originScheduledTime) : null;
+  const dwell = entry.hosAnalysis.dwellTimeTotal ?? 0;
+  const computed = pickup !== null ? pickup + dwell + entry.routeDurationHours : null;
+  if (deliveryEnd !== null && computed !== null) return Math.max(deliveryEnd, computed);
+  return deliveryEnd ?? computed;
+}
+
+// =====================================================================
+// SET-COVER SOLVER — finds the mathematically optimal shift assignment
+// =====================================================================
+
+/**
+ * Generate all valid shift templates using DFS.
+ * A "shift template" is a sequence of lane IDs that respects:
+ * - HOS limits (11h drive / 14h duty)
+ * - Timing (each leg starts after the previous finishes + deadhead)
+ * - Geography (graph edges between consecutive legs)
+ * - Max legs per shift
+ * - Max wait between legs
+ */
+function generateShiftTemplates(
+  lanes: ShiftBuilderEntry[],
+  graph: Map<string, LaneEdge[]>,
+  maxLegs: number,
+  prePostTripHours: number,
+  maxWaitHours: number,
+  timeLimitMs: number = 500, // hard time limit for DFS
+): string[][] {
+  const templates: string[][] = [];
+  const startTime = Date.now();
+  const laneMap = new Map(lanes.map((l) => [l.id, l]));
+
+  // Sort lanes by pickup time
+  const sorted = [...lanes].sort((a, b) => {
+    const aT = a.originScheduledTime ? (parseTimeToHours(a.originScheduledTime) ?? 99) : 99;
+    const bT = b.originScheduledTime ? (parseTimeToHours(b.originScheduledTime) ?? 99) : 99;
+    return aT - bT;
+  });
+
+  // DFS from each lane as a potential shift start
+  for (const startLane of sorted) {
+    if (Date.now() - startTime > timeLimitMs) break;
+
+    // Each shift template starts with this lane
+    const stack: Array<{
+      legs: string[];
+      drive: number;
+      duty: number;
+      clock: number | null;
+      lastId: string;
+    }> = [];
+
+    const startDwell = startLane.hosAnalysis.dwellTimeTotal ?? 0;
+    const startClock = getFinishTime(startLane);
+
+    stack.push({
+      legs: [startLane.id],
+      drive: startLane.routeDurationHours,
+      duty: startLane.routeDurationHours + startDwell + prePostTripHours,
+      clock: startClock,
+      lastId: startLane.id,
+    });
+
+    while (stack.length > 0) {
+      if (Date.now() - startTime > timeLimitMs) break;
+
+      const current = stack.pop()!;
+
+      // This is a valid template (even with 1 leg)
+      templates.push([...current.legs]);
+
+      // Try extending with each reachable lane
+      if (current.legs.length >= maxLegs) continue;
+
+      const edges = graph.get(current.lastId) ?? [];
+      for (const edge of edges) {
+        const nextLane = laneMap.get(edge.toId);
+        if (!nextLane) continue;
+        if (current.legs.includes(edge.toId)) continue; // no duplicates
+
+        // Time check
+        const nextPickup = nextLane.originScheduledTime
+          ? parseTimeToHours(nextLane.originScheduledTime) : null;
+        const nextPickupEnd = nextLane.originScheduledEndTime
+          ? parseTimeToHours(nextLane.originScheduledEndTime)
+          : (nextPickup !== null ? nextPickup + 0.25 : null);
+
+        let wait = 0;
+        if (current.clock !== null && nextPickup !== null) {
+          const arrival = current.clock + edge.deadheadDriveHours;
+          if (arrival > (nextPickupEnd ?? nextPickup) + 0.25) continue; // too late
+          if (nextPickup < current.clock - 0.25) continue; // starts before we finish
+          wait = Math.max(0, nextPickup - arrival);
+          if (wait > maxWaitHours) continue;
+        }
+
+        // HOS check
+        const newDrive = current.drive + nextLane.routeDurationHours + edge.deadheadDriveHours;
+        const nextDwell = nextLane.hosAnalysis.dwellTimeTotal ?? 0;
+        const newDuty = current.duty + nextLane.routeDurationHours + nextDwell + edge.deadheadDriveHours + wait;
+
+        if (newDrive > HOS.MAX_DRIVE_SOLO) continue;
+        if (newDuty > HOS.MAX_DUTY_SOLO) continue;
+
+        const nextClock = getFinishTime(nextLane);
+
+        stack.push({
+          legs: [...current.legs, edge.toId],
+          drive: newDrive,
+          duty: newDuty,
+          clock: nextClock,
+          lastId: edge.toId,
+        });
+      }
+    }
+  }
+
+  return templates;
+}
+
+/**
+ * Solve minimum set cover: find fewest shift templates that cover all lanes.
+ * Uses greedy set cover with backtracking for small improvements.
+ */
+function solveMinimumSetCover(
+  allLaneIds: Set<string>,
+  templates: string[][],
+  timeLimitMs: number = 200,
+): string[][] | null {
+  const startTime = Date.now();
+
+  // Pre-filter: only keep templates with 2+ legs (single-leg templates are last resort)
+  const multiLegTemplates = templates.filter((t) => t.length >= 2);
+  const singleLegTemplates = templates.filter((t) => t.length === 1);
+
+  // Sort templates by length descending (greedy: biggest coverage first)
+  multiLegTemplates.sort((a, b) => b.length - a.length);
+
+  // Greedy set cover
+  const uncovered = new Set(allLaneIds);
+  const selected: string[][] = [];
+
+  while (uncovered.size > 0) {
+    if (Date.now() - startTime > timeLimitMs) return null; // timeout
+
+    // Find the template that covers the most uncovered lanes
+    let bestTemplate: string[] | null = null;
+    let bestCoverage = 0;
+
+    for (const template of multiLegTemplates) {
+      let coverage = 0;
+      let valid = true;
+      for (const laneId of template) {
+        if (uncovered.has(laneId)) {
+          coverage++;
+        } else {
+          valid = false; // lane already covered by another shift
+        }
+      }
+      // Template must ONLY contain uncovered lanes (no overlap)
+      if (valid && coverage > bestCoverage) {
+        bestCoverage = coverage;
+        bestTemplate = template;
+      }
+    }
+
+    if (!bestTemplate) {
+      // No multi-leg template fits — use single-leg for remaining
+      for (const laneId of uncovered) {
+        const single = singleLegTemplates.find((t) => t[0] === laneId);
+        if (single) {
+          selected.push(single);
+          uncovered.delete(laneId);
+        }
+      }
+      break;
+    }
+
+    selected.push(bestTemplate);
+    for (const laneId of bestTemplate) {
+      uncovered.delete(laneId);
+    }
+  }
+
+  if (uncovered.size > 0) return null; // couldn't cover all lanes
+  return selected;
+}
+
+/**
+ * Build shifts using the set-cover solver.
+ * Falls back to greedy if solver can't find a solution in time.
+ */
+function buildShiftsForDaySetCover(
+  lanes: ShiftBuilderEntry[],
+  graph: Map<string, LaneEdge[]>,
+  maxLegs: number,
+  prePostTripHours: number,
+  maxWaitHours: number,
+  bases: BaseLocation[],
+): DriverShift[] | null {
+  if (lanes.length === 0) return [];
+  const laneMap = new Map(lanes.map((l) => [l.id, l]));
+
+  // Step 1: Generate valid shift templates
+  const templates = generateShiftTemplates(lanes, graph, maxLegs, prePostTripHours, maxWaitHours, 400);
+
+  if (templates.length === 0) return null;
+
+  // Step 2: Solve minimum set cover
+  const allLaneIds = new Set(lanes.map((l) => l.id));
+  const solution = solveMinimumSetCover(allLaneIds, templates, 200);
+
+  if (!solution) return null;
+
+  // Step 3: Convert solution to DriverShift[]
+  const shifts: DriverShift[] = solution.map((template) => {
+    let totalDrive = 0;
+    let totalDuty = prePostTripHours;
+    let totalMiles = 0;
+    let totalDH = 0;
+
+    for (let i = 0; i < template.length; i++) {
+      const lane = laneMap.get(template[i])!;
+      totalDrive += lane.routeDurationHours;
+      totalDuty += lane.hosAnalysis.dutyTimePerRun;
+      totalMiles += lane.routeMiles;
+
+      if (i > 0) {
+        const edge = (graph.get(template[i - 1]) ?? []).find((e) => e.toId === template[i]);
+        if (edge) {
+          totalDrive += edge.deadheadDriveHours;
+          totalDuty += edge.deadheadDriveHours;
+          totalMiles += edge.deadheadMiles;
+          totalDH += edge.deadheadMiles;
+        }
+        // Wait time
+        const prevLane = laneMap.get(template[i - 1])!;
+        const prevFinish = getFinishTime(prevLane);
+        const curPickup = lane.originScheduledTime ? parseTimeToHours(lane.originScheduledTime) : null;
+        if (prevFinish !== null && curPickup !== null) {
+          const wait = Math.max(0, curPickup - prevFinish - (edge?.deadheadDriveHours ?? 0));
+          totalDuty += wait;
+        }
+      }
+    }
+
+    // Assign base
+    const firstLane = laneMap.get(template[0])!;
+    const base = findNearestBaseByCity(firstLane.originCity, firstLane.originState, bases);
+
+    const shift: DriverShift = {
+      legs: template,
+      totalDriveHours: Math.round(totalDrive * 10) / 10,
+      totalDutyHours: Math.round(totalDuty * 10) / 10,
+      totalMiles: Math.round(totalMiles),
+      totalDeadheadMiles: Math.round(totalDH),
+      baseName: base?.base.name ?? null,
+    };
+
+    return shift;
+  });
+
+  // Sort by first leg pickup time
+  shifts.sort((a, b) => {
+    const aLane = laneMap.get(a.legs[0]);
+    const bLane = laneMap.get(b.legs[0]);
+    const aT = aLane?.originScheduledTime ? (parseTimeToHours(aLane.originScheduledTime) ?? 99) : 99;
+    const bT = bLane?.originScheduledTime ? (parseTimeToHours(bLane.originScheduledTime) ?? 99) : 99;
+    return aT - bT;
+  });
+
+  return shifts;
+}
+
+// =====================================================================
+
+export function buildShiftsForDay(
   lanesRunningToday: ShiftBuilderEntry[],
   graph: Map<string, LaneEdge[]>,
   maxLegs: number,
@@ -904,65 +1185,42 @@ function buildShiftsForDay(
   weeklyDutyCeiling: number = 14,
   bases: BaseLocation[] = [],
   multiSeed: boolean = false,
+  useSolver: boolean = true,
 ): DriverShift[] {
   if (lanesRunningToday.length === 0) return [];
 
+  // Try set-cover solver first (optimal solution) — skip for fast/display queries
+  let setCoverResult: DriverShift[] | null = null;
+  if (useSolver) {
+    setCoverResult = buildShiftsForDaySetCover(
+      lanesRunningToday, graph, maxLegs, prePostTripHours, maxWaitHours, bases,
+    );
+  }
+
+  // Also run greedy engine for comparison
   const sorted = [...lanesRunningToday].sort((a, b) => {
     const aTime = a.originScheduledTime ? (parseTimeToHours(a.originScheduledTime) ?? 99) : 99;
     const bTime = b.originScheduledTime ? (parseTimeToHours(b.originScheduledTime) ?? 99) : 99;
     return aTime - bTime;
   });
 
-  // Fast path: single seed (used for most days in the year)
-  if (!multiSeed || lanesRunningToday.length <= 4) {
-    return _buildShiftsForDaySingleSeed(
-      lanesRunningToday, sorted, sorted[0], graph, maxLegs, prePostTripHours,
-      maxWaitHours, weeklyDutyCeiling, bases,
-    );
+  // Greedy engine (fallback)
+  const greedyResult = _buildShiftsForDaySingleSeed(
+    lanesRunningToday, sorted, sorted[0], graph, maxLegs, prePostTripHours,
+    maxWaitHours, weeklyDutyCeiling, bases,
+  );
+
+  // Pick the better result: fewer shifts wins
+  if (setCoverResult && setCoverResult.length < greedyResult.length) {
+    return setCoverResult;
   }
-
-  // Multi-seed optimization: only for peak days
-  // Try different starting lanes and pick the result with fewest drivers
-  const seedCandidates: ShiftBuilderEntry[] = [sorted[0]];
-  const seen = new Set<string>([sorted[0].id]);
-
-  // Add middle, last, and evenly spaced
-  const indices = [
-    Math.floor(sorted.length / 4),
-    Math.floor(sorted.length / 2),
-    Math.floor(sorted.length * 3 / 4),
-    sorted.length - 1,
-  ];
-  for (const idx of indices) {
-    if (idx > 0 && idx < sorted.length && !seen.has(sorted[idx].id)) {
-      seedCandidates.push(sorted[idx]);
-      seen.add(sorted[idx].id);
-    }
-    if (seedCandidates.length >= 5) break;
-  }
-
-  let bestResult: DriverShift[] | null = null;
-  let bestDriverCount = Infinity;
-
-  for (const seed of seedCandidates) {
-    const result = _buildShiftsForDaySingleSeed(
-      lanesRunningToday, sorted, seed, graph, maxLegs, prePostTripHours,
-      maxWaitHours, weeklyDutyCeiling, bases,
-    );
-    if (result.length < bestDriverCount) {
-      bestDriverCount = result.length;
-      bestResult = result;
-    }
-    if (bestDriverCount <= Math.ceil(lanesRunningToday.length / maxLegs)) break;
-  }
-
-  return bestResult ?? [];
+  return greedyResult;
 }
 
 function _buildShiftsForDaySingleSeed(
   lanesRunningToday: ShiftBuilderEntry[],
   sorted: ShiftBuilderEntry[],
-  seedLane: ShiftBuilderEntry,
+  seedLaneArg: ShiftBuilderEntry,
   graph: Map<string, LaneEdge[]>,
   maxLegs: number,
   prePostTripHours: number,
@@ -975,7 +1233,7 @@ function _buildShiftsForDaySingleSeed(
   const openShifts: ShiftState[] = [];
 
   // Seed with the given starting lane
-  const firstLane = seedLane;
+  const firstLane = seedLaneArg;
   assigned.add(firstLane.id);
   const pickupTime = firstLane.originScheduledTime ? parseTimeToHours(firstLane.originScheduledTime) : null;
   const dwell = firstLane.hosAnalysis.dwellTimeTotal ?? 0;
@@ -1049,9 +1307,11 @@ function _buildShiftsForDaySingleSeed(
         const s = openShifts[si];
         if (s.shift.legs.length >= maxLegs) continue;
 
+
         const edges = graph.get(s.lastLaneId) ?? [];
         const edge = edges.find((e) => e.toId === lane.id);
         if (!edge) continue; // not geographically connected
+
 
         // Calculate return-to-base hours if this leg were the last one
         const candidateReturnHours = (s.baseLat != null || s.baseCity != null)
@@ -1061,11 +1321,9 @@ function _buildShiftsForDaySingleSeed(
             )
           : 0;
 
-        // Adaptive wait: allow longer waits for underutilized shifts
-        // A shift with 3h duty has 11h remaining — it can afford a long wait
-        // A shift with 12h duty should NOT wait long — it's nearly full
+        // Adaptive wait: allow slightly longer waits for underutilized shifts
         const effectiveMaxWait = s.shift.totalDutyHours < MIN_EFFICIENT_DUTY_HOURS
-          ? Math.max(maxWaitHours, 5.0) // underutilized: up to 5h wait
+          ? Math.max(maxWaitHours, 1.5) // underutilized: up to 1.5h wait
           : maxWaitHours;
 
         const result = canAddLeg(
@@ -1204,11 +1462,10 @@ function _buildShiftsForDaySingleSeed(
     }
   }
 
-  // ---- PASS 2: Aggressively consolidate underutilized shifts ----
-  // Uses relaxed wait time (up to 6h) for merging — it's cheaper to have
-  // one driver wait than to hire a second driver for a single run.
-  // Tries BOTH directions: donor-after-receiver AND donor-before-receiver.
-  const MERGE_MAX_WAIT = Math.max(maxWaitHours, 6.0); // at least 6h for consolidation
+  // ---- PASS 2: Consolidate underutilized shifts ----
+  // Allow slightly more wait than the main engine for merging (up to 1.5h)
+  // to avoid creating unnecessary single-leg shifts.
+  const MERGE_MAX_WAIT = Math.max(maxWaitHours, 1.5);
 
   const mergedIndices = new Set<number>();
 
@@ -1559,9 +1816,192 @@ function _buildShiftsForDaySingleSeed(
       return aTime - bTime;
     });
 
-  return finalShifts;
+  // ---- POST-PROCESS: Cascade split-merge to reduce driver count ----
+  // 1. Find single-leg straggler
+  // 2. Walk backward to find its predecessor chain on the donor shift
+  // 3. Split: extract predecessors from donor, form new shift with predecessors + straggler
+  // 4. Merge: the shortened donor now has HOS slack — try to absorb another short shift
+  // 5. Net effect: straggler eliminated + one short shift merged = -1 driver
+
+  const singleLegShifts = finalShifts.filter((s) => s.legs.length === 1);
+
+  for (const straggler of singleLegShifts) {
+    const stragglerLane = laneMap.get(straggler.legs[0]);
+    if (!stragglerLane) continue;
+    const corridorCities = new Set([
+      stragglerLane.originCity.toLowerCase(),
+      stragglerLane.destCity.toLowerCase(),
+    ]);
+
+    // Step 1: Walk backward from straggler to find predecessor chain
+    const backwardChain: { laneId: string; donorShiftIdx: number }[] = [];
+    let targetId = straggler.legs[0];
+
+    for (let depth = 0; depth < 3; depth++) {
+      let found = false;
+      for (let si = 0; si < finalShifts.length; si++) {
+        const shift = finalShifts[si];
+        if (shift === straggler || shift.legs.length <= 1) continue;
+
+        // Only check last (depth+1) legs of the shift
+        for (let li = shift.legs.length - 1; li >= Math.max(0, shift.legs.length - depth - 1); li--) {
+          const legId = shift.legs[li];
+          const edge = (graph.get(legId) ?? []).find((e) => e.toId === targetId);
+          if (!edge) continue;
+          const pred = laneMap.get(legId);
+          if (!pred) continue;
+          if (!corridorCities.has(pred.originCity.toLowerCase()) || !corridorCities.has(pred.destCity.toLowerCase())) continue;
+
+          const pf = getFinishTime(pred);
+          const tp = laneMap.get(targetId)?.originScheduledTime ? parseTimeToHours(laneMap.get(targetId)!.originScheduledTime!) : null;
+          if (pf !== null && tp !== null && (tp - pf > maxWaitHours + 1 || tp < pf - 0.25)) continue;
+
+          backwardChain.unshift({ laneId: legId, donorShiftIdx: si });
+          targetId = legId;
+          found = true;
+          break;
+        }
+        if (found) break;
+      }
+      if (!found) break;
+    }
+
+    if (backwardChain.length === 0) continue;
+
+    // All predecessors must be from the SAME donor shift and at the END
+    const donorIdx = backwardChain[0].donorShiftIdx;
+    if (!backwardChain.every((b) => b.donorShiftIdx === donorIdx)) continue;
+    const donorShift = finalShifts[donorIdx];
+    const removeCount = backwardChain.length;
+    if (donorShift.legs.length - removeCount < 1) continue;
+    const donorEnd = donorShift.legs.slice(-removeCount);
+    if (!donorEnd.every((id, i) => id === backwardChain[i].laneId)) continue;
+
+    // Step 2: Validate the new shift (predecessors + straggler)
+    const newLegs = [...backwardChain.map((b) => b.laneId), straggler.legs[0]];
+    let nd = 0, ndu = prePostTripHours, nm = 0, ok = true;
+    for (let i = 0; i < newLegs.length; i++) {
+      const l = laneMap.get(newLegs[i])!;
+      nd += l.routeDurationHours;
+      ndu += l.hosAnalysis.dutyTimePerRun;
+      nm += l.routeMiles;
+      if (i > 0) {
+        const e = (graph.get(newLegs[i - 1]) ?? []).find((x) => x.toId === newLegs[i]);
+        if (!e) { ok = false; break; }
+        nd += e.deadheadDriveHours; ndu += e.deadheadDriveHours; nm += e.deadheadMiles;
+        const pf = getFinishTime(laneMap.get(newLegs[i - 1])!);
+        const cp = l.originScheduledTime ? parseTimeToHours(l.originScheduledTime) : null;
+        if (pf !== null && cp !== null) ndu += Math.max(0, cp - pf - e.deadheadDriveHours);
+      }
+    }
+    if (!ok || nd > HOS.MAX_DRIVE_SOLO || ndu > HOS.MAX_DUTY_SOLO) continue;
+
+    // Step 3: After splitting, can the shortened donor absorb legs from another short shift?
+    // Calculate donor's remaining HOS after split
+    let donorDriveAfter = donorShift.totalDriveHours;
+    let donorDutyAfter = donorShift.totalDutyHours;
+    for (const bc of backwardChain) {
+      const rl = laneMap.get(bc.laneId)!;
+      donorDriveAfter -= rl.routeDurationHours;
+      donorDutyAfter -= rl.hosAnalysis.dutyTimePerRun;
+    }
+    const donorHOSSlack = HOS.MAX_DRIVE_SOLO - donorDriveAfter;
+    const donorNewLastId = donorShift.legs[donorShift.legs.length - removeCount - 1];
+    const donorNewLastLane = laneMap.get(donorNewLastId);
+    const donorNewClock = donorNewLastLane ? getFinishTime(donorNewLastLane) : null;
+
+    // Find a short shift whose legs can be appended to the shortened donor
+    let mergeTarget: { shiftIdx: number; totalLegs: number } | null = null;
+
+    for (let mi = 0; mi < finalShifts.length; mi++) {
+      if (mi === donorIdx) continue;
+      const candidate = finalShifts[mi];
+      if (candidate === straggler) continue;
+      if (candidate.legs.length === 0) continue;
+      if (donorShift.legs.length - removeCount + candidate.legs.length > maxLegs) continue;
+
+      // Check: can donor chain to candidate's first leg?
+      const candFirstId = candidate.legs[0];
+      const mergeEdge = (graph.get(donorNewLastId) ?? []).find((e) => e.toId === candFirstId);
+      if (!mergeEdge) continue;
+
+      // Check HOS and timing for all candidate legs
+      let testDrive = donorDriveAfter;
+      let testDuty = donorDutyAfter;
+      let testClock = donorNewClock;
+      let feasible = true;
+
+      for (let ci = 0; ci < candidate.legs.length; ci++) {
+        const cl = laneMap.get(candidate.legs[ci]);
+        if (!cl) { feasible = false; break; }
+        const ce = ci === 0 ? mergeEdge : (graph.get(candidate.legs[ci - 1]) ?? []).find((x) => x.toId === candidate.legs[ci]);
+        if (!ce) { feasible = false; break; }
+
+        const r = canAddLeg(testDrive, testDuty, testClock, cl, ce.deadheadDriveHours, prePostTripHours, false, maxWaitHours);
+        if (!r) { feasible = false; break; }
+        testDrive = r.newDrive;
+        testDuty = r.newDuty;
+        testClock = r.newClockTime;
+      }
+
+      if (feasible) {
+        mergeTarget = { shiftIdx: mi, totalLegs: candidate.legs.length };
+        break;
+      }
+    }
+
+    if (!mergeTarget) continue; // Can't cascade — skip this straggler
+
+    // Step 4: EXECUTE THE CASCADE
+    // a) Remove predecessors from donor
+    for (let r = 0; r < removeCount; r++) {
+      donorShift.legs.pop();
+    }
+    donorShift.totalDriveHours = donorDriveAfter;
+    donorShift.totalDutyHours = donorDutyAfter;
+
+    // b) Merge the short shift INTO the donor
+    const mergeShift = finalShifts[mergeTarget.shiftIdx];
+    for (const lid of mergeShift.legs) {
+      donorShift.legs.push(lid);
+    }
+    // Recalculate donor totals (simplified)
+    let recDrive = 0, recDuty = prePostTripHours, recMiles = 0;
+    for (let i = 0; i < donorShift.legs.length; i++) {
+      const l = laneMap.get(donorShift.legs[i])!;
+      recDrive += l.routeDurationHours;
+      recDuty += l.hosAnalysis.dutyTimePerRun;
+      recMiles += l.routeMiles;
+      if (i > 0) {
+        const e = (graph.get(donorShift.legs[i-1]) ?? []).find((x) => x.toId === donorShift.legs[i]);
+        if (e) { recDrive += e.deadheadDriveHours; recDuty += e.deadheadDriveHours; recMiles += e.deadheadMiles; }
+      }
+    }
+    donorShift.totalDriveHours = recDrive;
+    donorShift.totalDutyHours = recDuty;
+    donorShift.totalMiles = recMiles;
+
+    // c) Replace straggler with the new corridor shift
+    straggler.legs = newLegs;
+    straggler.totalDriveHours = nd;
+    straggler.totalDutyHours = ndu;
+    straggler.totalMiles = nm;
+    straggler.totalDeadheadMiles = 0;
+
+    // d) Mark the merged shift as empty (to be removed)
+    mergeShift.legs = [];
+
+    break; // one cascade per pass
+  }
+
+  const postSwapShifts = finalShifts.filter((s) => s.legs.length > 0);
+  return postSwapShifts;
 }
 
+/**
+ * Build multi-leg driver shifts across all schedule dates.
+ * Returns per-day shift assignments and aggregate driver counts.
+ */
 /**
  * Build multi-leg driver shifts across all schedule dates.
  * Returns per-day shift assignments and aggregate driver counts.
@@ -1572,9 +2012,10 @@ export function buildDriverShifts(
   maxLegs = 6,
   prePostTripHours = 1.0,
   maxWaitHours = MAX_WAIT_BETWEEN_LEGS,
-  scheduleOnDays = 5, // days per on-cycle, used to calculate weekly duty ceiling
-  bases: BaseLocation[] = [], // all known bases for return-to-base checks
+  scheduleOnDays = 5,
+  bases: BaseLocation[] = [],
   weeklyHosMode: 'uniform' | 'flexible' = 'flexible',
+  useSolver: boolean = true,
 ): {
   /** Map of date → array of shifts for that day */
   dailyShifts: Map<string, DriverShift[]>;
@@ -1634,7 +2075,7 @@ export function buildDriverShifts(
 
   for (const date of sortedDates) {
     const lanesRunning = dateEntries.get(date)!;
-    const shifts = buildShiftsForDay(lanesRunning, graph, maxLegs, prePostTripHours, maxWaitHours, weeklyDutyCeiling, bases, false);
+    const shifts = buildShiftsForDay(lanesRunning, graph, maxLegs, prePostTripHours, maxWaitHours, weeklyDutyCeiling, bases, false, useSolver);
     dailyShifts.set(date, shifts);
 
     // Collect duty hours for this day's shifts (sorted by duty desc for pairing)
@@ -1679,13 +2120,12 @@ export function buildDriverShifts(
     }
   }
 
-  // Multi-seed re-run for days with the most shifts to optimize driver count.
-  // Only re-run the top 3 heaviest days to stay within compute budget.
+  // Multi-seed re-run for days near the peak driver count
   const heavyDays = sortedDates
     .map((d) => ({ date: d, count: dailyShifts.get(d)?.length ?? 0, lanes: dateEntries.get(d)!.length }))
+    .filter((d) => d.lanes > 4 && d.count >= peakShifts - 2)
     .sort((a, b) => b.count - a.count)
-    .slice(0, 3)
-    .filter((d) => d.lanes > 4 && d.count > 1);
+    .slice(0, 5);
 
   for (const hd of heavyDays) {
     const lanes = dateEntries.get(hd.date)!;
@@ -1698,7 +2138,7 @@ export function buildDriverShifts(
     }
   }
 
-  // Recalculate all metrics after multi-seed optimization
+  // Recalculate final metrics
   peakShifts = 0;
   peakDate = '';
   totalLegs = 0;
@@ -1932,13 +2372,9 @@ function parseTimeToHours(time: string): number | null {
 
 // ---- CONVEX INTERNAL FUNCTIONS ----
 
-/**
- * Run full analysis for a session — computes all lane costs, driver counts, and aggregates.
- */
-export const runFullAnalysis = internalMutation({
-  args: {
-    sessionId: v.id('laneAnalysisSessions'),
-  },
+/** Read all data needed for analysis — fast query, no computation */
+export const _readAnalysisData = internalQuery({
+  args: { sessionId: v.id('laneAnalysisSessions') },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
     if (!session || session.isDeleted) throw new Error('Session not found');
@@ -1948,24 +2384,61 @@ export const runFullAnalysis = internalMutation({
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
       .collect();
 
-    if (entries.length === 0) return;
-
-    // Get fuel prices from cache
     const fuelPrices = await ctx.db.query('fuelPriceCache').collect();
-    const fuelPriceMap = new Map(fuelPrices.map((fp) => [fp.region, fp.pricePerGallon]));
-
-    // Get toll estimates from cache
     const tollEstimates = await ctx.db.query('tollEstimateCache').collect();
-    const tollMap = new Map(
-      tollEstimates.map((t) => [`${t.originHash}:${t.destinationHash}`, t.tollCost]),
-    );
-
-    // Get bases for return-to-base checks
     const baseDocs = await ctx.db
       .query('laneAnalysisBases')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
       .collect();
-    const basesForShifts = baseDocs.map((b) => ({
+
+    return { session, entries, fuelPrices, tollEstimates, baseDocs };
+  },
+});
+
+/** Write analysis results — fast mutation, no computation */
+export const _writeAnalysisResults = internalMutation({
+  args: {
+    sessionId: v.id('laneAnalysisSessions'),
+    results: v.array(v.any()),
+  },
+  handler: async (ctx, args) => {
+    // Clear old results
+    const oldResults = await ctx.db
+      .query('laneAnalysisResults')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+    for (const r of oldResults) {
+      await ctx.db.delete(r._id);
+    }
+    // Write new results
+    for (const result of args.results) {
+      await ctx.db.insert('laneAnalysisResults', result);
+    }
+  },
+});
+
+/**
+ * Run full analysis for a session — action with long timeout.
+ * Reads data via query, computes in JS, writes via mutation.
+ */
+export const runFullAnalysis = internalAction({
+  args: {
+    sessionId: v.id('laneAnalysisSessions'),
+  },
+  handler: async (ctx, args) => {
+    // Step 1: Read all data (fast query)
+    const data = await ctx.runQuery(internal.laneAnalyzerCalculations._readAnalysisData, {
+      sessionId: args.sessionId,
+    });
+
+    const { session, entries, fuelPrices, tollEstimates, baseDocs } = data;
+    if (entries.length === 0) return;
+
+    const fuelPriceMap = new Map(fuelPrices.map((fp: any) => [fp.region, fp.pricePerGallon]));
+    const tollMap = new Map(
+      tollEstimates.map((t: any) => [`${t.originHash}:${t.destinationHash}`, t.tollCost]),
+    );
+    const basesForShifts = baseDocs.map((b: any) => ({
       id: b._id as string,
       name: b.name,
       lat: b.latitude ?? 0,
@@ -1974,21 +2447,15 @@ export const runFullAnalysis = internalMutation({
       state: b.state ?? '',
     }));
 
-    // Clear old results for this session
-    const oldResults = await ctx.db
-      .query('laneAnalysisResults')
-      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
-      .collect();
-    for (const r of oldResults) {
-      await ctx.db.delete(r._id);
-    }
-
     const now = Date.now();
     const schedulePatternParsed = parseSchedulePattern(
       session.driverSchedulePattern,
       session.customScheduleOnDays,
       session.customScheduleOffDays,
     );
+
+    // Step 2: Pure computation — no DB access needed
+    const resultsToWrite: any[] = [];
 
     // Per-lane calculations
     const entryAnalyses: Array<{
@@ -2110,8 +2577,8 @@ export const runFullAnalysis = internalMutation({
       totalCostPerYear += costPerYear;
       totalRevenuePerYear += revenuePerYear;
 
-      // Write per-lane result
-      await ctx.db.insert('laneAnalysisResults', {
+      // Collect per-lane result (will be written in batch at the end)
+      resultsToWrite.push({
         sessionId: args.sessionId,
         workosOrgId: session.workosOrgId,
         entryId: entry._id,
@@ -2296,8 +2763,8 @@ export const runFullAnalysis = internalMutation({
       };
     });
 
-    // Write aggregate result
-    await ctx.db.insert('laneAnalysisResults', {
+    // Collect aggregate result
+    resultsToWrite.push({
       sessionId: args.sessionId,
       workosOrgId: session.workosOrgId,
       resultType: 'AGGREGATE',
@@ -2332,6 +2799,12 @@ export const runFullAnalysis = internalMutation({
           peakDayShifts: peakDayShiftSummary,
         },
       }),
+    });
+
+    // Step 3: Write all results in a single mutation call
+    await ctx.runMutation(internal.laneAnalyzerCalculations._writeAnalysisResults, {
+      sessionId: args.sessionId,
+      results: resultsToWrite,
     });
   },
 });

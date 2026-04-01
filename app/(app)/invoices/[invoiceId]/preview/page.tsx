@@ -1,26 +1,30 @@
-"use client";
+'use client';
 
-import { useQuery } from "convex/react";
-import { api } from "@/convex/_generated/api";
-import { Id } from "@/convex/_generated/dataModel";
-import { InvoiceTemplate } from "@/app/(app)/invoices/_components/preview/invoice-template";
-import { InvoicePDFTemplate } from "@/app/(app)/invoices/_components/preview/invoice-pdf-template";
-import { useParams } from "next/navigation";
-import { Button } from "@/components/ui/button";
-import { ArrowLeft, Printer, Download } from "lucide-react";
-import { pdf } from "@react-pdf/renderer";
-import { toast } from "sonner";
-import Link from "next/link";
-import { useEffect } from "react";
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
+import { InvoiceTemplate } from '@/app/(app)/invoices/_components/preview/invoice-template';
+import { InvoicePDFTemplate } from '@/app/(app)/invoices/_components/preview/invoice-pdf-template';
+import { useParams } from 'next/navigation';
+import { Button } from '@/components/ui/button';
+import { ArrowLeft, Printer, Download, RefreshCw } from 'lucide-react';
+import { pdf } from '@react-pdf/renderer';
+import { toast } from 'sonner';
+import Link from 'next/link';
+import { useEffect, useState } from 'react';
+import { useMutation } from 'convex/react';
 
 export default function InvoicePreviewPage() {
   const params = useParams();
-  const invoiceId = params.invoiceId as Id<"loadInvoices">;
+  const invoiceId = params.invoiceId as Id<'loadInvoices'>;
+  const [isRecalculating, setIsRecalculating] = useState(false);
+
+  const recalculateInvoice = useMutation(api.invoices.recalculateInvoiceAmount);
 
   // Fetch invoice data with calculated amounts
   const invoice = useQuery(api.invoices.getInvoice, { invoiceId });
   const lineItems = useQuery(api.invoices.getLineItems, { invoiceId });
-  
+
   // Debug: Log invoice data
   useEffect(() => {
     if (invoice) {
@@ -29,14 +33,11 @@ export default function InvoicePreviewPage() {
       console.log('Total:', invoice.totalAmount);
     }
   }, [invoice]);
-  const customer = useQuery(
-    api.customers.getById, 
-    invoice?.customerId ? { customerId: invoice.customerId } : "skip"
-  );
+  const customer = useQuery(api.customers.getById, invoice?.customerId ? { customerId: invoice.customerId } : 'skip');
 
   // Format phone number for display: (760)755-3340
   const formatPhoneNumber = (phone: string): string => {
-    if (!phone) return "";
+    if (!phone) return '';
     const digits = phone.replace(/\D/g, '');
     if (digits.length !== 10) return phone; // Return as-is if not 10 digits
     return `(${digits.slice(0, 3)})${digits.slice(3, 6)}-${digits.slice(6)}`;
@@ -45,79 +46,79 @@ export default function InvoicePreviewPage() {
   // Fetch organization settings for company details
   const orgSettings = useQuery(
     api.settings.getOrgSettings,
-    invoice?.workosOrgId ? { workosOrgId: invoice.workosOrgId } : "skip"
+    invoice?.workosOrgId ? { workosOrgId: invoice.workosOrgId } : 'skip',
   );
 
   // Build company details from org settings or use defaults
   const companyDetails = orgSettings
     ? {
-        name: orgSettings.name || "Company Name",
-        email: orgSettings.billingEmail || "billing@company.com",
-        phone: formatPhoneNumber(orgSettings.billingPhone || ""),
+        name: orgSettings.name || 'Company Name',
+        email: orgSettings.billingEmail || 'billing@company.com',
+        phone: formatPhoneNumber(orgSettings.billingPhone || ''),
         address: orgSettings.billingAddress
           ? `${orgSettings.billingAddress.addressLine1}${orgSettings.billingAddress.addressLine2 ? '\n' + orgSettings.billingAddress.addressLine2 : ''}\n${orgSettings.billingAddress.city}, ${orgSettings.billingAddress.state} ${orgSettings.billingAddress.zip}\n${orgSettings.billingAddress.country}`
-          : "Address not available",
+          : 'Address not available',
         logoUrl: orgSettings.logoUrl || undefined,
       }
     : {
-        name: "Company Name",
-        email: "billing@company.com",
-        phone: "",
-        address: "Address not available",
+        name: 'Company Name',
+        email: 'billing@company.com',
+        phone: '',
+        address: 'Address not available',
         logoUrl: undefined,
       };
 
   const handlePrint = async () => {
     if (!invoice || !customer || !lineItems) {
-      toast.error("Invoice data not ready");
+      toast.error('Invoice data not ready');
       return;
     }
 
     try {
-      toast.loading("Generating PDF for printing...");
-      
+      toast.loading('Generating PDF for printing...');
+
       const blob = await pdf(
         <InvoicePDFTemplate
           invoice={invoice}
           customer={customer}
           lineItems={lineItems as any}
           companyDetails={companyDetails}
-        />
+        />,
       ).toBlob();
-      
+
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank');
-      
+
       toast.dismiss();
-      toast.success("PDF opened in new tab");
-      
+      toast.success('PDF opened in new tab');
+
       // Clean up the URL after a delay
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       toast.dismiss();
-      toast.error("Failed to generate PDF");
+      toast.error('Failed to generate PDF');
       console.error('PDF generation error:', error);
     }
   };
 
   const handleDownloadPDF = async () => {
     if (!invoice || !customer || !lineItems) {
-      toast.error("Invoice data not ready");
+      toast.error('Invoice data not ready');
       return;
     }
 
     try {
-      toast.loading("Generating PDF...");
-      
+      toast.loading('Generating PDF...');
+
       const blob = await pdf(
         <InvoicePDFTemplate
           invoice={invoice}
           customer={customer}
           lineItems={lineItems as any}
           companyDetails={companyDetails}
-        />
+        />,
       ).toBlob();
-      
+
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -126,12 +127,12 @@ export default function InvoicePreviewPage() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      
+
       toast.dismiss();
-      toast.success("PDF downloaded successfully");
+      toast.success('PDF downloaded successfully');
     } catch (error) {
       toast.dismiss();
-      toast.error("Failed to generate PDF");
+      toast.error('Failed to generate PDF');
       console.error('PDF generation error:', error);
     }
   };
@@ -147,6 +148,19 @@ export default function InvoicePreviewPage() {
     );
   }
 
+  const handleRecalculate = async () => {
+    try {
+      setIsRecalculating(true);
+      toast.loading('Recalculating invoice...', { id: 'recalc' });
+      const res = await recalculateInvoice({ invoiceId });
+      toast.success(`Invoice recalculated. New total: $${res.newTotal.toFixed(2)}`, { id: 'recalc' });
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to recalculate invoice.', { id: 'recalc' });
+    } finally {
+      setIsRecalculating(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950">
       {/* Action Bar (hidden when printing) */}
@@ -158,21 +172,20 @@ export default function InvoicePreviewPage() {
               Back to Invoices
             </Link>
           </Button>
-          
+
           <div className="flex items-center gap-2">
-            <Button 
-              variant="outline" 
-              size="sm" 
-              onClick={handlePrint}
-            >
+            {(invoice.totalAmount === 0 || invoice.totalAmount === undefined) && invoice.status === 'PAID' && (
+              <Button variant="destructive" size="sm" onClick={handleRecalculate} disabled={isRecalculating}>
+                <RefreshCw className={`w-4 h-4 mr-2 ${isRecalculating ? 'animate-spin' : ''}`} />
+                Fix Missing Rate
+              </Button>
+            )}
+            <Button variant="outline" size="sm" onClick={handlePrint}>
               <Printer className="w-4 h-4 mr-2" />
               Print
             </Button>
-            
-            <Button 
-              size="sm"
-              onClick={handleDownloadPDF}
-            >
+
+            <Button size="sm" onClick={handleDownloadPDF}>
               <Download className="w-4 h-4 mr-2" />
               Save as PDF
             </Button>
@@ -184,16 +197,17 @@ export default function InvoicePreviewPage() {
       <div className="print:hidden max-w-[800px] mx-auto px-4 py-4">
         <div className="bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg p-3 text-center">
           <p className="text-sm text-blue-900 dark:text-blue-100">
-            💡 <strong>Tip:</strong> Press <kbd className="px-2 py-1 bg-white dark:bg-slate-800 border rounded text-xs font-mono">Cmd+P</kbd> (Mac) 
-            or <kbd className="px-2 py-1 bg-white dark:bg-slate-800 border rounded text-xs font-mono">Ctrl+P</kbd> (Windows) 
-            to save as PDF
+            💡 <strong>Tip:</strong> Press{' '}
+            <kbd className="px-2 py-1 bg-white dark:bg-slate-800 border rounded text-xs font-mono">Cmd+P</kbd> (Mac) or{' '}
+            <kbd className="px-2 py-1 bg-white dark:bg-slate-800 border rounded text-xs font-mono">Ctrl+P</kbd>{' '}
+            (Windows) to save as PDF
           </p>
         </div>
       </div>
 
       {/* Invoice Content */}
       <div className="print:p-0 print:bg-white">
-        <InvoiceTemplate 
+        <InvoiceTemplate
           invoice={invoice}
           customer={customer}
           lineItems={lineItems as any}
