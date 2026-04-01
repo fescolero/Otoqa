@@ -6,6 +6,8 @@ import {
   buildStopDwell,
   parseSchedulePattern,
   buildDriverShifts,
+  buildShiftsForDay,
+  buildAdjacencyGraph,
   haversineDistance,
 } from './laneAnalyzerCalculations';
 
@@ -591,7 +593,7 @@ export const getShiftsForDate = query({
 
     // Build shifts using the same engine
     const schedParsed = parseSchedulePattern(session.driverSchedulePattern, session.customScheduleOnDays, session.customScheduleOffDays);
-    const result = buildDriverShifts(shiftEntries, session.maxDeadheadMiles ?? 75, session.maxChainingLegs ?? 8, prePostHours, session.maxWaitHours ?? 3.0, schedParsed.onDays, bases, session.weeklyHosMode ?? 'flexible');
+    const result = buildDriverShifts(shiftEntries, session.maxDeadheadMiles ?? 75, session.maxChainingLegs ?? 8, prePostHours, session.maxWaitHours ?? 3.0, schedParsed.onDays, bases, session.weeklyHosMode ?? 'flexible', false);
     const dayShifts = result.dailyShifts.get(args.date) ?? [];
 
     // Map entry IDs to names for display
@@ -632,6 +634,221 @@ export const getShiftsForWeek = query({
 
     if (entries.length === 0) return { days: [] };
 
+    // ---- Check for solver results ----
+    const aggregateResult = await ctx.db
+      .query('laneAnalysisResults')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .filter((q) => q.eq(q.field('resultType'), 'AGGREGATE'))
+      .first();
+
+    let solverData: {
+      weeklySchedule?: Array<{
+        driverId: number;
+        days: Record<string, {
+          legs: string[];
+          driveHours: number; dutyHours: number;
+          miles: number; deadheadMiles: number;
+          startTime: number | null; endTime: number | null;
+        }>;
+      }>;
+      // Legacy peak-day shifts (for old sessions before weekly schedule storage)
+      shifts?: Array<{
+        legs: string[]; legNames: string[]; legCount: number;
+        driveHours: number; dutyHours: number; miles: number; deadheadMiles: number;
+        fuelCost: number; driverPay: number; totalCost: number;
+      }>;
+      status?: string;
+    } | null = null;
+
+    if (aggregateResult?.hosAnalysis) {
+      try {
+        const parsed = JSON.parse(aggregateResult.hosAnalysis);
+        if (parsed?.solver) {
+          solverData = parsed.solver;
+        }
+      } catch {}
+    }
+
+    // Build entry name map, entry lookup, and schedule dates
+    const nameMap = new Map(entries.map((e) => [e._id as string, e.name]));
+    const entryMap = new Map(entries.map((e) => [e._id as string, e]));
+    const entrySchedules = new Map<string, Set<string>>();
+    for (const entry of entries) {
+      const dates = calculateScheduleForYear(
+        entry.scheduleRule, session.analysisYear,
+        entry.contractPeriodStart, entry.contractPeriodEnd,
+      );
+      entrySchedules.set(entry._id as string, new Set(dates));
+    }
+
+    // ---- Tier 1: Full weekly schedule from Python solver ----
+    if (solverData?.weeklySchedule && solverData.weeklySchedule.length > 0 && solverData.status !== 'failed') {
+      const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const days: Array<{
+        date: string;
+        dayName: string;
+        lanesRunning: number;
+        shifts: Array<{
+          legs: string[];
+          legIds: string[];
+          legCount: number;
+          driveHours: number;
+          dutyHours: number;
+          miles: number;
+          deadheadMiles: number;
+        }>;
+      }> = [];
+
+      const startDate = new Date(args.weekStartDate + 'T00:00:00');
+
+      for (let d = 0; d < 7; d++) {
+        const current = new Date(startDate);
+        current.setDate(startDate.getDate() + d);
+        const dateStr = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`;
+        const dayName = dayNames[d];
+
+        // Which entries are scheduled to run on this date?
+        const todayEntryIds = new Set<string>();
+        for (const [entryId, dates] of entrySchedules) {
+          if (dates.has(dateStr)) todayEntryIds.add(entryId);
+        }
+
+        if (todayEntryIds.size === 0) {
+          days.push({ date: dateStr, dayName, lanesRunning: 0, shifts: [] });
+          continue;
+        }
+
+        // Read exact solver assignments for this day name
+        const dayShifts: typeof days[0]['shifts'] = [];
+
+        for (const driver of solverData.weeklySchedule) {
+          const solverDay = driver.days[dayName];
+          if (!solverDay || !solverDay.legs || solverDay.legs.length === 0) continue;
+
+          // Filter to legs that are actually scheduled today (respects holiday/exclusion rules)
+          const retainedLegs = solverDay.legs.filter((lid) => todayEntryIds.has(lid));
+          if (retainedLegs.length === 0) continue;
+
+          // If all legs retained, use solver's exact metrics
+          if (retainedLegs.length === solverDay.legs.length) {
+            dayShifts.push({
+              legs: retainedLegs.map((lid) => nameMap.get(lid) ?? lid),
+              legIds: retainedLegs,
+              legCount: retainedLegs.length,
+              driveHours: solverDay.driveHours,
+              dutyHours: solverDay.dutyHours,
+              miles: solverDay.miles,
+              deadheadMiles: solverDay.deadheadMiles,
+            });
+          } else {
+            // Some legs excluded — rebuild metrics from retained leg sequence
+            // Deadhead/wait are edge-dependent, so we must re-walk the sequence
+            const prePostHours = session.prePostTripMinutes != null ? session.prePostTripMinutes / 60 : 1.0;
+            let driveHours = 0;
+            let dutyHours = prePostHours;
+            let miles = 0;
+            let deadheadMiles = 0;
+
+            for (let i = 0; i < retainedLegs.length; i++) {
+              const entry = entryMap.get(retainedLegs[i]);
+              if (!entry) continue;
+
+              const routeDuration = entry.routeDurationHours ?? 0;
+              const routeMiles = entry.routeMiles ?? 0;
+              const dwellHours = (entry.originAppointmentType === 'FCFS' ? 1.5 : entry.originAppointmentType === 'Live' ? 1.0 : 0.5) / 2
+                + (entry.destinationAppointmentType === 'FCFS' ? 1.5 : entry.destinationAppointmentType === 'Live' ? 1.0 : 0.5) / 2;
+
+              driveHours += routeDuration;
+              dutyHours += routeDuration + dwellHours;
+              miles += routeMiles;
+
+              // Deadhead between consecutive retained legs
+              if (i > 0) {
+                const prevEntry = entryMap.get(retainedLegs[i - 1]);
+                if (prevEntry && prevEntry.destinationLat && prevEntry.destinationLng && entry.originLat && entry.originLng) {
+                  const dhMiles = haversineDistance(prevEntry.destinationLat, prevEntry.destinationLng, entry.originLat, entry.originLng);
+                  const dhHours = dhMiles / 55;
+                  deadheadMiles += dhMiles;
+                  driveHours += dhHours;
+                  dutyHours += dhHours;
+                  miles += dhMiles;
+                }
+              }
+            }
+
+            dayShifts.push({
+              legs: retainedLegs.map((lid) => nameMap.get(lid) ?? lid),
+              legIds: retainedLegs,
+              legCount: retainedLegs.length,
+              driveHours: Math.round(driveHours * 10) / 10,
+              dutyHours: Math.round(dutyHours * 10) / 10,
+              miles: Math.round(miles),
+              deadheadMiles: Math.round(deadheadMiles),
+            });
+          }
+        }
+
+        days.push({
+          date: dateStr,
+          dayName,
+          lanesRunning: todayEntryIds.size,
+          shifts: dayShifts,
+        });
+      }
+
+      return { days };
+    }
+
+    // ---- Tier 2: Legacy peak-day shifts (old sessions before weekly schedule storage) ----
+    if (solverData?.shifts && solverData.shifts.length > 0 && solverData.status !== 'failed') {
+      const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const days: Array<{
+        date: string; dayName: string; lanesRunning: number;
+        shifts: Array<{ legs: string[]; legIds: string[]; legCount: number; driveHours: number; dutyHours: number; miles: number; deadheadMiles: number }>;
+      }> = [];
+
+      const startDate = new Date(args.weekStartDate + 'T00:00:00');
+
+      for (let d = 0; d < 7; d++) {
+        const current = new Date(startDate);
+        current.setDate(startDate.getDate() + d);
+        const dateStr = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`;
+
+        const todayEntryIds = new Set<string>();
+        for (const [entryId, dates] of entrySchedules) {
+          if (dates.has(dateStr)) todayEntryIds.add(entryId);
+        }
+
+        if (todayEntryIds.size === 0) {
+          days.push({ date: dateStr, dayName: dayNames[d], lanesRunning: 0, shifts: [] });
+          continue;
+        }
+
+        // Filter legacy peak-day shifts to legs running today (proportional scaling — legacy behavior)
+        const dayShifts = solverData.shifts
+          .map((shift) => {
+            const todayLegs = shift.legs.filter((lid) => todayEntryIds.has(lid));
+            if (todayLegs.length === 0) return null;
+            const ratio = todayLegs.length / shift.legCount;
+            return {
+              legs: todayLegs.map((lid) => nameMap.get(lid) ?? lid),
+              legIds: todayLegs,
+              legCount: todayLegs.length,
+              driveHours: Math.round(shift.driveHours * ratio * 10) / 10,
+              dutyHours: Math.round(shift.dutyHours * ratio * 10) / 10,
+              miles: Math.round(shift.miles * ratio),
+              deadheadMiles: Math.round(shift.deadheadMiles * ratio),
+            };
+          })
+          .filter((s): s is NonNullable<typeof s> => s !== null);
+
+        days.push({ date: dateStr, dayName: dayNames[d], lanesRunning: todayEntryIds.size, shifts: dayShifts });
+      }
+
+      return { days };
+    }
+
+    // ---- Tier 3: JS engine fallback (no solver results) ----
     const stopDwellOverrides = buildStopDwell({
       dwellTimeApptMinutes: session.dwellTimeApptMinutes,
       dwellTimeLiveMinutes: session.dwellTimeLiveMinutes,
@@ -639,7 +856,7 @@ export const getShiftsForWeek = query({
     });
     const prePostHours = session.prePostTripMinutes != null ? session.prePostTripMinutes / 60 : 1.0;
     const schedParsed = parseSchedulePattern(session.driverSchedulePattern, session.customScheduleOnDays, session.customScheduleOffDays);
-    const nameMap = new Map(entries.map((e) => [e._id as string, e.name]));
+    // nameMap already computed above
 
     // Fetch bases for return-to-base checks
     const baseDocs = await ctx.db
@@ -655,15 +872,7 @@ export const getShiftsForWeek = query({
       state: b.state ?? '',
     }));
 
-    // Pre-expand all entry schedules for the year
-    const entrySchedules = new Map<string, Set<string>>();
-    for (const entry of entries) {
-      const dates = calculateScheduleForYear(
-        entry.scheduleRule, session.analysisYear,
-        entry.contractPeriodStart, entry.contractPeriodEnd,
-      );
-      entrySchedules.set(entry._id as string, new Set(dates));
-    }
+    // entrySchedules already computed above (before solver check)
 
     // Build shift entries once (with all dates, the engine filters per day)
     const allShiftEntries = entries.map((entry) => {
@@ -700,6 +909,11 @@ export const getShiftsForWeek = query({
       };
     });
 
+    // Build adjacency graph ONCE for all entries (expensive part)
+    const graph = buildAdjacencyGraph(allShiftEntries, session.maxDeadheadMiles ?? 75);
+    const maxLegs = session.maxChainingLegs ?? 8;
+    const maxWait = session.maxWaitHours ?? 3.0;
+
     // Generate 7 days
     const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const days: Array<{
@@ -732,10 +946,8 @@ export const getShiftsForWeek = query({
         continue;
       }
 
-      // Set schedule dates for the engine (single day)
-      const dayEntries = entriesForDay.map((e) => ({ ...e, scheduleDates: [dateStr] }));
-      const result = buildDriverShifts(dayEntries, session.maxDeadheadMiles ?? 75, session.maxChainingLegs ?? 8, prePostHours, session.maxWaitHours ?? 3.0, schedParsed.onDays, bases, session.weeklyHosMode ?? 'flexible');
-      const dayShifts = result.dailyShifts.get(dateStr) ?? [];
+      // Run shift builder directly (fast — no solver, shared graph)
+      const dayShifts = buildShiftsForDay(entriesForDay, graph, maxLegs, prePostHours, maxWait, 14, bases, false, false);
 
       days.push({
         date: dateStr,
@@ -919,5 +1131,56 @@ export const importLanesFromContract = mutation({
     }
 
     return imported;
+  },
+});
+
+// ---- Export for Python solver ----
+
+export const exportEntriesForSolver = query({
+  args: {
+    sessionId: v.id('laneAnalysisSessions'),
+  },
+  handler: async (ctx, args) => {
+    const entries = await ctx.db
+      .query('laneAnalysisEntries')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+
+    // Also fetch bases for this session
+    const bases = await ctx.db
+      .query('laneAnalysisBases')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+
+    return {
+      entries: entries.map((e) => ({
+        id: e._id,
+        name: e.name,
+        originCity: e.originCity,
+        originState: e.originState,
+        originLat: e.originLat,
+        originLng: e.originLng,
+        destinationCity: e.destinationCity,
+        destinationState: e.destinationState,
+        destinationLat: e.destinationLat,
+        destinationLng: e.destinationLng,
+        routeMiles: e.routeMiles,
+        routeDurationHours: e.routeDurationHours,
+        originScheduledTime: e.originScheduledTime,
+        originScheduledEndTime: e.originScheduledEndTime,
+        destinationScheduledTime: e.destinationScheduledTime,
+        destinationScheduledEndTime: e.destinationScheduledEndTime,
+        originAppointmentType: e.originAppointmentType,
+        destinationAppointmentType: e.destinationAppointmentType,
+        scheduleRule: e.scheduleRule,
+      })),
+      bases: bases.map((b) => ({
+        name: b.name,
+        city: b.city,
+        state: b.state,
+        lat: b.latitude,
+        lng: b.longitude,
+      })),
+    };
   },
 });

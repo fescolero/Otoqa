@@ -1,0 +1,10 @@
+steps:
+  # Enable QEMU for cross-platform builds (amd64 builder → arm64 image)
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['run', '--privileged', 'tonistiigi/binfmt', '--install', 'arm64']
+  # Build arm64 image using buildx
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['buildx', 'create', '--use', '--name', 'multiarch']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['buildx', 'build', '--platform', 'linux/arm64', '-f', 'scripts/Dockerfile', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/lane-solver:arm64', '--push', 'scripts/']
+images: []
