@@ -431,6 +431,13 @@ function WeeklyShiftView({
                               <span className="text-[10px] text-muted-foreground">
                                 {shift.legCount} leg{shift.legCount !== 1 ? 's' : ''}
                               </span>
+                              {'isExact' in shift && (
+                                (shift as any).isExact ? (
+                                  <Badge variant="outline" className="text-[9px] text-emerald-600 border-emerald-300">Exact</Badge>
+                                ) : (
+                                  <Badge variant="outline" className="text-[9px] text-amber-600 border-amber-300">Estimated</Badge>
+                                )
+                              )}
                             </div>
                             <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
                               <span>{shift.driveHours}h drive / {shift.dutyHours}h duty</span>

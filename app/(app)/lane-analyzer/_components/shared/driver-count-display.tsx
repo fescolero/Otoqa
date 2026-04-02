@@ -38,6 +38,8 @@ export function DriverCountDisplay({
   chainingInfo,
   unpairedMinDrivers,
 }: DriverCountDisplayProps) {
+  const hasRecommended = realisticDrivers > 0 && realisticDrivers !== minDrivers;
+
   return (
     <Card>
       <CardContent className="pt-6">
@@ -45,20 +47,30 @@ export function DriverCountDisplay({
           <Users className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm text-muted-foreground">Fleet Required</span>
         </div>
-        <div className="mt-1 flex items-baseline gap-3">
-          <div>
-            <span className="text-2xl font-bold">{realisticDrivers}</span>
-            <span className="text-sm text-muted-foreground ml-1">drivers</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Truck className="h-3.5 w-3.5 text-muted-foreground" />
-            <span className="text-lg font-semibold">{trucks}</span>
-            <span className="text-sm text-muted-foreground">trucks</span>
-          </div>
-        </div>
-        <div className="text-xs text-muted-foreground mt-1">
-          Min: {minDrivers} drivers (without relief)
-        </div>
+        {hasRecommended ? (
+          <>
+            <div className="mt-1 flex items-baseline gap-3">
+              <div>
+                <span className="text-2xl font-bold">{realisticDrivers}</span>
+                <span className="text-sm text-muted-foreground ml-1">drivers</span>
+              </div>
+              <Badge variant="secondary" className="text-xs">Recommended</Badge>
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              Min legal: {minDrivers} drivers (HOS compliant)
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="mt-1">
+              <span className="text-2xl font-bold">{minDrivers || realisticDrivers}</span>
+              <span className="text-sm text-muted-foreground ml-1">drivers</span>
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              Min: {minDrivers} drivers (without relief)
+            </div>
+          </>
+        )}
 
         {/* Multi-Leg Shift Summary */}
         {chainingInfo && chainingInfo.driverSavings > 0 && (
