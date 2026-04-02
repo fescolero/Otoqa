@@ -692,16 +692,19 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             dh_mi = _compute_dh(la, lb)
             dh_h = dh_mi / 55.0
 
-            # Physical feasibility: arrival at b must be before b's pickup window closes
-            if la.finish_time is not None and lb.pickup_end_time is not None:
-                arrival_at_b = la.finish_time + dh_h
-                pe_b = lb.pickup_end_time
-                if pe_b < la.finish_time: pe_b += 24.0  # handle wrap
-                if arrival_at_b > pe_b + 0.25: continue  # can't arrive in time
-
-            # Max wait: don't allow excessive idle between legs
+            # Physical feasibility on the SAME service day:
+            # B must start after A finishes. No day-wrapping — if B's pickup is
+            # earlier than A's finish, it's a different service day, not chainable.
             if la.finish_time is not None and lb.pickup_time is not None:
-                wait = lb.pickup_time - (la.finish_time + dh_h)
+                # B must pick up after A finishes (on same timeline)
+                if lb.pickup_time < la.finish_time - 0.25: continue  # B starts before A ends
+                # Arrival at B: A.finish + deadhead
+                arrival_at_b = la.finish_time + dh_h
+                # Must arrive before B's pickup window closes
+                pe_b = lb.pickup_end_time if lb.pickup_end_time is not None else lb.pickup_time + 0.25
+                if arrival_at_b > pe_b + 0.25: continue  # can't arrive in time
+                # Max wait
+                wait = lb.pickup_time - arrival_at_b
                 if wait > max_wait_h: continue  # too long to wait
 
             pair_dh[(i, j)] = (dh_h, dh_mi)
@@ -761,7 +764,18 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             break
 
     if len(order) != n:
-        order = lane_ids
+        # Circuit extraction failed — fall back to geo ordering, mark NOT exact
+        ordered = _order_geo([lane_map[lid] for lid in lane_ids], base_city)
+        ordered_ids = [l.id for l in ordered]
+        drive = sum(lane_map[lid].route_duration_hours for lid in ordered_ids)
+        dh_m_total = 0.0
+        for k in range(1, len(ordered_ids)):
+            la_fb = lane_map[ordered_ids[k - 1]]
+            lb_fb = lane_map[ordered_ids[k]]
+            dh_mi = _compute_dh(la_fb, lb_fb)
+            drive += dh_mi / 55.0
+            dh_m_total += dh_mi
+        return (ordered_ids, drive, int(dh_m_total), False)  # NOT exact
 
     drive = sum(lane_map[lid].route_duration_hours for lid in order)
     dh_total = 0.0
@@ -1271,6 +1285,24 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     hos_violations.append(f'D{d+1} {day_names_map[day]}: {drive:.1f}h drive > {HOS_MAX_DRIVE}h')
                 if duty > HOS_MAX_DUTY:
                     hos_violations.append(f'D{d+1} {day_names_map[day]}: {duty:.1f}h duty > {HOS_MAX_DUTY}h')
+
+                # Validate each adjacent transition is physically feasible
+                for k in range(1, len(ordered_ids)):
+                    la_v = lane_map[ordered_ids[k - 1]]
+                    lb_v = lane_map[ordered_ids[k]]
+                    if la_v.finish_time is not None and lb_v.pickup_time is not None:
+                        if lb_v.pickup_time < la_v.finish_time - 0.25:
+                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} impossible (B starts {lb_v.pickup_time:.1f}h before A finishes {la_v.finish_time:.1f}h)')
+                        else:
+                            dh_v = _compute_dh(la_v, lb_v)
+                            arrival_v = la_v.finish_time + dh_v / 55.0
+                            pe_v = lb_v.pickup_end_time or lb_v.pickup_time + 0.25
+                            if arrival_v > pe_v + 0.25:
+                                hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} late arrival ({arrival_v:.1f}h > window {pe_v:.1f}h)')
+
+                # If not exact, flag it
+                if not is_exact:
+                    hos_violations.append(f'D{d+1} {day_names_map[day]}: sequencing not exact (fallback used)')
 
                 names = [lane_map[lid].name for lid in ordered_ids]
                 driver_days[day_names_map[day]] = {
