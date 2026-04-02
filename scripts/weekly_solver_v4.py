@@ -1412,15 +1412,16 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             return result
 
     # Smarter lower bound: account for daily time-span requirements
-    # If the day spans >14h, at least 2 shift windows needed per day
+    pp_min = int(pre_post_h * MINUTES)
+    duty_max_min = int(HOS_MAX_DUTY * MINUTES)
     daily_mins = []
     for day in working_days:
         lids = day_lane_ids[day]
         if not lids: continue
         starts = [lane_pickup_min[lid] for lid in lids]
         finishes = [lane_finish_min[lid] for lid in lids]
-        span = max(finishes) - min(starts) + pre_post_min
-        windows_needed = max(1, (span + max_duty_m - 1) // max_duty_m)
+        span = max(finishes) - min(starts) + pp_min
+        windows_needed = max(1, (span + duty_max_min - 1) // duty_max_min)
         lanes_per_window = (len(lids) + windows_needed - 1) // windows_needed
         daily_mins.append(max((lanes_per_window + max_legs - 1) // max_legs, windows_needed))
     if daily_mins:
