@@ -895,7 +895,7 @@ interface BaseLocation {
 /** Max distance (miles) the last leg's destination can be from the base for return-to-base check */
 const MAX_RETURN_TO_BASE_MILES = 80;
 
-function buildShiftsForDay(
+export function buildShiftsForDay(
   lanesRunningToday: ShiftBuilderEntry[],
   graph: Map<string, LaneEdge[]>,
   maxLegs: number,
