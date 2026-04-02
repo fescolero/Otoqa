@@ -1411,20 +1411,33 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             result['recommendedDriverCount'] = n_drivers
             return result
 
+    # Smarter lower bound: account for daily time-span requirements
+    # If the day spans >14h, at least 2 shift windows needed per day
+    daily_mins = []
+    for day in working_days:
+        lids = day_lane_ids[day]
+        if not lids: continue
+        starts = [lane_pickup_min[lid] for lid in lids]
+        finishes = [lane_finish_min[lid] for lid in lids]
+        span = max(finishes) - min(starts) + pre_post_min
+        windows_needed = max(1, (span + max_duty_m - 1) // max_duty_m)
+        lanes_per_window = (len(lids) + windows_needed - 1) // windows_needed
+        daily_mins.append(max((lanes_per_window + max_legs - 1) // max_legs, windows_needed))
+    if daily_mins:
+        theoretical_min = max(theoretical_min, max(daily_mins))
+
     # --- Phase 1: Find minimum legal (HOS-compliant) driver count ---
+    # Use shorter times to stay within Convex 600s action limit
+    # Budget: ~15s per infeasible probe, 120s for optimization, 120s per operational try
     print(f"Phase 1: Searching for minimum legal drivers (starting at {theoretical_min})...")
     min_legal_result = None
     for try_drivers in range(theoretical_min, max_lanes_day + 5):
         print(f"  Trying {try_drivers} drivers...")
-        search_time = 30 if try_drivers < max_lanes_day else 300
-        result = _solve(try_drivers, search_time)
+        result = _solve(try_drivers, 15)  # quick feasibility probe
         if result and result.get('hosCompliant'):
-            if search_time < 300:
-                print(f"  Found compliant at {try_drivers}! Re-solving with full optimization...")
-                final = _solve(try_drivers, 300)
-                min_legal_result = final if (final and final.get('hosCompliant')) else result
-            else:
-                min_legal_result = result
+            print(f"  Found compliant at {try_drivers}! Re-solving with optimization...")
+            final = _solve(try_drivers, 120)
+            min_legal_result = final if (final and final.get('hosCompliant')) else result
             break
 
     if not min_legal_result:
@@ -1447,7 +1460,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
 
     for try_drivers in range(min_legal_count + 1, min_legal_count + 6):
         print(f"  Trying {try_drivers} drivers (operational)...")
-        result = _solve(try_drivers, 300)
+        result = _solve(try_drivers, 120)
         if result and result.get('hosCompliant'):
             viable, new_concerns = _is_operationally_viable(result)
             if viable:
