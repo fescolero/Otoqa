@@ -936,6 +936,104 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
     return (order, drive, dh_total, True, gaps)  # is_exact=True
 
 
+def _detect_pair_blocks(lanes, lane_map, lane_active_days, day_lane_ids, working_days,
+                        lane_pickup_min, lane_finish_min):
+    """Detect natural same-day reverse pairs and collapse into blocks.
+    Returns:
+      blocks: dict of block_id -> (out_lid, ret_lid, corridor, combined_drive, combined_span)
+      block_day_units: dict of day -> list of unit_ids (block_ids + singleton_lids)
+      unit_to_legs: dict of unit_id -> [lid, ...] (ordered legs in the block)
+      unit_pickup_min: dict of unit_id -> earliest pickup minute
+      unit_finish_min: dict of unit_id -> latest finish minute
+      unit_drive_min: dict of unit_id -> combined drive minutes
+    """
+    # Find all natural same-day pairs (gap <= 0.5h, reverse corridor)
+    candidates = []
+    for la in lanes:
+        for lb in lanes:
+            if la.id >= lb.id: continue
+            if la.origin_city.lower().strip() != lb.dest_city.lower().strip(): continue
+            if la.dest_city.lower().strip() != lb.origin_city.lower().strip(): continue
+            if la.finish_time is None or lb.pickup_time is None: continue
+            if lb.finish_time is None or la.pickup_time is None: continue
+            # Determine which is outbound, which is return
+            if la.finish_time <= (lb.pickup_end_time or lb.pickup_time + 0.25):
+                gap = lb.pickup_time - la.finish_time
+                if gap <= 0.5:
+                    shared = lane_active_days.get(la.id, set()) & lane_active_days.get(lb.id, set())
+                    if shared:
+                        candidates.append((gap, la.id, lb.id, shared))
+            if lb.finish_time <= (la.pickup_end_time or la.pickup_time + 0.25):
+                gap = la.pickup_time - lb.finish_time
+                if gap <= 0.5:
+                    shared = lane_active_days.get(la.id, set()) & lane_active_days.get(lb.id, set())
+                    if shared:
+                        candidates.append((gap, lb.id, la.id, shared))
+
+    # Greedy one-to-one matching
+    candidates.sort(key=lambda x: x[0])
+    paired = set()
+    blocks = {}  # block_id -> (out_lid, ret_lid, shared_days)
+    block_counter = 0
+    for gap, out_id, ret_id, shared in candidates:
+        if out_id in paired or ret_id in paired:
+            continue
+        paired.add(out_id)
+        paired.add(ret_id)
+        block_id = f'BLK_{block_counter}'
+        block_counter += 1
+        out_lane = lane_map[out_id]
+        ret_lane = lane_map[ret_id]
+        blocks[block_id] = (out_id, ret_id, shared)
+
+    # Build per-day unit lists: blocks + singletons
+    block_day_units = {}
+    unit_to_legs = {}  # unit_id -> [lid, ...]
+    unit_pickup_min = {}
+    unit_finish_min = {}
+    unit_drive_min = {}
+
+    # Create unit entries for blocks
+    lid_to_block = {}  # lid -> block_id
+    for block_id, (out_id, ret_id, shared) in blocks.items():
+        lid_to_block[out_id] = block_id
+        lid_to_block[ret_id] = block_id
+        unit_to_legs[block_id] = [out_id, ret_id]
+        unit_pickup_min[block_id] = min(lane_pickup_min[out_id], lane_pickup_min[ret_id])
+        unit_finish_min[block_id] = max(lane_finish_min[out_id], lane_finish_min[ret_id])
+        unit_drive_min[block_id] = (lane_map[out_id].route_duration_hours + lane_map[ret_id].route_duration_hours) * MINUTES
+
+    # Build per-day units
+    for day in working_days:
+        units = []
+        seen_blocks = set()
+        day_set = set(day_lane_ids[day])
+        for lid in day_lane_ids[day]:
+            if lid in lid_to_block:
+                bid = lid_to_block[lid]
+                out_id, ret_id, shared = blocks[bid]
+                if day in shared and bid not in seen_blocks and out_id in day_set and ret_id in day_set:
+                    # Both legs active — use block
+                    units.append(bid)
+                    seen_blocks.add(bid)
+                elif bid not in seen_blocks or lid not in [l for u in units for l in unit_to_legs.get(u, [])]:
+                    # One leg only or block already added — singleton
+                    units.append(lid)
+                    unit_to_legs.setdefault(lid, [lid])
+                    unit_pickup_min.setdefault(lid, lane_pickup_min[lid])
+                    unit_finish_min.setdefault(lid, lane_finish_min[lid])
+                    unit_drive_min.setdefault(lid, lane_map[lid].route_duration_hours * MINUTES)
+            else:
+                units.append(lid)
+                unit_to_legs.setdefault(lid, [lid])
+                unit_pickup_min.setdefault(lid, lane_pickup_min[lid])
+                unit_finish_min.setdefault(lid, lane_finish_min[lid])
+                unit_drive_min.setdefault(lid, lane_map[lid].route_duration_hours * MINUTES)
+        block_day_units[day] = units
+
+    return blocks, block_day_units, unit_to_legs, unit_pickup_min, unit_finish_min, unit_drive_min, lid_to_block
+
+
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
                       lane_pickup_end_min, lane_finish_min, lane_drive_min, lane_duty_min,
                       day_lane_ids, working_days, day_names_map, pre_post_h, max_legs, max_wait_h,
@@ -953,21 +1051,42 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     max_duty_m = int(HOS_MAX_DUTY * MINUTES)
     weekly_cap = int(MAX_WEEKLY_DUTY * MINUTES)
 
+    # --- Pair-block pre-computation ---
+    # Collapse natural same-day reverse pairs into atomic blocks.
+    # The solver assigns blocks (2-leg units) + singletons (1-leg units) to drivers.
+    blocks, block_day_units, unit_to_legs, unit_pickup_min, unit_finish_min, unit_drive_min, lid_to_block = \
+        _detect_pair_blocks(lanes, lane_map, lane_active_days, day_lane_ids, working_days,
+                           lane_pickup_min, lane_finish_min)
+
+    # Create assignment variables at the UNIT level (blocks + singletons)
+    unit_assign = {}  # day -> unit_id -> [BoolVar per driver]
+    for day in working_days:
+        unit_assign[day] = {}
+        for uid in block_day_units[day]:
+            unit_assign[day][uid] = [model.NewBoolVar(f'u_{day}_{uid}_{d}') for d in range(n_drivers)]
+
+    # Coverage: each unit assigned to exactly 1 driver
+    for day in working_days:
+        for uid in block_day_units[day]:
+            model.Add(sum(unit_assign[day][uid]) == 1)
+
+    # Max legs per driver per day (count actual legs, not units)
+    for day in working_days:
+        for d in range(n_drivers):
+            leg_count = sum(
+                unit_assign[day][uid][d] * len(unit_to_legs[uid])
+                for uid in block_day_units[day]
+            )
+            model.Add(leg_count <= max_legs)
+
+    # Create per-lane assign variables DERIVED from unit assignments
+    # (needed by downstream constraints that reference individual lanes)
     assign = {}
     for day in working_days:
         assign[day] = {}
-        for lid in day_lane_ids[day]:
-            assign[day][lid] = [model.NewBoolVar(f'a_{day}_{lid}_{d}') for d in range(n_drivers)]
-
-    # Coverage: each lane assigned to exactly 1 driver per day
-    for day in working_days:
-        for lid in day_lane_ids[day]:
-            model.Add(sum(assign[day][lid]) == 1)
-
-    # Max legs per driver per day
-    for day in working_days:
-        for d in range(n_drivers):
-            model.Add(sum(assign[day][lid][d] for lid in day_lane_ids[day]) <= max_legs)
+        for uid in block_day_units[day]:
+            for lid in unit_to_legs[uid]:
+                assign[day][lid] = unit_assign[day][uid]  # same BoolVar list
 
     # --- Generic corridor pair detection + same-driver constraints ---
     # Auto-detect natural round-trip pairs: outbound A→B paired with return B→A
