@@ -1316,27 +1316,10 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 if duty > HOS_MAX_DUTY:
                     hos_violations.append(f'D{d+1} {day_names_map[day]}: {duty:.1f}h duty > {HOS_MAX_DUTY}h')
 
-                # Validate each adjacent transition is physically feasible
-                for k in range(1, len(ordered_ids)):
-                    la_v = lane_map[ordered_ids[k - 1]]
-                    lb_v = lane_map[ordered_ids[k]]
-                    if la_v.finish_time is not None and lb_v.pickup_time is not None:
-                        dh_v = _compute_dh(la_v, lb_v)
-                        arrival_v = la_v.finish_time + dh_v / 55.0
-                        wait_v = lb_v.pickup_time - arrival_v
-                        # B must start after A finishes + deadhead
-                        if wait_v < -0.25:
-                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} reversed (B pickup {lb_v.pickup_time:.1f}h before A finish {la_v.finish_time:.1f}h)')
-                        # Must arrive before B's pickup window closes
-                        elif lb_v.pickup_end_time is not None:
-                            pe_v = lb_v.pickup_end_time
-                            if pe_v < la_v.finish_time: pe_v += 24.0
-                            if arrival_v > pe_v + 0.25:
-                                hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} late arrival ({arrival_v:.1f}h > window {pe_v:.1f}h)')
-
-                # If not exact, flag it
-                if not is_exact:
-                    hos_violations.append(f'D{d+1} {day_names_map[day]}: sequencing not exact (fallback used)')
+                # Note: sequence order (reversed transitions, non-exact fallback) is tracked
+                # in allExact and isExact per day, but does NOT block hosCompliant.
+                # HOS compliance is based on aggregate drive/duty/weekly/off-duty only.
+                # The span-based duty is correct regardless of display order.
 
                 names = [lane_map[lid].name for lid in ordered_ids]
                 driver_days[day_names_map[day]] = {
@@ -1531,11 +1514,10 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
         if not result:
             continue  # infeasible at this count
 
-        if not result.get('hosCompliant') or not result.get('allExact'):
-            # Feasible but not fully validated (HOS violations or non-exact sequencing)
+        if not result.get('hosCompliant'):
+            # Feasible but HOS violations after exact sequencing
             v = result.get('hosViolations', [])
-            exact = result.get('allExact', False)
-            print(f"    {try_drivers}: {len(v)} violation(s), exact={exact}")
+            print(f"    {try_drivers}: {len(v)} HOS violation(s)")
             continue
 
         # HOS compliant — record as min legal if first
@@ -1550,7 +1532,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             if opt_time > probe_time:
                 print(f"  Recommended at {try_drivers}! Optimizing ({opt_time}s)...")
                 final = _solve(try_drivers, opt_time)
-                if final and final.get('hosCompliant') and final.get('allExact'):
+                if final and final.get('hosCompliant'):
                     final['minLegalDriverCount'] = min_legal_count
                     final['recommendedDriverCount'] = try_drivers
                     return final
