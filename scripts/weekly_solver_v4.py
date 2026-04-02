@@ -1477,21 +1477,24 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             result['recommendedDriverCount'] = n_drivers
             return result
 
-    # Smarter lower bound: account for daily time-span requirements
+    # Smarter lower bound: account for time-span windows + exclusive blocks
     pp_min = int(pre_post_h * MINUTES)
     duty_max_min = int(HOS_MAX_DUTY * MINUTES)
-    daily_mins = []
     for day in working_days:
         lids = day_lane_ids[day]
         if not lids: continue
+        # Count exclusive blocks on this day (each needs a dedicated driver)
+        exclusive_on_day = sum(1 for out_id, ret_id, shared in exclusive_blocks
+                              if day in shared and out_id in day_lid_set[day])
+        non_exclusive_lanes = len(lids) - exclusive_on_day * 2
+        # Drivers for non-exclusive lanes
         starts = [lane_pickup_min[lid] for lid in lids]
         finishes = [lane_finish_min[lid] for lid in lids]
         span = max(finishes) - min(starts) + pp_min
         windows_needed = max(1, (span + duty_max_min - 1) // duty_max_min)
-        lanes_per_window = (len(lids) + windows_needed - 1) // windows_needed
-        daily_mins.append(max((lanes_per_window + max_legs - 1) // max_legs, windows_needed))
-    if daily_mins:
-        theoretical_min = max(theoretical_min, max(daily_mins))
+        non_excl_drivers = max((non_exclusive_lanes + max_legs - 1) // max_legs, windows_needed)
+        day_min = exclusive_on_day + non_excl_drivers
+        theoretical_min = max(theoretical_min, day_min)
 
     # --- Single-pass search: find first HOS-compliant + operationally viable count ---
     # Budget: must complete within Convex 600s action limit.
