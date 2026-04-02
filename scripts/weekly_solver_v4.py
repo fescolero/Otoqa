@@ -1281,6 +1281,71 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 model.AddAbsEquality(abs_diff, raw_diff)
                 band_penalty_vars.append(abs_diff)
 
+    # 9. Corridor affinity: penalize distinct corridors per driver-day
+    # A "corridor" is a city pair (e.g., colton↔san_diego). Each lane belongs to one.
+    # Penalty = (corridors_used - 1) per driver-day — pushes SD legs with SD, MV with MV.
+    lane_corridor = {}  # lid -> corridor_key
+    corridor_set = set()
+    for l in lanes:
+        key = frozenset([l.origin_city.lower().strip(), l.dest_city.lower().strip()])
+        lane_corridor[l.id] = key
+        corridor_set.add(key)
+    corridor_list = sorted(corridor_set, key=str)
+    corridor_idx = {c: i for i, c in enumerate(corridor_list)}
+
+    corridor_count_penalty_vars = []
+    for day in working_days:
+        lids = day_lane_ids[day]
+        if not lids: continue
+        # Which corridors appear on this day?
+        day_corridors = set(corridor_idx[lane_corridor[lid]] for lid in lids)
+        if len(day_corridors) <= 1: continue  # single corridor day, no penalty needed
+
+        for d in range(n_drivers):
+            if (day, d) not in driver_works_var: continue
+            # For each corridor present on this day, create a "uses" bool
+            uses_vars = []
+            for cidx in day_corridors:
+                corr_lids = [lid for lid in lids if corridor_idx[lane_corridor[lid]] == cidx]
+                if not corr_lids: continue
+                uses = model.NewBoolVar(f'uc_{day}_{d}_{cidx}')
+                # uses = 1 if driver d has any lane from this corridor
+                model.AddMaxEquality(uses, [assign[day][lid][d] for lid in corr_lids])
+                uses_vars.append(uses)
+            # Penalty = sum(uses) - 1 = distinct corridors used - 1
+            if len(uses_vars) >= 2:
+                corr_count = model.NewIntVar(0, len(uses_vars), f'cc_{day}_{d}')
+                model.Add(corr_count == sum(uses_vars))
+                excess = model.NewIntVar(0, len(uses_vars), f'cx_{day}_{d}')
+                model.AddMaxEquality(excess, [corr_count - 1, model.NewConstant(0)])
+                corridor_count_penalty_vars.append(excess)
+
+    # 10. Cross-corridor overlap penalty (soft): penalize overlapping legs from different corridors
+    cross_overlap_penalty_vars = []
+    for day in working_days:
+        lids = day_lane_ids[day]
+        for i, lid_a in enumerate(lids):
+            la = lane_map[lid_a]
+            start_a = lane_pickup_min[lid_a]
+            finish_a = lane_finish_min[lid_a]
+            corr_a = lane_corridor[lid_a]
+            for j, lid_b in enumerate(lids):
+                if j <= i: continue
+                lb = lane_map[lid_b]
+                start_b = lane_pickup_min[lid_b]
+                finish_b = lane_finish_min[lid_b]
+                corr_b = lane_corridor[lid_b]
+                # Skip same corridor
+                if corr_a == corr_b: continue
+                # Check overlap
+                if not (start_a < finish_b and start_b < finish_a): continue
+                # Overlapping different corridors — add soft penalty per driver
+                for d in range(n_drivers):
+                    both = model.NewBoolVar(f'xo_{day}_{i}_{j}_{d}')
+                    model.AddBoolAnd([assign[day][lid_a][d], assign[day][lid_b][d]]).OnlyEnforceIf(both)
+                    model.AddBoolOr([assign[day][lid_a][d].Not(), assign[day][lid_b][d].Not()]).OnlyEnforceIf(both.Not())
+                    cross_overlap_penalty_vars.append(both)
+
     # --- Weighted objective ---
     PAIR_WEIGHT = 10           # reward zero-DH pairings
     RETURN_WEIGHT = 2          # penalize far-from-base finishes
@@ -1290,6 +1355,8 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     WEEKLY_EXCESS_WEIGHT = 1   # penalize weekly duty over 58h target
     HEAVY_DAY_WEIGHT = 1       # penalize heavy days (>12h or >7 legs)
     BAND_WEIGHT = 1            # penalize shift-band inconsistency
+    CORRIDOR_COUNT_WEIGHT = 50 # penalize distinct corridors per driver-day (strong)
+    CROSS_OVERLAP_WEIGHT = 30  # penalize cross-corridor overlapping assignments (strong)
 
     obj_terms = []
     if reward_terms:
@@ -1308,6 +1375,10 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         obj_terms.extend(-v * HEAVY_DAY_WEIGHT for v in heavy_day_vars)
     if band_penalty_vars:
         obj_terms.extend(-v * BAND_WEIGHT for v in band_penalty_vars)
+    if corridor_count_penalty_vars:
+        obj_terms.extend(-v * CORRIDOR_COUNT_WEIGHT for v in corridor_count_penalty_vars)
+    if cross_overlap_penalty_vars:
+        obj_terms.extend(-v * CROSS_OVERLAP_WEIGHT for v in cross_overlap_penalty_vars)
     if obj_terms:
         model.Maximize(sum(obj_terms))
 
