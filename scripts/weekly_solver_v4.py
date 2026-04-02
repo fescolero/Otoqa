@@ -861,14 +861,46 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         active_pairs.append((out_id, ret_id, shared))
 
     # 3. Apply hard same-driver constraints for matched pairs
+    # Also identify exclusive blocks: long-haul pairs where combined drive > 5h
+    # or combined span > 10h. These get ONLY the pair on that driver-day (no extra legs).
+    EXCLUSIVE_DRIVE_THRESHOLD = 5.0  # hours combined route drive
+    EXCLUSIVE_SPAN_THRESHOLD = 10.0  # hours combined time span
+
     pair_constraints = 0
+    exclusive_blocks = []  # (out_id, ret_id, shared_days)
     for out_id, ret_id, shared in active_pairs:
+        out_lane = lane_map[out_id]
+        ret_lane = lane_map[ret_id]
+        combined_drive = out_lane.route_duration_hours + ret_lane.route_duration_hours
+        # Compute combined span (order: outbound first, then return)
+        if out_lane.finish_time and ret_lane.finish_time and out_lane.pickup_time and ret_lane.pickup_time:
+            if out_lane.finish_time <= ret_lane.pickup_time + 0.5:
+                combined_span = ret_lane.finish_time - out_lane.pickup_time
+            else:
+                combined_span = out_lane.finish_time - ret_lane.pickup_time
+        else:
+            combined_span = 0
+
+        is_exclusive = combined_drive > EXCLUSIVE_DRIVE_THRESHOLD or combined_span > EXCLUSIVE_SPAN_THRESHOLD
+
         for day in working_days:
             if day not in shared: continue
             if out_id not in day_lid_set[day] or ret_id not in day_lid_set[day]: continue
+            # Same-driver constraint
             for d in range(n_drivers):
                 model.Add(assign[day][out_id][d] == assign[day][ret_id][d])
             pair_constraints += 1
+
+            if is_exclusive:
+                # Exclusive block: driver doing this pair gets NO other lanes that day
+                other_lids = [lid for lid in day_lane_ids[day] if lid != out_id and lid != ret_id]
+                for d in range(n_drivers):
+                    for other_lid in other_lids:
+                        # If driver d has the outbound, they cannot have any other lane
+                        model.Add(assign[day][other_lid][d] + assign[day][out_id][d] <= 1)
+
+        if is_exclusive:
+            exclusive_blocks.append((out_id, ret_id, shared))
 
     # --- HOS: span-based 14h duty, 11h drive (route only), 10h off-duty, 70h weekly ---
     # Drive/DH are computed exactly in post-solve sequencing, not constrained here.
@@ -1478,10 +1510,11 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
         if not result:
             continue  # infeasible at this count
 
-        if not result.get('hosCompliant'):
-            # Feasible but not HOS-compliant after exact sequencing
+        if not result.get('hosCompliant') or not result.get('allExact'):
+            # Feasible but not fully validated (HOS violations or non-exact sequencing)
             v = result.get('hosViolations', [])
-            print(f"    {try_drivers}: {len(v)} HOS violation(s)")
+            exact = result.get('allExact', False)
+            print(f"    {try_drivers}: {len(v)} violation(s), exact={exact}")
             continue
 
         # HOS compliant — record as min legal if first
@@ -1496,7 +1529,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             if opt_time > probe_time:
                 print(f"  Recommended at {try_drivers}! Optimizing ({opt_time}s)...")
                 final = _solve(try_drivers, opt_time)
-                if final and final.get('hosCompliant'):
+                if final and final.get('hosCompliant') and final.get('allExact'):
                     final['minLegalDriverCount'] = min_legal_count
                     final['recommendedDriverCount'] = try_drivers
                     return final
