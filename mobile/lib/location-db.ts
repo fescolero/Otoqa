@@ -14,13 +14,21 @@ import * as SQLite from 'expo-sqlite';
 const DB_NAME = 'otoqa_locations.db';
 
 let db: SQLite.SQLiteDatabase | null = null;
+// Mutex: prevents concurrent callers from each spawning their own openAndInit()
+// when db is null (e.g. multiple GPS callbacks firing simultaneously at startup).
+let dbInitPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 function isRecoverableDbError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes('NativeDatabase.execAsync') || message.includes('NullPointerException');
+  return (
+    message.includes('NativeDatabase') ||
+    message.includes('NullPointerException') ||
+    message.includes('Access to closed')
+  );
 }
 
 async function resetDbHandle(): Promise<void> {
+  dbInitPromise = null;
   if (db) {
     try {
       await db.closeAsync();
@@ -69,8 +77,24 @@ const SCHEMA_SQL = `
 
 async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   const newDb = await SQLite.openDatabaseAsync(DB_NAME);
-  await newDb.execAsync(SCHEMA_SQL);
-  return newDb;
+  // Android: the native handle can be transiently null immediately after
+  // openDatabaseAsync resolves, causing execAsync to throw NullPointerException.
+  // Retry with exponential backoff to give the native layer time to finish init.
+  const RETRY_DELAYS_MS = [300, 600, 1200];
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      await newDb.execAsync(SCHEMA_SQL);
+      return newDb;
+    } catch (err) {
+      if (!isRecoverableDbError(err)) throw err;
+      lastErr = err;
+      if (attempt < RETRY_DELAYS_MS.length) {
+        await new Promise<void>((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+      }
+    }
+  }
+  throw lastErr as Error;
 }
 
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
@@ -88,11 +112,25 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
         /* already dead */
       }
       db = null;
+      dbInitPromise = null;
     }
   }
 
-  db = await openAndInit();
-  return db;
+  // Serialize concurrent callers: only one openAndInit() runs at a time.
+  if (!dbInitPromise) {
+    dbInitPromise = openAndInit()
+      .then((newDb) => {
+        db = newDb;
+        dbInitPromise = null;
+        return newDb;
+      })
+      .catch((err) => {
+        dbInitPromise = null;
+        throw err;
+      });
+  }
+
+  return dbInitPromise;
 }
 
 /**
@@ -101,6 +139,7 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
  * may have invalidated while the app was backgrounded.
  */
 export async function reopenDb(): Promise<void> {
+  dbInitPromise = null;
   await resetDbHandle();
   db = await openAndInit();
   console.log('[LocationDB] Database connection refreshed');
@@ -147,6 +186,7 @@ export async function insertLocation(loc: {
 
     console.warn('[LocationDB] Insert failed with stale handle, reopening and retrying once');
     await resetDbHandle();
+    await new Promise<void>((r) => setTimeout(r, 150));
     const database = await getDb();
     const result = await database.runAsync(
       `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)

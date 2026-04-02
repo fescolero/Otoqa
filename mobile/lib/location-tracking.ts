@@ -1381,21 +1381,25 @@ async function syncUnsyncedToConvex(
           `[LocationTracking] Server accepted ${result.inserted}/${syncedIds.length} — some points may have been rejected (org mismatch or invalid driver/load)`,
         );
       }
+
+      // Only continue batching when the server is actually accepting points.
+      // If inserted=0 we must NOT recurse — server is rejecting everything and
+      // looping would spin infinitely without ever marking any rows synced.
+      const remaining = await getUnsyncedCount();
+      if (remaining > 0) {
+        console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
+        const nextResult = await syncUnsyncedToConvex(organizationId);
+        return { success: true, synced: result.inserted + nextResult.synced };
+      }
+
+      return { success: true, synced: result.inserted };
     } else {
       console.warn(
         `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — NOT marking synced, will retry`,
       );
       trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
+      return { success: false, synced: 0 };
     }
-
-    const remaining = await getUnsyncedCount();
-    if (remaining > 0) {
-      console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
-      const nextResult = await syncUnsyncedToConvex(organizationId);
-      return { success: true, synced: result.inserted + nextResult.synced };
-    }
-
-    return { success: true, synced: result.inserted };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     const isAuthError =
