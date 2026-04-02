@@ -1477,15 +1477,26 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             result['recommendedDriverCount'] = n_drivers
             return result
 
-    # Smarter lower bound: account for time-span windows + exclusive blocks
+    # Smarter lower bound: account for time-span windows + exclusive long-haul pairs
     pp_min = int(pre_post_h * MINUTES)
     duty_max_min = int(HOS_MAX_DUTY * MINUTES)
+
+    # Pre-detect exclusive pairs (same logic as _build_and_solve)
+    excl_pair_ids = set()  # lane IDs that are part of exclusive blocks
+    for la in lanes:
+        for lb in lanes:
+            if la.id >= lb.id: continue
+            if la.origin_city.lower().strip() != lb.dest_city.lower().strip(): continue
+            if la.dest_city.lower().strip() != lb.origin_city.lower().strip(): continue
+            combined_drive = la.route_duration_hours + lb.route_duration_hours
+            if combined_drive > 5.0:
+                excl_pair_ids.add(la.id)
+                excl_pair_ids.add(lb.id)
+
     for day in working_days:
         lids = day_lane_ids[day]
         if not lids: continue
-        # Count exclusive blocks on this day (each needs a dedicated driver)
-        exclusive_on_day = sum(1 for out_id, ret_id, shared in exclusive_blocks
-                              if day in shared and out_id in day_lid_set[day])
+        exclusive_on_day = sum(1 for lid in lids if lid in excl_pair_ids) // 2
         non_exclusive_lanes = len(lids) - exclusive_on_day * 2
         # Drivers for non-exclusive lanes
         starts = [lane_pickup_min[lid] for lid in lids]
