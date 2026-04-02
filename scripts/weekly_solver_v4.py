@@ -1052,6 +1052,44 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         if is_exclusive:
             exclusive_blocks.append((out_id, ret_id, shared))
 
+    # --- Local corridor blocks: reward same-corridor pairs on the same driver ---
+    # Group non-exclusive pairs by corridor. For each pair of same-corridor pairs
+    # active on the same day, reward them being on the same driver.
+    pair_corridor = {}  # out_id -> corridor key
+    for out_id, ret_id, shared in active_pairs:
+        out_lane = lane_map[out_id]
+        corr = frozenset([out_lane.origin_city.lower().strip(), out_lane.dest_city.lower().strip()])
+        pair_corridor[out_id] = corr
+
+    corridor_block_rewards = []
+    for day in working_days:
+        # Group non-exclusive pairs active today by corridor
+        from collections import defaultdict
+        corr_pairs_today = defaultdict(list)  # corridor -> [(out_id, ret_id)]
+        for out_id, ret_id, shared in active_pairs:
+            if day not in shared: continue
+            if out_id not in day_lid_set[day] or ret_id not in day_lid_set[day]: continue
+            # Skip exclusive blocks (already isolated)
+            is_excl = any(out_id == eid and ret_id == rid for eid, rid, _ in exclusive_blocks)
+            if is_excl: continue
+            corr = pair_corridor.get(out_id)
+            if corr:
+                corr_pairs_today[corr].append((out_id, ret_id))
+
+        # For each corridor with 2+ pairs today, reward same-driver assignment
+        for corr, pairs in corr_pairs_today.items():
+            if len(pairs) < 2: continue
+            for i in range(len(pairs)):
+                for j in range(i + 1, len(pairs)):
+                    out_i, ret_i = pairs[i]
+                    out_j, ret_j = pairs[j]
+                    for d in range(n_drivers):
+                        # Reward: both pairs on same driver
+                        both = model.NewBoolVar(f'cb_{day}_{i}_{j}_{d}')
+                        model.AddBoolAnd([assign[day][out_i][d], assign[day][out_j][d]]).OnlyEnforceIf(both)
+                        model.AddBoolOr([assign[day][out_i][d].Not(), assign[day][out_j][d].Not()]).OnlyEnforceIf(both.Not())
+                        corridor_block_rewards.append(both)
+
     # --- HOS: span-based 14h duty, 11h drive (route only), 10h off-duty, 70h weekly ---
     # Drive/DH are computed exactly in post-solve sequencing, not constrained here.
     # The span-based duty window is the HOS authority for feasibility.
@@ -1326,8 +1364,28 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     model.AddMaxEquality(excess3, [corr_count - 2, model.NewConstant(0)])
                     corridor_count_penalty_vars.append(excess3 * 5)  # 5x multiplier for 3rd+ corridor
 
-    # 10. Cross-corridor overlap penalty (soft)
-    cross_overlap_penalty_vars = []
+    # 10. Cross-corridor overlap penalty — distance-weighted
+    # Mixing nearby corridors (SD+MV, SA+CoI) is cheaper than far ones (CoI+SB+ANA)
+    # Pre-compute corridor-pair distances from non-base city locations
+    from lane_solver import haversine as hav_fn
+    city_locs = {}
+    for l in lanes:
+        for city, lat, lng in [(l.origin_city, l.origin_lat, l.origin_lng),
+                                (l.dest_city, l.dest_lat, l.dest_lng)]:
+            cn = city.lower().strip()
+            if cn != base_city and cn not in city_locs and lat and lng:
+                city_locs[cn] = (lat, lng)
+
+    def _corridor_distance(corr_a, corr_b):
+        """Distance between two corridors' non-base endpoints."""
+        cities_a = [c for c in corr_a if c != base_city]
+        cities_b = [c for c in corr_b if c != base_city]
+        if not cities_a or not cities_b: return 0
+        ca = cities_a[0]; cb = cities_b[0]
+        if ca not in city_locs or cb not in city_locs: return 50
+        return int(hav_fn(city_locs[ca][0], city_locs[ca][1], city_locs[cb][0], city_locs[cb][1]))
+
+    cross_overlap_penalty_vars = []  # (both_var, distance_weight)
     for day in working_days:
         lids = day_lane_ids[day]
         for i, lid_a in enumerate(lids):
@@ -1339,11 +1397,14 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 corr_b = lane_corridor[lid_b]
                 if corr_a == corr_b: continue
                 if not (start_a < finish_b and start_b < finish_a): continue
+                dist = _corridor_distance(corr_a, corr_b)
+                if dist < 10: continue  # very close corridors — acceptable mixing
+                weight = max(1, dist // 10)  # 1 per 10 miles distance
                 for d in range(n_drivers):
                     both = model.NewBoolVar(f'xo_{day}_{i}_{j}_{d}')
                     model.AddBoolAnd([assign[day][lid_a][d], assign[day][lid_b][d]]).OnlyEnforceIf(both)
                     model.AddBoolOr([assign[day][lid_a][d].Not(), assign[day][lid_b][d].Not()]).OnlyEnforceIf(both.Not())
-                    cross_overlap_penalty_vars.append(both)
+                    cross_overlap_penalty_vars.append(both * weight)
 
     # --- Weighted objective ---
     PAIR_WEIGHT = 10           # reward zero-DH pairings
@@ -1356,8 +1417,11 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     BAND_WEIGHT = 1            # penalize shift-band inconsistency
     CORRIDOR_WEIGHT = 300      # penalize distinct corridors per driver-day (dominant)
     CROSS_OVERLAP_WEIGHT = 150 # penalize cross-corridor overlapping (dominant)
+    CORRIDOR_BLOCK_WEIGHT = 80 # reward same-corridor pair blocks on same driver
 
     obj_terms = []
+    if corridor_block_rewards:
+        obj_terms.extend(r * CORRIDOR_BLOCK_WEIGHT for r in corridor_block_rewards)
     if reward_terms:
         obj_terms.extend(r * PAIR_WEIGHT for r in reward_terms)
     if return_penalties:
