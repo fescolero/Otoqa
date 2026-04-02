@@ -812,6 +812,8 @@ export const runExternalSolver = internalAction({
           driveHours: number; dutyHours: number;
           miles: number; deadheadMiles: number;
           startTime: number | null; endTime: number | null;
+          isExact?: boolean;
+          legGaps?: Array<{ miles: number; driveHours: number; waitHours: number | null; prevEndTime: number | null; nextStartTime: number | null; earliestArrival: number | null }>;
         }>;
         totalDriveHours: number;
         totalDutyHours: number;
@@ -847,6 +849,8 @@ export const runExternalSolver = internalAction({
             deadheadMiles: dayData.deadheadMiles ?? 0,
             startTime: dayData.startTime,
             endTime: dayData.endTime,
+            isExact: dayData.isExact ?? false,
+            legGaps: dayData.legGaps ?? [],
           },
         ]),
       ),

@@ -672,14 +672,37 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
     """Exact per-day sequencer: finds optimal lane ordering for a single driver's daily assignment.
     Uses a small circuit model to minimize deadhead for just these lanes.
     Arc validity enforces: finish_a + deadhead_ab <= pickup_end_b and wait <= max_wait.
-    Returns (ordered_ids, drive_hours, dh_miles, is_exact).
-    is_exact=False means fallback ordering was used."""
+    Returns (ordered_ids, drive_hours, dh_miles, is_exact, leg_gaps).
+    is_exact=False means fallback ordering was used.
+    leg_gaps: list of dicts with per-transition details."""
+
+    def _build_gaps(ordered, lm):
+        """Build per-transition gap details from an ordered sequence."""
+        gaps = []
+        for k in range(1, len(ordered)):
+            la_g = lm[ordered[k - 1]]
+            lb_g = lm[ordered[k]]
+            dh_mi = _compute_dh(la_g, lb_g)
+            dh_h = dh_mi / 55.0
+            prev_end = la_g.finish_time
+            next_start = lb_g.pickup_time
+            earliest_arr = (prev_end + dh_h) if prev_end is not None else None
+            wait_h = (next_start - earliest_arr) if (next_start is not None and earliest_arr is not None) else None
+            gaps.append({
+                'miles': round(dh_mi, 1),
+                'driveHours': round(dh_h, 2),
+                'waitHours': round(max(0, wait_h), 2) if wait_h is not None else None,
+                'prevEndTime': round(prev_end, 2) if prev_end is not None else None,
+                'nextStartTime': round(next_start, 2) if next_start is not None else None,
+                'earliestArrival': round(earliest_arr, 2) if earliest_arr is not None else None,
+            })
+        return gaps
 
     if len(lane_ids) <= 1:
         if not lane_ids:
-            return ([], 0.0, 0, True)
+            return ([], 0.0, 0, True, [])
         l = lane_map[lane_ids[0]]
-        return (lane_ids, l.route_duration_hours, 0, True)
+        return (lane_ids, l.route_duration_hours, 0, True, [])
 
     n = len(lane_ids)
     # Compute pairwise deadhead with physical feasibility checks
@@ -745,7 +768,7 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             dh_mi = _compute_dh(la, lb)
             drive += dh_mi / 55.0
             dh_m_total += dh_mi
-        return (ordered_ids, drive, int(dh_m_total), False)  # is_exact=False
+        return (ordered_ids, drive, int(dh_m_total), False, _build_gaps(ordered_ids, lane_map))  # is_exact=False
 
     # Extract ordering from circuit
     order = []
@@ -773,7 +796,7 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             dh_mi = _compute_dh(la_fb, lb_fb)
             drive += dh_mi / 55.0
             dh_m_total += dh_mi
-        return (ordered_ids, drive, int(dh_m_total), False)  # NOT exact
+        return (ordered_ids, drive, int(dh_m_total), False, _build_gaps(ordered_ids, lane_map))  # NOT exact
 
     drive = sum(lane_map[lid].route_duration_hours for lid in order)
     dh_total = 0.0
@@ -784,7 +807,7 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             dh_h, dh_m = pair_dh[(idx_a, idx_b)]
             drive += dh_h
             dh_total += dh_m
-    return (order, drive, int(dh_total), True)  # is_exact=True
+    return (order, drive, int(dh_total), True, _build_gaps(order, lane_map))  # is_exact=True
 
 
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
@@ -1231,7 +1254,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     for repair_round in range(max_repair_rounds):
         violations_found = False
         for (d, day), legs in list(driver_day_legs.items()):
-            _, drive, _, _ = _sequence_driver_day(legs, lane_map, graph, base_city, max_wait_h)
+            _, drive, _, _, _ = _sequence_driver_day(legs, lane_map, graph, base_city, max_wait_h)
             if drive <= max_drive_h:
                 continue
             violations_found = True
@@ -1246,13 +1269,13 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     d2_fi = [lane_map[lid].finish_time for lid in d2_legs if lane_map[lid].finish_time]
                     if d2_st and d2_fi and (max(d2_fi) - min(d2_st) + pre_post_h) > HOS_MAX_DUTY: continue
                     # Exact drive check for d2
-                    _, d2_drive, _, _ = _sequence_driver_day(d2_legs, lane_map, graph, base_city, max_wait_h)
+                    _, d2_drive, _, _, _ = _sequence_driver_day(d2_legs, lane_map, graph, base_city, max_wait_h)
                     if d2_drive > max_drive_h: continue
                     # Exact drive check for d after removing swap_lid
                     d_remaining = [lid for lid in legs if lid != swap_lid]
                     d_new_drive = 0
                     if d_remaining:
-                        _, d_new_drive, _, _ = _sequence_driver_day(d_remaining, lane_map, graph, base_city, max_wait_h)
+                        _, d_new_drive, _, _, _ = _sequence_driver_day(d_remaining, lane_map, graph, base_city, max_wait_h)
                         if d_new_drive > max_drive_h: continue
                     # Off-duty check
                     if not _check_off_duty_ok(d2, day, d2_legs): continue
@@ -1297,7 +1320,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         for day in working_days:
             legs = driver_day_legs.get((d, day), [])
             if legs:
-                ordered_ids, drive, dh_miles_total, is_exact = _sequence_driver_day(
+                ordered_ids, drive, dh_miles_total, is_exact, leg_gaps = _sequence_driver_day(
                     legs, lane_map, graph, base_city, max_wait_h
                 )
                 if not is_exact:
@@ -1328,6 +1351,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     'miles': round(miles), 'deadheadMiles': round(dh_miles_total),
                     'startTime': earliest_start, 'endTime': latest_finish,
                     'isExact': is_exact,
+                    'legGaps': leg_gaps,
                 }
 
         # Validate weekly duty

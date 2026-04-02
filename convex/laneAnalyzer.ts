@@ -696,6 +696,8 @@ export const getShiftsForWeek = query({
           dutyHours: number;
           miles: number;
           deadheadMiles: number;
+          isExact?: boolean;
+          legGaps?: Array<{ miles: number; driveHours: number; waitHours: number | null; prevEndTime: number | null; nextStartTime: number | null; earliestArrival: number | null }>;
         }>;
       }> = [];
 
@@ -739,6 +741,8 @@ export const getShiftsForWeek = query({
               dutyHours: solverDay.dutyHours,
               miles: solverDay.miles,
               deadheadMiles: solverDay.deadheadMiles,
+              isExact: (solverDay as any).isExact ?? false,
+              legGaps: (solverDay as any).legGaps ?? [],
             });
           } else {
             // Some legs excluded — rebuild metrics from retained leg sequence
@@ -784,6 +788,8 @@ export const getShiftsForWeek = query({
               dutyHours: Math.round(dutyHours * 10) / 10,
               miles: Math.round(miles),
               deadheadMiles: Math.round(deadheadMiles),
+              isExact: false, // rebuilt from partial legs — not exact
+              legGaps: [],
             });
           }
         }
