@@ -785,6 +785,7 @@ export const runExternalSolver = internalAction({
         pre_post_hours: session?.prePostTripMinutes != null ? session.prePostTripMinutes / 60 : 1.0,
         max_gap_hours: (session as any)?.maxGapHours ?? 3.0,
         drive_buffer_hours: (session as any)?.driveBufferHours ?? 1.5,
+        target_drivers: (session as any)?.targetDriverCount ?? undefined,
         bases: data.bases,
       },
     });
