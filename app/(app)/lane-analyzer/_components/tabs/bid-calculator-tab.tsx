@@ -425,6 +425,11 @@ export function BidCalculatorTab({
               <span className="text-muted-foreground">
                 70h: <strong>{session.weeklyHosMode === 'uniform' ? 'Uniform' : 'Flexible'}</strong>
               </span>
+              {(session as any).targetDriverCount && (
+                <span className="text-muted-foreground">
+                  Target: <strong>{(session as any).targetDriverCount} drivers</strong>
+                </span>
+              )}
               <Button variant="ghost" size="sm" className="ml-auto h-7 gap-1 text-xs" onClick={() => setEditingConfig(true)}>
                 <Pencil className="h-3 w-3" /> Edit
               </Button>
@@ -750,6 +755,7 @@ function SessionConfigEditor({ session, onSave, onCancel }: SessionConfigEditorP
   const [maxLegs, setMaxLegs] = useState(String(session.maxChainingLegs ?? 8));
   const [maxDeadhead, setMaxDeadhead] = useState(String(session.maxDeadheadMiles ?? 75));
   const [maxWait, setMaxWait] = useState(String(session.maxWaitHours ?? 3.0));
+  const [targetDrivers, setTargetDrivers] = useState(String((session as any).targetDriverCount ?? ''));
   const [weeklyMode, setWeeklyMode] = useState<'uniform' | 'flexible'>(session.weeklyHosMode ?? 'flexible');
   const [saving, setSaving] = useState(false);
 
@@ -774,6 +780,7 @@ function SessionConfigEditor({ session, onSave, onCancel }: SessionConfigEditorP
         maxChainingLegs: parseInt(maxLegs) || 8,
         maxDeadheadMiles: parseInt(maxDeadhead) || 75,
         maxWaitHours: parseFloat(maxWait) || 3.0,
+        targetDriverCount: targetDrivers ? parseInt(targetDrivers) : undefined,
         weeklyHosMode: weeklyMode,
       });
     } finally {
@@ -893,6 +900,10 @@ function SessionConfigEditor({ session, onSave, onCancel }: SessionConfigEditorP
             <div>
               <Label className="text-xs">Max Wait (hrs)</Label>
               <Input type="number" step="0.5" min={0.5} max={6} value={maxWait} onChange={(e) => setMaxWait(e.target.value)} className="h-8 text-sm" />
+            </div>
+            <div>
+              <Label className="text-xs">Target Drivers</Label>
+              <Input type="number" min={1} max={50} placeholder="Auto" value={targetDrivers} onChange={(e) => setTargetDrivers(e.target.value)} className="h-8 text-sm" />
             </div>
           </div>
           <div className="flex items-center gap-6 mt-3">
