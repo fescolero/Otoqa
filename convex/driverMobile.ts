@@ -760,7 +760,14 @@ export const checkOutFromStop = mutation({
       .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
       .collect();
 
-    const lastStop = allStops.reduce((prev, current) =>
+    // Exclude DETOUR stops and Canceled stops — they don't gate load completion.
+    // Detour stops use fractional sequence numbers (e.g., 3.01) and would otherwise
+    // be picked as "lastStop" by the reduce, blocking auto-completion of the load.
+    const scheduledStops = allStops.filter(
+      (s) => s.stopType !== 'DETOUR' && s.status !== 'Canceled',
+    );
+    const stopsForLastCheck = scheduledStops.length > 0 ? scheduledStops : allStops;
+    const lastStop = stopsForLastCheck.reduce((prev, current) =>
       prev.sequenceNumber > current.sequenceNumber ? prev : current,
     );
 

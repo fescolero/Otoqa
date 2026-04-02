@@ -281,7 +281,8 @@ export default function TripDetailScreen() {
       const resolvedStopId =
         checkInModal.type === 'out' ? (activeCheckedInStop?._id ?? checkInModal.stopId) : checkInModal.stopId;
       const currentStop = displayStops.find((s: any) => s._id === resolvedStopId);
-      const totalStops = displayStops.length;
+      // Exclude DETOUR stops from the count — they don't gate load/tracking completion.
+      const totalStops = displayStops.filter((s: any) => s.stopType !== 'DETOUR').length;
 
       if (checkInModal.type === 'out' && activeCheckedInStop && activeCheckedInStop._id !== checkInModal.stopId) {
         console.warn(
