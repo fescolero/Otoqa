@@ -14,13 +14,20 @@ import * as SQLite from 'expo-sqlite';
 const DB_NAME = 'otoqa_locations.db';
 
 let db: SQLite.SQLiteDatabase | null = null;
+// Mutex for concurrent getDb() callers — prevents two concurrent openAndInit() races.
+let dbInitPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 function isRecoverableDbError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes('NativeDatabase.execAsync') || message.includes('NullPointerException');
+  return (
+    message.includes('NativeDatabase.execAsync') ||
+    message.includes('NullPointerException') ||
+    message.includes('Access to closed')
+  );
 }
 
 async function resetDbHandle(): Promise<void> {
+  dbInitPromise = null; // cancel any in-flight init so next getDb() starts fresh
   if (db) {
     try {
       await db.closeAsync();
@@ -28,6 +35,17 @@ async function resetDbHandle(): Promise<void> {
       // ignore dead native handles
     }
     db = null;
+  }
+}
+
+async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (!isRecoverableDbError(error)) throw error;
+    console.warn('[LocationDB] Recoverable DB error, reopening and retrying once');
+    await resetDbHandle();
+    return await fn();
   }
 }
 
@@ -74,25 +92,44 @@ async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
 }
 
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
+  // Join any in-flight init first — prevents two concurrent openAndInit() calls.
+  if (dbInitPromise) return dbInitPromise;
+
   if (db) {
     // Verify the native handle is still alive. Android can destroy it after
     // long background periods while the JS reference remains cached.
     try {
       await db.execAsync('SELECT 1');
+      // Re-check after the yield: another caller may have started a reinit.
+      if (dbInitPromise) return dbInitPromise;
       return db;
     } catch {
       console.warn('[LocationDB] Stale DB handle detected, reopening...');
-      try {
-        await db.closeAsync();
-      } catch {
-        /* already dead */
-      }
-      db = null;
+      // Fall through to claim the mutex below.
     }
   }
 
-  db = await openAndInit();
-  return db;
+  // Claim mutex synchronously (no await before assignment) so concurrent
+  // callers that reach here after the probe-yield all join the same promise.
+  if (!dbInitPromise) {
+    const staleDb = db;
+    db = null; // clear immediately so concurrent probes fail fast
+    dbInitPromise = (async () => {
+      if (staleDb) {
+        try {
+          await staleDb.closeAsync();
+        } catch {
+          /* already dead */
+        }
+      }
+      const newDb = await openAndInit();
+      db = newDb;
+      return newDb;
+    })().finally(() => {
+      dbInitPromise = null;
+    });
+  }
+  return dbInitPromise;
 }
 
 /**
@@ -102,7 +139,7 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
  */
 export async function reopenDb(): Promise<void> {
   await resetDbHandle();
-  db = await openAndInit();
+  await getDb(); // uses mutex so concurrent callers share one openAndInit()
   console.log('[LocationDB] Database connection refreshed');
 }
 
@@ -134,7 +171,7 @@ export async function insertLocation(loc: {
     Date.now(),
   ] as const;
 
-  try {
+  return withDbRetry(async () => {
     const database = await getDb();
     const result = await database.runAsync(
       `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
@@ -142,19 +179,7 @@ export async function insertLocation(loc: {
       ...args,
     );
     return result.lastInsertRowId;
-  } catch (error) {
-    if (!isRecoverableDbError(error)) throw error;
-
-    console.warn('[LocationDB] Insert failed with stale handle, reopening and retrying once');
-    await resetDbHandle();
-    const database = await getDb();
-    const result = await database.runAsync(
-      `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-      ...args,
-    );
-    return result.lastInsertRowId;
-  }
+  });
 }
 
 export async function insertLocationBatch(
@@ -172,36 +197,38 @@ export async function insertLocationBatch(
 ): Promise<number> {
   if (locations.length === 0) return 0;
 
-  const database = await getDb();
-  const now = Date.now();
-  let inserted = 0;
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const now = Date.now();
+    let inserted = 0;
 
-  const stmt = await database.prepareAsync(
-    `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
-     VALUES ($driverId, $loadId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`,
-  );
+    const stmt = await database.prepareAsync(
+      `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
+       VALUES ($driverId, $loadId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`,
+    );
 
-  try {
-    for (const loc of locations) {
-      await stmt.executeAsync({
-        $driverId: loc.driverId,
-        $loadId: loc.loadId,
-        $orgId: loc.organizationId,
-        $lat: loc.latitude,
-        $lng: loc.longitude,
-        $acc: loc.accuracy,
-        $spd: loc.speed,
-        $hdg: loc.heading,
-        $rec: loc.recordedAt,
-        $cre: now,
-      });
-      inserted++;
+    try {
+      for (const loc of locations) {
+        await stmt.executeAsync({
+          $driverId: loc.driverId,
+          $loadId: loc.loadId,
+          $orgId: loc.organizationId,
+          $lat: loc.latitude,
+          $lng: loc.longitude,
+          $acc: loc.accuracy,
+          $spd: loc.speed,
+          $hdg: loc.heading,
+          $rec: loc.recordedAt,
+          $cre: now,
+        });
+        inserted++;
+      }
+    } finally {
+      await stmt.finalizeAsync();
     }
-  } finally {
-    await stmt.finalizeAsync();
-  }
 
-  return inserted;
+    return inserted;
+  });
 }
 
 // ============================================
@@ -209,46 +236,56 @@ export async function insertLocationBatch(
 // ============================================
 
 export async function getUnsyncedLocations(limit = 100): Promise<LocationRow[]> {
-  const database = await getDb();
-  return await database.getAllAsync<LocationRow>(
-    'SELECT * FROM locations WHERE synced = 0 ORDER BY recordedAt ASC LIMIT ?',
-    limit,
-  );
+  return withDbRetry(async () => {
+    const database = await getDb();
+    return database.getAllAsync<LocationRow>(
+      'SELECT * FROM locations WHERE synced = 0 ORDER BY recordedAt ASC LIMIT ?',
+      limit,
+    );
+  });
 }
 
 export async function getUnsyncedForLoad(loadId: string, limit = 500): Promise<LocationRow[]> {
-  const database = await getDb();
-  return await database.getAllAsync<LocationRow>(
-    'SELECT * FROM locations WHERE loadId = ? AND synced = 0 ORDER BY recordedAt ASC LIMIT ?',
-    loadId,
-    limit,
-  );
+  return withDbRetry(async () => {
+    const database = await getDb();
+    return database.getAllAsync<LocationRow>(
+      'SELECT * FROM locations WHERE loadId = ? AND synced = 0 ORDER BY recordedAt ASC LIMIT ?',
+      loadId,
+      limit,
+    );
+  });
 }
 
 export async function getUnsyncedCount(): Promise<number> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM locations WHERE synced = 0',
-  );
-  return row?.count ?? 0;
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const row = await database.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM locations WHERE synced = 0',
+    );
+    return row?.count ?? 0;
+  });
 }
 
 export async function getUnsyncedCountForLoad(loadId: string): Promise<number> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM locations WHERE loadId = ? AND synced = 0',
-    loadId,
-  );
-  return row?.count ?? 0;
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const row = await database.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM locations WHERE loadId = ? AND synced = 0',
+      loadId,
+    );
+    return row?.count ?? 0;
+  });
 }
 
 export async function getTotalCountForLoad(loadId: string): Promise<number> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM locations WHERE loadId = ?',
-    loadId,
-  );
-  return row?.count ?? 0;
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const row = await database.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM locations WHERE loadId = ?',
+      loadId,
+    );
+    return row?.count ?? 0;
+  });
 }
 
 // ============================================
@@ -257,16 +294,20 @@ export async function getTotalCountForLoad(loadId: string): Promise<number> {
 
 export async function markAsSynced(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
-  const database = await getDb();
-  const placeholders = ids.map(() => '?').join(',');
-  await database.runAsync(`UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
+  await withDbRetry(async () => {
+    const database = await getDb();
+    const placeholders = ids.map(() => '?').join(',');
+    await database.runAsync(`UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
+  });
 }
 
 export async function deleteOldSyncedLocations(olderThanMs: number = 7 * 24 * 60 * 60 * 1000): Promise<number> {
-  const database = await getDb();
-  const cutoff = Date.now() - olderThanMs;
-  const result = await database.runAsync('DELETE FROM locations WHERE synced = 1 AND createdAt < ?', cutoff);
-  return result.changes;
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const cutoff = Date.now() - olderThanMs;
+    const result = await database.runAsync('DELETE FROM locations WHERE synced = 1 AND createdAt < ?', cutoff);
+    return result.changes;
+  });
 }
 
 // ============================================
@@ -276,13 +317,15 @@ export async function deleteOldSyncedLocations(olderThanMs: number = 7 * 24 * 60
 export async function getLastLocationForLoad(
   loadId: string,
 ): Promise<{ latitude: number; longitude: number; recordedAt: number } | null> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{
-    latitude: number;
-    longitude: number;
-    recordedAt: number;
-  }>('SELECT latitude, longitude, recordedAt FROM locations WHERE loadId = ? ORDER BY recordedAt DESC LIMIT 1', loadId);
-  return row ?? null;
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const row = await database.getFirstAsync<{
+      latitude: number;
+      longitude: number;
+      recordedAt: number;
+    }>('SELECT latitude, longitude, recordedAt FROM locations WHERE loadId = ? ORDER BY recordedAt DESC LIMIT 1', loadId);
+    return row ?? null;
+  });
 }
 
 // ============================================
@@ -290,9 +333,11 @@ export async function getLastLocationForLoad(
 // ============================================
 
 export async function deleteAllForLoad(loadId: string): Promise<number> {
-  const database = await getDb();
-  const result = await database.runAsync('DELETE FROM locations WHERE loadId = ?', loadId);
-  return result.changes;
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const result = await database.runAsync('DELETE FROM locations WHERE loadId = ?', loadId);
+    return result.changes;
+  });
 }
 
 export async function closeDb(): Promise<void> {

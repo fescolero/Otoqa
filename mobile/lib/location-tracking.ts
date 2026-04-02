@@ -1381,18 +1381,20 @@ async function syncUnsyncedToConvex(
           `[LocationTracking] Server accepted ${result.inserted}/${syncedIds.length} — some points may have been rejected (org mismatch or invalid driver/load)`,
         );
       }
+
+      // Only continue batching when the server accepted points; if inserted===0
+      // the same records would be selected again causing infinite recursion.
+      const remaining = await getUnsyncedCount();
+      if (remaining > 0) {
+        console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
+        const nextResult = await syncUnsyncedToConvex(organizationId);
+        return { success: true, synced: result.inserted + nextResult.synced };
+      }
     } else {
       console.warn(
         `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — NOT marking synced, will retry`,
       );
       trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
-    }
-
-    const remaining = await getUnsyncedCount();
-    if (remaining > 0) {
-      console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
-      const nextResult = await syncUnsyncedToConvex(organizationId);
-      return { success: true, synced: result.inserted + nextResult.synced };
     }
 
     return { success: true, synced: result.inserted };
