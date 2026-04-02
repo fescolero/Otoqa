@@ -1476,58 +1476,68 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
     if daily_mins:
         theoretical_min = max(theoretical_min, max(daily_mins))
 
-    # --- Phase 1: Find minimum legal (HOS-compliant) driver count ---
-    # Use shorter times to stay within Convex 600s action limit
-    # Budget: ~15s per infeasible probe, 120s for optimization, 120s per operational try
-    print(f"Phase 1: Searching for minimum legal drivers (starting at {theoretical_min})...")
-    min_legal_result = None
-    for try_drivers in range(theoretical_min, max_lanes_day + 5):
-        print(f"  Trying {try_drivers} drivers...")
-        result = _solve(try_drivers, 15)  # quick feasibility probe
-        if result and result.get('hosCompliant'):
-            print(f"  Found compliant at {try_drivers}! Re-solving with optimization...")
-            final = _solve(try_drivers, 120)
-            min_legal_result = final if (final and final.get('hosCompliant')) else result
+    # --- Single-pass search: find first HOS-compliant + operationally viable count ---
+    # Budget: must complete within Convex 600s action limit.
+    # Strategy: fast probes (10s) to find first compliant, then 90s optimization.
+    # Skip separate min-legal search — go directly for recommended.
+    import time as _time
+    search_start = _time.time()
+    TIME_BUDGET = 500  # seconds, leave 100s margin for Convex overhead
+
+    print(f"Searching for recommended drivers (starting at {theoretical_min})...")
+    min_legal_count = None
+    for try_drivers in range(theoretical_min, max_lanes_day + 8):
+        elapsed = _time.time() - search_start
+        remaining = TIME_BUDGET - elapsed
+        if remaining < 20:
+            print(f"  Time budget exhausted ({elapsed:.0f}s used)")
             break
 
-    if not min_legal_result:
-        return {'success': False, 'error': 'Could not find feasible solution', 'driverCount': 0}
+        probe_time = min(10, int(remaining / 3))
+        print(f"  Trying {try_drivers} drivers ({probe_time}s probe, {elapsed:.0f}s elapsed)...")
+        result = _solve(try_drivers, probe_time)
 
-    min_legal_count = min_legal_result['driverCount']
-    viable, concerns = _is_operationally_viable(min_legal_result)
+        if not result:
+            continue  # infeasible at this count
 
-    if viable:
-        print(f"  Minimum legal ({min_legal_count}) is also operationally viable!")
-        min_legal_result['minLegalDriverCount'] = min_legal_count
-        min_legal_result['recommendedDriverCount'] = min_legal_count
-        return min_legal_result
+        if not result.get('hosCompliant'):
+            # Feasible but not HOS-compliant after exact sequencing
+            v = result.get('hosViolations', [])
+            print(f"    {try_drivers}: {len(v)} HOS violation(s)")
+            continue
 
-    # --- Phase 2: Search for recommended operational count ---
-    print(f"\nPhase 2: Minimum legal = {min_legal_count} (not operationally viable)")
-    for c in concerns:
-        print(f"    ⚠ {c}")
-    print(f"  Searching for recommended operational count...")
+        # HOS compliant — record as min legal if first
+        if min_legal_count is None:
+            min_legal_count = try_drivers
+            print(f"  Min legal: {try_drivers}")
 
-    for try_drivers in range(min_legal_count + 1, min_legal_count + 6):
-        print(f"  Trying {try_drivers} drivers (operational)...")
-        result = _solve(try_drivers, 120)
-        if result and result.get('hosCompliant'):
-            viable, new_concerns = _is_operationally_viable(result)
-            if viable:
-                print(f"  Recommended operational: {try_drivers} drivers")
-                result['minLegalDriverCount'] = min_legal_count
-                result['recommendedDriverCount'] = try_drivers
-                return result
-            else:
-                print(f"    {try_drivers}: not yet viable — {len(new_concerns)} concern(s)")
-                for c in new_concerns:
-                    print(f"      {c}")
+        viable, concerns = _is_operationally_viable(result)
+        if viable:
+            # Found recommended! Re-solve with more time for better optimization
+            opt_time = min(90, int(remaining - 10))
+            if opt_time > probe_time:
+                print(f"  Recommended at {try_drivers}! Optimizing ({opt_time}s)...")
+                final = _solve(try_drivers, opt_time)
+                if final and final.get('hosCompliant'):
+                    final['minLegalDriverCount'] = min_legal_count
+                    final['recommendedDriverCount'] = try_drivers
+                    return final
+            result['minLegalDriverCount'] = min_legal_count
+            result['recommendedDriverCount'] = try_drivers
+            return result
+        else:
+            print(f"    {try_drivers}: not operationally viable — {len(concerns)} concern(s)")
 
-    # Fallback: return minimum legal with both counts
-    print(f"  Could not find viable count within +5. Returning minimum legal.")
-    min_legal_result['minLegalDriverCount'] = min_legal_count
-    min_legal_result['recommendedDriverCount'] = min_legal_count
-    return min_legal_result
+    # Fallback: return best result found
+    if min_legal_count is not None:
+        print(f"  Returning min legal ({min_legal_count}) as fallback")
+        result = _solve(min_legal_count, min(60, max(10, int(TIME_BUDGET - (_time.time() - search_start) - 5))))
+        if result:
+            result['minLegalDriverCount'] = min_legal_count
+            result['recommendedDriverCount'] = min_legal_count
+            return result
+
+    return {'success': False, 'error': 'Could not find feasible solution', 'driverCount': 0}
 
 
 if __name__ == '__main__':
