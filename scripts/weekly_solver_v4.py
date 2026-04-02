@@ -699,9 +699,10 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
                 if pe_b < la.finish_time: pe_b += 24.0  # handle wrap
                 if arrival_at_b > pe_b + 0.25: continue  # can't arrive in time
 
-            # Max wait: don't allow excessive idle between legs
+            # Timing: B must start after A finishes (+ deadhead), and wait must be reasonable
             if la.finish_time is not None and lb.pickup_time is not None:
                 wait = lb.pickup_time - (la.finish_time + dh_h)
+                if wait < -0.25: continue  # B starts before A finishes — impossible sequence
                 if wait > max_wait_h: continue  # too long to wait
 
             pair_dh[(i, j)] = (dh_h, dh_mi)
@@ -1319,13 +1320,19 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 for k in range(1, len(ordered_ids)):
                     la_v = lane_map[ordered_ids[k - 1]]
                     lb_v = lane_map[ordered_ids[k]]
-                    if la_v.finish_time is not None and lb_v.pickup_end_time is not None:
+                    if la_v.finish_time is not None and lb_v.pickup_time is not None:
                         dh_v = _compute_dh(la_v, lb_v)
                         arrival_v = la_v.finish_time + dh_v / 55.0
-                        pe_v = lb_v.pickup_end_time
-                        if pe_v < la_v.finish_time: pe_v += 24.0
-                        if arrival_v > pe_v + 0.25:
-                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} late arrival ({arrival_v:.1f}h > window {pe_v:.1f}h)')
+                        wait_v = lb_v.pickup_time - arrival_v
+                        # B must start after A finishes + deadhead
+                        if wait_v < -0.25:
+                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} reversed (B pickup {lb_v.pickup_time:.1f}h before A finish {la_v.finish_time:.1f}h)')
+                        # Must arrive before B's pickup window closes
+                        elif lb_v.pickup_end_time is not None:
+                            pe_v = lb_v.pickup_end_time
+                            if pe_v < la_v.finish_time: pe_v += 24.0
+                            if arrival_v > pe_v + 0.25:
+                                hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} late arrival ({arrival_v:.1f}h > window {pe_v:.1f}h)')
 
                 # If not exact, flag it
                 if not is_exact:
