@@ -1117,11 +1117,9 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         if dd_vars:
             model.Add(sum(dd_vars) <= weekly_cap)
 
-    # --- Operational sanity: max intra-day gap (hard) + idle/span penalties (soft) ---
+    # --- Operational sanity constraints ---
 
-    # HARD: For every pair of lanes (A, B) on the same driver/day where B starts after A,
-    # if the gap (B.pickup - A.finish) > max_gap, forbid them on the same driver.
-    # This kills the "park driver all day" anti-pattern.
+    # HARD: Max intra-day gap — forbid lanes with >max_gap between them on same driver.
     max_gap_min = int(max_gap_hours * MINUTES)
     for day in working_days:
         lids = day_lane_ids[day]
@@ -1130,10 +1128,9 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             for j, lid_b in enumerate(lids):
                 if i == j: continue
                 pickup_b = lane_pickup_min[lid_b]
-                if pickup_b <= finish_a: continue  # B doesn't start after A
+                if pickup_b <= finish_a: continue
                 gap = pickup_b - finish_a
-                if gap <= max_gap_min: continue  # gap is OK
-                # Gap too large: forbid A and B on the same driver
+                if gap <= max_gap_min: continue
                 for d in range(n_drivers):
                     model.Add(assign[day][lid_a][d] + assign[day][lid_b][d] <= 1)
 
