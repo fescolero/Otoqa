@@ -86,9 +86,28 @@ const SCHEMA_SQL = `
 `;
 
 async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
-  const newDb = await SQLite.openDatabaseAsync(DB_NAME);
-  await newDb.execAsync(SCHEMA_SQL);
-  return newDb;
+  // Android's SQLite native handle can transiently return a null NativeDatabase
+  // after background wakeups. Retry up to 4 times with exponential backoff before
+  // giving up — each failed attempt closes the leaked native handle first.
+  const BACKOFF_MS = [0, 300, 600, 1200];
+  let lastErr: unknown;
+  for (const delay of BACKOFF_MS) {
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    const newDb = await SQLite.openDatabaseAsync(DB_NAME);
+    try {
+      await newDb.execAsync(SCHEMA_SQL);
+      return newDb;
+    } catch (err) {
+      try {
+        await newDb.closeAsync();
+      } catch {
+        /* best-effort: handle may already be dead */
+      }
+      lastErr = err;
+      if (!isRecoverableDbError(err)) throw err;
+    }
+  }
+  throw lastErr;
 }
 
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
