@@ -692,20 +692,34 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             dh_mi = _compute_dh(la, lb)
             dh_h = dh_mi / 55.0
 
-            # Physical feasibility on the SAME service day:
-            # B must start after A finishes. No day-wrapping — if B's pickup is
-            # earlier than A's finish, it's a different service day, not chainable.
+            # Physical feasibility on the same service day:
+            # B must start after A finishes, with deadhead-adjusted arrival check.
+            # Day-wrap allowed ONLY for lanes finishing after midnight (>24h)
+            # chaining to lanes also after midnight — NOT for post-midnight finish
+            # chaining back to early-morning lanes (that's a different service day).
             if la.finish_time is not None and lb.pickup_time is not None:
-                # B must pick up after A finishes (on same timeline)
-                if lb.pickup_time < la.finish_time - 0.25: continue  # B starts before A ends
-                # Arrival at B: A.finish + deadhead
-                arrival_at_b = la.finish_time + dh_h
-                # Must arrive before B's pickup window closes
-                pe_b = lb.pickup_end_time if lb.pickup_end_time is not None else lb.pickup_time + 0.25
-                if arrival_at_b > pe_b + 0.25: continue  # can't arrive in time
+                finish_a = la.finish_time
+                pickup_b = lb.pickup_time
+                pe_b = lb.pickup_end_time if lb.pickup_end_time is not None else pickup_b + 0.25
+
+                # Reject day-wrap: if A finishes after midnight (>24h) and B picks up
+                # before noon (<12h), this is a next-service-day transition, not same-day.
+                if finish_a > 24.0 and pickup_b < 12.0:
+                    continue
+
+                # B must pick up after A finishes (allow tight handoffs within 15min)
+                if pickup_b < finish_a - 0.25:
+                    continue
+
+                # Arrival at B after deadhead
+                arrival_at_b = finish_a + dh_h
+                if arrival_at_b > pe_b + 0.25:
+                    continue  # can't arrive in time
+
                 # Max wait
-                wait = lb.pickup_time - arrival_at_b
-                if wait > max_wait_h: continue  # too long to wait
+                wait = pickup_b - arrival_at_b
+                if wait > max_wait_h:
+                    continue
 
             pair_dh[(i, j)] = (dh_h, dh_mi)
 
@@ -1291,7 +1305,10 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     la_v = lane_map[ordered_ids[k - 1]]
                     lb_v = lane_map[ordered_ids[k]]
                     if la_v.finish_time is not None and lb_v.pickup_time is not None:
-                        if lb_v.pickup_time < la_v.finish_time - 0.25:
+                        # Day-wrap check: post-midnight finish → pre-noon pickup = different service day
+                        if la_v.finish_time > 24.0 and lb_v.pickup_time < 12.0:
+                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} day-wrap (finish {la_v.finish_time:.1f}h, pickup {lb_v.pickup_time:.1f}h)')
+                        elif lb_v.pickup_time < la_v.finish_time - 0.25:
                             hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} impossible (B starts {lb_v.pickup_time:.1f}h before A finishes {la_v.finish_time:.1f}h)')
                         else:
                             dh_v = _compute_dh(la_v, lb_v)
