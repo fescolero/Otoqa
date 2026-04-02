@@ -692,34 +692,17 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             dh_mi = _compute_dh(la, lb)
             dh_h = dh_mi / 55.0
 
-            # Physical feasibility on the same service day:
-            # B must start after A finishes, with deadhead-adjusted arrival check.
-            # Day-wrap allowed ONLY for lanes finishing after midnight (>24h)
-            # chaining to lanes also after midnight — NOT for post-midnight finish
-            # chaining back to early-morning lanes (that's a different service day).
+            # Physical feasibility: arrival at b must be before b's pickup window closes
+            if la.finish_time is not None and lb.pickup_end_time is not None:
+                arrival_at_b = la.finish_time + dh_h
+                pe_b = lb.pickup_end_time
+                if pe_b < la.finish_time: pe_b += 24.0  # handle wrap
+                if arrival_at_b > pe_b + 0.25: continue  # can't arrive in time
+
+            # Max wait: don't allow excessive idle between legs
             if la.finish_time is not None and lb.pickup_time is not None:
-                finish_a = la.finish_time
-                pickup_b = lb.pickup_time
-                pe_b = lb.pickup_end_time if lb.pickup_end_time is not None else pickup_b + 0.25
-
-                # Reject day-wrap: if A finishes after midnight (>24h) and B picks up
-                # before noon (<12h), this is a next-service-day transition, not same-day.
-                if finish_a > 24.0 and pickup_b < 12.0:
-                    continue
-
-                # B must pick up after A finishes (allow tight handoffs within 15min)
-                if pickup_b < finish_a - 0.25:
-                    continue
-
-                # Arrival at B after deadhead
-                arrival_at_b = finish_a + dh_h
-                if arrival_at_b > pe_b + 0.25:
-                    continue  # can't arrive in time
-
-                # Max wait
-                wait = pickup_b - arrival_at_b
-                if wait > max_wait_h:
-                    continue
+                wait = lb.pickup_time - (la.finish_time + dh_h)
+                if wait > max_wait_h: continue  # too long to wait
 
             pair_dh[(i, j)] = (dh_h, dh_mi)
 
@@ -1304,18 +1287,13 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 for k in range(1, len(ordered_ids)):
                     la_v = lane_map[ordered_ids[k - 1]]
                     lb_v = lane_map[ordered_ids[k]]
-                    if la_v.finish_time is not None and lb_v.pickup_time is not None:
-                        # Day-wrap check: post-midnight finish → pre-noon pickup = different service day
-                        if la_v.finish_time > 24.0 and lb_v.pickup_time < 12.0:
-                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} day-wrap (finish {la_v.finish_time:.1f}h, pickup {lb_v.pickup_time:.1f}h)')
-                        elif lb_v.pickup_time < la_v.finish_time - 0.25:
-                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} impossible (B starts {lb_v.pickup_time:.1f}h before A finishes {la_v.finish_time:.1f}h)')
-                        else:
-                            dh_v = _compute_dh(la_v, lb_v)
-                            arrival_v = la_v.finish_time + dh_v / 55.0
-                            pe_v = lb_v.pickup_end_time or lb_v.pickup_time + 0.25
-                            if arrival_v > pe_v + 0.25:
-                                hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} late arrival ({arrival_v:.1f}h > window {pe_v:.1f}h)')
+                    if la_v.finish_time is not None and lb_v.pickup_end_time is not None:
+                        dh_v = _compute_dh(la_v, lb_v)
+                        arrival_v = la_v.finish_time + dh_v / 55.0
+                        pe_v = lb_v.pickup_end_time
+                        if pe_v < la_v.finish_time: pe_v += 24.0
+                        if arrival_v > pe_v + 0.25:
+                            hos_violations.append(f'D{d+1} {day_names_map[day]}: {la_v.name}->{lb_v.name} late arrival ({arrival_v:.1f}h > window {pe_v:.1f}h)')
 
                 # If not exact, flag it
                 if not is_exact:
