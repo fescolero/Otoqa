@@ -668,6 +668,149 @@ def _compute_dh(la, lb):
         return 150.0  # unknown locations, assume moderate
 
 
+def _greedy_time_order(lane_ids, lane_map):
+    """Order lanes by time-feasible greedy: start from earliest pickup,
+    always pick the next reachable leg with lowest deadhead.
+    Pre-bundles detected natural pairs (reverse corridor, tight gap) as atomic units."""
+    if len(lane_ids) <= 1:
+        return lane_ids
+
+    lanes_left = list(lane_ids)
+    lm = lane_map
+
+    # Step 1: Pre-bundle natural same-day pairs (reverse corridor, gap <= 0.5h)
+    bundles = []  # list of (lid_list, earliest_pickup, latest_finish)
+    bundled = set()
+    for i, lid_a in enumerate(lanes_left):
+        if lid_a in bundled: continue
+        la = lm[lid_a]
+        best_pair = None
+        for j, lid_b in enumerate(lanes_left):
+            if i == j or lid_b in bundled: continue
+            lb = lm[lid_b]
+            # Check reverse corridor
+            if (la.origin_city.lower().strip() != lb.dest_city.lower().strip() or
+                la.dest_city.lower().strip() != lb.origin_city.lower().strip()):
+                continue
+            # Check timing: one finishes before the other starts
+            if la.finish_time is not None and lb.pickup_time is not None:
+                if la.finish_time <= lb.pickup_time + 0.5 and lb.pickup_time - la.finish_time <= 0.5:
+                    # la → lb pair
+                    if best_pair is None or lb.pickup_time < lm[best_pair[1]].pickup_time:
+                        best_pair = (lid_a, lid_b, la.pickup_time or 0, lb.finish_time or 0)
+            if lb.finish_time is not None and la.pickup_time is not None:
+                if lb.finish_time <= la.pickup_time + 0.5 and la.pickup_time - lb.finish_time <= 0.5:
+                    # lb → la pair
+                    if best_pair is None or la.pickup_time < (lm.get(best_pair[1]) or la).pickup_time:
+                        best_pair = (lid_b, lid_a, lb.pickup_time or 0, la.finish_time or 0)
+        if best_pair:
+            lid_out, lid_ret, earliest, latest = best_pair
+            bundled.add(lid_out)
+            bundled.add(lid_ret)
+            bundles.append(([lid_out, lid_ret], earliest, latest))
+        else:
+            bundles.append(([lid_a], la.pickup_time or 0, la.finish_time or 0))
+
+    # Add any unbundled lanes
+    for lid in lanes_left:
+        if lid not in bundled:
+            l = lm[lid]
+            bundles.append(([lid], l.pickup_time or 0, l.finish_time or 0))
+
+    # Step 2: Greedy time ordering of bundles
+    bundles.sort(key=lambda b: b[1])  # sort by earliest pickup
+    remaining = list(bundles)
+    ordered = []
+    current_finish = 0.0
+
+    while remaining:
+        # Find next feasible bundle: pickup >= current_finish (or closest)
+        best = None
+        best_score = float('inf')
+        for i, (lids, pickup, finish) in enumerate(remaining):
+            # Prefer bundles that start after current finish (no overlap)
+            if pickup >= current_finish - 0.25:
+                # Score: lower pickup is better, then lower deadhead
+                last_lid = ordered[-1][-1] if ordered else None
+                dh = 0
+                if last_lid:
+                    la_last = lm[last_lid]
+                    lb_first = lm[lids[0]]
+                    dh = _compute_dh(la_last, lb_first)
+                score = dh + max(0, pickup - current_finish) * 10  # prefer tight connections
+                if score < best_score:
+                    best = i
+                    best_score = score
+        if best is None:
+            # No time-feasible bundle left — just take the earliest remaining
+            best = 0
+        lids, pickup, finish = remaining.pop(best)
+        for lid in lids:
+            ordered.append(lids)
+            break
+        ordered_flat = []
+        for b in []:
+            pass
+        current_finish = finish
+
+    # Flatten bundles into ordered lane IDs
+    result = []
+    used = set()
+    remaining2 = list(bundles)
+
+    # Re-do the greedy with proper flattening
+    result = []
+    current_finish = 0.0
+    remaining2 = sorted(bundles, key=lambda b: b[1])
+
+    while remaining2:
+        best = None
+        best_score = float('inf')
+        for i, (lids, pickup, finish) in enumerate(remaining2):
+            if pickup >= current_finish - 0.25:
+                dh = 0
+                if result:
+                    dh = _compute_dh(lm[result[-1]], lm[lids[0]])
+                score = dh + max(0, pickup - current_finish) * 10
+                if score < best_score:
+                    best = i
+                    best_score = score
+        if best is None:
+            best = 0
+        lids, pickup, finish = remaining2.pop(best)
+        result.extend(lids)
+        current_finish = finish
+
+    return result if len(result) == len(lane_ids) else lane_ids
+
+
+def _metrics_from_chain(ordered_ids, lane_map):
+    """Compute drive, deadhead, and gap data from a final ordered chain."""
+    drive = sum(lane_map[lid].route_duration_hours for lid in ordered_ids)
+    dh_total = 0.0
+    gaps = []
+    for k in range(1, len(ordered_ids)):
+        la = lane_map[ordered_ids[k - 1]]
+        lb = lane_map[ordered_ids[k]]
+        dh_mi = _compute_dh(la, lb)
+        dh_h = dh_mi / 55.0
+        drive += dh_h
+        dh_total += dh_mi
+        prev_end = la.finish_time
+        next_start = lb.pickup_time
+        earliest_arr = (prev_end + dh_h) if prev_end is not None else None
+        wait_h = (next_start - earliest_arr) if (next_start is not None and earliest_arr is not None) else None
+        gaps.append({
+            'miles': round(dh_mi, 1),
+            'driveHours': round(dh_h, 2),
+            'waitHours': round(max(0, wait_h), 2) if wait_h is not None else None,
+            'prevEndTime': round(prev_end, 2) if prev_end is not None else None,
+            'nextStartTime': round(next_start, 2) if next_start is not None else None,
+            'earliestArrival': round(earliest_arr, 2) if earliest_arr is not None else None,
+        })
+    return drive, int(dh_total), gaps
+
+
 def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
     """Exact per-day sequencer: finds optimal lane ordering for a single driver's daily assignment.
     Uses a small circuit model to minimize deadhead for just these lanes.
@@ -757,18 +900,10 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
     status = solver.Solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        # Fallback: geographic ordering with haversine-based deadhead (not just graph)
-        ordered = _order_geo([lane_map[lid] for lid in lane_ids], base_city)
-        ordered_ids = [l.id for l in ordered]
-        drive = sum(lane_map[lid].route_duration_hours for lid in ordered_ids)
-        dh_m_total = 0.0
-        for k in range(1, len(ordered_ids)):
-            la = lane_map[ordered_ids[k - 1]]
-            lb = lane_map[ordered_ids[k]]
-            dh_mi = _compute_dh(la, lb)
-            drive += dh_mi / 55.0
-            dh_m_total += dh_mi
-        return (ordered_ids, drive, int(dh_m_total), False, _build_gaps(ordered_ids, lane_map))  # is_exact=False
+        # Fallback: time-feasible greedy with pair bundling
+        ordered_ids = _greedy_time_order(lane_ids, lane_map)
+        drive, dh_total, gaps = _metrics_from_chain(ordered_ids, lane_map)
+        return (ordered_ids, drive, dh_total, False, gaps)  # is_exact=False
 
     # Extract ordering from circuit
     order = []
@@ -785,29 +920,13 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
             break
 
     if len(order) != n:
-        # Circuit extraction failed — fall back to geo ordering, mark NOT exact
-        ordered = _order_geo([lane_map[lid] for lid in lane_ids], base_city)
-        ordered_ids = [l.id for l in ordered]
-        drive = sum(lane_map[lid].route_duration_hours for lid in ordered_ids)
-        dh_m_total = 0.0
-        for k in range(1, len(ordered_ids)):
-            la_fb = lane_map[ordered_ids[k - 1]]
-            lb_fb = lane_map[ordered_ids[k]]
-            dh_mi = _compute_dh(la_fb, lb_fb)
-            drive += dh_mi / 55.0
-            dh_m_total += dh_mi
-        return (ordered_ids, drive, int(dh_m_total), False, _build_gaps(ordered_ids, lane_map))  # NOT exact
+        # Circuit extraction failed — fall back to greedy time ordering
+        ordered_ids = _greedy_time_order(lane_ids, lane_map)
+        drive, dh_total, gaps = _metrics_from_chain(ordered_ids, lane_map)
+        return (ordered_ids, drive, dh_total, False, gaps)  # NOT exact
 
-    drive = sum(lane_map[lid].route_duration_hours for lid in order)
-    dh_total = 0.0
-    for k in range(1, len(order)):
-        idx_a = lane_ids.index(order[k - 1])
-        idx_b = lane_ids.index(order[k])
-        if (idx_a, idx_b) in pair_dh:
-            dh_h, dh_m = pair_dh[(idx_a, idx_b)]
-            drive += dh_h
-            dh_total += dh_m
-    return (order, drive, int(dh_total), True, _build_gaps(order, lane_map))  # is_exact=True
+    drive, dh_total, gaps = _metrics_from_chain(order, lane_map)
+    return (order, drive, dh_total, True, gaps)  # is_exact=True
 
 
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
