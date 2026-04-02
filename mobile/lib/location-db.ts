@@ -87,7 +87,18 @@ const SCHEMA_SQL = `
 
 async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   const newDb = await SQLite.openDatabaseAsync(DB_NAME);
-  await newDb.execAsync(SCHEMA_SQL);
+  try {
+    await newDb.execAsync(SCHEMA_SQL);
+  } catch (err) {
+    // Close the native handle on init failure — prevents file-lock leaks that
+    // would cause every subsequent withDbRetry attempt to also fail.
+    try {
+      await newDb.closeAsync();
+    } catch {
+      /* best-effort: handle may already be dead */
+    }
+    throw err;
+  }
   return newDb;
 }
 
