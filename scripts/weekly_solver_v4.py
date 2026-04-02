@@ -763,6 +763,7 @@ def _greedy_time_order(lane_ids, lane_map):
     current_finish = 0.0
     remaining2 = sorted(bundles, key=lambda b: b[1])
 
+    current_corridor = None
     while remaining2:
         best = None
         best_score = float('inf')
@@ -771,7 +772,11 @@ def _greedy_time_order(lane_ids, lane_map):
                 dh = 0
                 if result:
                     dh = _compute_dh(lm[result[-1]], lm[lids[0]])
-                score = dh + max(0, pickup - current_finish) * 10
+                # Score: prefer same corridor (big bonus), then low DH, then low wait
+                first_lane = lm[lids[0]]
+                bundle_corr = frozenset([first_lane.origin_city.lower().strip(), first_lane.dest_city.lower().strip()])
+                corridor_switch = 0 if bundle_corr == current_corridor else 100
+                score = corridor_switch + dh + max(0, pickup - current_finish) * 10
                 if score < best_score:
                     best = i
                     best_score = score
@@ -780,6 +785,8 @@ def _greedy_time_order(lane_ids, lane_map):
         lids, pickup, finish = remaining2.pop(best)
         result.extend(lids)
         current_finish = finish
+        last_lane = lm[lids[-1]]
+        current_corridor = frozenset([last_lane.origin_city.lower().strip(), last_lane.dest_city.lower().strip()])
 
     return result if len(result) == len(lane_ids) else lane_ids
 
@@ -1309,9 +1316,15 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             if len(uses_vars) >= 2:
                 corr_count = model.NewIntVar(0, len(uses_vars), f'cc_{day}_{d}')
                 model.Add(corr_count == sum(uses_vars))
+                # Linear penalty for 2 corridors
                 excess = model.NewIntVar(0, len(uses_vars), f'cx_{day}_{d}')
                 model.AddMaxEquality(excess, [corr_count - 1, model.NewConstant(0)])
                 corridor_count_penalty_vars.append(excess)
+                # Escalating penalty for 3+ corridors (much more expensive)
+                if len(uses_vars) >= 3:
+                    excess3 = model.NewIntVar(0, len(uses_vars), f'c3_{day}_{d}')
+                    model.AddMaxEquality(excess3, [corr_count - 2, model.NewConstant(0)])
+                    corridor_count_penalty_vars.append(excess3 * 5)  # 5x multiplier for 3rd+ corridor
 
     # 10. Cross-corridor overlap penalty (soft)
     cross_overlap_penalty_vars = []
@@ -1341,8 +1354,8 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     WEEKLY_EXCESS_WEIGHT = 1   # penalize weekly duty over 58h target
     HEAVY_DAY_WEIGHT = 1       # penalize heavy days (>12h or >7 legs)
     BAND_WEIGHT = 1            # penalize shift-band inconsistency
-    CORRIDOR_WEIGHT = 200      # penalize distinct corridors per driver-day (dominant)
-    CROSS_OVERLAP_WEIGHT = 100 # penalize cross-corridor overlapping (dominant)
+    CORRIDOR_WEIGHT = 300      # penalize distinct corridors per driver-day (dominant)
+    CROSS_OVERLAP_WEIGHT = 150 # penalize cross-corridor overlapping (dominant)
 
     obj_terms = []
     if reward_terms:
