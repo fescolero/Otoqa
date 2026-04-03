@@ -827,6 +827,8 @@ export const runExternalSolver = internalAction({
       allExact?: boolean;
       minLegalDriverCount?: number;
       recommendedDriverCount?: number;
+      minDispatchableDriverCount?: number;
+      qualitySummary?: { exactDayCount: number; estimatedDayCount: number; maxDeadheadDayMiles: number };
       error?: string;
     };
 
@@ -897,7 +899,9 @@ export const runExternalSolver = internalAction({
       allExact: result.allExact ?? false,
       minLegalDriverCount: result.minLegalDriverCount ?? result.driverCount,
       recommendedDriverCount: result.recommendedDriverCount ?? result.driverCount,
+      minDispatchableDriverCount: result.minDispatchableDriverCount ?? result.driverCount,
       constraints: result.constraints ?? null,
+      qualitySummary: result.qualitySummary ?? null,
       quality: {
         maxDailyDrive: Math.round(maxDailyDrive * 10) / 10,
         maxDailyDuty: Math.round(maxDailyDuty * 10) / 10,
@@ -930,7 +934,9 @@ export const storeSolverResults = internalMutation({
     allExact: v.boolean(),
     minLegalDriverCount: v.number(),
     recommendedDriverCount: v.number(),
+    minDispatchableDriverCount: v.number(),
     constraints: v.any(),
+    qualitySummary: v.any(),
     quality: v.object({
       maxDailyDrive: v.number(),
       maxDailyDuty: v.number(),
@@ -958,12 +964,14 @@ export const storeSolverResults = internalMutation({
         driverCount: args.driverCount,
         minLegalDriverCount: args.minLegalDriverCount,
         recommendedDriverCount: args.recommendedDriverCount,
+        minDispatchableDriverCount: args.minDispatchableDriverCount,
         weeklySchedule: args.weeklySchedule,
         hosCompliant: args.hosCompliant,
         hosViolations: args.hosViolations,
         allExact: args.allExact,
         constraints: args.constraints,
         quality: args.quality,
+        qualitySummary: args.qualitySummary,
         source: 'weekly_solver_v4',
         solvedAt: Date.now(),
       };
