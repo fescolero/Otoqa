@@ -2504,7 +2504,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             for dn, dd in dr['days'].items():
                 if dd.get('isExact'): continue  # don't touch exact rows
                 if any(lid in excl_pair_ids for lid in dd['legs']): continue  # don't touch exclusive
-                score = _score_driver_day(dd['legs'], lane_map, pre_post_h)
+                score = _row_quality_score(dd['legs'], lane_map, pre_post_h)
                 if score > worst_score:
                     worst_score = score
                     worst_key = (d_idx, dn)
@@ -2514,7 +2514,8 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
 
         d_idx, dn = worst_key
         worst_dd = weekly_schedule[d_idx]['days'][dn]
-        blocks = _build_blocks_for_day(worst_dd['legs'], lane_map, excl_pair_ids)
+        # Build fragments from the worst day (corridor-coherent groups)
+        blocks = _generate_fragments_for_day(worst_dd['legs'], lane_map, excl_pair_ids)
 
         # Try moving the highest-DH non-exclusive block to another driver on same day
         best_move = None
@@ -2558,7 +2559,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
 
                 # Score improvement — penalize recipient degradation heavily
                 old_worst_score = worst_score
-                new_worst_score = _score_driver_day(remaining_legs, lane_map, pre_post_h) if remaining_legs else 0
+                new_worst_score = _row_quality_score(remaining_legs, lane_map, pre_post_h) if remaining_legs else 0
                 improvement = old_worst_score - new_worst_score - new_r_score * 0.5
                 if improvement > best_improvement:
                     best_improvement = improvement
