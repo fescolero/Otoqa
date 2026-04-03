@@ -2,92 +2,162 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { paginationOptsValidator } from 'convex/server';
+import type { Id } from './_generated/dataModel';
 
-const paymentMethodValidator = v.optional(v.union(
-  v.literal('FUEL_CARD'),
-  v.literal('CASH'),
-  v.literal('CHECK'),
-  v.literal('CREDIT_CARD'),
-  v.literal('EFS'),
-  v.literal('COMDATA'),
-));
+const paymentMethodValidator = v.optional(
+  v.union(
+    v.literal('FUEL_CARD'),
+    v.literal('CASH'),
+    v.literal('CHECK'),
+    v.literal('CREDIT_CARD'),
+    v.literal('EFS'),
+    v.literal('COMDATA'),
+  ),
+);
 
-const locationValidator = v.optional(v.object({
-  city: v.string(),
-  state: v.string(),
-}));
+const locationValidator = v.optional(
+  v.object({
+    city: v.string(),
+    state: v.string(),
+  }),
+);
+
+const listArgs = {
+  organizationId: v.string(),
+  dateRangeStart: v.optional(v.number()),
+  dateRangeEnd: v.optional(v.number()),
+  driverId: v.optional(v.id('drivers')),
+  carrierId: v.optional(v.id('carrierPartnerships')),
+  truckId: v.optional(v.id('trucks')),
+  vendorId: v.optional(v.id('fuelVendors')),
+  search: v.optional(v.string()),
+};
+
+interface DefListFilters {
+  organizationId: string;
+  dateRangeStart?: number;
+  dateRangeEnd?: number;
+  driverId?: Id<'drivers'>;
+  carrierId?: Id<'carrierPartnerships'>;
+  truckId?: Id<'trucks'>;
+  vendorId?: Id<'fuelVendors'>;
+  search?: string;
+}
+
+function buildDefEntriesQuery(ctx: any, args: DefListFilters) {
+  return ctx.db
+    .query('defEntries')
+    .withIndex('by_organization_and_date', (q: any) => {
+      const base = q.eq('organizationId', args.organizationId);
+      if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined) {
+        return base.gte('entryDate', args.dateRangeStart).lte('entryDate', args.dateRangeEnd);
+      }
+      if (args.dateRangeStart !== undefined) {
+        return base.gte('entryDate', args.dateRangeStart);
+      }
+      if (args.dateRangeEnd !== undefined) {
+        return base.lte('entryDate', args.dateRangeEnd);
+      }
+      return base;
+    })
+    .order('desc');
+}
+
+function matchesDefFilters(entry: any, args: DefListFilters) {
+  if (args.driverId && entry.driverId !== args.driverId) {
+    return false;
+  }
+  if (args.carrierId && entry.carrierId !== args.carrierId) {
+    return false;
+  }
+  if (args.truckId && entry.truckId !== args.truckId) {
+    return false;
+  }
+  if (args.vendorId && entry.vendorId !== args.vendorId) {
+    return false;
+  }
+  return true;
+}
+
+function matchesDefSearch(entry: any, search: string | undefined) {
+  if (!search) {
+    return true;
+  }
+
+  const normalizedSearch = search.trim().toLowerCase();
+  if (!normalizedSearch) {
+    return true;
+  }
+
+  const haystack = [
+    entry.vendorName,
+    entry.driverName,
+    entry.carrierName,
+    entry.truckUnitId,
+    entry.receiptNumber,
+    entry.fuelCardNumber,
+    entry.paymentMethod,
+    entry.notes,
+    entry.location ? `${entry.location.city}, ${entry.location.state}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return haystack.includes(normalizedSearch);
+}
+
+async function enrichDefEntry(ctx: any, entry: any) {
+  const [vendor, driver, carrier, truck] = (await Promise.all([
+    ctx.db.get(entry.vendorId),
+    entry.driverId ? ctx.db.get(entry.driverId) : null,
+    entry.carrierId ? ctx.db.get(entry.carrierId) : null,
+    entry.truckId ? ctx.db.get(entry.truckId) : null,
+  ])) as any[];
+
+  return {
+    ...entry,
+    vendorName: vendor?.name ?? 'Unknown',
+    driverName: driver ? `${driver.firstName} ${driver.lastName}` : undefined,
+    carrierName: carrier?.carrierName ?? undefined,
+    truckUnitId: truck?.unitId ?? undefined,
+  };
+}
 
 export const list = query({
   args: {
-    organizationId: v.string(),
+    ...listArgs,
     paginationOpts: paginationOptsValidator,
-    dateRangeStart: v.optional(v.number()),
-    dateRangeEnd: v.optional(v.number()),
-    driverId: v.optional(v.id('drivers')),
-    carrierId: v.optional(v.id('carrierPartnerships')),
-    truckId: v.optional(v.id('trucks')),
-    vendorId: v.optional(v.id('fuelVendors')),
-    search: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error('Not authenticated');
 
-    let q = ctx.db
-      .query('defEntries')
-      .withIndex('by_organization_and_date', (q) => {
-        const base = q.eq('organizationId', args.organizationId);
-        if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined) {
-          return base.gte('entryDate', args.dateRangeStart).lte('entryDate', args.dateRangeEnd);
-        }
-        if (args.dateRangeStart !== undefined) {
-          return base.gte('entryDate', args.dateRangeStart);
-        }
-        if (args.dateRangeEnd !== undefined) {
-          return base.lte('entryDate', args.dateRangeEnd);
-        }
-        return base;
-      })
-      .order('desc');
+    const filters: DefListFilters = args;
+    const result = await buildDefEntriesQuery(ctx, filters).paginate(args.paginationOpts);
+    const filtered = result.page.filter((entry: any) => matchesDefFilters(entry, filters));
 
-    const result = await q.paginate(args.paginationOpts);
-
-    let filtered = result.page;
-    if (args.driverId) {
-      filtered = filtered.filter((e) => e.driverId === args.driverId);
-    }
-    if (args.carrierId) {
-      filtered = filtered.filter((e) => e.carrierId === args.carrierId);
-    }
-    if (args.truckId) {
-      filtered = filtered.filter((e) => e.truckId === args.truckId);
-    }
-    if (args.vendorId) {
-      filtered = filtered.filter((e) => e.vendorId === args.vendorId);
-    }
-
-    const enriched = await Promise.all(
-      filtered.map(async (entry) => {
-        const [vendor, driver, carrier, truck] = await Promise.all([
-          ctx.db.get(entry.vendorId),
-          entry.driverId ? ctx.db.get(entry.driverId) : null,
-          entry.carrierId ? ctx.db.get(entry.carrierId) : null,
-          entry.truckId ? ctx.db.get(entry.truckId) : null,
-        ]);
-        return {
-          ...entry,
-          vendorName: vendor?.name ?? 'Unknown',
-          driverName: driver ? `${driver.firstName} ${driver.lastName}` : undefined,
-          carrierName: carrier?.carrierName ?? undefined,
-          truckUnitId: truck?.unitId ?? undefined,
-        };
-      })
-    );
+    const enriched = await Promise.all(filtered.map((entry: any) => enrichDefEntry(ctx, entry)));
+    const searched = enriched.filter((entry: any) => matchesDefSearch(entry, filters.search));
 
     return {
       ...result,
-      page: enriched,
+      page: searched,
     };
+  },
+});
+
+export const count = query({
+  args: listArgs,
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error('Not authenticated');
+
+    const filters: DefListFilters = args;
+    const entries = await buildDefEntriesQuery(ctx, filters).collect();
+    const filtered = entries.filter((entry: any) => matchesDefFilters(entry, filters));
+    const enriched = await Promise.all(filtered.map((entry: any) => enrichDefEntry(ctx, entry)));
+    return enriched.filter((entry: any) => matchesDefSearch(entry, filters.search)).length;
   },
 });
 
@@ -121,7 +191,7 @@ export const get = query({
       driverName: driver ? `${driver.firstName} ${driver.lastName}` : undefined,
       carrierName: carrier?.carrierName ?? undefined,
       truckUnitId: truck?.unitId ?? undefined,
-      loadReference: load ? (load as Record<string, unknown>).referenceNumber as string | undefined : undefined,
+      loadReference: load ? ((load as Record<string, unknown>).referenceNumber as string | undefined) : undefined,
       receiptUrl,
     };
   },
@@ -292,22 +362,24 @@ export const remove = mutation({
 export const bulkCreate = mutation({
   args: {
     organizationId: v.string(),
-    entries: v.array(v.object({
-      entryDate: v.number(),
-      driverId: v.optional(v.id('drivers')),
-      carrierId: v.optional(v.id('carrierPartnerships')),
-      truckId: v.optional(v.id('trucks')),
-      vendorId: v.id('fuelVendors'),
-      gallons: v.number(),
-      pricePerGallon: v.number(),
-      odometerReading: v.optional(v.number()),
-      location: locationValidator,
-      fuelCardNumber: v.optional(v.string()),
-      receiptNumber: v.optional(v.string()),
-      loadId: v.optional(v.id('loadInformation')),
-      paymentMethod: paymentMethodValidator,
-      notes: v.optional(v.string()),
-    })),
+    entries: v.array(
+      v.object({
+        entryDate: v.number(),
+        driverId: v.optional(v.id('drivers')),
+        carrierId: v.optional(v.id('carrierPartnerships')),
+        truckId: v.optional(v.id('trucks')),
+        vendorId: v.id('fuelVendors'),
+        gallons: v.number(),
+        pricePerGallon: v.number(),
+        odometerReading: v.optional(v.number()),
+        location: locationValidator,
+        fuelCardNumber: v.optional(v.string()),
+        receiptNumber: v.optional(v.string()),
+        loadId: v.optional(v.id('loadInformation')),
+        paymentMethod: paymentMethodValidator,
+        notes: v.optional(v.string()),
+      }),
+    ),
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {

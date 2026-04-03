@@ -1,7 +1,7 @@
 'use client';
 
-import { useVirtualizer } from '@tanstack/react-virtual';
-import { useRef } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
+import { Virtualizer, elementScroll, observeElementOffset, observeElementRect } from '@tanstack/virtual-core';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { format } from 'date-fns';
@@ -43,12 +43,30 @@ export function FuelEntriesTable({
   isAllSelected,
 }: FuelEntriesTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const rerender = useReducer(() => ({}), {})[1];
 
-  const rowVirtualizer = useVirtualizer({
+  const options = {
     count: entries.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 52,
     overscan: 10,
+    observeElementRect,
+    observeElementOffset,
+    scrollToFn: elementScroll,
+    onChange: () => {
+      rerender();
+    },
+  };
+
+  const [rowVirtualizer] = useState(() => new Virtualizer(options));
+  rowVirtualizer.setOptions(options);
+
+  useEffect(() => {
+    return rowVirtualizer._didMount();
+  }, [rowVirtualizer]);
+
+  useEffect(() => {
+    return rowVirtualizer._willUpdate();
   });
 
   return (
@@ -57,41 +75,18 @@ export function FuelEntriesTable({
       <div className="flex-shrink-0 border-b bg-slate-50">
         <div className="flex items-center h-10 w-full">
           <div className="px-2 w-12 flex items-center">
-            <Checkbox
-              checked={isAllSelected && entries.length > 0}
-              onCheckedChange={onSelectAll}
-            />
+            <Checkbox checked={isAllSelected && entries.length > 0} onCheckedChange={onSelectAll} />
           </div>
-          <div className="px-3 w-28 font-medium text-muted-foreground text-xs uppercase">
-            Date
-          </div>
-          <div className="px-3 flex-1 font-medium text-muted-foreground text-xs uppercase">
-            Driver / Carrier
-          </div>
-          <div className="px-3 w-24 font-medium text-muted-foreground text-xs uppercase">
-            Truck
-          </div>
-          <div className="px-3 flex-1 font-medium text-muted-foreground text-xs uppercase">
-            Vendor
-          </div>
-          <div className="px-3 w-36 font-medium text-muted-foreground text-xs uppercase">
-            Location
-          </div>
-          <div className="px-3 w-24 font-medium text-muted-foreground text-xs uppercase text-right">
-            Gallons
-          </div>
-          <div className="px-3 w-24 font-medium text-muted-foreground text-xs uppercase text-right">
-            Price/Gal
-          </div>
-          <div className="px-3 w-28 font-medium text-muted-foreground text-xs uppercase text-right">
-            Total
-          </div>
-          <div className="px-3 w-20 font-medium text-muted-foreground text-xs uppercase text-center">
-            Type
-          </div>
-          <div className="px-3 w-32 font-medium text-muted-foreground text-xs uppercase">
-            Payment
-          </div>
+          <div className="px-3 w-28 font-medium text-muted-foreground text-xs uppercase">Date</div>
+          <div className="px-3 flex-1 font-medium text-muted-foreground text-xs uppercase">Driver / Carrier</div>
+          <div className="px-3 w-24 font-medium text-muted-foreground text-xs uppercase">Truck</div>
+          <div className="px-3 flex-1 font-medium text-muted-foreground text-xs uppercase">Vendor</div>
+          <div className="px-3 w-36 font-medium text-muted-foreground text-xs uppercase">Location</div>
+          <div className="px-3 w-24 font-medium text-muted-foreground text-xs uppercase text-right">Gallons</div>
+          <div className="px-3 w-24 font-medium text-muted-foreground text-xs uppercase text-right">Price/Gal</div>
+          <div className="px-3 w-28 font-medium text-muted-foreground text-xs uppercase text-right">Total</div>
+          <div className="px-3 w-20 font-medium text-muted-foreground text-xs uppercase text-center">Type</div>
+          <div className="px-3 w-32 font-medium text-muted-foreground text-xs uppercase">Payment</div>
         </div>
       </div>
 
@@ -129,47 +124,25 @@ export function FuelEntriesTable({
                   }`}
                   onClick={() => onRowClick(entry._id, entry.type)}
                 >
-                  <div
-                    className="px-2 w-12 flex items-center"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <Checkbox
-                      checked={isSelected}
-                      onCheckedChange={() => onSelectRow(entry._id)}
-                    />
+                  <div className="px-2 w-12 flex items-center" onClick={(e) => e.stopPropagation()}>
+                    <Checkbox checked={isSelected} onCheckedChange={() => onSelectRow(entry._id)} />
                   </div>
-                  <div className="px-3 w-28 text-sm">
-                    {format(new Date(entry.entryDate), 'MMM d, yyyy')}
-                  </div>
+                  <div className="px-3 w-28 text-sm">{format(new Date(entry.entryDate), 'MMM d, yyyy')}</div>
                   <div className="px-3 flex-1 min-w-0">
-                    {entry.driverName && (
-                      <div className="text-sm font-medium truncate">
-                        {entry.driverName}
-                      </div>
-                    )}
+                    {entry.driverName && <div className="text-sm font-medium truncate">{entry.driverName}</div>}
                     {entry.carrierName && (
-                      <div className="text-xs text-muted-foreground truncate">
-                        {entry.carrierName}
-                      </div>
+                      <div className="text-xs text-muted-foreground truncate">{entry.carrierName}</div>
                     )}
                     {!entry.driverName && !entry.carrierName && (
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
                   </div>
-                  <div className="px-3 w-24 text-sm truncate">
-                    {entry.truckUnitId || '—'}
-                  </div>
-                  <div className="px-3 flex-1 text-sm truncate min-w-0">
-                    {entry.vendorName}
-                  </div>
+                  <div className="px-3 w-24 text-sm truncate">{entry.truckUnitId || '—'}</div>
+                  <div className="px-3 flex-1 text-sm truncate min-w-0">{entry.vendorName}</div>
                   <div className="px-3 w-36 text-sm truncate min-w-0">
-                    {entry.location
-                      ? `${entry.location.city}, ${entry.location.state}`
-                      : '—'}
+                    {entry.location ? `${entry.location.city}, ${entry.location.state}` : '—'}
                   </div>
-                  <div className="px-3 w-24 text-sm text-right tabular-nums">
-                    {entry.gallons.toFixed(2)}
-                  </div>
+                  <div className="px-3 w-24 text-sm text-right tabular-nums">{entry.gallons.toFixed(2)}</div>
                   <div className="px-3 w-24 text-sm text-right tabular-nums">
                     {formatCurrency(entry.pricePerGallon)}
                   </div>
@@ -177,15 +150,11 @@ export function FuelEntriesTable({
                     {formatCurrency(entry.totalCost)}
                   </div>
                   <div className="px-3 w-20 flex justify-center">
-                    <Badge
-                      variant={entry.type === 'def' ? 'secondary' : 'default'}
-                    >
+                    <Badge variant={entry.type === 'def' ? 'secondary' : 'default'}>
                       {entry.type === 'def' ? 'DEF' : 'Fuel'}
                     </Badge>
                   </div>
-                  <div className="px-3 w-32 text-sm truncate">
-                    {entry.paymentMethod || '—'}
-                  </div>
+                  <div className="px-3 w-32 text-sm truncate">{entry.paymentMethod || '—'}</div>
                 </div>
               );
             })}
