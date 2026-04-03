@@ -14,10 +14,10 @@ import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-import { useMutation } from 'convex/react';
+import { useConvexAuth, useMutation, usePaginatedQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useRouter } from 'next/navigation';
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useTransition } from 'react';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { Plus, Download, Upload, Trash2, X, Droplets } from 'lucide-react';
 import { DieselFilterBar, DieselFilterState } from '@/components/diesel/diesel-filter-bar';
@@ -47,34 +47,49 @@ interface EnrichedEntry {
 export default function DieselPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const { isAuthenticated } = useConvexAuth();
   const organizationId = useOrganizationId();
+  const [isLoadingMore, startLoadMoreTransition] = useTransition();
 
   const [activeTab, setActiveTab] = useState<TabValue>('all');
   const [filters, setFilters] = useState<DieselFilterState>({ search: '' });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  const paginationOpts = { numItems: 100, cursor: null };
+  const paginatedQueryArgs =
+    organizationId && isAuthenticated
+      ? {
+          organizationId,
+          ...(filters.driverId ? { driverId: filters.driverId as never } : {}),
+          ...(filters.carrierId ? { carrierId: filters.carrierId as never } : {}),
+          ...(filters.truckId ? { truckId: filters.truckId as never } : {}),
+          ...(filters.vendorId ? { vendorId: filters.vendorId as never } : {}),
+          ...(filters.dateRange
+            ? {
+                dateRangeStart: filters.dateRange.start,
+                dateRangeEnd: filters.dateRange.end,
+              }
+            : {}),
+          ...(filters.search ? { search: filters.search } : {}),
+        }
+      : 'skip';
 
-  const queryArgs = organizationId
-    ? {
-        organizationId,
-        paginationOpts,
-        ...(filters.driverId ? { driverId: filters.driverId as never } : {}),
-        ...(filters.carrierId ? { carrierId: filters.carrierId as never } : {}),
-        ...(filters.truckId ? { truckId: filters.truckId as never } : {}),
-        ...(filters.vendorId ? { vendorId: filters.vendorId as never } : {}),
-        ...(filters.dateRange
-          ? {
-              dateRangeStart: filters.dateRange.start,
-              dateRangeEnd: filters.dateRange.end,
-            }
-          : {}),
-        ...(filters.search ? { search: filters.search } : {}),
-      }
-    : 'skip';
-
-  const fuelResult = useAuthQuery(api.fuelEntries.list, queryArgs as never);
-  const defResult = useAuthQuery(api.defEntries.list, queryArgs as never);
+  const {
+    results: fuelResults,
+    status: fuelPaginationStatus,
+    loadMore: loadMoreFuel,
+  } = usePaginatedQuery(api.fuelEntries.list, paginatedQueryArgs as never, { initialNumItems: 50 });
+  const {
+    results: defResults,
+    status: defPaginationStatus,
+    loadMore: loadMoreDef,
+  } = usePaginatedQuery(api.defEntries.list, paginatedQueryArgs as never, { initialNumItems: 50 });
+  const {
+    results: allResults,
+    status: allPaginationStatus,
+    loadMore: loadMoreAll,
+  } = usePaginatedQuery(api.fuelEntries.listCombined, paginatedQueryArgs as never, { initialNumItems: 100 });
+  const fuelCount = useAuthQuery(api.fuelEntries.count, organizationId ? (paginatedQueryArgs as never) : 'skip');
+  const defCount = useAuthQuery(api.defEntries.count, organizationId ? (paginatedQueryArgs as never) : 'skip');
 
   const driversData = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
   const trucksData = useAuthQuery(api.trucks.list, organizationId ? { organizationId } : 'skip');
@@ -96,8 +111,8 @@ export default function DieselPage() {
   }, [carriersData]);
 
   const fuelEntries: Array<EnrichedEntry> = useMemo(() => {
-    if (!fuelResult?.page) return [];
-    return fuelResult.page.map((e: Record<string, unknown>) => ({
+    if (!fuelResults) return [];
+    return fuelResults.map((e: Record<string, unknown>) => ({
       _id: e._id as string,
       entryDate: e.entryDate as number,
       vendorName: (e.vendorName as string) ?? 'Unknown',
@@ -111,11 +126,11 @@ export default function DieselPage() {
       paymentMethod: e.paymentMethod as string | undefined,
       location: e.location as { city: string; state: string } | undefined,
     }));
-  }, [fuelResult]);
+  }, [fuelResults]);
 
   const defEntries: Array<EnrichedEntry> = useMemo(() => {
-    if (!defResult?.page) return [];
-    return defResult.page.map((e: Record<string, unknown>) => ({
+    if (!defResults) return [];
+    return defResults.map((e: Record<string, unknown>) => ({
       _id: e._id as string,
       entryDate: e.entryDate as number,
       vendorName: (e.vendorName as string) ?? 'Unknown',
@@ -129,13 +144,73 @@ export default function DieselPage() {
       paymentMethod: e.paymentMethod as string | undefined,
       location: e.location as { city: string; state: string } | undefined,
     }));
-  }, [defResult]);
+  }, [defResults]);
+
+  const allEntries: Array<EnrichedEntry> = useMemo(() => {
+    if (!allResults) return [];
+    return allResults.map((e: Record<string, unknown>) => ({
+      _id: e._id as string,
+      entryDate: e.entryDate as number,
+      vendorName: (e.vendorName as string) ?? 'Unknown',
+      driverName: e.driverName as string | undefined,
+      carrierName: e.carrierName as string | undefined,
+      truckUnitId: e.truckUnitId as string | undefined,
+      gallons: e.gallons as number,
+      pricePerGallon: e.pricePerGallon as number,
+      totalCost: e.totalCost as number,
+      type: e.type as 'fuel' | 'def',
+      paymentMethod: e.paymentMethod as string | undefined,
+      location: e.location as { city: string; state: string } | undefined,
+    }));
+  }, [allResults]);
 
   const displayEntries = useMemo(() => {
     if (activeTab === 'fuel') return fuelEntries;
     if (activeTab === 'def') return defEntries;
-    return [...fuelEntries, ...defEntries].sort((a, b) => b.entryDate - a.entryDate);
-  }, [activeTab, fuelEntries, defEntries]);
+    return allEntries;
+  }, [activeTab, fuelEntries, defEntries, allEntries]);
+
+  const canLoadMore =
+    activeTab === 'fuel'
+      ? fuelPaginationStatus === 'CanLoadMore'
+      : activeTab === 'def'
+        ? defPaginationStatus === 'CanLoadMore'
+        : allPaginationStatus === 'CanLoadMore';
+
+  const handleLoadMore = useCallback(() => {
+    startLoadMoreTransition(() => {
+      if (activeTab === 'fuel') {
+        if (fuelPaginationStatus === 'CanLoadMore') {
+          loadMoreFuel(50);
+        }
+        return;
+      }
+
+      if (activeTab === 'def') {
+        if (defPaginationStatus === 'CanLoadMore') {
+          loadMoreDef(50);
+        }
+        return;
+      }
+
+      if (allPaginationStatus === 'CanLoadMore') {
+        loadMoreAll(100);
+      }
+    });
+  }, [
+    activeTab,
+    allPaginationStatus,
+    defPaginationStatus,
+    fuelPaginationStatus,
+    loadMoreAll,
+    loadMoreDef,
+    loadMoreFuel,
+    startLoadMoreTransition,
+  ]);
+
+  const totalFuelCount = fuelCount ?? fuelEntries.length;
+  const totalDefCount = defCount ?? defEntries.length;
+  const totalAllCount = totalFuelCount + totalDefCount;
 
   const handleRowClick = useCallback(
     (id: string, type: 'fuel' | 'def') => {
@@ -246,7 +321,7 @@ export default function DieselPage() {
     }));
   }, [vendorsData]);
 
-  const isLoading = !fuelResult && !defResult;
+  const isLoading = !fuelResults && !defResults && !allResults;
 
   return (
     <>
@@ -325,19 +400,19 @@ export default function DieselPage() {
                 <TabsTrigger value="all">
                   All
                   <Badge variant="secondary" className="ml-2 text-xs">
-                    {fuelEntries.length + defEntries.length}
+                    {totalAllCount}
                   </Badge>
                 </TabsTrigger>
                 <TabsTrigger value="fuel">
                   Fuel
                   <Badge variant="secondary" className="ml-2 text-xs">
-                    {fuelEntries.length}
+                    {totalFuelCount}
                   </Badge>
                 </TabsTrigger>
                 <TabsTrigger value="def">
                   DEF
                   <Badge variant="secondary" className="ml-2 text-xs">
-                    {defEntries.length}
+                    {totalDefCount}
                   </Badge>
                 </TabsTrigger>
               </TabsList>
@@ -391,14 +466,27 @@ export default function DieselPage() {
                 Loading entries...
               </div>
             ) : (
-              <FuelEntriesTable
-                entries={displayEntries}
-                onRowClick={handleRowClick}
-                selectedIds={selectedIds}
-                onSelectRow={handleSelectRow}
-                onSelectAll={handleSelectAll}
-                isAllSelected={selectedIds.size === displayEntries.length && displayEntries.length > 0}
-              />
+              <div className="flex h-full flex-col">
+                <div className="min-h-0 flex-1">
+                  <FuelEntriesTable
+                    entries={displayEntries}
+                    onRowClick={handleRowClick}
+                    selectedIds={selectedIds}
+                    onSelectRow={handleSelectRow}
+                    onSelectAll={handleSelectAll}
+                    isAllSelected={selectedIds.size === displayEntries.length && displayEntries.length > 0}
+                  />
+                </div>
+                {canLoadMore && (
+                  <div className="border-t bg-background px-6 py-4">
+                    <div className="flex justify-center">
+                      <Button variant="outline" onClick={handleLoadMore} disabled={isLoadingMore}>
+                        {isLoadingMore ? 'Loading...' : 'Load More'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

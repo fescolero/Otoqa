@@ -2,18 +2,8 @@
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Calendar } from '@/components/ui/calendar';
 import { CalendarIcon, Search, X, Filter } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -71,10 +61,10 @@ export function DieselFilterBar({
 }: DieselFilterBarProps) {
   const [localSearch, setLocalSearch] = useState(filters.search);
   const [dateFrom, setDateFrom] = useState<Date | undefined>(
-    filters.dateRange ? new Date(filters.dateRange.start) : undefined
+    filters.dateRange ? new Date(filters.dateRange.start) : undefined,
   );
   const [dateTo, setDateTo] = useState<Date | undefined>(
-    filters.dateRange ? new Date(filters.dateRange.end) : undefined
+    filters.dateRange ? new Date(filters.dateRange.end) : undefined,
   );
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -91,7 +81,7 @@ export function DieselFilterBar({
         onFiltersChange({ ...filters, search: value });
       }, 300);
     },
-    [filters, onFiltersChange]
+    [filters, onFiltersChange],
   );
 
   useEffect(() => {
@@ -101,12 +91,7 @@ export function DieselFilterBar({
   }, []);
 
   const hasActiveFilters =
-    filters.search ||
-    filters.driverId ||
-    filters.carrierId ||
-    filters.truckId ||
-    filters.vendorId ||
-    filters.dateRange;
+    filters.search || filters.driverId || filters.carrierId || filters.truckId || filters.vendorId || filters.dateRange;
 
   const activeFilterCount = [
     filters.search,
@@ -126,11 +111,17 @@ export function DieselFilterBar({
 
   const handleDateRangeApply = () => {
     if (dateFrom && dateTo) {
+      const start = new Date(dateFrom);
+      start.setHours(0, 0, 0, 0);
+
+      const end = new Date(dateTo);
+      end.setHours(23, 59, 59, 999);
+
       onFiltersChange({
         ...filters,
         dateRange: {
-          start: dateFrom.getTime(),
-          end: dateTo.getTime(),
+          start: start.getTime(),
+          end: end.getTime(),
         },
       });
     }
@@ -141,7 +132,7 @@ export function DieselFilterBar({
       className={cn(
         'sticky top-0 z-40 bg-slate-50/50 border-y border-slate-200/60 px-4 py-3',
         'flex items-center gap-3',
-        className
+        className,
       )}
     >
       {/* Search */}
@@ -159,9 +150,7 @@ export function DieselFilterBar({
       {drivers.length > 0 && (
         <Select
           value={filters.driverId || 'all'}
-          onValueChange={(value) =>
-            onFiltersChange({ ...filters, driverId: value === 'all' ? undefined : value })
-          }
+          onValueChange={(value) => onFiltersChange({ ...filters, driverId: value === 'all' ? undefined : value })}
         >
           <SelectTrigger className="w-40 h-9 bg-white">
             <SelectValue placeholder="All Drivers" />
@@ -181,9 +170,7 @@ export function DieselFilterBar({
       {carriers.length > 0 && (
         <Select
           value={filters.carrierId || 'all'}
-          onValueChange={(value) =>
-            onFiltersChange({ ...filters, carrierId: value === 'all' ? undefined : value })
-          }
+          onValueChange={(value) => onFiltersChange({ ...filters, carrierId: value === 'all' ? undefined : value })}
         >
           <SelectTrigger className="w-40 h-9 bg-white">
             <SelectValue placeholder="All Carriers" />
@@ -203,9 +190,7 @@ export function DieselFilterBar({
       {trucks.length > 0 && (
         <Select
           value={filters.truckId || 'all'}
-          onValueChange={(value) =>
-            onFiltersChange({ ...filters, truckId: value === 'all' ? undefined : value })
-          }
+          onValueChange={(value) => onFiltersChange({ ...filters, truckId: value === 'all' ? undefined : value })}
         >
           <SelectTrigger className="w-36 h-9 bg-white">
             <SelectValue placeholder="All Trucks" />
@@ -225,9 +210,7 @@ export function DieselFilterBar({
       {vendors.length > 0 && (
         <Select
           value={filters.vendorId || 'all'}
-          onValueChange={(value) =>
-            onFiltersChange({ ...filters, vendorId: value === 'all' ? undefined : value })
-          }
+          onValueChange={(value) => onFiltersChange({ ...filters, vendorId: value === 'all' ? undefined : value })}
         >
           <SelectTrigger className="w-40 h-9 bg-white">
             <SelectValue placeholder="All Vendors" />
@@ -251,43 +234,27 @@ export function DieselFilterBar({
             size="sm"
             className={cn(
               'h-9 justify-start text-left font-normal bg-white',
-              !filters.dateRange && 'text-muted-foreground'
+              !filters.dateRange && 'text-muted-foreground',
             )}
           >
             <CalendarIcon className="mr-2 h-4 w-4" />
-            {filters.dateRange ? (
-              `${format(filters.dateRange.start, 'MMM d')} - ${format(filters.dateRange.end, 'MMM d')}`
-            ) : (
-              'Date Range'
-            )}
+            {filters.dateRange
+              ? `${format(filters.dateRange.start, 'MMM d')} - ${format(filters.dateRange.end, 'MMM d')}`
+              : 'Date Range'}
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-0" align="start">
           <div className="p-3 space-y-3">
             <div>
               <label className="text-sm font-medium mb-2 block">From</label>
-              <Calendar
-                mode="single"
-                selected={dateFrom}
-                onSelect={setDateFrom}
-                initialFocus
-              />
+              <Calendar mode="single" selected={dateFrom} onSelect={setDateFrom} initialFocus />
             </div>
             <div>
               <label className="text-sm font-medium mb-2 block">To</label>
-              <Calendar
-                mode="single"
-                selected={dateTo}
-                onSelect={setDateTo}
-              />
+              <Calendar mode="single" selected={dateTo} onSelect={setDateTo} />
             </div>
             <div className="flex gap-2">
-              <Button
-                size="sm"
-                onClick={handleDateRangeApply}
-                disabled={!dateFrom || !dateTo}
-                className="flex-1"
-              >
+              <Button size="sm" onClick={handleDateRangeApply} disabled={!dateFrom || !dateTo} className="flex-1">
                 Apply
               </Button>
               <Button
@@ -309,12 +276,7 @@ export function DieselFilterBar({
 
       {/* Clear All */}
       {hasActiveFilters && (
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handleClearAll}
-          className="h-9"
-        >
+        <Button variant="ghost" size="sm" onClick={handleClearAll} className="h-9">
           <X className="w-4 h-4 mr-2" />
           Clear All
         </Button>
