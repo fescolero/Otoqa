@@ -28,12 +28,64 @@ from lane_solver import (
 )
 
 
+def _safe_float(value, field_name: str, lane_id: str) -> float:
+    """Convert a value to float, raising ValueError with a clear message on failure."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"Lane '{lane_id}': invalid numeric value for {field_name}: {value!r}")
+
+
+def validate_request_body(body: Any) -> list[dict]:
+    """Validate the top-level request body shape. Returns the lanes list.
+
+    Raises ValueError with a descriptive message if the body is malformed.
+    """
+    if not isinstance(body, dict):
+        raise ValueError("Request body must be a JSON object")
+    lanes = body.get('lanes')
+    if lanes is None:
+        raise ValueError("Request body must contain a 'lanes' key")
+    if not isinstance(lanes, list):
+        raise ValueError("'lanes' must be a list")
+    bad = [i for i, item in enumerate(lanes) if not isinstance(item, dict)]
+    if bad:
+        raise ValueError(f"'lanes' entries at indices {bad} are not objects")
+    return lanes
+
+
 def lanes_from_json(data: list[dict]) -> list[Lane]:
-    """Convert JSON lane objects to Lane dataclass instances."""
+    """Convert JSON lane objects to Lane dataclass instances.
+
+    Raises ValueError if required fields are missing or numeric fields are invalid.
+    Required fields (checked by accepted aliases):
+      - id or name
+      - originCity or origin_city
+      - destinationCity or dest_city
+    """
+    missing = []
+    for i, row in enumerate(data):
+        lane_id = row.get('id') or row.get('name') or ''
+        problems = []
+        if not row.get('id') and not row.get('name'):
+            problems.append('id/name')
+        if not row.get('originCity') and not row.get('origin_city'):
+            problems.append('originCity/origin_city')
+        if not row.get('destinationCity') and not row.get('dest_city'):
+            problems.append('destinationCity/dest_city')
+        if problems:
+            missing.append(f"  lane[{i}] (id={lane_id!r}): missing {', '.join(problems)}")
+
+    if missing:
+        raise ValueError("Lanes missing required fields:\n" + "\n".join(missing))
+
     lanes = []
     for row in data:
+        lane_id = row.get('id', row.get('name', ''))
         lane = Lane(
-            id=row.get('id', row.get('name', '')),
+            id=lane_id,
             name=row.get('name', ''),
             origin_city=row.get('originCity', row.get('origin_city', '')),
             origin_state=row.get('originState', row.get('origin_state', '')),
@@ -43,13 +95,13 @@ def lanes_from_json(data: list[dict]) -> list[Lane]:
             dest_state=row.get('destinationState', row.get('dest_state', '')),
             dest_lat=row.get('destinationLat', row.get('dest_lat')),
             dest_lng=row.get('destinationLng', row.get('dest_lng')),
-            route_miles=float(row.get('routeMiles', row.get('route_miles', 0)) or 0),
-            route_duration_hours=float(row.get('routeDurationHours', row.get('route_duration_hours', 0)) or 0),
+            route_miles=_safe_float(row.get('routeMiles', row.get('route_miles', 0)) or 0, 'routeMiles', lane_id),
+            route_duration_hours=_safe_float(row.get('routeDurationHours', row.get('route_duration_hours', 0)) or 0, 'routeDurationHours', lane_id),
             pickup_time=parse_time(row.get('originScheduledTime', row.get('pickup_time', ''))),
             pickup_end_time=parse_time(row.get('originScheduledEndTime', row.get('pickup_end_time', ''))),
             delivery_time=parse_time(row.get('destinationScheduledTime', row.get('delivery_time', ''))),
             delivery_end_time=parse_time(row.get('destinationScheduledEndTime', row.get('delivery_end_time', ''))),
-            dwell_hours=float(row.get('dwell_hours', 0.5)),
+            dwell_hours=_safe_float(row.get('dwell_hours', 0.5), 'dwell_hours', lane_id),
         )
         lanes.append(lane)
     return lanes
@@ -214,63 +266,76 @@ def solve_weekly_endpoint(entries, config):
 
 
 class SolverHandler(BaseHTTPRequestHandler):
+
+    def _send_json(self, status: int, data: dict):
+        """Send a JSON response with CORS headers."""
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
+    def _read_json_body(self) -> Any:
+        """Read and parse the JSON request body.
+
+        Raises json.JSONDecodeError on malformed JSON.
+        """
+        content_length = int(self.headers.get('Content-Length', 0))
+        raw = self.rfile.read(content_length)
+        return json.loads(raw)
+
     def do_POST(self):
         if self.path == '/solve':
-            content_length = int(self.headers['Content-Length'])
-            body = json.loads(self.rfile.read(content_length))
-
-            lanes_data = body.get('lanes', [])
-            config = body.get('config', {})
-
-            lanes = lanes_from_json(lanes_data)
-            result = solve(lanes, config)
-
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode())
-
-        elif self.path == '/solve-weekly':
-            content_length = int(self.headers['Content-Length'])
-            body = json.loads(self.rfile.read(content_length))
-
-            entries = body.get('lanes', [])
-            config = body.get('config', {})
-            n_drivers = config.get('target_drivers') or None
+            try:
+                body = self._read_json_body()
+            except (json.JSONDecodeError, ValueError) as e:
+                self._send_json(400, {'success': False, 'error': f'Malformed JSON: {e}'})
+                return
 
             try:
-                from weekly_solver_v4 import solve_weekly_v4_api
-                result = solve_weekly_v4_api(entries, config, n_drivers)
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps(result).encode())
+                lanes_data = body.get('lanes', [])
+                config = body.get('config', {})
+                lanes = lanes_from_json(lanes_data)
+                result = solve(lanes, config)
+                self._send_json(200, result)
+            except ValueError as e:
+                self._send_json(400, {'success': False, 'error': str(e)})
             except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+                self._send_json(500, {'success': False, 'error': str(e)})
+
+        elif self.path == '/solve-weekly':
+            try:
+                body = self._read_json_body()
+            except (json.JSONDecodeError, ValueError) as e:
+                self._send_json(400, {'success': False, 'error': f'Malformed JSON: {e}'})
+                return
+
+            try:
+                lanes_data = validate_request_body(body)
+                config = body.get('config', {})
+                n_drivers = config.get('target_drivers') or None
+
+                # Validate lane fields before passing to solver
+                lanes_from_json(lanes_data)
+
+                from weekly_solver_v4 import solve_weekly_v4_api
+                result = solve_weekly_v4_api(lanes_data, config, n_drivers)
+                self._send_json(200, result)
+            except ValueError as e:
+                self._send_json(400, {'success': False, 'error': str(e)})
+            except Exception as e:
+                self._send_json(500, {'success': False, 'error': str(e)})
 
         elif self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            self._send_json(200, {'status': 'ok'})
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_json(404, {'success': False, 'error': 'Not found'})
 
     def do_GET(self):
         if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            self._send_json(200, {'status': 'ok'})
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_json(404, {'success': False, 'error': 'Not found'})
 
     def do_OPTIONS(self):
         self.send_response(200)
