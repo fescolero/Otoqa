@@ -1617,6 +1617,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         for day in working_days:
             if day not in shared: continue
             if out_id not in day_lid_set[day] or ret_id not in day_lid_set[day]: continue
+
             # Same-driver constraint
             for d in range(n_drivers):
                 model.Add(assign[day][out_id][d] == assign[day][ret_id][d])
