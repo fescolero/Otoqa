@@ -1174,6 +1174,29 @@ def _local_optimize(result, lane_map, graph, base_city, config,
     total_improvement = 0.0
     exact_scores_used = 0
     modified_keys = set()
+    tabu_set = set()  # (frag_key, donor_key, recip_key) — prevents oscillation
+    move_log = []  # explainability: detailed log of accepted moves
+
+    # --- Quality scoreboard: pre-v2 snapshot ---
+    def _row_metrics(legs):
+        """Quick per-row metrics for scoreboard."""
+        if not legs:
+            return {'score': 0, 'dh': 0, 'overlaps': 0, 'corridors': 0, 'legs': 0}
+        _, dh_mi, _ = _metrics_from_chain(legs, lane_map)
+        corrs = len(set(_corridor_of_leg(lane_map[lid]) for lid in legs))
+        overlaps = _count_cross_corridor_overlaps(legs, lane_map)
+        return {'score': _row_quality_score(legs, lane_map, pre_post_h),
+                'dh': dh_mi, 'overlaps': overlaps, 'corridors': corrs, 'legs': len(legs)}
+
+    pre_scoreboard = {}
+    for key, entry in dd.items():
+        if key not in frozen and entry['legs']:
+            pre_scoreboard[key] = _row_metrics(entry['legs'])
+
+    print(f"  v2 scoreboard (pre): {len(pre_scoreboard)} estimated rows, "
+          f"worst={max((m['score'] for m in pre_scoreboard.values()), default=0):.0f}, "
+          f"total_overlaps={sum(m['overlaps'] for m in pre_scoreboard.values())}, "
+          f"total_dh={sum(m['dh'] for m in pre_scoreboard.values())}")
 
     for iteration in range(max_iterations):
         if _time.time() - start_time >= max_time_s:
@@ -1207,12 +1230,16 @@ def _local_optimize(result, lane_map, graph, base_city, config,
                 continue
             frag_legs = frag['legs']
             frag_corridor = frag['corridor']
+            frag_key = tuple(sorted(frag_legs))  # stable key for tabu
             remaining = [lid for lid in donor_legs if lid not in set(frag_legs)]
 
             # Same-day recipients only
             candidates = []
             for key, entry in sorted(dd.items(), key=lambda x: (x[0][0], x[0][1])):
                 if key in frozen or key == worst_key or key[1] != donor_day or not entry['legs']:
+                    continue
+                # Tabu check: skip if this exact move was recently made
+                if (frag_key, worst_key, key) in tabu_set or (frag_key, key, worst_key) in tabu_set:
                     continue
                 feasible, cs = _cheap_recipient_score(frag_legs, frag_corridor, entry['legs'], lane_map, max_legs)
                 if feasible:
@@ -1312,7 +1339,8 @@ def _local_optimize(result, lane_map, graph, base_city, config,
                     continue
 
                 if best_move is None or net > best_move[4]:
-                    best_move = (frag, recip_key, remaining, ordered_ids, net)
+                    best_move = (frag, recip_key, remaining, ordered_ids, net,
+                                 old_recip_score, new_recip_score, new_donor_score, dh_miles)
 
             if exact_scores_used >= max_exact_scores or _time.time() - start_time >= max_time_s - 2:
                 break
@@ -1320,7 +1348,32 @@ def _local_optimize(result, lane_map, graph, base_city, config,
         if best_move is None:
             break
 
-        frag, recip_key, new_donor_legs, new_recip_legs, improvement = best_move
+        frag, recip_key, new_donor_legs, new_recip_legs, improvement, \
+            old_r_score, new_r_score, new_d_score, new_r_dh = best_move
+
+        # --- Explainability: log detailed move info ---
+        old_donor_metrics = _row_metrics(donor_legs)
+        old_recip_metrics = _row_metrics(dd[recip_key]['legs'])
+        new_donor_metrics = _row_metrics(new_donor_legs) if new_donor_legs else {'score': 0, 'dh': 0, 'overlaps': 0, 'corridors': 0, 'legs': 0}
+        new_recip_metrics = _row_metrics(new_recip_legs)
+
+        move_entry = {
+            'move': moves_accepted + 1,
+            'frag': frag['legs'], 'corridor': frag['corridor'],
+            'donor': f'D{worst_key[0]+1}/{worst_key[1]}',
+            'recipient': f'D{recip_key[0]+1}/{recip_key[1]}',
+            'donor_score': f'{old_donor_metrics["score"]:.0f} -> {new_donor_metrics["score"]:.0f}',
+            'recip_score': f'{old_recip_metrics["score"]:.0f} -> {new_recip_metrics["score"]:.0f}',
+            'donor_dh': f'{old_donor_metrics["dh"]} -> {new_donor_metrics["dh"]}',
+            'recip_dh': f'{old_recip_metrics["dh"]} -> {new_recip_metrics["dh"]}',
+            'donor_overlaps': f'{old_donor_metrics["overlaps"]} -> {new_donor_metrics["overlaps"]}',
+            'recip_overlaps': f'{old_recip_metrics["overlaps"]} -> {new_recip_metrics["overlaps"]}',
+            'net_improvement': round(improvement),
+        }
+        move_log.append(move_entry)
+
+        # Apply move
+        frag_key = tuple(sorted(frag['legs']))
         dd[worst_key]['legs'] = new_donor_legs
         dd[worst_key]['is_exact'] = False
         dd[recip_key]['legs'] = new_recip_legs
@@ -1330,16 +1383,43 @@ def _local_optimize(result, lane_map, graph, base_city, config,
         if not new_donor_legs:
             del dd[worst_key]
 
+        # Tabu: remember this fragment + donor/recip pair for remaining iterations
+        tabu_set.add((frag_key, worst_key, recip_key))
+
         moves_accepted += 1
         total_improvement += improvement
-        print(f"  v2 move {moves_accepted}: frag {frag['legs']} "
+        print(f"  v2 move {moves_accepted}: {frag['corridor']} frag ({len(frag['legs'])} legs) "
               f"D{worst_key[0]+1}/{worst_key[1]} -> D{recip_key[0]+1}/{recip_key[1]} "
-              f"improvement={improvement:.0f}")
+              f"| score {old_donor_metrics['score']:.0f}->{new_donor_metrics['score']:.0f} / "
+              f"{old_recip_metrics['score']:.0f}->{new_recip_metrics['score']:.0f} "
+              f"| DH {old_donor_metrics['dh']}->{new_donor_metrics['dh']} / "
+              f"{old_recip_metrics['dh']}->{new_recip_metrics['dh']} "
+              f"| net={improvement:.0f}")
 
     elapsed = _time.time() - start_time
+
+    # --- Quality scoreboard: post-v2 snapshot ---
+    post_scoreboard = {}
+    for key, entry in dd.items():
+        if key not in frozen and entry['legs']:
+            post_scoreboard[key] = _row_metrics(entry['legs'])
+
+    if moves_accepted > 0:
+        print(f"  v2 scoreboard (post): "
+              f"worst={max((m['score'] for m in post_scoreboard.values()), default=0):.0f}, "
+              f"total_overlaps={sum(m['overlaps'] for m in post_scoreboard.values())}, "
+              f"total_dh={sum(m['dh'] for m in post_scoreboard.values())}")
+
     result['v2Stats'] = {
         'moves_tried': moves_tried, 'moves_accepted': moves_accepted,
         'time_s': round(elapsed, 1), 'improvement': round(total_improvement, 1),
+        'move_log': move_log,
+        'pre_worst_score': max((m['score'] for m in pre_scoreboard.values()), default=0),
+        'post_worst_score': max((m['score'] for m in post_scoreboard.values()), default=0),
+        'pre_total_overlaps': sum(m['overlaps'] for m in pre_scoreboard.values()),
+        'post_total_overlaps': sum(m['overlaps'] for m in post_scoreboard.values()),
+        'pre_total_dh': sum(m['dh'] for m in pre_scoreboard.values()),
+        'post_total_dh': sum(m['dh'] for m in post_scoreboard.values()),
     }
 
     if moves_accepted == 0:
