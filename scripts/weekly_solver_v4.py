@@ -1069,7 +1069,9 @@ def _rebuild_schedule(mutable, lane_map, graph, base_city, pre_post_h, max_wait_
     import copy as _copy
     n_drivers = mutable['n_drivers']
     dd = mutable['driver_days']
-    all_day_names = sorted(set(dn for (_, dn) in dd.keys()))
+    # Service-week order, not alphabetical (Mon < Tue < ... < Sun)
+    _DAY_ORDER = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
+    all_day_names = sorted(set(dn for (_, dn) in dd.keys()), key=lambda d: _DAY_ORDER.get(d, 99))
     weekly_schedule = []
     all_exact = True
     hos_violations = []
@@ -1409,6 +1411,8 @@ def _maybe_run_v2(result, lane_map, graph, base_city, config):
     try:
         return _local_optimize(result, lane_map, graph, base_city, config)
     except Exception as e:
+        result['v2Applied'] = False
+        result['v2Stats'] = {'moves_tried': 0, 'moves_accepted': 0, 'time_s': 0, 'improvement': 0}
         result['v2Error'] = str(e)
         print(f"  v2 optimizer failed: {e}")
         return result
