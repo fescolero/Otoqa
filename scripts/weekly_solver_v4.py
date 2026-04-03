@@ -2214,9 +2214,10 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             'daysWorked': len(driver_days),
         })
 
-    # ---- Phase 5: Unconditional local repair on worst estimated rows ----
-    # For each day, find the worst-scoring estimated driver-day and try to
-    # improve it by swapping one block to a better-scoring recipient.
+    # ---- Phase 5a: Overlap repair on estimated rows ----
+    # Detect overlapping legs on the same driver-day and move one to another driver.
+    # This targets the "assignment bucket" problem where the span model assigns
+    # overlapping legs to the same driver because the total window fits in 14h.
     excl_pair_ids = set()
     for la in lanes:
         for lb in lanes:
@@ -2226,6 +2227,165 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             if la.route_duration_hours + lb.route_duration_hours > 5.0:
                 excl_pair_ids.add(la.id)
                 excl_pair_ids.add(lb.id)
+
+    # Count exact days before repair
+    exact_before = sum(1 for dr in weekly_schedule for dd in dr['days'].values() if dd.get('isExact'))
+
+    for overlap_pass in range(5):
+        moved_any = False
+        for d_idx, dr in enumerate(weekly_schedule):
+            for dn, dd in list(dr['days'].items()):
+                if dd.get('isExact'): continue  # don't touch exact rows
+                if any(lid in excl_pair_ids for lid in dd['legs']): continue  # don't touch LV
+
+                # Find overlapping leg pairs
+                legs = dd['legs']
+                overlaps = []
+                for i in range(len(legs)):
+                    li = lane_map[legs[i]]
+                    si = li.pickup_time; fi = li.finish_time
+                    if si is None or fi is None: continue
+                    for j in range(i + 1, len(legs)):
+                        lj = lane_map[legs[j]]
+                        sj = lj.pickup_time; fj = lj.finish_time
+                        if sj is None or fj is None: continue
+                        if si < fj and sj < fi:  # overlap
+                            overlaps.append((i, j, legs[i], legs[j]))
+
+                if not overlaps: continue
+
+                # Try to move one leg from the worst overlap to another driver
+                # Pick the overlap pair with the most time conflict
+                overlaps.sort(key=lambda x: min(
+                    lane_map[x[2]].finish_time or 0, lane_map[x[3]].finish_time or 0
+                ) - max(
+                    lane_map[x[2]].pickup_time or 0, lane_map[x[3]].pickup_time or 0
+                ), reverse=True)
+
+                for _, _, lid_a, lid_b in overlaps[:3]:  # try worst 3 overlaps
+                    # Try moving lid_b (or lid_a) to another driver
+                    for move_lid in [lid_b, lid_a]:
+                        # Build a singleton block for the move candidate
+                        move_block = {
+                            'id': f'ovlp_{move_lid[:8]}',
+                            'legs': [move_lid],
+                            'corridor': _corridor_of_leg(lane_map[move_lid]),
+                            'is_exclusive': False,
+                            'start': lane_map[move_lid].pickup_time,
+                            'end': lane_map[move_lid].finish_time,
+                            'drive': lane_map[move_lid].route_duration_hours,
+                        }
+
+                        best_recipient = None
+                        best_score = float('inf')
+
+                        for r_idx, recip in enumerate(weekly_schedule):
+                            if r_idx == d_idx: continue
+                            r_dd = recip['days'].get(dn)
+                            # Don't insert into exact or exclusive days
+                            if r_dd and r_dd.get('isExact'): continue
+                            if r_dd and any(lid in excl_pair_ids for lid in r_dd.get('legs', [])): continue
+
+                            r_legs = list(r_dd['legs']) if r_dd else []
+                            result = _try_insert_block(move_block, r_legs, lane_map, max_legs, pre_post_h)
+                            if not result: continue
+                            new_r_legs, new_r_score = result
+
+                            # Check: would the move CREATE new overlaps on the recipient?
+                            has_new_overlap = False
+                            ml = lane_map[move_lid]
+                            ms = ml.pickup_time; mf = ml.finish_time
+                            if ms is not None and mf is not None:
+                                for rl in r_legs:
+                                    rl_lane = lane_map[rl]
+                                    rs = rl_lane.pickup_time; rf = rl_lane.finish_time
+                                    if rs is not None and rf is not None:
+                                        if ms < rf and rs < mf:
+                                            # Same corridor overlap is OK (pair legs overlap naturally)
+                                            if _corridor_of_leg(ml) != _corridor_of_leg(rl_lane):
+                                                has_new_overlap = True
+                                                break
+                            if has_new_overlap: continue
+
+                            # Check weekly duty
+                            if r_dd:
+                                old_r_duty = r_dd.get('dutyHours', 0)
+                                new_r_starts = [lane_map[lid].pickup_time for lid in new_r_legs if lane_map[lid].pickup_time]
+                                new_r_ends = [lane_map[lid].finish_time for lid in new_r_legs if lane_map[lid].finish_time]
+                                new_r_duty = (max(new_r_ends) - min(new_r_starts) + pre_post_h) if new_r_starts and new_r_ends else 0
+                                if recip.get('totalDutyHours', 0) - old_r_duty + new_r_duty > MAX_WEEKLY_DUTY:
+                                    continue
+
+                            if new_r_score < best_score:
+                                best_recipient = (r_idx, new_r_legs, new_r_score)
+                                best_score = new_r_score
+
+                        if best_recipient:
+                            r_idx, new_r_legs, _ = best_recipient
+                            # Remove move_lid from source
+                            new_src_legs = [lid for lid in legs if lid != move_lid]
+
+                            # Resequence source
+                            if new_src_legs:
+                                src_ord, src_dr, src_dh, src_ex, src_gaps = _sequence_driver_day(
+                                    new_src_legs, lane_map, graph, base_city, max_wait_h)
+                                src_starts = [lane_map[lid].pickup_time for lid in src_ord if lane_map[lid].pickup_time]
+                                src_ends = [lane_map[lid].finish_time for lid in src_ord if lane_map[lid].finish_time]
+                                weekly_schedule[d_idx]['days'][dn] = {
+                                    'legs': src_ord, 'legNames': [lane_map[lid].name for lid in src_ord],
+                                    'legCount': len(src_ord),
+                                    'driveHours': round(src_dr, 1),
+                                    'dutyHours': round((max(src_ends) - min(src_starts) + pre_post_h) if src_starts and src_ends else 0, 1),
+                                    'miles': round(sum(lane_map[lid].route_miles for lid in src_ord) + src_dh),
+                                    'deadheadMiles': round(src_dh),
+                                    'startTime': min(src_starts) if src_starts else 0,
+                                    'endTime': max(src_ends) if src_ends else 0,
+                                    'isExact': src_ex, 'legGaps': src_gaps,
+                                }
+                            else:
+                                del weekly_schedule[d_idx]['days'][dn]
+
+                            # Resequence recipient
+                            dst_ord, dst_dr, dst_dh, dst_ex, dst_gaps = _sequence_driver_day(
+                                new_r_legs, lane_map, graph, base_city, max_wait_h)
+                            dst_starts = [lane_map[lid].pickup_time for lid in dst_ord if lane_map[lid].pickup_time]
+                            dst_ends = [lane_map[lid].finish_time for lid in dst_ord if lane_map[lid].finish_time]
+                            weekly_schedule[r_idx]['days'][dn] = {
+                                'legs': dst_ord, 'legNames': [lane_map[lid].name for lid in dst_ord],
+                                'legCount': len(dst_ord),
+                                'driveHours': round(dst_dr, 1),
+                                'dutyHours': round((max(dst_ends) - min(dst_starts) + pre_post_h) if dst_starts and dst_ends else 0, 1),
+                                'miles': round(sum(lane_map[lid].route_miles for lid in dst_ord) + dst_dh),
+                                'deadheadMiles': round(dst_dh),
+                                'startTime': min(dst_starts) if dst_starts else 0,
+                                'endTime': max(dst_ends) if dst_ends else 0,
+                                'isExact': dst_ex, 'legGaps': dst_gaps,
+                            }
+
+                            # Recompute totals
+                            for idx in [d_idx, r_idx]:
+                                d = weekly_schedule[idx]
+                                d['totalDriveHours'] = round(sum(v['driveHours'] for v in d['days'].values()), 1)
+                                d['totalDutyHours'] = round(sum(v['dutyHours'] for v in d['days'].values()), 1)
+                                d['totalMiles'] = round(sum(v.get('miles', 0) for v in d['days'].values()))
+                                d['totalDeadheadMiles'] = round(sum(v.get('deadheadMiles', 0) for v in d['days'].values()))
+                                d['daysWorked'] = len(d['days'])
+
+                            moved_any = True
+                            break  # move succeeded, recheck this day
+                    if moved_any: break
+                if moved_any: break
+            if moved_any: break
+
+        # Check exact count didn't drop
+        exact_after = sum(1 for dr in weekly_schedule for dd in dr['days'].values() if dd.get('isExact'))
+        if exact_after < exact_before:
+            break
+
+        if not moved_any:
+            break
+
+    # ---- Phase 5b: Unconditional local repair on worst estimated rows ----
 
     MAX_REPAIR_PASSES = 3
     # Count exact days before repair to prevent regression
