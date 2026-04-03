@@ -2082,6 +2082,9 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 excl_pair_ids.add(lb.id)
 
     MAX_REPAIR_PASSES = 3
+    # Count exact days before repair to prevent regression
+    exact_before_repair = sum(1 for dr in weekly_schedule for dd in dr['days'].values() if dd.get('isExact'))
+
     for repair_pass in range(MAX_REPAIR_PASSES):
         improved = False
         # Find worst estimated driver-day across all drivers
@@ -2116,13 +2119,22 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             for r_idx, recip in enumerate(weekly_schedule):
                 if r_idx == d_idx: continue
                 r_dd = recip['days'].get(dn)
+                # Don't insert into exclusive days
                 if r_dd and any(lid in excl_pair_ids for lid in r_dd.get('legs', [])):
-                    continue  # don't add to exclusive days
+                    continue
+                # Don't insert into exact days (protect exactness)
+                if r_dd and r_dd.get('isExact'):
+                    continue
 
                 r_legs = list(r_dd['legs']) if r_dd else []
                 result = _try_insert_block(block, r_legs, lane_map, max_legs, pre_post_h)
                 if not result: continue
                 new_r_legs, new_r_score = result
+
+                # Anti-concentration: recipient DH can't become worse than source's current DH
+                _, new_r_dh, _ = _metrics_from_chain(new_r_legs, lane_map)
+                if new_r_dh > worst_dd.get('deadheadMiles', 0):
+                    continue  # would just move the ugliness, not fix it
 
                 # Check recipient weekly duty wouldn't exceed 70h
                 if r_dd:
@@ -2134,10 +2146,10 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     if recip_weekly > MAX_WEEKLY_DUTY:
                         continue
 
-                # Score improvement
+                # Score improvement — penalize recipient degradation heavily
                 old_worst_score = worst_score
                 new_worst_score = _score_driver_day(remaining_legs, lane_map, pre_post_h) if remaining_legs else 0
-                improvement = old_worst_score - new_worst_score - new_r_score * 0.3  # penalize recipient degradation
+                improvement = old_worst_score - new_worst_score - new_r_score * 0.5
                 if improvement > best_improvement:
                     best_improvement = improvement
                     best_move = (b_idx, block, r_idx, remaining_legs, new_r_legs)
@@ -2192,6 +2204,12 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 dr['totalMiles'] = round(sum(v.get('miles', 0) for v in dr['days'].values()))
                 dr['totalDeadheadMiles'] = round(sum(v.get('deadheadMiles', 0) for v in dr['days'].values()))
                 dr['daysWorked'] = len(dr['days'])
+            # Check exact count didn't drop — if it did, this repair was bad
+            exact_after = sum(1 for dr in weekly_schedule for dd in dr['days'].values() if dd.get('isExact'))
+            if exact_after < exact_before_repair:
+                # Exact regression — this shouldn't happen since we skip exact days,
+                # but if it does, stop repairing
+                break
             improved = True
 
         if not improved:
