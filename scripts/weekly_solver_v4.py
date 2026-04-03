@@ -1003,6 +1003,494 @@ def _try_insert_block(block, target_legs, lane_map, max_legs=8, pre_post_h=1.0):
     return (ordered, score)
 
 
+# ========================================================================
+# v2 Local Optimizer — opt-in post-solve layer
+# ========================================================================
+
+def _build_mutable_state(weekly_schedule):
+    """Convert weekly_schedule list into a flat mutable dict for v2 iteration.
+    Returns {
+        'driver_days': {(driver_idx, day_name): {'legs': [...], 'is_exact': bool}},
+        'driver_weekly_duty': {driver_idx: float},
+        'n_drivers': int,
+    }
+    """
+    dd = {}
+    weekly_duty = {}
+    for i, dr in enumerate(weekly_schedule):
+        weekly_duty[i] = sum(v['dutyHours'] for v in dr['days'].values())
+        for day_name, day_data in dr['days'].items():
+            dd[(i, day_name)] = {
+                'legs': list(day_data['legs']),
+                'is_exact': day_data.get('isExact', False),
+            }
+    return {
+        'driver_days': dd,
+        'driver_weekly_duty': weekly_duty,
+        'n_drivers': len(weekly_schedule),
+    }
+
+
+def _cheap_recipient_score(frag_legs, frag_corridor, recipient_legs, lane_map, max_legs=8):
+    """Quick heuristic score for insertion candidacy. Lower = better fit.
+    Returns (feasible: bool, score: float). No solver calls.
+    """
+    if len(recipient_legs) + len(frag_legs) > max_legs:
+        return (False, 9999)
+
+    # Dominant corridor of recipient
+    corr_counts = {}
+    for lid in recipient_legs:
+        c = _corridor_of_leg(lane_map[lid])
+        corr_counts[c] = corr_counts.get(c, 0) + 1
+    dominant_corr = max(corr_counts, key=corr_counts.get) if corr_counts else ''
+
+    score = 0.0
+    # Corridor match bonus
+    if frag_corridor == dominant_corr:
+        score -= 50.0
+
+    # Time-window overlap penalty
+    frag_starts = [lane_map[lid].pickup_time for lid in frag_legs if lane_map[lid].pickup_time is not None]
+    frag_ends = [lane_map[lid].finish_time for lid in frag_legs if lane_map[lid].finish_time is not None]
+    for lid in recipient_legs:
+        rl = lane_map[lid]
+        if rl.pickup_time is None or rl.finish_time is None:
+            continue
+        for fs, fe in zip(frag_starts, frag_ends):
+            if fs < rl.finish_time and rl.pickup_time < fe:  # overlap
+                score += 30.0
+
+    # Rough DH estimate (haversine from nearest recipient endpoint to fragment)
+    if frag_starts:
+        frag_first = lane_map[frag_legs[0]]
+        min_dh = 999.0
+        for lid in recipient_legs:
+            rl = lane_map[lid]
+            dh = _compute_dh(rl, frag_first)
+            min_dh = min(min_dh, dh)
+        score += min_dh * 0.5
+
+    return (True, score)
+
+
+def _rebuild_schedule(mutable, lane_map, graph, base_city, pre_post_h, max_wait_h,
+                      original_schedule, modified_keys):
+    """Rebuild weekly_schedule from mutable state, only re-sequencing modified days.
+    Unmodified days are copied from original_schedule to avoid ordering drift.
+
+    Returns (weekly_schedule_list, all_exact, hos_violations_list).
+    Matches v1 Phase 4 output format exactly.
+    """
+    import copy as _copy
+
+    n_drivers = mutable['n_drivers']
+    dd = mutable['driver_days']
+    all_day_names = sorted(set(dn for (_, dn) in dd.keys()))
+
+    weekly_schedule = []
+    all_exact = True
+    hos_violations = []
+
+    for d in range(n_drivers):
+        driver_days = {}
+        orig_days = original_schedule[d]['days'] if d < len(original_schedule) else {}
+
+        for day_name in all_day_names:
+            entry = dd.get((d, day_name))
+
+            # Day was emptied by a move
+            if not entry or not entry['legs']:
+                continue
+
+            # If day wasn't modified, preserve original data exactly
+            if (d, day_name) not in modified_keys and day_name in orig_days:
+                day_data = _copy.deepcopy(orig_days[day_name])
+                if not day_data.get('isExact', False):
+                    all_exact = False
+                driver_days[day_name] = day_data
+                continue
+
+            # Re-sequence modified day
+            legs = entry['legs']
+            ordered_ids, drive, dh_miles_total, is_exact, leg_gaps = _sequence_driver_day(
+                legs, lane_map, graph, base_city, max_wait_h
+            )
+            if not is_exact:
+                all_exact = False
+            miles = sum(lane_map[lid].route_miles for lid in ordered_ids) + dh_miles_total
+
+            all_starts = [lane_map[lid].pickup_time for lid in ordered_ids if lane_map[lid].pickup_time is not None]
+            all_finishes = [lane_map[lid].finish_time for lid in ordered_ids if lane_map[lid].finish_time is not None]
+            earliest_start = min(all_starts) if all_starts else 0
+            latest_finish = max(all_finishes) if all_finishes else 0
+            duty = (latest_finish - earliest_start) + pre_post_h
+
+            if drive > HOS_MAX_DRIVE:
+                hos_violations.append(f'D{d+1} {day_name}: {drive:.1f}h drive > {HOS_MAX_DRIVE}h')
+            if duty > HOS_MAX_DUTY:
+                hos_violations.append(f'D{d+1} {day_name}: {duty:.1f}h duty > {HOS_MAX_DUTY}h')
+
+            names = [lane_map[lid].name for lid in ordered_ids]
+            driver_days[day_name] = {
+                'legs': ordered_ids, 'legNames': names, 'legCount': len(ordered_ids),
+                'driveHours': round(drive, 1), 'dutyHours': round(duty, 1),
+                'miles': round(miles), 'deadheadMiles': round(dh_miles_total),
+                'startTime': earliest_start, 'endTime': latest_finish,
+                'isExact': is_exact,
+                'legGaps': leg_gaps,
+            }
+
+        # Weekly duty validation
+        weekly_duty = sum(v['dutyHours'] for v in driver_days.values())
+        if weekly_duty > MAX_WEEKLY_DUTY:
+            hos_violations.append(f'D{d+1}: {weekly_duty:.1f}h weekly > {MAX_WEEKLY_DUTY}h')
+
+        # Off-duty between consecutive days
+        prev_end = None; prev_dn = None
+        for day_name in all_day_names:
+            dd_entry = driver_days.get(day_name)
+            if not dd_entry:
+                prev_end = None; prev_dn = None; continue
+            if prev_end is not None and dd_entry.get('startTime') is not None:
+                off = (dd_entry['startTime'] + 24) - prev_end
+                if off < OFF_DUTY_HOURS:
+                    hos_violations.append(f'D{d+1} {prev_dn}->{day_name}: {off:.1f}h off < {OFF_DUTY_HOURS}h')
+            prev_end = dd_entry.get('endTime'); prev_dn = day_name
+
+        driver_id = original_schedule[d]['driverId'] if d < len(original_schedule) else d + 1
+        weekly_schedule.append({
+            'driverId': driver_id, 'days': driver_days,
+            'totalDriveHours': round(sum(v['driveHours'] for v in driver_days.values()), 1),
+            'totalDutyHours': round(sum(v['dutyHours'] for v in driver_days.values()), 1),
+            'totalMiles': round(sum(v.get('miles', 0) for v in driver_days.values())),
+            'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in driver_days.values())),
+            'daysWorked': len(driver_days),
+        })
+
+    return weekly_schedule, all_exact, hos_violations
+
+
+def _local_optimize(result, lane_map, graph, base_city, config,
+                    max_iterations=5, max_time_s=15, max_exact_scores=12):
+    """Opt-in post-v1 local optimizer. Improves estimated days via fragment moves.
+
+    Returns modified result dict with v2 fields added.
+    On validation failure, restores original and sets result['v2Error'].
+    """
+    import copy as _copy
+    import time as _time
+    from collections import Counter
+
+    ws = result.get('weeklySchedule')
+    if not ws:
+        result['v2Applied'] = False
+        result['v2Stats'] = {'moves_tried': 0, 'moves_accepted': 0, 'time_s': 0, 'improvement': 0}
+        return result
+
+    pre_post_h = config.get('pre_post_hours', 1.0)
+    max_wait_h = config.get('max_wait', 2.0)
+    max_legs = config.get('max_legs', DEFAULT_MAX_LEGS)
+
+    # Deep-copy for rollback
+    original_ws = _copy.deepcopy(ws)
+
+    # Baselines
+    coverage_pre = Counter((dn, lid) for dr in ws for dn, dd in dr['days'].items() for lid in dd['legs'])
+    exact_count_pre = sum(1 for dr in ws for dd in dr['days'].values() if dd.get('isExact'))
+    max_dh_pre = max((dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values()), default=0)
+
+    # Build mutable state
+    mut = _build_mutable_state(ws)
+    dd = mut['driver_days']
+
+    # Mark frozen days (isExact=True)
+    frozen = set()
+    for key, entry in dd.items():
+        if entry['is_exact']:
+            frozen.add(key)
+
+    start_time = _time.time()
+    moves_tried = 0
+    moves_accepted = 0
+    total_improvement = 0.0
+    exact_scores_used = 0
+    modified_keys = set()  # track which (driver, day) were changed
+
+    for iteration in range(max_iterations):
+        elapsed = _time.time() - start_time
+        if elapsed >= max_time_s:
+            break
+
+        # Score non-frozen days → find worst 1
+        worst_key = None
+        worst_score = -1
+        for key, entry in dd.items():
+            if key in frozen or not entry['legs']:
+                continue
+            score = _row_quality_score(entry['legs'], lane_map, pre_post_h)
+            if score > worst_score:
+                worst_score = score
+                worst_key = key
+
+        if worst_key is None or worst_score <= 0:
+            break
+
+        donor_d, donor_day = worst_key
+        donor_legs = dd[worst_key]['legs']
+
+        # Generate fragments
+        # Need exclusive_units — for v2.0 we pass empty set since we freeze on isExact only
+        fragments = _generate_fragments_for_day(donor_legs, lane_map, set())
+
+        best_move = None  # (frag, recip_key, new_donor_legs, new_recip_legs, improvement)
+
+        for frag in sorted(fragments, key=lambda f: (-sum(
+            _compute_dh(lane_map[f['legs'][i]], lane_map[f['legs'][i+1]])
+            for i in range(len(f['legs'])-1)) if len(f['legs']) > 1 else 0,
+            -len(f['legs']), f['legs'][0])):
+
+            if frag.get('is_exclusive'):
+                continue
+
+            frag_corridor = frag['corridor']
+            frag_legs = frag['legs']
+            remaining_donor_legs = [lid for lid in donor_legs if lid not in set(frag_legs)]
+
+            # Cheap-score non-frozen recipients ON THE SAME DAY → top 2
+            # Lanes are day-specific: moving across days changes coverage
+            candidates = []
+            for key, entry in sorted(dd.items(), key=lambda x: (x[0][0], x[0][1])):
+                if key in frozen or key == worst_key:
+                    continue
+                if key[1] != donor_day:  # must be same day
+                    continue
+                if not entry['legs']:
+                    continue
+                feasible, cheap_score = _cheap_recipient_score(
+                    frag_legs, frag_corridor, entry['legs'], lane_map, max_legs)
+                if feasible:
+                    candidates.append((cheap_score, key))
+
+            candidates.sort(key=lambda x: (x[0], x[1][0], x[1][1]))
+            top_candidates = candidates[:2]
+
+            for _, recip_key in top_candidates:
+                # Wall-clock check before each exact-score
+                if _time.time() - start_time >= max_time_s - 2:
+                    break
+                if exact_scores_used >= max_exact_scores:
+                    break
+
+                recip_d, recip_day = recip_key
+                recip_legs = dd[recip_key]['legs']
+                combined = list(recip_legs) + frag_legs
+
+                moves_tried += 1
+                exact_scores_used += 1
+
+                # Exact-score the combined day
+                ordered_ids, drive, dh_miles, is_exact, leg_gaps = _sequence_driver_day(
+                    combined, lane_map, graph, base_city, max_wait_h
+                )
+
+                # Validate HOS on recipient
+                all_starts = [lane_map[lid].pickup_time for lid in ordered_ids if lane_map[lid].pickup_time is not None]
+                all_finishes = [lane_map[lid].finish_time for lid in ordered_ids if lane_map[lid].finish_time is not None]
+                if not all_starts or not all_finishes:
+                    continue
+                duty = (max(all_finishes) - min(all_starts)) + pre_post_h
+                if drive > HOS_MAX_DRIVE or duty > HOS_MAX_DUTY:
+                    continue
+
+                # Validate weekly duty for recipient driver
+                recip_weekly = sum(
+                    dd[(recip_d, dn)]['legs'] and _day_duty(dd[(recip_d, dn)]['legs'], lane_map, pre_post_h)
+                    for dn in set(k[1] for k in dd.keys() if k[0] == recip_d)
+                    if dd.get((recip_d, dn)) and dd[(recip_d, dn)]['legs']
+                )
+                # Replace recipient day duty with new duty
+                old_recip_duty = _day_duty(recip_legs, lane_map, pre_post_h)
+                new_recip_weekly = recip_weekly - old_recip_duty + duty
+                if new_recip_weekly > MAX_WEEKLY_DUTY:
+                    continue
+
+                # Validate weekly duty for donor driver
+                donor_weekly = sum(
+                    dd[(donor_d, dn)]['legs'] and _day_duty(dd[(donor_d, dn)]['legs'], lane_map, pre_post_h)
+                    for dn in set(k[1] for k in dd.keys() if k[0] == donor_d)
+                    if dd.get((donor_d, dn)) and dd[(donor_d, dn)]['legs']
+                )
+                old_donor_duty = _day_duty(donor_legs, lane_map, pre_post_h)
+                new_donor_duty = _day_duty(remaining_donor_legs, lane_map, pre_post_h) if remaining_donor_legs else 0
+                new_donor_weekly = donor_weekly - old_donor_duty + new_donor_duty
+                if new_donor_weekly > MAX_WEEKLY_DUTY:
+                    continue
+
+                # Score improvement
+                new_recip_score = _row_quality_score(ordered_ids, lane_map, pre_post_h)
+                old_recip_score = _row_quality_score(recip_legs, lane_map, pre_post_h)
+                new_donor_score = _row_quality_score(remaining_donor_legs, lane_map, pre_post_h) if remaining_donor_legs else 0
+                old_donor_score = worst_score
+
+                # Acceptance: net improvement > 0 and recipient doesn't worsen too much
+                donor_improvement = old_donor_score - new_donor_score
+                recip_worsening = new_recip_score - old_recip_score
+                net = donor_improvement - recip_worsening
+
+                if net <= 0:
+                    continue
+                if recip_worsening > donor_improvement:
+                    continue
+
+                # Check max DH doesn't increase
+                new_dh = max(dh_miles, sum(
+                    _compute_dh(lane_map[remaining_donor_legs[i]], lane_map[remaining_donor_legs[i+1]])
+                    for i in range(len(remaining_donor_legs)-1)
+                ) if len(remaining_donor_legs) > 1 else 0)
+                if new_dh > max_dh_pre:
+                    continue
+
+                if best_move is None or net > best_move[4]:
+                    best_move = (frag, recip_key, remaining_donor_legs, ordered_ids, net)
+
+            if exact_scores_used >= max_exact_scores or _time.time() - start_time >= max_time_s - 2:
+                break
+
+        if best_move is None:
+            break
+
+        # Apply move
+        frag, recip_key, new_donor_legs, new_recip_legs, improvement = best_move
+        dd[worst_key]['legs'] = new_donor_legs
+        dd[worst_key]['is_exact'] = False  # donor was already estimated
+        dd[recip_key]['legs'] = new_recip_legs
+        dd[recip_key]['is_exact'] = False  # recipient re-sequenced
+        modified_keys.add(worst_key)
+        modified_keys.add(recip_key)
+
+        # Remove empty donor day
+        if not new_donor_legs:
+            del dd[worst_key]
+
+        # Update weekly duty cache
+        mut['driver_weekly_duty'][worst_key[0]] = sum(
+            _day_duty(dd[(worst_key[0], dn)]['legs'], lane_map, pre_post_h)
+            for dn in set(k[1] for k in dd.keys() if k[0] == worst_key[0])
+            if dd.get((worst_key[0], dn)) and dd[(worst_key[0], dn)]['legs']
+        )
+        mut['driver_weekly_duty'][recip_key[0]] = sum(
+            _day_duty(dd[(recip_key[0], dn)]['legs'], lane_map, pre_post_h)
+            for dn in set(k[1] for k in dd.keys() if k[0] == recip_key[0])
+            if dd.get((recip_key[0], dn)) and dd[(recip_key[0], dn)]['legs']
+        )
+
+        moves_accepted += 1
+        total_improvement += improvement
+        print(f"  v2 move {moves_accepted}: frag {[l for l in frag['legs']]} "
+              f"D{worst_key[0]+1}/{worst_key[1]} → D{recip_key[0]+1}/{recip_key[1]} "
+              f"improvement={improvement:.0f}")
+
+    elapsed = _time.time() - start_time
+
+    # Stats
+    result['v2Stats'] = {
+        'moves_tried': moves_tried,
+        'moves_accepted': moves_accepted,
+        'time_s': round(elapsed, 1),
+        'improvement': round(total_improvement, 1),
+    }
+
+    if moves_accepted == 0:
+        result['v2Applied'] = False
+        return result
+
+    # Rebuild schedule (only re-sequence modified days)
+    new_ws, all_exact, hos_violations = _rebuild_schedule(
+        mut, lane_map, graph, base_city, pre_post_h, max_wait_h, original_ws, modified_keys
+    )
+
+    # Validate coverage
+    coverage_post = Counter((dn, lid) for dr in new_ws for dn, dd in dr['days'].items() for lid in dd['legs'])
+    if coverage_post != coverage_pre:
+        print("  v2 ROLLBACK: coverage mismatch")
+        result['v2Applied'] = False
+        result['v2Error'] = 'Coverage mismatch after v2'
+        result['weeklySchedule'] = original_ws
+        return result
+
+    # Validate exact count
+    exact_count_post = sum(1 for dr in new_ws for dd in dr['days'].values() if dd.get('isExact'))
+    if exact_count_post < exact_count_pre:
+        print(f"  v2 ROLLBACK: exact count dropped {exact_count_pre} → {exact_count_post}")
+        result['v2Applied'] = False
+        result['v2Error'] = f'Exact count dropped {exact_count_pre} → {exact_count_post}'
+        result['weeklySchedule'] = original_ws
+        return result
+
+    # Validate max DH
+    max_dh_post = max((dd.get('deadheadMiles', 0) for dr in new_ws for dd in dr['days'].values()), default=0)
+    if max_dh_post > max_dh_pre:
+        print(f"  v2 ROLLBACK: max DH increased {max_dh_pre} → {max_dh_post}")
+        result['v2Applied'] = False
+        result['v2Error'] = f'Max DH increased {max_dh_pre} → {max_dh_post}'
+        result['weeklySchedule'] = original_ws
+        return result
+
+    # Validate HOS
+    hos_compliant = len(hos_violations) == 0
+    if not hos_compliant and result.get('hosCompliant'):
+        print(f"  v2 ROLLBACK: HOS violations introduced")
+        result['v2Applied'] = False
+        result['v2Error'] = f'HOS violations: {hos_violations}'
+        result['weeklySchedule'] = original_ws
+        return result
+
+    # Apply
+    result['weeklySchedule'] = new_ws
+    result['allExact'] = all_exact
+    result['hosCompliant'] = hos_compliant
+    result['hosViolations'] = hos_violations if not hos_compliant else []
+    result['v2Applied'] = True
+
+    # Recompute qualitySummary if it existed
+    if 'qualitySummary' in result:
+        exact_d = sum(1 for dr in new_ws for dd in dr['days'].values() if dd.get('isExact'))
+        est_d = sum(1 for dr in new_ws for dd in dr['days'].values() if not dd.get('isExact'))
+        max_dh_day = max((dd.get('deadheadMiles', 0) for dr in new_ws for dd in dr['days'].values()), default=0)
+        result['qualitySummary'] = {
+            'exactDayCount': exact_d,
+            'estimatedDayCount': est_d,
+            'maxDeadheadDayMiles': max_dh_day,
+        }
+
+    print(f"  v2 complete: {moves_accepted} moves, {total_improvement:.0f} improvement, {elapsed:.1f}s")
+    return result
+
+
+def _day_duty(legs, lane_map, pre_post_h=1.0):
+    """Quick duty calculation for a day's legs (span-based)."""
+    if not legs:
+        return 0.0
+    starts = [lane_map[lid].pickup_time for lid in legs if lane_map[lid].pickup_time is not None]
+    finishes = [lane_map[lid].finish_time for lid in legs if lane_map[lid].finish_time is not None]
+    if not starts or not finishes:
+        return 0.0
+    return (max(finishes) - min(starts)) + pre_post_h
+
+
+def _maybe_run_v2(result, lane_map, graph, base_city, config):
+    """Gate wrapper for v2 local optimizer. Only runs when enabled."""
+    if not config.get('enable_local_optimize'):
+        return result
+    try:
+        return _local_optimize(result, lane_map, graph, base_city, config)
+    except Exception as e:
+        result['v2Error'] = str(e)
+        print(f"  v2 optimizer failed: {e}")
+        return result
+
+
 def _compress_schedule(schedule, lane_map, graph, base_city, max_legs=8,
                        pre_post_h=1.0, max_wait_h=3.0, working_days=None):
     """Try to compress a k-driver schedule to k-1 drivers.
@@ -2599,7 +3087,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
         if result:
             result['minLegalDriverCount'] = n_drivers
             result['recommendedDriverCount'] = n_drivers
-            return result
+            return _maybe_run_v2(result, lane_map, graph, base_city, config)
 
     # Smarter lower bound: account for time-span windows + exclusive long-haul pairs
     pp_min = int(pre_post_h * MINUTES)
@@ -2699,7 +3187,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
                         'maxDeadheadDayMiles': max_dh_day,
                     }
                     print(f"  Compressed to {compressed['driverCount']} drivers! exact={exact_d} est={est_d} maxDH={max_dh_day}")
-                    return compressed
+                    return _maybe_run_v2(compressed, lane_map, graph, base_city, config)
                 else:
                     print(f"  Compression failed — keeping {try_drivers}")
 
@@ -2713,7 +3201,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
                 'estimatedDayCount': est_d,
                 'maxDeadheadDayMiles': max_dh_day,
             }
-            return result
+            return _maybe_run_v2(result, lane_map, graph, base_city, config)
         else:
             print(f"    {try_drivers}: not operationally viable — {len(concerns)} concern(s)")
 
@@ -2724,7 +3212,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
         if result:
             result['minLegalDriverCount'] = min_legal_count
             result['recommendedDriverCount'] = min_legal_count
-            return result
+            return _maybe_run_v2(result, lane_map, graph, base_city, config)
 
     return {'success': False, 'error': 'Could not find feasible solution', 'driverCount': 0}
 
