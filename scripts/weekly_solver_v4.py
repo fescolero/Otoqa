@@ -2100,7 +2100,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     HEAVY_DAY_WEIGHT = 1       # penalize heavy days (>12h or >7 legs)
     BAND_WEIGHT = 1            # penalize shift-band inconsistency
     CORRIDOR_WEIGHT = 300      # penalize distinct corridors per driver-day (dominant)
-    CROSS_OVERLAP_WEIGHT = 150 # penalize cross-corridor overlapping (dominant)
+    CROSS_OVERLAP_WEIGHT = 250 # penalize cross-corridor overlapping (dominant)
     CORRIDOR_BLOCK_WEIGHT = 80 # reward same-corridor pair blocks on same driver
 
     obj_terms = []
@@ -2491,7 +2491,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
 
     # ---- Phase 5b: Unconditional local repair on worst estimated rows ----
 
-    MAX_REPAIR_PASSES = 3
+    MAX_REPAIR_PASSES = 5
     # Count exact days before repair to prevent regression
     exact_before_repair = sum(1 for dr in weekly_schedule for dd in dr['days'].values() if dd.get('isExact'))
 
@@ -2509,7 +2509,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     worst_score = score
                     worst_key = (d_idx, dn)
 
-        if worst_key is None or worst_score < 50:
+        if worst_key is None or worst_score < 30:
             break  # nothing worth repairing
 
         d_idx, dn = worst_key
