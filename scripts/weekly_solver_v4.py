@@ -1386,6 +1386,116 @@ def _detect_pair_blocks(lanes, lane_map, lane_active_days, day_lane_ids, working
     return blocks, block_day_units, unit_to_legs, unit_pickup_min, unit_finish_min, unit_drive_min, lid_to_block
 
 
+def _generate_fragments(block_day_units, unit_to_legs, unit_pickup_min, unit_finish_min,
+                        unit_drive_min, lane_map, blocks, working_days):
+    """Merge same-corridor unit pairs into 2-unit fragments (max 4 legs).
+
+    Rules — only merge unit A with unit B if:
+    1. Same corridor
+    2. Combined legs <= 4
+    3. Neither is exclusive (long-haul, combined drive > 5h)
+    4. B starts after A finishes (time-feasible)
+    5. Gap between A's finish and B's pickup <= 1.5h
+    6. Deadhead between A's last leg and B's first leg <= 60mi
+    7. Combined drive < 11h
+
+    Returns updated (frag_day_units, unit_to_legs, unit_pickup_min, unit_finish_min, unit_drive_min).
+    Original unit dicts are NOT modified — new fragment entries are added.
+    """
+    # Identify exclusive unit IDs
+    excl_uids = set()
+    for bid, (out_id, ret_id, _) in blocks.items():
+        out_l = lane_map[out_id]; ret_l = lane_map[ret_id]
+        if out_l.route_duration_hours + ret_l.route_duration_hours > 5.0:
+            excl_uids.add(bid)
+
+    # Copy dicts so we don't mutate originals
+    ftl = dict(unit_to_legs)
+    fpm = dict(unit_pickup_min)
+    ffm = dict(unit_finish_min)
+    fdm = dict(unit_drive_min)
+    frag_day_units = {}
+    frag_counter = 0
+
+    for day in working_days:
+        units = block_day_units.get(day, [])
+        if not units:
+            frag_day_units[day] = []
+            continue
+
+        # Group by corridor
+        from collections import defaultdict
+        corr_groups = defaultdict(list)
+        for uid in units:
+            legs = ftl.get(uid, [uid])
+            first = lane_map[legs[0]]
+            corr = _corridor_of_leg(first)
+            corr_groups[corr].append(uid)
+
+        # Sort each group by pickup time
+        for corr in corr_groups:
+            corr_groups[corr].sort(key=lambda uid: fpm.get(uid, 0))
+
+        # Greedily merge adjacent same-corridor pairs
+        merged = set()
+        day_frags = []
+
+        for corr, group in corr_groups.items():
+            i = 0
+            while i < len(group):
+                uid_a = group[i]
+                # Skip exclusive — always standalone
+                if uid_a in excl_uids:
+                    day_frags.append(uid_a)
+                    i += 1
+                    continue
+
+                # Try merge with next in group
+                if i + 1 < len(group):
+                    uid_b = group[i + 1]
+                    if uid_b not in excl_uids:
+                        legs_a = ftl.get(uid_a, [uid_a])
+                        legs_b = ftl.get(uid_b, [uid_b])
+
+                        # Check combined leg count
+                        if len(legs_a) + len(legs_b) <= 4:
+                            # Check time feasibility: B starts after A finishes
+                            finish_a = ffm.get(uid_a, 0)
+                            pickup_b = fpm.get(uid_b, 0)
+                            gap_h = (pickup_b - finish_a) / MINUTES
+
+                            if gap_h >= -0.25 and gap_h <= 1.5:
+                                # Check deadhead
+                                last_a = lane_map[legs_a[-1]]
+                                first_b = lane_map[legs_b[0]]
+                                dh = _compute_dh(last_a, first_b)
+
+                                if dh <= 60:
+                                    # Check combined drive
+                                    combined_drive = fdm.get(uid_a, 0) + fdm.get(uid_b, 0)
+                                    if combined_drive < HOS_MAX_DRIVE * MINUTES:
+                                        # Merge!
+                                        fid = f'FRAG_{day}_{frag_counter}'
+                                        frag_counter += 1
+                                        ftl[fid] = legs_a + legs_b
+                                        fpm[fid] = min(fpm.get(uid_a, 0), fpm.get(uid_b, 0))
+                                        ffm[fid] = max(ffm.get(uid_a, 0), ffm.get(uid_b, 0))
+                                        fdm[fid] = combined_drive
+                                        merged.add(uid_a)
+                                        merged.add(uid_b)
+                                        day_frags.append(fid)
+                                        i += 2
+                                        continue
+
+                # No merge — keep as standalone
+                day_frags.append(uid_a)
+                i += 1
+
+        frag_day_units[day] = day_frags
+
+    return frag_day_units, ftl, fpm, ffm, fdm
+
+
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
                       lane_pickup_end_min, lane_finish_min, lane_drive_min, lane_duty_min,
                       day_lane_ids, working_days, day_names_map, pre_post_h, max_legs, max_wait_h,
