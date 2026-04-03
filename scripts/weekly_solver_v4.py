@@ -826,6 +826,108 @@ def _corridor_of_leg(lane):
     return "|".join(sorted([a, b]))
 
 
+def _identify_exclusive_units(unit_to_legs, lane_map, drive_threshold=5.0):
+    """Return set of unit IDs that should be treated as exclusive (long-haul)."""
+    excl = set()
+    for uid, legs in unit_to_legs.items():
+        if len(legs) == 2:
+            la = lane_map[legs[0]]; lb = lane_map[legs[1]]
+            if la.route_duration_hours + lb.route_duration_hours > drive_threshold:
+                excl.add(uid)
+    return excl
+
+
+def _count_cross_corridor_overlaps(legs, lane_map):
+    """Count cross-corridor overlapping leg pairs in a driver-day."""
+    count = 0
+    for i in range(len(legs)):
+        li = lane_map[legs[i]]
+        si = li.pickup_time; fi = li.finish_time
+        if si is None or fi is None: continue
+        ci = _corridor_of_leg(li)
+        for j in range(i + 1, len(legs)):
+            lj = lane_map[legs[j]]
+            sj = lj.pickup_time; fj = lj.finish_time
+            if sj is None or fj is None: continue
+            if si < fj and sj < fi:  # time overlap
+                if ci != _corridor_of_leg(lj):  # different corridors
+                    count += 1
+    return count
+
+
+def _row_quality_score(legs, lane_map, pre_post_h=1.0):
+    """Score a driver-day for repair prioritization. Higher = worse."""
+    if not legs: return 0
+    drive, dh_miles, gaps = _metrics_from_chain(legs, lane_map)
+    corrs = set(_corridor_of_leg(lane_map[lid]) for lid in legs)
+    overlaps = _count_cross_corridor_overlaps(legs, lane_map)
+    return (
+        dh_miles * 1.0
+        + max(0, len(corrs) - 1) * 40
+        + overlaps * 60
+        + 100  # estimated penalty (only called on estimated rows)
+    )
+
+
+def _generate_fragments_for_day(ordered_ids, lane_map, exclusive_units,
+                                 max_units_per_fragment=2, max_gap_h=1.5, max_dh_mi=60):
+    """Build corridor-coherent fragments from a solved driver-day's ordered legs.
+
+    Returns list of fragment dicts, each with:
+    - id, legs, corridor, is_exclusive
+    """
+    if not ordered_ids:
+        return []
+
+    # First, build raw blocks (consecutive reverse-pair detection)
+    blocks = _build_blocks_for_day(ordered_ids, lane_map,
+                                    exclusive_pair_ids={lid for uid in exclusive_units for lid in uid}
+                                    if isinstance(next(iter(exclusive_units), None), (list, tuple)) else exclusive_units)
+
+    # Now merge adjacent same-corridor blocks into fragments (max 2 blocks per fragment)
+    fragments = []
+    i = 0
+    frag_counter = 0
+    while i < len(blocks):
+        blk_a = blocks[i]
+        merged = False
+
+        if not blk_a['is_exclusive'] and i + 1 < len(blocks):
+            blk_b = blocks[i + 1]
+            if (not blk_b['is_exclusive'] and
+                blk_a['corridor'] == blk_b['corridor'] and
+                len(blk_a['legs']) + len(blk_b['legs']) <= 4):
+                # Check gap
+                last_a = lane_map[blk_a['legs'][-1]]
+                first_b = lane_map[blk_b['legs'][0]]
+                if last_a.finish_time is not None and first_b.pickup_time is not None:
+                    gap = first_b.pickup_time - last_a.finish_time
+                    dh = _compute_dh(last_a, first_b)
+                    if -0.25 <= gap <= max_gap_h and dh <= max_dh_mi:
+                        # Merge
+                        fragments.append({
+                            'id': f'frag_{frag_counter}',
+                            'legs': blk_a['legs'] + blk_b['legs'],
+                            'corridor': blk_a['corridor'],
+                            'is_exclusive': False,
+                        })
+                        frag_counter += 1
+                        i += 2
+                        merged = True
+
+        if not merged:
+            fragments.append({
+                'id': f'frag_{frag_counter}',
+                'legs': blk_a['legs'],
+                'corridor': blk_a['corridor'],
+                'is_exclusive': blk_a['is_exclusive'],
+            })
+            frag_counter += 1
+            i += 1
+
+    return fragments
+
+
 def _build_blocks_for_day(ordered_ids, lane_map, exclusive_pair_ids=None):
     """Convert an ordered leg sequence into movable blocks.
     Consecutive reverse-pair legs become a pair block; others are singletons."""
@@ -2214,8 +2316,9 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             'daysWorked': len(driver_days),
         })
 
-    # ---- Phase 5a: Overlap repair on estimated rows ----
-    # Detect overlapping legs on the same driver-day and move one to another driver.
+    # ---- Phase 5: Fragment-aware repair on estimated rows ----
+    # Build fragments from solved days, then move worst-scoring fragments
+    # to improve overlap density, corridor coherence, and deadhead.
     # This targets the "assignment bucket" problem where the span model assigns
     # overlapping legs to the same driver because the total window fits in 14h.
     excl_pair_ids = set()
@@ -2228,10 +2331,11 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                 excl_pair_ids.add(la.id)
                 excl_pair_ids.add(lb.id)
 
-    # Count exact days before repair
+    # Unified fragment-aware repair
     exact_before = sum(1 for dr in weekly_schedule for dd in dr['days'].values() if dd.get('isExact'))
+    max_dh_before = max((dd.get('deadheadMiles', 0) for dr in weekly_schedule for dd in dr['days'].values()), default=0)
 
-    for overlap_pass in range(5):
+    for repair_pass in range(5):
         moved_any = False
         for d_idx, dr in enumerate(weekly_schedule):
             for dn, dd in list(dr['days'].items()):
