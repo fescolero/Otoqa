@@ -1290,21 +1290,34 @@ def _detect_pair_blocks(lanes, lane_map, lane_active_days, day_lane_ids, working
                     if shared:
                         candidates.append((gap, lb.id, la.id, shared))
 
-    # Greedy one-to-one matching
+    # Canonical mutual-best matching:
+    # Only pair A with B if B is A's best-gap match AND A is B's best-gap match.
+    # This prevents unstable matchings like 404+409 when 409+410 is a better pair.
     candidates.sort(key=lambda x: x[0])
+
+    # Build best-match lookup: for each lane, what's its tightest-gap reverse partner?
+    best_match = {}  # lid -> (partner_lid, gap)
+    for gap, out_id, ret_id, shared in candidates:
+        if out_id not in best_match or gap < best_match[out_id][1]:
+            best_match[out_id] = (ret_id, gap)
+        if ret_id not in best_match or gap < best_match[ret_id][1]:
+            best_match[ret_id] = (out_id, gap)
+
+    # Only accept pairs where both sides agree on each other as best match
     paired = set()
-    blocks = {}  # block_id -> (out_lid, ret_lid, shared_days)
+    blocks = {}
     block_counter = 0
     for gap, out_id, ret_id, shared in candidates:
         if out_id in paired or ret_id in paired:
             continue
-        paired.add(out_id)
-        paired.add(ret_id)
-        block_id = f'BLK_{block_counter}'
-        block_counter += 1
-        out_lane = lane_map[out_id]
-        ret_lane = lane_map[ret_id]
-        blocks[block_id] = (out_id, ret_id, shared)
+        # Mutual best: out's best is ret, AND ret's best is out
+        if (best_match.get(out_id, (None,))[0] == ret_id and
+            best_match.get(ret_id, (None,))[0] == out_id):
+            paired.add(out_id)
+            paired.add(ret_id)
+            block_id = f'BLK_{block_counter}'
+            block_counter += 1
+            blocks[block_id] = (out_id, ret_id, shared)
 
     # Build per-day unit lists: blocks + singletons
     block_day_units = {}
@@ -1350,6 +1363,25 @@ def _detect_pair_blocks(lanes, lane_map, lane_active_days, day_lane_ids, working
                 unit_finish_min.setdefault(lid, lane_finish_min[lid])
                 unit_drive_min.setdefault(lid, lane_map[lid].route_duration_hours * MINUTES)
         block_day_units[day] = units
+
+    # Unit invariant assertions: every active lane appears exactly once per day
+    for day in working_days:
+        unit_lids = []
+        for uid in block_day_units[day]:
+            unit_lids.extend(unit_to_legs.get(uid, [uid]))
+        day_set = set(day_lane_ids[day])
+        unit_set = set(unit_lids)
+        if unit_set != day_set:
+            missing = day_set - unit_set
+            extra = unit_set - day_set
+            if missing:
+                # Missing lanes — add as singletons
+                for lid in missing:
+                    block_day_units[day].append(lid)
+                    unit_to_legs.setdefault(lid, [lid])
+                    unit_pickup_min.setdefault(lid, lane_pickup_min[lid])
+                    unit_finish_min.setdefault(lid, lane_finish_min[lid])
+                    unit_drive_min.setdefault(lid, lane_map[lid].route_duration_hours * MINUTES)
 
     return blocks, block_day_units, unit_to_legs, unit_pickup_min, unit_finish_min, unit_drive_min, lid_to_block
 
