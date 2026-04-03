@@ -826,17 +826,6 @@ def _corridor_of_leg(lane):
     return "|".join(sorted([a, b]))
 
 
-def _identify_exclusive_units(unit_to_legs, lane_map, drive_threshold=5.0):
-    """Return set of unit IDs that should be treated as exclusive (long-haul)."""
-    excl = set()
-    for uid, legs in unit_to_legs.items():
-        if len(legs) == 2:
-            la = lane_map[legs[0]]; lb = lane_map[legs[1]]
-            if la.route_duration_hours + lb.route_duration_hours > drive_threshold:
-                excl.add(uid)
-    return excl
-
-
 def _count_cross_corridor_overlaps(legs, lane_map):
     """Count cross-corridor overlapping leg pairs in a driver-day."""
     count = 0
@@ -974,30 +963,6 @@ def _build_blocks_for_day(ordered_ids, lane_map, exclusive_pair_ids=None):
     return blocks
 
 
-def _score_driver_day(ordered_ids, lane_map, pre_post_h=1.0):
-    """Score a driver-day: lower is better."""
-    if not ordered_ids:
-        return 0.0
-    drive, dh_miles, gaps = _metrics_from_chain(ordered_ids, lane_map)
-    all_starts = [lane_map[lid].pickup_time for lid in ordered_ids if lane_map[lid].pickup_time is not None]
-    all_ends = [lane_map[lid].finish_time for lid in ordered_ids if lane_map[lid].finish_time is not None]
-    duty = (max(all_ends) - min(all_starts) + pre_post_h) if all_starts and all_ends else 0
-    corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered_ids)
-    extra_corrs = max(0, len(corrs) - 1)
-    # Overlap-style gaps: where next pickup < prev finish
-    overlap_gaps = 0
-    for g in gaps:
-        if g.get('waitHours') is not None and g['waitHours'] < -0.1:
-            overlap_gaps += 1
-
-    return (
-        dh_miles * 1.0
-        + extra_corrs * 40
-        + overlap_gaps * 60
-        + max(0, duty - 10) * 60 * 10  # per minute over 10h target
-    )
-
-
 def _validate_driver_day_chain(ordered_ids, lane_map, pre_post_h=1.0):
     """Validate a driver-day chain for HOS compliance.
     Returns (ok, violations)."""
@@ -1034,7 +999,7 @@ def _try_insert_block(block, target_legs, lane_map, max_legs=8, pre_post_h=1.0):
         duty = max(all_ends) - min(all_starts) + pre_post_h
         if duty > HOS_MAX_DUTY:
             return None
-    score = _score_driver_day(ordered, lane_map, pre_post_h)
+    score = _row_quality_score(ordered, lane_map, pre_post_h)
     return (ordered, score)
 
 
@@ -1488,114 +1453,6 @@ def _detect_pair_blocks(lanes, lane_map, lane_active_days, day_lane_ids, working
     return blocks, block_day_units, unit_to_legs, unit_pickup_min, unit_finish_min, unit_drive_min, lid_to_block
 
 
-def _generate_fragments(block_day_units, unit_to_legs, unit_pickup_min, unit_finish_min,
-                        unit_drive_min, lane_map, blocks, working_days):
-    """Merge same-corridor unit pairs into 2-unit fragments (max 4 legs).
-
-    Rules — only merge unit A with unit B if:
-    1. Same corridor
-    2. Combined legs <= 4
-    3. Neither is exclusive (long-haul, combined drive > 5h)
-    4. B starts after A finishes (time-feasible)
-    5. Gap between A's finish and B's pickup <= 1.5h
-    6. Deadhead between A's last leg and B's first leg <= 60mi
-    7. Combined drive < 11h
-
-    Returns updated (frag_day_units, unit_to_legs, unit_pickup_min, unit_finish_min, unit_drive_min).
-    Original unit dicts are NOT modified — new fragment entries are added.
-    """
-    # Identify exclusive unit IDs
-    excl_uids = set()
-    for bid, (out_id, ret_id, _) in blocks.items():
-        out_l = lane_map[out_id]; ret_l = lane_map[ret_id]
-        if out_l.route_duration_hours + ret_l.route_duration_hours > 5.0:
-            excl_uids.add(bid)
-
-    # Copy dicts so we don't mutate originals
-    ftl = dict(unit_to_legs)
-    fpm = dict(unit_pickup_min)
-    ffm = dict(unit_finish_min)
-    fdm = dict(unit_drive_min)
-    frag_day_units = {}
-    frag_counter = 0
-
-    for day in working_days:
-        units = block_day_units.get(day, [])
-        if not units:
-            frag_day_units[day] = []
-            continue
-
-        # Group by corridor
-        from collections import defaultdict
-        corr_groups = defaultdict(list)
-        for uid in units:
-            legs = ftl.get(uid, [uid])
-            first = lane_map[legs[0]]
-            corr = _corridor_of_leg(first)
-            corr_groups[corr].append(uid)
-
-        # Sort each group by pickup time
-        for corr in corr_groups:
-            corr_groups[corr].sort(key=lambda uid: fpm.get(uid, 0))
-
-        # Greedily merge adjacent same-corridor pairs
-        merged = set()
-        day_frags = []
-
-        for corr, group in corr_groups.items():
-            i = 0
-            while i < len(group):
-                uid_a = group[i]
-                # Skip exclusive — always standalone
-                if uid_a in excl_uids:
-                    day_frags.append(uid_a)
-                    i += 1
-                    continue
-
-                # Try merge with next in group
-                if i + 1 < len(group):
-                    uid_b = group[i + 1]
-                    if uid_b not in excl_uids:
-                        legs_a = ftl.get(uid_a, [uid_a])
-                        legs_b = ftl.get(uid_b, [uid_b])
-
-                        # Check combined leg count
-                        if len(legs_a) + len(legs_b) <= 4:
-                            # Check time feasibility: B starts after A finishes
-                            finish_a = ffm.get(uid_a, 0)
-                            pickup_b = fpm.get(uid_b, 0)
-                            gap_h = (pickup_b - finish_a) / MINUTES
-
-                            if gap_h >= -0.25 and gap_h <= 1.5:
-                                # Check deadhead
-                                last_a = lane_map[legs_a[-1]]
-                                first_b = lane_map[legs_b[0]]
-                                dh = _compute_dh(last_a, first_b)
-
-                                if dh <= 60:
-                                    # Check combined drive
-                                    combined_drive = fdm.get(uid_a, 0) + fdm.get(uid_b, 0)
-                                    if combined_drive < HOS_MAX_DRIVE * MINUTES:
-                                        # Merge!
-                                        fid = f'FRAG_{day}_{frag_counter}'
-                                        frag_counter += 1
-                                        ftl[fid] = legs_a + legs_b
-                                        fpm[fid] = min(fpm.get(uid_a, 0), fpm.get(uid_b, 0))
-                                        ffm[fid] = max(ffm.get(uid_a, 0), ffm.get(uid_b, 0))
-                                        fdm[fid] = combined_drive
-                                        merged.add(uid_a)
-                                        merged.add(uid_b)
-                                        day_frags.append(fid)
-                                        i += 2
-                                        continue
-
-                # No merge — keep as standalone
-                day_frags.append(uid_a)
-                i += 1
-
-        frag_day_units[day] = day_frags
-
-    return frag_day_units, ftl, fpm, ffm, fdm
 
 
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
