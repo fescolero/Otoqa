@@ -560,6 +560,7 @@ def solve_weekly_v4(entries, config={}, n_drivers_override=None):
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 300
     solver.parameters.num_workers = 8
+    solver.parameters.random_seed = 42  # reproducibility
 
     print(f"\nSolving for {n_drivers} drivers...")
     t1 = time.time()
@@ -1222,6 +1223,7 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 5
     solver.parameters.num_workers = 4
+    solver.parameters.random_seed = 42  # reproducibility
     status = solver.Solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -1885,6 +1887,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = solver_time
     solver.parameters.num_workers = 8
+    solver.parameters.random_seed = 42  # reproducibility
 
     status = solver.Solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
