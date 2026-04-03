@@ -2068,6 +2068,150 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             'daysWorked': len(driver_days),
         })
 
+    # ---- Phase 5: Unconditional local repair on worst estimated rows ----
+    # For each day, find the worst-scoring estimated driver-day and try to
+    # improve it by swapping one block to a better-scoring recipient.
+    excl_pair_ids = set()
+    for la in lanes:
+        for lb in lanes:
+            if la.id >= lb.id: continue
+            if la.origin_city.lower().strip() != lb.dest_city.lower().strip(): continue
+            if la.dest_city.lower().strip() != lb.origin_city.lower().strip(): continue
+            if la.route_duration_hours + lb.route_duration_hours > 5.0:
+                excl_pair_ids.add(la.id)
+                excl_pair_ids.add(lb.id)
+
+    MAX_REPAIR_PASSES = 3
+    for repair_pass in range(MAX_REPAIR_PASSES):
+        improved = False
+        # Find worst estimated driver-day across all drivers
+        worst_score = 0
+        worst_key = None  # (driver_idx, day_name)
+        for d_idx, dr in enumerate(weekly_schedule):
+            for dn, dd in dr['days'].items():
+                if dd.get('isExact'): continue  # don't touch exact rows
+                if any(lid in excl_pair_ids for lid in dd['legs']): continue  # don't touch exclusive
+                score = _score_driver_day(dd['legs'], lane_map, pre_post_h)
+                if score > worst_score:
+                    worst_score = score
+                    worst_key = (d_idx, dn)
+
+        if worst_key is None or worst_score < 50:
+            break  # nothing worth repairing
+
+        d_idx, dn = worst_key
+        worst_dd = weekly_schedule[d_idx]['days'][dn]
+        blocks = _build_blocks_for_day(worst_dd['legs'], lane_map, excl_pair_ids)
+
+        # Try moving the highest-DH non-exclusive block to another driver on same day
+        best_move = None
+        best_improvement = 0
+        for b_idx, block in enumerate(blocks):
+            if block['is_exclusive']: continue
+            remaining_legs = []
+            for b in blocks:
+                if b['id'] != block['id']:
+                    remaining_legs.extend(b['legs'])
+
+            for r_idx, recip in enumerate(weekly_schedule):
+                if r_idx == d_idx: continue
+                r_dd = recip['days'].get(dn)
+                if r_dd and any(lid in excl_pair_ids for lid in r_dd.get('legs', [])):
+                    continue  # don't add to exclusive days
+
+                r_legs = list(r_dd['legs']) if r_dd else []
+                result = _try_insert_block(block, r_legs, lane_map, max_legs, pre_post_h)
+                if not result: continue
+                new_r_legs, new_r_score = result
+
+                # Check recipient weekly duty wouldn't exceed 70h
+                if r_dd:
+                    old_r_duty = r_dd.get('dutyHours', 0)
+                    new_r_starts = [lane_map[lid].pickup_time for lid in new_r_legs if lane_map[lid].pickup_time]
+                    new_r_ends = [lane_map[lid].finish_time for lid in new_r_legs if lane_map[lid].finish_time]
+                    new_r_duty = (max(new_r_ends) - min(new_r_starts) + pre_post_h) if new_r_starts and new_r_ends else 0
+                    recip_weekly = recip.get('totalDutyHours', 0) - old_r_duty + new_r_duty
+                    if recip_weekly > MAX_WEEKLY_DUTY:
+                        continue
+
+                # Score improvement
+                old_worst_score = worst_score
+                new_worst_score = _score_driver_day(remaining_legs, lane_map, pre_post_h) if remaining_legs else 0
+                improvement = old_worst_score - new_worst_score - new_r_score * 0.3  # penalize recipient degradation
+                if improvement > best_improvement:
+                    best_improvement = improvement
+                    best_move = (b_idx, block, r_idx, remaining_legs, new_r_legs)
+
+        if best_move and best_improvement > 20:
+            b_idx, block, r_idx, remaining_legs, new_r_legs = best_move
+            # Apply the move: resequence both affected days
+            if remaining_legs:
+                new_src_ordered, new_src_drive, new_src_dh, new_src_exact, new_src_gaps = \
+                    _sequence_driver_day(remaining_legs, lane_map, graph, base_city, max_wait_h)
+                src_starts = [lane_map[lid].pickup_time for lid in new_src_ordered if lane_map[lid].pickup_time]
+                src_ends = [lane_map[lid].finish_time for lid in new_src_ordered if lane_map[lid].finish_time]
+                weekly_schedule[d_idx]['days'][dn] = {
+                    'legs': new_src_ordered,
+                    'legNames': [lane_map[lid].name for lid in new_src_ordered],
+                    'legCount': len(new_src_ordered),
+                    'driveHours': round(new_src_drive, 1),
+                    'dutyHours': round((max(src_ends) - min(src_starts) + pre_post_h) if src_starts and src_ends else 0, 1),
+                    'miles': round(sum(lane_map[lid].route_miles for lid in new_src_ordered) + new_src_dh),
+                    'deadheadMiles': round(new_src_dh),
+                    'startTime': min(src_starts) if src_starts else 0,
+                    'endTime': max(src_ends) if src_ends else 0,
+                    'isExact': new_src_exact,
+                    'legGaps': new_src_gaps,
+                }
+            else:
+                del weekly_schedule[d_idx]['days'][dn]
+
+            new_dst_ordered, new_dst_drive, new_dst_dh, new_dst_exact, new_dst_gaps = \
+                _sequence_driver_day(new_r_legs, lane_map, graph, base_city, max_wait_h)
+            dst_starts = [lane_map[lid].pickup_time for lid in new_dst_ordered if lane_map[lid].pickup_time]
+            dst_ends = [lane_map[lid].finish_time for lid in new_dst_ordered if lane_map[lid].finish_time]
+            weekly_schedule[r_idx]['days'][dn] = {
+                'legs': new_dst_ordered,
+                'legNames': [lane_map[lid].name for lid in new_dst_ordered],
+                'legCount': len(new_dst_ordered),
+                'driveHours': round(new_dst_drive, 1),
+                'dutyHours': round((max(dst_ends) - min(dst_starts) + pre_post_h) if dst_starts and dst_ends else 0, 1),
+                'miles': round(sum(lane_map[lid].route_miles for lid in new_dst_ordered) + new_dst_dh),
+                'deadheadMiles': round(new_dst_dh),
+                'startTime': min(dst_starts) if dst_starts else 0,
+                'endTime': max(dst_ends) if dst_ends else 0,
+                'isExact': new_dst_exact,
+                'legGaps': new_dst_gaps,
+            }
+
+            # Recompute totals for affected drivers
+            for idx in [d_idx, r_idx]:
+                dr = weekly_schedule[idx]
+                dr['totalDriveHours'] = round(sum(v['driveHours'] for v in dr['days'].values()), 1)
+                dr['totalDutyHours'] = round(sum(v['dutyHours'] for v in dr['days'].values()), 1)
+                dr['totalMiles'] = round(sum(v.get('miles', 0) for v in dr['days'].values()))
+                dr['totalDeadheadMiles'] = round(sum(v.get('deadheadMiles', 0) for v in dr['days'].values()))
+                dr['daysWorked'] = len(dr['days'])
+            improved = True
+
+        if not improved:
+            break
+
+    # Recompute allExact after repairs
+    all_exact = all(dd.get('isExact', False) for dr in weekly_schedule for dd in dr['days'].values())
+
+    # Recompute HOS violations after repairs
+    hos_violations = []
+    for dr in weekly_schedule:
+        weekly_duty = sum(v['dutyHours'] for v in dr['days'].values())
+        if weekly_duty > MAX_WEEKLY_DUTY:
+            hos_violations.append(f'D{dr["driverId"]}: {weekly_duty:.1f}h weekly')
+        for dn, dd in dr['days'].items():
+            if dd['driveHours'] > HOS_MAX_DRIVE:
+                hos_violations.append(f'D{dr["driverId"]} {dn}: {dd["driveHours"]}h drive')
+            if dd['dutyHours'] > HOS_MAX_DUTY:
+                hos_violations.append(f'D{dr["driverId"]} {dn}: {dd["dutyHours"]}h duty')
+
     hos_compliant = len(hos_violations) == 0
     return {
         'success': True, 'driverCount': n_drivers, 'weeklySchedule': weekly_schedule,
