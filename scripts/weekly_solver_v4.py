@@ -1396,6 +1396,181 @@ def _local_optimize(result, lane_map, graph, base_city, config,
               f"{old_recip_metrics['dh']}->{new_recip_metrics['dh']} "
               f"| net={improvement:.0f}")
 
+    # ---- Phase 2: Wrong-corridor swap search ----
+    # After one-way moves are exhausted, try swaps on remaining mixed rows.
+    # Target: find a minority-corridor fragment in the worst row, swap it with
+    # a fragment from another row that has the donor's dominant corridor.
+    swap_iterations = 3
+    for swap_iter in range(swap_iterations):
+        if _time.time() - start_time >= max_time_s - 2:
+            break
+        if exact_scores_used >= max_exact_scores:
+            break
+
+        # Find worst non-frozen row with 2+ corridors (swap candidate)
+        swap_donor_key = None
+        swap_donor_score = -1
+        for key, entry in dd.items():
+            if key in frozen or not entry['legs'] or len(entry['legs']) < 3:
+                continue
+            corrs = set(_corridor_of_leg(lane_map[lid]) for lid in entry['legs'])
+            if len(corrs) < 2:
+                continue  # already corridor-pure, no swap needed
+            score = _row_quality_score(entry['legs'], lane_map, pre_post_h)
+            if score > swap_donor_score:
+                swap_donor_score = score
+                swap_donor_key = key
+
+        if swap_donor_key is None:
+            break
+
+        sd, sd_day = swap_donor_key
+        sd_legs = dd[swap_donor_key]['legs']
+
+        # Identify dominant vs minority corridor
+        corr_counts = {}
+        for lid in sd_legs:
+            c = _corridor_of_leg(lane_map[lid])
+            corr_counts[c] = corr_counts.get(c, 0) + 1
+        dominant_corr = max(corr_counts, key=corr_counts.get)
+
+        # Generate fragments and find minority-corridor ones
+        sd_frags = _generate_fragments_for_day(sd_legs, lane_map, set())
+        minority_frags = [f for f in sd_frags
+                          if f['corridor'] != dominant_corr and not f.get('is_exclusive')]
+
+        if not minority_frags:
+            break  # no wrong-corridor fragment to swap out
+
+        best_swap = None  # (minority_frag, recip_key, complement_frag, new_sd_legs, new_sr_legs, net)
+
+        for mf in sorted(minority_frags, key=lambda f: (-len(f['legs']), f['legs'][0])):
+            mf_legs = mf['legs']
+            mf_key = tuple(sorted(mf_legs))
+            sd_remaining = [lid for lid in sd_legs if lid not in set(mf_legs)]
+
+            # Search same-day estimated rows for a complement swap
+            for key, entry in sorted(dd.items(), key=lambda x: (x[0][0], x[0][1])):
+                if key in frozen or key == swap_donor_key or key[1] != sd_day or not entry['legs']:
+                    continue
+                if (mf_key, swap_donor_key, key) in tabu_set or (mf_key, key, swap_donor_key) in tabu_set:
+                    continue
+
+                sr_legs = entry['legs']
+                sr_frags = _generate_fragments_for_day(sr_legs, lane_map, set())
+
+                # Find a fragment in the recipient that matches donor's dominant corridor
+                complement_frags = [f for f in sr_frags
+                                    if f['corridor'] == dominant_corr and not f.get('is_exclusive')]
+                if not complement_frags:
+                    continue
+
+                for cf in sorted(complement_frags, key=lambda f: (-len(f['legs']), f['legs'][0])):
+                    if _time.time() - start_time >= max_time_s - 2 or exact_scores_used >= max_exact_scores:
+                        break
+
+                    cf_legs = cf['legs']
+                    sr_remaining = [lid for lid in sr_legs if lid not in set(cf_legs)]
+
+                    # New donor: sd_remaining + cf_legs (swap in the complement)
+                    new_sd = sd_remaining + cf_legs
+                    # New recipient: sr_remaining + mf_legs (swap in the minority)
+                    new_sr = sr_remaining + mf_legs
+
+                    if len(new_sd) > max_legs or len(new_sr) > max_legs:
+                        continue
+
+                    # Exact-score both new rows
+                    exact_scores_used += 2
+                    moves_tried += 2
+
+                    sd_ordered, sd_drive, sd_dh, sd_exact, _ = _sequence_driver_day(
+                        new_sd, lane_map, graph, base_city, max_wait_h)
+                    sr_ordered, sr_drive, sr_dh, sr_exact, _ = _sequence_driver_day(
+                        new_sr, lane_map, graph, base_city, max_wait_h)
+
+                    # HOS check on both
+                    sd_starts = [lane_map[lid].pickup_time for lid in sd_ordered if lane_map[lid].pickup_time is not None]
+                    sd_ends = [lane_map[lid].finish_time for lid in sd_ordered if lane_map[lid].finish_time is not None]
+                    sr_starts = [lane_map[lid].pickup_time for lid in sr_ordered if lane_map[lid].pickup_time is not None]
+                    sr_ends = [lane_map[lid].finish_time for lid in sr_ordered if lane_map[lid].finish_time is not None]
+
+                    if not sd_starts or not sd_ends or not sr_starts or not sr_ends:
+                        continue
+                    sd_duty = (max(sd_ends) - min(sd_starts)) + pre_post_h
+                    sr_duty = (max(sr_ends) - min(sr_starts)) + pre_post_h
+                    if sd_drive > HOS_MAX_DRIVE or sd_duty > HOS_MAX_DUTY:
+                        continue
+                    if sr_drive > HOS_MAX_DRIVE or sr_duty > HOS_MAX_DUTY:
+                        continue
+
+                    # Score improvement
+                    old_sd_score = swap_donor_score
+                    old_sr_score = _row_quality_score(sr_legs, lane_map, pre_post_h)
+                    new_sd_score = _row_quality_score(sd_ordered, lane_map, pre_post_h)
+                    new_sr_score = _row_quality_score(sr_ordered, lane_map, pre_post_h)
+
+                    net = (old_sd_score - new_sd_score) + (old_sr_score - new_sr_score)
+                    if net <= 0:
+                        continue
+                    # Worst row must improve
+                    if new_sd_score >= old_sd_score:
+                        continue
+
+                    if best_swap is None or net > best_swap[5]:
+                        best_swap = (mf, key, cf, sd_ordered, sr_ordered, net,
+                                     old_sd_score, new_sd_score, old_sr_score, new_sr_score,
+                                     sd_dh, sr_dh)
+
+                    break  # only try first complement per recipient
+
+        if best_swap is None:
+            break
+
+        mf, sr_key, cf, new_sd_ordered, new_sr_ordered, net, \
+            old_sd_sc, new_sd_sc, old_sr_sc, new_sr_sc, sd_dh_new, sr_dh_new = best_swap
+
+        # Explainability
+        old_sd_m = _row_metrics(sd_legs)
+        old_sr_m = _row_metrics(dd[sr_key]['legs'])
+        new_sd_m = _row_metrics(new_sd_ordered)
+        new_sr_m = _row_metrics(new_sr_ordered)
+
+        move_entry = {
+            'move': moves_accepted + 1, 'type': 'swap',
+            'donor_frag': mf['legs'], 'donor_corridor': mf['corridor'],
+            'complement_frag': cf['legs'], 'complement_corridor': cf['corridor'],
+            'row_a': f'D{swap_donor_key[0]+1}/{swap_donor_key[1]}',
+            'row_b': f'D{sr_key[0]+1}/{sr_key[1]}',
+            'row_a_score': f'{old_sd_m["score"]:.0f} -> {new_sd_m["score"]:.0f}',
+            'row_b_score': f'{old_sr_m["score"]:.0f} -> {new_sr_m["score"]:.0f}',
+            'row_a_dh': f'{old_sd_m["dh"]} -> {new_sd_m["dh"]}',
+            'row_b_dh': f'{old_sr_m["dh"]} -> {new_sr_m["dh"]}',
+            'net_improvement': round(net),
+        }
+        move_log.append(move_entry)
+
+        # Apply swap
+        dd[swap_donor_key]['legs'] = list(new_sd_ordered)
+        dd[swap_donor_key]['is_exact'] = False
+        dd[sr_key]['legs'] = list(new_sr_ordered)
+        dd[sr_key]['is_exact'] = False
+        modified_keys.add(swap_donor_key)
+        modified_keys.add(sr_key)
+
+        tabu_set.add((tuple(sorted(mf['legs'])), swap_donor_key, sr_key))
+        tabu_set.add((tuple(sorted(cf['legs'])), sr_key, swap_donor_key))
+
+        moves_accepted += 1
+        total_improvement += net
+        print(f"  v2 SWAP {moves_accepted}: {mf['corridor']} <-> {cf['corridor']} "
+              f"D{swap_donor_key[0]+1}/{swap_donor_key[1]} <-> D{sr_key[0]+1}/{sr_key[1]} "
+              f"| score {old_sd_m['score']:.0f}->{new_sd_m['score']:.0f} / "
+              f"{old_sr_m['score']:.0f}->{new_sr_m['score']:.0f} "
+              f"| DH {old_sd_m['dh']}->{new_sd_m['dh']} / "
+              f"{old_sr_m['dh']}->{new_sr_m['dh']} "
+              f"| net={net:.0f}")
+
     elapsed = _time.time() - start_time
 
     # --- Quality scoreboard: post-v2 snapshot ---
