@@ -2,8 +2,9 @@
 
 ## Commit
 Branch: `autofix/20260331-104805-sqlite-retry-reads-v3`
-Commit: `5224ded`
-Date: 2026-04-02
+Commit: `b22fd78` (latest)
+Initial baseline: `5224ded`
+Date: 2026-04-02 (updated 2026-04-03)
 
 ## Solver Settings
 - CP-SAT random_seed: 42
@@ -52,15 +53,35 @@ D9: 8L 6.2h/7.5h DH=0mi   corr=3 [Estimated]   — multi-corridor
 5. Phase 5 local repair on worst estimated rows
 6. Compression engine (10->9, triggered when needed)
 
-## Known Limitations
-- Estimated days (~63%) still show assignment-bucket patterns
-- Per-day circuit has 5s timeout — complex local days fall back to greedy
+## Known Limitations (v1 ceiling)
+- Estimated days (~63%) have overlapping local legs from different corridors
+- Monday has 41 lanes with 197 time-overlapping pairs; max 9 non-overlapping per driver
+- At 9 drivers with 6 non-LV handling ~35 local legs, overlaps are mathematically unavoidable
+- Weight tuning has hit diminishing returns (proven: same result with different weights + fixed seed)
+- Per-day circuit has 5s timeout — complex local days fall back to greedy ordering
 - Local repair improves fleet DH more than per-row plausibility
 - One structural 3-corridor day at 9 drivers is unavoidable
-- CP-SAT nondeterminism means results vary slightly (seed helps)
 
-## Next Sprint
-- Post-solve fragment-aware repair (Option 2)
-- Make Phase 5 repair corridor-coherent
-- Only on estimated rows, strict guardrails
-- Don't touch CP-SAT model for fragment assignment
+## What WON'T improve with more v1 tuning
+- Cross-corridor overlap count (structural capacity limit)
+- Estimated-day route plausibility (assignment-bucket pattern)
+- Per-row deadhead concentration (limited by time-slot availability)
+
+## v2 Local Optimizer (separate sprint)
+A second-stage optimizer that runs AFTER v1 and cleans up estimated days.
+
+Existing building blocks:
+- `_generate_fragments_for_day()` — corridor-coherent fragment builder
+- `_row_quality_score()` — scores by DH + corridors + overlaps
+- `_count_cross_corridor_overlaps()` — overlap measurement
+- `_identify_exclusive_units()` — knows what not to touch
+- Phase 5 repair infrastructure — fragment move + resequence
+
+What v2 needs:
+- Time-slot-aware recipient scoring (not just HOS feasibility)
+- Fragment-level understanding of which moves reduce overlaps
+- Only touch Estimated non-exclusive rows
+- Accept moves only if: HOS valid, exact count holds, max DH doesn't rise,
+  worst-row overlap/quality improves
+
+This is a sprint, not a tweak. Keep v1 stable; build v2 as a separate layer.
