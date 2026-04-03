@@ -818,6 +818,324 @@ def _metrics_from_chain(ordered_ids, lane_map):
     return drive, int(dh_total), gaps
 
 
+def _corridor_of_leg(lane):
+    """Normalized corridor family string for a lane."""
+    a = lane.origin_city.lower().strip()
+    b = lane.dest_city.lower().strip()
+    return "|".join(sorted([a, b]))
+
+
+def _build_blocks_for_day(ordered_ids, lane_map, exclusive_pair_ids=None):
+    """Convert an ordered leg sequence into movable blocks.
+    Consecutive reverse-pair legs become a pair block; others are singletons."""
+    if exclusive_pair_ids is None:
+        exclusive_pair_ids = set()
+    blocks = []
+    i = 0
+    while i < len(ordered_ids):
+        lid = ordered_ids[i]
+        la = lane_map[lid]
+        merged = False
+        # Try to merge with next leg as a natural pair
+        if i + 1 < len(ordered_ids):
+            lid_next = ordered_ids[i + 1]
+            lb = lane_map[lid_next]
+            if (la.origin_city.lower().strip() == lb.dest_city.lower().strip() and
+                la.dest_city.lower().strip() == lb.origin_city.lower().strip()):
+                # Reverse corridor pair — merge
+                is_excl = lid in exclusive_pair_ids or lid_next in exclusive_pair_ids
+                all_starts = [t for t in [la.pickup_time, lb.pickup_time] if t is not None]
+                all_ends = [t for t in [la.finish_time, lb.finish_time] if t is not None]
+                blocks.append({
+                    'id': f'blk_{lid[:8]}_{lid_next[:8]}',
+                    'legs': [lid, lid_next],
+                    'corridor': _corridor_of_leg(la),
+                    'is_exclusive': is_excl,
+                    'start': min(all_starts) if all_starts else None,
+                    'end': max(all_ends) if all_ends else None,
+                    'drive': la.route_duration_hours + lb.route_duration_hours,
+                })
+                i += 2
+                merged = True
+        if not merged:
+            blocks.append({
+                'id': f'single_{lid[:12]}',
+                'legs': [lid],
+                'corridor': _corridor_of_leg(la),
+                'is_exclusive': lid in exclusive_pair_ids,
+                'start': la.pickup_time,
+                'end': la.finish_time,
+                'drive': la.route_duration_hours,
+            })
+            i += 1
+    return blocks
+
+
+def _score_driver_day(ordered_ids, lane_map, pre_post_h=1.0):
+    """Score a driver-day: lower is better."""
+    if not ordered_ids:
+        return 0.0
+    drive, dh_miles, gaps = _metrics_from_chain(ordered_ids, lane_map)
+    all_starts = [lane_map[lid].pickup_time for lid in ordered_ids if lane_map[lid].pickup_time is not None]
+    all_ends = [lane_map[lid].finish_time for lid in ordered_ids if lane_map[lid].finish_time is not None]
+    duty = (max(all_ends) - min(all_starts) + pre_post_h) if all_starts and all_ends else 0
+    corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered_ids)
+    extra_corrs = max(0, len(corrs) - 1)
+    # Overlap-style gaps: where next pickup < prev finish
+    overlap_gaps = 0
+    for g in gaps:
+        if g.get('waitHours') is not None and g['waitHours'] < -0.1:
+            overlap_gaps += 1
+
+    return (
+        dh_miles * 1.0
+        + extra_corrs * 40
+        + overlap_gaps * 60
+        + max(0, duty - 10) * 60 * 10  # per minute over 10h target
+    )
+
+
+def _validate_driver_day_chain(ordered_ids, lane_map, pre_post_h=1.0):
+    """Validate a driver-day chain for HOS compliance.
+    Returns (ok, violations)."""
+    if not ordered_ids:
+        return True, []
+    drive, dh_miles, gaps = _metrics_from_chain(ordered_ids, lane_map)
+    all_starts = [lane_map[lid].pickup_time for lid in ordered_ids if lane_map[lid].pickup_time is not None]
+    all_ends = [lane_map[lid].finish_time for lid in ordered_ids if lane_map[lid].finish_time is not None]
+    duty = (max(all_ends) - min(all_starts) + pre_post_h) if all_starts and all_ends else 0
+    violations = []
+    if drive > HOS_MAX_DRIVE:
+        violations.append(f'drive {drive:.1f}h > {HOS_MAX_DRIVE}h')
+    if duty > HOS_MAX_DUTY:
+        violations.append(f'duty {duty:.1f}h > {HOS_MAX_DUTY}h')
+    return len(violations) == 0, violations
+
+
+def _try_insert_block(block, target_legs, lane_map, max_legs=8, pre_post_h=1.0):
+    """Try inserting a block's legs into a target driver-day.
+    Returns (new_ordered_legs, score) or None if infeasible."""
+    new_legs = list(target_legs) + block['legs']
+    if len(new_legs) > max_legs:
+        return None
+    # Use greedy time ordering on the combined set
+    ordered = _greedy_time_order(new_legs, lane_map)
+    # Validate
+    ok, violations = _validate_driver_day_chain(ordered, lane_map, pre_post_h)
+    if not ok:
+        return None
+    # Check span
+    all_starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+    all_ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+    if all_starts and all_ends:
+        duty = max(all_ends) - min(all_starts) + pre_post_h
+        if duty > HOS_MAX_DUTY:
+            return None
+    score = _score_driver_day(ordered, lane_map, pre_post_h)
+    return (ordered, score)
+
+
+def _compress_schedule(schedule, lane_map, graph, base_city, max_legs=8,
+                       pre_post_h=1.0, max_wait_h=3.0, working_days=None):
+    """Try to compress a k-driver schedule to k-1 drivers.
+    Returns the compressed schedule dict or None if infeasible."""
+    if working_days is None:
+        working_days = [1, 2, 3, 4, 5, 6]
+
+    ws = schedule['weeklySchedule']
+    n = len(ws)
+    if n <= 1:
+        return None
+
+    # Build exclusive pair IDs for block detection
+    lv_threshold_drive = 5.0
+    excl_ids = set()
+    for la in lane_map.values():
+        for lb in lane_map.values():
+            if la.id >= lb.id: continue
+            if la.origin_city.lower().strip() != lb.dest_city.lower().strip(): continue
+            if la.dest_city.lower().strip() != lb.origin_city.lower().strip(): continue
+            if la.route_duration_hours + lb.route_duration_hours > lv_threshold_drive:
+                excl_ids.add(la.id)
+                excl_ids.add(lb.id)
+
+    # Score each driver for donor candidacy (higher = better donor to remove)
+    donor_scores = []
+    for idx, dr in enumerate(ws):
+        total_drive = sum(dd['driveHours'] for dd in dr['days'].values())
+        total_duty = sum(dd['dutyHours'] for dd in dr['days'].values())
+        has_exclusive = any(
+            any(lid in excl_ids for lid in dd['legs'])
+            for dd in dr['days'].values()
+        )
+        exact_count = sum(1 for dd in dr['days'].values() if dd.get('isExact'))
+        days_worked = len(dr['days'])
+        # Prefer removing drivers with: low total drive, no exclusive blocks, few exact days
+        score = 0
+        if has_exclusive:
+            score -= 10000  # never remove exclusive block drivers
+        score -= exact_count * 100
+        score -= total_drive * 10
+        score += (6 - days_worked) * 50  # fewer days = easier to redistribute
+        donor_scores.append((score, idx))
+
+    donor_scores.sort(reverse=True)  # highest score = best donor
+
+    # Try each candidate donor
+    for _, donor_idx in donor_scores[:3]:  # try top 3 candidates
+        donor = ws[donor_idx]
+        recipients = [dr for i, dr in enumerate(ws) if i != donor_idx]
+
+        # Collect donor blocks per day
+        success = True
+        new_recipient_days = {}  # (recipient_idx, day_name) -> new leg list
+
+        for day_name, dd in donor['days'].items():
+            blocks = _build_blocks_for_day(dd['legs'], lane_map, excl_ids)
+            day_placed = True
+
+            for block in blocks:
+                # Try inserting into each recipient on this day
+                best = None
+                best_score = float('inf')
+                for r_idx, recip in enumerate(recipients):
+                    r_dd = recip['days'].get(day_name)
+                    r_key = (r_idx, day_name)
+
+                    # Use updated legs if we already inserted into this recipient today
+                    if r_key in new_recipient_days:
+                        target_legs = new_recipient_days[r_key]
+                    elif r_dd:
+                        target_legs = list(r_dd['legs'])
+                    else:
+                        target_legs = []
+
+                    # Don't insert into exclusive block days
+                    if r_dd and any(lid in excl_ids for lid in (r_dd.get('legs', []))):
+                        if not block.get('is_exclusive'):
+                            continue  # can't add non-exclusive to exclusive day
+
+                    result = _try_insert_block(block, target_legs, lane_map, max_legs, pre_post_h)
+                    if result:
+                        new_legs, score = result
+                        if score < best_score:
+                            best = (r_idx, new_legs, score)
+                            best_score = score
+
+                if best:
+                    r_idx, new_legs, _ = best
+                    new_recipient_days[(r_idx, day_name)] = new_legs
+                else:
+                    day_placed = False
+                    break
+
+            if not day_placed:
+                success = False
+                break
+
+        if not success:
+            continue
+
+        # Build compressed schedule
+        compressed_ws = []
+        for r_idx, recip in enumerate(recipients):
+            new_driver = {'driverId': r_idx + 1, 'days': {}}
+            for day_name, dd in recip['days'].items():
+                r_key = (r_idx, day_name)
+                if r_key in new_recipient_days:
+                    legs = new_recipient_days[r_key]
+                else:
+                    legs = list(dd['legs'])
+
+                # Resequence and compute metrics
+                ordered, drive, dh_miles, is_exact, leg_gaps = _sequence_driver_day(
+                    legs, lane_map, graph, base_city, max_wait_h
+                )
+                all_starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+                all_ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+                earliest = min(all_starts) if all_starts else 0
+                latest = max(all_ends) if all_ends else 0
+                duty = (latest - earliest) + pre_post_h
+                miles = sum(lane_map[lid].route_miles for lid in ordered) + dh_miles
+
+                new_driver['days'][day_name] = {
+                    'legs': ordered,
+                    'legNames': [lane_map[lid].name for lid in ordered],
+                    'legCount': len(ordered),
+                    'driveHours': round(drive, 1),
+                    'dutyHours': round(duty, 1),
+                    'miles': round(miles),
+                    'deadheadMiles': round(dh_miles),
+                    'startTime': earliest,
+                    'endTime': latest,
+                    'isExact': is_exact,
+                    'legGaps': leg_gaps,
+                }
+
+            # Add days that only came from donor insertions
+            for (ri, dn), legs in new_recipient_days.items():
+                if ri == r_idx and dn not in new_driver['days']:
+                    ordered, drive, dh_miles, is_exact, leg_gaps = _sequence_driver_day(
+                        legs, lane_map, graph, base_city, max_wait_h
+                    )
+                    all_starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+                    all_ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+                    earliest = min(all_starts) if all_starts else 0
+                    latest = max(all_ends) if all_ends else 0
+                    duty = (latest - earliest) + pre_post_h
+                    miles = sum(lane_map[lid].route_miles for lid in ordered) + dh_miles
+
+                    new_driver['days'][dn] = {
+                        'legs': ordered,
+                        'legNames': [lane_map[lid].name for lid in ordered],
+                        'legCount': len(ordered),
+                        'driveHours': round(drive, 1),
+                        'dutyHours': round(duty, 1),
+                        'miles': round(miles),
+                        'deadheadMiles': round(dh_miles),
+                        'startTime': earliest,
+                        'endTime': latest,
+                        'isExact': is_exact,
+                        'legGaps': leg_gaps,
+                    }
+
+            new_driver['totalDriveHours'] = round(sum(v['driveHours'] for v in new_driver['days'].values()), 1)
+            new_driver['totalDutyHours'] = round(sum(v['dutyHours'] for v in new_driver['days'].values()), 1)
+            new_driver['totalMiles'] = round(sum(v.get('miles', 0) for v in new_driver['days'].values()))
+            new_driver['totalDeadheadMiles'] = round(sum(v.get('deadheadMiles', 0) for v in new_driver['days'].values()))
+            new_driver['daysWorked'] = len(new_driver['days'])
+            compressed_ws.append(new_driver)
+
+        # Validate compressed schedule
+        all_ok = True
+        violations = []
+        for dr in compressed_ws:
+            weekly_duty = dr['totalDutyHours']
+            if weekly_duty > MAX_WEEKLY_DUTY:
+                violations.append(f'D{dr["driverId"]}: {weekly_duty:.1f}h weekly')
+                all_ok = False
+            for dn, dd in dr['days'].items():
+                if dd['driveHours'] > HOS_MAX_DRIVE:
+                    violations.append(f'D{dr["driverId"]} {dn}: {dd["driveHours"]}h drive')
+                    all_ok = False
+                if dd['dutyHours'] > HOS_MAX_DUTY:
+                    violations.append(f'D{dr["driverId"]} {dn}: {dd["dutyHours"]}h duty')
+                    all_ok = False
+
+        if all_ok:
+            return {
+                'success': True,
+                'driverCount': len(compressed_ws),
+                'weeklySchedule': compressed_ws,
+                'hosCompliant': True,
+                'hosViolations': [],
+                'allExact': all(dd.get('isExact', False) for dr in compressed_ws for dd in dr['days'].values()),
+                'compressionSource': schedule.get('driverCount', n),
+            }
+
+    return None  # no donor worked
+
+
 def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
     """Exact per-day sequencer: finds optimal lane ordering for a single driver's daily assignment.
     Uses a small circuit model to minimize deadhead for just these lanes.
@@ -1926,11 +2244,45 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
                 print(f"  Recommended at {try_drivers}! Optimizing ({opt_time}s)...")
                 final = _solve(try_drivers, opt_time)
                 if final and final.get('hosCompliant'):
-                    final['minLegalDriverCount'] = min_legal_count
-                    final['recommendedDriverCount'] = try_drivers
-                    return final
+                    result = final  # use optimized version for compression
             result['minLegalDriverCount'] = min_legal_count
             result['recommendedDriverCount'] = try_drivers
+
+            # --- Compression: try to reduce recommended count ---
+            remaining_after = TIME_BUDGET - (_time.time() - search_start)
+            if try_drivers > (min_legal_count or try_drivers) and remaining_after > 30:
+                print(f"\n  Attempting compression {try_drivers} → {try_drivers - 1}...")
+                compressed = _compress_schedule(result, lane_map, graph, base_city,
+                                                max_legs, pre_post_h, max_wait_h, working_days)
+                if compressed:
+                    compressed['minLegalDriverCount'] = min_legal_count
+                    compressed['recommendedDriverCount'] = try_drivers
+                    compressed['minDispatchableDriverCount'] = compressed['driverCount']
+                    # Quality summary
+                    cws = compressed['weeklySchedule']
+                    exact_d = sum(1 for dr in cws for dd in dr['days'].values() if dd.get('isExact'))
+                    est_d = sum(1 for dr in cws for dd in dr['days'].values() if not dd.get('isExact'))
+                    max_dh_day = max((dd.get('deadheadMiles', 0) for dr in cws for dd in dr['days'].values()), default=0)
+                    compressed['qualitySummary'] = {
+                        'exactDayCount': exact_d,
+                        'estimatedDayCount': est_d,
+                        'maxDeadheadDayMiles': max_dh_day,
+                    }
+                    print(f"  Compressed to {compressed['driverCount']} drivers! exact={exact_d} est={est_d} maxDH={max_dh_day}")
+                    return compressed
+                else:
+                    print(f"  Compression failed — keeping {try_drivers}")
+
+            # Add quality summary to non-compressed result
+            rws = result['weeklySchedule']
+            exact_d = sum(1 for dr in rws for dd in dr['days'].values() if dd.get('isExact'))
+            est_d = sum(1 for dr in rws for dd in dr['days'].values() if not dd.get('isExact'))
+            max_dh_day = max((dd.get('deadheadMiles', 0) for dr in rws for dd in dr['days'].values()), default=0)
+            result['qualitySummary'] = {
+                'exactDayCount': exact_d,
+                'estimatedDayCount': est_d,
+                'maxDeadheadDayMiles': max_dh_day,
+            }
             return result
         else:
             print(f"    {try_drivers}: not operationally viable — {len(concerns)} concern(s)")
