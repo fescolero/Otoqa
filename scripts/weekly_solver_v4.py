@@ -845,15 +845,34 @@ def _count_cross_corridor_overlaps(legs, lane_map):
 
 
 def _row_quality_score(legs, lane_map, pre_post_h=1.0):
-    """Score a driver-day for repair prioritization. Higher = worse."""
+    """Score a driver-day for repair prioritization. Higher = worse.
+
+    Components:
+    - DH miles (×1.0) — raw deadhead cost
+    - Corridor count (×40 per extra) — corridor mixing penalty
+    - Cross-corridor overlaps (×60) — time-overlapping different corridors
+    - Idle spread (×8 per hour) — total wait/idle time between legs
+    - Estimated baseline (+100) — always present for estimated rows
+    """
     if not legs: return 0
     drive, dh_miles, gaps = _metrics_from_chain(legs, lane_map)
     corrs = set(_corridor_of_leg(lane_map[lid]) for lid in legs)
     overlaps = _count_cross_corridor_overlaps(legs, lane_map)
+
+    # Idle spread: total wait hours between consecutive legs
+    # This catches D7-style rows where same-corridor legs are time-spread
+    total_wait = 0.0
+    if gaps:
+        for g in gaps:
+            w = g.get('waitHours')
+            if w is not None and w > 0:
+                total_wait += w
+
     return (
         dh_miles * 1.0
         + max(0, len(corrs) - 1) * 40
         + overlaps * 60
+        + total_wait * 8  # penalize idle spread (same-corridor DH problem)
         + 100  # estimated penalty (only called on estimated rows)
     )
 
@@ -1022,7 +1041,11 @@ def _build_mutable_state(weekly_schedule):
 
 
 def _cheap_recipient_score(frag_legs, frag_corridor, recipient_legs, lane_map, max_legs=8):
-    """Quick heuristic score for insertion candidacy. Lower = better. No solver calls."""
+    """Quick heuristic score for insertion candidacy. Lower = better. No solver calls.
+
+    Scores: corridor match, time-window overlap, DH estimate, and time-slot fit.
+    Time-slot fit rewards fragments that fill gaps between existing legs (reduces idle).
+    """
     if len(recipient_legs) + len(frag_legs) > max_legs:
         return (False, 9999)
     corr_counts = {}
@@ -1031,8 +1054,12 @@ def _cheap_recipient_score(frag_legs, frag_corridor, recipient_legs, lane_map, m
         corr_counts[c] = corr_counts.get(c, 0) + 1
     dominant_corr = max(corr_counts, key=corr_counts.get) if corr_counts else ''
     score = 0.0
+
+    # Corridor match bonus
     if frag_corridor == dominant_corr:
         score -= 50.0
+
+    # Time-window overlap penalty (hard conflicts)
     frag_times = [(lane_map[lid].pickup_time, lane_map[lid].finish_time)
                   for lid in frag_legs if lane_map[lid].pickup_time is not None and lane_map[lid].finish_time is not None]
     for lid in recipient_legs:
@@ -1042,10 +1069,48 @@ def _cheap_recipient_score(frag_legs, frag_corridor, recipient_legs, lane_map, m
         for fs, fe in frag_times:
             if fs < rl.finish_time and rl.pickup_time < fe:
                 score += 30.0
+
+    # Rough DH estimate
     if frag_legs:
         frag_first = lane_map[frag_legs[0]]
         min_dh = min((_compute_dh(lane_map[lid], frag_first) for lid in recipient_legs), default=999)
         score += min_dh * 0.5
+
+    # Time-slot fit: reward fragments that slot into gaps between existing legs
+    # Compute recipient's time gaps, then check if fragment fills one
+    if frag_times and recipient_legs:
+        recip_events = []
+        for lid in recipient_legs:
+            rl = lane_map[lid]
+            if rl.pickup_time is not None and rl.finish_time is not None:
+                recip_events.append((rl.pickup_time, rl.finish_time))
+        if recip_events:
+            recip_events.sort()
+            # Find the gap that best contains the fragment's time range
+            frag_start = min(fs for fs, _ in frag_times)
+            frag_end = max(fe for _, fe in frag_times)
+            best_gap_fit = 999.0
+            # Gap before first leg
+            if frag_end <= recip_events[0][0] + 0.5:
+                gap_waste = max(0, recip_events[0][0] - frag_end)
+                best_gap_fit = min(best_gap_fit, gap_waste)
+            # Gaps between legs
+            for i in range(len(recip_events) - 1):
+                gap_start = recip_events[i][1]
+                gap_end = recip_events[i + 1][0]
+                if frag_start >= gap_start - 0.5 and frag_end <= gap_end + 0.5:
+                    gap_waste = max(0, frag_start - gap_start) + max(0, gap_end - frag_end)
+                    best_gap_fit = min(best_gap_fit, gap_waste)
+            # Gap after last leg
+            if frag_start >= recip_events[-1][1] - 0.5:
+                gap_waste = max(0, frag_start - recip_events[-1][1])
+                best_gap_fit = min(best_gap_fit, gap_waste)
+            # Reward tight fits, penalize poor fits
+            if best_gap_fit < 2.0:
+                score -= 30.0 * (2.0 - best_gap_fit)  # up to -60 bonus for tight fit
+            else:
+                score += best_gap_fit * 5.0  # penalty for big gap
+
     return (True, score)
 
 
