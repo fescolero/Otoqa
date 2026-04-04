@@ -2158,6 +2158,572 @@ def _detect_pair_blocks(lanes, lane_map, lane_active_days, day_lane_ids, working
 
 
 
+# ========================================================================
+# v5 Route-Candidate Solver — generate routes first, then select cover
+# ========================================================================
+
+from dataclasses import dataclass, field as _field
+
+@dataclass
+class CandidateRoute:
+    lane_set: frozenset
+    ordered_ids: list
+    drive_hours: float
+    dh_miles: int
+    duty_hours: float
+    start_time: float
+    end_time: float
+    corridor_count: int
+    dominant_corridor: str
+    is_exact: bool
+    is_exclusive: bool
+    cost: float
+    leg_gaps: list
+
+
+def _generate_day_candidates(day_lids, lane_map, graph, pair_blocks, excl_pair_ids,
+                              pre_post_h=1.0, max_legs=8, max_wait_h=2.0, max_deadhead=75,
+                              base_city='colton', time_budget=30):
+    """Generate candidate driver-day routes for one day.
+
+    Returns list of CandidateRoute objects, deduplicated and pruned.
+    Uses three generators: exclusive pairs, corridor-chain DFS, pair-seeded expansion.
+    Plus singleton fallback for coverage guarantee.
+    """
+    import time as _t
+    from lane_solver import can_add_leg
+    gen_start = _t.time()
+
+    candidates_by_set = {}  # frozenset(lane_ids) -> CandidateRoute
+    seq_cache = {}  # frozenset -> (ordered, drive, dh, is_exact, gaps)
+
+    def _seq_and_build(lane_ids, is_exclusive=False):
+        """Sequence a lane set and build a CandidateRoute. Returns None if infeasible."""
+        ls = frozenset(lane_ids)
+        if ls in candidates_by_set:
+            return candidates_by_set[ls]
+
+        # Sequence (with cache)
+        if ls in seq_cache:
+            ordered, drive, dh, is_exact, gaps = seq_cache[ls]
+        else:
+            ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
+                list(lane_ids), lane_map, graph, base_city, max_wait_h)
+            seq_cache[ls] = (ordered, drive, dh, is_exact, gaps)
+
+        # Compute metrics
+        starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+        ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+        if not starts or not ends:
+            return None
+        start_time = min(starts)
+        end_time = max(ends)
+        duty = (end_time - start_time) + pre_post_h
+
+        # HOS check
+        if drive > HOS_MAX_DRIVE or duty > HOS_MAX_DUTY:
+            return None
+
+        # Corridor info
+        corrs = {}
+        for lid in ordered:
+            c = _corridor_of_leg(lane_map[lid])
+            corrs[c] = corrs.get(c, 0) + 1
+        dominant = max(corrs, key=corrs.get) if corrs else ''
+        corr_count = len(corrs)
+
+        # Wait time
+        total_wait = sum(g.get('waitHours', 0) or 0 for g in gaps) if gaps else 0
+
+        # Cost
+        cost = (dh * 1.0
+                + (corr_count - 1) * 50
+                + total_wait * 10
+                + (100 if not is_exact else 0)
+                + (200 if len(lane_ids) == 1 else 0))  # singleton penalty
+
+        cr = CandidateRoute(
+            lane_set=ls, ordered_ids=ordered, drive_hours=round(drive, 1),
+            dh_miles=dh, duty_hours=round(duty, 1),
+            start_time=start_time, end_time=end_time,
+            corridor_count=corr_count, dominant_corridor=dominant,
+            is_exact=is_exact, is_exclusive=is_exclusive,
+            cost=round(cost, 1), leg_gaps=gaps,
+        )
+        candidates_by_set[ls] = cr
+        return cr
+
+    # (a) Exclusive pair candidates
+    excl_lanes = set()
+    for lid_a in day_lids:
+        if lid_a not in excl_pair_ids:
+            continue
+        la = lane_map[lid_a]
+        for lid_b in day_lids:
+            if lid_b == lid_a or lid_b not in excl_pair_ids:
+                continue
+            lb = lane_map[lid_b]
+            if (la.origin_city.lower().strip() == lb.dest_city.lower().strip() and
+                la.dest_city.lower().strip() == lb.origin_city.lower().strip()):
+                combined = la.route_duration_hours + lb.route_duration_hours
+                if combined > 5.0:
+                    _seq_and_build([lid_a, lid_b], is_exclusive=True)
+                    excl_lanes.add(lid_a)
+                    excl_lanes.add(lid_b)
+
+    non_excl_lids = [lid for lid in day_lids if lid not in excl_lanes]
+
+    # (b) Corridor-chain DFS
+    # Group lanes by corridor
+    corr_groups = {}
+    for lid in non_excl_lids:
+        c = _corridor_of_leg(lane_map[lid])
+        corr_groups.setdefault(c, []).append(lid)
+
+    # Sort each group by pickup time
+    for c in corr_groups:
+        corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
+
+    for corridor, clids in corr_groups.items():
+        for start_lid in clids:
+            if _t.time() - gen_start > time_budget:
+                break
+            sl = lane_map[start_lid]
+            chain = [start_lid]
+            drive = sl.route_duration_hours
+            duty = sl.route_duration_hours + sl.dwell_hours + pre_post_h
+            clock = sl.finish_time
+
+            # Extend within same corridor
+            for _ in range(max_legs - 1):
+                best = None
+                for next_id, dh_mi, dh_h in graph.get(chain[-1], []):
+                    if next_id in chain or next_id not in non_excl_lids:
+                        continue
+                    nl = lane_map[next_id]
+                    # Same corridor preferred
+                    if _corridor_of_leg(nl) != corridor:
+                        continue
+                    result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
+                    if result:
+                        if not best or (nl.pickup_time or 99) < (lane_map[best[0]].pickup_time or 99):
+                            best = (next_id, dh_mi, dh_h, result)
+                if best:
+                    nid, _, _, (nd, ndu, nc, _) = best
+                    chain.append(nid)
+                    drive, duty, clock = nd, ndu, nc
+                    if len(chain) >= 2:
+                        _seq_and_build(list(chain))
+                else:
+                    break
+
+            # Also try 1 cross-corridor hop from the chain end
+            if len(chain) >= 2:
+                for next_id, dh_mi, dh_h in graph.get(chain[-1], []):
+                    if next_id in chain or next_id not in non_excl_lids:
+                        continue
+                    nl = lane_map[next_id]
+                    if _corridor_of_leg(nl) == corridor:
+                        continue  # already tried same-corridor
+                    result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
+                    if result:
+                        extended = chain + [next_id]
+                        _seq_and_build(list(extended))
+                        break  # only one cross-corridor hop
+
+    # (c) Pair-seeded expansion
+    for (out_id, ret_id), pdata in pair_blocks.items() if isinstance(pair_blocks, dict) else []:
+        if out_id in excl_lanes or ret_id in excl_lanes:
+            continue
+        if out_id not in non_excl_lids or ret_id not in non_excl_lids:
+            continue
+        pair_corr = _corridor_of_leg(lane_map[out_id])
+        base = [out_id, ret_id]
+        _seq_and_build(base)
+
+        # Expand with same-corridor legs
+        for lid in non_excl_lids:
+            if lid in base:
+                continue
+            if _corridor_of_leg(lane_map[lid]) != pair_corr:
+                continue
+            expanded = base + [lid]
+            if len(expanded) <= max_legs:
+                _seq_and_build(expanded)
+
+    # (d) Singleton fallback
+    for lid in non_excl_lids:
+        _seq_and_build([lid])
+
+    # --- Prune candidates ---
+    all_cands = list(candidates_by_set.values())
+
+    # Always keep exclusive candidates
+    kept = [c for c in all_cands if c.is_exclusive]
+    rest = [c for c in all_cands if not c.is_exclusive]
+    rest.sort(key=lambda c: c.cost)
+
+    # Diversity buckets
+    pure = [c for c in rest if c.corridor_count == 1 and len(c.ordered_ids) >= 2]
+    mixed = [c for c in rest if c.corridor_count >= 2]
+    short = [c for c in rest if len(c.ordered_ids) <= 3]
+    longer = [c for c in rest if len(c.ordered_ids) >= 6]
+
+    # Take from each bucket
+    max_total = 400
+    remaining_budget = max_total - len(kept)
+    added = set()
+
+    for bucket, pct in [(pure, 0.20), (mixed, 0.10), (short, 0.10), (longer, 0.10)]:
+        n = int(remaining_budget * pct)
+        for c in bucket[:n]:
+            if c.lane_set not in added:
+                kept.append(c)
+                added.add(c.lane_set)
+
+    # Fill rest with best by cost
+    for c in rest:
+        if len(kept) >= max_total:
+            break
+        if c.lane_set not in added:
+            kept.append(c)
+            added.add(c.lane_set)
+
+    print(f"    {len(kept)} candidates (excl={sum(1 for c in kept if c.is_exclusive)}, "
+          f"exact={sum(1 for c in kept if c.is_exact)}, "
+          f"singletons={sum(1 for c in kept if len(c.ordered_ids)==1)})")
+    return kept
+
+
+def _select_day_cover(candidates, day_lids, excl_pair_ids, n_drivers, solver_time=30):
+    """Select minimum-cost set of candidates covering all lanes exactly once.
+
+    Uses CP-SAT set partitioning. Route count is a hard constraint (<= n_drivers),
+    not the dominant objective — quality is.
+    """
+    from ortools.sat.python import cp_model
+
+    model = cp_model.CpModel()
+
+    # Variables: x[i] = use candidate i
+    x = [model.NewBoolVar(f'x_{i}') for i in range(len(candidates))]
+
+    # Coverage: each lane covered exactly once
+    lane_to_cands = {}
+    for i, c in enumerate(candidates):
+        for lid in c.lane_set:
+            lane_to_cands.setdefault(lid, []).append(i)
+
+    for lid in day_lids:
+        cand_indices = lane_to_cands.get(lid, [])
+        if not cand_indices:
+            print(f"    WARNING: lane {lid} not covered by any candidate!")
+            continue
+        model.Add(sum(x[i] for i in cand_indices) == 1)
+
+    # Route count <= n_drivers
+    model.Add(sum(x) <= n_drivers)
+
+    # Exclusive lanes only in exclusive candidates
+    for i, c in enumerate(candidates):
+        if not c.is_exclusive:
+            for lid in c.lane_set:
+                if lid in excl_pair_ids:
+                    model.Add(x[i] == 0)
+                    break
+
+    # Objective: minimize cost (quality-driven) + light route count tiebreaker
+    cost_terms = [x[i] * int(candidates[i].cost * 10) for i in range(len(candidates))]
+    route_count_penalty = [x[i] * 50 for i in range(len(candidates))]
+    model.Minimize(sum(cost_terms) + sum(route_count_penalty))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = solver_time
+    solver.parameters.num_workers = 8
+    solver.parameters.random_seed = 42
+
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(f"    Day cover INFEASIBLE")
+        return None
+
+    selected = [candidates[i] for i in range(len(candidates)) if solver.Value(x[i])]
+    print(f"    Selected {len(selected)} routes, "
+          f"total_cost={sum(c.cost for c in selected):.0f}, "
+          f"total_dh={sum(c.dh_miles for c in selected)}")
+    return selected
+
+
+def _assemble_weekly(day_covers, lane_map, graph, base_city, pre_post_h, max_wait_h,
+                     working_days, day_names_map, n_drivers):
+    """Assemble daily route covers into a weekly driver schedule.
+
+    Uses CP-SAT to assign routes to driver slots respecting:
+    - 10h off-duty between consecutive days
+    - 70h weekly duty cap
+    - Minimize drivers used + corridor variance
+    """
+    from ortools.sat.python import cp_model
+
+    # Collect all routes across days
+    day_routes = {}  # day -> list[CandidateRoute]
+    for day in working_days:
+        dn = day_names_map[day]
+        routes = day_covers.get(day, [])
+        if routes:
+            day_routes[day] = routes
+
+    if not day_routes:
+        return None
+
+    model = cp_model.CpModel()
+
+    # Variables: y[day][route_idx][driver] = BoolVar
+    y = {}
+    for day in day_routes:
+        y[day] = {}
+        for ri in range(len(day_routes[day])):
+            y[day][ri] = {}
+            for d in range(n_drivers):
+                y[day][ri][d] = model.NewBoolVar(f'y_{day}_{ri}_{d}')
+
+    # Each route assigned to exactly 1 driver
+    for day in day_routes:
+        for ri in range(len(day_routes[day])):
+            model.Add(sum(y[day][ri][d] for d in range(n_drivers)) == 1)
+
+    # Each driver gets at most 1 route per day
+    for day in day_routes:
+        for d in range(n_drivers):
+            model.Add(sum(y[day][ri][d] for ri in range(len(day_routes[day]))) <= 1)
+
+    # Off-duty: 10h between consecutive working days
+    ordered_days = [d for d in working_days if d in day_routes]
+    for k in range(len(ordered_days) - 1):
+        day_k = ordered_days[k]
+        day_k1 = ordered_days[k + 1]
+        for d in range(n_drivers):
+            for ri_k, route_k in enumerate(day_routes[day_k]):
+                for ri_k1, route_k1 in enumerate(day_routes[day_k1]):
+                    off_duty = (route_k1.start_time + 24) - route_k.end_time
+                    if off_duty < OFF_DUTY_HOURS:
+                        # These two routes can't be on the same driver
+                        model.Add(y[day_k][ri_k][d] + y[day_k1][ri_k1][d] <= 1)
+
+    # Weekly duty cap: 70h per driver
+    for d in range(n_drivers):
+        weekly_duty_terms = []
+        for day in day_routes:
+            for ri, route in enumerate(day_routes[day]):
+                weekly_duty_terms.append(y[day][ri][d] * int(route.duty_hours * 10))
+        model.Add(sum(weekly_duty_terms) <= int(MAX_WEEKLY_DUTY * 10))
+
+    # Track which drivers are used
+    driver_used = [model.NewBoolVar(f'du_{d}') for d in range(n_drivers)]
+    for d in range(n_drivers):
+        has_work = []
+        for day in day_routes:
+            for ri in range(len(day_routes[day])):
+                has_work.append(y[day][ri][d])
+        model.AddMaxEquality(driver_used[d], has_work + [model.NewConstant(0)])
+
+    # Objective: minimize drivers + corridor variance
+    obj = []
+    obj.extend(du * 1000 for du in driver_used)
+    # Light route cost pass-through
+    for day in day_routes:
+        for ri, route in enumerate(day_routes[day]):
+            for d in range(n_drivers):
+                obj.append(y[day][ri][d] * int(route.cost))
+    model.Minimize(sum(obj))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 30
+    solver.parameters.num_workers = 8
+    solver.parameters.random_seed = 42
+
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print("  Weekly assembly INFEASIBLE")
+        return None
+
+    # Extract assignment
+    weekly_schedule = []
+    all_exact = True
+    hos_violations = []
+
+    for d in range(n_drivers):
+        if not solver.Value(driver_used[d]):
+            continue
+        driver_days = {}
+        for day in day_routes:
+            dn = day_names_map[day]
+            for ri, route in enumerate(day_routes[day]):
+                if solver.Value(y[day][ri][d]):
+                    if not route.is_exact:
+                        all_exact = False
+                    miles = sum(lane_map[lid].route_miles for lid in route.ordered_ids) + route.dh_miles
+                    names = [lane_map[lid].name for lid in route.ordered_ids]
+                    driver_days[dn] = {
+                        'legs': route.ordered_ids,
+                        'legNames': names,
+                        'legCount': len(route.ordered_ids),
+                        'driveHours': route.drive_hours,
+                        'dutyHours': route.duty_hours,
+                        'miles': round(miles),
+                        'deadheadMiles': route.dh_miles,
+                        'startTime': route.start_time,
+                        'endTime': route.end_time,
+                        'isExact': route.is_exact,
+                        'legGaps': route.leg_gaps,
+                    }
+                    # HOS validation
+                    if route.drive_hours > HOS_MAX_DRIVE:
+                        hos_violations.append(f'D{d+1} {dn}: {route.drive_hours}h drive')
+                    if route.duty_hours > HOS_MAX_DUTY:
+                        hos_violations.append(f'D{d+1} {dn}: {route.duty_hours}h duty')
+
+        # Weekly duty
+        weekly_duty = sum(v['dutyHours'] for v in driver_days.values())
+        if weekly_duty > MAX_WEEKLY_DUTY:
+            hos_violations.append(f'D{d+1}: {weekly_duty:.1f}h weekly')
+
+        # Off-duty validation
+        _DAY_ORDER = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
+        sorted_days = sorted(driver_days.keys(), key=lambda dn: _DAY_ORDER.get(dn, 99))
+        prev_end = None
+        prev_dn = None
+        for dn in sorted_days:
+            dd = driver_days[dn]
+            if prev_end is not None and dd.get('startTime') is not None:
+                off = (dd['startTime'] + 24) - prev_end
+                if off < OFF_DUTY_HOURS:
+                    hos_violations.append(f'D{d+1} {prev_dn}->{dn}: {off:.1f}h off')
+            prev_end = dd.get('endTime')
+            prev_dn = dn
+
+        weekly_schedule.append({
+            'driverId': len(weekly_schedule) + 1,
+            'days': driver_days,
+            'totalDriveHours': round(sum(v['driveHours'] for v in driver_days.values()), 1),
+            'totalDutyHours': round(sum(v['dutyHours'] for v in driver_days.values()), 1),
+            'totalMiles': round(sum(v.get('miles', 0) for v in driver_days.values())),
+            'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in driver_days.values())),
+            'daysWorked': len(driver_days),
+        })
+
+    hos_compliant = len(hos_violations) == 0
+    return {
+        'success': True,
+        'driverCount': len(weekly_schedule),
+        'weeklySchedule': weekly_schedule,
+        'hosCompliant': hos_compliant,
+        'hosViolations': hos_violations if not hos_compliant else [],
+        'allExact': all_exact,
+        'constraints': {
+            'offDutyHours': OFF_DUTY_HOURS,
+            'maxWeeklyDuty': MAX_WEEKLY_DUTY,
+            'maxDailyDrive': HOS_MAX_DRIVE,
+            'maxDailyDuty': HOS_MAX_DUTY,
+        },
+    }
+
+
+def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
+                         lane_pickup_min, lane_pickup_end_min, lane_finish_min,
+                         lane_drive_min, lane_duty_min, day_lane_ids, working_days,
+                         day_names_map, pre_post_h, max_legs, max_wait_h,
+                         solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333,
+                         max_deadhead=75):
+    """v5 Route-Candidate solver: generate routes first, then select cover.
+
+    Three phases:
+    1. Generate candidate driver-day routes (pre-sequenced, costed)
+    2. Select covering set via CP-SAT per day
+    3. Assemble weekly schedule via CP-SAT driver linking
+    """
+    import time as _t
+    v5_start = _t.time()
+
+    # Pre-detect exclusive pairs
+    excl_pair_ids = set()
+    for la in lanes:
+        for lb in lanes:
+            if la.id >= lb.id:
+                continue
+            if (la.origin_city.lower().strip() != lb.dest_city.lower().strip() or
+                la.dest_city.lower().strip() != lb.origin_city.lower().strip()):
+                continue
+            if la.route_duration_hours + lb.route_duration_hours > 5.0:
+                excl_pair_ids.add(la.id)
+                excl_pair_ids.add(lb.id)
+
+    # Detect pair blocks for candidate seeding
+    pair_blocks = {}
+    blocks_data = _detect_pair_blocks(
+        lanes, lane_map, lane_active_days, day_lane_ids, working_days,
+        lane_pickup_min, lane_finish_min)
+    # blocks_data is a tuple of 7 items; pair_blocks = blocks (first item)
+    if blocks_data:
+        raw_blocks = blocks_data[0]
+        for bid, binfo in raw_blocks.items():
+            if isinstance(binfo, tuple) and len(binfo) >= 2:
+                pair_blocks[(binfo[0], binfo[1])] = binfo
+
+    print(f"v5: {len(lanes)} lanes, {n_drivers} drivers, {len(excl_pair_ids)//2} exclusive pairs")
+
+    # Phase 1: Generate candidates per day
+    time_per_day = max(10, int((solver_time * 0.5) / len(working_days)))
+    day_candidates = {}
+    for day in working_days:
+        lids = day_lane_ids[day]
+        if not lids:
+            continue
+        dn = day_names_map[day]
+        print(f"  {dn}: {len(lids)} lanes, generating candidates ({time_per_day}s)...")
+        cands = _generate_day_candidates(
+            lids, lane_map, graph, pair_blocks, excl_pair_ids,
+            pre_post_h=pre_post_h, max_legs=max_legs, max_wait_h=max_wait_h,
+            max_deadhead=max_deadhead, base_city=base_city, time_budget=time_per_day)
+        day_candidates[day] = cands
+
+    gen_elapsed = _t.time() - v5_start
+    print(f"  Generation: {gen_elapsed:.1f}s, "
+          f"{sum(len(c) for c in day_candidates.values())} total candidates")
+
+    # Phase 2: Select cover per day
+    day_covers = {}
+    for day in working_days:
+        lids = day_lane_ids[day]
+        if not lids or day not in day_candidates:
+            continue
+        dn = day_names_map[day]
+        cover_time = max(10, int((solver_time * 0.3) / len(working_days)))
+        print(f"  {dn}: selecting cover...")
+        cover = _select_day_cover(
+            day_candidates[day], lids, excl_pair_ids, n_drivers, solver_time=cover_time)
+        if cover is None:
+            print(f"  {dn}: cover FAILED, falling back to v4")
+            return None  # trigger v4 fallback
+        day_covers[day] = cover
+
+    cover_elapsed = _t.time() - v5_start - gen_elapsed
+    print(f"  Cover selection: {cover_elapsed:.1f}s")
+
+    # Phase 3: Weekly assembly
+    print(f"  Assembling weekly schedule...")
+    result = _assemble_weekly(
+        day_covers, lane_map, graph, base_city, pre_post_h, max_wait_h,
+        working_days, day_names_map, n_drivers)
+
+    total_elapsed = _t.time() - v5_start
+    print(f"  v5 total: {total_elapsed:.1f}s")
+
+    if result:
+        result['solverVersion'] = 'v5'
+    return result
+
+
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
                       lane_pickup_end_min, lane_finish_min, lane_drive_min, lane_duty_min,
                       day_lane_ids, working_days, day_names_map, pre_post_h, max_legs, max_wait_h,
@@ -3372,6 +3938,14 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
     idle_wt = config.get('idle_weight') if config.get('idle_weight') is not None else None
 
     def _solve(nd, st=300, seed=42):
+        if config.get('solver_version') == 'v5':
+            return _build_and_solve_v5(
+                nd, lanes, lane_map, graph, lane_active_days,
+                lane_pickup_min, lane_pickup_end_min, lane_finish_min,
+                lane_drive_min, lane_duty_min, day_lane_ids, working_days,
+                day_names_map, pre_post_h, max_legs, max_wait_h,
+                solver_time=st, base_city=base_city, max_deadhead=max_deadhead,
+            )
         return _build_and_solve(
             nd, lanes, lane_map, graph, lane_active_days,
             lane_pickup_min, lane_pickup_end_min, lane_finish_min,
