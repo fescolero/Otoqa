@@ -2676,18 +2676,108 @@ def _assemble_weekly(day_covers, lane_map, graph, base_city, pre_post_h, max_wai
     }
 
 
+def _generate_targeted_candidates(scarce_lids, day_lids, lane_map, graph, excl_pair_ids,
+                                   existing_sets, pre_post_h, max_legs, max_wait_h, max_deadhead,
+                                   base_city, max_new=100):
+    """Generate new candidate routes targeted at scarce (hard-to-cover) lanes.
+
+    For each scarce lane, build routes that include it alongside other scarce lanes.
+    This is the heuristic pricing step — scarce lanes proxy for high dual values.
+    """
+    from lane_solver import can_add_leg
+    new_candidates = {}
+    non_excl_set = set(lid for lid in day_lids if lid not in excl_pair_ids)
+
+    # Sort scarce lanes by pickup time
+    scarce_sorted = sorted(scarce_lids, key=lambda lid: lane_map[lid].pickup_time or 99)
+    scarce_set = set(scarce_lids)
+
+    for start_lid in scarce_sorted:
+        if len(new_candidates) >= max_new:
+            break
+        sl = lane_map[start_lid]
+
+        # Greedy route building: always prefer other scarce lanes as next extension
+        chain = [start_lid]
+        drive = sl.route_duration_hours
+        duty = sl.route_duration_hours + sl.dwell_hours + pre_post_h
+        clock = sl.finish_time
+
+        for _ in range(max_legs - 1):
+            best_scarce = None
+            best_other = None
+            for next_id, dh_mi, dh_h in graph.get(chain[-1], []):
+                if next_id in chain or next_id not in non_excl_set:
+                    continue
+                nl = lane_map[next_id]
+                result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
+                if not result:
+                    continue
+                if next_id in scarce_set:
+                    if not best_scarce or (nl.pickup_time or 99) < (lane_map[best_scarce[0]].pickup_time or 99):
+                        best_scarce = (next_id, dh_mi, dh_h, result)
+                else:
+                    if not best_other or (nl.pickup_time or 99) < (lane_map[best_other[0]].pickup_time or 99):
+                        best_other = (next_id, dh_mi, dh_h, result)
+
+            # Prefer scarce lanes, fall back to others
+            best = best_scarce or best_other
+            if best:
+                nid, _, _, (nd, ndu, nc, _) = best
+                chain.append(nid)
+                drive, duty, clock = nd, ndu, nc
+            else:
+                break
+
+        # Only emit if it includes 2+ legs and the set is new
+        if len(chain) >= 2:
+            ls = frozenset(chain)
+            if ls not in existing_sets and ls not in new_candidates:
+                # Sequence it
+                ordered, drv, dh, is_exact, gaps = _sequence_driver_day(
+                    chain, lane_map, graph, base_city, max_wait_h)
+                starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+                ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+                if starts and ends:
+                    st = min(starts)
+                    et = max(ends)
+                    dty = (et - st) + pre_post_h
+                    if drv <= HOS_MAX_DRIVE and dty <= HOS_MAX_DUTY:
+                        corrs = {}
+                        for lid in ordered:
+                            c = _corridor_of_leg(lane_map[lid])
+                            corrs[c] = corrs.get(c, 0) + 1
+                        dominant = max(corrs, key=corrs.get) if corrs else ''
+                        wait = sum(g.get('waitHours', 0) or 0 for g in gaps) if gaps else 0
+                        cost = dh * 1.0 + (len(corrs) - 1) * 50 + wait * 10 + (100 if not is_exact else 0)
+                        cr = CandidateRoute(
+                            lane_set=ls, ordered_ids=ordered, drive_hours=round(drv, 1),
+                            dh_miles=dh, duty_hours=round(dty, 1),
+                            start_time=st, end_time=et,
+                            corridor_count=len(corrs), dominant_corridor=dominant,
+                            is_exact=is_exact, is_exclusive=False,
+                            cost=round(cost, 1), leg_gaps=gaps,
+                        )
+                        new_candidates[ls] = cr
+
+    return list(new_candidates.values())
+
+
 def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                          lane_pickup_min, lane_pickup_end_min, lane_finish_min,
                          lane_drive_min, lane_duty_min, day_lane_ids, working_days,
                          day_names_map, pre_post_h, max_legs, max_wait_h,
                          solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333,
                          max_deadhead=75):
-    """v5 Route-Candidate solver: generate routes first, then select cover.
+    """v5.1 Route-Candidate solver with iterative pricing loop.
 
-    Three phases:
-    1. Generate candidate driver-day routes (pre-sequenced, costed)
-    2. Select covering set via CP-SAT per day
-    3. Assemble weekly schedule via CP-SAT driver linking
+    Architecture:
+    1. Bootstrap: singletons + exclusive pairs + DFS chains
+    2. Solve restricted master (set cover)
+    3. Compute lane scarcity (heuristic dual prices)
+    4. Generate targeted candidates for scarce lanes
+    5. Repeat until cover at n_drivers found or budget exhausted
+    6. Weekly assembly via CP-SAT
     """
     import time as _t
     v5_start = _t.time()
@@ -2705,12 +2795,10 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                 excl_pair_ids.add(la.id)
                 excl_pair_ids.add(lb.id)
 
-    # Detect pair blocks for candidate seeding
     pair_blocks = {}
     blocks_data = _detect_pair_blocks(
         lanes, lane_map, lane_active_days, day_lane_ids, working_days,
         lane_pickup_min, lane_finish_min)
-    # blocks_data is a tuple of 7 items; pair_blocks = blocks (first item)
     if blocks_data:
         raw_blocks = blocks_data[0]
         for bid, binfo in raw_blocks.items():
@@ -2719,43 +2807,86 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
 
     print(f"v5: {len(lanes)} lanes, {n_drivers} drivers, {len(excl_pair_ids)//2} exclusive pairs")
 
-    # Phase 1: Generate candidates per day
-    time_per_day = max(10, int((solver_time * 0.5) / len(working_days)))
-    day_candidates = {}
+    # --- Iterative pricing loop per day ---
+    max_pricing_rounds = 5
+    day_covers = {}
+
     for day in working_days:
         lids = day_lane_ids[day]
         if not lids:
             continue
         dn = day_names_map[day]
-        print(f"  {dn}: {len(lids)} lanes, generating candidates ({time_per_day}s)...")
+        day_budget = max(20, int(solver_time * 0.7 / len(working_days)))
+
+        # Phase 1: Bootstrap candidates
+        print(f"  {dn}: {len(lids)} lanes, bootstrap...")
         cands = _generate_day_candidates(
             lids, lane_map, graph, pair_blocks, excl_pair_ids,
             pre_post_h=pre_post_h, max_legs=max_legs, max_wait_h=max_wait_h,
-            max_deadhead=max_deadhead, base_city=base_city, time_budget=time_per_day)
-        day_candidates[day] = cands
+            max_deadhead=max_deadhead, base_city=base_city, time_budget=day_budget // 2)
+
+        existing_sets = {c.lane_set for c in cands}
+
+        # Pricing loop
+        best_cover = None
+        for pricing_round in range(max_pricing_rounds):
+            if _t.time() - v5_start > solver_time * 0.8:
+                break
+
+            # Try cover
+            cover = _select_day_cover(cands, lids, excl_pair_ids, n_drivers, solver_time=10)
+            if cover and len(cover) <= n_drivers:
+                best_cover = cover
+                print(f"    Round {pricing_round}: cover found! {len(cover)} routes")
+                break
+
+            # Cover failed or too many routes — compute lane scarcity
+            lane_cand_count = {}
+            for lid in lids:
+                cnt = sum(1 for c in cands if lid in c.lane_set and len(c.ordered_ids) >= 2)
+                lane_cand_count[lid] = cnt
+
+            # Scarce lanes: in fewest multi-leg candidates
+            scarce = sorted(
+                [(lid, cnt) for lid, cnt in lane_cand_count.items() if lid not in excl_pair_ids],
+                key=lambda x: x[1])
+            scarce_lids = [lid for lid, cnt in scarce[:15]]  # top 15 scarcest
+
+            if not scarce_lids:
+                break
+
+            route_count = len(cover) if cover else 999
+            print(f"    Round {pricing_round}: {route_count} routes (need <={n_drivers}), "
+                  f"targeting {len(scarce_lids)} scarce lanes")
+
+            # Generate targeted candidates for scarce lanes
+            new_cands = _generate_targeted_candidates(
+                scarce_lids, lids, lane_map, graph, excl_pair_ids,
+                existing_sets, pre_post_h, max_legs, max_wait_h, max_deadhead,
+                base_city, max_new=100)
+
+            if not new_cands:
+                print(f"    No new candidates generated, stopping")
+                break
+
+            cands.extend(new_cands)
+            existing_sets.update(c.lane_set for c in new_cands)
+            print(f"    +{len(new_cands)} targeted candidates (total: {len(cands)})")
+
+        if best_cover is None:
+            # Last attempt with relaxed route count
+            cover = _select_day_cover(cands, lids, excl_pair_ids, n_drivers * 2, solver_time=15)
+            if cover:
+                best_cover = cover
+                print(f"    Relaxed cover: {len(cover)} routes")
+            else:
+                print(f"  {dn}: cover FAILED after {max_pricing_rounds} rounds")
+                return None
+
+        day_covers[day] = best_cover
 
     gen_elapsed = _t.time() - v5_start
-    print(f"  Generation: {gen_elapsed:.1f}s, "
-          f"{sum(len(c) for c in day_candidates.values())} total candidates")
-
-    # Phase 2: Select cover per day
-    day_covers = {}
-    for day in working_days:
-        lids = day_lane_ids[day]
-        if not lids or day not in day_candidates:
-            continue
-        dn = day_names_map[day]
-        cover_time = max(10, int((solver_time * 0.3) / len(working_days)))
-        print(f"  {dn}: selecting cover...")
-        cover = _select_day_cover(
-            day_candidates[day], lids, excl_pair_ids, n_drivers, solver_time=cover_time)
-        if cover is None:
-            print(f"  {dn}: cover FAILED, falling back to v4")
-            return None  # trigger v4 fallback
-        day_covers[day] = cover
-
-    cover_elapsed = _t.time() - v5_start - gen_elapsed
-    print(f"  Cover selection: {cover_elapsed:.1f}s")
+    print(f"  Pricing loop: {gen_elapsed:.1f}s")
 
     # Phase 3: Weekly assembly
     print(f"  Assembling weekly schedule...")
