@@ -1,127 +1,103 @@
-# Weekly Solver v2.1 Final Baseline
+# Weekly Solver Baseline
 
-## Commit
+## Current Production: v4 (v2.1 tuning)
 Branch: `autofix/20260331-104805-sqlite-retry-reads-v3`
-Latest commit: `e494403`
-Date: 2026-04-03
+Latest: `3e6031f`
 
-## What shipped
+### What's deployed
+- Phase 1 CP-SAT assignment with corridor penalties + pair protection + sequence-cost proxy
+- v2 post-solve optimizer (moves, swaps, scoreboard, explainability, tabu)
+- Best-of-3 with fixed seeds and quality ranking
+- API validation + error envelopes
+- `enable_local_optimize: true` + `best_of_n: 3` in Convex config
 
-### Phase 1 CP-SAT improvements
-- **Progressive corridor-count penalty** — 3rd corridor 2.7x steeper, 4th 5x, 5th 6x. Eliminated 5-corridor disaster rows.
-- **Pair corridor protection** — 200-weight penalty for cross-corridor legs on pair-row drivers. Protects 615→616 SA pair.
-- **Sequence-cost proxy** — Penalizes large time gaps (>3h) between same-driver legs. Makes solver aware of approximate sequencing costs before actual sequencing. Produces tighter-packed rows.
-- **Configurable idle_weight** — behind flag, default 1. Higher values push tighter packing.
+### 917DK results (9 drivers, 50 lanes)
+- 4 exact days reliably (3 LV + SA pair)
+- No 5-corridor disaster rows
+- 615→616 SA pair always protected
+- Worst DH: ~143-160mi (same-corridor SD spread — structural)
+- Floor is high, ceiling is structural
 
-### v2 post-solve optimizer (opt-in)
-- **One-way fragment moves** — corridor-coherent fragments between same-day drivers
-- **Wrong-corridor swap search** — target minority-corridor fragments, swap with complement
-- **Quality scoreboard** — pre/post worst score, total overlaps, total DH
-- **Explainability** — per-move logging with scores, DH, overlaps
-- **Tabu memory** — prevents oscillation
-- **Clean pair protection** — estimated 2-leg pairs frozen as donors/recipients
+---
 
-### Best-of-N solver
-- **Fixed seeds** [42, 123, 271] — deterministic, no timing luck
-- **Quality ranking** — exact days (×800), max DH with escalation above 150mi, 3+ corridor penalty (×600), total DH tiebreaker
-- **Default: best_of_n=3** in Convex config
+## v5 Prototype: Route-Candidate Solver
 
-### API hygiene
-- Input validation (400/500 error envelopes)
-- CORS on all paths
-- Schema fix (targetDriverCount)
-
-## Contract: 917DK (50 lanes, 9 drivers)
-
-### Monday final result
+### Architecture (validated)
 ```
-D1: 2L exact  — LV (307+308)
-D2: 6L est    — COI + ANA. Clean, well-packed. ~239mi.
-D3: 2L exact  — LV (301+302)
-D4: 5L est    — Pure SD. +143mi DH. Structural same-corridor spread.
-D5: 7L est    — SA + MV. +92mi DH. Moderate.
-D6: 2L exact  — LV (303+304)
-D7: 8L est    — SB-dominant + SA oddball. +67mi DH. Well-packed.
-D8: 2L exact  — SA pair (615+616). PROTECTED.
-D9: 7L est    — SD + MV + SB. +46mi DH. Improved but still mixed.
+Phase 1: Generate candidate driver-day routes (pre-sequenced, costed)
+Phase 2: Select covering set via CP-SAT per day
+Phase 3: Assemble weekly schedule via CP-SAT driver linking
 ```
 
-### What actually improved vs v1
-| Metric | v1 start | v2.1 final |
-|--------|----------|------------|
-| 5-corridor rows | 1 | **0** (eliminated) |
-| 615/616 pair | sometimes broken | **always protected** |
-| 3+ corridor rows | 2 | 0-1 |
-| Best estimated row | ~0mi DH, 1 corridor | D2: 6L COI+ANA, tightly packed |
-| Worst estimated DH | +149mi | +143mi (slight improvement) |
-| Consistency | varies wildly | best-of-3 with proper ranking |
-| Observability | none | scoreboard + explainability |
-| API safety | crashes on bad input | validation + error envelopes |
+### What the prototype proved
+1. Route-first is implementable in this codebase
+2. CandidateRoute data model works
+3. Daily cover + weekly assembly framing is valid
+4. CP-SAT set partitioning works for route selection
+5. Weekly assembly as optimization (not greedy) is correct
 
-### What did NOT improve
-- Exact day count: still 4 (3 LV + SA pair), not reliably 5
-- D4-type SD spread: ~143mi DH is near-structural for this contract
-- Total fleet miles: roughly same as v1
-- The solver redistributes corridor mixing pain between drivers, doesn't eliminate it
+### What the prototype exposed
+**Naive DFS candidate generation produces overlapping, locally-correlated routes.**
+- 500 candidates per day, but minimum cover is 16 routes (not 9)
+- DFS chains are greedy and similar — they share the same popular legs
+- The master problem (set cover) can't find a 9-route cover because the candidates aren't diverse enough
+- This is NOT a set-cover problem — it's a candidate generation problem
 
-### Honest assessment
-The floor is higher (no disasters, pairs protected, tighter packing). The ceiling is about the same (4 exact, ~143mi worst DH). The value is in consistency and safety, not peak quality.
+### Lesson
+> A successful route-first solver needs **iterative candidate generation**, not one-shot enumeration.
+> The master problem must influence which candidates get created.
 
-## Structural limits (917DK at 9 drivers)
-- 41 Monday lanes, 7 corridors, 3 exclusive LV pairs = 6 drivers handling 35 local legs
-- At least 1 driver-day will have 2+ corridors (unavoidable)
-- SD afternoon legs (203/105/204/106/107) are inherently time-spread → ~143mi DH
-- The solver is near-optimal within the assign-then-sequence architecture
+---
 
-## What would move the needle next
-1. **Route-first architecture** — generate candidate driver-day routes with known DH, then select covering set. Fundamentally different solver. Would produce better results.
-2. **More drivers** — 10 drivers gives more slack, potentially cleaner rows.
-3. **Different contract windows** — tighter pickup windows reduce spread.
-4. **Integrated sequencing** — deeper Phase 1 modeling of transition costs. The sequence-cost proxy is a step toward this.
+## v5.1 Next Step: Mine Candidates from v4 Solutions
 
-## Architecture
-```
-Phase 1: CP-SAT assignment
-  - Pair blocks, HOS constraints
-  - Corridor penalties (progressive)
-  - Pair corridor protection
-  - Sequence-cost proxy (time-gap penalty)
-Phase 2: Extract assignments
-Phase 3: Drive violation repair
-Phase 4: Final sequencing + validation
-Phase 5: Fragment-aware local repair
-v2: Post-solve optimizer (opt-in)
-  - One-way moves + wrong-corridor swaps
-  - Quality scoreboard + explainability
-  - Tabu memory + pair protection
-Best-of-3: Fixed-seed multi-run with quality ranking
-```
+### Option B: Route mining (practical bridge path)
+1. Run v4 solver (best-of-3) to get strong 9-driver schedules
+2. Extract each driver-day route as a seed candidate
+3. Mutate seeds:
+   - Drop 1 leg → generate shorter variant
+   - Add 1 same-corridor leg → generate extended variant
+   - Swap 1 cross-corridor leg for same-corridor leg
+   - Recombine: take legs from 2 different v4 routes
+4. Sequence all mutations via `_sequence_driver_day()`
+5. Solve set-cover over the mined + mutated pool
+6. If cover improves over v4, use it. Otherwise keep v4 result.
 
-## All commits this session (20 total)
-```
-e494403 Add sequence-cost proxy to Phase 1
-6e15c44 Improve best-of-N ranking
-ea33937 Enable best-of-3 in Convex config
-0418fbd Add best-of-N solver with fixed seeds
-4e0b3e0 Add configurable idle_weight (behind flag)
-46d724a v2.1: slot-fit scoring + idle spread penalty
-f3500dc Lock v2.0 baseline doc
-96cd308 Pair corridor protection in Phase 1
-b2de606 Progressive corridor penalty in Phase 1
-1ff1294 Clean pair row protection in v2
-711c5b0 Wrong-corridor swap search
-7a56ae5 Enable v2 in Convex config
-d0335b6 Scoreboard, explainability, tabu
-f90e0c9 Day ordering fix + v2Stats on exception
-4c45404 v2 local optimizer (core)
-10586b1 API validation + error envelopes
-7a4e77a Dead file cleanup + track production files
-97e03d7 Schema fix (targetDriverCount)
-```
+### Why this works
+- v4 already produces 9-route covering sets (proven feasible)
+- The seed candidates ARE globally compatible by construction
+- Mutations explore the neighborhood of proven solutions
+- Set-cover can find better combinations from the mutated pool
 
-## Files
-- `scripts/weekly_solver_v4.py` — solver (~3200 lines)
-- `scripts/solver_api.py` — HTTP wrapper with validation
-- `scripts/lane_solver.py` — shared library
-- `scripts/entries.json` — regression test fixture
-- `scripts/test_solver_regression.py` — 12-assertion regression test
+### Option A: Column generation (long-term)
+- Start with small candidate pool
+- Solve day-cover master problem
+- Inspect uncovered/expensive lanes (dual values)
+- Generate new candidates targeted at those lanes
+- Repeat until convergence
+- This is the research-backed path but more complex to implement
+
+---
+
+## Architecture Stack
+
+### What carries forward to v5 (all reusable)
+- API validation + error envelopes (solver_api.py)
+- Quality scoreboard + explainability
+- Pair protection (Phase 1 + v2 freeze)
+- Best-of-N with quality ranking
+- CandidateRoute dataclass
+- `_select_day_cover()` — CP-SAT set partitioning
+- `_assemble_weekly()` — CP-SAT weekly driver linking
+- `_sequence_driver_day()` — per-day circuit sequencer
+- v2 post-solve optimizer (light polish only in v5)
+- All UI/Convex infrastructure
+
+### What gets replaced in v5
+- `_build_and_solve()` (v4 Phase 1) → `_build_and_solve_v5()` with mined candidates
+- `_generate_day_candidates()` → mine from v4 solutions instead of naive DFS
+
+### 3 durable optimization layers (target)
+1. **Candidate generation** — mine from v4 + mutate
+2. **Cover selection** — CP-SAT set partitioning + weekly linking
+3. **Light polish** — v2 optimizer (moves, swaps, not rescue)
