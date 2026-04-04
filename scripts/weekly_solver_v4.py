@@ -2162,7 +2162,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                       lane_pickup_end_min, lane_finish_min, lane_drive_min, lane_duty_min,
                       day_lane_ids, working_days, day_names_map, pre_post_h, max_legs, max_wait_h,
                       solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333,
-                      max_gap_hours=3.0, drive_buffer_hours=1.5):
+                      max_gap_hours=3.0, drive_buffer_hours=1.5, idle_weight_override=None):
     """Two-phase solver:
     Phase 1: Span-based weekly assignment (fast, finds minimum drivers).
     Phase 2: Exact per-day sequencing for drive/DH metrics.
@@ -2696,7 +2696,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     PAIR_WEIGHT = 10           # reward zero-DH pairings
     RETURN_WEIGHT = 2          # penalize far-from-base finishes
     DH_PENALTY_WEIGHT = 3      # penalize deadhead miles
-    IDLE_WEIGHT = 1            # penalize idle time (per minute)
+    IDLE_WEIGHT = idle_weight_override if idle_weight_override is not None else 1
     SPAN_WEIGHT = 2            # penalize span over 10h target
     WEEKLY_EXCESS_WEIGHT = 1   # penalize weekly duty over 58h target
     HEAVY_DAY_WEIGHT = 1       # penalize heavy days (>12h or >7 legs)
@@ -3330,6 +3330,8 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
         return len(concerns) == 0, concerns
 
     # --- Solver helper ---
+    idle_wt = config.get('idle_weight') if config.get('idle_weight') is not None else None
+
     def _solve(nd, st=300):
         return _build_and_solve(
             nd, lanes, lane_map, graph, lane_active_days,
@@ -3338,6 +3340,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             day_names_map, pre_post_h, max_legs, max_wait_h,
             solver_time=st, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
             max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
+            idle_weight_override=idle_wt,
         )
 
     # If n_drivers specified, solve at that count and return
