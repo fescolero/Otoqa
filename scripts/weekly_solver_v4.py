@@ -2235,11 +2235,11 @@ def _generate_day_candidates(day_lids, lane_map, graph, pair_blocks, excl_pair_i
         # Wait time
         total_wait = sum(g.get('waitHours', 0) or 0 for g in gaps) if gaps else 0
 
-        # Cost
-        cost = (dh * 1.0
+        # Cost — DH is dominant (3x), exact bonus reduced to 50
+        cost = (dh * 3.0
                 + (corr_count - 1) * 50
                 + total_wait * 10
-                + (100 if not is_exact else 0)
+                + (50 if not is_exact else 0)
                 + (200 if len(lane_ids) == 1 else 0))  # singleton penalty
 
         cr = CandidateRoute(
@@ -2699,8 +2699,9 @@ def _make_candidate(lane_ids, lane_map, graph, base_city, pre_post_h, max_wait_h
         corrs[c] = corrs.get(c, 0) + 1
     dominant = max(corrs, key=corrs.get) if corrs else ''
     wait = sum(g.get('waitHours', 0) or 0 for g in gaps) if gaps else 0
-    cost = (dh * 1.0 + (len(corrs) - 1) * 50 + wait * 10
-            + (100 if not is_exact else 0) + (200 if len(lane_ids) == 1 else 0))
+    # DH is the dominant cost — 3x weight so it outranks exact/corridor bonuses
+    cost = (dh * 3.0 + (len(corrs) - 1) * 50 + wait * 10
+            + (50 if not is_exact else 0) + (200 if len(lane_ids) == 1 else 0))
     return CandidateRoute(
         lane_set=ls, ordered_ids=ordered, drive_hours=round(drv, 1),
         dh_miles=dh, duty_hours=round(dty, 1), start_time=st, end_time=et,
