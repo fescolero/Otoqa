@@ -2533,15 +2533,20 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
             if len(uses_vars) >= 2:
                 corr_count = model.NewIntVar(0, len(uses_vars), f'cc_{day}_{d}')
                 model.Add(corr_count == sum(uses_vars))
-                # Linear penalty for 2 corridors
+                # Linear penalty for 2 corridors (acceptable)
                 excess = model.NewIntVar(0, len(uses_vars), f'cx_{day}_{d}')
                 model.AddMaxEquality(excess, [corr_count - 1, model.NewConstant(0)])
                 corridor_count_penalty_vars.append(excess)
-                # Escalating penalty for 3+ corridors (much more expensive)
+                # Progressive escalation for 3+ corridors:
+                # 3 corridors = very expensive, 4+ = prohibitive
                 if len(uses_vars) >= 3:
                     excess3 = model.NewIntVar(0, len(uses_vars), f'c3_{day}_{d}')
                     model.AddMaxEquality(excess3, [corr_count - 2, model.NewConstant(0)])
-                    corridor_count_penalty_vars.append(excess3 * 5)  # 5x multiplier for 3rd+ corridor
+                    corridor_count_penalty_vars.append(excess3 * 15)  # 15x for 3rd corridor
+                if len(uses_vars) >= 4:
+                    excess4 = model.NewIntVar(0, len(uses_vars), f'c4_{day}_{d}')
+                    model.AddMaxEquality(excess4, [corr_count - 3, model.NewConstant(0)])
+                    corridor_count_penalty_vars.append(excess4 * 40)  # 40x for 4th+ corridor
 
     # 10. Cross-corridor overlap penalty — distance-weighted
     # Mixing nearby corridors (SD+MV, SA+CoI) is cheaper than far ones (CoI+SB+ANA)
