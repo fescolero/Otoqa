@@ -115,7 +115,28 @@ v5.2 proves route-first architecture + LP master + SPPRC pricing works as a syst
 
 ---
 
-## Next Sprint: Branch-and-Price (deferred)
+## Seeded-SPPRC Diagnostic (NEW)
+
+**Result: integer 9-cover found immediately at round 0 with v4 seeds.**
+
+```
+ROUND 0 (bootstrap+v4 seeds): LP=10.54 frac=9.0 int9=SUCCESS (9)
+ROUND 1 (+80 SPPRC cols): LP=10.54 frac=9.0 int9=SUCCESS (9)
+```
+
+### Interpretation
+- The LP-integer gap is NOT intrinsic to set-covering
+- It's caused by **missing specific structural columns** in the SPPRC pool
+- With v4's 9 routes added, integer cover works immediately
+- **Branch-and-price may not be necessary**
+
+### Revised next sprint
+The issue is column quality, not master structure:
+1. **Hybrid v5.3**: permanent v4 seeds + SPPRC refinement
+2. **Diverse SPPRC**: improve column generation to discover v4-quality routes without seeds
+3. **Branch-and-price**: still available if hybrid fails
+
+## Next Sprint Options (updated)
 
 ### Why branch-and-price
 The LP relaxation is loose because set-covering LPs often have fractional optima that can't be realized integrally. Branch-and-price:
