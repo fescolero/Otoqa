@@ -1166,7 +1166,22 @@ def _local_optimize(result, lane_map, graph, base_city, config,
 
     mut = _build_mutable_state(ws)
     dd = mut['driver_days']
-    frozen = {key for key, entry in dd.items() if entry['is_exact']}
+
+    # Freeze rules:
+    # 1. Exact days (isExact=True) — already proven by circuit solver
+    # 2. Clean 2-leg pair rows — even if estimated, a reverse-pair with low DH is valuable
+    #    and should never have fragments inserted into it
+    frozen = set()
+    for key, entry in dd.items():
+        if entry['is_exact']:
+            frozen.add(key)
+        elif len(entry['legs']) == 2:
+            # Check if it's a clean reverse pair (same corridor, low DH)
+            la, lb = lane_map.get(entry['legs'][0]), lane_map.get(entry['legs'][1])
+            if la and lb and _corridor_of_leg(la) == _corridor_of_leg(lb):
+                dh = _compute_dh(la, lb) + _compute_dh(lb, la)
+                if dh < 20:  # essentially zero-DH pair
+                    frozen.add(key)
 
     start_time = _time.time()
     moves_tried = 0
