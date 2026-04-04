@@ -115,6 +115,38 @@ v5.2 proves route-first architecture + LP master + SPPRC pricing works as a syst
 
 ---
 
+## v5.3 Hybrid — SHIPPABLE (NEW)
+
+v4 seeds + SPPRC refinement + LP master + integer cover.
+
+### 917DK benchmark vs v4
+| Metric | v4 | v5_hybrid | Delta |
+|--------|-----|-----------|-------|
+| Exact days | 21 | **25** | **+4** ✅ |
+| Max DH | 162 | 162 | tied |
+| Total DH | 1591 | **1178** | **-413** ✅ |
+| Time | 301s | 232s | -69s |
+
+v5_hybrid beats v4 on exact-day count AND total DH, ties on max DH.
+Deployed to VM. Enable via `config.solver_version: 'v5_hybrid'`.
+
+### Architecture
+1. Run v4 best-of-1 (180s) → seed routes per day
+2. Bootstrap v5 pool (DFS candidates)
+3. Inject v4 seeds into pool
+4. LP master (GLOP) → dual prices
+5. SPPRC pricing adds improving columns
+6. Integer cover at n_drivers via CP-SAT
+7. Weekly assembly via CP-SAT
+8. v2 local optimizer refinement
+
+### Status
+- **Production default**: v4 (unchanged)
+- **Opt-in**: v5_hybrid via `solver_version: 'v5_hybrid'` in Convex config
+- Needs validation on 2+ more contracts before becoming default
+
+---
+
 ## Seeded-SPPRC Diagnostic (NEW)
 
 **Result: integer 9-cover found immediately at round 0 with v4 seeds.**
