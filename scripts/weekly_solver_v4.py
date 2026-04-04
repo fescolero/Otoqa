@@ -2231,6 +2231,43 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         if is_exclusive:
             exclusive_blocks.append((out_id, ret_id, shared))
 
+    # --- Pair corridor protection: penalize cross-corridor legs on pair-row drivers ---
+    # When a driver has a clean reverse pair, adding a cross-corridor leg makes the row
+    # much worse (see D9 regression: 615/616 SA pair contaminated with 107 SD leg).
+    # Add a strong penalty for each cross-corridor leg assigned to a pair's driver.
+    pair_protect_penalty_vars = []
+    for out_id, ret_id, shared in active_pairs:
+        # Skip exclusive blocks (already fully isolated)
+        is_excl = any(out_id == eid and ret_id == rid for eid, rid, _ in exclusive_blocks)
+        if is_excl:
+            continue
+        out_lane = lane_map[out_id]
+        pair_corr = frozenset([out_lane.origin_city.lower().strip(), out_lane.dest_city.lower().strip()])
+
+        for day in working_days:
+            if day not in shared:
+                continue
+            if out_id not in day_lid_set[day] or ret_id not in day_lid_set[day]:
+                continue
+            # Find cross-corridor legs on this day
+            cross_lids = []
+            for lid in day_lane_ids[day]:
+                if lid == out_id or lid == ret_id:
+                    continue
+                l = lane_map[lid]
+                l_corr = frozenset([l.origin_city.lower().strip(), l.dest_city.lower().strip()])
+                if l_corr != pair_corr:
+                    cross_lids.append(lid)
+            if not cross_lids:
+                continue
+            for d in range(n_drivers):
+                for cross_lid in cross_lids:
+                    # Penalty fires when driver d has BOTH the pair and a cross-corridor leg
+                    both = model.NewBoolVar(f'pp_{day}_{d}_{out_id[:6]}_{cross_lid[:6]}')
+                    model.AddBoolAnd([assign[day][out_id][d], assign[day][cross_lid][d]]).OnlyEnforceIf(both)
+                    model.AddBoolOr([assign[day][out_id][d].Not(), assign[day][cross_lid][d].Not()]).OnlyEnforceIf(both.Not())
+                    pair_protect_penalty_vars.append(both)
+
     # --- Local corridor blocks: reward same-corridor pairs on the same driver ---
     # Group non-exclusive pairs by corridor. For each pair of same-corridor pairs
     # active on the same day, reward them being on the same driver.
@@ -2602,6 +2639,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     CORRIDOR_WEIGHT = 300      # penalize distinct corridors per driver-day (dominant)
     CROSS_OVERLAP_WEIGHT = 250 # penalize cross-corridor overlapping (dominant)
     CORRIDOR_BLOCK_WEIGHT = 80 # reward same-corridor pair blocks on same driver
+    PAIR_PROTECT_WEIGHT = 200  # penalize cross-corridor legs on pair-row drivers
 
     obj_terms = []
     if corridor_block_rewards:
@@ -2626,6 +2664,8 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         obj_terms.extend(-v * CORRIDOR_WEIGHT for v in corridor_count_penalty_vars)
     if cross_overlap_penalty_vars:
         obj_terms.extend(-v * CROSS_OVERLAP_WEIGHT for v in cross_overlap_penalty_vars)
+    if pair_protect_penalty_vars:
+        obj_terms.extend(-v * PAIR_PROTECT_WEIGHT for v in pair_protect_penalty_vars)
     if obj_terms:
         model.Maximize(sum(obj_terms))
 
