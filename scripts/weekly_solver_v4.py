@@ -3349,15 +3349,41 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
 
     # --- Quality scoring for best-of-N comparison ---
     def _result_quality(r):
-        """Score a solver result for best-of-N comparison. Higher = better."""
+        """Score a solver result for best-of-N comparison. Higher = better.
+
+        Priority order (what dispatchers care about):
+        1. Exact days (proven routes) — highest weight
+        2. Low max single-day DH — worst row matters most
+        3. Low worst-row corridor count — 3+ corridors is near-disqualifying
+        4. Low total DH — fleet efficiency, secondary tiebreaker
+        """
         if not r or not r.get('weeklySchedule'):
             return -9999
         ws = r['weeklySchedule']
         exact_days = sum(1 for dr in ws for dd in dr['days'].values() if dd.get('isExact'))
         total_dh = sum(dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values())
         max_day_dh = max((dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values()), default=0)
-        # Prioritize: exact days (×1000) > low max DH (×-2) > low total DH (×-0.5)
-        return exact_days * 1000 - max_day_dh * 2 - total_dh * 0.5
+        # Count 3+ corridor rows (near-disqualifying)
+        three_plus_corr = 0
+        for dr in ws:
+            for dd in dr['days'].values():
+                corrs = set()
+                for lid in dd.get('legs', []):
+                    l = lane_map.get(lid)
+                    if l:
+                        corrs.add(frozenset([l.origin_city.lower().strip(), l.dest_city.lower().strip()]))
+                if len(corrs) >= 3:
+                    three_plus_corr += 1
+        # Score thresholds: max_dh > 150 is bad, > 200 is very bad
+        dh_penalty = max_day_dh * 5
+        if max_day_dh > 150:
+            dh_penalty += (max_day_dh - 150) * 10  # steep escalation above 150mi
+        return (
+            exact_days * 800        # exact days important but not overwhelming
+            - dh_penalty            # worst row DH with escalation above 150mi
+            - three_plus_corr * 600 # 3+ corridor rows near-disqualifying
+            - total_dh * 0.3        # fleet DH as tiebreaker
+        )
 
     # If n_drivers specified, solve at that count and return
     if n_drivers:
