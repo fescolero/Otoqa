@@ -3154,13 +3154,14 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                          lane_drive_min, lane_duty_min, day_lane_ids, working_days,
                          day_names_map, pre_post_h, max_legs, max_wait_h,
                          solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333,
-                         max_deadhead=75):
-    """v5.1 Route-Candidate solver with LP-based column generation.
+                         max_deadhead=75, seed_schedule=None):
+    """v5 Route-Candidate solver with LP-based column generation.
 
     Architecture:
     1. Bootstrap: singletons + exclusive pairs + DFS chains
+       (+ optional v4 seed routes if seed_schedule provided)
     2. LP master: solve LP relaxation, get dual prices per lane
-    3. Pricing: generate routes guided by dual prices (high-value lanes)
+    3. Pricing: SPPRC label-setting DP guided by dual prices
     4. Repeat until LP lower bound >= n_drivers or no improving columns
     5. Final: integer cover via CP-SAT on accumulated pool
     6. Weekly assembly via CP-SAT
@@ -3191,7 +3192,24 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
             if isinstance(binfo, tuple) and len(binfo) >= 2:
                 pair_blocks[(binfo[0], binfo[1])] = binfo
 
-    print(f"v5: {len(lanes)} lanes, {n_drivers} drivers, {len(excl_pair_ids)//2} exclusive pairs")
+    # Extract v4 seed routes per day (hybrid mode)
+    day_num_map = {v: k for k, v in day_names_map.items()}
+    v4_seeds_by_day = {}
+    if seed_schedule:
+        for dr in seed_schedule:
+            for dn_name, dd in dr.get('days', {}).items():
+                day = day_num_map.get(dn_name)
+                if day is None or not dd.get('legs'):
+                    continue
+                is_excl = all(lid in excl_pair_ids for lid in dd['legs']) and len(dd['legs']) == 2
+                cr = _make_candidate(dd['legs'], lane_map, graph, base_city, pre_post_h, max_wait_h,
+                                     is_exclusive=is_excl)
+                if cr:
+                    v4_seeds_by_day.setdefault(day, []).append(cr)
+        seed_count = sum(len(v) for v in v4_seeds_by_day.values())
+        print(f"v5 hybrid: {len(lanes)} lanes, {n_drivers} drivers, {len(excl_pair_ids)//2} exclusive pairs, {seed_count} v4 seeds")
+    else:
+        print(f"v5: {len(lanes)} lanes, {n_drivers} drivers, {len(excl_pair_ids)//2} exclusive pairs")
 
     # --- LP-based column generation per day ---
     max_cg_rounds = 8
@@ -3212,6 +3230,16 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
             max_deadhead=max_deadhead, base_city=base_city, time_budget=day_budget // 3)
 
         existing_sets = {c.lane_set for c in cands}
+
+        # Inject v4 seed routes
+        seeds_added = 0
+        for seed in v4_seeds_by_day.get(day, []):
+            if seed.lane_set not in existing_sets:
+                cands.append(seed)
+                existing_sets.add(seed.lane_set)
+                seeds_added += 1
+        if seeds_added:
+            print(f"    +{seeds_added} v4 seed routes")
 
         # Column generation loop
         best_cover = None
@@ -4508,14 +4536,32 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
     TIME_BUDGET = 500  # seconds, leave 100s margin for Convex overhead
     idle_wt = config.get('idle_weight') if config.get('idle_weight') is not None else None
 
+    # For v5_hybrid: run v4 first to get seed routes
+    v4_seed_schedule = None
+    if config.get('solver_version') == 'v5_hybrid':
+        print("v5_hybrid: running v4 baseline for seed routes...")
+        v4_result = _build_and_solve(
+            n_drivers or 9, lanes, lane_map, graph, lane_active_days,
+            lane_pickup_min, lane_pickup_end_min, lane_finish_min,
+            lane_drive_min, lane_duty_min, day_lane_ids, working_days,
+            day_names_map, pre_post_h, max_legs, max_wait_h,
+            solver_time=180, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
+            max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
+            idle_weight_override=idle_wt, solver_seed=42,
+        )
+        if v4_result and v4_result.get('weeklySchedule'):
+            v4_seed_schedule = v4_result['weeklySchedule']
+            print(f"v5_hybrid: v4 seeds extracted, drivers={v4_result.get('driverCount')}")
+
     def _solve(nd, st=300, seed=42):
-        if config.get('solver_version') == 'v5':
+        if config.get('solver_version') in ('v5', 'v5_hybrid'):
             return _build_and_solve_v5(
                 nd, lanes, lane_map, graph, lane_active_days,
                 lane_pickup_min, lane_pickup_end_min, lane_finish_min,
                 lane_drive_min, lane_duty_min, day_lane_ids, working_days,
                 day_names_map, pre_post_h, max_legs, max_wait_h,
                 solver_time=st, base_city=base_city, max_deadhead=max_deadhead,
+                seed_schedule=v4_seed_schedule,
             )
         return _build_and_solve(
             nd, lanes, lane_map, graph, lane_active_days,
