@@ -2253,83 +2253,130 @@ def _generate_day_candidates(day_lids, lane_map, graph, pair_blocks, excl_pair_i
         candidates_by_set[ls] = cr
         return cr
 
-    # (a) Exclusive pair candidates
+    # (a) Exclusive pair candidates — use mutual-best matching (not N×M)
     excl_lanes = set()
-    for lid_a in day_lids:
-        if lid_a not in excl_pair_ids:
+    used_excl = set()
+    # Sort exclusive lanes by pickup time for deterministic matching
+    excl_day_lids = sorted([lid for lid in day_lids if lid in excl_pair_ids],
+                           key=lambda lid: lane_map[lid].pickup_time or 99)
+    for lid_a in excl_day_lids:
+        if lid_a in used_excl:
             continue
         la = lane_map[lid_a]
-        for lid_b in day_lids:
-            if lid_b == lid_a or lid_b not in excl_pair_ids:
+        # Find best matching return lane (earliest pickup after la finishes)
+        best_b = None
+        best_gap = 999
+        for lid_b in excl_day_lids:
+            if lid_b == lid_a or lid_b in used_excl:
                 continue
             lb = lane_map[lid_b]
             if (la.origin_city.lower().strip() == lb.dest_city.lower().strip() and
                 la.dest_city.lower().strip() == lb.origin_city.lower().strip()):
                 combined = la.route_duration_hours + lb.route_duration_hours
                 if combined > 5.0:
-                    _seq_and_build([lid_a, lid_b], is_exclusive=True)
-                    excl_lanes.add(lid_a)
-                    excl_lanes.add(lid_b)
+                    gap = abs((lb.pickup_time or 99) - (la.finish_time or 0))
+                    if gap < best_gap:
+                        best_gap = gap
+                        best_b = lid_b
+        if best_b:
+            _seq_and_build([lid_a, best_b], is_exclusive=True)
+            excl_lanes.add(lid_a)
+            excl_lanes.add(best_b)
+            used_excl.add(lid_a)
+            used_excl.add(best_b)
 
     non_excl_lids = [lid for lid in day_lids if lid not in excl_lanes]
 
-    # (b) Corridor-chain DFS
-    # Group lanes by corridor
-    corr_groups = {}
-    for lid in non_excl_lids:
-        c = _corridor_of_leg(lane_map[lid])
-        corr_groups.setdefault(c, []).append(lid)
+    # (b) Full DFS route generation (same pattern as generate_all_shifts in lane_solver.py)
+    non_excl_set = set(non_excl_lids)
+    sorted_non_excl = sorted(non_excl_lids, key=lambda lid: lane_map[lid].pickup_time or 99)
+    max_candidates = 2000  # hard cap before dedup
 
-    # Sort each group by pickup time
-    for c in corr_groups:
-        corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
+    for start_lid in sorted_non_excl:
+        if _t.time() - gen_start > time_budget or len(candidates_by_set) > max_candidates:
+            break
+        sl = lane_map[start_lid]
 
-    for corridor, clids in corr_groups.items():
-        for start_lid in clids:
-            if _t.time() - gen_start > time_budget:
+        # DFS stack: (legs, drive, duty, clock)
+        stack = [(
+            [start_lid],
+            sl.route_duration_hours,
+            sl.route_duration_hours + sl.dwell_hours + pre_post_h,
+            sl.finish_time,
+        )]
+
+        while stack:
+            if len(candidates_by_set) > max_candidates or _t.time() - gen_start > time_budget:
                 break
-            sl = lane_map[start_lid]
-            chain = [start_lid]
-            drive = sl.route_duration_hours
-            duty = sl.route_duration_hours + sl.dwell_hours + pre_post_h
-            clock = sl.finish_time
 
-            # Extend within same corridor
-            for _ in range(max_legs - 1):
-                best = None
-                for next_id, dh_mi, dh_h in graph.get(chain[-1], []):
-                    if next_id in chain or next_id not in non_excl_lids:
-                        continue
-                    nl = lane_map[next_id]
-                    # Same corridor preferred
-                    if _corridor_of_leg(nl) != corridor:
-                        continue
-                    result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
-                    if result:
-                        if not best or (nl.pickup_time or 99) < (lane_map[best[0]].pickup_time or 99):
-                            best = (next_id, dh_mi, dh_h, result)
-                if best:
-                    nid, _, _, (nd, ndu, nc, _) = best
-                    chain.append(nid)
-                    drive, duty, clock = nd, ndu, nc
-                    if len(chain) >= 2:
-                        _seq_and_build(list(chain))
-                else:
-                    break
+            legs, drive, duty, clock = stack.pop()
 
-            # Also try 1 cross-corridor hop from the chain end
-            if len(chain) >= 2:
-                for next_id, dh_mi, dh_h in graph.get(chain[-1], []):
-                    if next_id in chain or next_id not in non_excl_lids:
-                        continue
-                    nl = lane_map[next_id]
-                    if _corridor_of_leg(nl) == corridor:
-                        continue  # already tried same-corridor
-                    result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
-                    if result:
-                        extended = chain + [next_id]
-                        _seq_and_build(list(extended))
-                        break  # only one cross-corridor hop
+            # Emit routes with 2+ legs
+            if len(legs) >= 2:
+                _seq_and_build(list(legs))
+
+            if len(legs) >= max_legs:
+                continue
+
+            # Extend — prioritize low-DH edges first
+            last_id = legs[-1]
+            edges = graph.get(last_id, [])
+            # Sort: low DH first, then by pickup time
+            edges_sorted = sorted(edges, key=lambda e: (
+                e[1],  # DH miles
+                lane_map[e[0]].pickup_time if lane_map.get(e[0]) and lane_map[e[0]].pickup_time else 99,
+            ))
+            for next_id, dh_miles_val, dh_hours in edges_sorted:
+                if next_id in legs or next_id not in non_excl_set:
+                    continue
+                nl = lane_map.get(next_id)
+                if not nl:
+                    continue
+                result = can_add_leg(drive, duty, clock, nl, dh_hours, pre_post_h, max_wait_h)
+                if result:
+                    new_drive, new_duty, new_clock, _ = result
+                    stack.append((legs + [next_id], new_drive, new_duty, new_clock))
+
+    # (b2) Fill under-covered lanes — ensure every non-exclusive lane appears in 3+ candidates
+    for lid in non_excl_lids:
+        cand_count = sum(1 for ls in candidates_by_set if lid in ls)
+        if cand_count >= 3:
+            continue
+        # Build routes that include this lane
+        sl = lane_map[lid]
+        # Forward: start from this lane, extend
+        chain_fwd = [lid]
+        drive = sl.route_duration_hours
+        duty = sl.route_duration_hours + sl.dwell_hours + pre_post_h
+        clock = sl.finish_time
+        for _ in range(max_legs - 1):
+            best = None
+            for next_id, dh_mi, dh_h in graph.get(chain_fwd[-1], []):
+                if next_id in chain_fwd or next_id not in non_excl_set:
+                    continue
+                nl = lane_map[next_id]
+                result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
+                if result:
+                    if not best or (nl.pickup_time or 99) < (lane_map[best[0]].pickup_time or 99):
+                        best = (next_id, dh_mi, dh_h, result)
+            if best:
+                nid, _, _, (nd, ndu, nc, _) = best
+                chain_fwd.append(nid)
+                drive, duty, clock = nd, ndu, nc
+                if len(chain_fwd) >= 2:
+                    _seq_and_build(list(chain_fwd))
+            else:
+                break
+
+        # Backward: find lanes that can precede this lane
+        for pre_lid in non_excl_lids:
+            if pre_lid == lid or pre_lid in chain_fwd:
+                continue
+            pl = lane_map[pre_lid]
+            if pl.finish_time and sl.pickup_time and pl.finish_time < sl.pickup_time:
+                dh = _compute_dh(pl, sl)
+                if dh <= max_deadhead:
+                    _seq_and_build([pre_lid, lid])
 
     # (c) Pair-seeded expansion
     for (out_id, ret_id), pdata in pair_blocks.items() if isinstance(pair_blocks, dict) else []:
@@ -2358,9 +2405,9 @@ def _generate_day_candidates(day_lids, lane_map, graph, pair_blocks, excl_pair_i
     # --- Prune candidates ---
     all_cands = list(candidates_by_set.values())
 
-    # Always keep exclusive candidates
-    kept = [c for c in all_cands if c.is_exclusive]
-    rest = [c for c in all_cands if not c.is_exclusive]
+    # Always keep exclusive candidates + singletons (coverage guarantee)
+    kept = [c for c in all_cands if c.is_exclusive or len(c.ordered_ids) == 1]
+    rest = [c for c in all_cands if not c.is_exclusive and len(c.ordered_ids) > 1]
     rest.sort(key=lambda c: c.cost)
 
     # Diversity buckets
@@ -2370,7 +2417,7 @@ def _generate_day_candidates(day_lids, lane_map, graph, pair_blocks, excl_pair_i
     longer = [c for c in rest if len(c.ordered_ids) >= 6]
 
     # Take from each bucket
-    max_total = 400
+    max_total = 500  # higher cap since singletons take ~35 slots
     remaining_budget = max_total - len(kept)
     added = set()
 
