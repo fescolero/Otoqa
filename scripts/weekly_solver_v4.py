@@ -2162,7 +2162,8 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                       lane_pickup_end_min, lane_finish_min, lane_drive_min, lane_duty_min,
                       day_lane_ids, working_days, day_names_map, pre_post_h, max_legs, max_wait_h,
                       solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333,
-                      max_gap_hours=3.0, drive_buffer_hours=1.5, idle_weight_override=None):
+                      max_gap_hours=3.0, drive_buffer_hours=1.5, idle_weight_override=None,
+                      solver_seed=42):
     """Two-phase solver:
     Phase 1: Span-based weekly assignment (fast, finds minimum drivers).
     Phase 2: Exact per-day sequencing for drive/DH metrics.
@@ -2737,7 +2738,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = solver_time
     solver.parameters.num_workers = 8
-    solver.parameters.random_seed = 42  # reproducibility
+    solver.parameters.random_seed = solver_seed
 
     status = solver.Solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -3329,10 +3330,13 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
                 concerns.append(f'D{dr["driverId"]}: {heavy} heavy days')
         return len(concerns) == 0, concerns
 
-    # --- Solver helper ---
+    # --- Timing + solver helper ---
+    import time as _time
+    search_start = _time.time()
+    TIME_BUDGET = 500  # seconds, leave 100s margin for Convex overhead
     idle_wt = config.get('idle_weight') if config.get('idle_weight') is not None else None
 
-    def _solve(nd, st=300):
+    def _solve(nd, st=300, seed=42):
         return _build_and_solve(
             nd, lanes, lane_map, graph, lane_active_days,
             lane_pickup_min, lane_pickup_end_min, lane_finish_min,
@@ -3340,11 +3344,58 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
             day_names_map, pre_post_h, max_legs, max_wait_h,
             solver_time=st, base_city=base_city, base_lat=base_lat, base_lng=base_lng,
             max_gap_hours=max_gap_h, drive_buffer_hours=drive_buffer_h,
-            idle_weight_override=idle_wt,
+            idle_weight_override=idle_wt, solver_seed=seed,
         )
+
+    # --- Quality scoring for best-of-N comparison ---
+    def _result_quality(r):
+        """Score a solver result for best-of-N comparison. Higher = better."""
+        if not r or not r.get('weeklySchedule'):
+            return -9999
+        ws = r['weeklySchedule']
+        exact_days = sum(1 for dr in ws for dd in dr['days'].values() if dd.get('isExact'))
+        total_dh = sum(dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values())
+        max_day_dh = max((dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values()), default=0)
+        # Prioritize: exact days (×1000) > low max DH (×-2) > low total DH (×-0.5)
+        return exact_days * 1000 - max_day_dh * 2 - total_dh * 0.5
 
     # If n_drivers specified, solve at that count and return
     if n_drivers:
+        best_of_n = config.get('best_of_n', 1)
+        seeds = [42, 123, 271][:best_of_n]  # fixed seeds, deterministic
+
+        if best_of_n > 1:
+            per_seed_time = max(60, int(TIME_BUDGET / best_of_n) - 10)
+            print(f"Best-of-{best_of_n} with seeds {seeds}, {per_seed_time}s each...")
+            candidates = []
+            for seed in seeds:
+                elapsed = _time.time() - search_start
+                remaining = TIME_BUDGET - elapsed
+                if remaining < 30:
+                    break
+                st = min(per_seed_time, int(remaining - 10))
+                print(f"  Seed {seed} ({st}s)...")
+                r = _solve(n_drivers, st=st, seed=seed)
+                if r and r.get('hosCompliant'):
+                    q = _result_quality(r)
+                    ws = r['weeklySchedule']
+                    exact_d = sum(1 for dr in ws for dd in dr['days'].values() if dd.get('isExact'))
+                    max_dh = max((dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values()), default=0)
+                    total_dh = sum(dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values())
+                    print(f"    exact={exact_d} max_dh={max_dh} total_dh={total_dh} quality={q:.0f}")
+                    candidates.append((q, r, seed))
+            if candidates:
+                candidates.sort(key=lambda x: -x[0])  # best first
+                result = candidates[0][1]
+                best_seed = candidates[0][2]
+                print(f"  Best: seed={best_seed} quality={candidates[0][0]:.0f}")
+                result['minLegalDriverCount'] = n_drivers
+                result['recommendedDriverCount'] = n_drivers
+                result['bestOfN'] = {'seeds_tried': len(candidates), 'best_seed': best_seed,
+                                     'all_qualities': [(s, round(q)) for q, _, s in candidates]}
+                return _maybe_run_v2(result, lane_map, graph, base_city, config)
+
+        # Single run (default or best_of_n=1)
         print(f"Trying specified target: {n_drivers} drivers...")
         result = _solve(n_drivers)
         if result:
@@ -3387,8 +3438,7 @@ def solve_weekly_v4_api(entries, config={}, n_drivers=None):
     # Strategy: fast probes (10s) to find first compliant, then 90s optimization.
     # Skip separate min-legal search — go directly for recommended.
     import time as _time
-    search_start = _time.time()
-    TIME_BUDGET = 500  # seconds, leave 100s margin for Convex overhead
+    # search_start and TIME_BUDGET already set above
 
     print(f"Searching for recommended drivers (starting at {theoretical_min})...")
     min_legal_count = None
