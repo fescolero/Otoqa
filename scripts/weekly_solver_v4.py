@@ -2854,11 +2854,14 @@ def _solve_lp_master(candidates, day_lids, excl_pair_ids):
         for lid in c.lane_set:
             lane_to_cands.setdefault(lid, []).append(i)
 
+    COST_COEFF = 0.001  # tiebreaker coefficient for route quality
+
     for lid in day_lids:
         cand_indices = lane_to_cands.get(lid, [])
         if not cand_indices:
             continue
-        ct = solver.Add(sum(x[i] for i in cand_indices) == 1)
+        # Covering relaxation (>=) gives cleaner dual interpretation than partitioning (==)
+        ct = solver.Add(sum(x[i] for i in cand_indices) >= 1)
         lane_constraints[lid] = ct
 
     # Block non-exclusive candidates from covering exclusive lanes
@@ -2870,9 +2873,9 @@ def _solve_lp_master(candidates, day_lids, excl_pair_ids):
                     break
 
     # Objective: minimize route count + small cost tiebreaker
+    # Coefficient per route i = 1 + COST_COEFF * cost_i
     solver.Minimize(
-        sum(x[i] for i in range(len(candidates)))
-        + sum(x[i] * candidates[i].cost * 0.001 for i in range(len(candidates)))
+        sum(x[i] * (1.0 + COST_COEFF * candidates[i].cost) for i in range(len(candidates)))
     )
 
     status = solver.Solve()
@@ -2926,9 +2929,11 @@ def _price_new_routes(dual_prices, day_lids, lane_map, graph, excl_pair_ids,
                 result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
                 if not result:
                     continue
-                # Score by dual value minus DH cost
+                # Score by dual value minus marginal cost of adding this lane
+                # Adding a lane increases route cost by ~DH miles
                 dual_val = dual_prices.get(next_id, 0)
-                score = dual_val - dh_mi * 0.02  # prioritize high-dual lanes with low DH
+                marginal_cost = dh_mi * 0.001  # matches LP COST_COEFF
+                score = dual_val - marginal_cost  # net value of adding this lane
                 if score > best_score:
                     best_score = score
                     best = (next_id, dh_mi, dh_h, result)
@@ -2951,9 +2956,12 @@ def _price_new_routes(dual_prices, day_lids, lane_map, graph, excl_pair_ids,
             if ls not in existing_sets and ls not in new_candidates:
                 cr = _make_candidate(chain, lane_map, graph, base_city, pre_post_h, max_wait_h)
                 if cr:
-                    # Check reduced cost: sum(duals) - route_cost > 0 means improving
-                    rc = sum(dual_prices.get(lid, 0) for lid in cr.lane_set) - 1.0  # -1 for route count
-                    if rc > -0.5:  # allow slightly negative (near-improving)
+                    # Reduced cost = obj_coeff - sum(duals for covered lanes)
+                    # obj_coeff = 1 + 0.001 * route_cost
+                    # Improving if reduced_cost < 0 (sum of duals exceeds obj coeff)
+                    obj_coeff = 1.0 + 0.001 * cr.cost
+                    rc = obj_coeff - sum(dual_prices.get(lid, 0) for lid in cr.lane_set)
+                    if rc < 0.1:  # improving or near-improving
                         new_candidates[cr.lane_set] = cr
 
     # Strategy 2: Combine two high-dual lanes
@@ -3108,8 +3116,11 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                 print(f"    LP infeasible")
                 break
 
-            print(f"    CG round {cg_round}: LP obj={lp_obj:.2f} (frac routes={frac_routes:.1f}), "
-                  f"pool={len(cands)}")
+            # Integer diagnostic: uncapped route count
+            int_diag = _select_day_cover(cands, lids, excl_pair_ids, len(lids), solver_time=5)
+            int_min = len(int_diag) if int_diag else 999
+            print(f"    CG round {cg_round}: LP={lp_obj:.2f} frac={frac_routes:.1f} "
+                  f"int_min={int_min} pool={len(cands)}")
 
             # Try integer cover at n_drivers
             cover = _select_day_cover(cands, lids, excl_pair_ids, n_drivers, solver_time=10)
