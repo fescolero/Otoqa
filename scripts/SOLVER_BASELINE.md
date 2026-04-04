@@ -2,7 +2,7 @@
 
 ## Current Production: v4 (v2.1 tuning)
 Branch: `autofix/20260331-104805-sqlite-retry-reads-v3`
-Latest: `3e6031f`
+Latest: `6c0aad4`
 
 ### What's deployed
 - Phase 1 CP-SAT assignment with corridor penalties + pair protection + sequence-cost proxy
@@ -75,6 +75,84 @@ Phase 3: Assemble weekly schedule via CP-SAT driver linking
 - **Integer 9-route cover: SUCCESS**
 - Confirms: v5 architecture works, bottleneck is purely pricing
 - **SPPRC is the confirmed next build**
+
+---
+
+## v5.2: SPPRC Pricing (current checkpoint)
+
+### Architecture
+```
+LP master (GLOP) with dual prices ↕ SPPRC pricing subproblem
+                ↓
+         Integer cover (CP-SAT)
+                ↓
+         Weekly assembly (CP-SAT)
+```
+
+### SPPRC implementation
+- Label-setting DP over lane-time network
+- Domination by (last_lane, num_legs, corridor_set) + drive/duty/rc dimensions
+- MAX_PER_STATE=10, MAX_PROCESSED=200k per round
+- 18k-19k labels processed per pricing round
+- No DAG restriction — `can_add_leg` handles time feasibility
+- Generates 80 routes per round with best_rc > 0 (improving columns)
+
+### What SPPRC proved
+- Column generation can drive LP bound down materially
+- LP Tuesday: 11.42 → 10.51 → 10.50 (close to 9)
+- LP Monday: 12.39 → 11.51 → 11.13
+- Pricing is no longer the blind bottleneck
+
+### What SPPRC did NOT solve
+- **LP-integer gap remains large**: LP=10.50, integer=17 on Tuesday
+- The fractional optimal uses routes at partial weights that can't be realized integrally
+- SPPRC columns are improving but the LP relaxation itself is loose
+
+### Honest verdict
+**We are at the boundary between "advanced prototype" and "research-grade routing solver."**
+
+v5.2 proves route-first architecture + LP master + SPPRC pricing works as a system. The remaining gap is a master-side problem, not a column-quality problem.
+
+---
+
+## Next Sprint: Branch-and-Price (deferred)
+
+### Why branch-and-price
+The LP relaxation is loose because set-covering LPs often have fractional optima that can't be realized integrally. Branch-and-price:
+- Branches on fractional variables
+- Uses LP duals at each branch to guide further column generation
+- Closes the LP-integer gap systematically
+
+### Why it's a separate sprint
+- Not a tweak — it's a new solver architecture
+- Requires: branching strategy, tree search, incremental LP re-solves
+- ~1-2 weeks of focused work
+
+### Alternative: one more seeded-SPPRC diagnostic
+Before committing to branch-and-price:
+- Add v4 seeds to the SPPRC pool
+- Check if integer cover collapses toward LP bound
+- Tells us whether the gap is "missing columns" or "weak master structure"
+
+### Decision for next sprint
+- **Long-term engine**: branch-and-price
+- **Uncertainty reduction first**: seeded-SPPRC diagnostic
+
+---
+
+## Session Takeaways
+
+### What we proved
+1. v4 (production) works: 9 drivers, 4 exact days, pair protection
+2. v5 route-first architecture is sound (diagnostic: 9-route integer cover with seeds)
+3. LP master with dual prices is correct
+4. SPPRC pricing generates genuinely improving columns
+5. Remaining blocker is the LP-integer gap (master-side)
+
+### What we did NOT prove
+- That v5 can beat v4 on its own (needs branch-and-price or better)
+- That SPPRC alone can close the integer gap
+- That the architecture works across contracts (only tested 917DK)
 
 ### Option A: Column generation (long-term)
 - Start with small candidate pool
