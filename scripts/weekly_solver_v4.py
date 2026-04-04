@@ -2893,6 +2893,117 @@ def _solve_lp_master(candidates, day_lids, excl_pair_ids):
     return dual_prices, lp_obj, fractional_routes
 
 
+def _spprc_pricing(dual_prices, day_lids, lane_map, graph, excl_pair_ids,
+                    pre_post_h, max_legs, max_wait_h, base_city,
+                    existing_sets, max_routes=80):
+    """SPPRC pricing: find routes with negative reduced cost via label-setting DP.
+
+    Explores ALL feasible paths through the lane-time DAG.
+    Uses domination to prune: label A dominates B if A has less drive, less duty,
+    and higher reduced cost.
+    """
+    from lane_solver import can_add_leg
+
+    non_excl_lids = [lid for lid in day_lids if lid not in excl_pair_ids]
+    sorted_lids = sorted(non_excl_lids, key=lambda lid: lane_map[lid].pickup_time or 99)
+    lid_index = {lid: i for i, lid in enumerate(sorted_lids)}
+
+    # Precompute feasible transitions (not restricted to forward-in-time)
+    # can_add_leg handles time feasibility — no need for DAG restriction
+    lid_set = set(sorted_lids)
+    feasible_next = {}
+    for lid in sorted_lids:
+        nexts = []
+        for next_id, dh_mi, dh_h in graph.get(lid, []):
+            if next_id not in lid_set or next_id in excl_pair_ids:
+                continue
+            nexts.append((next_id, dh_mi, dh_h))
+        feasible_next[lid] = nexts
+
+    best_labels = {}  # (last_lid, num_legs) -> [(drive, duty, rc)]
+    MAX_PER_STATE = 10  # more labels per state = more exploration
+
+    def _dominated(drive, duty, rc, key):
+        for ed, edt, erc in best_labels.get(key, []):
+            if ed <= drive and edt <= duty and erc >= rc:
+                return True
+        return False
+
+    def _add(drive, duty, rc, key):
+        existing = best_labels.get(key, [])
+        kept = [(ed, edt, erc) for ed, edt, erc in existing
+                if not (drive <= ed and duty <= edt and rc >= erc)]
+        kept.append((drive, duty, rc))
+        kept.sort(key=lambda x: -x[2])
+        best_labels[key] = kept[:MAX_PER_STATE]
+
+    new_routes = []
+    processed = 0
+    MAX_PROCESSED = 200000  # allow deeper exploration
+
+    for start_lid in sorted_lids:
+        if processed > MAX_PROCESSED:
+            break
+        sl = lane_map[start_lid]
+        if sl.pickup_time is None:
+            continue
+
+        drive0 = sl.route_duration_hours
+        duty0 = sl.route_duration_hours + sl.dwell_hours + pre_post_h
+        clock0 = sl.finish_time
+        rc0 = dual_prices.get(start_lid, 0)
+
+        stack = [(start_lid, drive0, duty0, clock0, frozenset([start_lid]), rc0, [start_lid])]
+
+        while stack and processed < MAX_PROCESSED:
+            last_lid, dr, du, cl, vis, rc, path = stack.pop()
+            processed += 1
+
+            # Domination key includes corridor mix for diversity
+            corr_key = frozenset(_corridor_of_leg(lane_map[lid]) for lid in vis if lid in lane_map)
+            state_key = (last_lid, len(vis), corr_key)
+            if _dominated(dr, du, rc, state_key):
+                continue
+            _add(dr, du, rc, state_key)
+
+            if len(path) >= 2:
+                final_rc = rc - 1.0
+                if final_rc > -0.5:
+                    ls = frozenset(path)
+                    if ls not in existing_sets:
+                        cr = _make_candidate(path, lane_map, graph, base_city, pre_post_h, max_wait_h)
+                        if cr:
+                            exact_rc = sum(dual_prices.get(lid, 0) for lid in cr.lane_set) - (1.0 + 0.001 * cr.cost)
+                            if exact_rc > -0.5:
+                                new_routes.append((exact_rc, cr))
+
+            if len(path) >= max_legs:
+                continue
+
+            for next_lid, dh_mi, dh_h in feasible_next.get(last_lid, []):
+                if next_lid in vis:
+                    continue
+                nl = lane_map[next_lid]
+                result = can_add_leg(dr, du, cl, nl, dh_h, pre_post_h, max_wait_h, is_first=False)
+                if not result:
+                    continue
+                new_dr, new_du, new_cl, _ = result
+                next_rc = rc + dual_prices.get(next_lid, 0) - dh_mi * 0.001
+                new_corr = frozenset(_corridor_of_leg(lane_map[lid]) for lid in (vis | {next_lid}) if lid in lane_map)
+                new_state = (next_lid, len(vis) + 1, new_corr)
+                if not _dominated(new_dr, new_du, next_rc, new_state):
+                    stack.append((next_lid, new_dr, new_du, new_cl,
+                                  vis | {next_lid}, next_rc, path + [next_lid]))
+
+    new_routes.sort(key=lambda x: -x[0])
+    result_cands = [cr for _, cr in new_routes[:max_routes]]
+    if new_routes:
+        print(f"    SPPRC: {processed} labels, {len(result_cands)} routes (best_rc={new_routes[0][0]:.2f})")
+    else:
+        print(f"    SPPRC: {processed} labels, 0 routes")
+    return result_cands
+
+
 def _price_new_routes(dual_prices, day_lids, lane_map, graph, excl_pair_ids,
                        existing_sets, pre_post_h, max_legs, max_wait_h, max_deadhead,
                        base_city, max_new=80):
@@ -3141,11 +3252,11 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                 # Generate new columns guided by dual prices
                 pass  # continue to pricing
 
-            # Pricing: generate improving columns using dual prices
-            new_cands = _price_new_routes(
+            # Pricing: SPPRC label-setting DP (replaces greedy pricer)
+            new_cands = _spprc_pricing(
                 dual_prices, lids, lane_map, graph, excl_pair_ids,
-                existing_sets, pre_post_h, max_legs, max_wait_h, max_deadhead,
-                base_city, max_new=80)
+                pre_post_h, max_legs, max_wait_h, base_city,
+                existing_sets, max_routes=80)
 
             if not new_cands:
                 print(f"    No improving columns, stopping")
