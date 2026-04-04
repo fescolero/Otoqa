@@ -1,6 +1,7 @@
+'use node';
+
 import { v } from 'convex/values';
 import { action } from './_generated/server';
-import OpenAI from 'openai';
 
 // ==========================================
 // LANE SCHEDULE OCR IMPORT
@@ -14,11 +15,11 @@ export interface ExtractedLaneEntry {
   originCity: { value: string | null; confidence: 'high' | 'medium' | 'low' };
   originState: { value: string | null; confidence: 'high' | 'medium' | 'low' };
   originZip: { value: string | null; confidence: 'high' | 'medium' | 'low' };
-  originAddress: { value: string | null; confidence: 'high' | 'medium' | 'low' };
+  originAddress: { value: string | null; confidence: 'high' | 'medium' | 'low'; resolvedFromAlias?: boolean };
   destinationCity: { value: string | null; confidence: 'high' | 'medium' | 'low' };
   destinationState: { value: string | null; confidence: 'high' | 'medium' | 'low' };
   destinationZip: { value: string | null; confidence: 'high' | 'medium' | 'low' };
-  destinationAddress: { value: string | null; confidence: 'high' | 'medium' | 'low' };
+  destinationAddress: { value: string | null; confidence: 'high' | 'medium' | 'low'; resolvedFromAlias?: boolean };
   miles: { value: number | null; confidence: 'high' | 'medium' | 'low' };
   rateType: { value: string | null; confidence: 'high' | 'medium' | 'low' };
   rate: { value: number | null; confidence: 'high' | 'medium' | 'low' };
@@ -101,6 +102,7 @@ Fields to extract for each lane:
 - notes: any relevant notes or special instructions
 
 Each field must be an object: {"value": <value-or-null>, "confidence": "high"|"medium"|"low"}
+For originAddress and destinationAddress ONLY, if you permanently replaced a nickname/alias using a mapping table from the appendix, add "resolvedFromAlias": true to the object.
 
 Example:
 {
@@ -110,7 +112,7 @@ Example:
       "originCity": {"value": "Detroit", "confidence": "high"},
       "originState": {"value": "MI", "confidence": "high"},
       "originZip": {"value": "48201", "confidence": "medium"},
-      "originAddress": {"value": "1234 Industrial Blvd, Detroit, MI 48201", "confidence": "medium"},
+      "originAddress": {"value": "1234 Industrial Blvd, Detroit, MI 48201", "confidence": "high", "resolvedFromAlias": true},
       "destinationCity": {"value": "Chicago", "confidence": "high"},
       "destinationState": {"value": "IL", "confidence": "high"},
       "destinationZip": {"value": "60601", "confidence": "medium"},
@@ -134,8 +136,13 @@ Example:
 }`;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Extract lane entries from bid package pages using GPT-4o-mini vision.
+ * Extract lane entries from bid package pages using GLM-4V Modal API for Vision
+ * and Together AI (DeepSeek/Qwen) for Reasoning.
  */
 export const extractLanesFromDocument = action({
   args: {
@@ -147,62 +154,138 @@ export const extractLanesFromDocument = action({
     ),
   },
   handler: async (ctx, args): Promise<{ entries: ExtractedLaneEntry[]; error?: string }> => {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return { entries: [], error: 'OPENAI_API_KEY not configured' };
+    // 1. Vision Pass (Modal GLM-OCR)
+    const modalUrl = process.env.MODAL_OCR_URL;
+    if (!modalUrl) {
+      return { entries: [], error: 'MODAL_OCR_URL not configured' };
     }
 
-    const openai = new OpenAI({ apiKey });
+    const base64Images = args.pages.map((p) => p.imageUrl.split(',')[1] || p.imageUrl);
+    let rawMarkdownPages: string[] = [];
+
+    try {
+      const modalResponse = await fetch(modalUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          images_base64: base64Images,
+          prompt:
+            'Extract all text and tables from this document exactly as it appears. Preserve all line items, columns, headers, and rows perfectly. Output in Markdown format.',
+        }),
+      });
+
+      if (!modalResponse.ok) {
+        throw new Error(`Modal API returned ${modalResponse.status}: ${await modalResponse.text()}`);
+      }
+
+      const modalData = await modalResponse.json();
+      if (modalData.error) {
+        throw new Error(`Modal OCR Error: ${modalData.error}`);
+      }
+      rawMarkdownPages = modalData.texts || [];
+    } catch (error) {
+      console.error('Modal extraction error:', error);
+      return {
+        entries: [],
+        error: `Failed to extract text via Modal GLM-OCR: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    const fullMarkdown = rawMarkdownPages.map((text, i) => `--- PAGE ${i + 1} ---\n${text}`).join('\n\n');
+
+    // 2. Reasoner Pass (Together AI - DeepSeek/Qwen)
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return { entries: [], error: 'OPENROUTER_API_KEY not configured' };
+    }
 
     try {
       const allEntries: ExtractedLaneEntry[] = [];
 
-      // Process pages in chunks (up to 4 pages per chunk for context)
-      const chunkSize = 4;
-      for (let i = 0; i < args.pages.length; i += chunkSize) {
-        const chunk = args.pages.slice(i, i + chunkSize);
+      let response: Response | null = null;
 
-        const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];
-
-        for (const page of chunk) {
-          content.push({
-            type: 'image_url',
-            image_url: { url: page.imageUrl, detail: 'high' },
-          });
-          if (page.pageText) {
-            content.push({
-              type: 'text',
-              text: `Extracted page text:\n${page.pageText}`,
-            });
-          }
-        }
-
-        const response = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: buildLaneExtractionPrompt() },
-            { role: 'user', content },
-          ],
-          response_format: { type: 'json_object' },
-          max_tokens: 16000,
-          temperature: 0,
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'X-Title': 'Otoqa Lane OCR',
+          },
+          body: JSON.stringify({
+            model: 'qwen/qwen3.5-397b-a17b',
+            reasoning: { enabled: false },
+            messages: [
+              { role: 'system', content: buildLaneExtractionPrompt() },
+              {
+                role: 'user',
+                content: `Here is the precise Markdown extracted from the contract/bid package:\n\n${fullMarkdown}\n\nIMPORTANT: If there is an appendix or table anywhere in the document mapping facility nicknames/aliases to full addresses, use it to permanently replace the nicknames with the full addresses in the final JSON. Extract every distinct lane into the requested JSON schema. Return ONLY valid JSON and no markdown fences.`,
+              },
+            ],
+            response_format: { type: 'json_object' },
+            max_tokens: 3000,
+            temperature: 0,
+          }),
         });
 
-        const raw = response.choices[0]?.message?.content;
-        if (!raw) continue;
-
-        let parsed: { entries?: unknown[] } | null = null;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          // Try to repair truncated JSON
-          parsed = repairTruncatedJson(raw);
+        if (response.ok || ![429, 503, 504].includes(response.status) || attempt === 3) {
+          break;
         }
 
-        if (parsed?.entries && Array.isArray(parsed.entries)) {
-          for (const entry of parsed.entries) {
-            allEntries.push(normalizeExtractedLane(entry as Record<string, unknown>));
-          }
+        await sleep(attempt * 1500);
+      }
+
+      if (!response) {
+        return { entries: [], error: 'OpenRouter API request did not produce a response' };
+      }
+
+      if (!response.ok) {
+        return { entries: [], error: `OpenRouter API error ${response.status}: ${await response.text()}` };
+      }
+
+      const payload = (await response.json()) as {
+        choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }>;
+        error?: { message?: string };
+      };
+
+      if (payload.error?.message) {
+        return { entries: [], error: `OpenRouter API error: ${payload.error.message}` };
+      }
+
+      const rawContent = payload.choices?.[0]?.message?.content as unknown;
+      let raw: string | null = null;
+      if (typeof rawContent === 'string') {
+        raw = rawContent;
+      } else if (Array.isArray(rawContent)) {
+        raw = rawContent
+          .map((part: unknown) => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part === 'object' && 'text' in part) {
+              return String((part as { text?: unknown }).text ?? '');
+            }
+            return '';
+          })
+          .join('');
+      }
+
+      if (!raw) return { entries: [], error: 'Empty response from LLM Reasoner' };
+
+      let parsed: { entries?: unknown[] } | null = null;
+      try {
+        parsed = JSON.parse(
+          raw
+            .replace(/^```json\s*/i, '')
+            .replace(/^```\s*/i, '')
+            .replace(/```\s*$/i, '')
+            .trim(),
+        );
+      } catch {
+        parsed = repairTruncatedJson(raw);
+      }
+
+      if (parsed?.entries && Array.isArray(parsed.entries)) {
+        for (const entry of parsed.entries) {
+          allEntries.push(normalizeExtractedLane(entry as Record<string, unknown>));
         }
       }
 
@@ -261,11 +344,29 @@ function toConfidenceField<T>(
     return { value: null, confidence: 'low' };
   }
   const rawValue = field.value ?? null;
-  const confidence = (['high', 'medium', 'low'].includes(field.confidence as string)
-    ? field.confidence
-    : 'low') as 'high' | 'medium' | 'low';
+  const confidence = (['high', 'medium', 'low'].includes(field.confidence as string) ? field.confidence : 'low') as
+    | 'high'
+    | 'medium'
+    | 'low';
   const value = transform ? transform(rawValue) : (rawValue as T | null);
   return { value, confidence };
+}
+
+function toAddressField(
+  obj: Record<string, unknown>,
+  key: string,
+): { value: string | null; confidence: 'high' | 'medium' | 'low'; resolvedFromAlias?: boolean } {
+  const field = obj[key] as { value?: unknown; confidence?: string; resolvedFromAlias?: boolean } | undefined;
+  if (!field || typeof field !== 'object') {
+    return { value: null, confidence: 'low' };
+  }
+  const rawValue = field.value ?? null;
+  const confidence = (['high', 'medium', 'low'].includes(field.confidence as string) ? field.confidence : 'low') as
+    | 'high'
+    | 'medium'
+    | 'low';
+  const value = typeof rawValue === 'string' ? rawValue.trim() : null;
+  return { value, confidence, resolvedFromAlias: field.resolvedFromAlias === true };
 }
 
 function normalizeExtractedLane(raw: Record<string, unknown>): ExtractedLaneEntry {
@@ -274,11 +375,13 @@ function normalizeExtractedLane(raw: Record<string, unknown>): ExtractedLaneEntr
     originCity: toConfidenceField(raw, 'originCity', (v) => (typeof v === 'string' ? v.trim() : null)),
     originState: toConfidenceField(raw, 'originState', (v) => (typeof v === 'string' ? v.trim().toUpperCase() : null)),
     originZip: toConfidenceField(raw, 'originZip', (v) => (typeof v === 'string' ? v.trim() : null)),
-    originAddress: toConfidenceField(raw, 'originAddress', (v) => (typeof v === 'string' ? v.trim() : null)),
+    originAddress: toAddressField(raw, 'originAddress'),
     destinationCity: toConfidenceField(raw, 'destinationCity', (v) => (typeof v === 'string' ? v.trim() : null)),
-    destinationState: toConfidenceField(raw, 'destinationState', (v) => (typeof v === 'string' ? v.trim().toUpperCase() : null)),
+    destinationState: toConfidenceField(raw, 'destinationState', (v) =>
+      typeof v === 'string' ? v.trim().toUpperCase() : null,
+    ),
     destinationZip: toConfidenceField(raw, 'destinationZip', (v) => (typeof v === 'string' ? v.trim() : null)),
-    destinationAddress: toConfidenceField(raw, 'destinationAddress', (v) => (typeof v === 'string' ? v.trim() : null)),
+    destinationAddress: toAddressField(raw, 'destinationAddress'),
     miles: toConfidenceField(raw, 'miles', (v) => (typeof v === 'number' ? v : null)),
     rateType: toConfidenceField(raw, 'rateType', (v) => {
       if (typeof v !== 'string') return null;

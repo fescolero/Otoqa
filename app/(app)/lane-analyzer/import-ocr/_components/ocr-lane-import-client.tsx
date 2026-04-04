@@ -10,20 +10,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import {
@@ -58,6 +46,7 @@ interface OcrPage {
 interface ExtractedField<T = string> {
   value: T | null;
   confidence: 'high' | 'medium' | 'low';
+  resolvedFromAlias?: boolean;
 }
 
 interface ExtractedStop {
@@ -269,15 +258,17 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
     const { mappedHeaders, allRows } = csvMapping;
 
     // Build keyed row objects from raw rows + confirmed mapping
-    const keyedRows: Record<string, string>[] = allRows.map((values) => {
-      const row: Record<string, string> = {};
-      mappedHeaders.forEach((key, idx) => {
-        if (key && values[idx] !== undefined) {
-          row[key] = values[idx].trim();
-        }
-      });
-      return row;
-    }).filter((row) => Object.values(row).some((v) => v));
+    const keyedRows: Record<string, string>[] = allRows
+      .map((values) => {
+        const row: Record<string, string> = {};
+        mappedHeaders.forEach((key, idx) => {
+          if (key && values[idx] !== undefined) {
+            row[key] = values[idx].trim();
+          }
+        });
+        return row;
+      })
+      .filter((row) => Object.values(row).some((v) => v));
 
     // Map to ReviewRow format
     const mapped: ReviewRow[] = keyedRows.map((row) => {
@@ -314,37 +305,109 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
   const handleDownloadTemplate = () => {
     const headers = [
       'Lane Name',
-      'Origin Address', 'Origin City', 'Origin State', 'Origin Zip',
-      'Origin Appt Type', 'Origin Time Start', 'Origin Time End',
-      'Stop 1 Address', 'Stop 1 City', 'Stop 1 State', 'Stop 1 Zip', 'Stop 1 Type',
-      'Stop 1 Appt Type', 'Stop 1 Time Start', 'Stop 1 Time End',
-      'Stop 2 Address', 'Stop 2 City', 'Stop 2 State', 'Stop 2 Zip', 'Stop 2 Type',
-      'Stop 2 Appt Type', 'Stop 2 Time Start', 'Stop 2 Time End',
-      'Stop 3 Address', 'Stop 3 City', 'Stop 3 State', 'Stop 3 Zip', 'Stop 3 Type',
-      'Stop 3 Appt Type', 'Stop 3 Time Start', 'Stop 3 Time End',
-      'Destination Address', 'Destination City', 'Destination State', 'Destination Zip',
-      'Dest Appt Type', 'Dest Time Start', 'Dest Time End',
-      'Miles', 'Rate', 'Rate Type',
-      'Active Days', 'Exclude Federal Holidays', 'Equipment Type',
-      'Contract Start', 'Contract End',
-      'Round Trip', 'HCR', 'Trip Number', 'Notes',
+      'Origin Address',
+      'Origin City',
+      'Origin State',
+      'Origin Zip',
+      'Origin Appt Type',
+      'Origin Time Start',
+      'Origin Time End',
+      'Stop 1 Address',
+      'Stop 1 City',
+      'Stop 1 State',
+      'Stop 1 Zip',
+      'Stop 1 Type',
+      'Stop 1 Appt Type',
+      'Stop 1 Time Start',
+      'Stop 1 Time End',
+      'Stop 2 Address',
+      'Stop 2 City',
+      'Stop 2 State',
+      'Stop 2 Zip',
+      'Stop 2 Type',
+      'Stop 2 Appt Type',
+      'Stop 2 Time Start',
+      'Stop 2 Time End',
+      'Stop 3 Address',
+      'Stop 3 City',
+      'Stop 3 State',
+      'Stop 3 Zip',
+      'Stop 3 Type',
+      'Stop 3 Appt Type',
+      'Stop 3 Time Start',
+      'Stop 3 Time End',
+      'Destination Address',
+      'Destination City',
+      'Destination State',
+      'Destination Zip',
+      'Dest Appt Type',
+      'Dest Time Start',
+      'Dest Time End',
+      'Miles',
+      'Rate',
+      'Rate Type',
+      'Active Days',
+      'Exclude Federal Holidays',
+      'Equipment Type',
+      'Contract Start',
+      'Contract End',
+      'Round Trip',
+      'HCR',
+      'Trip Number',
+      'Notes',
     ];
     const exampleRow = [
       'Chicago to Houston Multi-Stop',
-      '123 Main St', 'Chicago', 'IL', '60601',
-      'APPT', '06:00', '07:00',
-      '500 Market St', 'Indianapolis', 'IN', '46201', 'Delivery',
-      'APPT', '12:00', '14:00',
-      '200 Broadway', 'Nashville', 'TN', '37201', 'Delivery',
-      'FCFS', '08:00', '16:00',
-      '', '', '', '', '',
-      '', '', '',
-      '789 Elm St', 'Houston', 'TX', '77001',
-      'APPT', '18:00', '20:00',
-      '1050', '3200', 'Flat Rate',
-      'Mon,Tue,Wed,Thu,Fri', 'Yes', 'Dry Van',
-      '2026-01-01', '2026-12-31',
-      'No', '', '', '',
+      '123 Main St',
+      'Chicago',
+      'IL',
+      '60601',
+      'APPT',
+      '06:00',
+      '07:00',
+      '500 Market St',
+      'Indianapolis',
+      'IN',
+      '46201',
+      'Delivery',
+      'APPT',
+      '12:00',
+      '14:00',
+      '200 Broadway',
+      'Nashville',
+      'TN',
+      '37201',
+      'Delivery',
+      'FCFS',
+      '08:00',
+      '16:00',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '789 Elm St',
+      'Houston',
+      'TX',
+      '77001',
+      'APPT',
+      '18:00',
+      '20:00',
+      '1050',
+      '3200',
+      'Flat Rate',
+      'Mon,Tue,Wed,Thu,Fri',
+      'Yes',
+      'Dry Van',
+      '2026-01-01',
+      '2026-12-31',
+      'No',
+      '',
+      '',
+      '',
     ];
     const csv = headers.join(',') + '\n' + exampleRow.join(',');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -361,7 +424,9 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
     setStep('extracting');
 
     const totalPages = ocrPages.length;
-    const chunkSize = 4;
+    // CRITICAL: Convex has a hard 5-minute timeout.
+    // GLM-4V takes ~60-80s per dense page. Chunk size must be 1 to prevent Convex timeouts!
+    const chunkSize = 1;
     const totalChunks = Math.ceil(totalPages / chunkSize);
     const allEntries: ExtractedLane[] = [];
 
@@ -400,8 +465,10 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
       const seen = new Set<string>();
       const dedupedEntries = allEntries.filter((lane) => {
         const key = [
-          lane.originCity.value, lane.originState.value,
-          lane.destinationCity.value, lane.destinationState.value,
+          lane.originCity.value,
+          lane.originState.value,
+          lane.destinationCity.value,
+          lane.destinationState.value,
           lane.frequency.value,
         ].join('|');
         if (seen.has(key)) return false;
@@ -454,22 +521,16 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
   // ---- STEP 3: REVIEW & IMPORT ----
 
   const toggleExpand = (index: number) => {
-    setReviewRows((prev) =>
-      prev.map((r, i) => (i === index ? { ...r, expanded: !r.expanded } : r)),
-    );
+    setReviewRows((prev) => prev.map((r, i) => (i === index ? { ...r, expanded: !r.expanded } : r)));
   };
 
   const toggleSkip = (index: number) => {
-    setReviewRows((prev) =>
-      prev.map((r, i) => (i === index ? { ...r, skip: !r.skip } : r)),
-    );
+    setReviewRows((prev) => prev.map((r, i) => (i === index ? { ...r, skip: !r.skip } : r)));
   };
 
   const updateOverride = (index: number, field: string, value: unknown) => {
     setReviewRows((prev) =>
-      prev.map((r, i) =>
-        i === index ? { ...r, overrides: { ...r.overrides, [field]: value } } : r,
-      ),
+      prev.map((r, i) => (i === index ? { ...r, overrides: { ...r.overrides, [field]: value } } : r)),
     );
   };
 
@@ -502,9 +563,10 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
         // Build lane name including stops
         const stops = lane.intermediateStops ?? [];
         const stopCities = stops.filter((s) => s.city).map((s) => s.city);
-        const defaultName = stopCities.length > 0
-          ? `${originCity}, ${originState} → ${stopCities.join(' → ')} → ${destCity}, ${destState}`
-          : `${originCity}, ${originState} → ${destCity}, ${destState}`;
+        const defaultName =
+          stopCities.length > 0
+            ? `${originCity}, ${originState} → ${stopCities.join(' → ')} → ${destCity}, ${destState}`
+            : `${originCity}, ${originState} → ${destCity}, ${destState}`;
 
         await createEntry({
           sessionId: targetSessionId as Id<'laneAnalysisSessions'>,
@@ -526,19 +588,20 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
           destinationAppointmentType: (lane.destApptType?.value ?? 'APPT') as 'APPT' | 'FCFS' | 'Live',
           destinationScheduledTime: lane.destTimeStart?.value ?? undefined,
           destinationScheduledEndTime: lane.destTimeEnd?.value ?? undefined,
-          intermediateStops: stops.length > 0
-            ? stops.map((s, i) => ({
-                address: s.address || `${s.city}, ${s.state}`,
-                city: s.city,
-                state: s.state,
-                zip: s.zip,
-                stopOrder: i + 1,
-                stopType: s.stopType,
-                type: (s.apptType ?? 'APPT') as 'APPT' | 'FCFS' | 'Live',
-                arrivalTime: s.timeStart || undefined,
-                arrivalEndTime: s.timeEnd || undefined,
-              }))
-            : undefined,
+          intermediateStops:
+            stops.length > 0
+              ? stops.map((s, i) => ({
+                  address: s.address || `${s.city}, ${s.state}`,
+                  city: s.city,
+                  state: s.state,
+                  zip: s.zip,
+                  stopOrder: i + 1,
+                  stopType: s.stopType,
+                  type: (s.apptType ?? 'APPT') as 'APPT' | 'FCFS' | 'Live',
+                  arrivalTime: s.timeStart || undefined,
+                  arrivalEndTime: s.timeEnd || undefined,
+                }))
+              : undefined,
           routeMiles: o.miles ?? lane.miles.value ?? undefined,
           isRoundTrip: lane.isRoundTrip.value ?? false,
           isCityRoute: o.isCityRoute ?? false,
@@ -551,9 +614,17 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
           contractPeriodStart: lane.contractStart.value ?? undefined,
           contractPeriodEnd: lane.contractEnd.value ?? undefined,
           rateType: (o.rateType ?? lane.rateType.value ?? 'Flat Rate') as 'Flat Rate' | 'Per Mile' | 'Per Stop',
-          ratePerRun: (o.rateType ?? lane.rateType.value) === 'Flat Rate' ? (o.rate ?? lane.rate.value ?? undefined) : undefined,
-          ratePerMile: (o.rateType ?? lane.rateType.value) === 'Per Mile' ? (o.rate ?? lane.rate.value ?? undefined) : undefined,
-          equipmentClass: (o.equipmentType ?? lane.equipmentType.value ?? undefined) as 'Dry Van' | 'Refrigerated' | 'Flatbed' | 'Tanker' | 'Bobtail' | undefined,
+          ratePerRun:
+            (o.rateType ?? lane.rateType.value) === 'Flat Rate' ? (o.rate ?? lane.rate.value ?? undefined) : undefined,
+          ratePerMile:
+            (o.rateType ?? lane.rateType.value) === 'Per Mile' ? (o.rate ?? lane.rate.value ?? undefined) : undefined,
+          equipmentClass: (o.equipmentType ?? lane.equipmentType.value ?? undefined) as
+            | 'Dry Van'
+            | 'Refrigerated'
+            | 'Flatbed'
+            | 'Tanker'
+            | 'Bobtail'
+            | undefined,
         });
         imported++;
       }
@@ -600,16 +671,18 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
         <Card>
           <CardHeader>
             <CardTitle>Import Lanes</CardTitle>
-            <CardDescription>
-              Upload a CSV spreadsheet or use OCR to extract lanes from a PDF/image
-            </CardDescription>
+            <CardDescription>Upload a CSV spreadsheet or use OCR to extract lanes from a PDF/image</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Mode Toggle */}
             <div className="flex rounded-lg border p-1 w-fit">
               <button
                 type="button"
-                onClick={() => { setUploadMode('csv'); setFiles([]); setOcrPages([]); }}
+                onClick={() => {
+                  setUploadMode('csv');
+                  setFiles([]);
+                  setOcrPages([]);
+                }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                   uploadMode === 'csv'
                     ? 'bg-primary text-primary-foreground'
@@ -621,7 +694,11 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
               </button>
               <button
                 type="button"
-                onClick={() => { setUploadMode('ocr'); setFiles([]); setOcrPages([]); }}
+                onClick={() => {
+                  setUploadMode('ocr');
+                  setFiles([]);
+                  setOcrPages([]);
+                }}
                 className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                   uploadMode === 'ocr'
                     ? 'bg-primary text-primary-foreground'
@@ -658,16 +735,8 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                 >
                   <FileSpreadsheet className="h-10 w-10 mx-auto text-muted-foreground mb-4" />
                   <p className="font-medium">Drop a CSV file here or click to browse</p>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    Supports .csv and .tsv files
-                  </p>
-                  <input
-                    ref={csvInputRef}
-                    type="file"
-                    accept=".csv,.tsv"
-                    className="hidden"
-                    onChange={handleCsvFile}
-                  />
+                  <p className="text-sm text-muted-foreground mt-1">Supports .csv and .tsv files</p>
+                  <input ref={csvInputRef} type="file" accept=".csv,.tsv" className="hidden" onChange={handleCsvFile} />
                 </div>
 
                 <div className="flex items-center gap-3 text-sm">
@@ -675,20 +744,17 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                     <Download className="h-3.5 w-3.5 mr-1.5" />
                     Download CSV Template
                   </Button>
-                  <span className="text-muted-foreground">
-                    Use the template for the expected column format
-                  </span>
+                  <span className="text-muted-foreground">Use the template for the expected column format</span>
                 </div>
 
                 {/* Column mapping hint */}
                 <div className="rounded-md border bg-muted/50 p-3">
                   <p className="text-xs font-medium mb-1.5">Accepted column headers:</p>
                   <p className="text-xs text-muted-foreground leading-relaxed">
-                    Lane Name, Origin Address / City / State / Zip / Appt Type / Time Start / Time End,
-                    Stop 1–10 Address / City / State / Zip / Type / Appt Type / Time Start / Time End,
-                    Dest Address / City / State / Zip / Appt Type / Time Start / Time End,
-                    Miles, Rate, Rate Type, Active Days, Equipment,
-                    Contract Start, Contract End, Round Trip, HCR, Trip #, Notes
+                    Lane Name, Origin Address / City / State / Zip / Appt Type / Time Start / Time End, Stop 1–10
+                    Address / City / State / Zip / Type / Appt Type / Time Start / Time End, Dest Address / City / State
+                    / Zip / Appt Type / Time Start / Time End, Miles, Rate, Rate Type, Active Days, Equipment, Contract
+                    Start, Contract End, Round Trip, HCR, Trip #, Notes
                   </p>
                 </div>
               </div>
@@ -718,9 +784,7 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                 >
                   <Upload className="h-10 w-10 mx-auto text-muted-foreground mb-4" />
                   <p className="font-medium">Drop files here or click to browse</p>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    Supports PDF, JPG, PNG
-                  </p>
+                  <p className="text-sm text-muted-foreground mt-1">Supports PDF, JPG, PNG</p>
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -737,18 +801,11 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                       <div key={i} className="flex items-center gap-2 text-sm">
                         <FileText className="h-4 w-4 text-muted-foreground" />
                         <span>{f.name}</span>
-                        <span className="text-muted-foreground">
-                          ({(f.size / 1024).toFixed(0)} KB)
-                        </span>
+                        <span className="text-muted-foreground">({(f.size / 1024).toFixed(0)} KB)</span>
                       </div>
                     ))}
-                    <p className="text-sm text-muted-foreground">
-                      {ocrPages.length} page(s) ready for extraction
-                    </p>
-                    <Button
-                      onClick={handleExtract}
-                      disabled={ocrPages.length === 0 || !targetSessionId}
-                    >
+                    <p className="text-sm text-muted-foreground">{ocrPages.length} page(s) ready for extraction</p>
+                    <Button onClick={handleExtract} disabled={ocrPages.length === 0 || !targetSessionId}>
                       Extract Lanes
                     </Button>
                   </div>
@@ -765,9 +822,7 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
           <CardContent className="py-16 text-center space-y-4">
             <Loader2 className="h-10 w-10 mx-auto animate-spin text-primary" />
             <p className="font-medium">Extracting lanes from document...</p>
-            <p className="text-sm text-muted-foreground">
-              {extractionProgress.status || 'Preparing pages...'}
-            </p>
+            <p className="text-sm text-muted-foreground">{extractionProgress.status || 'Preparing pages...'}</p>
             {extractionProgress.total > 0 && (
               <div className="max-w-md mx-auto space-y-2">
                 <div className="w-full bg-muted rounded-full h-2.5">
@@ -796,9 +851,7 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
               <CardDescription>
                 Verify each CSV column is mapped to the correct field. Fix any mismatches before importing.
                 {csvMapping.unmapped.length > 0 && (
-                  <span className="text-amber-600 ml-1">
-                    {csvMapping.unmapped.length} column(s) not mapped.
-                  </span>
+                  <span className="text-amber-600 ml-1">{csvMapping.unmapped.length} column(s) not mapped.</span>
                 )}
               </CardDescription>
             </CardHeader>
@@ -844,7 +897,10 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                             </Select>
                           </td>
                           {csvMapping.sampleRows.map((row, rowIdx) => (
-                            <td key={rowIdx} className="p-2 text-muted-foreground max-w-[200px] truncate whitespace-nowrap">
+                            <td
+                              key={rowIdx}
+                              className="p-2 text-muted-foreground max-w-[200px] truncate whitespace-nowrap"
+                            >
                               {row[colIdx] ?? ''}
                             </td>
                           ))}
@@ -858,13 +914,17 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
           </Card>
 
           <div className="flex items-center justify-between">
-            <Button variant="outline" onClick={() => { setStep('upload'); setCsvMapping(null); }}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setStep('upload');
+                setCsvMapping(null);
+              }}
+            >
               Start Over
             </Button>
             <div className="flex items-center gap-3">
-              <span className="text-sm text-muted-foreground">
-                {csvMapping.allRows.length} row(s) found
-              </span>
+              <span className="text-sm text-muted-foreground">{csvMapping.allRows.length} row(s) found</span>
               <Button onClick={handleConfirmCsvMapping} disabled={!targetSessionId}>
                 <Check className="h-4 w-4 mr-1.5" />
                 Confirm & Continue
@@ -881,12 +941,18 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
             <div>
               <span className="font-medium">{reviewRows.length} lanes extracted</span>
               <span className="text-muted-foreground ml-2">
-                ({reviewRows.filter((r) => !r.skip).length} to import,{' '}
-                {reviewRows.filter((r) => r.skip).length} skipped)
+                ({reviewRows.filter((r) => !r.skip).length} to import, {reviewRows.filter((r) => r.skip).length}{' '}
+                skipped)
               </span>
             </div>
             <div className="flex gap-2">
-              <Button variant="outline" onClick={() => { setStep('upload'); setReviewRows([]); }}>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setStep('upload');
+                  setReviewRows([]);
+                }}
+              >
                 Start Over
               </Button>
               <Button
@@ -901,10 +967,7 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
 
           {reviewRows.map((row, index) => (
             <Card key={index} className={row.skip ? 'opacity-50' : ''}>
-              <div
-                className="flex items-center gap-3 p-4 cursor-pointer"
-                onClick={() => toggleExpand(index)}
-              >
+              <div className="flex items-center gap-3 p-4 cursor-pointer" onClick={() => toggleExpand(index)}>
                 {row.expanded ? (
                   <ChevronDown className="h-4 w-4 shrink-0" />
                 ) : (
@@ -915,22 +978,47 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                   <div className="font-medium truncate">
                     {row.overrides.laneName ?? row.lane.laneName.value ?? 'Unnamed Lane'}
                   </div>
-                  <div className="text-sm text-muted-foreground">
-                    {row.overrides.originCity ?? row.lane.originCity.value},{' '}
-                    {row.overrides.originState ?? row.lane.originState.value}
+                  <div className="text-sm text-muted-foreground flex items-center flex-wrap">
+                    <span>
+                      {row.overrides.originCity ?? row.lane.originCity.value},{' '}
+                      {row.overrides.originState ?? row.lane.originState.value}
+                      {row.lane.originAddress?.resolvedFromAlias && (
+                        <span title="Address resolved from Appendix mapping" className="cursor-help ml-1">
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] leading-none h-4 px-1 py-0 bg-blue-500/10 border-blue-500/30 text-blue-600 font-medium"
+                          >
+                            Mapped
+                          </Badge>
+                        </span>
+                      )}
+                    </span>
                     {(row.lane.intermediateStops ?? []).length > 0 && (
-                      <>
+                      <span className="mx-1.5">
                         {' → '}
                         {row.lane.intermediateStops.map((s) => `${s.city}, ${s.state}`).join(' → ')}
-                      </>
+                      </span>
                     )}
-                    {' → '}
-                    {row.overrides.destinationCity ?? row.lane.destinationCity.value},{' '}
-                    {row.overrides.destinationState ?? row.lane.destinationState.value}
-                    {(row.overrides.miles ?? row.lane.miles.value) &&
-                      ` • ${row.overrides.miles ?? row.lane.miles.value} mi`}
+                    <span className="mx-1.5">{' → '}</span>
+                    <span>
+                      {row.overrides.destinationCity ?? row.lane.destinationCity.value},{' '}
+                      {row.overrides.destinationState ?? row.lane.destinationState.value}
+                      {row.lane.destinationAddress?.resolvedFromAlias && (
+                        <span title="Address resolved from Appendix mapping" className="cursor-help ml-1">
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] leading-none h-4 px-1 py-0 bg-blue-500/10 border-blue-500/30 text-blue-600 font-medium"
+                          >
+                            Mapped
+                          </Badge>
+                        </span>
+                      )}
+                    </span>
+                    {(row.overrides.miles ?? row.lane.miles.value) && (
+                      <span className="ml-1.5">• {row.overrides.miles ?? row.lane.miles.value} mi</span>
+                    )}
                     {(row.lane.intermediateStops ?? []).length > 0 && (
-                      <Badge variant="outline" className="ml-2 text-xs">
+                      <Badge variant="outline" className="ml-2 text-[10px] h-4">
                         {row.lane.intermediateStops.length + 2} stops
                       </Badge>
                     )}
@@ -939,27 +1027,39 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                   <div className="text-xs text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
                     {row.lane.originApptType?.value && (
                       <span>
-                        <span className="font-medium">PU:</span>{' '}
-                        {row.lane.originApptType.value}
+                        <span className="font-medium">PU:</span> {row.lane.originApptType.value}
                         {row.lane.originTimeStart?.value && (
-                          <> {row.lane.originTimeStart.value}{row.lane.originTimeEnd?.value && `–${row.lane.originTimeEnd.value}`}</>
+                          <>
+                            {' '}
+                            {row.lane.originTimeStart.value}
+                            {row.lane.originTimeEnd?.value && `–${row.lane.originTimeEnd.value}`}
+                          </>
                         )}
                       </span>
                     )}
-                    {(row.lane.intermediateStops ?? []).map((s, si) => (
-                      (s.apptType || s.timeStart) ? (
+                    {(row.lane.intermediateStops ?? []).map((s, si) =>
+                      s.apptType || s.timeStart ? (
                         <span key={si}>
-                          <span className="font-medium">Stop {si + 1}:</span>{' '}
-                          {s.apptType}{s.timeStart && <> {s.timeStart}{s.timeEnd && `–${s.timeEnd}`}</>}
+                          <span className="font-medium">Stop {si + 1}:</span> {s.apptType}
+                          {s.timeStart && (
+                            <>
+                              {' '}
+                              {s.timeStart}
+                              {s.timeEnd && `–${s.timeEnd}`}
+                            </>
+                          )}
                         </span>
-                      ) : null
-                    ))}
+                      ) : null,
+                    )}
                     {row.lane.destApptType?.value && (
                       <span>
-                        <span className="font-medium">DEL:</span>{' '}
-                        {row.lane.destApptType.value}
+                        <span className="font-medium">DEL:</span> {row.lane.destApptType.value}
                         {row.lane.destTimeStart?.value && (
-                          <> {row.lane.destTimeStart.value}{row.lane.destTimeEnd?.value && `–${row.lane.destTimeEnd.value}`}</>
+                          <>
+                            {' '}
+                            {row.lane.destTimeStart.value}
+                            {row.lane.destTimeEnd?.value && `–${row.lane.destTimeEnd.value}`}
+                          </>
                         )}
                       </span>
                     )}
@@ -991,7 +1091,10 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={(e) => { e.stopPropagation(); toggleSkip(index); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSkip(index);
+                    }}
                   >
                     {row.skip ? 'Include' : 'Skip'}
                   </Button>
@@ -1096,9 +1199,11 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                               onChange={(e) => {
                                 const updated = [...row.lane.intermediateStops];
                                 updated[sIdx] = { ...updated[sIdx], address: e.target.value };
-                                setReviewRows((prev) => prev.map((r, i) =>
-                                  i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r
-                                ));
+                                setReviewRows((prev) =>
+                                  prev.map((r, i) =>
+                                    i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r,
+                                  ),
+                                );
                               }}
                               className="col-span-2 h-7 text-xs"
                             />
@@ -1108,9 +1213,11 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                               onChange={(e) => {
                                 const updated = [...row.lane.intermediateStops];
                                 updated[sIdx] = { ...updated[sIdx], city: e.target.value };
-                                setReviewRows((prev) => prev.map((r, i) =>
-                                  i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r
-                                ));
+                                setReviewRows((prev) =>
+                                  prev.map((r, i) =>
+                                    i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r,
+                                  ),
+                                );
                               }}
                               className="h-7 text-xs"
                             />
@@ -1121,9 +1228,11 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                                 onChange={(e) => {
                                   const updated = [...row.lane.intermediateStops];
                                   updated[sIdx] = { ...updated[sIdx], state: e.target.value };
-                                  setReviewRows((prev) => prev.map((r, i) =>
-                                    i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r
-                                  ));
+                                  setReviewRows((prev) =>
+                                    prev.map((r, i) =>
+                                      i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r,
+                                    ),
+                                  );
                                 }}
                                 className="h-7 text-xs w-14"
                               />
@@ -1133,9 +1242,11 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                                 onChange={(e) => {
                                   const updated = [...row.lane.intermediateStops];
                                   updated[sIdx] = { ...updated[sIdx], zip: e.target.value };
-                                  setReviewRows((prev) => prev.map((r, i) =>
-                                    i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r
-                                  ));
+                                  setReviewRows((prev) =>
+                                    prev.map((r, i) =>
+                                      i === index ? { ...r, lane: { ...r.lane, intermediateStops: updated } } : r,
+                                    ),
+                                  );
                                 }}
                                 className="h-7 text-xs"
                               />
@@ -1263,15 +1374,29 @@ export function OcrLaneImportClient({ organizationId, userId }: OcrLaneImportCli
                         onCheckedChange={(v) => updateOverride(index, 'isCityRoute', v)}
                         id={`city-${index}`}
                       />
-                      <Label htmlFor={`city-${index}`} className="text-xs">City Route</Label>
+                      <Label htmlFor={`city-${index}`} className="text-xs">
+                        City Route
+                      </Label>
                     </div>
                   </div>
 
                   {/* Extra info from OCR */}
-                  {(row.lane.hcr.value || row.lane.tripNumber.value || row.lane.contractStart.value || row.lane.notes.value) && (
+                  {(row.lane.hcr.value ||
+                    row.lane.tripNumber.value ||
+                    row.lane.contractStart.value ||
+                    row.lane.notes.value) && (
                     <div className="text-xs text-muted-foreground space-y-1 pt-2 border-t">
-                      {row.lane.hcr.value && <div>HCR: {row.lane.hcr.value}{row.lane.tripNumber.value && ` / Trip: ${row.lane.tripNumber.value}`}</div>}
-                      {row.lane.contractStart.value && <div>Contract: {row.lane.contractStart.value} → {row.lane.contractEnd.value ?? '?'}</div>}
+                      {row.lane.hcr.value && (
+                        <div>
+                          HCR: {row.lane.hcr.value}
+                          {row.lane.tripNumber.value && ` / Trip: ${row.lane.tripNumber.value}`}
+                        </div>
+                      )}
+                      {row.lane.contractStart.value && (
+                        <div>
+                          Contract: {row.lane.contractStart.value} → {row.lane.contractEnd.value ?? '?'}
+                        </div>
+                      )}
                       {row.lane.notes.value && <div>Notes: {row.lane.notes.value}</div>}
                     </div>
                   )}
@@ -1313,8 +1438,8 @@ async function renderPdfToImages(file: File): Promise<OcrPage[]> {
     const textItems = textContent.items as Array<{ str: string }>;
     const pageText = textItems.map((item) => item.str).join(' ');
 
-    // Render to canvas at 150 DPI
-    const scale = 150 / 72;
+    // Keep OCR images within the vision model's safe resolution range.
+    const scale = 110 / 72;
     const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = viewport.width;
@@ -1337,14 +1462,27 @@ function normalizeHeader(h: string): string {
 }
 
 const HEADER_MAP: Record<string, string> = {
-  lanename: 'laneName', name: 'laneName', lane: 'laneName',
-  origincity: 'originCity', origcity: 'originCity', fromcity: 'originCity',
-  originstate: 'originState', origstate: 'originState', fromstate: 'originState',
-  originzip: 'originZip', origzip: 'originZip', fromzip: 'originZip',
-  originaddress: 'originAddress', origaddress: 'originAddress', fromaddress: 'originAddress',
-  originappttype: 'originApptType', originappointmenttype: 'originApptType',
-  origintimestart: 'originTimeStart', originscheduledtime: 'originTimeStart',
-  origintimeend: 'originTimeEnd', originscheduledendtime: 'originTimeEnd',
+  lanename: 'laneName',
+  name: 'laneName',
+  lane: 'laneName',
+  origincity: 'originCity',
+  origcity: 'originCity',
+  fromcity: 'originCity',
+  originstate: 'originState',
+  origstate: 'originState',
+  fromstate: 'originState',
+  originzip: 'originZip',
+  origzip: 'originZip',
+  fromzip: 'originZip',
+  originaddress: 'originAddress',
+  origaddress: 'originAddress',
+  fromaddress: 'originAddress',
+  originappttype: 'originApptType',
+  originappointmenttype: 'originApptType',
+  origintimestart: 'originTimeStart',
+  originscheduledtime: 'originTimeStart',
+  origintimeend: 'originTimeEnd',
+  originscheduledendtime: 'originTimeEnd',
   // Intermediate stops (up to 10)
   ...Object.fromEntries(
     Array.from({ length: 10 }, (_, i) => {
@@ -1362,25 +1500,56 @@ const HEADER_MAP: Record<string, string> = {
       ];
     }).flat(),
   ),
-  destinationcity: 'destCity', destcity: 'destCity', tocity: 'destCity',
-  destinationstate: 'destState', deststate: 'destState', tostate: 'destState',
-  destinationzip: 'destZip', destzip: 'destZip', tozip: 'destZip',
-  destinationaddress: 'destAddress', destaddress: 'destAddress', toaddress: 'destAddress',
-  destappttype: 'destApptType', destinationappttype: 'destApptType',
-  desttimestart: 'destTimeStart', destinationtimestart: 'destTimeStart',
-  desttimeend: 'destTimeEnd', destinationtimeend: 'destTimeEnd',
-  miles: 'miles', distance: 'miles', routemiles: 'miles',
-  rate: 'rate', price: 'rate', linehaul: 'rate',
-  ratetype: 'rateType', pricetype: 'rateType',
-  activedays: 'activeDays', schedule: 'activeDays', days: 'activeDays',
-  excludefederalholidays: 'excludeHolidays', excludeholidays: 'excludeHolidays', holidays: 'excludeHolidays', federalholidays: 'excludeHolidays', noholidays: 'excludeHolidays',
-  equipmenttype: 'equipment', equipment: 'equipment', trailer: 'equipment', trailertype: 'equipment',
-  contractstart: 'contractStart', startdate: 'contractStart',
-  contractend: 'contractEnd', enddate: 'contractEnd',
+  destinationcity: 'destCity',
+  destcity: 'destCity',
+  tocity: 'destCity',
+  destinationstate: 'destState',
+  deststate: 'destState',
+  tostate: 'destState',
+  destinationzip: 'destZip',
+  destzip: 'destZip',
+  tozip: 'destZip',
+  destinationaddress: 'destAddress',
+  destaddress: 'destAddress',
+  toaddress: 'destAddress',
+  destappttype: 'destApptType',
+  destinationappttype: 'destApptType',
+  desttimestart: 'destTimeStart',
+  destinationtimestart: 'destTimeStart',
+  desttimeend: 'destTimeEnd',
+  destinationtimeend: 'destTimeEnd',
+  miles: 'miles',
+  distance: 'miles',
+  routemiles: 'miles',
+  rate: 'rate',
+  price: 'rate',
+  linehaul: 'rate',
+  ratetype: 'rateType',
+  pricetype: 'rateType',
+  activedays: 'activeDays',
+  schedule: 'activeDays',
+  days: 'activeDays',
+  excludefederalholidays: 'excludeHolidays',
+  excludeholidays: 'excludeHolidays',
+  holidays: 'excludeHolidays',
+  federalholidays: 'excludeHolidays',
+  noholidays: 'excludeHolidays',
+  equipmenttype: 'equipment',
+  equipment: 'equipment',
+  trailer: 'equipment',
+  trailertype: 'equipment',
+  contractstart: 'contractStart',
+  startdate: 'contractStart',
+  contractend: 'contractEnd',
+  enddate: 'contractEnd',
   roundtrip: 'roundTrip',
-  hcr: 'hcr', routeid: 'hcr',
-  tripnumber: 'tripNumber', trip: 'tripNumber', tripno: 'tripNumber',
-  notes: 'notes', comments: 'notes',
+  hcr: 'hcr',
+  routeid: 'hcr',
+  tripnumber: 'tripNumber',
+  trip: 'tripNumber',
+  tripno: 'tripNumber',
+  notes: 'notes',
+  comments: 'notes',
 };
 
 /** Parse CSV text into raw headers + raw row arrays (no mapping) */
@@ -1460,13 +1629,30 @@ function parseYesNo(s: string | undefined, defaultValue: boolean): boolean {
 }
 
 const DAY_NAMES: Record<string, number> = {
-  sun: 0, sunday: 0, su: 0,
-  mon: 1, monday: 1, mo: 1, m: 1,
-  tue: 2, tuesday: 2, tu: 2,
-  wed: 3, wednesday: 3, we: 3, w: 3,
-  thu: 4, thursday: 4, th: 4,
-  fri: 5, friday: 5, fr: 5, f: 5,
-  sat: 6, saturday: 6, sa: 6,
+  sun: 0,
+  sunday: 0,
+  su: 0,
+  mon: 1,
+  monday: 1,
+  mo: 1,
+  m: 1,
+  tue: 2,
+  tuesday: 2,
+  tu: 2,
+  wed: 3,
+  wednesday: 3,
+  we: 3,
+  w: 3,
+  thu: 4,
+  thursday: 4,
+  th: 4,
+  fri: 5,
+  friday: 5,
+  fr: 5,
+  f: 5,
+  sat: 6,
+  saturday: 6,
+  sa: 6,
 };
 
 /** Parse an "Active Days" string like "Mon,Tue,Wed,Thu,Fri" or "1,2,3,4,5" into number[] */
@@ -1502,7 +1688,10 @@ function parseActiveDays(s: string): number[] | null {
   if (lower === 'weekends') return [0, 6];
 
   // Split on comma/semicolon/pipe/slash but NOT hyphen (hyphens are for ranges)
-  const parts = s.split(/[,;|\/]+/).map((p) => p.trim().toLowerCase()).filter(Boolean);
+  const parts = s
+    .split(/[,;|\/]+/)
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
   const days: number[] = [];
 
   for (const part of parts) {
@@ -1529,7 +1718,7 @@ function parseActiveDays(s: string): number[] | null {
 
 /** Convert a parsed CSV row object to the ExtractedLane structure */
 function csvRowToExtractedLane(row: Record<string, string>): ExtractedLane {
-  const high = <T = string>(value: T | null): ExtractedField<T> => ({ value, confidence: 'high' as const });
+  const high = <T = string,>(value: T | null): ExtractedField<T> => ({ value, confidence: 'high' as const });
   const str = (key: string): string | null => row[key] || null;
   const num = (key: string): number | null => {
     const v = row[key];

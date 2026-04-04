@@ -17,7 +17,7 @@ import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-import { useAction, useMutation } from 'convex/react';
+import { useAction, useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { useRouter } from 'next/navigation';
@@ -27,9 +27,6 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import Link from 'next/link';
 import { AlertCircle, ArrowLeft, CheckCircle, Download, Loader2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
-import * as pdfjsLib from 'pdfjs-dist';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 type Confidence = 'high' | 'medium' | 'low';
 
@@ -66,7 +63,18 @@ type ExtractedFuelEntry = {
   carrierName?: ExtractedField<string | null>;
   truckUnit?: ExtractedField<string | null>;
   notes?: ExtractedField<string | null>;
+  sourcePage?: ExtractedField<string | number | null>;
+  sourceTableIndex?: ExtractedField<string | number | null>;
+  sourceRowIndex?: ExtractedField<string | number | null>;
 };
+
+type OcrTable = {
+  pageNumber: number;
+  headers: string[];
+  rows: string[][];
+};
+
+type EditableOcrTable = OcrTable & { tableIndex: number };
 
 type FuelPaymentMethod = 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA';
 type FuelCategory = 'FUEL' | 'DEF' | 'OTHER';
@@ -103,9 +111,15 @@ interface ReviewRow {
   selectedVendorId?: Id<'fuelVendors'>;
 }
 
+type SourceSelection = {
+  pageNumber: number;
+  tableIndex: number;
+  rowIndex: number;
+};
+
 type Step = 'upload' | 'extracting' | 'review';
 
-const PDF_DPI = 150;
+const PDF_DPI = 110;
 const PAYMENT_METHOD_MAP: Record<string, FuelPaymentMethod> = {
   'fuel_card': 'FUEL_CARD',
   'fuel card': 'FUEL_CARD',
@@ -182,6 +196,13 @@ function getCellInputClass(hasError = false, hasWarning = false) {
   if (hasError) return 'h-8 min-w-[120px] border-destructive text-destructive';
   if (hasWarning) return 'h-8 min-w-[120px] border-yellow-500 text-yellow-700';
   return 'h-8 min-w-[120px]';
+}
+
+function buildEditableTables(tables: OcrTable[]): EditableOcrTable[] {
+  return tables.map((table, index) => ({
+    ...table,
+    tableIndex: index + 1,
+  }));
 }
 
 function formatPaymentMethodLabel(value: FuelPaymentMethod) {
@@ -307,6 +328,10 @@ function buildStructuredPageText(items: unknown[]): string {
 }
 
 async function renderPdfToImages(file: File): Promise<OcrPageInput[]> {
+  // Dynamically load pdfjs only in the browser to avoid DOMMatrix SSR errors
+  const pdfjsLib = await import('pdfjs-dist');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
   const pages: OcrPageInput[] = [];
@@ -335,7 +360,10 @@ export default function OcrFuelImportPage() {
   const organizationId = useOrganizationId();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const extractFuelEntries = useAction(api.fuelReceiptImport.extractFuelEntriesFromReceipts);
+  const startFuelReceiptJob = useAction((api as any).fuelReceiptImport.startFuelReceiptExtractionJob);
+  const processFuelReceiptPage = useAction((api as any).fuelReceiptImport.processFuelReceiptPage);
+  const previewFuelEntriesFromTable = useAction((api as any).fuelReceiptImport.previewFuelEntriesFromTable);
+  const finalizeFuelReceiptJob = useMutation((api as any).fuelReceiptImportState.finalizeFuelReceiptExtractionJob);
   const bulkCreate = useMutation(api.fuelEntries.bulkCreate);
 
   const drivers = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
@@ -351,9 +379,25 @@ export default function OcrFuelImportPage() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [ocrPages, setOcrPages] = useState<OcrPageInput[]>([]);
   const [extractedEntries, setExtractedEntries] = useState<ExtractedFuelEntry[]>([]);
+  const [ocrTables, setOcrTables] = useState<OcrTable[]>([]);
+  const [editableOcrTables, setEditableOcrTables] = useState<EditableOcrTable[]>([]);
   const [reviewRows, setReviewRows] = useState<ReviewRow[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [importResult, setImportResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [currentJobId, setCurrentJobId] = useState<Id<'fuelOcrJobs'> | null>(null);
+  const [selectedSource, setSelectedSource] = useState<SourceSelection | null>(null);
+  const [jobWarning, setJobWarning] = useState<string | null>(null);
+
+  const fuelOcrJob = useQuery(
+    (api as any).fuelReceiptImportState.getFuelReceiptExtractionJob,
+    currentJobId ? { jobId: currentJobId } : 'skip',
+  );
+
+  const ocrProgressLabel = fuelOcrJob ? `${fuelOcrJob.processedPages} of ${fuelOcrJob.totalPages} pages OCR'd` : null;
+  const reasoningProgressLabel =
+    fuelOcrJob?.reasonerTotalChunks && fuelOcrJob.reasonerTotalChunks > 0
+      ? `${fuelOcrJob.reasonerCursor ?? 0} of ${fuelOcrJob.reasonerTotalChunks} mapping chunks completed`
+      : null;
 
   const carriers = useMemo(
     () =>
@@ -435,10 +479,24 @@ export default function OcrFuelImportPage() {
           if (label) warnings.push(`${label} price per gallon`);
         }
 
+        const totalCost = entry.totalCost?.value;
+        if (gallons && pricePerGallon && totalCost) {
+          const expectedTotal = Number(gallons) * Number(pricePerGallon);
+          // Magic Math Validator (OCR Error Catching)
+          if (Math.abs(expectedTotal - Number(totalCost)) > 0.05) {
+            errors.push(
+              `Math mismatch: ${gallons} x $${pricePerGallon} = $${expectedTotal.toFixed(2)} (but total is $${totalCost}). Please verify digits.`,
+            );
+          }
+        }
+
         const fuelType = entry.fuelType?.value?.toString().trim() || '';
         const normalizedFuelType = fuelType ? normalizeFuelType(fuelType) : '';
         if (normalizedFuelType === 'DEF') {
           errors.push('Fuel type is DEF; use the DEF workflow instead');
+        }
+        if (normalizedFuelType === 'FUEL' && Number(gallons) > 0 && Number(gallons) < 15) {
+          warnings.push(`Improbable amount (${gallons} gal) for Diesel. Verify if this was actually DEF.`);
         }
         if (normalizedFuelType === 'OTHER') {
           warnings.push('Fuel type normalized to OTHER; verify this is a fuel entry');
@@ -554,6 +612,50 @@ export default function OcrFuelImportPage() {
     setReviewRows((current) => syncReviewRows(extractedEntries, current));
   }, [extractedEntries, syncReviewRows]);
 
+  useEffect(() => {
+    if (!fuelOcrJob || !currentJobId) return;
+
+    if (fuelOcrJob.status === 'completed') {
+      const typedEntries = fuelOcrJob.entries as ExtractedFuelEntry[];
+      const typedTables = (fuelOcrJob.tables ?? []) as OcrTable[];
+      setExtractedEntries(typedEntries);
+      setOcrTables(typedTables);
+      setEditableOcrTables(buildEditableTables(typedTables));
+      setReviewRows(syncReviewRows(typedEntries));
+      setStep('review');
+      setIsProcessing(false);
+      setCurrentJobId(null);
+      setJobWarning(null);
+      toast.success(`Extracted ${typedEntries.length} transaction(s)`);
+      return;
+    }
+
+    if (fuelOcrJob.status === 'reasoning_failed') {
+      const typedEntries = fuelOcrJob.entries as ExtractedFuelEntry[];
+      const typedTables = (fuelOcrJob.tables ?? []) as OcrTable[];
+      setExtractedEntries(typedEntries);
+      setOcrTables(typedTables);
+      setEditableOcrTables(buildEditableTables(typedTables));
+      setReviewRows(syncReviewRows(typedEntries));
+      setStep('review');
+      setIsProcessing(false);
+      setCurrentJobId(null);
+      setJobWarning(fuelOcrJob.error || 'OCR succeeded, but mapping failed. Retry mapping from saved OCR data.');
+      return;
+    }
+
+    if (fuelOcrJob.status === 'failed') {
+      setStep('upload');
+      setIsProcessing(false);
+      setCurrentJobId(null);
+      setOcrTables([]);
+      setEditableOcrTables([]);
+      setSelectedSource(null);
+      setJobWarning(null);
+      toast.error(fuelOcrJob.error || 'OCR extraction failed');
+    }
+  }, [currentJobId, fuelOcrJob, syncReviewRows]);
+
   const updateField = useCallback(
     (rowIndex: number, field: keyof ExtractedFuelEntry, value: string | number | null) => {
       const nextValue =
@@ -641,8 +743,12 @@ export default function OcrFuelImportPage() {
       setSelectedFiles(supportedFiles);
       setOcrPages(imageSets.flat());
       setExtractedEntries([]);
+      setOcrTables([]);
+      setEditableOcrTables([]);
       setReviewRows([]);
       setImportResult(null);
+      setSelectedSource(null);
+      setJobWarning(null);
       setStep('upload');
       toast.success(`Loaded ${supportedFiles.length} file(s), ${imageSets.flat().length} page(s)`);
     } catch (error) {
@@ -680,34 +786,136 @@ export default function OcrFuelImportPage() {
     setIsProcessing(true);
 
     try {
-      const result = await extractFuelEntries({
-        pages: ocrPages,
-        vendorNames: (vendors ?? []).map((vendor) => vendor.name),
+      const vendorNamesList = (vendors ?? []).map((vendor) => vendor.name);
+      const job = await startFuelReceiptJob({
+        totalPages: ocrPages.length,
+        vendorNames: vendorNamesList,
       });
+      setCurrentJobId(job.jobId as Id<'fuelOcrJobs'>);
 
-      if (result.error && result.entries.length === 0) {
-        toast.error(result.error);
-        setStep('upload');
-        return;
+      for (let i = 0; i < ocrPages.length; i++) {
+        const result = await processFuelReceiptPage({
+          jobId: job.jobId,
+          pageIndex: i,
+          page: ocrPages[i],
+        });
+
+        if (!result.ok) {
+          toast.error(`Error on page ${i + 1}: ${result.error || 'OCR failed'}`);
+          setStep('upload');
+          setIsProcessing(false);
+          setCurrentJobId(null);
+          return;
+        }
       }
 
-      if (result.error) {
-        toast.warning(result.error);
-      }
-
-      const typedEntries = result.entries as ExtractedFuelEntry[];
-      setExtractedEntries(typedEntries);
-      setReviewRows(syncReviewRows(typedEntries));
-      setStep('review');
-      toast.success(`Extracted ${typedEntries.length} transaction(s)`);
+      await finalizeFuelReceiptJob({ jobId: job.jobId });
+      toast.info('OCR complete. Finalizing extracted transactions...');
     } catch (error) {
       console.error('OCR extraction failed:', error);
       toast.error('OCR extraction failed');
       setStep('upload');
+      setCurrentJobId(null);
+    } finally {
+      // Keep processing state while the background reasoner job finishes.
+    }
+  }, [finalizeFuelReceiptJob, ocrPages, processFuelReceiptPage, startFuelReceiptJob, vendors]);
+
+  const updateOcrTableCell = useCallback((tableIndex: number, rowIndex: number, colIndex: number, value: string) => {
+    setEditableOcrTables((current) =>
+      current.map((table) => {
+        if (table.tableIndex !== tableIndex) return table;
+        return {
+          ...table,
+          rows: table.rows.map((row, rIdx) =>
+            rIdx === rowIndex ? row.map((cell, cIdx) => (cIdx === colIndex ? value : cell)) : row,
+          ),
+        };
+      }),
+    );
+  }, []);
+
+  const handleRemapTable = useCallback(
+    async (tableIndex: number) => {
+      const table = editableOcrTables.find((item) => item.tableIndex === tableIndex);
+      if (!table) return;
+
+      try {
+        setIsProcessing(true);
+        const result = await previewFuelEntriesFromTable({
+          vendorNames: (vendors ?? []).map((vendor) => vendor.name),
+          pageNumber: table.pageNumber,
+          tableIndex: table.tableIndex,
+          headers: table.headers,
+          rows: table.rows,
+        });
+
+        if (result.error) {
+          toast.error(result.error);
+          return;
+        }
+
+        const remappedEntries = result.entries as ExtractedFuelEntry[];
+        const nextEntries = [
+          ...extractedEntries.filter(
+            (entry) =>
+              Number(entry.sourcePage?.value ?? -1) !== table.pageNumber ||
+              Number(entry.sourceTableIndex?.value ?? -1) !== table.tableIndex,
+          ),
+          ...remappedEntries,
+        ];
+
+        setExtractedEntries(nextEntries);
+        setReviewRows(syncReviewRows(nextEntries));
+        toast.success(`Re-mapped Page ${table.pageNumber}, Table ${table.tableIndex}`);
+      } catch (error) {
+        console.error('Table remap failed:', error);
+        toast.error('Failed to re-map table');
+      } finally {
+        setIsProcessing(false);
+      }
+    },
+    [editableOcrTables, extractedEntries, previewFuelEntriesFromTable, syncReviewRows, vendors],
+  );
+
+  const handleRetryMapping = useCallback(async () => {
+    if (editableOcrTables.length === 0) {
+      toast.error('No OCR tables available to re-map');
+      return;
+    }
+
+    try {
+      setIsProcessing(true);
+      let nextEntries: ExtractedFuelEntry[] = [];
+
+      for (const table of editableOcrTables) {
+        const result = await previewFuelEntriesFromTable({
+          vendorNames: (vendors ?? []).map((vendor) => vendor.name),
+          pageNumber: table.pageNumber,
+          tableIndex: table.tableIndex,
+          headers: table.headers,
+          rows: table.rows,
+        });
+
+        if (result.error) {
+          toast.error(`Retry failed for page ${table.pageNumber} table ${table.tableIndex}: ${result.error}`);
+          return;
+        }
+
+        nextEntries = nextEntries.concat(result.entries as ExtractedFuelEntry[]);
+      }
+
+      setExtractedEntries(nextEntries);
+      setReviewRows(syncReviewRows(nextEntries));
+      setJobWarning(null);
+      toast.success('Mapping retried from saved OCR data');
+    } catch (error) {
+      console.error('Retry mapping failed:', error);
+      toast.error('Retry mapping failed');
     } finally {
       setIsProcessing(false);
     }
-  }, [extractFuelEntries, ocrPages, syncReviewRows, vendors]);
+  }, [editableOcrTables, previewFuelEntriesFromTable, syncReviewRows, vendors]);
 
   const toggleSkip = (index: number) => {
     setReviewRows((current) =>
@@ -959,6 +1167,10 @@ export default function OcrFuelImportPage() {
               <p className="text-sm text-muted-foreground">
                 We are scanning each page for diesel purchase transactions and matching them to the fuel entry schema.
               </p>
+              <div className="mt-4 space-y-2 text-sm text-muted-foreground">
+                <p>{ocrProgressLabel ?? 'Preparing OCR job...'}</p>
+                <p>{reasoningProgressLabel ?? 'Mapping will begin after OCR finishes.'}</p>
+              </div>
             </div>
           </Card>
         )}
@@ -1000,13 +1212,115 @@ export default function OcrFuelImportPage() {
                   <Badge variant="outline">{extractedEntries.length} extracted</Badge>
                 </div>
 
+                {jobWarning && (
+                  <Card className="border-yellow-500/40 bg-yellow-500/5 p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <h3 className="font-medium text-yellow-700">OCR completed, mapping needs attention</h3>
+                        <p className="text-sm text-muted-foreground">{jobWarning}</p>
+                      </div>
+                      <Button variant="outline" onClick={handleRetryMapping} disabled={isProcessing}>
+                        {isProcessing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                        Retry Mapping
+                      </Button>
+                    </div>
+                  </Card>
+                )}
+
                 <Card className="overflow-hidden">
+                  <div className="border-b px-4 py-3">
+                    <h3 className="font-medium">OCR Source Tables</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Review the original table structure GLM extracted from the document before import mapping.
+                    </p>
+                  </div>
+                  <div className="space-y-4 p-4">
+                    {editableOcrTables.length > 0 ? (
+                      editableOcrTables.map((table) => (
+                        <div key={`${table.pageNumber}-${table.tableIndex}`} className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline">Page {table.pageNumber}</Badge>
+                            <Badge variant="secondary">Table {table.tableIndex}</Badge>
+                            <span className="text-xs text-muted-foreground">{table.rows.length} rows</span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => handleRemapTable(table.tableIndex)}
+                              disabled={isProcessing}
+                            >
+                              Re-map table
+                            </Button>
+                          </div>
+                          <div className="overflow-x-auto rounded-md border">
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead className="w-14">Row</TableHead>
+                                  {table.headers.map((header, headerIndex) => (
+                                    <TableHead key={`${table.pageNumber}-${table.tableIndex}-${headerIndex}`}>
+                                      {header}
+                                    </TableHead>
+                                  ))}
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {table.rows.map((row, rowIndex) => (
+                                  <TableRow
+                                    key={`${table.pageNumber}-${table.tableIndex}-row-${rowIndex}`}
+                                    className={
+                                      selectedSource &&
+                                      selectedSource.pageNumber === table.pageNumber &&
+                                      selectedSource.tableIndex === table.tableIndex &&
+                                      selectedSource.rowIndex === rowIndex + 1
+                                        ? 'bg-blue-500/10'
+                                        : undefined
+                                    }
+                                  >
+                                    <TableCell className="text-xs text-muted-foreground">{rowIndex + 1}</TableCell>
+                                    {table.headers.map((_, colIndex) => (
+                                      <TableCell
+                                        key={`${table.pageNumber}-${table.tableIndex}-row-${rowIndex}-col-${colIndex}`}
+                                        className="align-top text-xs"
+                                      >
+                                        <Input
+                                          value={row[colIndex] || ''}
+                                          onChange={(event) =>
+                                            updateOcrTableCell(table.tableIndex, rowIndex, colIndex, event.target.value)
+                                          }
+                                          className="h-8 min-w-[120px] text-xs"
+                                        />
+                                      </TableCell>
+                                    ))}
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        No markdown tables were detected for this document.
+                      </p>
+                    )}
+                  </div>
+                </Card>
+
+                <Card className="overflow-hidden">
+                  <div className="border-b px-4 py-3">
+                    <h3 className="font-medium">Mapped Fuel Entries</h3>
+                    <p className="text-sm text-muted-foreground">
+                      These rows are Otoqa&apos;s interpretation of the OCR tables. Fix issues here before import.
+                    </p>
+                  </div>
                   <div className="overflow-x-auto">
                     <Table>
                       <TableHeader>
                         <TableRow>
                           <TableHead className="w-10">#</TableHead>
                           <TableHead>Status</TableHead>
+                          <TableHead>Source</TableHead>
                           <TableHead>Date</TableHead>
                           <TableHead>Vendor</TableHead>
                           <TableHead>Assigned To</TableHead>
@@ -1052,6 +1366,29 @@ export default function OcrFuelImportPage() {
                                     <Badge variant="default" className="text-xs">
                                       Valid
                                     </Badge>
+                                  )}
+                                </TableCell>
+                                <TableCell className="align-top">
+                                  {row.extracted.sourcePage?.value &&
+                                  row.extracted.sourceTableIndex?.value &&
+                                  row.extracted.sourceRowIndex?.value ? (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-7 text-xs"
+                                      onClick={() =>
+                                        setSelectedSource({
+                                          pageNumber: Number(row.extracted.sourcePage?.value),
+                                          tableIndex: Number(row.extracted.sourceTableIndex?.value),
+                                          rowIndex: Number(row.extracted.sourceRowIndex?.value),
+                                        })
+                                      }
+                                    >
+                                      P{row.extracted.sourcePage.value} T{row.extracted.sourceTableIndex.value} R
+                                      {row.extracted.sourceRowIndex.value}
+                                    </Button>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground">-</span>
                                   )}
                                 </TableCell>
                                 <TableCell className="align-top">
@@ -1252,7 +1589,7 @@ export default function OcrFuelImportPage() {
                                 </TableCell>
                               </TableRow>
                               <TableRow key={`details-${index}`} className={row.skip ? 'opacity-40' : ''}>
-                                <TableCell colSpan={10} className="bg-muted/20 py-4">
+                                <TableCell colSpan={11} className="bg-muted/20 py-4">
                                   <div className="grid gap-4 lg:grid-cols-[1.3fr_1fr_1fr_1fr_1fr]">
                                     <div className="space-y-3">
                                       <div className="grid gap-3 sm:grid-cols-2">

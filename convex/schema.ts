@@ -2206,20 +2206,11 @@ export default defineSchema({
     defaultFuelPricePerGallon: v.optional(v.number()), // manual override
 
     // Default driver pay
-    defaultDriverPayType: v.union(
-      v.literal('PER_MILE'),
-      v.literal('PER_HOUR'),
-      v.literal('FLAT_PER_RUN'),
-    ),
+    defaultDriverPayType: v.union(v.literal('PER_MILE'), v.literal('PER_HOUR'), v.literal('FLAT_PER_RUN')),
     defaultDriverPayRate: v.number(), // rate for the selected pay type
 
     // Driver schedule pattern
-    driverSchedulePattern: v.union(
-      v.literal('5on2off'),
-      v.literal('6on1off'),
-      v.literal('7on'),
-      v.literal('custom'),
-    ),
+    driverSchedulePattern: v.union(v.literal('5on2off'), v.literal('6on1off'), v.literal('7on'), v.literal('custom')),
     customScheduleOnDays: v.optional(v.number()),
     customScheduleOffDays: v.optional(v.number()),
 
@@ -2233,10 +2224,12 @@ export default defineSchema({
     maxDeadheadMiles: v.optional(v.number()), // max deadhead between chained legs (default 75)
     maxWaitHours: v.optional(v.number()), // max idle wait between legs (default 3.0)
     targetDriverCount: v.optional(v.number()), // target driver count (if set, solver uses this instead of auto-search)
-    weeklyHosMode: v.optional(v.union(
-      v.literal('uniform'),  // distribute 70h evenly across on-days (conservative)
-      v.literal('flexible'), // allow up to 14h/day, manage 70h across the week (realistic)
-    )),
+    weeklyHosMode: v.optional(
+      v.union(
+        v.literal('uniform'), // distribute 70h evenly across on-days (conservative)
+        v.literal('flexible'), // allow up to 14h/day, manage 70h across the week (realistic)
+      ),
+    ),
     allowSameLaneRepeat: v.optional(v.boolean()), // allow same lane to run multiple times per driver shift
 
     // Analysis scope
@@ -2322,16 +2315,12 @@ export default defineSchema({
 
     // Rate (what customer pays)
     ratePerRun: v.optional(v.number()),
-    rateType: v.optional(
-      v.union(v.literal('Per Mile'), v.literal('Flat Rate'), v.literal('Per Stop')),
-    ),
+    rateType: v.optional(v.union(v.literal('Per Mile'), v.literal('Flat Rate'), v.literal('Per Stop'))),
     ratePerMile: v.optional(v.number()),
     minimumRate: v.optional(v.number()),
 
     // Fuel surcharge (revenue side)
-    fuelSurchargeType: v.optional(
-      v.union(v.literal('PERCENTAGE'), v.literal('FLAT'), v.literal('DOE_INDEX')),
-    ),
+    fuelSurchargeType: v.optional(v.union(v.literal('PERCENTAGE'), v.literal('FLAT'), v.literal('DOE_INDEX'))),
     fuelSurchargeValue: v.optional(v.number()),
 
     // Accessorials
@@ -2355,9 +2344,7 @@ export default defineSchema({
     mpgOverride: v.optional(v.number()), // overrides session default
 
     // Driver pay override (per-lane override of session default)
-    driverPayTypeOverride: v.optional(
-      v.union(v.literal('PER_MILE'), v.literal('PER_HOUR'), v.literal('FLAT_PER_RUN')),
-    ),
+    driverPayTypeOverride: v.optional(v.union(v.literal('PER_MILE'), v.literal('PER_HOUR'), v.literal('FLAT_PER_RUN'))),
     driverPayRateOverride: v.optional(v.number()),
 
     // Base assignment
@@ -2399,11 +2386,7 @@ export default defineSchema({
     sessionId: v.id('laneAnalysisSessions'),
     workosOrgId: v.string(),
     entryId: v.optional(v.id('laneAnalysisEntries')), // null = aggregate result
-    resultType: v.union(
-      v.literal('PER_LANE'),
-      v.literal('AGGREGATE'),
-      v.literal('OPTIMIZATION_SUGGESTION'),
-    ),
+    resultType: v.union(v.literal('PER_LANE'), v.literal('AGGREGATE'), v.literal('OPTIMIZATION_SUGGESTION')),
     computedAt: v.number(),
 
     // Per-lane cost metrics
@@ -2469,4 +2452,26 @@ export default defineSchema({
     fetchedAt: v.number(),
     expiresAt: v.number(),
   }).index('by_route', ['originHash', 'destinationHash']),
+
+  fuelOcrJobs: defineTable({
+    status: v.union(
+      v.literal('queued'),
+      v.literal('processing_pages'),
+      v.literal('ocr_completed'),
+      v.literal('processing_reasoner'),
+      v.literal('completed'),
+      v.literal('reasoning_failed'),
+      v.literal('failed'),
+    ),
+    totalPages: v.number(),
+    processedPages: v.number(),
+    vendorNames: v.array(v.string()),
+    pageMarkdowns: v.array(v.string()),
+    entriesJson: v.optional(v.string()),
+    reasonerCursor: v.optional(v.number()),
+    reasonerTotalChunks: v.optional(v.number()),
+    error: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index('by_status', ['status']),
 });

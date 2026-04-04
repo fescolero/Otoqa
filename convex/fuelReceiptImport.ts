@@ -1,8 +1,8 @@
 'use node';
-
-import OpenAI from 'openai';
 import { v } from 'convex/values';
-import { action } from './_generated/server';
+import { action, internalAction } from './_generated/server';
+import type { Id } from './_generated/dataModel';
+import { internal } from './_generated/api';
 
 const confidenceValidator = v.union(v.literal('high'), v.literal('medium'), v.literal('low'));
 
@@ -28,6 +28,9 @@ const extractedFuelEntryValidator = v.object({
   carrierName: v.optional(extractedFieldValidator),
   truckUnit: v.optional(extractedFieldValidator),
   notes: v.optional(extractedFieldValidator),
+  sourcePage: v.optional(extractedFieldValidator),
+  sourceTableIndex: v.optional(extractedFieldValidator),
+  sourceRowIndex: v.optional(extractedFieldValidator),
 });
 
 type Confidence = 'high' | 'medium' | 'low';
@@ -54,6 +57,29 @@ type ExtractedFuelEntry = {
   carrierName?: ExtractedField<string | null>;
   truckUnit?: ExtractedField<string | null>;
   notes?: ExtractedField<string | null>;
+  sourcePage?: ExtractedField<number | null>;
+  sourceTableIndex?: ExtractedField<number | null>;
+  sourceRowIndex?: ExtractedField<number | null>;
+};
+
+type MarkdownTable = {
+  headers: string[];
+  rows: string[][];
+};
+
+type ChunkedMarkdownTable = {
+  headers: string[];
+  rows: string[][];
+  rowOffset: number;
+};
+
+type FuelReasonerTask = {
+  pageNumber: number;
+  tableIndex: number;
+  rowOffset: number;
+  headers: string[];
+  rows: string[][];
+  contextLabel: string;
 };
 
 function wrap<T>(value: T, confidence: Confidence = 'high'): ExtractedField<T> {
@@ -152,6 +178,7 @@ Rules:
 19. Some statements contain grouped sections where the header appears once and later rows continue under the same column positions after a visual break.
 20. If a group of rows continues after a blank line, driver section, or subtotal without a repeated header, keep using the same prior column mapping.
 21. Do not remap columns after section breaks unless a clearly new header row appears.
+22. Include sourcePage, sourceTableIndex, and sourceRowIndex whenever a row comes from a parsed markdown table.
 
 Fields to extract for each entry:
 - entryDate: purchase date as shown on document
@@ -170,6 +197,9 @@ Fields to extract for each entry:
 - carrierName: carrier name if shown and the fuel is tied to a carrier rather than a driver
 - truckUnit: truck/unit/tractor number if shown
 - notes: short note only when useful for context or ambiguity
+- sourcePage: page number of the OCR source row when available
+- sourceTableIndex: 1-based table index on that page when available
+- sourceRowIndex: 1-based row index within that source table when available
 
 Important mapping checks:
 - gallons should usually be the QUANTITY field and often contains values like 10.0, 57.43, 126.44
@@ -237,14 +267,6 @@ function repairTruncatedJson(raw: string): { entries?: unknown[] } | null {
   }
 }
 
-function chunkArray<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-  return chunks;
-}
-
 function buildEntryKey(entry: ExtractedFuelEntry): string {
   return [
     entry.entryDate.value ?? '',
@@ -261,106 +283,480 @@ function buildEntryKey(entry: ExtractedFuelEntry): string {
     .join('|');
 }
 
-async function extractChunk(
-  openai: OpenAI,
-  prompt: string,
+function parseMarkdownTables(markdown: string): MarkdownTable[] {
+  const lines = markdown.split(/\r?\n/);
+  const tables: MarkdownTable[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const headerLine = lines[i]?.trim() ?? '';
+    const separatorLine = lines[i + 1]?.trim() ?? '';
+    const isHeader = headerLine.startsWith('|') && headerLine.endsWith('|');
+    const isSeparator = /^\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/.test(separatorLine);
+
+    if (!isHeader || !isSeparator) {
+      i += 1;
+      continue;
+    }
+
+    const headers = headerLine
+      .split('|')
+      .map((cell) => cell.trim())
+      .filter((cell) => cell.length > 0);
+
+    const rows: string[][] = [];
+    i += 2;
+
+    while (i < lines.length) {
+      const rowLine = lines[i]?.trim() ?? '';
+      if (!rowLine.startsWith('|') || !rowLine.endsWith('|')) break;
+
+      const split = rowLine.split('|').map((cell) => cell.trim());
+      const row = split.slice(1, split.length - 1);
+      if (row.length > 0) rows.push(row);
+      i += 1;
+    }
+
+    if (headers.length > 0 && rows.length > 0) {
+      tables.push({ headers, rows });
+    }
+  }
+
+  return tables;
+}
+
+function chunkMarkdownTable(table: MarkdownTable, chunkSize = 10): ChunkedMarkdownTable[] {
+  const chunks: ChunkedMarkdownTable[] = [];
+
+  for (let i = 0; i < table.rows.length; i += chunkSize) {
+    chunks.push({
+      headers: table.headers,
+      rows: table.rows.slice(i, i + chunkSize),
+      rowOffset: i,
+    });
+  }
+
+  return chunks;
+}
+
+function buildReasonerTasks(pageMarkdowns: string[]): FuelReasonerTask[] {
+  const tasks: FuelReasonerTask[] = [];
+
+  for (let pageIndex = 0; pageIndex < pageMarkdowns.length; pageIndex++) {
+    const pageMarkdown = pageMarkdowns[pageIndex];
+    if (!pageMarkdown.trim()) continue;
+
+    const tables = parseMarkdownTables(pageMarkdown);
+    if (tables.length === 0) {
+      tasks.push({
+        pageNumber: pageIndex + 1,
+        tableIndex: 0,
+        rowOffset: 0,
+        headers: [],
+        rows: [],
+        contextLabel: `page ${pageIndex + 1}`,
+      });
+      continue;
+    }
+
+    for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
+      const table = tables[tableIndex];
+      const chunks = chunkMarkdownTable(table, 10);
+      for (const chunk of chunks) {
+        tasks.push({
+          pageNumber: pageIndex + 1,
+          tableIndex: tableIndex + 1,
+          rowOffset: chunk.rowOffset,
+          headers: chunk.headers,
+          rows: chunk.rows,
+          contextLabel: `page ${pageIndex + 1} table ${tableIndex + 1} rows ${chunk.rowOffset + 1}-${chunk.rowOffset + chunk.rows.length}`,
+        });
+      }
+    }
+  }
+
+  return tasks;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function extractMarkdownPages(
   pages: Array<{ imageUrl: string; pageText?: string }>,
-  chunkLabel: string,
-  instruction?: string,
+): Promise<{ markdownPages: string[]; error?: string }> {
+  const modalUrl = process.env.MODAL_OCR_URL;
+  if (!modalUrl) {
+    return { markdownPages: [], error: 'MODAL_OCR_URL environment variable is not set' };
+  }
+
+  const base64Images = pages.map((p) => p.imageUrl.split(',')[1] || p.imageUrl);
+
+  try {
+    const modalResponse = await fetch(modalUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        images_base64: base64Images,
+        prompt:
+          'Extract all text and tables from this document exactly as it appears. Preserve all line items, columns, headers, and rows perfectly. Output in Markdown format.',
+      }),
+    });
+
+    if (!modalResponse.ok) {
+      throw new Error(`Modal API returned ${modalResponse.status}: ${await modalResponse.text()}`);
+    }
+
+    const modalData = await modalResponse.json();
+    if (modalData.error) {
+      throw new Error(`Modal OCR Error: ${modalData.error}`);
+    }
+    return { markdownPages: modalData.texts || [] };
+  } catch (error) {
+    return {
+      markdownPages: [],
+      error: `Failed to extract text via Modal GLM-OCR: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+async function reasonOverMarkdown(
+  apiKey: string,
+  prompt: string,
+  fullMarkdown: string,
+  contextLabel = 'unknown',
 ): Promise<{ entries: ExtractedFuelEntry[]; error?: string }> {
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: prompt },
-      {
-        role: 'user',
-        content: [
-          ...pages.map((page) => ({
-            type: 'image_url' as const,
-            image_url: { url: page.imageUrl, detail: 'high' as const },
-          })),
-          ...pages
-            .filter((page) => !!page.pageText?.trim())
-            .map((page, index) => ({
-              type: 'text' as const,
-              text: `Extracted text for ${chunkLabel}${pages.length > 1 ? ` item ${index + 1}` : ''}:\n${page.pageText}`,
-            })),
-          {
-            type: 'text' as const,
-            text:
-              instruction ??
-              `Extract all diesel fuel purchase transactions from ${chunkLabel}. Return one entry per visible transaction line item.`,
+  try {
+    let response: Response | null = null;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      console.log(`[FuelOCR][Reasoner] ${contextLabel} attempt ${attempt} starting`);
+      try {
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'X-Title': 'Otoqa Fuel OCR',
           },
-        ],
-      },
-    ],
-    max_tokens: 16000,
-    temperature: 0,
-  });
+          body: JSON.stringify({
+            model: 'qwen/qwen3.5-397b-a17b',
+            reasoning: { enabled: false },
+            messages: [
+              { role: 'system', content: prompt },
+              {
+                role: 'user',
+                content: `Here is the precise Markdown extracted from the fuel invoices/statements:\n\n${fullMarkdown}\n\nExtract all diesel fuel purchase transactions. Return one entry per visible transaction line item. Respect column semantics exactly: QUANTITY means gallons, PRICE means pricePerGallon, and AMT EXCP CODE means totalCost. Return ONLY valid JSON with this exact shape: {"entries":[...]} and no markdown fences.`,
+              },
+            ],
+            response_format: { type: 'json_object' },
+            max_tokens: 2500,
+            temperature: 0,
+          }),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[FuelOCR][Reasoner] ${contextLabel} attempt ${attempt} fetch exception: ${message}`);
+        if (attempt === 3) {
+          return { entries: [], error: `Together fetch failed after ${attempt} attempts: ${message}` };
+        }
+        await sleep(attempt * 1500);
+        continue;
+      }
 
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    return { entries: [], error: `No response content from OpenAI for ${chunkLabel}` };
+      console.log(`[FuelOCR][Reasoner] ${contextLabel} attempt ${attempt} status ${response.status}`);
+
+      if (response.ok || ![429, 503, 504].includes(response.status) || attempt === 3) {
+        break;
+      }
+
+      await sleep(attempt * 1500);
+    }
+
+    if (!response) {
+      return { entries: [], error: 'OpenRouter API request did not produce a response' };
+    }
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      console.error(
+        `[FuelOCR][Reasoner] ${contextLabel} non-200 response ${response.status}: ${responseText.slice(0, 1000)}`,
+      );
+      return {
+        entries: [],
+        error: `OpenRouter API error ${response.status}: ${responseText}`,
+      };
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }>;
+      error?: { message?: string };
+    };
+
+    if (payload.error?.message) {
+      console.error(`[FuelOCR][Reasoner] ${contextLabel} payload error: ${payload.error.message}`);
+      return { entries: [], error: `OpenRouter API error: ${payload.error.message}` };
+    }
+
+    const rawContent = payload.choices?.[0]?.message?.content as unknown;
+    let content: string | null = null;
+    if (typeof rawContent === 'string') {
+      content = rawContent;
+    } else if (Array.isArray(rawContent)) {
+      const parts: unknown[] = rawContent;
+      content = parts
+        .map((part: unknown) => {
+          if (typeof part === 'string') return part;
+          if (part && typeof part === 'object' && 'text' in part) {
+            return String((part as { text?: unknown }).text ?? '');
+          }
+          return '';
+        })
+        .join('');
+    }
+    if (!content) {
+      console.error(
+        `[FuelOCR][Reasoner] ${contextLabel} empty content. finish_reason=${payload.choices?.[0]?.finish_reason ?? 'unknown'}`,
+      );
+      return {
+        entries: [],
+        error: `No response content from Reasoner API. Finish reason: ${payload.choices?.[0]?.finish_reason ?? 'unknown'}`,
+      };
+    }
+
+    const cleaned = content
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```\s*$/i, '')
+      .trim();
+    const parsed =
+      payload.choices?.[0]?.finish_reason === 'length' ? repairTruncatedJson(cleaned) : JSON.parse(cleaned);
+    if (!parsed || !Array.isArray(parsed.entries)) {
+      console.error(
+        `[FuelOCR][Reasoner] ${contextLabel} invalid entries array. finish_reason=${payload.choices?.[0]?.finish_reason ?? 'unknown'} content_preview=${cleaned.slice(0, 500)}`,
+      );
+      return { entries: [], error: `Reasoner response did not contain a valid entries array` };
+    }
+
+    console.log(
+      `[FuelOCR][Reasoner] ${contextLabel} success with ${parsed.entries.length} entries. finish_reason=${payload.choices?.[0]?.finish_reason ?? 'unknown'}`,
+    );
+
+    return {
+      entries: parsed.entries
+        .filter((entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+        .map(normalizeEntry),
+    };
+  } catch (error) {
+    console.error(
+      `[FuelOCR][Reasoner] ${contextLabel} parse failure: ${error instanceof Error ? error.stack || error.message : String(error)}`,
+    );
+    return {
+      entries: [],
+      error: `Failed to parse data via Reasoner API: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-
-  const parsed = response.choices[0]?.finish_reason === 'length' ? repairTruncatedJson(content) : JSON.parse(content);
-  if (!parsed || !Array.isArray(parsed.entries)) {
-    return { entries: [], error: `OpenAI response did not contain a valid entries array for ${chunkLabel}` };
-  }
-
-  return {
-    entries: parsed.entries
-      .filter((entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
-      .map(normalizeEntry),
-  };
 }
 
-async function extractChunkWithAudit(
-  openai: OpenAI,
+async function reasonOverTable(
+  apiKey: string,
   prompt: string,
-  pages: Array<{ imageUrl: string; pageText?: string }>,
-  chunkLabel: string,
+  pageNumber: number,
+  tableIndex: number,
+  rowOffset: number,
+  table: MarkdownTable,
 ): Promise<{ entries: ExtractedFuelEntry[]; error?: string }> {
-  const primary = await extractChunk(
-    openai,
+  const tableMarkdown = [
+    `| ${table.headers.join(' | ')} |`,
+    `| ${table.headers.map(() => '---').join(' | ')} |`,
+    ...table.rows.map((row) => `| ${row.join(' | ')} |`),
+  ].join('\n');
+
+  return await reasonOverMarkdown(
+    apiKey,
     prompt,
-    pages,
-    chunkLabel,
-    `Extract all diesel fuel purchase transactions from ${chunkLabel}. Return one entry per visible transaction line item. Be exhaustive and include every row in dense statement tables. Respect column semantics exactly: QUANTITY means gallons, PRICE means pricePerGallon, and AMT EXCP CODE means totalCost for that line item. If grouped rows continue after a visual break without a repeated header, keep using the same column mapping from the prior header.`,
+    `--- PAGE ${pageNumber} TABLE ${tableIndex} ROWS ${rowOffset + 1}-${rowOffset + table.rows.length} ---\n${tableMarkdown}\n\nUse the table headers exactly as written. Preserve every non-summary transaction row from this table. Do not collapse, summarize, or skip repeated-looking rows unless they are clearly totals/subtotals. For every returned entry from this table set sourcePage=${pageNumber}, sourceTableIndex=${tableIndex}, and sourceRowIndex to the 1-based original row number from this table chunk. The first row in this chunk corresponds to original sourceRowIndex=${rowOffset + 1}.`,
+    `page ${pageNumber} table ${tableIndex} rows ${rowOffset + 1}-${rowOffset + table.rows.length}`,
   );
-
-  if (primary.error) return primary;
-
-  const knownEntries = primary.entries.map((entry) => ({
-    entryDate: entry.entryDate.value,
-    vendorName: entry.vendorName.value,
-    gallons: entry.gallons.value,
-    pricePerGallon: entry.pricePerGallon.value,
-    totalCost: entry.totalCost?.value ?? null,
-    receiptNumber: entry.receiptNumber?.value ?? null,
-    driverName: entry.driverName?.value ?? null,
-    carrierName: entry.carrierName?.value ?? null,
-    truckUnit: entry.truckUnit?.value ?? null,
-  }));
-
-  const audit = await extractChunk(
-    openai,
-    prompt,
-    pages,
-    chunkLabel,
-    `Review ${chunkLabel} again for missed transaction rows. Dense tables often contain more line items than the first pass catches. Already extracted rows: ${JSON.stringify(knownEntries)}. Return only additional missing transaction line items not already listed. While auditing, keep field mapping strict: QUANTITY -> gallons, PRICE -> pricePerGallon, AMT EXCP CODE -> totalCost. If later row groups do not repeat the header, continue using the same prior column mapping.`,
-  );
-
-  if (audit.error) return primary;
-
-  const deduped = new Map<string, ExtractedFuelEntry>();
-  for (const entry of [...primary.entries, ...audit.entries]) {
-    deduped.set(buildEntryKey(entry), entry);
-  }
-
-  return { entries: Array.from(deduped.values()) };
 }
+
+export const startFuelReceiptExtractionJob = action({
+  args: {
+    totalPages: v.number(),
+    vendorNames: v.array(v.string()),
+  },
+  returns: v.object({ jobId: v.id('fuelOcrJobs') }),
+  handler: async (ctx, args): Promise<{ jobId: Id<'fuelOcrJobs'> }> => {
+    const now = Date.now();
+    const jobId: Id<'fuelOcrJobs'> = await ctx.runMutation(internal.fuelReceiptImportState.createFuelReceiptJob, {
+      totalPages: args.totalPages,
+      vendorNames: args.vendorNames,
+      createdAt: now,
+    });
+    return { jobId };
+  },
+});
+
+export const processFuelReceiptPage = action({
+  args: {
+    jobId: v.id('fuelOcrJobs'),
+    pageIndex: v.number(),
+    page: v.object({
+      imageUrl: v.string(),
+      pageText: v.optional(v.string()),
+    }),
+  },
+  returns: v.object({ ok: v.boolean(), error: v.optional(v.string()) }),
+  handler: async (ctx, args) => {
+    await ctx.runMutation(internal.fuelReceiptImportState.markFuelReceiptJobProcessingPages, {
+      jobId: args.jobId,
+    });
+
+    const markdownResult = await extractMarkdownPages([args.page]);
+    if (markdownResult.error) {
+      await ctx.runMutation(internal.fuelReceiptImportState.failFuelReceiptJob, {
+        jobId: args.jobId,
+        error: markdownResult.error,
+      });
+      return { ok: false, error: markdownResult.error };
+    }
+
+    await ctx.runMutation(internal.fuelReceiptImportState.storeFuelReceiptPageMarkdown, {
+      jobId: args.jobId,
+      pageIndex: args.pageIndex,
+      markdown: markdownResult.markdownPages[0] ?? '',
+    });
+
+    return { ok: true };
+  },
+});
+
+export const previewFuelEntriesFromTable = action({
+  args: {
+    vendorNames: v.array(v.string()),
+    pageNumber: v.number(),
+    tableIndex: v.number(),
+    headers: v.array(v.string()),
+    rows: v.array(v.array(v.string())),
+  },
+  returns: v.object({
+    entries: v.array(extractedFuelEntryValidator),
+    error: v.optional(v.string()),
+  }),
+  handler: async (_ctx, args) => {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return { entries: [], error: 'OPENROUTER_API_KEY environment variable is not set' };
+    }
+
+    const prompt = buildPrompt(args.vendorNames);
+    const result = await reasonOverTable(apiKey, prompt, args.pageNumber, args.tableIndex, 0, {
+      headers: args.headers,
+      rows: args.rows,
+    });
+
+    return result;
+  },
+});
+
+export const runFuelReceiptReasoner = internalAction({
+  args: { jobId: v.id('fuelOcrJobs') },
+  handler: async (ctx, args) => {
+    const job = await ctx.runQuery(internal.fuelReceiptImportState.getFuelReceiptJobInternal, {
+      jobId: args.jobId,
+    });
+    if (!job) return;
+
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      await ctx.runMutation(internal.fuelReceiptImportState.failFuelReceiptJob, {
+        jobId: args.jobId,
+        error: 'OPENROUTER_API_KEY environment variable is not set',
+      });
+      return;
+    }
+
+    const tasks = buildReasonerTasks(job.pageMarkdowns);
+    const cursor = job.reasonerCursor ?? 0;
+
+    if (tasks.length === 0) {
+      await ctx.runMutation(internal.fuelReceiptImportState.completeFuelReceiptJob, {
+        jobId: args.jobId,
+        entriesJson: job.entriesJson ?? '[]',
+      });
+      return;
+    }
+
+    if (cursor >= tasks.length) {
+      await ctx.runMutation(internal.fuelReceiptImportState.completeFuelReceiptJob, {
+        jobId: args.jobId,
+        entriesJson: job.entriesJson ?? '[]',
+      });
+      return;
+    }
+
+    const prompt = buildPrompt(job.vendorNames);
+    const task = tasks[cursor];
+
+    let result: { entries: ExtractedFuelEntry[]; error?: string };
+    if (task.tableIndex > 0) {
+      result = await reasonOverTable(apiKey, prompt, task.pageNumber, task.tableIndex, task.rowOffset, {
+        headers: task.headers,
+        rows: task.rows,
+      });
+    } else {
+      result = await reasonOverMarkdown(
+        apiKey,
+        prompt,
+        `--- PAGE ${task.pageNumber} ---\n${job.pageMarkdowns[task.pageNumber - 1]}`,
+        task.contextLabel,
+      );
+    }
+
+    if (result.error) {
+      await ctx.runMutation(internal.fuelReceiptImportState.failFuelReceiptJob, {
+        jobId: args.jobId,
+        error: `Reasoner failed on ${task.contextLabel}: ${result.error}`,
+      });
+      return;
+    }
+
+    const existingEntriesRaw = job.entriesJson ? (JSON.parse(job.entriesJson) as unknown[]) : [];
+    const existingEntries = existingEntriesRaw
+      .filter((entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+      .map(normalizeEntry);
+
+    const deduped = new Map<string, ExtractedFuelEntry>();
+    for (const entry of [...existingEntries, ...result.entries]) {
+      const key = buildEntryKey(entry);
+      if (!deduped.has(key)) {
+        deduped.set(key, entry);
+      }
+    }
+
+    const nextEntries = Array.from(deduped.values());
+    const nextCursor = cursor + 1;
+
+    await ctx.runMutation(internal.fuelReceiptImportState.updateFuelReceiptReasonerProgress, {
+      jobId: args.jobId,
+      entriesJson: JSON.stringify(nextEntries),
+      reasonerCursor: nextCursor,
+      reasonerTotalChunks: tasks.length,
+    });
+
+    if (nextCursor >= tasks.length) {
+      await ctx.runMutation(internal.fuelReceiptImportState.completeFuelReceiptJob, {
+        jobId: args.jobId,
+        entriesJson: JSON.stringify(nextEntries),
+      });
+      return;
+    }
+
+    await ctx.scheduler.runAfter(0, internal.fuelReceiptImport.runFuelReceiptReasoner, {
+      jobId: args.jobId,
+    });
+  },
+});
 
 function normalizeEntry(entry: Record<string, unknown>): ExtractedFuelEntry {
   const entryDate = entry.entryDate as Record<string, unknown> | undefined;
@@ -379,6 +775,9 @@ function normalizeEntry(entry: Record<string, unknown>): ExtractedFuelEntry {
   const carrierName = entry.carrierName as Record<string, unknown> | undefined;
   const truckUnit = entry.truckUnit as Record<string, unknown> | undefined;
   const notes = entry.notes as Record<string, unknown> | undefined;
+  const sourcePage = entry.sourcePage as Record<string, unknown> | undefined;
+  const sourceTableIndex = entry.sourceTableIndex as Record<string, unknown> | undefined;
+  const sourceRowIndex = entry.sourceRowIndex as Record<string, unknown> | undefined;
 
   return {
     entryDate: wrap(toStringOrNull(entryDate?.value), normalizeConfidence(entryDate?.confidence)),
@@ -397,6 +796,9 @@ function normalizeEntry(entry: Record<string, unknown>): ExtractedFuelEntry {
     carrierName: wrap(toStringOrNull(carrierName?.value), normalizeConfidence(carrierName?.confidence)),
     truckUnit: wrap(toStringOrNull(truckUnit?.value), normalizeConfidence(truckUnit?.confidence)),
     notes: wrap(toStringOrNull(notes?.value), normalizeConfidence(notes?.confidence)),
+    sourcePage: wrap(toNumberOrNull(sourcePage?.value), normalizeConfidence(sourcePage?.confidence)),
+    sourceTableIndex: wrap(toNumberOrNull(sourceTableIndex?.value), normalizeConfidence(sourceTableIndex?.confidence)),
+    sourceRowIndex: wrap(toNumberOrNull(sourceRowIndex?.value), normalizeConfidence(sourceRowIndex?.confidence)),
   };
 }
 
@@ -415,36 +817,34 @@ export const extractFuelEntriesFromReceipts = action({
     error: v.optional(v.string()),
   }),
   handler: async (_ctx, args) => {
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
-      return { entries: [], error: 'OPENAI_API_KEY environment variable is not set' };
+      return { entries: [], error: 'OPENROUTER_API_KEY environment variable is not set' };
     }
 
-    const openai = new OpenAI({ apiKey });
+    // Switch to Together AI endpoint for the Reasoner pass
     const prompt = buildPrompt(args.vendorNames);
-    const pageChunks = chunkArray(args.pages, 1);
 
     try {
-      const chunkResults = await Promise.all(
-        pageChunks.map((chunk, index) =>
-          extractChunkWithAudit(
-            openai,
-            prompt,
-            chunk,
-            pageChunks.length === 1 ? 'these documents' : `page ${index + 1}`,
-          ),
-        ),
-      );
+      const markdownResult = await extractMarkdownPages(args.pages);
+      if (markdownResult.error) {
+        return { entries: [], error: markdownResult.error };
+      }
 
-      const errors = chunkResults.map((result) => result.error).filter((error): error is string => !!error);
+      const fullMarkdown = markdownResult.markdownPages
+        .map((text: string, i: number) => `--- PAGE ${i + 1} ---\n${text}`)
+        .join('\n\n');
+      const result = await reasonOverMarkdown(apiKey, prompt, fullMarkdown);
+
+      if (result.error) {
+        return result;
+      }
+
       const deduped = new Map<string, ExtractedFuelEntry>();
-
-      for (const result of chunkResults) {
-        for (const entry of result.entries) {
-          const key = buildEntryKey(entry);
-          if (!deduped.has(key)) {
-            deduped.set(key, entry);
-          }
+      for (const entry of result.entries) {
+        const key = buildEntryKey(entry);
+        if (!deduped.has(key)) {
+          deduped.set(key, entry);
         }
       }
 
@@ -453,18 +853,11 @@ export const extractFuelEntriesFromReceipts = action({
       if (entries.length === 0) {
         return {
           entries: [],
-          error: errors[0] || 'No diesel transactions were detected. Try a clearer file or use CSV import instead.',
+          error: 'No diesel transactions were detected. Try a clearer file or use CSV import instead.',
         };
       }
 
-      return {
-        entries,
-        ...(errors.length > 0
-          ? {
-              error: `Extracted ${entries.length} transaction(s), but some page passes had issues: ${errors.join('; ')}`,
-            }
-          : {}),
-      };
+      return { entries };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown extraction error';
       return { entries: [], error: message };
