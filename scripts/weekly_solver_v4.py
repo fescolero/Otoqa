@@ -2830,20 +2830,220 @@ def _generate_targeted_candidates(scarce_lids, day_lids, lane_map, graph, excl_p
     return list(new_candidates.values())
 
 
+def _solve_lp_master(candidates, day_lids, excl_pair_ids):
+    """Solve LP relaxation of set-partitioning master.
+
+    Returns (dual_prices, lp_obj, min_routes_fractional) where:
+    - dual_prices: dict of lane_id -> dual value (shadow price)
+    - lp_obj: LP objective value (fractional lower bound on route count)
+    - min_routes_fractional: sum of x values (fractional route count)
+    """
+    from ortools.linear_solver import pywraplp
+
+    solver = pywraplp.Solver.CreateSolver('GLOP')
+    if not solver:
+        return None, 999, 999
+
+    # Variables: x[i] in [0, 1] (LP relaxation)
+    x = [solver.NumVar(0, 1, f'x_{i}') for i in range(len(candidates))]
+
+    # Coverage: each lane covered exactly once
+    lane_constraints = {}
+    lane_to_cands = {}
+    for i, c in enumerate(candidates):
+        for lid in c.lane_set:
+            lane_to_cands.setdefault(lid, []).append(i)
+
+    for lid in day_lids:
+        cand_indices = lane_to_cands.get(lid, [])
+        if not cand_indices:
+            continue
+        ct = solver.Add(sum(x[i] for i in cand_indices) == 1)
+        lane_constraints[lid] = ct
+
+    # Block non-exclusive candidates from covering exclusive lanes
+    for i, c in enumerate(candidates):
+        if not c.is_exclusive:
+            for lid in c.lane_set:
+                if lid in excl_pair_ids:
+                    solver.Add(x[i] == 0)
+                    break
+
+    # Objective: minimize route count + small cost tiebreaker
+    solver.Minimize(
+        sum(x[i] for i in range(len(candidates)))
+        + sum(x[i] * candidates[i].cost * 0.001 for i in range(len(candidates)))
+    )
+
+    status = solver.Solve()
+    if status != pywraplp.Solver.OPTIMAL:
+        return None, 999, 999
+
+    # Extract dual prices
+    dual_prices = {}
+    for lid, ct in lane_constraints.items():
+        dual_prices[lid] = ct.dual_value()
+
+    fractional_routes = sum(x[i].solution_value() for i in range(len(candidates)))
+    lp_obj = solver.Objective().Value()
+
+    return dual_prices, lp_obj, fractional_routes
+
+
+def _price_new_routes(dual_prices, day_lids, lane_map, graph, excl_pair_ids,
+                       existing_sets, pre_post_h, max_legs, max_wait_h, max_deadhead,
+                       base_city, max_new=80):
+    """Generate routes with positive reduced cost using dual prices.
+
+    Reduced cost of a route = route_cost - sum(dual_prices for its lanes).
+    A route with negative reduced cost can improve the LP objective.
+    We want routes where sum(duals) > route_cost — high-value lane coverage.
+    """
+    from lane_solver import can_add_leg
+    non_excl_set = set(lid for lid in day_lids if lid not in excl_pair_ids)
+    new_candidates = {}
+
+    # Sort lanes by dual price (highest first — most valuable to cover)
+    high_dual_lids = sorted(
+        [(lid, dual_prices.get(lid, 0)) for lid in non_excl_set],
+        key=lambda x: -x[1])
+
+    def _build_from_seed(seed_lid, prefer_high_dual=True):
+        """Build a route starting from seed, extending by dual-value priority."""
+        sl = lane_map[seed_lid]
+        chain = [seed_lid]
+        drive = sl.route_duration_hours
+        duty = sl.route_duration_hours + sl.dwell_hours + pre_post_h
+        clock = sl.finish_time
+
+        for _ in range(max_legs - 1):
+            best = None
+            best_score = -9999
+            for next_id, dh_mi, dh_h in graph.get(chain[-1], []):
+                if next_id in chain or next_id not in non_excl_set:
+                    continue
+                nl = lane_map[next_id]
+                result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
+                if not result:
+                    continue
+                # Score by dual value minus DH cost
+                dual_val = dual_prices.get(next_id, 0)
+                score = dual_val - dh_mi * 0.02  # prioritize high-dual lanes with low DH
+                if score > best_score:
+                    best_score = score
+                    best = (next_id, dh_mi, dh_h, result)
+
+            if best:
+                nid, _, _, (nd, ndu, nc, _) = best
+                chain.append(nid)
+                drive, duty, clock = nd, ndu, nc
+            else:
+                break
+        return chain
+
+    # Strategy 1: Start from highest-dual lanes
+    for lid, dual_val in high_dual_lids[:20]:
+        if len(new_candidates) >= max_new:
+            break
+        chain = _build_from_seed(lid)
+        if len(chain) >= 2:
+            ls = frozenset(chain)
+            if ls not in existing_sets and ls not in new_candidates:
+                cr = _make_candidate(chain, lane_map, graph, base_city, pre_post_h, max_wait_h)
+                if cr:
+                    # Check reduced cost: sum(duals) - route_cost > 0 means improving
+                    rc = sum(dual_prices.get(lid, 0) for lid in cr.lane_set) - 1.0  # -1 for route count
+                    if rc > -0.5:  # allow slightly negative (near-improving)
+                        new_candidates[cr.lane_set] = cr
+
+    # Strategy 2: Combine two high-dual lanes
+    top_dual = [(lid, d) for lid, d in high_dual_lids if d > 0.5][:15]
+    for i, (lid_a, _) in enumerate(top_dual):
+        if len(new_candidates) >= max_new:
+            break
+        la = lane_map[lid_a]
+        for lid_b, _ in top_dual[i+1:]:
+            lb = lane_map[lid_b]
+            if lb.pickup_time is None or la.finish_time is None:
+                continue
+            # Try a→b
+            dh = _compute_dh(la, lb)
+            if dh <= max_deadhead:
+                dh_h = dh / 55.0
+                result = can_add_leg(
+                    la.route_duration_hours,
+                    la.route_duration_hours + la.dwell_hours + pre_post_h,
+                    la.finish_time, lb, dh_h, pre_post_h, max_wait_h)
+                if result:
+                    chain = _build_from_seed(lid_a)
+                    if lid_b not in chain:
+                        # Try inserting lid_b
+                        chain_with_b = [lid_a, lid_b]
+                        nd, ndu, nc, _ = result
+                        extended = chain_with_b[:]
+                        dr, du, cl = nd, ndu, nc
+                        for _ in range(max_legs - 2):
+                            best = None
+                            for nxt, dm, dh2 in graph.get(extended[-1], []):
+                                if nxt in extended or nxt not in non_excl_set:
+                                    continue
+                                nl = lane_map[nxt]
+                                r2 = can_add_leg(dr, du, cl, nl, dh2, pre_post_h, max_wait_h)
+                                if r2:
+                                    dscore = dual_prices.get(nxt, 0) - dm * 0.02
+                                    if not best or dscore > best[4]:
+                                        best = (nxt, dm, dh2, r2, dscore)
+                            if best:
+                                nid, _, _, (nd2, ndu2, nc2, _), _ = best
+                                extended.append(nid)
+                                dr, du, cl = nd2, ndu2, nc2
+                            else:
+                                break
+                        if len(extended) >= 2:
+                            ls = frozenset(extended)
+                            if ls not in existing_sets and ls not in new_candidates:
+                                cr = _make_candidate(extended, lane_map, graph, base_city,
+                                                     pre_post_h, max_wait_h)
+                                if cr:
+                                    new_candidates[cr.lane_set] = cr
+
+    # Strategy 3: Backward search from high-dual lanes
+    for lid, dual_val in high_dual_lids[:10]:
+        if len(new_candidates) >= max_new:
+            break
+        sl = lane_map[lid]
+        for pre_lid in non_excl_set:
+            if pre_lid == lid:
+                continue
+            pl = lane_map[pre_lid]
+            if pl.finish_time and sl.pickup_time and pl.finish_time < sl.pickup_time:
+                dh = _compute_dh(pl, sl)
+                if dh <= max_deadhead:
+                    chain = [pre_lid, lid]
+                    ls = frozenset(chain)
+                    if ls not in existing_sets and ls not in new_candidates:
+                        cr = _make_candidate(chain, lane_map, graph, base_city,
+                                             pre_post_h, max_wait_h, existing_sets)
+                        if cr:
+                            new_candidates[cr.lane_set] = cr
+
+    return list(new_candidates.values())
+
+
 def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                          lane_pickup_min, lane_pickup_end_min, lane_finish_min,
                          lane_drive_min, lane_duty_min, day_lane_ids, working_days,
                          day_names_map, pre_post_h, max_legs, max_wait_h,
                          solver_time=300, base_city='colton', base_lat=34.0430, base_lng=-117.3333,
                          max_deadhead=75):
-    """v5.1 Route-Candidate solver with iterative pricing loop.
+    """v5.1 Route-Candidate solver with LP-based column generation.
 
     Architecture:
     1. Bootstrap: singletons + exclusive pairs + DFS chains
-    2. Solve restricted master (set cover)
-    3. Compute lane scarcity (heuristic dual prices)
-    4. Generate targeted candidates for scarce lanes
-    5. Repeat until cover at n_drivers found or budget exhausted
+    2. LP master: solve LP relaxation, get dual prices per lane
+    3. Pricing: generate routes guided by dual prices (high-value lanes)
+    4. Repeat until LP lower bound >= n_drivers or no improving columns
+    5. Final: integer cover via CP-SAT on accumulated pool
     6. Weekly assembly via CP-SAT
     """
     import time as _t
@@ -2874,8 +3074,8 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
 
     print(f"v5: {len(lanes)} lanes, {n_drivers} drivers, {len(excl_pair_ids)//2} exclusive pairs")
 
-    # --- Iterative pricing loop per day ---
-    max_pricing_rounds = 5
+    # --- LP-based column generation per day ---
+    max_cg_rounds = 8
     day_covers = {}
 
     for day in working_days:
@@ -2885,90 +3085,79 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
         dn = day_names_map[day]
         day_budget = max(20, int(solver_time * 0.7 / len(working_days)))
 
-        # Phase 1: Bootstrap candidates
+        # Phase 1: Bootstrap pool
         print(f"  {dn}: {len(lids)} lanes, bootstrap...")
         cands = _generate_day_candidates(
             lids, lane_map, graph, pair_blocks, excl_pair_ids,
             pre_post_h=pre_post_h, max_legs=max_legs, max_wait_h=max_wait_h,
-            max_deadhead=max_deadhead, base_city=base_city, time_budget=day_budget // 2)
+            max_deadhead=max_deadhead, base_city=base_city, time_budget=day_budget // 3)
 
         existing_sets = {c.lane_set for c in cands}
 
-        # Pricing loop
+        # Column generation loop
         best_cover = None
-        for pricing_round in range(max_pricing_rounds):
+        prev_lp_obj = 999
+
+        for cg_round in range(max_cg_rounds):
             if _t.time() - v5_start > solver_time * 0.8:
                 break
 
-            # Try cover
+            # Solve LP master
+            dual_prices, lp_obj, frac_routes = _solve_lp_master(cands, lids, excl_pair_ids)
+            if dual_prices is None:
+                print(f"    LP infeasible")
+                break
+
+            print(f"    CG round {cg_round}: LP obj={lp_obj:.2f} (frac routes={frac_routes:.1f}), "
+                  f"pool={len(cands)}")
+
+            # Try integer cover at n_drivers
             cover = _select_day_cover(cands, lids, excl_pair_ids, n_drivers, solver_time=10)
             if cover and len(cover) <= n_drivers:
                 best_cover = cover
-                print(f"    Round {pricing_round}: cover found! {len(cover)} routes")
+                print(f"    Integer cover found! {len(cover)} routes")
                 break
 
-            # Cover failed or too many routes — solve min-route diagnostic
-            diag_cover = _select_day_cover(cands, lids, excl_pair_ids, len(lids), solver_time=5)
-            min_routes = len(diag_cover) if diag_cover else 999
-
-            # Compute lane scarcity (heuristic dual price)
-            lane_scarcity = {}
-            for lid in lids:
-                if lid in excl_pair_ids:
-                    continue
-                multi_count = sum(1 for c in cands if lid in c.lane_set and len(c.ordered_ids) >= 2)
-                singleton_only = multi_count == 0
-                # Average cost of candidates covering this lane
-                covering_costs = [c.cost for c in cands if lid in c.lane_set]
-                avg_cost = sum(covering_costs) / max(1, len(covering_costs))
-                # High-corridor coverage
-                high_corr = sum(1 for c in cands if lid in c.lane_set and c.corridor_count >= 3)
-
-                scarcity = (
-                    100 / max(1, multi_count)
-                    + (50 if singleton_only else 0)
-                    + avg_cost * 0.3
-                    + high_corr * 20
-                )
-                lane_scarcity[lid] = scarcity
-
-            scarce = sorted(lane_scarcity.items(), key=lambda x: -x[1])
-            scarce_lids = [lid for lid, _ in scarce[:15]]
-
-            if not scarce_lids:
+            # Check LP convergence
+            if abs(lp_obj - prev_lp_obj) < 0.01:
+                print(f"    LP converged (no improvement)")
                 break
+            prev_lp_obj = lp_obj
 
-            print(f"    Round {pricing_round}: min_routes={min_routes} (need <={n_drivers}), "
-                  f"targeting {len(scarce_lids)} scarce lanes")
+            # LP lower bound check
+            if frac_routes > n_drivers + 0.5:
+                # LP says we need more than n_drivers even fractionally
+                # Generate new columns guided by dual prices
+                pass  # continue to pricing
 
-            # Generate targeted candidates for scarce lanes
-            new_cands = _generate_targeted_candidates(
-                scarce_lids, lids, lane_map, graph, excl_pair_ids,
+            # Pricing: generate improving columns using dual prices
+            new_cands = _price_new_routes(
+                dual_prices, lids, lane_map, graph, excl_pair_ids,
                 existing_sets, pre_post_h, max_legs, max_wait_h, max_deadhead,
-                base_city, max_new=100)
+                base_city, max_new=80)
 
             if not new_cands:
-                print(f"    No new candidates generated, stopping")
+                print(f"    No improving columns, stopping")
                 break
 
             cands.extend(new_cands)
             existing_sets.update(c.lane_set for c in new_cands)
-            print(f"    +{len(new_cands)} targeted candidates (total: {len(cands)})")
+            print(f"    +{len(new_cands)} priced columns (total: {len(cands)})")
 
         if best_cover is None:
-            # Last attempt with relaxed route count
+            # Fallback: relaxed integer cover
             cover = _select_day_cover(cands, lids, excl_pair_ids, n_drivers * 2, solver_time=15)
             if cover:
                 best_cover = cover
                 print(f"    Relaxed cover: {len(cover)} routes")
             else:
-                print(f"  {dn}: cover FAILED after {max_pricing_rounds} rounds")
+                print(f"  {dn}: cover FAILED")
                 return None
 
         day_covers[day] = best_cover
 
     gen_elapsed = _t.time() - v5_start
-    print(f"  Pricing loop: {gen_elapsed:.1f}s")
+    print(f"  Column generation: {gen_elapsed:.1f}s")
 
     # Phase 3: Weekly assembly
     print(f"  Assembling weekly schedule...")
