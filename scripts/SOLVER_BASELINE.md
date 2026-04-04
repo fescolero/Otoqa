@@ -69,6 +69,13 @@ Phase 3: Assemble weekly schedule via CP-SAT driver linking
 - Mutations explore the neighborhood of proven solutions
 - Set-cover can find better combinations from the mutated pool
 
+### Diagnostic Result: v4-seeded test
+- Added 5 v4 seed routes to v5 pool
+- LP dropped 12.27 → **10.22** (frac routes = 9.0)
+- **Integer 9-route cover: SUCCESS**
+- Confirms: v5 architecture works, bottleneck is purely pricing
+- **SPPRC is the confirmed next build**
+
 ### Option A: Column generation (long-term)
 - Start with small candidate pool
 - Solve day-cover master problem
