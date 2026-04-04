@@ -143,6 +143,7 @@ export const updateSession = mutation({
     targetDriverCount: v.optional(v.number()),
     weeklyHosMode: v.optional(v.union(v.literal('uniform'), v.literal('flexible'))),
     allowSameLaneRepeat: v.optional(v.boolean()),
+    solverVersion: v.optional(v.union(v.literal('v4'), v.literal('v5_hybrid'))),
   },
   handler: async (ctx, args) => {
     const { id, ...updates } = args;
