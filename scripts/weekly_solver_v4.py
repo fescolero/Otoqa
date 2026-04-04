@@ -2546,6 +2546,38 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
                     model.AddBoolOr([assign[day][lid_a][d].Not(), assign[day][next_id][d].Not()]).OnlyEnforceIf(both.Not())
                     dh_penalty_terms.append(both * (int(dh_miles_val) // 5))
 
+    # 5b. Sequence-cost proxy: penalize large time gaps between same-driver legs.
+    # When two legs are on the same driver but far apart in time, the sequencer
+    # will need to insert idle wait or long DH. This makes the solver "see" the
+    # approximate cost of time-spread assignments before sequencing.
+    seq_cost_vars = []
+    SEQ_COST_GAP_THRESHOLD = 3.0  # hours — gaps below this are acceptable
+    for day in working_days:
+        lids = day_lane_ids[day]
+        if len(lids) < 2:
+            continue
+        # Pre-sort lanes by pickup time for efficient gap detection
+        timed_lids = [(lane_pickup_min.get(lid, 0), lane_finish_min.get(lid, 0), lid) for lid in lids]
+        timed_lids.sort()
+        # Only check non-adjacent time pairs (pairs with large gaps)
+        for i in range(len(timed_lids)):
+            _, fi, lid_a = timed_lids[i]
+            for j in range(i + 1, min(i + 6, len(timed_lids))):  # limit to nearby pairs
+                sj, _, lid_b = timed_lids[j]
+                gap_min = sj - fi
+                gap_h = gap_min / MINUTES
+                if gap_h <= SEQ_COST_GAP_THRESHOLD:
+                    continue
+                # Large gap — penalize if both on same driver
+                gap_cost = int((gap_h - SEQ_COST_GAP_THRESHOLD) * 2)  # 2 points per hour over threshold
+                if gap_cost <= 0:
+                    continue
+                for d in range(n_drivers):
+                    both = model.NewBoolVar(f'sq_{day}_{lid_a[-4:]}_{lid_b[-4:]}_{d}')
+                    model.AddBoolAnd([assign[day][lid_a][d], assign[day][lid_b][d]]).OnlyEnforceIf(both)
+                    model.AddBoolOr([assign[day][lid_a][d].Not(), assign[day][lid_b][d].Not()]).OnlyEnforceIf(both.Not())
+                    seq_cost_vars.append(both * gap_cost)
+
     # 6. Weekly duty excess: penalize each driver's weekly duty above 58h target
     target_weekly_min = int(58.0 * MINUTES)
     weekly_excess_vars = []
@@ -2706,6 +2738,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
     CROSS_OVERLAP_WEIGHT = 250 # penalize cross-corridor overlapping (dominant)
     CORRIDOR_BLOCK_WEIGHT = 80 # reward same-corridor pair blocks on same driver
     PAIR_PROTECT_WEIGHT = 200  # penalize cross-corridor legs on pair-row drivers
+    SEQ_COST_WEIGHT = 30       # penalize time-gap between same-driver legs (sequence cost proxy)
 
     obj_terms = []
     if corridor_block_rewards:
@@ -2732,6 +2765,8 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
         obj_terms.extend(-v * CROSS_OVERLAP_WEIGHT for v in cross_overlap_penalty_vars)
     if pair_protect_penalty_vars:
         obj_terms.extend(-v * PAIR_PROTECT_WEIGHT for v in pair_protect_penalty_vars)
+    if seq_cost_vars:
+        obj_terms.extend(-v * SEQ_COST_WEIGHT for v in seq_cost_vars)
     if obj_terms:
         model.Maximize(sum(obj_terms))
 
