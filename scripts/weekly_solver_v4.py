@@ -2676,89 +2676,156 @@ def _assemble_weekly(day_covers, lane_map, graph, base_city, pre_post_h, max_wai
     }
 
 
+def _make_candidate(lane_ids, lane_map, graph, base_city, pre_post_h, max_wait_h,
+                     existing_sets=None, is_exclusive=False):
+    """Build a CandidateRoute from a lane list. Returns None if infeasible or duplicate."""
+    ls = frozenset(lane_ids)
+    if existing_sets and ls in existing_sets:
+        return None
+
+    ordered, drv, dh, is_exact, gaps = _sequence_driver_day(
+        list(lane_ids), lane_map, graph, base_city, max_wait_h)
+    starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+    ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+    if not starts or not ends:
+        return None
+    st, et = min(starts), max(ends)
+    dty = (et - st) + pre_post_h
+    if drv > HOS_MAX_DRIVE or dty > HOS_MAX_DUTY:
+        return None
+    corrs = {}
+    for lid in ordered:
+        c = _corridor_of_leg(lane_map[lid])
+        corrs[c] = corrs.get(c, 0) + 1
+    dominant = max(corrs, key=corrs.get) if corrs else ''
+    wait = sum(g.get('waitHours', 0) or 0 for g in gaps) if gaps else 0
+    cost = (dh * 1.0 + (len(corrs) - 1) * 50 + wait * 10
+            + (100 if not is_exact else 0) + (200 if len(lane_ids) == 1 else 0))
+    return CandidateRoute(
+        lane_set=ls, ordered_ids=ordered, drive_hours=round(drv, 1),
+        dh_miles=dh, duty_hours=round(dty, 1), start_time=st, end_time=et,
+        corridor_count=len(corrs), dominant_corridor=dominant,
+        is_exact=is_exact, is_exclusive=is_exclusive,
+        cost=round(cost, 1), leg_gaps=gaps,
+    )
+
+
 def _generate_targeted_candidates(scarce_lids, day_lids, lane_map, graph, excl_pair_ids,
                                    existing_sets, pre_post_h, max_legs, max_wait_h, max_deadhead,
                                    base_city, max_new=100):
-    """Generate new candidate routes targeted at scarce (hard-to-cover) lanes.
+    """Generate new candidate routes targeting scarce (hard-to-cover) lanes.
 
-    For each scarce lane, build routes that include it alongside other scarce lanes.
-    This is the heuristic pricing step — scarce lanes proxy for high dual values.
+    Strategy: build routes anchored on scarce lanes, extended by time-fit first,
+    then low DH, then corridor coherence. Also try combining multiple scarce lanes.
     """
     from lane_solver import can_add_leg
     new_candidates = {}
     non_excl_set = set(lid for lid in day_lids if lid not in excl_pair_ids)
-
-    # Sort scarce lanes by pickup time
-    scarce_sorted = sorted(scarce_lids, key=lambda lid: lane_map[lid].pickup_time or 99)
     scarce_set = set(scarce_lids)
 
-    for start_lid in scarce_sorted:
-        if len(new_candidates) >= max_new:
-            break
-        sl = lane_map[start_lid]
+    # Sort scarce by pickup time
+    scarce_sorted = sorted(scarce_lids, key=lambda lid: lane_map[lid].pickup_time or 99)
 
-        # Greedy route building: always prefer other scarce lanes as next extension
-        chain = [start_lid]
-        drive = sl.route_duration_hours
-        duty = sl.route_duration_hours + sl.dwell_hours + pre_post_h
-        clock = sl.finish_time
-
-        for _ in range(max_legs - 1):
-            best_scarce = None
-            best_other = None
+    def _extend_chain(chain, drive, duty, clock, prefer_scarce=True):
+        """Extend a chain greedily, preferring scarce/time-fit lanes."""
+        for _ in range(max_legs - len(chain)):
+            candidates_for_ext = []
             for next_id, dh_mi, dh_h in graph.get(chain[-1], []):
                 if next_id in chain or next_id not in non_excl_set:
                     continue
                 nl = lane_map[next_id]
                 result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
-                if not result:
-                    continue
-                if next_id in scarce_set:
-                    if not best_scarce or (nl.pickup_time or 99) < (lane_map[best_scarce[0]].pickup_time or 99):
-                        best_scarce = (next_id, dh_mi, dh_h, result)
-                else:
-                    if not best_other or (nl.pickup_time or 99) < (lane_map[best_other[0]].pickup_time or 99):
-                        best_other = (next_id, dh_mi, dh_h, result)
+                if result:
+                    # Score: prefer scarce, then time-fit, then low DH
+                    priority = 0
+                    if prefer_scarce and next_id in scarce_set:
+                        priority -= 100
+                    # Time fit: how soon after current can this start
+                    if clock and nl.pickup_time:
+                        wait = max(0, nl.pickup_time - clock - dh_h)
+                        priority += wait * 20  # prefer tight fits
+                    priority += dh_mi  # prefer low DH
+                    candidates_for_ext.append((priority, next_id, dh_mi, dh_h, result))
 
-            # Prefer scarce lanes, fall back to others
-            best = best_scarce or best_other
-            if best:
-                nid, _, _, (nd, ndu, nc, _) = best
-                chain.append(nid)
-                drive, duty, clock = nd, ndu, nc
-            else:
+            if not candidates_for_ext:
                 break
+            candidates_for_ext.sort()
+            _, nid, _, _, (nd, ndu, nc, _) = candidates_for_ext[0]
+            chain.append(nid)
+            drive, duty, clock = nd, ndu, nc
+        return chain, drive, duty, clock
 
-        # Only emit if it includes 2+ legs and the set is new
+    # Strategy 1: Start from each scarce lane, extend with time-fit preference
+    for start_lid in scarce_sorted:
+        if len(new_candidates) >= max_new:
+            break
+        sl = lane_map[start_lid]
+        chain = [start_lid]
+        drive = sl.route_duration_hours
+        duty = sl.route_duration_hours + sl.dwell_hours + pre_post_h
+        clock = sl.finish_time
+
+        chain, drive, duty, clock = _extend_chain(chain, drive, duty, clock, prefer_scarce=True)
+
         if len(chain) >= 2:
-            ls = frozenset(chain)
-            if ls not in existing_sets and ls not in new_candidates:
-                # Sequence it
-                ordered, drv, dh, is_exact, gaps = _sequence_driver_day(
-                    chain, lane_map, graph, base_city, max_wait_h)
-                starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
-                ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
-                if starts and ends:
-                    st = min(starts)
-                    et = max(ends)
-                    dty = (et - st) + pre_post_h
-                    if drv <= HOS_MAX_DRIVE and dty <= HOS_MAX_DUTY:
-                        corrs = {}
-                        for lid in ordered:
-                            c = _corridor_of_leg(lane_map[lid])
-                            corrs[c] = corrs.get(c, 0) + 1
-                        dominant = max(corrs, key=corrs.get) if corrs else ''
-                        wait = sum(g.get('waitHours', 0) or 0 for g in gaps) if gaps else 0
-                        cost = dh * 1.0 + (len(corrs) - 1) * 50 + wait * 10 + (100 if not is_exact else 0)
-                        cr = CandidateRoute(
-                            lane_set=ls, ordered_ids=ordered, drive_hours=round(drv, 1),
-                            dh_miles=dh, duty_hours=round(dty, 1),
-                            start_time=st, end_time=et,
-                            corridor_count=len(corrs), dominant_corridor=dominant,
-                            is_exact=is_exact, is_exclusive=False,
-                            cost=round(cost, 1), leg_gaps=gaps,
-                        )
-                        new_candidates[ls] = cr
+            cr = _make_candidate(chain, lane_map, graph, base_city, pre_post_h, max_wait_h,
+                                 existing_sets | set(new_candidates.keys()))
+            if cr:
+                new_candidates[cr.lane_set] = cr
+
+    # Strategy 2: Combine pairs of scarce lanes that are time-compatible
+    for i, lid_a in enumerate(scarce_sorted):
+        if len(new_candidates) >= max_new:
+            break
+        la = lane_map[lid_a]
+        for lid_b in scarce_sorted[i+1:]:
+            lb = lane_map[lid_b]
+            if lb.pickup_time is None or la.finish_time is None:
+                continue
+            # Check if b can follow a
+            dh = _compute_dh(la, lb)
+            if dh > max_deadhead:
+                continue
+            dh_h = dh / 55.0
+            result = can_add_leg(
+                la.route_duration_hours,
+                la.route_duration_hours + la.dwell_hours + pre_post_h,
+                la.finish_time, lb, dh_h, pre_post_h, max_wait_h)
+            if result:
+                chain = [lid_a, lid_b]
+                nd, ndu, nc, _ = result
+                chain, _, _, _ = _extend_chain(chain, nd, ndu, nc, prefer_scarce=True)
+                if len(chain) >= 2:
+                    cr = _make_candidate(chain, lane_map, graph, base_city, pre_post_h, max_wait_h,
+                                         existing_sets | set(new_candidates.keys()))
+                    if cr:
+                        new_candidates[cr.lane_set] = cr
+
+    # Strategy 3: Build routes backward — find what precedes each scarce lane
+    for lid in scarce_sorted:
+        if len(new_candidates) >= max_new:
+            break
+        sl = lane_map[lid]
+        # Find all lanes that can precede this one
+        predecessors = []
+        for pre_lid in non_excl_set:
+            if pre_lid == lid:
+                continue
+            pl = lane_map[pre_lid]
+            if pl.finish_time and sl.pickup_time and pl.finish_time < sl.pickup_time:
+                dh = _compute_dh(pl, sl)
+                if dh <= max_deadhead:
+                    dh_h = dh / 55.0
+                    wait = max(0, sl.pickup_time - pl.finish_time - dh_h)
+                    if wait <= max_wait_h:
+                        predecessors.append((wait + dh, pre_lid))
+        predecessors.sort()
+        for _, pre_lid in predecessors[:3]:
+            chain = [pre_lid, lid]
+            cr = _make_candidate(chain, lane_map, graph, base_city, pre_post_h, max_wait_h,
+                                 existing_sets | set(new_candidates.keys()))
+            if cr:
+                new_candidates[cr.lane_set] = cr
 
     return list(new_candidates.values())
 
@@ -2840,23 +2907,38 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                 print(f"    Round {pricing_round}: cover found! {len(cover)} routes")
                 break
 
-            # Cover failed or too many routes — compute lane scarcity
-            lane_cand_count = {}
-            for lid in lids:
-                cnt = sum(1 for c in cands if lid in c.lane_set and len(c.ordered_ids) >= 2)
-                lane_cand_count[lid] = cnt
+            # Cover failed or too many routes — solve min-route diagnostic
+            diag_cover = _select_day_cover(cands, lids, excl_pair_ids, len(lids), solver_time=5)
+            min_routes = len(diag_cover) if diag_cover else 999
 
-            # Scarce lanes: in fewest multi-leg candidates
-            scarce = sorted(
-                [(lid, cnt) for lid, cnt in lane_cand_count.items() if lid not in excl_pair_ids],
-                key=lambda x: x[1])
-            scarce_lids = [lid for lid, cnt in scarce[:15]]  # top 15 scarcest
+            # Compute lane scarcity (heuristic dual price)
+            lane_scarcity = {}
+            for lid in lids:
+                if lid in excl_pair_ids:
+                    continue
+                multi_count = sum(1 for c in cands if lid in c.lane_set and len(c.ordered_ids) >= 2)
+                singleton_only = multi_count == 0
+                # Average cost of candidates covering this lane
+                covering_costs = [c.cost for c in cands if lid in c.lane_set]
+                avg_cost = sum(covering_costs) / max(1, len(covering_costs))
+                # High-corridor coverage
+                high_corr = sum(1 for c in cands if lid in c.lane_set and c.corridor_count >= 3)
+
+                scarcity = (
+                    100 / max(1, multi_count)
+                    + (50 if singleton_only else 0)
+                    + avg_cost * 0.3
+                    + high_corr * 20
+                )
+                lane_scarcity[lid] = scarcity
+
+            scarce = sorted(lane_scarcity.items(), key=lambda x: -x[1])
+            scarce_lids = [lid for lid, _ in scarce[:15]]
 
             if not scarce_lids:
                 break
 
-            route_count = len(cover) if cover else 999
-            print(f"    Round {pricing_round}: {route_count} routes (need <={n_drivers}), "
+            print(f"    Round {pricing_round}: min_routes={min_routes} (need <={n_drivers}), "
                   f"targeting {len(scarce_lids)} scarce lanes")
 
             # Generate targeted candidates for scarce lanes
