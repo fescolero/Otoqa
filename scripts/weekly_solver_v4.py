@@ -1992,7 +1992,7 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 5
-    solver.parameters.num_workers = 4
+    solver.parameters.num_workers = 1  # deterministic
     solver.parameters.random_seed = 42  # reproducibility
     status = solver.Solve(model)
 
@@ -2402,13 +2402,16 @@ def _generate_day_candidates(day_lids, lane_map, graph, pair_blocks, excl_pair_i
     for lid in non_excl_lids:
         _seq_and_build([lid])
 
-    # --- Prune candidates ---
-    all_cands = list(candidates_by_set.values())
+    # --- Prune candidates (deterministic ordering) ---
+    # Sort by a stable composite key to eliminate dict-insertion-order variance
+    all_cands = sorted(
+        candidates_by_set.values(),
+        key=lambda c: (c.cost, -len(c.ordered_ids), tuple(sorted(c.lane_set)))
+    )
 
     # Always keep exclusive candidates + singletons (coverage guarantee)
     kept = [c for c in all_cands if c.is_exclusive or len(c.ordered_ids) == 1]
     rest = [c for c in all_cands if not c.is_exclusive and len(c.ordered_ids) > 1]
-    rest.sort(key=lambda c: c.cost)
 
     # Diversity buckets
     pure = [c for c in rest if c.corridor_count == 1 and len(c.ordered_ids) >= 2]
@@ -2450,6 +2453,12 @@ def _select_day_cover(candidates, day_lids, excl_pair_ids, n_drivers, solver_tim
     """
     from ortools.sat.python import cp_model
 
+    # Sort candidates deterministically — critical for reproducibility
+    candidates = sorted(
+        candidates,
+        key=lambda c: (c.cost, -len(c.ordered_ids), tuple(sorted(c.lane_set)))
+    )
+
     model = cp_model.CpModel()
 
     # Variables: x[i] = use candidate i
@@ -2486,7 +2495,7 @@ def _select_day_cover(candidates, day_lids, excl_pair_ids, n_drivers, solver_tim
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = solver_time
-    solver.parameters.num_workers = 8
+    solver.parameters.num_workers = 1  # deterministic — parallel search is non-reproducible
     solver.parameters.random_seed = 42
 
     status = solver.Solve(model)
@@ -2586,7 +2595,7 @@ def _assemble_weekly(day_covers, lane_map, graph, base_city, pre_post_h, max_wai
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30
-    solver.parameters.num_workers = 8
+    solver.parameters.num_workers = 1  # deterministic — parallel search is non-reproducible
     solver.parameters.random_seed = 42
 
     status = solver.Solve(model)
@@ -2840,6 +2849,12 @@ def _solve_lp_master(candidates, day_lids, excl_pair_ids):
     - min_routes_fractional: sum of x values (fractional route count)
     """
     from ortools.linear_solver import pywraplp
+
+    # Sort candidates deterministically — critical for reproducible duals
+    candidates = sorted(
+        candidates,
+        key=lambda c: (c.cost, -len(c.ordered_ids), tuple(sorted(c.lane_set)))
+    )
 
     solver = pywraplp.Solver.CreateSolver('GLOP')
     if not solver:
@@ -3938,7 +3953,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = solver_time
-    solver.parameters.num_workers = 8
+    solver.parameters.num_workers = 1  # deterministic — parallel search is non-reproducible
     solver.parameters.random_seed = solver_seed
 
     status = solver.Solve(model)
