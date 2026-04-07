@@ -788,10 +788,7 @@ export const runExternalSolver = internalAction({
         target_drivers: session?.targetDriverCount ?? undefined,
         enable_local_optimize: true,
         best_of_n: 3,
-        // v5_hybrid is opt-in per-session via session.solverVersion field.
-        // Default is v4 (proven, consistent). v5_hybrid beats v4 on 917DK
-        // but needs validation on 2+ more contracts before becoming default.
-        solver_version: (session as any)?.solverVersion ?? 'v4',
+        solver_version: 'v5_hybrid',
         bases: data.bases,
       },
     });
