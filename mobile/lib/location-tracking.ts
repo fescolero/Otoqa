@@ -55,6 +55,7 @@ const MAX_ACCURACY_METERS = 50; // Reject readings with > 50 m accuracy
 const MIN_DISTANCE_BETWEEN_POINTS = 250; // Skip if < 250 m from last point
 const MIN_TIME_BETWEEN_SAVES_MS = 30 * 1000; // Hard floor — never save more often than 30 s
 const SYNC_BATCH_SIZE = 50; // Max points per sync batch
+const SYNC_REJECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min backoff after server rejects all points
 
 // ============================================
 // BACKGROUND-SAFE CONVEX CLIENT
@@ -229,6 +230,7 @@ const TRACKING_SESSION_MAX_AGE_MS = 18 * 60 * 60 * 1000; // 18 hours
 const LAST_HEARTBEAT_KEY = 'location_last_heartbeat';
 const BG_TASK_ALIVE_KEY = 'bg_task_last_alive';
 const BG_FALLBACK_LOCATIONS_KEY = 'bg_fallback_locations';
+const SYNC_REJECT_TS_KEY = 'sync_reject_last_ts';
 
 /**
  * Save locations to AsyncStorage as a fallback when SQLite is unavailable.
@@ -523,37 +525,48 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   let syncCount = 0;
   if (sqliteAvailable && MOBILE_LOCATION_API_KEY) {
     try {
+      const now = Date.now();
+      const rejectTsRaw = await storage.getString(SYNC_REJECT_TS_KEY);
+      const rejectTs = rejectTsRaw ? parseInt(rejectTsRaw, 10) : 0;
+      const inRejectCooldown = rejectTs > 0 && now - rejectTs < SYNC_REJECT_COOLDOWN_MS;
+
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
       if (unsynced.length > 0) {
-        syncAttempted = true;
-        const payload = unsynced.map((loc) => ({
-          driverId: loc.driverId as Id<'drivers'>,
-          loadId: loc.loadId as Id<'loadInformation'>,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-          accuracy: loc.accuracy ?? undefined,
-          speed: loc.speed ?? undefined,
-          heading: loc.heading ?? undefined,
-          trackingType: 'LOAD_ROUTE' as const,
-          recordedAt: loc.recordedAt,
-        }));
-
-        const result = await syncViaHttpEndpoint(payload, state.organizationId);
-        syncSuccess = true;
-        syncCount = result.inserted;
-
-        if (result.inserted > 0) {
-          // Only mark synced if the server actually accepted points.
-          // If inserted === 0, the server rejected everything (org mismatch,
-          // driver deleted, etc.) — retaining as unsynced lets us retry later
-          // or investigate why points are rejected.
-          await markAsSynced(unsynced.map((r) => r.id));
-          console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
+        if (inRejectCooldown) {
+          console.log(`[LocationTracking] BG HTTP sync skipped — in reject cooldown (${Math.round((SYNC_REJECT_COOLDOWN_MS - (now - rejectTs)) / 1000)}s remaining)`);
         } else {
-          console.warn(
-            `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
-          );
-          trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+          syncAttempted = true;
+          const payload = unsynced.map((loc) => ({
+            driverId: loc.driverId as Id<'drivers'>,
+            loadId: loc.loadId as Id<'loadInformation'>,
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            accuracy: loc.accuracy ?? undefined,
+            speed: loc.speed ?? undefined,
+            heading: loc.heading ?? undefined,
+            trackingType: 'LOAD_ROUTE' as const,
+            recordedAt: loc.recordedAt,
+          }));
+
+          const result = await syncViaHttpEndpoint(payload, state.organizationId);
+          syncSuccess = true;
+          syncCount = result.inserted;
+
+          if (result.inserted > 0) {
+            // Only mark synced if the server actually accepted points.
+            // If inserted === 0, the server rejected everything (org mismatch,
+            // driver deleted, etc.) — retaining as unsynced lets us retry later
+            // or investigate why points are rejected.
+            await markAsSynced(unsynced.map((r) => r.id));
+            await storage.delete(SYNC_REJECT_TS_KEY); // clear cooldown on success
+            console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
+          } else {
+            await storage.set(SYNC_REJECT_TS_KEY, now.toString()); // start cooldown
+            console.warn(
+              `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry after cooldown)`,
+            );
+            trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+          }
         }
       }
     } catch (flushError) {
