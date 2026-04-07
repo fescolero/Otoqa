@@ -2445,7 +2445,7 @@ def _generate_day_candidates(day_lids, lane_map, graph, pair_blocks, excl_pair_i
     return kept
 
 
-def _select_day_cover(candidates, day_lids, excl_pair_ids, n_drivers, solver_time=30):
+def _select_day_cover(candidates, day_lids, excl_pair_ids, n_drivers, solver_time=30, seed=42):
     """Select minimum-cost set of candidates covering all lanes exactly once.
 
     Uses CP-SAT set partitioning. Route count is a hard constraint (<= n_drivers),
@@ -2496,11 +2496,10 @@ def _select_day_cover(candidates, day_lids, excl_pair_ids, n_drivers, solver_tim
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = solver_time
     solver.parameters.num_workers = 8
-    solver.parameters.random_seed = 42
+    solver.parameters.random_seed = seed
 
     status = solver.Solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        print(f"    Day cover INFEASIBLE")
         return None
 
     selected = [candidates[i] for i in range(len(candidates)) if solver.Value(x[i])]
@@ -3230,6 +3229,7 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
     # --- LP-based column generation per day ---
     max_cg_rounds = 8
     day_covers = {}
+    day_candidates = {}  # persist final pools for best-of-3 re-solve
 
     for day in working_days:
         lids = day_lane_ids[day]
@@ -3321,22 +3321,84 @@ def _build_and_solve_v5(n_drivers, lanes, lane_map, graph, lane_active_days,
                 return None
 
         day_covers[day] = best_cover
+        day_candidates[day] = cands  # persist for best-of-3 re-solve
 
     gen_elapsed = _t.time() - v5_start
     print(f"  Column generation: {gen_elapsed:.1f}s")
 
-    # Phase 3: Weekly assembly
-    print(f"  Assembling weekly schedule...")
-    result = _assemble_weekly(
-        day_covers, lane_map, graph, base_city, pre_post_h, max_wait_h,
-        working_days, day_names_map, n_drivers)
+    # Phase 3: Best-of-3 cover + weekly assembly
+    # The candidate pools are fixed — re-solve cover + assembly with different
+    # CP-SAT seeds to absorb parallel search variance.
+    cover_seeds = [42, 123, 271]
+    best_result = None
+    best_quality = -9999
+
+    # Collect all day candidate pools for re-solving
+    day_pools = {}
+    for day in working_days:
+        lids = day_lane_ids[day]
+        if not lids or day not in day_candidates:
+            continue
+        day_pools[day] = day_candidates[day]
+
+    for cs_idx, cover_seed in enumerate(cover_seeds):
+        if _t.time() - v5_start > solver_time * 0.9:
+            break
+
+        # Re-solve day covers with this seed
+        trial_covers = {}
+        trial_ok = True
+        for day in working_days:
+            if day not in day_pools:
+                continue
+            lids = day_lane_ids[day]
+            cover = _select_day_cover(day_pools[day], lids, excl_pair_ids, n_drivers,
+                                       solver_time=8, seed=cover_seed)
+            if cover:
+                trial_covers[day] = cover
+            else:
+                # Try relaxed
+                cover = _select_day_cover(day_pools[day], lids, excl_pair_ids, n_drivers * 2,
+                                           solver_time=8, seed=cover_seed)
+                if cover:
+                    trial_covers[day] = cover
+                else:
+                    trial_ok = False
+                    break
+
+        if not trial_ok:
+            continue
+
+        # Weekly assembly
+        trial_result = _assemble_weekly(
+            trial_covers, lane_map, graph, base_city, pre_post_h, max_wait_h,
+            working_days, day_names_map, n_drivers)
+
+        if not trial_result or not trial_result.get('weeklySchedule'):
+            continue
+
+        # Score this trial
+        ws = trial_result['weeklySchedule']
+        exact = sum(1 for dr in ws for dd in dr['days'].values() if dd.get('isExact'))
+        max_dh = max((dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values()), default=0)
+        total_dh = sum(dd.get('deadheadMiles', 0) for dr in ws for dd in dr['days'].values())
+        # Same quality scoring as v4 best-of-N
+        dh_penalty = max_dh * 5 + (max(0, max_dh - 150) * 10)
+        quality = exact * 800 - dh_penalty - total_dh * 0.3
+
+        print(f"  Trial {cs_idx+1} (seed={cover_seed}): exact={exact} max_dh={max_dh} "
+              f"total_dh={total_dh} quality={quality:.0f}")
+
+        if quality > best_quality:
+            best_quality = quality
+            best_result = trial_result
 
     total_elapsed = _t.time() - v5_start
     print(f"  v5 total: {total_elapsed:.1f}s")
 
-    if result:
-        result['solverVersion'] = 'v5'
-    return result
+    if best_result:
+        best_result['solverVersion'] = 'v5'
+    return best_result
 
 
 def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_pickup_min,
