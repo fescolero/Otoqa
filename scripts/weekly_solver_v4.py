@@ -1992,7 +1992,7 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 5
-    solver.parameters.num_workers = 1  # deterministic
+    solver.parameters.num_workers = 4
     solver.parameters.random_seed = 42  # reproducibility
     status = solver.Solve(model)
 
@@ -2495,7 +2495,7 @@ def _select_day_cover(candidates, day_lids, excl_pair_ids, n_drivers, solver_tim
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = solver_time
-    solver.parameters.num_workers = 1  # deterministic — parallel search is non-reproducible
+    solver.parameters.num_workers = 8
     solver.parameters.random_seed = 42
 
     status = solver.Solve(model)
@@ -2595,7 +2595,7 @@ def _assemble_weekly(day_covers, lane_map, graph, base_city, pre_post_h, max_wai
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30
-    solver.parameters.num_workers = 1  # deterministic — parallel search is non-reproducible
+    solver.parameters.num_workers = 8
     solver.parameters.random_seed = 42
 
     status = solver.Solve(model)
@@ -3953,7 +3953,7 @@ def _build_and_solve(n_drivers, lanes, lane_map, graph, lane_active_days, lane_p
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = solver_time
-    solver.parameters.num_workers = 1  # deterministic — parallel search is non-reproducible
+    solver.parameters.num_workers = 8
     solver.parameters.random_seed = solver_seed
 
     status = solver.Solve(model)
