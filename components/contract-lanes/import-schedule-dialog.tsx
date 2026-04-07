@@ -1,13 +1,24 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useAction, useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { Upload, Settings2, Loader2, TableProperties, Import, ChevronLeft, ChevronRight, MessageSquare, PanelRightClose, X } from 'lucide-react';
+import {
+  Upload,
+  Settings2,
+  Loader2,
+  TableProperties,
+  Import,
+  ChevronLeft,
+  ChevronRight,
+  MessageSquare,
+  PanelRightClose,
+  X,
+} from 'lucide-react';
 import { ScheduleConfigureStep } from './schedule-configure-step';
 import { ScheduleReviewTable } from './schedule-review-table';
 import { ScheduleChatPanel } from './schedule-chat-panel';
@@ -17,11 +28,9 @@ import type {
   ExtractedLane,
   ChatMessage,
   DedupResult,
+  FacilityDirectoryRow,
   WizardStep,
 } from './schedule-import-types';
-import * as pdfjsLib from 'pdfjs-dist';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 interface ImportScheduleDialogProps {
   open: boolean;
@@ -69,6 +78,134 @@ export function ImportScheduleDialog({
   const [extractionProgress, setExtractionProgress] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [facilityOverrides, setFacilityOverrides] = useState<Record<string, Partial<FacilityDirectoryRow>>>({});
+
+  const facilityDirectory = useMemo<FacilityDirectoryRow[]>(() => {
+    const map = new Map<string, FacilityDirectoryRow>();
+    for (const lane of lanes) {
+      for (const stop of lane.stops || []) {
+        const facilityName = stop.facilityName?.value?.trim() || null;
+        const nassCode = stop.nassCode?.value?.trim() || null;
+        if (!facilityName && !nassCode) continue;
+
+        const key = `${facilityName || ''}|${nassCode || ''}`;
+        const existing = map.get(key);
+        map.set(key, {
+          facilityName: facilityName || existing?.facilityName || `Facility ${nassCode || map.size + 1}`,
+          nassCode,
+          address: stop.address?.value || existing?.address || null,
+          city: stop.city?.value || existing?.city || null,
+          state: stop.state?.value || existing?.state || null,
+          zip: stop.zip?.value || existing?.zip || null,
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.facilityName.localeCompare(b.facilityName));
+  }, [lanes]);
+
+  const mergedFacilityDirectory = useMemo<FacilityDirectoryRow[]>(() => {
+    return facilityDirectory.map((facility) => {
+      const key = `${facility.facilityName}|${facility.nassCode || ''}`;
+      const override = facilityOverrides[key] || {};
+      return {
+        ...facility,
+        ...override,
+      };
+    });
+  }, [facilityDirectory, facilityOverrides]);
+
+  useEffect(() => {
+    if (mergedFacilityDirectory.length === 0) return;
+
+    const facilityByKey = new Map<string, FacilityDirectoryRow>();
+    for (const facility of mergedFacilityDirectory) {
+      const hasResolvedAddress = !!(facility.address || facility.city || facility.state || facility.zip);
+      if (!hasResolvedAddress) continue;
+      if (facility.nassCode) facilityByKey.set(`nass:${facility.nassCode.toLowerCase()}`, facility);
+      facilityByKey.set(`name:${facility.facilityName.toLowerCase()}`, facility);
+    }
+
+    if (facilityByKey.size === 0) return;
+
+    setLanes((currentLanes) => {
+      let changed = false;
+
+      const nextLanes = currentLanes.map((lane) => {
+        if (!lane.stops || lane.stops.length === 0) return lane;
+
+        const nextStops = lane.stops.map((stop) => {
+          const hasAddress = !!(stop.address?.value || stop.city?.value || stop.state?.value || stop.zip?.value);
+          if (hasAddress) return stop;
+
+          const nassCode = stop.nassCode?.value?.toLowerCase() || '';
+          const facilityName = stop.facilityName?.value?.toLowerCase() || '';
+          const facility =
+            (nassCode && facilityByKey.get(`nass:${nassCode}`)) ||
+            (facilityName && facilityByKey.get(`name:${facilityName}`));
+
+          if (!facility) return stop;
+
+          const nextAddress = facility.address || stop.address?.value || null;
+          const nextCity = facility.city || stop.city?.value || null;
+          const nextState = facility.state || stop.state?.value || null;
+          const nextZip = facility.zip || stop.zip?.value || null;
+
+          const noValueChange =
+            nextAddress === (stop.address?.value || null) &&
+            nextCity === (stop.city?.value || null) &&
+            nextState === (stop.state?.value || null) &&
+            nextZip === (stop.zip?.value || null);
+
+          if (noValueChange) return stop;
+
+          changed = true;
+          return {
+            ...stop,
+            address: {
+              ...stop.address,
+              value: nextAddress,
+              confidence: facility.address ? 'high' : stop.address?.confidence || 'low',
+            },
+            city: {
+              ...stop.city,
+              value: nextCity,
+              confidence: facility.city ? 'high' : stop.city?.confidence || 'low',
+            },
+            state: {
+              ...stop.state,
+              value: nextState,
+              confidence: facility.state ? 'high' : stop.state?.confidence || 'low',
+            },
+            zip: {
+              ...stop.zip,
+              value: nextZip,
+              confidence: facility.zip ? 'high' : stop.zip?.confidence || 'low',
+            },
+          };
+        });
+
+        return changed ? { ...lane, stops: nextStops } : lane;
+      });
+
+      return changed ? nextLanes : currentLanes;
+    });
+  }, [mergedFacilityDirectory]);
+
+  const handleFacilityDirectoryChange = useCallback((rows: FacilityDirectoryRow[]) => {
+    setFacilityOverrides((current) => {
+      const next: Record<string, Partial<FacilityDirectoryRow>> = { ...current };
+      for (const row of rows) {
+        const key = `${row.facilityName}|${row.nassCode || ''}`;
+        next[key] = {
+          address: row.address || null,
+          city: row.city || null,
+          state: row.state || null,
+          zip: row.zip || null,
+        };
+      }
+      return next;
+    });
+  }, []);
 
   const extractLanes = useAction(api.scheduleImport.extractLanesFromSchedule);
   const verifyStops = useAction(api.scheduleImport.verifyAndEnrichStops);
@@ -81,13 +218,14 @@ export function ImportScheduleDialog({
 
   const checkExisting = useQuery(
     api.contractLanes.checkExistingLanes,
-    dedupPairs.length > 0
-      ? { workosOrgId, pairs: dedupPairs }
-      : 'skip',
+    dedupPairs.length > 0 ? { workosOrgId, pairs: dedupPairs } : 'skip',
   );
   const bulkUpsert = useMutation(api.contractLanes.bulkUpsert);
 
   const renderPdfToImages = useCallback(async (file: File): Promise<string[]> => {
+    const pdfjsLib = await import('pdfjs-dist');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
     const images: string[] = [];
@@ -160,9 +298,7 @@ export function ImportScheduleDialog({
       for (let i = 0; i < pageImages.length; i += PAGES_PER_BATCH) {
         const batch = pageImages.slice(i, i + PAGES_PER_BATCH);
         const endPage = Math.min(i + PAGES_PER_BATCH, pageImages.length);
-        setExtractionProgress(
-          `Processing pages ${i + 1}-${endPage} of ${pageImages.length}...`,
-        );
+        setExtractionProgress(`Processing pages ${i + 1}-${endPage} of ${pageImages.length}...`);
 
         const result = await extractLanes({
           imageUrls: batch,
@@ -180,13 +316,36 @@ export function ImportScheduleDialog({
 
         for (const lane of result.lanes) {
           const laneTyped = lane as unknown as ExtractedLane;
-          const isDuplicate = allLanes.some(
+          const existingIndex = allLanes.findIndex(
             (existing) =>
               existing.hcr?.value === laneTyped.hcr?.value &&
               existing.tripNumber?.value === laneTyped.tripNumber?.value,
           );
-          if (!isDuplicate) {
+
+          if (existingIndex === -1) {
             allLanes.push({ ...laneTyped, _selected: true });
+            continue;
+          }
+
+          const scoreLane = (candidate: ExtractedLane) => {
+            let score = 0;
+            if (candidate.contractName?.value) score += 2;
+            if (candidate.contractPeriodStart?.value) score += 1;
+            if (candidate.contractPeriodEnd?.value) score += 1;
+            if (candidate.miles?.value != null) score += 1;
+            for (const stop of candidate.stops || []) {
+              if (stop.address?.value) score += 2;
+              if (stop.city?.value) score += 1;
+              if (stop.state?.value) score += 1;
+              if (stop.zip?.value) score += 1;
+              if (stop.facilityName?.value) score += 1;
+              if (stop.nassCode?.value) score += 1;
+            }
+            return score;
+          };
+
+          if (scoreLane(laneTyped) > scoreLane(allLanes[existingIndex])) {
+            allLanes[existingIndex] = { ...laneTyped, _selected: true };
           }
         }
       }
@@ -250,8 +409,7 @@ export function ImportScheduleDialog({
         (lane.rateType?.value !== undefined && lane.rateType.value !== existing.rateType) ||
         (lane.contractPeriodStart?.value !== undefined &&
           lane.contractPeriodStart.value !== existing.contractPeriodStart) ||
-        (lane.contractPeriodEnd?.value !== undefined &&
-          lane.contractPeriodEnd.value !== existing.contractPeriodEnd) ||
+        (lane.contractPeriodEnd?.value !== undefined && lane.contractPeriodEnd.value !== existing.contractPeriodEnd) ||
         (lane.miles?.value !== undefined && lane.miles.value !== existing.miles);
 
       if (hasChanges) {
@@ -283,9 +441,7 @@ export function ImportScheduleDialog({
   const handleImport = useCallback(async () => {
     setIsProcessing(true);
     try {
-      const toCreate = dedupResults
-        .filter((r) => r.selected && r.category === 'new')
-        .map((r) => r.lane);
+      const toCreate = dedupResults.filter((r) => r.selected && r.category === 'new').map((r) => r.lane);
 
       const toUpdate = dedupResults
         .filter((r) => r.selected && (r.category === 'update' || r.category === 'restore'))
@@ -296,7 +452,9 @@ export function ImportScheduleDialog({
         .map((r) => r.existingId as Id<'contractLanes'>);
 
       const newLanes = toCreate.map((lane) => ({
-        contractName: (lane.contractName?.value as string) || `Lane: ${lane.hcr?.value || 'Unknown'}/${lane.tripNumber?.value || 'Unknown'}`,
+        contractName:
+          (lane.contractName?.value as string) ||
+          `Lane: ${lane.hcr?.value || 'Unknown'}/${lane.tripNumber?.value || 'Unknown'}`,
         contractPeriodStart: (lane.contractPeriodStart?.value as string) || '',
         contractPeriodEnd: (lane.contractPeriodEnd?.value as string) || '',
         hcr: (lane.hcr?.value as string) || undefined,
@@ -307,18 +465,19 @@ export function ImportScheduleDialog({
           state: (s.state?.value as string) || '',
           zip: (s.zip?.value as string) || '',
           stopOrder: idx + 1,
-          stopType: ((s.stopType?.value as 'Pickup' | 'Delivery') || 'Pickup'),
+          stopType: (s.stopType?.value as 'Pickup' | 'Delivery') || 'Pickup',
           type: 'APPT' as const,
           arrivalTime: '',
         })),
         miles: (lane.miles?.value as number) || undefined,
         calculatedMiles: lane._calculatedMiles || undefined,
         rate: (lane.rate?.value as number) || 0,
-        rateType: ((lane.rateType?.value as 'Per Mile' | 'Flat Rate' | 'Per Stop') || 'Flat Rate'),
-        currency: ((lane.currency?.value as 'USD' | 'CAD' | 'MXN') || undefined),
+        rateType: (lane.rateType?.value as 'Per Mile' | 'Flat Rate' | 'Per Stop') || 'Flat Rate',
+        currency: (lane.currency?.value as 'USD' | 'CAD' | 'MXN') || undefined,
         minimumRate: (lane.minimumRate?.value as number) || undefined,
         minimumQuantity: (lane.minimumQuantity?.value as number) || undefined,
-        equipmentClass: (lane.equipmentClass?.value as 'Bobtail' | 'Dry Van' | 'Refrigerated' | 'Flatbed' | 'Tanker') || undefined,
+        equipmentClass:
+          (lane.equipmentClass?.value as 'Bobtail' | 'Dry Van' | 'Refrigerated' | 'Flatbed' | 'Tanker') || undefined,
         equipmentSize: (lane.equipmentSize?.value as '53ft' | '48ft' | '45ft') || undefined,
         stopOffRate: (lane.stopOffRate?.value as number) || undefined,
         includedStops: (lane.includedStops?.value as number) || undefined,
@@ -332,7 +491,7 @@ export function ImportScheduleDialog({
         contractPeriodStart: (r.lane.contractPeriodStart?.value as string) || undefined,
         contractPeriodEnd: (r.lane.contractPeriodEnd?.value as string) || undefined,
         rate: (r.lane.rate?.value as number) || undefined,
-        rateType: ((r.lane.rateType?.value as 'Per Mile' | 'Flat Rate' | 'Per Stop') || undefined),
+        rateType: (r.lane.rateType?.value as 'Per Mile' | 'Flat Rate' | 'Per Stop') || undefined,
         miles: (r.lane.miles?.value as number) || undefined,
         calculatedMiles: r.lane._calculatedMiles || undefined,
       }));
@@ -370,6 +529,7 @@ export function ImportScheduleDialog({
     setLanes([]);
     setChatMessages([]);
     setDedupResults([]);
+    setFacilityOverrides({});
     setExtractionProgress('');
     setIsProcessing(false);
     setChatOpen(false);
@@ -389,6 +549,7 @@ export function ImportScheduleDialog({
         showCloseButton={false}
         className="max-w-[95vw] sm:max-w-[95vw] w-[1400px] max-h-[92vh] h-[88vh] flex flex-col p-0 gap-0 overflow-hidden"
       >
+        <DialogTitle className="sr-only">Import Contract Schedule</DialogTitle>
         {/* Header with step indicator */}
         <div className="flex items-center border-b px-4 py-3 shrink-0">
           <div className="flex-1 flex items-center justify-center gap-1">
@@ -397,11 +558,7 @@ export function ImportScheduleDialog({
               const isComplete = i < currentStepIndex;
               return (
                 <div key={s} className="flex items-center">
-                  {i > 0 && (
-                    <div
-                      className={`h-px w-8 mx-1 ${isComplete ? 'bg-primary' : 'bg-border'}`}
-                    />
-                  )}
+                  {i > 0 && <div className={`h-px w-8 mx-1 ${isComplete ? 'bg-primary' : 'bg-border'}`} />}
                   <div
                     className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md whitespace-nowrap transition-colors ${
                       isActive
@@ -441,22 +598,13 @@ export function ImportScheduleDialog({
                 onDragOver={(e) => e.preventDefault()}
               >
                 <Upload className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                <h3 className="text-lg font-semibold mb-2">
-                  Upload Schedule PDF
-                </h3>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Drag and drop a PDF file, or click to browse
-                </p>
+                <h3 className="text-lg font-semibold mb-2">Upload Schedule PDF</h3>
+                <p className="text-sm text-muted-foreground mb-4">Drag and drop a PDF file, or click to browse</p>
                 <label>
                   <Button variant="outline" asChild>
                     <span>Choose File</span>
                   </Button>
-                  <input
-                    type="file"
-                    accept=".pdf"
-                    className="hidden"
-                    onChange={handleFileUpload}
-                  />
+                  <input type="file" accept=".pdf" className="hidden" onChange={handleFileUpload} />
                 </label>
                 {pdfFile && (
                   <div className="mt-4 text-sm font-medium">
@@ -494,22 +642,14 @@ export function ImportScheduleDialog({
             <div className="flex flex-col items-center justify-center h-full gap-4">
               <Loader2 className="h-12 w-12 animate-spin text-primary" />
               <p className="text-lg font-medium">Extracting lane data...</p>
-              {extractionProgress && (
-                <p className="text-sm text-muted-foreground">
-                  {extractionProgress}
-                </p>
-              )}
+              {extractionProgress && <p className="text-sm text-muted-foreground">{extractionProgress}</p>}
             </div>
           )}
 
           {step === 'review' && (
             <div className="flex h-full min-h-0 relative">
               <div className="flex-1 min-w-0 overflow-auto">
-                <ScheduleReviewTable
-                  lanes={lanes}
-                  config={config!}
-                  onLanesChange={setLanes}
-                />
+                <ScheduleReviewTable lanes={lanes} config={config!} onLanesChange={setLanes} />
               </div>
               {chatOpen && (
                 <div className="w-[380px] shrink-0 border-l flex flex-col bg-background">
@@ -518,12 +658,7 @@ export function ImportScheduleDialog({
                       <MessageSquare className="h-4 w-4 text-primary" />
                       <span className="text-sm font-medium">Correction Assistant</span>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => setChatOpen(false)}
-                    >
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setChatOpen(false)}>
                       <PanelRightClose className="h-4 w-4" />
                     </Button>
                   </div>
@@ -531,6 +666,8 @@ export function ImportScheduleDialog({
                     <ScheduleChatPanel
                       lanes={lanes}
                       config={config!}
+                      facilityDirectory={mergedFacilityDirectory}
+                      onFacilityDirectoryChange={handleFacilityDirectoryChange}
                       messages={chatMessages}
                       onMessagesChange={setChatMessages}
                       onLanesChange={setLanes}
@@ -543,10 +680,7 @@ export function ImportScheduleDialog({
 
           {step === 'import' && (
             <div className="h-full overflow-y-auto p-6">
-              <ScheduleDedupReview
-                results={dedupResults}
-                onResultsChange={setDedupResults}
-              />
+              <ScheduleDedupReview results={dedupResults} onResultsChange={setDedupResults} />
             </div>
           )}
         </div>
@@ -605,16 +739,8 @@ export function ImportScheduleDialog({
 
             {step === 'review' && (
               <>
-                <Button
-                  variant="outline"
-                  onClick={() => setChatOpen(!chatOpen)}
-                  className="gap-2"
-                >
-                  {chatOpen ? (
-                    <PanelRightClose className="h-4 w-4" />
-                  ) : (
-                    <MessageSquare className="h-4 w-4" />
-                  )}
+                <Button variant="outline" onClick={() => setChatOpen(!chatOpen)} className="gap-2">
+                  {chatOpen ? <PanelRightClose className="h-4 w-4" /> : <MessageSquare className="h-4 w-4" />}
                   {chatOpen ? 'Hide Assistant' : 'Correction Assistant'}
                 </Button>
                 <Button
@@ -630,10 +756,7 @@ export function ImportScheduleDialog({
             {step === 'import' && (
               <Button
                 onClick={handleImport}
-                disabled={
-                  isProcessing ||
-                  dedupResults.filter((r) => r.selected).length === 0
-                }
+                disabled={isProcessing || dedupResults.filter((r) => r.selected).length === 0}
               >
                 {isProcessing ? (
                   <>
@@ -641,10 +764,7 @@ export function ImportScheduleDialog({
                     Importing...
                   </>
                 ) : (
-                  <>
-                    Import{' '}
-                    {dedupResults.filter((r) => r.selected).length} Lane(s)
-                  </>
+                  <>Import {dedupResults.filter((r) => r.selected).length} Lane(s)</>
                 )}
               </Button>
             )}

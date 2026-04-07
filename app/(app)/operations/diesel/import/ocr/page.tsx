@@ -27,9 +27,6 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import Link from 'next/link';
 import { AlertCircle, ArrowLeft, CheckCircle, Download, Loader2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
-import * as pdfjsLib from 'pdfjs-dist';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 type Confidence = 'high' | 'medium' | 'low';
 
@@ -307,6 +304,9 @@ function buildStructuredPageText(items: unknown[]): string {
 }
 
 async function renderPdfToImages(file: File): Promise<OcrPageInput[]> {
+  const pdfjsLib = await import('pdfjs-dist');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
   const pages: OcrPageInput[] = [];
@@ -680,26 +680,60 @@ export default function OcrFuelImportPage() {
     setIsProcessing(true);
 
     try {
-      const result = await extractFuelEntries({
-        pages: ocrPages,
-        vendorNames: (vendors ?? []).map((vendor) => vendor.name),
-      });
+      const vendorNames = (vendors ?? []).map((vendor) => vendor.name);
+      const combinedEntries: ExtractedFuelEntry[] = [];
+      const seen = new Set<string>();
+      const pageErrors: string[] = [];
 
-      if (result.error && result.entries.length === 0) {
-        toast.error(result.error);
+      for (let index = 0; index < ocrPages.length; index += 1) {
+        const result = await extractFuelEntries({
+          pages: [ocrPages[index]],
+          vendorNames,
+        });
+
+        if (result.error && result.entries.length === 0) {
+          pageErrors.push(`Page ${index + 1}: ${result.error}`);
+          continue;
+        }
+
+        if (result.error) {
+          pageErrors.push(`Page ${index + 1}: ${result.error}`);
+        }
+
+        for (const entry of result.entries as ExtractedFuelEntry[]) {
+          const key = [
+            entry.entryDate.value ?? '',
+            entry.vendorName.value ?? '',
+            entry.driverName?.value ?? '',
+            entry.gallons.value ?? '',
+            entry.pricePerGallon.value ?? '',
+            entry.totalCost?.value ?? '',
+          ]
+            .map((value) => String(value).trim().toLowerCase())
+            .join('|');
+
+          if (!seen.has(key)) {
+            seen.add(key);
+            combinedEntries.push(entry);
+          }
+        }
+      }
+
+      const typedEntries = combinedEntries;
+      if (typedEntries.length === 0) {
+        toast.error(pageErrors[0] || 'No transactions were extracted');
         setStep('upload');
         return;
       }
 
-      if (result.error) {
-        toast.warning(result.error);
-      }
-
-      const typedEntries = result.entries as ExtractedFuelEntry[];
       setExtractedEntries(typedEntries);
       setReviewRows(syncReviewRows(typedEntries));
       setStep('review');
-      toast.success(`Extracted ${typedEntries.length} transaction(s)`);
+      if (pageErrors.length > 0) {
+        toast.warning(`Extracted ${typedEntries.length} transaction(s) with issues: ${pageErrors.join(' | ')}`);
+      } else {
+        toast.success(`Extracted ${typedEntries.length} transaction(s)`);
+      }
     } catch (error) {
       console.error('OCR extraction failed:', error);
       toast.error('OCR extraction failed');

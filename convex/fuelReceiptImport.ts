@@ -1,6 +1,5 @@
 'use node';
 
-import OpenAI from 'openai';
 import { v } from 'convex/values';
 import { action } from './_generated/server';
 
@@ -60,189 +59,165 @@ function wrap<T>(value: T, confidence: Confidence = 'high'): ExtractedField<T> {
   return { value, confidence };
 }
 
-function normalizePaymentMethod(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return null;
-
-  const map: Record<string, string> = {
-    'fuel_card': 'FUEL_CARD',
-    'fuel card': 'FUEL_CARD',
-    'fuelcard': 'FUEL_CARD',
-    'cash': 'CASH',
-    'check': 'CHECK',
-    'credit card': 'CREDIT_CARD',
-    'credit_card': 'CREDIT_CARD',
-    'credit-card': 'CREDIT_CARD',
-    'cc': 'CREDIT_CARD',
-    'efs': 'EFS',
-    'comdata': 'COMDATA',
-  };
-
-  return map[normalized] || value.toString().trim().toUpperCase() || null;
-}
-
-function normalizeConfidence(value: unknown): Confidence {
-  return value === 'high' || value === 'medium' || value === 'low' ? value : 'medium';
-}
-
 function toNumberOrNull(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'string') return null;
-
   const cleaned = value.replace(/[^0-9.-]/g, '');
   if (!cleaned) return null;
-
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function toStringOrNull(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed || null;
+function buildRowOcrPrompt() {
+  return [
+    'Extract this fuel statement page as visible text rows in reading order.',
+    'Do not reconstruct a markdown table.',
+    'Do not infer columns.',
+    'Preserve each visible transaction row as its own line.',
+    'Keep headers and section labels when helpful, but preserve row text exactly as seen.',
+    'Stop at totals/subtotals and do not continue or repeat the last row.',
+  ].join(' ');
 }
 
-function buildPrompt(vendorNames: string[]) {
-  const vendorSection = vendorNames.length
-    ? `\nKnown vendor names for this organization: ${vendorNames.join(', ')}. If a receipt clearly matches one of these, return that exact vendor name.`
-    : '';
+function parsePageContext(markdown: string, vendorNames: string[]) {
+  let invoiceNumber: string | null = null;
+  let vendorName: string | null = null;
 
-  return `You are an OCR extraction assistant for diesel fuel imports in a transportation system.
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
 
-The uploaded files may be phone photos, scans, PDFs, fuel receipts, emailed invoices, or multi-page vendor statements. Vendor layouts vary widely. There is NO standard template, so rely on labels, line items, headers, tables, totals, card data, and surrounding context.${vendorSection}
+    const invoiceMatch = line.match(/Invoice No:\s*(\S+)/i);
+    if (invoiceMatch) invoiceNumber = invoiceMatch[1];
 
-OCR context / terminology:
-- Prod = Product
-- DSL = Diesel
-- ULSD = Ultra Low Sulfur Diesel
-- AGO = Automotive Gas Oil / Diesel
-- GSL = Gasoline
-- REG = Regular Gasoline
-- UNL = Unleaded Gasoline
-- PREM = Premium Gasoline
-- MID = Midgrade Gasoline
-- DEF = Diesel Exhaust Fluid
-- Price = Price/Gal
-- Quantity = Gallons
-- Amt Excp Code = line-item total amount
-
-Extract every distinct diesel or fuel purchase transaction visible across all pages.
-
-Rules:
-1. Return ONLY valid JSON. No markdown.
-2. Use this exact shape: {"entries":[...]}.
-3. Each entry must map to one actual fuel purchase transaction line item, never a statement summary or rolled-up daily/monthly total.
-4. If the same transaction appears on multiple pages, return it once.
-5. Ignore non-fuel merchandise, loyalty messages, footer text, and non-transaction summary sections.
-6. Ignore DEF-only purchases.
-7. If a field is missing, use null.
-8. Do not guess. Low-quality or ambiguous values should still be returned if visible, but with lower confidence.
-9. Numeric fields must be numbers only.
-10. paymentMethod must be one of: FUEL_CARD, CASH, CHECK, CREDIT_CARD, EFS, COMDATA, or null.
-11. If the document is a statement with a summary total and transaction detail rows, extract the detail rows only.
-12. If a single page shows multiple transaction lines, return one entry per line.
-13. Keep column meanings strict. Do not swap quantity, unit price, and total.
-14. If a table uses QUANTITY, map it to gallons.
-15. If a table uses PRICE, PRICE/GAL, UNIT PRICE, or similar, map it to pricePerGallon.
-16. If a table uses AMT, AMOUNT, AMT EXCP CODE, EXT AMOUNT, LINE TOTAL, or similar, map it to totalCost.
-17. If a row contains both gallons and total but the price is missing, do not copy the total into pricePerGallon.
-18. If a value is ambiguous between total and price, prefer null over guessing.
-19. Some statements contain grouped sections where the header appears once and later rows continue under the same column positions after a visual break.
-20. If a group of rows continues after a blank line, driver section, or subtotal without a repeated header, keep using the same prior column mapping.
-21. Do not remap columns after section breaks unless a clearly new header row appears.
-
-Fields to extract for each entry:
-- entryDate: purchase date as shown on document
-- vendorName: merchant/vendor/fuel stop name
-- gallons: fuel quantity purchased
-- pricePerGallon: price per gallon / unit price
-- fuelType: fuel product/type/code when shown (examples: DSL, DIESEL, ULSD, AGO, GSL, REG, UNL, DEF)
-- totalCost: transaction total if shown
-- odometerReading: odometer / mileage reading
-- city: city if shown
-- state: state if shown
-- fuelCardNumber: fuel card number or masked card number if shown
-- receiptNumber: receipt, invoice, transaction, or ticket number if shown
-- paymentMethod: normalized payment method enum
-- driverName: driver name if shown
-- carrierName: carrier name if shown and the fuel is tied to a carrier rather than a driver
-- truckUnit: truck/unit/tractor number if shown
-- notes: short note only when useful for context or ambiguity
-
-Important mapping checks:
-- gallons should usually be the QUANTITY field and often contains values like 10.0, 57.43, 126.44
-- pricePerGallon should usually be a smaller per-unit number like 2.99, 3.419, 4.12
-- totalCost should usually equal or closely match gallons x pricePerGallon
-- never place a line total into gallons or pricePerGallon
-- when provided extracted page text, treat each text line as a candidate table row and preserve the same column meaning across later grouped sections
-
-Each field must be an object shaped like:
-{"value": <value-or-null>, "confidence": "high"|"medium"|"low"}
-
-Example:
-{
-  "entries": [
-    {
-      "entryDate": {"value": "03/11/2026", "confidence": "high"},
-      "vendorName": {"value": "Love's Travel Stop", "confidence": "high"},
-      "gallons": {"value": 126.44, "confidence": "high"},
-      "pricePerGallon": {"value": 3.419, "confidence": "high"},
-      "fuelType": {"value": "DSL", "confidence": "high"},
-      "totalCost": {"value": 432.32, "confidence": "high"},
-      "odometerReading": {"value": 401122, "confidence": "medium"},
-      "city": {"value": "Amarillo", "confidence": "medium"},
-      "state": {"value": "TX", "confidence": "medium"},
-      "fuelCardNumber": {"value": "****1234", "confidence": "medium"},
-      "receiptNumber": {"value": "948221", "confidence": "high"},
-      "paymentMethod": {"value": "COMDATA", "confidence": "medium"},
-      "driverName": {"value": "John Smith", "confidence": "low"},
-      "carrierName": {"value": null, "confidence": "low"},
-      "truckUnit": {"value": "T-204", "confidence": "medium"},
-      "notes": {"value": "Transaction appears in statement detail table", "confidence": "low"}
+    if (!vendorName) {
+      const exactVendor = vendorNames.find((vendor) => vendor.toLowerCase() === line.toLowerCase());
+      if (exactVendor) vendorName = exactVendor;
+      else if (line.toUpperCase() === 'SC FUELS') vendorName = 'SC FUELS';
     }
-  ]
-}`;
-}
-
-function repairTruncatedJson(raw: string): { entries?: unknown[] } | null {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    // Try partial recovery.
   }
 
-  try {
-    const entriesIndex = raw.indexOf('"entries"');
-    if (entriesIndex === -1) return null;
+  return { invoiceNumber, vendorName };
+}
 
-    const arrayStart = raw.indexOf('[', entriesIndex);
-    if (arrayStart === -1) return null;
+function splitVehicleSections(markdown: string) {
+  const lines = markdown.split(/\r?\n/);
+  const sections: Array<{ label: string; lines: string[] }> = [];
+  let current: string[] = [];
+  let currentLabel: string | null = null;
+  let headerLine: string | null = null;
 
-    let depth = 0;
-    let lastValidEnd = -1;
-    for (let i = arrayStart + 1; i < raw.length; i++) {
-      if (raw[i] === '{') depth++;
-      if (raw[i] === '}') {
-        depth--;
-        if (depth === 0) lastValidEnd = i;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.toUpperCase().includes('DATE TIME DRIVER')) {
+      headerLine = rawLine;
+      continue;
+    }
+
+    if (/^Total for Vehicle\s+/i.test(line)) {
+      if (current.length > 0 && headerLine) {
+        current.push(rawLine);
+        sections.push({ label: currentLabel ?? `section-${sections.length + 1}`, lines: [headerLine, ...current] });
       }
+      current = [];
+      currentLabel = null;
+      continue;
     }
 
-    if (lastValidEnd === -1) return null;
-    return JSON.parse(`${raw.slice(0, lastValidEnd + 1)}]}`);
-  } catch {
-    return null;
+    if (/^\d{3,6}$/.test(line)) {
+      if (current.length > 0 && headerLine) {
+        sections.push({ label: currentLabel ?? `section-${sections.length + 1}`, lines: [headerLine, ...current] });
+        current = [];
+      }
+      currentLabel = line;
+      continue;
+    }
+
+    if (currentLabel && headerLine) {
+      current.push(rawLine);
+    }
   }
+
+  if (current.length > 0 && headerLine) {
+    sections.push({ label: currentLabel ?? `section-${sections.length + 1}`, lines: [headerLine, ...current] });
+  }
+
+  return sections;
 }
 
-function chunkArray<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
+function isTransactionLine(line: string) {
+  return /^\d{2}\/\d{2}\/\d{2}\s+\d{1,2}:\d{2}[AP]/.test(line.trim());
+}
+
+function parseFuelRow(
+  row: string,
+  context: { vendorName: string | null; invoiceNumber: string | null },
+): ExtractedFuelEntry | null {
+  const tokens = row.trim().split(/\s+/);
+  if (tokens.length < 8) return null;
+
+  const entryDate = tokens[0];
+  const timeValue = tokens[1];
+
+  const productIndex = tokens.findIndex((token) =>
+    ['DSL', 'DEF', 'ULSD', 'AGO', 'GSL', 'REG', 'UNL', 'PREM', 'MID'].includes(token),
+  );
+  if (productIndex === -1) return null;
+
+  const preProduct = tokens.slice(2, productIndex);
+  const postProduct = tokens.slice(productIndex + 1).filter((token) => token !== '-');
+  const fuelType = tokens[productIndex];
+  if (preProduct.length < 3 || postProduct.length < 2) return null;
+
+  const odometerToken = preProduct.at(-2) ?? null;
+  const siteToken = preProduct.at(-1) ?? null;
+  const left = preProduct.slice(0, -2);
+
+  let misc: string | null = null;
+  let driverTokens = left;
+  const cardIndex = left.findIndex((token) => token === 'CARD');
+  if (cardIndex >= 0) {
+    driverTokens = left.slice(0, cardIndex);
+    misc = left.slice(cardIndex).join(' ');
+  } else if (left.length > 0 && /\d/.test(left[left.length - 1])) {
+    misc = left[left.length - 1];
+    driverTokens = left.slice(0, -1);
   }
-  return chunks;
+
+  const driverName = driverTokens.join(' ').trim() || null;
+  const numericTokens = postProduct.filter((token) => /^-?\d+(?:\.\d+)?$/.test(token));
+  if (numericTokens.length < 2) return null;
+
+  const pricePerGallon = Number(numericTokens[0]);
+  const totalCost = Number(numericTokens[numericTokens.length - 1]);
+
+  // Statement rows vary, but when the source follows the documented header,
+  // QUANTITY is usually the token right before FET/SET/MEF blocks. In practice,
+  // this is often the 3rd numeric token if present, otherwise fall back to the
+  // numeric token right before the final total.
+  const gallonsCandidate = numericTokens.length >= 3 ? numericTokens[2] : numericTokens[numericTokens.length - 2];
+  const gallons = gallonsCandidate ? Number(gallonsCandidate) : null;
+
+  return {
+    entryDate: wrap(entryDate),
+    vendorName: wrap(context.vendorName, context.vendorName ? 'medium' : 'low'),
+    gallons: wrap(gallons),
+    pricePerGallon: wrap(pricePerGallon),
+    fuelType: wrap(fuelType),
+    totalCost: wrap(totalCost),
+    odometerReading: wrap(odometerToken ? toNumberOrNull(odometerToken) : null, 'medium'),
+    city: wrap(null, 'low'),
+    state: wrap(null, 'low'),
+    fuelCardNumber: wrap(misc, misc ? 'medium' : 'low'),
+    receiptNumber: wrap(context.invoiceNumber, context.invoiceNumber ? 'medium' : 'low'),
+    paymentMethod: wrap(misc && misc.includes('CARD') ? 'FUEL_CARD' : null, misc ? 'medium' : 'low'),
+    driverName: wrap(driverName, driverName ? 'high' : 'low'),
+    carrierName: wrap(null, 'low'),
+    truckUnit: wrap(null, 'low'),
+    notes: wrap(`Time: ${timeValue}${siteToken ? `; Site: ${siteToken}` : ''}`, 'medium'),
+  };
 }
 
 function buildEntryKey(entry: ExtractedFuelEntry): string {
@@ -261,105 +236,37 @@ function buildEntryKey(entry: ExtractedFuelEntry): string {
     .join('|');
 }
 
-async function extractChunk(
-  openai: OpenAI,
-  prompt: string,
-  pages: Array<{ imageUrl: string; pageText?: string }>,
-  chunkLabel: string,
-  instruction?: string,
-): Promise<{ entries: ExtractedFuelEntry[]; error?: string }> {
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: prompt },
-      {
-        role: 'user',
-        content: [
-          ...pages.map((page) => ({
-            type: 'image_url' as const,
-            image_url: { url: page.imageUrl, detail: 'high' as const },
-          })),
-          ...pages
-            .filter((page) => !!page.pageText?.trim())
-            .map((page, index) => ({
-              type: 'text' as const,
-              text: `Extracted text for ${chunkLabel}${pages.length > 1 ? ` item ${index + 1}` : ''}:\n${page.pageText}`,
-            })),
-          {
-            type: 'text' as const,
-            text:
-              instruction ??
-              `Extract all diesel fuel purchase transactions from ${chunkLabel}. Return one entry per visible transaction line item.`,
-          },
-        ],
-      },
-    ],
-    max_tokens: 16000,
-    temperature: 0,
-  });
-
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    return { entries: [], error: `No response content from OpenAI for ${chunkLabel}` };
+async function extractRowsViaModal(pages: Array<{ imageUrl: string; pageText?: string }>) {
+  const modalUrl = process.env.MODAL_OCR_URL;
+  if (!modalUrl) {
+    return { texts: [] as string[], error: 'MODAL_OCR_URL environment variable is not set' };
   }
 
-  const parsed = response.choices[0]?.finish_reason === 'length' ? repairTruncatedJson(content) : JSON.parse(content);
-  if (!parsed || !Array.isArray(parsed.entries)) {
-    return { entries: [], error: `OpenAI response did not contain a valid entries array for ${chunkLabel}` };
+  const results: string[] = [];
+  for (const page of pages) {
+    const imageBase64 = page.imageUrl.includes(',') ? page.imageUrl.split(',')[1] : page.imageUrl;
+    const response = await fetch(modalUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_base64: imageBase64,
+        prompt: buildRowOcrPrompt(),
+      }),
+    });
+
+    if (!response.ok) {
+      return { texts: [], error: `Modal OCR error ${response.status}: ${await response.text()}` };
+    }
+
+    const payload = (await response.json()) as { text?: string; texts?: string[]; error?: string };
+    if (payload.error) {
+      return { texts: [], error: payload.error };
+    }
+
+    results.push(payload.text ?? payload.texts?.[0] ?? '');
   }
 
-  return {
-    entries: parsed.entries
-      .filter((entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
-      .map(normalizeEntry),
-  };
-}
-
-async function extractChunkWithAudit(
-  openai: OpenAI,
-  prompt: string,
-  pages: Array<{ imageUrl: string; pageText?: string }>,
-  chunkLabel: string,
-): Promise<{ entries: ExtractedFuelEntry[]; error?: string }> {
-  const primary = await extractChunk(
-    openai,
-    prompt,
-    pages,
-    chunkLabel,
-    `Extract all diesel fuel purchase transactions from ${chunkLabel}. Return one entry per visible transaction line item. Be exhaustive and include every row in dense statement tables. Respect column semantics exactly: QUANTITY means gallons, PRICE means pricePerGallon, and AMT EXCP CODE means totalCost for that line item. If grouped rows continue after a visual break without a repeated header, keep using the same column mapping from the prior header.`,
-  );
-
-  if (primary.error) return primary;
-
-  const knownEntries = primary.entries.map((entry) => ({
-    entryDate: entry.entryDate.value,
-    vendorName: entry.vendorName.value,
-    gallons: entry.gallons.value,
-    pricePerGallon: entry.pricePerGallon.value,
-    totalCost: entry.totalCost?.value ?? null,
-    receiptNumber: entry.receiptNumber?.value ?? null,
-    driverName: entry.driverName?.value ?? null,
-    carrierName: entry.carrierName?.value ?? null,
-    truckUnit: entry.truckUnit?.value ?? null,
-  }));
-
-  const audit = await extractChunk(
-    openai,
-    prompt,
-    pages,
-    chunkLabel,
-    `Review ${chunkLabel} again for missed transaction rows. Dense tables often contain more line items than the first pass catches. Already extracted rows: ${JSON.stringify(knownEntries)}. Return only additional missing transaction line items not already listed. While auditing, keep field mapping strict: QUANTITY -> gallons, PRICE -> pricePerGallon, AMT EXCP CODE -> totalCost. If later row groups do not repeat the header, continue using the same prior column mapping.`,
-  );
-
-  if (audit.error) return primary;
-
-  const deduped = new Map<string, ExtractedFuelEntry>();
-  for (const entry of [...primary.entries, ...audit.entries]) {
-    deduped.set(buildEntryKey(entry), entry);
-  }
-
-  return { entries: Array.from(deduped.values()) };
+  return { texts: results };
 }
 
 function normalizeEntry(entry: Record<string, unknown>): ExtractedFuelEntry {
@@ -381,22 +288,52 @@ function normalizeEntry(entry: Record<string, unknown>): ExtractedFuelEntry {
   const notes = entry.notes as Record<string, unknown> | undefined;
 
   return {
-    entryDate: wrap(toStringOrNull(entryDate?.value), normalizeConfidence(entryDate?.confidence)),
-    vendorName: wrap(toStringOrNull(vendorName?.value), normalizeConfidence(vendorName?.confidence)),
-    gallons: wrap(toNumberOrNull(gallons?.value), normalizeConfidence(gallons?.confidence)),
-    pricePerGallon: wrap(toNumberOrNull(pricePerGallon?.value), normalizeConfidence(pricePerGallon?.confidence)),
-    fuelType: wrap(toStringOrNull(fuelType?.value), normalizeConfidence(fuelType?.confidence)),
-    totalCost: wrap(toNumberOrNull(totalCost?.value), normalizeConfidence(totalCost?.confidence)),
-    odometerReading: wrap(toNumberOrNull(odometerReading?.value), normalizeConfidence(odometerReading?.confidence)),
-    city: wrap(toStringOrNull(city?.value), normalizeConfidence(city?.confidence)),
-    state: wrap(toStringOrNull(state?.value), normalizeConfidence(state?.confidence)),
-    fuelCardNumber: wrap(toStringOrNull(fuelCardNumber?.value), normalizeConfidence(fuelCardNumber?.confidence)),
-    receiptNumber: wrap(toStringOrNull(receiptNumber?.value), normalizeConfidence(receiptNumber?.confidence)),
-    paymentMethod: wrap(normalizePaymentMethod(paymentMethod?.value), normalizeConfidence(paymentMethod?.confidence)),
-    driverName: wrap(toStringOrNull(driverName?.value), normalizeConfidence(driverName?.confidence)),
-    carrierName: wrap(toStringOrNull(carrierName?.value), normalizeConfidence(carrierName?.confidence)),
-    truckUnit: wrap(toStringOrNull(truckUnit?.value), normalizeConfidence(truckUnit?.confidence)),
-    notes: wrap(toStringOrNull(notes?.value), normalizeConfidence(notes?.confidence)),
+    entryDate: wrap(
+      typeof entryDate?.value === 'string' ? entryDate.value : null,
+      (entryDate?.confidence as Confidence) ?? 'medium',
+    ),
+    vendorName: wrap(
+      typeof vendorName?.value === 'string' ? vendorName.value : null,
+      (vendorName?.confidence as Confidence) ?? 'medium',
+    ),
+    gallons: wrap(toNumberOrNull(gallons?.value), (gallons?.confidence as Confidence) ?? 'medium'),
+    pricePerGallon: wrap(toNumberOrNull(pricePerGallon?.value), (pricePerGallon?.confidence as Confidence) ?? 'medium'),
+    fuelType: wrap(
+      typeof fuelType?.value === 'string' ? fuelType.value : null,
+      (fuelType?.confidence as Confidence) ?? 'medium',
+    ),
+    totalCost: wrap(toNumberOrNull(totalCost?.value), (totalCost?.confidence as Confidence) ?? 'medium'),
+    odometerReading: wrap(
+      toNumberOrNull(odometerReading?.value),
+      (odometerReading?.confidence as Confidence) ?? 'medium',
+    ),
+    city: wrap(typeof city?.value === 'string' ? city.value : null, (city?.confidence as Confidence) ?? 'medium'),
+    state: wrap(typeof state?.value === 'string' ? state.value : null, (state?.confidence as Confidence) ?? 'medium'),
+    fuelCardNumber: wrap(
+      typeof fuelCardNumber?.value === 'string' ? fuelCardNumber.value : null,
+      (fuelCardNumber?.confidence as Confidence) ?? 'medium',
+    ),
+    receiptNumber: wrap(
+      typeof receiptNumber?.value === 'string' ? receiptNumber.value : null,
+      (receiptNumber?.confidence as Confidence) ?? 'medium',
+    ),
+    paymentMethod: wrap(
+      typeof paymentMethod?.value === 'string' ? paymentMethod.value : null,
+      (paymentMethod?.confidence as Confidence) ?? 'medium',
+    ),
+    driverName: wrap(
+      typeof driverName?.value === 'string' ? driverName.value : null,
+      (driverName?.confidence as Confidence) ?? 'medium',
+    ),
+    carrierName: wrap(
+      typeof carrierName?.value === 'string' ? carrierName.value : null,
+      (carrierName?.confidence as Confidence) ?? 'medium',
+    ),
+    truckUnit: wrap(
+      typeof truckUnit?.value === 'string' ? truckUnit.value : null,
+      (truckUnit?.confidence as Confidence) ?? 'medium',
+    ),
+    notes: wrap(typeof notes?.value === 'string' ? notes.value : null, (notes?.confidence as Confidence) ?? 'medium'),
   };
 }
 
@@ -415,56 +352,45 @@ export const extractFuelEntriesFromReceipts = action({
     error: v.optional(v.string()),
   }),
   handler: async (_ctx, args) => {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return { entries: [], error: 'OPENAI_API_KEY environment variable is not set' };
-    }
-
-    const openai = new OpenAI({ apiKey });
-    const prompt = buildPrompt(args.vendorNames);
-    const pageChunks = chunkArray(args.pages, 1);
-
     try {
-      const chunkResults = await Promise.all(
-        pageChunks.map((chunk, index) =>
-          extractChunkWithAudit(
-            openai,
-            prompt,
-            chunk,
-            pageChunks.length === 1 ? 'these documents' : `page ${index + 1}`,
-          ),
-        ),
-      );
+      const ocr = await extractRowsViaModal(args.pages);
+      if (ocr.error) {
+        return { entries: [], error: ocr.error };
+      }
 
-      const errors = chunkResults.map((result) => result.error).filter((error): error is string => !!error);
       const deduped = new Map<string, ExtractedFuelEntry>();
 
-      for (const result of chunkResults) {
-        for (const entry of result.entries) {
-          const key = buildEntryKey(entry);
-          if (!deduped.has(key)) {
-            deduped.set(key, entry);
+      for (const pageText of ocr.texts) {
+        const context = parsePageContext(pageText, args.vendorNames);
+        const sections = splitVehicleSections(pageText);
+
+        for (const section of sections) {
+          for (const rawLine of section.lines) {
+            const line = rawLine.trim();
+            if (!line || /^Total for Vehicle\s+/i.test(line) || !isTransactionLine(line)) {
+              continue;
+            }
+
+            const parsed = parseFuelRow(line, context);
+            if (!parsed) continue;
+
+            const key = buildEntryKey(parsed);
+            if (!deduped.has(key)) {
+              deduped.set(key, normalizeEntry(parsed as unknown as Record<string, unknown>));
+            }
           }
         }
       }
 
       const entries = Array.from(deduped.values());
-
       if (entries.length === 0) {
         return {
           entries: [],
-          error: errors[0] || 'No diesel transactions were detected. Try a clearer file or use CSV import instead.',
+          error: 'No diesel transactions were detected. Try a clearer file or use CSV import instead.',
         };
       }
 
-      return {
-        entries,
-        ...(errors.length > 0
-          ? {
-              error: `Extracted ${entries.length} transaction(s), but some page passes had issues: ${errors.join('; ')}`,
-            }
-          : {}),
-      };
+      return { entries };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown extraction error';
       return { entries: [], error: message };

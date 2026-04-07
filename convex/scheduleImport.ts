@@ -8,20 +8,12 @@ const extractionConfigValidator = v.object({
   includeLogistics: v.boolean(),
   includeFinancial: v.boolean(),
   extractDates: v.boolean(),
-  stopDetailLevel: v.union(
-    v.literal('full'),
-    v.literal('partial'),
-    v.literal('none'),
-  ),
+  stopDetailLevel: v.union(v.literal('full'), v.literal('partial'), v.literal('none')),
   includeEquipment: v.boolean(),
   includeFuelSurcharge: v.boolean(),
 });
 
-const confidenceValidator = v.union(
-  v.literal('high'),
-  v.literal('medium'),
-  v.literal('low'),
-);
+const confidenceValidator = v.union(v.literal('high'), v.literal('medium'), v.literal('low'));
 
 const extractedFieldValidator = v.object({
   value: v.any(),
@@ -33,6 +25,8 @@ const extractedStopValidator = v.object({
   city: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
   state: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
   zip: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
+  facilityName: v.optional(v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator })),
+  nassCode: v.optional(v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator })),
   stopOrder: v.object({ value: v.number(), confidence: confidenceValidator }),
   stopType: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
 });
@@ -84,10 +78,11 @@ CRITICAL RULES:
    - Durations: Strip "min", return integer (e.g., "10 min" → 10).
    - Dates: MM/DD/YYYY format.
 5. If a field is blank or not present, output null.
-6. Output ONLY valid JSON. No markdown formatting, no conversational text.`;
+6. Output ONLY valid JSON. No markdown formatting, no conversational text.
+7. Ignore summaries/recaps/totals: Do NOT extract rows from summary sections, recap tables, totals, aggregate listings, or repeated summary pages that duplicate the trip IDs. Only extract the primary trip schedule rows.`;
 
   const facilityInstructions = includeStops
-    ? `\n7. Facilities: Cross-reference the NASS Code for each stop with the Facility Address table (usually on subsequent pages). Inject the full address, city, state, and zip into each stop.`
+    ? `\n7. Facilities: Cross-reference the NASS Code for each stop with the Facility Address table (usually on subsequent pages). Inject the full address, city, state, and zip into each stop.\n8. If the full facility address is not explicitly visible in the document, return null for address/city/state/zip. Never invent placeholders such as "Address for X", "City for X", "State for X", "Zip for X", or schema text like "String (from NASS table)".`
     : '';
 
   let tripSchema: string;
@@ -143,7 +138,7 @@ JSON SCHEMA:
   ]
 }
 
-IMPORTANT: All pages belong to the same contract. Extract EVERY trip row — do not summarize or skip any. The "total_trip_count" must equal the length of the "trips" array.`;
+IMPORTANT: All pages belong to the same contract. Extract EVERY primary trip schedule row — do not summarize or skip any. Ignore summary/recap/total sections even if they repeat trip IDs. The "total_trip_count" must equal the length of the "trips" array.`;
 }
 
 type OcrTrip = {
@@ -193,6 +188,25 @@ function hi(val: unknown) {
   return { value: val ?? null, confidence: 'high' as const };
 }
 
+function cleanFacilityValue(val: string | undefined | null): string | null {
+  if (!val) return null;
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith('address for ') ||
+    lower.startsWith('city for ') ||
+    lower.startsWith('state for ') ||
+    lower.startsWith('zip for ') ||
+    lower.includes('string (from nass table)')
+  ) {
+    return null;
+  }
+
+  return trimmed;
+}
+
 function parseDate(dateStr: string | undefined | null): string | null {
   if (!dateStr) return null;
   const parts = dateStr.split('/');
@@ -208,10 +222,12 @@ function convertOcrToExtractedLanes(ocr: OcrResult) {
 
   return trips.map((trip) => {
     const stops = (trip.stops || []).map((s, idx) => ({
-      address: hi(s.address || s.facility?.address || null),
-      city: hi(s.city || s.facility?.city || null),
-      state: hi(s.state || s.facility?.state || null),
-      zip: hi(s.zip || s.facility?.zip || null),
+      address: hi(cleanFacilityValue(s.address || s.facility?.address || null)),
+      city: hi(cleanFacilityValue(s.city || s.facility?.city || null)),
+      state: hi(cleanFacilityValue(s.state || s.facility?.state || null)),
+      zip: hi(cleanFacilityValue(s.zip || s.facility?.zip || null)),
+      facilityName: hi(cleanFacilityValue(s.facility_name || s.facility?.facility_name || null)),
+      nassCode: hi(cleanFacilityValue(s.nass_code || s.facility?.nass_code || null)),
       stopOrder: hi(idx + 1),
       stopType: hi(idx === 0 ? 'Pickup' : 'Delivery'),
     }));
@@ -305,11 +321,10 @@ export const extractLanesFromSchedule = action({
     const openai = new OpenAI({ apiKey });
     const systemPrompt = buildExtractionPrompt(args.config);
 
-    const imageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] =
-      args.imageUrls.map((url) => ({
-        type: 'image_url' as const,
-        image_url: { url, detail: 'auto' as const },
-      }));
+    const imageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = args.imageUrls.map((url) => ({
+      type: 'image_url' as const,
+      image_url: { url, detail: 'auto' as const },
+    }));
 
     const allTrips: OcrTrip[] = [];
     let hcrNumber: string | null = null;
@@ -325,11 +340,12 @@ export const extractLanesFromSchedule = action({
           return await openai.chat.completions.create(createParams);
         } catch (err: unknown) {
           const isRateLimit =
-            err instanceof Error &&
-            (err.message.includes('429') || err.message.includes('Rate limit'));
+            err instanceof Error && (err.message.includes('429') || err.message.includes('Rate limit'));
           if (!isRateLimit || attempt === RATE_LIMIT_RETRIES) throw err;
           const delayMs = Math.min(2000 * Math.pow(2, attempt), 15000);
-          console.log(`[extractLanes] Rate limited, retrying in ${delayMs}ms (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})...`);
+          console.log(
+            `[extractLanes] Rate limited, retrying in ${delayMs}ms (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})...`,
+          );
           await new Promise((r) => setTimeout(r, delayMs));
         }
       }
@@ -384,14 +400,12 @@ export const extractLanesFromSchedule = action({
       const initialTrips = parsed!.trips || [];
       allTrips.push(...initialTrips);
 
-      console.log(`[extractLanes] HCR: ${hcrNumber}, Expected: ${expectedTripCount}, Got: ${initialTrips.length} trips`);
+      console.log(
+        `[extractLanes] HCR: ${hcrNumber}, Expected: ${expectedTripCount}, Got: ${initialTrips.length} trips`,
+      );
 
       // Continuation: if we got truncated or expected more trips, request remaining
-      if (
-        expectedTripCount &&
-        allTrips.length < expectedTripCount &&
-        allTrips.length > 0
-      ) {
+      if (expectedTripCount && allTrips.length < expectedTripCount && allTrips.length > 0) {
         for (let round = 0; round < MAX_CONTINUATION_ROUNDS; round++) {
           const remaining = expectedTripCount - allTrips.length;
           if (remaining <= 0) break;
@@ -469,8 +483,7 @@ export const extractLanesFromSchedule = action({
 
       return { lanes, error: warning };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown error during extraction';
+      const message = error instanceof Error ? error.message : 'Unknown error during extraction';
       console.error(`[extractLanes] Error: ${message}`);
 
       if (allTrips.length > 0) {
@@ -544,8 +557,7 @@ export const verifyAndEnrichStops = action({
         let zip = '';
         for (const comp of components) {
           if (comp.types.includes('locality')) city = comp.long_name;
-          if (comp.types.includes('administrative_area_level_1'))
-            state = comp.short_name;
+          if (comp.types.includes('administrative_area_level_1')) state = comp.short_name;
           if (comp.types.includes('postal_code')) zip = comp.long_name;
         }
 
@@ -565,9 +577,7 @@ export const verifyAndEnrichStops = action({
       }
     }
 
-    async function calculateDistance(
-      stops: Array<{ latitude: number; longitude: number }>,
-    ) {
+    async function calculateDistance(stops: Array<{ latitude: number; longitude: number }>) {
       if (stops.length < 2) return null;
 
       let totalMeters = 0;
@@ -575,17 +585,9 @@ export const verifyAndEnrichStops = action({
         const origin = stops[i];
         const dest = stops[i + 1];
         try {
-          const url = new URL(
-            'https://maps.googleapis.com/maps/api/distancematrix/json',
-          );
-          url.searchParams.append(
-            'origins',
-            `${origin.latitude},${origin.longitude}`,
-          );
-          url.searchParams.append(
-            'destinations',
-            `${dest.latitude},${dest.longitude}`,
-          );
+          const url = new URL('https://maps.googleapis.com/maps/api/distancematrix/json');
+          url.searchParams.append('origins', `${origin.latitude},${origin.longitude}`);
+          url.searchParams.append('destinations', `${dest.latitude},${dest.longitude}`);
           url.searchParams.append('key', apiKey!);
           url.searchParams.append('units', 'imperial');
 
@@ -602,9 +604,7 @@ export const verifyAndEnrichStops = action({
         }
       }
 
-      return totalMeters > 0
-        ? Math.round(totalMeters * 0.000621371 * 100) / 100
-        : null;
+      return totalMeters > 0 ? Math.round(totalMeters * 0.000621371 * 100) / 100 : null;
     }
 
     const enrichedLanes = [];
@@ -622,12 +622,7 @@ export const verifyAndEnrichStops = action({
       const geocodedCoords: Array<{ latitude: number; longitude: number }> = [];
 
       for (const stop of stops) {
-        const parts = [
-          stop.address?.value,
-          stop.city?.value,
-          stop.state?.value,
-          stop.zip?.value,
-        ].filter(Boolean);
+        const parts = [stop.address?.value, stop.city?.value, stop.state?.value, stop.zip?.value].filter(Boolean);
 
         if (parts.length === 0) {
           stop._verification = { status: 'not_found', suggestedCorrection: null };
@@ -647,15 +642,9 @@ export const verifyAndEnrichStops = action({
           longitude: geocoded.longitude,
         });
 
-        const cityMatch =
-          !stop.city?.value ||
-          geocoded.city.toLowerCase() === stop.city.value.toLowerCase();
-        const stateMatch =
-          !stop.state?.value ||
-          geocoded.state.toLowerCase() === stop.state.value.toLowerCase();
-        const zipMatch =
-          !stop.zip?.value ||
-          geocoded.zip === stop.zip.value;
+        const cityMatch = !stop.city?.value || geocoded.city.toLowerCase() === stop.city.value.toLowerCase();
+        const stateMatch = !stop.state?.value || geocoded.state.toLowerCase() === stop.state.value.toLowerCase();
+        const zipMatch = !stop.zip?.value || geocoded.zip === stop.zip.value;
 
         if (cityMatch && stateMatch && zipMatch) {
           stop._verification = { status: 'verified', suggestedCorrection: null };
@@ -688,6 +677,16 @@ export const verifyAndEnrichStops = action({
 export const applyChatCorrection = action({
   args: {
     lanes: v.array(v.any()),
+    facilityDirectory: v.array(
+      v.object({
+        facilityName: v.string(),
+        nassCode: v.optional(v.union(v.string(), v.null())),
+        address: v.optional(v.union(v.string(), v.null())),
+        city: v.optional(v.union(v.string(), v.null())),
+        state: v.optional(v.union(v.string(), v.null())),
+        zip: v.optional(v.union(v.string(), v.null())),
+      }),
+    ),
     userMessage: v.string(),
     conversationHistory: v.array(
       v.object({
@@ -739,6 +738,8 @@ The user has a table of extracted contract lanes with these active columns: ${ar
 
 The current table data is provided as a JSON array of compact objects. Each object has plain field values (not wrapped in confidence objects).
 
+You are also given a facility directory extracted from the same contract. Facility rows may only contain a facility name or NASS code, while the full address appears in a separate lookup table later in the document. Use the facility directory to match facility names/NASS codes to full address, city, state, and zip when the user asks to fix addresses.
+
 Your job is to interpret the user's correction and return the updated lanes array.
 
 RULES:
@@ -748,6 +749,7 @@ RULES:
 - If the user refers to rows by number, use 0-based indexing matching the array order.
 - If the user refers to a specific HCR or trip number, find the matching row(s).
 - For bulk changes ("change all X to Y"), apply to every matching row.
+- If the user mentions a facility name, site name, terminal name, or NASS code, use the facility directory to infer the correct address fields for the affected stops.
 - If the correction is ambiguous, explain what you understood and what you changed.
 - Keep your response concise. Do NOT add commentary inside the JSON.
 ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.length} total rows are shown. If the user's correction should apply to all rows, indicate this in your explanation and apply it to the rows shown. The client will apply the pattern to remaining rows.` : ''}`;
@@ -760,7 +762,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
       })),
       {
         role: 'user',
-        content: `Current table data (${lanesForContext.length} rows):\n${JSON.stringify(lanesForContext)}\n\nUser correction: ${args.userMessage}`,
+        content: `Facility directory (${args.facilityDirectory.length} rows):\n${JSON.stringify(args.facilityDirectory)}\n\nCurrent table data (${lanesForContext.length} rows):\n${JSON.stringify(lanesForContext)}\n\nUser correction: ${args.userMessage}`,
       },
     ];
 
@@ -790,10 +792,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
       let updatedLanes = parsed.lanes || lanesForContext;
 
       if (truncated && args.lanes.length > MAX_ROWS_IN_CONTEXT) {
-        updatedLanes = [
-          ...updatedLanes,
-          ...args.lanes.slice(MAX_ROWS_IN_CONTEXT),
-        ];
+        updatedLanes = [...updatedLanes, ...args.lanes.slice(MAX_ROWS_IN_CONTEXT)];
       }
 
       console.log(`[applyChatCorrection] Success: ${parsed.changedCells?.length || 0} cells changed`);
@@ -803,8 +802,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
         changedCells: parsed.changedCells || [],
       };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[applyChatCorrection] Error: ${message}`);
       return {
         lanes: args.lanes,
