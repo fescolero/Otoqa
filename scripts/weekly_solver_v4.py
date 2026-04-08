@@ -3295,84 +3295,44 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
             built_routes.append(([lid], _corridor_of_leg(lane_map[lid])))
             unassigned.discard(lid)
 
-        # Step 4: Merge small routes into larger ones to reach n_drivers
-        n_local = n_drivers - len(routes)  # local driver budget
-        built_routes.sort(key=lambda x: len(x[0]))
+        # Step 4: Merge routes to reach n_drivers
+        # Try ALL pairs each round, pick the merge with lowest DH
+        n_local = n_drivers - len(routes)
 
         while len(built_routes) > n_local:
-            if not built_routes:
+            best_merge = None  # (i, j, ordered, dh)
+
+            for dh_limit, corr_limit in [(MAX_ROUTE_DH, 2), (160, 3)]:
+                if best_merge:
+                    break
+                for i in range(len(built_routes)):
+                    for j in range(i + 1, len(built_routes)):
+                        combined = list(built_routes[i][0]) + list(built_routes[j][0])
+                        if len(combined) > max_legs:
+                            continue
+                        ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
+                            combined, lane_map, graph, base_city, max_wait_h)
+                        starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+                        ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+                        if not starts or not ends:
+                            continue
+                        duty_h = (max(ends) - min(starts)) + pre_post_h
+                        if drive > HOS_MAX_DRIVE or duty_h > HOS_MAX_DUTY:
+                            continue
+                        merged_corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered)
+                        if len(merged_corrs) > corr_limit or dh > dh_limit:
+                            continue
+                        if best_merge is None or dh < best_merge[3]:
+                            best_merge = (i, j, ordered, dh)
+
+            if best_merge is None:
                 break
-            donor_legs, donor_corr = built_routes[0]
-
-            best_idx = None
-            best_dh = 9999
-            best_ordered = None
-
-            for ri in range(1, len(built_routes)):
-                r_legs, r_corr = built_routes[ri]
-                combined = list(r_legs) + list(donor_legs)
-                if len(combined) > max_legs:
-                    continue
-
-                ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
-                    combined, lane_map, graph, base_city, max_wait_h)
-                starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
-                ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
-                if not starts or not ends:
-                    continue
-                duty_h = (max(ends) - min(starts)) + pre_post_h
-                if drive > HOS_MAX_DRIVE or duty_h > HOS_MAX_DUTY:
-                    continue
-
-                # Quality: prefer low DH, allow up to 2 corridors
-                merged_corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered)
-                if len(merged_corrs) > 2:
-                    continue
-                if dh > MAX_ROUTE_DH:
-                    continue
-                if dh < best_dh:
-                    best_dh = dh
-                    best_idx = ri
-                    best_ordered = ordered
-
-            if best_idx is not None:
-                _, r_corr = built_routes[best_idx]
-                built_routes[best_idx] = (best_ordered, r_corr)
-                built_routes.pop(0)
-                built_routes.sort(key=lambda x: len(x[0]))
-            else:
-                # Relax: allow up to 160mi DH and 3 corridors
-                best_idx2 = None
-                best_dh2 = 9999
-                best_ordered2 = None
-                for ri in range(1, len(built_routes)):
-                    r_legs, r_corr = built_routes[ri]
-                    combined = list(r_legs) + list(donor_legs)
-                    if len(combined) > max_legs:
-                        continue
-                    ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
-                        combined, lane_map, graph, base_city, max_wait_h)
-                    starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
-                    ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
-                    if not starts or not ends:
-                        continue
-                    duty_h = (max(ends) - min(starts)) + pre_post_h
-                    if drive > HOS_MAX_DRIVE or duty_h > HOS_MAX_DUTY:
-                        continue
-                    if dh > 160:
-                        continue
-                    if dh < best_dh2:
-                        best_dh2 = dh
-                        best_idx2 = ri
-                        best_ordered2 = ordered
-
-                if best_idx2 is not None:
-                    _, r_corr = built_routes[best_idx2]
-                    built_routes[best_idx2] = (best_ordered2, r_corr)
-                    built_routes.pop(0)
-                    built_routes.sort(key=lambda x: len(x[0]))
-                else:
-                    break  # can't compress further
+            i, j, ordered, dh = best_merge
+            merged_corr = built_routes[i][1] + '+' + built_routes[j][1]
+            built_routes.pop(j)  # remove higher index first
+            built_routes.pop(i)
+            built_routes.append((ordered, merged_corr))
+            built_routes.sort(key=lambda x: len(x[0]))
 
         for route_legs, _ in built_routes:
             routes.append((route_legs, False))
