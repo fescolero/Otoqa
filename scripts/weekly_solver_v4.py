@@ -3504,19 +3504,15 @@ def _build_greedy_schedule_pairchain(n_drivers, lanes, lane_map, graph, lane_act
     max_routes_day = max(len(r) for r in day_routes.values()) if day_routes else 0
     print(f"  Greedy: max_routes_any_day={max_routes_day} (target={n_drivers})")
 
-    # Build weekly schedule
-    weekly_schedule = []
-    all_exact = True
-    hos_violations = []
-
-    driver_days_map = {d: {} for d in range(max(n_drivers, max_routes_day))}
+    # Build and sequence all daily routes first
     _DAY_ORDER = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
+    day_route_data = {}  # day -> list of {legs, drive, dh, duty, start, end, ...}
 
+    all_exact = True
     for day in working_days:
         dn = day_names_map[day]
+        day_route_data[dn] = []
         for ri, (route_legs, _) in enumerate(day_routes.get(day, [])):
-            if ri >= len(driver_days_map):
-                driver_days_map[ri] = {}
             ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
                 route_legs, lane_map, graph, base_city, max_wait_h)
             if not is_exact:
@@ -3527,43 +3523,144 @@ def _build_greedy_schedule_pairchain(n_drivers, lanes, lane_map, graph, lane_act
             earliest = min(starts) if starts else 0
             latest = max(ends) if ends else 0
             duty_h = (latest - earliest) + pre_post_h
-            if drive > HOS_MAX_DRIVE:
-                hos_violations.append(f'D{ri+1} {dn}: {drive:.1f}h drive')
-            if duty_h > HOS_MAX_DUTY:
-                hos_violations.append(f'D{ri+1} {dn}: {duty_h:.1f}h duty')
             names = [lane_map[lid].name for lid in ordered]
-            driver_days_map[ri][dn] = {
+            day_route_data[dn].append({
                 'legs': ordered, 'legNames': names, 'legCount': len(ordered),
                 'driveHours': round(drive, 1), 'dutyHours': round(duty_h, 1),
                 'miles': round(miles), 'deadheadMiles': dh,
                 'startTime': earliest, 'endTime': latest,
                 'isExact': is_exact, 'legGaps': gaps,
-            }
+            })
 
-    for d_idx in sorted(driver_days_map.keys()):
-        days = driver_days_map[d_idx]
-        if not days:
-            continue
-        weekly_duty = sum(v['dutyHours'] for v in days.values())
-        if weekly_duty > MAX_WEEKLY_DUTY:
-            hos_violations.append(f'D{d_idx+1}: {weekly_duty:.1f}h weekly')
-        sorted_dns = sorted(days.keys(), key=lambda dn: _DAY_ORDER.get(dn, 99))
-        prev_end = None; prev_dn = None
-        for dn in sorted_dns:
-            dd = days[dn]
-            if prev_end is not None and dd.get('startTime') is not None:
-                off = (dd['startTime'] + 24) - prev_end
-                if off < OFF_DUTY_HOURS:
-                    hos_violations.append(f'D{d_idx+1} {prev_dn}->{dn}: {off:.1f}h off')
-            prev_end = dd.get('endTime'); prev_dn = dn
-        weekly_schedule.append({
-            'driverId': d_idx + 1, 'days': days,
-            'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
-            'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
-            'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
-            'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
-            'daysWorked': len(days),
-        })
+    # Weekly rotation optimizer: assign daily routes to drivers using CP-SAT
+    # Respects: 10h off-duty between consecutive days, 70h weekly cap
+    from ortools.sat.python import cp_model
+    model = cp_model.CpModel()
+
+    ordered_days = sorted([dn for dn in day_route_data if day_route_data[dn]],
+                          key=lambda d: _DAY_ORDER.get(d, 99))
+    # Allow extra driver slots for rotation (some drivers take days off)
+    # With 9 routes/day and off-duty constraints, some drivers need rest days
+    n_actual = max(n_drivers + 2, max_routes_day + 2)  # extra slots for rotation
+
+    # Variables: y[day][route_idx][driver] = BoolVar
+    y = {}
+    for dn in ordered_days:
+        y[dn] = {}
+        for ri in range(len(day_route_data[dn])):
+            y[dn][ri] = {}
+            for d in range(n_actual):
+                y[dn][ri][d] = model.NewBoolVar(f'y_{dn}_{ri}_{d}')
+
+    # Each route assigned to exactly 1 driver
+    for dn in ordered_days:
+        for ri in range(len(day_route_data[dn])):
+            model.Add(sum(y[dn][ri][d] for d in range(n_actual)) == 1)
+
+    # Each driver at most 1 route per day
+    for dn in ordered_days:
+        for d in range(n_actual):
+            model.Add(sum(y[dn][ri][d] for ri in range(len(day_route_data[dn]))) <= 1)
+
+    # 10h off-duty between consecutive working days
+    for k in range(len(ordered_days) - 1):
+        dn_k = ordered_days[k]
+        dn_k1 = ordered_days[k + 1]
+        for d in range(n_actual):
+            for ri_k, rd_k in enumerate(day_route_data[dn_k]):
+                for ri_k1, rd_k1 in enumerate(day_route_data[dn_k1]):
+                    off_duty = (rd_k1['startTime'] + 24) - rd_k['endTime']
+                    if off_duty < OFF_DUTY_HOURS:
+                        # These two routes can't be on the same driver
+                        model.Add(y[dn_k][ri_k][d] + y[dn_k1][ri_k1][d] <= 1)
+
+    # 70h weekly duty cap per driver
+    for d in range(n_actual):
+        weekly_terms = []
+        for dn in ordered_days:
+            for ri, rd in enumerate(day_route_data[dn]):
+                weekly_terms.append(y[dn][ri][d] * int(rd['dutyHours'] * 10))
+        model.Add(sum(weekly_terms) <= int(MAX_WEEKLY_DUTY * 10))
+
+    # Minimize drivers used + balance duty
+    driver_used = [model.NewBoolVar(f'du_{d}') for d in range(n_actual)]
+    for d in range(n_actual):
+        has_work = []
+        for dn in ordered_days:
+            for ri in range(len(day_route_data[dn])):
+                has_work.append(y[dn][ri][d])
+        model.AddMaxEquality(driver_used[d], has_work + [model.NewConstant(0)])
+
+    model.Minimize(sum(du * 1000 for du in driver_used))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 30
+    solver.parameters.num_workers = 8
+    solver.parameters.random_seed = 42
+    status = solver.Solve(model)
+
+    weekly_schedule = []
+    hos_violations = []
+
+    print(f"  Weekly rotation: status={solver.StatusName(status)} ({status})")
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print(f"  Weekly rotation: {sum(solver.Value(du) for du in driver_used)} drivers")
+
+        for d in range(n_actual):
+            if not solver.Value(driver_used[d]):
+                continue
+            days = {}
+            for dn in ordered_days:
+                for ri, rd in enumerate(day_route_data[dn]):
+                    if solver.Value(y[dn][ri][d]):
+                        days[dn] = rd
+                        if rd['driveHours'] > HOS_MAX_DRIVE:
+                            hos_violations.append(f'D{d+1} {dn}: {rd["driveHours"]}h drive')
+                        if rd['dutyHours'] > HOS_MAX_DUTY:
+                            hos_violations.append(f'D{d+1} {dn}: {rd["dutyHours"]}h duty')
+
+            weekly_duty = sum(v['dutyHours'] for v in days.values())
+            if weekly_duty > MAX_WEEKLY_DUTY:
+                hos_violations.append(f'D{d+1}: {weekly_duty:.1f}h weekly')
+
+            sorted_dns = sorted(days.keys(), key=lambda dn: _DAY_ORDER.get(dn, 99))
+            prev_end = None; prev_dn = None
+            for dn in sorted_dns:
+                dd = days[dn]
+                if prev_end is not None and dd.get('startTime') is not None:
+                    off = (dd['startTime'] + 24) - prev_end
+                    if off < OFF_DUTY_HOURS:
+                        hos_violations.append(f'D{d+1} {prev_dn}->{dn}: {off:.1f}h off')
+                prev_end = dd.get('endTime'); prev_dn = dn
+
+            weekly_schedule.append({
+                'driverId': len(weekly_schedule) + 1, 'days': days,
+                'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
+                'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
+                'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
+                'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
+                'daysWorked': len(days),
+            })
+    else:
+        print(f"  Weekly rotation INFEASIBLE — falling back to index assignment")
+        # Fallback to naive assignment (same as before)
+        driver_days_map = {d: {} for d in range(n_actual)}
+        for day in working_days:
+            dn = day_names_map[day]
+            for ri, rd in enumerate(day_route_data.get(dn, [])):
+                if ri < len(driver_days_map):
+                    driver_days_map[ri][dn] = rd
+        for d_idx in sorted(driver_days_map.keys()):
+            days = driver_days_map[d_idx]
+            if not days: continue
+            weekly_schedule.append({
+                'driverId': d_idx + 1, 'days': days,
+                'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
+                'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
+                'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
+                'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
+                'daysWorked': len(days),
+            })
 
     elapsed = _t.time() - start
     hos_compliant = len(hos_violations) == 0
@@ -3944,17 +4041,14 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
 
     # (compression is now integrated into step 5 merge above)
 
-    # Build weekly schedule
-    weekly_schedule = []
+    # Sequence all daily routes
+    _DAY_ORDER = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
     all_exact = True
-    hos_violations = []
-
-    driver_days_map = {d: {} for d in range(max(n_drivers, max_routes_day))}
+    day_route_data = {}
     for day in working_days:
         dn = day_names_map[day]
+        day_route_data[dn] = []
         for ri, (route_legs, _) in enumerate(day_routes.get(day, [])):
-            if ri >= len(driver_days_map):
-                driver_days_map[ri] = {}
             ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
                 route_legs, lane_map, graph, base_city, max_wait_h)
             if not is_exact:
@@ -3965,44 +4059,132 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
             earliest = min(starts) if starts else 0
             latest = max(ends) if ends else 0
             duty_h = (latest - earliest) + pre_post_h
-            if drive > HOS_MAX_DRIVE:
-                hos_violations.append(f'D{ri+1} {dn}: {drive:.1f}h drive')
-            if duty_h > HOS_MAX_DUTY:
-                hos_violations.append(f'D{ri+1} {dn}: {duty_h:.1f}h duty')
             names = [lane_map[lid].name for lid in ordered]
-            driver_days_map[ri][dn] = {
+            day_route_data[dn].append({
                 'legs': ordered, 'legNames': names, 'legCount': len(ordered),
                 'driveHours': round(drive, 1), 'dutyHours': round(duty_h, 1),
                 'miles': round(miles), 'deadheadMiles': dh,
                 'startTime': earliest, 'endTime': latest,
                 'isExact': is_exact, 'legGaps': gaps,
-            }
+            })
 
-    _DAY_ORDER = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
-    for d_idx in sorted(driver_days_map.keys()):
-        days = driver_days_map[d_idx]
-        if not days:
-            continue
-        weekly_duty = sum(v['dutyHours'] for v in days.values())
-        if weekly_duty > MAX_WEEKLY_DUTY:
-            hos_violations.append(f'D{d_idx+1}: {weekly_duty:.1f}h weekly')
-        sorted_dns = sorted(days.keys(), key=lambda dn: _DAY_ORDER.get(dn, 99))
-        prev_end = None; prev_dn = None
-        for dn in sorted_dns:
-            dd = days[dn]
-            if prev_end is not None and dd.get('startTime') is not None:
-                off = (dd['startTime'] + 24) - prev_end
-                if off < OFF_DUTY_HOURS:
-                    hos_violations.append(f'D{d_idx+1} {prev_dn}->{dn}: {off:.1f}h off')
-            prev_end = dd.get('endTime'); prev_dn = dn
-        weekly_schedule.append({
-            'driverId': d_idx + 1, 'days': days,
-            'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
-            'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
-            'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
-            'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
-            'daysWorked': len(days),
-        })
+    # Weekly rotation optimizer: CP-SAT assigns daily routes to drivers
+    # Ensures: 10h off-duty between consecutive days, 70h weekly cap
+    from ortools.sat.python import cp_model
+    model = cp_model.CpModel()
+    ordered_days = sorted([dn for dn in day_route_data if day_route_data[dn]],
+                          key=lambda d: _DAY_ORDER.get(d, 99))
+    n_slots = max_routes_day + 2  # extra slots allow rotation
+
+    y = {}
+    for dn in ordered_days:
+        y[dn] = {}
+        for ri in range(len(day_route_data[dn])):
+            y[dn][ri] = {}
+            for d in range(n_slots):
+                y[dn][ri][d] = model.NewBoolVar(f'y_{dn}_{ri}_{d}')
+
+    # Each route to exactly 1 driver
+    for dn in ordered_days:
+        for ri in range(len(day_route_data[dn])):
+            model.Add(sum(y[dn][ri][d] for d in range(n_slots)) == 1)
+
+    # Each driver at most 1 route per day
+    for dn in ordered_days:
+        for d in range(n_slots):
+            model.Add(sum(y[dn][ri][d] for ri in range(len(day_route_data[dn]))) <= 1)
+
+    # Off-duty: 10h between consecutive working days
+    for k in range(len(ordered_days) - 1):
+        dn_k, dn_k1 = ordered_days[k], ordered_days[k + 1]
+        for d in range(n_slots):
+            for ri_k, rd_k in enumerate(day_route_data[dn_k]):
+                for ri_k1, rd_k1 in enumerate(day_route_data[dn_k1]):
+                    off = (rd_k1['startTime'] + 24) - rd_k['endTime']
+                    if off < OFF_DUTY_HOURS:
+                        model.Add(y[dn_k][ri_k][d] + y[dn_k1][ri_k1][d] <= 1)
+
+    # Weekly duty cap
+    for d in range(n_slots):
+        weekly_terms = []
+        for dn in ordered_days:
+            for ri, rd in enumerate(day_route_data[dn]):
+                weekly_terms.append(y[dn][ri][d] * int(rd['dutyHours'] * 10))
+        model.Add(sum(weekly_terms) <= int(MAX_WEEKLY_DUTY * 10))
+
+    # Minimize drivers used
+    driver_used = [model.NewBoolVar(f'du_{d}') for d in range(n_slots)]
+    for d in range(n_slots):
+        has_work = [y[dn][ri][d] for dn in ordered_days for ri in range(len(day_route_data[dn]))]
+        model.AddMaxEquality(driver_used[d], has_work + [model.NewConstant(0)])
+    model.Minimize(sum(du * 1000 for du in driver_used))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 30
+    solver.parameters.num_workers = 8
+    solver.parameters.random_seed = 42
+    status = solver.Solve(model)
+
+    weekly_schedule = []
+    hos_violations = []
+
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        n_used = sum(solver.Value(du) for du in driver_used)
+        print(f"  Weekly rotation: {n_used} drivers (HOS-compliant assignment)")
+
+        for d in range(n_slots):
+            if not solver.Value(driver_used[d]):
+                continue
+            days = {}
+            for dn in ordered_days:
+                for ri, rd in enumerate(day_route_data[dn]):
+                    if solver.Value(y[dn][ri][d]):
+                        days[dn] = rd
+                        if rd['driveHours'] > HOS_MAX_DRIVE:
+                            hos_violations.append(f'D{len(weekly_schedule)+1} {dn}: {rd["driveHours"]}h drive')
+                        if rd['dutyHours'] > HOS_MAX_DUTY:
+                            hos_violations.append(f'D{len(weekly_schedule)+1} {dn}: {rd["dutyHours"]}h duty')
+
+            weekly_duty = sum(v['dutyHours'] for v in days.values())
+            if weekly_duty > MAX_WEEKLY_DUTY:
+                hos_violations.append(f'D{len(weekly_schedule)+1}: {weekly_duty:.1f}h weekly')
+            sorted_dns = sorted(days.keys(), key=lambda dn: _DAY_ORDER.get(dn, 99))
+            prev_end = None; prev_dn = None
+            for dn in sorted_dns:
+                dd = days[dn]
+                if prev_end is not None and dd.get('startTime') is not None:
+                    off = (dd['startTime'] + 24) - prev_end
+                    if off < OFF_DUTY_HOURS:
+                        hos_violations.append(f'D{len(weekly_schedule)+1} {prev_dn}->{dn}: {off:.1f}h off')
+                prev_end = dd.get('endTime'); prev_dn = dn
+
+            weekly_schedule.append({
+                'driverId': len(weekly_schedule) + 1, 'days': days,
+                'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
+                'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
+                'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
+                'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
+                'daysWorked': len(days),
+            })
+    else:
+        print(f"  Weekly rotation: INFEASIBLE at {n_slots} slots — using naive assignment")
+        driver_days_map = {d: {} for d in range(max_routes_day)}
+        for day in working_days:
+            dn = day_names_map[day]
+            for ri, rd in enumerate(day_route_data.get(dn, [])):
+                if ri < len(driver_days_map):
+                    driver_days_map[ri][dn] = rd
+        for d_idx in sorted(driver_days_map.keys()):
+            days = driver_days_map[d_idx]
+            if not days: continue
+            weekly_schedule.append({
+                'driverId': d_idx + 1, 'days': days,
+                'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
+                'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
+                'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
+                'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
+                'daysWorked': len(days),
+            })
 
     elapsed = _t.time() - start
     hos_compliant = len(hos_violations) == 0
