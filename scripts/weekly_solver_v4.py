@@ -3225,79 +3225,39 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
         corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
 
     # Classify corridors — use sequential capacity, not raw lane count
-    # Build pair-aware units
-    def _build_pair_units(lids):
-        units = []
-        used = set()
-        for lid in lids:
-            if lid in used: continue
-            partner = pair_map.get(lid)
-            if partner and partner in set(lids) and partner not in used:
-                la, lb = lane_map[lid], lane_map[partner]
-                start = min(la.pickup_time or 0, lb.pickup_time or 0)
-                end = max(la.finish_time or 0, lb.finish_time or 0)
-                units.append((start, end, [lid, partner]))
-                used.add(lid); used.add(partner)
-            else:
-                l = lane_map[lid]
-                units.append((l.pickup_time or 0, l.finish_time or 0, [lid]))
-                used.add(lid)
-        units.sort(key=lambda u: u[0])
-        return units
-
-    def _split_by_overlap(lids):
-        """Split into non-overlapping chains of pair-units."""
-        units = _build_pair_units(lids)
-        chains = []
-        for us, ue, ulids in units:
-            placed = False
-            for chain in chains:
-                if us >= chain[-1][1] - 0.25:
-                    chain.append((us, ue, ulids))
-                    placed = True
-                    break
-            if not placed:
-                chains.append([(us, ue, ulids)])
-        return [[lid for _, _, ul in chain for lid in ul] for chain in chains]
-
     big = []
     small = []
 
     for corr, lids in sorted(corr_groups.items(), key=lambda x: -len(x[1])):
-        # First split by pair overlap — pairs that overlap MUST be on different drivers
-        overlap_groups = _split_by_overlap(lids)
+        times = [(lane_map[lid].pickup_time or 0, lane_map[lid].finish_time or 0) for lid in lids]
+        span = max(t[1] for t in times) - min(t[0] for t in times)
+        seq_cap, _ = _count_sequential_capacity(lids, lane_map, max_legs, pre_post_h, MAX_WAIT)
 
-        for grp in overlap_groups:
-            times = [(lane_map[lid].pickup_time or 0, lane_map[lid].finish_time or 0) for lid in grp]
-            span = max(t[1] for t in times) - min(t[0] for t in times)
-            seq_cap, _ = _count_sequential_capacity(grp, lane_map, max_legs, pre_post_h, MAX_WAIT)
-
-            if span > DUTY_LIMIT and len(grp) > 1:
-                # Split at largest gap (pair-safe)
-                grp_sorted = sorted(grp, key=lambda lid: lane_map[lid].pickup_time or 99)
-                best_gap = 0
-                best_split = len(grp_sorted) // 2
-                for i in range(1, len(grp_sorted)):
-                    if pair_map.get(grp_sorted[i-1]) == grp_sorted[i]:
-                        continue
-                    prev_f = lane_map[grp_sorted[i-1]].finish_time or 0
-                    curr_s = lane_map[grp_sorted[i]].pickup_time or 0
-                    gap = curr_s - prev_f
-                    if gap > best_gap:
-                        best_gap = gap
-                        best_split = i
-                for chunk in [grp_sorted[:best_split], grp_sorted[best_split:]]:
-                    if not chunk: continue
-                    cap, _ = _count_sequential_capacity(chunk, lane_map, max_legs, pre_post_h, MAX_WAIT)
-                    if cap > 4:
-                        big.append((corr, chunk))
-                    else:
-                        cs = max(lane_map[lid].finish_time or 0 for lid in chunk) - min(lane_map[lid].pickup_time or 0 for lid in chunk)
-                        small.append((corr, chunk, cs))
-            elif seq_cap > 4:
-                big.append((corr, grp))
-            else:
-                small.append((corr, grp, span))
+        if span > DUTY_LIMIT and len(lids) > 1:
+            # Split at largest gap, never between paired legs
+            best_gap = 0
+            best_split = len(lids) // 2
+            for i in range(1, len(lids)):
+                if pair_map.get(lids[i-1]) == lids[i] or pair_map.get(lids[i]) == lids[i-1]:
+                    continue
+                prev_f = lane_map[lids[i-1]].finish_time or 0
+                curr_s = lane_map[lids[i]].pickup_time or 0
+                gap = curr_s - prev_f
+                if gap > best_gap:
+                    best_gap = gap
+                    best_split = i
+            for chunk in [lids[:best_split], lids[best_split:]]:
+                if not chunk: continue
+                cap, _ = _count_sequential_capacity(chunk, lane_map, max_legs, pre_post_h, MAX_WAIT)
+                if cap > 4:
+                    big.append((corr, chunk))
+                else:
+                    cs = max(lane_map[lid].finish_time or 0 for lid in chunk) - min(lane_map[lid].pickup_time or 0 for lid in chunk)
+                    small.append((corr, chunk, cs))
+        elif seq_cap > 4:
+            big.append((corr, lids))
+        else:
+            small.append((corr, lids, span))
 
     # Sort small corridors by end time (for sequential merging)
     small.sort(key=lambda x: max(lane_map[lid].finish_time or 0 for lid in x[1]))
@@ -3416,12 +3376,26 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                 if lid in used or lid not in unassigned_set:
                     continue
                 nl = lane_map[lid]
+
+                # KEY FIX: If this is a return leg and its outbound partner is
+                # available, strongly prefer the outbound instead. Don't skip
+                # the return entirely (that creates orphans), but penalize it
+                # so the outbound gets picked first.
+                partner = pair_map.get(lid)
+                pair_penalty = 0
+                if partner:
+                    op = lane_map[partner]
+                    is_return = (nl.origin_city.lower().strip() != 'colton' and
+                                 op.origin_city.lower().strip() == 'colton')
+                    if is_return and partner not in used and partner in unassigned_set:
+                        pair_penalty = 500  # strongly prefer outbound first
+
                 dh = _compute_dh(lane_map[route[-1]], nl)
                 dh_h = dh / 55.0
                 result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
                 if result:
                     _, _, _, wait = result
-                    score = dh + wait * 50
+                    score = dh + wait * 50 + pair_penalty
                     if score < best_score:
                         best_score = score
                         best = (lid, dh_h, result)
