@@ -3164,14 +3164,57 @@ def _price_new_routes(dual_prices, day_lids, lane_map, graph, excl_pair_ids,
     return list(new_candidates.values())
 
 
+def _count_sequential_capacity(lids, lane_map, max_legs, pre_post_h, max_wait_h):
+    """Count how many legs from this list a single driver can do sequentially.
+
+    Uses greedy: pick earliest available, then next feasible, repeat.
+    Returns (max_sequential, remaining_lids).
+    """
+    from lane_solver import can_add_leg
+    sorted_lids = sorted(lids, key=lambda lid: lane_map[lid].pickup_time or 99)
+    used = []
+    remaining = list(sorted_lids)
+
+    # Greedy chain: pick first available, extend
+    while remaining and len(used) < max_legs:
+        if not used:
+            used.append(remaining.pop(0))
+            continue
+        last = lane_map[used[-1]]
+        best = None
+        best_idx = None
+        for idx, lid in enumerate(remaining):
+            nl = lane_map[lid]
+            dh = _compute_dh(last, nl)
+            dh_h = dh / 55.0
+            result = can_add_leg(
+                sum(lane_map[u].route_duration_hours + dh_h for u in used),
+                0,  # simplified duty check
+                last.finish_time, nl, dh_h, pre_post_h, max_wait_h,
+                is_first=(len(used) == 0))
+            if result:
+                if best is None or (nl.pickup_time or 99) < (lane_map[best].pickup_time or 99):
+                    best = lid
+                    best_idx = idx
+        if best:
+            used.append(best)
+            remaining.pop(best_idx)
+        else:
+            break
+
+    return len(used), remaining
+
+
 def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h):
     """Plan driver slots by grouping corridors based on size and time compatibility.
 
     Returns list of lane-id lists, one per planned driver slot.
-    Small corridors (≤3 lanes) get merged with time-compatible larger corridors.
-    Wide corridors (span > 13h) get split into time chunks.
+    Accounts for time overlaps: a corridor with 8 lanes but only 5 sequentially
+    feasible gets split into 2 slots.
     """
+    from lane_solver import can_add_leg
     DUTY_LIMIT = HOS_MAX_DUTY - 1.0  # 13h — leave margin
+    MAX_WAIT = 2.0
 
     # Group by corridor
     corr_groups = {}
@@ -3181,30 +3224,41 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h)
     for c in corr_groups:
         corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
 
-    # Classify corridors
-    big = []    # >4 lanes — get their own driver(s)
-    small = []  # ≤4 lanes — need to share
+    # Classify corridors — use sequential capacity, not raw lane count
+    big = []    # needs dedicated driver(s)
+    small = []  # can share with others
 
     for corr, lids in sorted(corr_groups.items(), key=lambda x: -len(x[1])):
         times = [(lane_map[lid].pickup_time or 0, lane_map[lid].finish_time or 0) for lid in lids]
         span = max(t[1] for t in times) - min(t[0] for t in times)
 
-        if len(lids) > 4:
-            # Wide corridor: split at largest gap if span > DUTY_LIMIT
-            if span > DUTY_LIMIT and len(lids) > 1:
-                best_gap = 0
-                best_split = len(lids) // 2
-                for i in range(1, len(lids)):
-                    prev_f = lane_map[lids[i-1]].finish_time or 0
-                    curr_s = lane_map[lids[i]].pickup_time or 0
-                    gap = curr_s - prev_f
-                    if gap > best_gap:
-                        best_gap = gap
-                        best_split = i
-                big.append((corr, lids[:best_split]))
-                big.append((corr, lids[best_split:]))
-            else:
-                big.append((corr, lids))
+        # Check how many a single driver can actually do
+        seq_cap, leftover = _count_sequential_capacity(lids, lane_map, max_legs, pre_post_h, MAX_WAIT)
+
+        if span > DUTY_LIMIT and len(lids) > 1:
+            # Wide corridor: split at largest time gap
+            best_gap = 0
+            best_split = len(lids) // 2
+            for i in range(1, len(lids)):
+                prev_f = lane_map[lids[i-1]].finish_time or 0
+                curr_s = lane_map[lids[i]].pickup_time or 0
+                gap = curr_s - prev_f
+                if gap > best_gap:
+                    best_gap = gap
+                    best_split = i
+            chunk_a = lids[:best_split]
+            chunk_b = lids[best_split:]
+            # Each chunk: check if it needs its own driver or can share
+            for chunk in [chunk_a, chunk_b]:
+                cap, _ = _count_sequential_capacity(chunk, lane_map, max_legs, pre_post_h, MAX_WAIT)
+                if cap > 4:
+                    big.append((corr, chunk))
+                else:
+                    chunk_span = max(lane_map[lid].finish_time or 0 for lid in chunk) - min(lane_map[lid].pickup_time or 0 for lid in chunk)
+                    small.append((corr, chunk, chunk_span))
+        elif seq_cap > 4:
+            # Enough sequential legs for a dedicated driver
+            big.append((corr, lids))
         else:
             small.append((corr, lids, span))
 
@@ -3228,7 +3282,8 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h)
         best_slot = None
         best_slot_dh = 9999
         for si, slot_lids in enumerate(slots):
-            if len(slot_lids) + len(lids) > max_legs:
+            combined_all = list(slot_lids) + list(lids)
+            if len(combined_all) > max_legs:
                 continue
             # Check time compatibility
             slot_start = min(lane_map[lid].pickup_time or 0 for lid in slot_lids)
@@ -3238,7 +3293,11 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h)
             combined_span = combined_end - combined_start
             if combined_span + pre_post_h > HOS_MAX_DUTY:
                 continue
-            # Estimate DH: distance from slot's nearest endpoint to small group
+            # Check actual sequential capacity of combined
+            seq_cap, _ = _count_sequential_capacity(combined_all, lane_map, max_legs, pre_post_h, MAX_WAIT)
+            if seq_cap < len(combined_all):
+                continue  # can't actually do all these legs sequentially
+            # Estimate DH
             slot_last = lane_map[slot_lids[-1]]
             small_first = lane_map[lids[0]]
             dh = _compute_dh(slot_last, small_first)
