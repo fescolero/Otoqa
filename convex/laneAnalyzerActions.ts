@@ -788,7 +788,7 @@ export const runExternalSolver = internalAction({
         target_drivers: session?.targetDriverCount ?? undefined,
         enable_local_optimize: true,
         best_of_n: 3,
-        solver_version: 'v5_hybrid',
+        solver_version: 'greedy',
         bases: data.bases,
       },
     });
