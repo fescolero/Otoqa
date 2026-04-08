@@ -210,6 +210,10 @@ interface TrackingState {
   organizationId: string;
   trackingType: 'LOAD_ROUTE';
   startedAt: number;
+  /** Set to true when tracking was intentionally deactivated due to repeated server rejection.
+   * Prevents ensureTrackingForLoad from restarting the same rejected load — requires human
+   * intervention to fix the backend data (org mismatch / stale loadId). */
+  rejectDeactivated?: boolean;
 }
 
 // BufferedLocation type removed — GPS points are now stored in SQLite
@@ -603,7 +607,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
               const staleState = await storage.getString(TRACKING_STATE_KEY);
               if (staleState) {
                 const parsed = JSON.parse(staleState);
-                await storage.set(TRACKING_STATE_KEY, JSON.stringify({ ...parsed, isActive: false }));
+                await storage.set(TRACKING_STATE_KEY, JSON.stringify({ ...parsed, isActive: false, rejectDeactivated: true }));
               }
               await storage.delete(SYNC_REJECT_TS_KEY);
               await storage.delete(SYNC_REJECT_COUNT_KEY);
@@ -914,6 +918,15 @@ export async function ensureTrackingForLoad(params: {
 }> {
   const state = await getTrackingState();
   if (!state?.isActive) {
+    // Don't restart if the server repeatedly rejected GPS pings for this exact load —
+    // that signals a backend data issue (org mismatch / stale loadId) that requires
+    // human intervention. A different loadId is allowed through (new load may work).
+    if (state?.rejectDeactivated && state?.loadId === params.loadId) {
+      console.warn(
+        `[LocationTracking] ensureTrackingForLoad: skipping restart — load ${params.loadId.slice(0, 12)}... was reject-deactivated`,
+      );
+      return { success: false, action: 'started', message: 'Tracking deactivated: server rejected GPS pings for this load' };
+    }
     const result = await startLocationTracking(params);
     return { success: result.success, action: 'started', message: result.message };
   }
@@ -1522,7 +1535,7 @@ async function syncUnsyncedToConvex(
           const staleState = await storage.getString(TRACKING_STATE_KEY);
           if (staleState) {
             const parsed = JSON.parse(staleState);
-            await storage.set(TRACKING_STATE_KEY, JSON.stringify({ ...parsed, isActive: false }));
+            await storage.set(TRACKING_STATE_KEY, JSON.stringify({ ...parsed, isActive: false, rejectDeactivated: true }));
           }
           await storage.delete(SYNC_REJECT_TS_KEY);
           await storage.delete(SYNC_REJECT_COUNT_KEY);
