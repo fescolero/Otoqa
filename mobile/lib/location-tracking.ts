@@ -1217,6 +1217,11 @@ async function startForegroundPolling(organizationId: string) {
             });
             await saveFallbackLocations([locationRecord]);
             usedFallback = true;
+            // Fire-and-forget DB recovery: after the native handle is zombied,
+            // reopenDb() will succeed once Android re-initialises the JNI bridge.
+            // Calling it here (rather than waiting for the next foreground_resume)
+            // means the next location event can use SQLite directly.
+            reopenDb().catch(() => { /* still zombie — getDb() will retry on next insert */ });
           }
 
           lastForegroundLocation = {
@@ -1238,7 +1243,10 @@ async function startForegroundPolling(organizationId: string) {
           );
 
           // Sync immediately -- we're in the foreground with valid auth.
-          if (!isSyncing) {
+          // Skip sync when SQLite is broken (usedFallback): getUnsyncedLocations()
+          // would also fail with NPE, generating a noisy second error event with
+          // no benefit. The reopenDb() above will attempt recovery for the next event.
+          if (!isSyncing && !usedFallback) {
             isSyncing = true;
             try {
               await syncUnsyncedToConvex(organizationId);
