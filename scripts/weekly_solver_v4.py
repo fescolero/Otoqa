@@ -3216,6 +3216,29 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h)
     DUTY_LIMIT = HOS_MAX_DUTY - 1.0  # 13h — leave margin
     MAX_WAIT = 2.0
 
+    # Pre-detect natural pairs (outbound→return) and treat as atomic
+    # This prevents DH from splitting a pair across drivers
+    pair_map = {}  # lid -> partner_lid
+    used_in_pair = set()
+    all_sorted = sorted(local_lids, key=lambda lid: lane_map[lid].pickup_time or 99)
+    for i, lid_a in enumerate(all_sorted):
+        if lid_a in used_in_pair:
+            continue
+        la = lane_map[lid_a]
+        for lid_b in all_sorted[i+1:]:
+            if lid_b in used_in_pair:
+                continue
+            lb = lane_map[lid_b]
+            # Check reverse corridor + tight timing
+            if (la.origin_city.lower().strip() == lb.dest_city.lower().strip() and
+                la.dest_city.lower().strip() == lb.origin_city.lower().strip()):
+                if lb.pickup_time and la.finish_time and abs(lb.pickup_time - la.finish_time) < 0.5:
+                    pair_map[lid_a] = lid_b
+                    pair_map[lid_b] = lid_a
+                    used_in_pair.add(lid_a)
+                    used_in_pair.add(lid_b)
+                    break
+
     # Group by corridor
     corr_groups = {}
     for lid in local_lids:
@@ -3393,6 +3416,17 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                 route.append(lid)
                 drive, duty, clock = nd, ndu, nc
                 used.add(lid)
+                # If this leg has a pair partner, try to add it immediately
+                partner = pair_map.get(lid)
+                if partner and partner not in used and partner in unassigned_set and len(route) < max_legs:
+                    pl = lane_map[partner]
+                    pdh = _compute_dh(lane_map[route[-1]], pl)
+                    pdh_h = pdh / 55.0
+                    presult = can_add_leg(drive, duty, clock, pl, pdh_h, pre_post_h, max_wait_h)
+                    if presult:
+                        route.append(partner)
+                        drive, duty, clock = presult[0], presult[1], presult[2]
+                        used.add(partner)
                 changed = True
         return route, used
 
@@ -3400,6 +3434,27 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
         lids = day_lane_ids[day]
         if not lids:
             continue
+
+        # Detect natural pairs for this day
+        pair_map = {}
+        used_in_pair = set()
+        day_sorted = sorted(lids, key=lambda lid: lane_map[lid].pickup_time or 99)
+        for i, lid_a in enumerate(day_sorted):
+            if lid_a in used_in_pair or lid_a in excl_ids:
+                continue
+            la = lane_map[lid_a]
+            for lid_b in day_sorted[i+1:]:
+                if lid_b in used_in_pair or lid_b in excl_ids:
+                    continue
+                lb = lane_map[lid_b]
+                if (la.origin_city.lower().strip() == lb.dest_city.lower().strip() and
+                    la.dest_city.lower().strip() == lb.origin_city.lower().strip()):
+                    if lb.pickup_time and la.finish_time and abs(lb.pickup_time - la.finish_time) < 0.5:
+                        pair_map[lid_a] = lid_b
+                        pair_map[lid_b] = lid_a
+                        used_in_pair.add(lid_a)
+                        used_in_pair.add(lid_b)
+                        break
 
         routes = []
         assigned = set()
