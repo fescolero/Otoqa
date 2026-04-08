@@ -3295,8 +3295,40 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
             built_routes.append(([lid], _corridor_of_leg(lane_map[lid])))
             unassigned.discard(lid)
 
-        # Step 4: Merge routes to reach n_drivers
-        # Try ALL pairs each round, pick the merge with lowest DH
+        # Step 4: Redistribute legs to enable merging
+        # If we have too many routes, try moving legs between same-corridor
+        # routes to create one large (7-8 legs) and one small (1-2 legs)
+        n_local = n_drivers - len(routes)
+
+        if len(built_routes) > n_local:
+            # Group routes by dominant corridor
+            corr_route_groups = {}
+            for ri, (r_legs, r_corr) in enumerate(built_routes):
+                corr_route_groups.setdefault(r_corr, []).append(ri)
+
+            for corr, route_indices in corr_route_groups.items():
+                if len(route_indices) < 2:
+                    continue
+                # If this corridor has 2 routes totaling ≤8 legs, merge into one
+                legs_lists = [(ri, built_routes[ri][0]) for ri in route_indices]
+                total_legs = sum(len(legs) for _, legs in legs_lists)
+                if total_legs <= max_legs and len(legs_lists) == 2:
+                    ri_a, legs_a = legs_lists[0]
+                    ri_b, legs_b = legs_lists[1]
+                    combined = list(legs_a) + list(legs_b)
+                    ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
+                        combined, lane_map, graph, base_city, max_wait_h)
+                    starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+                    ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+                    if starts and ends:
+                        duty_h = (max(ends) - min(starts)) + pre_post_h
+                        if drive <= HOS_MAX_DRIVE and duty_h <= HOS_MAX_DUTY:
+                            # Replace both with single merged route
+                            built_routes[ri_a] = (ordered, corr)
+                            built_routes[ri_b] = (None, None)  # mark for removal
+            built_routes = [(r, c) for r, c in built_routes if r is not None]
+
+        # Now do all-pairs merge
         n_local = n_drivers - len(routes)
 
         while len(built_routes) > n_local:
