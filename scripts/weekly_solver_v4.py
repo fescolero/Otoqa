@@ -3328,28 +3328,36 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
     import time as _t
     start = _t.time()
 
-    # Pre-detect exclusive pairs
+    # Pre-detect exclusive pairs — match by TIGHTEST timing (outbound finish ≈ return pickup)
     excl_pairs = []
     excl_ids = set()
     used_excl = set()
-    for la in lanes:
+    # Sort by pickup time first for determinism
+    sorted_lanes = sorted(lanes, key=lambda l: l.pickup_time or 99)
+    for la in sorted_lanes:
         if la.id in used_excl:
             continue
-        for lb in lanes:
-            if lb.id in used_excl or la.id >= lb.id:
+        # Find the best return partner: reverse corridor + tightest gap after la finishes
+        best_partner = None
+        best_gap = 999
+        for lb in sorted_lanes:
+            if lb.id in used_excl or la.id == lb.id:
                 continue
             if (la.origin_city.lower().strip() == lb.dest_city.lower().strip() and
                 la.dest_city.lower().strip() == lb.origin_city.lower().strip()):
                 if la.route_duration_hours + lb.route_duration_hours > 5.0:
-                    if (la.pickup_time or 99) <= (lb.pickup_time or 99):
-                        excl_pairs.append((la.id, lb.id))
-                    else:
-                        excl_pairs.append((lb.id, la.id))
-                    excl_ids.add(la.id)
-                    excl_ids.add(lb.id)
-                    used_excl.add(la.id)
-                    used_excl.add(lb.id)
-                    break
+                    # Must be: la finishes, then lb picks up (outbound→return)
+                    if la.finish_time and lb.pickup_time:
+                        gap = lb.pickup_time - la.finish_time
+                        if 0 <= gap < best_gap:  # lb starts after la finishes, tightest wins
+                            best_gap = gap
+                            best_partner = lb
+        if best_partner:
+            excl_pairs.append((la.id, best_partner.id))
+            excl_ids.add(la.id)
+            excl_ids.add(best_partner.id)
+            used_excl.add(la.id)
+            used_excl.add(best_partner.id)
 
     day_routes = {}
     MAX_ROUTE_DH = 150  # quality ceiling — matches structural floor for SD spread
