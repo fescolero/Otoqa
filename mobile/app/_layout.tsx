@@ -249,6 +249,10 @@ export default function RootLayout() {
     const sub = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         checkForOTAUpdate('foreground');
+        // Re-attempt any queued offline mutations when the app returns to the
+        // foreground. The network listener only fires on quality transitions,
+        // so mutations queued while offline would otherwise wait indefinitely.
+        processQueue().catch(console.error);
       }
     });
 

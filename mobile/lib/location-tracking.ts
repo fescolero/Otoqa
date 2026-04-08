@@ -14,6 +14,7 @@ import {
   markAsSynced,
   getLastLocationForLoad,
   deleteOldSyncedLocations,
+  deleteAllForLoad,
   reopenDb,
 } from './location-db';
 import {
@@ -612,6 +613,19 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
               await storage.delete(SYNC_REJECT_TS_KEY);
               await storage.delete(SYNC_REJECT_COUNT_KEY);
             } catch { /* non-critical */ }
+
+            // Purge stale SQLite records — delete all GPS points whose loadId
+            // the server rejected. These reference loads that no longer exist in
+            // Convex (hard-deleted), permanently blocking newer valid records
+            // because getUnsyncedLocations returns oldest-first.
+            try {
+              const staleLoadIds = [...new Set(unsynced.map((r) => r.loadId))];
+              for (const loadId of staleLoadIds) {
+                const deleted = await deleteAllForLoad(String(loadId));
+                console.log(`[LocationTracking] BG purge: deleted ${deleted} stale GPS records for loadId=${loadId}`);
+              }
+            } catch { /* non-critical — purge failure doesn't block anything */ }
+
             trackBGTaskError({ step: 'sync_rejected', error: 'stale_tracking_deactivated_after_' + rejectCount + '_rejections' });
             return;
           }
@@ -1540,6 +1554,19 @@ async function syncUnsyncedToConvex(
           await storage.delete(SYNC_REJECT_TS_KEY);
           await storage.delete(SYNC_REJECT_COUNT_KEY);
         } catch { /* non-critical */ }
+
+        // Purge stale SQLite records — delete all GPS points whose loadId
+        // the server rejected. These reference loads that no longer exist in
+        // Convex (hard-deleted), permanently blocking newer valid records
+        // because getUnsyncedLocations returns oldest-first.
+        try {
+          const staleLoadIds = [...new Set(unsynced.map((r) => r.loadId))];
+          for (const loadId of staleLoadIds) {
+            const deleted = await deleteAllForLoad(String(loadId));
+            console.log(`[LocationTracking] Foreground purge: deleted ${deleted} stale GPS records for loadId=${loadId}`);
+          }
+        } catch { /* non-critical — purge failure doesn't block anything */ }
+
         trackBGTaskError({ step: 'sync_rejected', error: 'stale_tracking_deactivated_after_' + rejectCount + '_rejections' });
       }
     }

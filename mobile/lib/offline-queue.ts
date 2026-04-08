@@ -177,7 +177,22 @@ export async function processQueue(): Promise<void> {
       return;
     }
 
-    const queue = await getQueue();
+    const rawQueue = await getQueue();
+
+    // Reset mutations that exhausted their retries — give them one more attempt
+    // per processQueue invocation (foreground return, network reconnect, or mount).
+    // Without this, check-in/out mutations queued during a bad network period are
+    // permanently abandoned after maxRetries=5 and the driver's actions are lost.
+    const queue = rawQueue.map((m) =>
+      m.status === 'failed' && m.retryCount >= m.maxRetries
+        ? { ...m, status: 'pending' as const }
+        : m
+    );
+    const hadExhausted = queue.some((m, i) => m.status !== rawQueue[i].status);
+    if (hadExhausted) {
+      await saveQueue(queue);
+    }
+
     const pendingMutations = queue.filter(
       (m) => m.status === 'pending' || (m.status === 'failed' && m.retryCount < m.maxRetries)
     );
