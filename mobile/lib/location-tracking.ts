@@ -55,6 +55,8 @@ const MAX_ACCURACY_METERS = 50; // Reject readings with > 50 m accuracy
 const MIN_DISTANCE_BETWEEN_POINTS = 250; // Skip if < 250 m from last point
 const MIN_TIME_BETWEEN_SAVES_MS = 30 * 1000; // Hard floor — never save more often than 30 s
 const SYNC_BATCH_SIZE = 50; // Max points per sync batch
+const SYNC_REJECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min backoff after server rejects all points
+const MAX_CONSECUTIVE_REJECTIONS = 2; // Deactivate stale tracking state after this many consecutive rejections
 
 // ============================================
 // BACKGROUND-SAFE CONVEX CLIENT
@@ -229,6 +231,8 @@ const TRACKING_SESSION_MAX_AGE_MS = 18 * 60 * 60 * 1000; // 18 hours
 const LAST_HEARTBEAT_KEY = 'location_last_heartbeat';
 const BG_TASK_ALIVE_KEY = 'bg_task_last_alive';
 const BG_FALLBACK_LOCATIONS_KEY = 'bg_fallback_locations';
+const SYNC_REJECT_TS_KEY = 'sync_reject_last_ts';
+const SYNC_REJECT_COUNT_KEY = 'sync_reject_count';
 
 /**
  * Save locations to AsyncStorage as a fallback when SQLite is unavailable.
@@ -509,6 +513,8 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         });
         usedFallback = true;
         await saveFallbackLocations(locationsToSave);
+        // Fire-and-forget DB recovery so the next BG task invocation can use SQLite directly.
+        reopenDb().catch(() => { /* still zombie — next task will retry */ });
       }
     } else {
       usedFallback = true;
@@ -518,10 +524,27 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
   // Step 6: Sync to Convex via the HTTP endpoint (no Clerk JWT needed).
   // Uses a static API key that works regardless of auth state.
+  // Skip sync when SQLite is broken (usedFallback): getUnsyncedLocations() would also
+  // fail with NPE, emitting a noisy second error event. The reopenDb() above will
+  // attempt recovery for the next BG task invocation.
   let syncAttempted = false;
   let syncSuccess = false;
   let syncCount = 0;
-  if (sqliteAvailable && MOBILE_LOCATION_API_KEY) {
+  // Check cooldown: if the last sync was rejected by the server, wait SYNC_REJECT_COOLDOWN_MS
+  // before retrying to avoid hammering the server with known-bad requests.
+  let inCooldown = false;
+  try {
+    const rejectTsStr = await storage.getString(SYNC_REJECT_TS_KEY);
+    if (rejectTsStr) {
+      const rejectTs = parseInt(rejectTsStr, 10);
+      if (Date.now() - rejectTs < SYNC_REJECT_COOLDOWN_MS) {
+        inCooldown = true;
+        console.log('[LocationTracking] BG task: sync skipped — in reject cooldown');
+      }
+    }
+  } catch { /* non-critical */ }
+
+  if (sqliteAvailable && !usedFallback && !inCooldown && MOBILE_LOCATION_API_KEY) {
     try {
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
       if (unsynced.length > 0) {
@@ -549,11 +572,47 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
           // or investigate why points are rejected.
           await markAsSynced(unsynced.map((r) => r.id));
           console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
+          // Reset rejection counters on success
+          try {
+            await storage.delete(SYNC_REJECT_TS_KEY);
+            await storage.delete(SYNC_REJECT_COUNT_KEY);
+          } catch { /* non-critical */ }
         } else {
           console.warn(
             `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
           );
           trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+
+          // Increment consecutive rejection counter
+          let rejectCount = 1;
+          try {
+            const countStr = await storage.getString(SYNC_REJECT_COUNT_KEY);
+            rejectCount = countStr ? parseInt(countStr, 10) + 1 : 1;
+            await storage.set(SYNC_REJECT_COUNT_KEY, rejectCount.toString());
+            await storage.set(SYNC_REJECT_TS_KEY, Date.now().toString());
+          } catch { /* non-critical */ }
+
+          if (rejectCount > MAX_CONSECUTIVE_REJECTIONS) {
+            // Stale tracking state — server consistently rejects all points.
+            // Deactivate to stop the infinite retry loop.
+            console.warn(
+              `[LocationTracking] BG task: ${rejectCount} consecutive rejections — deactivating stale tracking state`,
+            );
+            try {
+              const staleState = await storage.getString(TRACKING_STATE_KEY);
+              if (staleState) {
+                const parsed = JSON.parse(staleState);
+                await storage.set(TRACKING_STATE_KEY, JSON.stringify({ ...parsed, isActive: false }));
+              }
+              await storage.delete(SYNC_REJECT_TS_KEY);
+              await storage.delete(SYNC_REJECT_COUNT_KEY);
+            } catch { /* non-critical */ }
+            trackBGTaskError({ step: 'sync_rejected', error: 'stale_tracking_deactivated_after_' + rejectCount + '_rejections' });
+            return;
+          }
+
+          // Apply cooldown: skip sync for SYNC_REJECT_COOLDOWN_MS after a rejection
+          await storage.set(SYNC_REJECT_TS_KEY, Date.now().toString());
         }
       }
     } catch (flushError) {
@@ -1217,6 +1276,11 @@ async function startForegroundPolling(organizationId: string) {
             });
             await saveFallbackLocations([locationRecord]);
             usedFallback = true;
+            // Fire-and-forget DB recovery: after the native handle is zombied,
+            // reopenDb() will succeed once Android re-initialises the JNI bridge.
+            // Calling it here (rather than waiting for the next foreground_resume)
+            // means the next location event can use SQLite directly.
+            reopenDb().catch(() => { /* still zombie — getDb() will retry on next insert */ });
           }
 
           lastForegroundLocation = {
@@ -1238,7 +1302,11 @@ async function startForegroundPolling(organizationId: string) {
           );
 
           // Sync immediately -- we're in the foreground with valid auth.
-          if (!isSyncing) {
+          // Skip sync when SQLite is broken (usedFallback): syncUnsyncedToConvex()
+          // calls getUnsyncedLocations() which also fails with NPE, generating a
+          // noisy second error event. The reopenDb() above attempts recovery for
+          // the next location event.
+          if (!isSyncing && !usedFallback) {
             isSyncing = true;
             try {
               await syncUnsyncedToConvex(organizationId);
