@@ -3775,6 +3775,14 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                     leg_end = nl.finish_time or 0
                     if (leg_end - route_start) + pre_post_h > HOS_MAX_DUTY:
                         continue
+                    # If this leg has a pair partner, check that the PARTNER
+                    # would also fit. If not, skip this leg entirely (keep pair atomic)
+                    partner_check = pair_map.get(lid)
+                    if partner_check and partner_check in unassigned_set and partner_check not in used:
+                        pc = lane_map[partner_check]
+                        pc_end = pc.finish_time or leg_end
+                        if (max(pc_end, leg_end) - route_start) + pre_post_h > HOS_MAX_DUTY:
+                            continue  # partner won't fit — skip both to avoid orphaning
                     _, _, _, wait = result
                     score = dh + wait * 50 + pair_penalty
                     if score < best_score:
