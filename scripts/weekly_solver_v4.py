@@ -3234,25 +3234,40 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
         seq_cap, _ = _count_sequential_capacity(lids, lane_map, max_legs, pre_post_h, MAX_WAIT)
 
         if span > DUTY_LIMIT and len(lids) > 1:
-            # Split at largest gap, never between paired legs
-            best_gap = 0
-            best_split = len(lids) // 2
-            for i in range(1, len(lids)):
-                if pair_map.get(lids[i-1]) == lids[i] or pair_map.get(lids[i]) == lids[i-1]:
+            # Recursively split until every chunk has span ≤ 14h (HOS_MAX_DUTY)
+            # Each chunk goes to big (if >4 sequential) or small (merge with other corridors)
+            def _split_to_fit(chunk_lids):
+                """Split a list of lanes into chunks that each fit within 14h duty."""
+                if not chunk_lids:
+                    return []
+                c_times = [(lane_map[lid].pickup_time or 0, lane_map[lid].finish_time or 0) for lid in chunk_lids]
+                c_span = max(t[1] for t in c_times) - min(t[0] for t in c_times)
+                if c_span + pre_post_h <= HOS_MAX_DUTY or len(chunk_lids) <= 1:
+                    return [chunk_lids]  # fits in one chunk
+                # Split at largest gap (pair-safe)
+                best_gap = 0
+                best_split = len(chunk_lids) // 2
+                for idx in range(1, len(chunk_lids)):
+                    if pair_map.get(chunk_lids[idx-1]) == chunk_lids[idx]:
+                        continue
+                    pf = lane_map[chunk_lids[idx-1]].finish_time or 0
+                    cs = lane_map[chunk_lids[idx]].pickup_time or 0
+                    gap = cs - pf
+                    if gap > best_gap:
+                        best_gap = gap
+                        best_split = idx
+                # Recurse on each half
+                return _split_to_fit(chunk_lids[:best_split]) + _split_to_fit(chunk_lids[best_split:])
+
+            chunks = _split_to_fit(lids)
+            for chunk in chunks:
+                if not chunk:
                     continue
-                prev_f = lane_map[lids[i-1]].finish_time or 0
-                curr_s = lane_map[lids[i]].pickup_time or 0
-                gap = curr_s - prev_f
-                if gap > best_gap:
-                    best_gap = gap
-                    best_split = i
-            for chunk in [lids[:best_split], lids[best_split:]]:
-                if not chunk: continue
                 cap, _ = _count_sequential_capacity(chunk, lane_map, max_legs, pre_post_h, MAX_WAIT)
-                if cap > 4:
+                cs = max(lane_map[lid].finish_time or 0 for lid in chunk) - min(lane_map[lid].pickup_time or 0 for lid in chunk)
+                if cap > 4 and cs + pre_post_h <= HOS_MAX_DUTY:
                     big.append((corr, chunk))
                 else:
-                    cs = max(lane_map[lid].finish_time or 0 for lid in chunk) - min(lane_map[lid].pickup_time or 0 for lid in chunk)
                     small.append((corr, chunk, cs))
         elif seq_cap > 4:
             big.append((corr, lids))
@@ -3290,10 +3305,6 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
             combined_span = combined_end - combined_start
             if combined_span + pre_post_h > HOS_MAX_DUTY:
                 continue
-            # Check actual sequential capacity of combined
-            seq_cap, _ = _count_sequential_capacity(combined_all, lane_map, max_legs, pre_post_h, MAX_WAIT)
-            if seq_cap < len(combined_all):
-                continue  # can't actually do all these legs sequentially
             # Estimate DH
             slot_last = lane_map[slot_lids[-1]]
             small_first = lane_map[lids[0]]
