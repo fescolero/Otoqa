@@ -3164,6 +3164,96 @@ def _price_new_routes(dual_prices, day_lids, lane_map, graph, excl_pair_ids,
     return list(new_candidates.values())
 
 
+def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h):
+    """Plan driver slots by grouping corridors based on size and time compatibility.
+
+    Returns list of lane-id lists, one per planned driver slot.
+    Small corridors (≤3 lanes) get merged with time-compatible larger corridors.
+    Wide corridors (span > 13h) get split into time chunks.
+    """
+    DUTY_LIMIT = HOS_MAX_DUTY - 1.0  # 13h — leave margin
+
+    # Group by corridor
+    corr_groups = {}
+    for lid in local_lids:
+        c = _corridor_of_leg(lane_map[lid])
+        corr_groups.setdefault(c, []).append(lid)
+    for c in corr_groups:
+        corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
+
+    # Classify corridors
+    big = []    # >4 lanes — get their own driver(s)
+    small = []  # ≤4 lanes — need to share
+
+    for corr, lids in sorted(corr_groups.items(), key=lambda x: -len(x[1])):
+        times = [(lane_map[lid].pickup_time or 0, lane_map[lid].finish_time or 0) for lid in lids]
+        span = max(t[1] for t in times) - min(t[0] for t in times)
+
+        if len(lids) > 4:
+            # Wide corridor: split at largest gap if span > DUTY_LIMIT
+            if span > DUTY_LIMIT and len(lids) > 1:
+                best_gap = 0
+                best_split = len(lids) // 2
+                for i in range(1, len(lids)):
+                    prev_f = lane_map[lids[i-1]].finish_time or 0
+                    curr_s = lane_map[lids[i]].pickup_time or 0
+                    gap = curr_s - prev_f
+                    if gap > best_gap:
+                        best_gap = gap
+                        best_split = i
+                big.append((corr, lids[:best_split]))
+                big.append((corr, lids[best_split:]))
+            else:
+                big.append((corr, lids))
+        else:
+            small.append((corr, lids, span))
+
+    # Sort small corridors by end time (for sequential merging)
+    small.sort(key=lambda x: max(lane_map[lid].finish_time or 0 for lid in x[1]))
+
+    # Build driver slots
+    slots = []
+
+    # Big corridors get their own slots
+    for corr, lids in big:
+        slots.append(list(lids))
+
+    # Merge small corridors into compatible slots or create new ones
+    for corr, lids, span in small:
+        merged = False
+        small_start = min(lane_map[lid].pickup_time or 0 for lid in lids)
+        small_end = max(lane_map[lid].finish_time or 0 for lid in lids)
+
+        # Try to fit into existing slot with room
+        best_slot = None
+        best_slot_dh = 9999
+        for si, slot_lids in enumerate(slots):
+            if len(slot_lids) + len(lids) > max_legs:
+                continue
+            # Check time compatibility
+            slot_start = min(lane_map[lid].pickup_time or 0 for lid in slot_lids)
+            slot_end = max(lane_map[lid].finish_time or 0 for lid in slot_lids)
+            combined_start = min(slot_start, small_start)
+            combined_end = max(slot_end, small_end)
+            combined_span = combined_end - combined_start
+            if combined_span + pre_post_h > HOS_MAX_DUTY:
+                continue
+            # Estimate DH: distance from slot's nearest endpoint to small group
+            slot_last = lane_map[slot_lids[-1]]
+            small_first = lane_map[lids[0]]
+            dh = _compute_dh(slot_last, small_first)
+            if dh < best_slot_dh:
+                best_slot_dh = dh
+                best_slot = si
+
+        if best_slot is not None:
+            slots[best_slot].extend(lids)
+        else:
+            slots.append(list(lids))
+
+    return slots
+
+
 def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                            day_lane_ids, working_days, day_names_map,
                            pre_post_h, max_legs, max_wait_h, base_city='colton'):
@@ -3271,29 +3361,35 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
         for c in corr_groups:
             corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
 
-        # Step 3: Build maximum-size corridor routes
-        # For each corridor, greedily build the LONGEST feasible route
-        # Then handle remaining with a second pass
+        # Step 3: Plan driver slots by corridor grouping
+        n_local_drivers = n_drivers - len(routes)
+        slots = _plan_day_slots(remaining, lane_map, n_local_drivers, max_legs, pre_post_h)
+
+        # Step 3b: Build routes within each slot
         unassigned = set(remaining)
-        built_routes = []  # (route_legs, corridor)
+        built_routes = []
 
-        # Sort corridors: largest first
-        sorted_corrs = sorted(corr_groups.keys(), key=lambda c: -len(corr_groups[c]))
-
-        for corridor in sorted_corrs:
-            clids = [lid for lid in corr_groups[corridor] if lid in unassigned]
-            while clids:
-                route, used = _build_corridor_route(clids, unassigned)
-                if not route:
-                    break
+        for slot_lids in slots:
+            available = [lid for lid in slot_lids if lid in unassigned]
+            if not available:
+                continue
+            # Build one route from this slot's lanes
+            route, used = _build_corridor_route(available, unassigned)
+            if route:
                 unassigned -= used
-                built_routes.append((route, corridor))
-                clids = [lid for lid in clids if lid in unassigned]
+                corr = _corridor_of_leg(lane_map[route[0]])
+                built_routes.append((route, corr))
+                # Any remaining in this slot become a second route
+                leftover = [lid for lid in available if lid in unassigned]
+                if leftover:
+                    route2, used2 = _build_corridor_route(leftover, unassigned)
+                    if route2:
+                        unassigned -= used2
+                        built_routes.append((route2, corr))
 
-        # Add singletons for anything remaining
+        # Singletons for anything still remaining
         for lid in sorted(unassigned, key=lambda l: lane_map[l].pickup_time or 99):
             built_routes.append(([lid], _corridor_of_leg(lane_map[lid])))
-            unassigned.discard(lid)
 
         # Step 4: Redistribute legs to enable merging
         # If we have too many routes, try moving legs between same-corridor
