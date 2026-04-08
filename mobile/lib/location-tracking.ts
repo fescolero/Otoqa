@@ -14,6 +14,7 @@ import {
   markAsSynced,
   getLastLocationForLoad,
   deleteOldSyncedLocations,
+  deleteAllForLoad,
   reopenDb,
 } from './location-db';
 import {
@@ -55,6 +56,12 @@ const MAX_ACCURACY_METERS = 50; // Reject readings with > 50 m accuracy
 const MIN_DISTANCE_BETWEEN_POINTS = 250; // Skip if < 250 m from last point
 const MIN_TIME_BETWEEN_SAVES_MS = 30 * 1000; // Hard floor — never save more often than 30 s
 const SYNC_BATCH_SIZE = 50; // Max points per sync batch
+const SYNC_REJECT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min backoff after server rejects all points
+const MAX_CONSECUTIVE_REJECTIONS = 2; // Deactivate stale tracking state after this many consecutive rejections
+
+// AsyncStorage keys for rejection tracking (shared between BG and foreground paths)
+const SYNC_REJECT_TS_KEY = 'location_sync_last_reject_ts';
+const SYNC_REJECT_COUNT_KEY = 'location_sync_reject_count';
 
 // ============================================
 // BACKGROUND-SAFE CONVEX CLIENT
@@ -206,6 +213,9 @@ interface TrackingState {
   organizationId: string;
   trackingType: 'LOAD_ROUTE';
   startedAt: number;
+  // Set to true when the server repeatedly rejects all GPS pings for this load.
+  // Prevents ensureTrackingForLoad from restarting a permanently-rejected session.
+  rejectDeactivated?: boolean;
 }
 
 // BufferedLocation type removed — GPS points are now stored in SQLite
@@ -521,7 +531,19 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   let syncAttempted = false;
   let syncSuccess = false;
   let syncCount = 0;
-  if (sqliteAvailable && MOBILE_LOCATION_API_KEY) {
+  // Check if we're in a rejection cooldown before attempting sync.
+  let inCooldown = false;
+  try {
+    const rejectTsStr = await storage.getString(SYNC_REJECT_TS_KEY);
+    if (rejectTsStr) {
+      const rejectTs = parseInt(rejectTsStr, 10);
+      if (Date.now() - rejectTs < SYNC_REJECT_COOLDOWN_MS) {
+        inCooldown = true;
+        console.log('[LocationTracking] BG sync skipped — in reject cooldown');
+      }
+    }
+  } catch { /* non-critical */ }
+  if (sqliteAvailable && !usedFallback && !inCooldown && MOBILE_LOCATION_API_KEY) {
     try {
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
       if (unsynced.length > 0) {
@@ -554,6 +576,50 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
           );
           trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+
+          // Increment consecutive rejection counter
+          let rejectCount = 1;
+          try {
+            const countStr = await storage.getString(SYNC_REJECT_COUNT_KEY);
+            rejectCount = countStr ? parseInt(countStr, 10) + 1 : 1;
+            await storage.set(SYNC_REJECT_COUNT_KEY, rejectCount.toString());
+            await storage.set(SYNC_REJECT_TS_KEY, Date.now().toString());
+          } catch { /* non-critical */ }
+
+          if (rejectCount > MAX_CONSECUTIVE_REJECTIONS) {
+            // Stale tracking state — server consistently rejects all points.
+            // Deactivate to stop the infinite retry loop.
+            console.warn(
+              `[LocationTracking] BG task: ${rejectCount} consecutive rejections — deactivating stale tracking state`,
+            );
+            try {
+              const staleState = await storage.getString(TRACKING_STATE_KEY);
+              if (staleState) {
+                const parsed = JSON.parse(staleState);
+                await storage.set(TRACKING_STATE_KEY, JSON.stringify({ ...parsed, isActive: false, rejectDeactivated: true }));
+              }
+              await storage.delete(SYNC_REJECT_TS_KEY);
+              await storage.delete(SYNC_REJECT_COUNT_KEY);
+            } catch { /* non-critical */ }
+
+            // Purge stale SQLite records — delete all GPS points whose loadId
+            // the server rejected. These reference loads that no longer exist in
+            // Convex (hard-deleted), permanently blocking newer valid records
+            // because getUnsyncedLocations returns oldest-first.
+            try {
+              const staleLoadIds = [...new Set(unsynced.map((r) => r.loadId))];
+              for (const loadId of staleLoadIds) {
+                const deleted = await deleteAllForLoad(String(loadId));
+                console.log(`[LocationTracking] BG purge: deleted ${deleted} stale GPS records for loadId=${loadId}`);
+              }
+            } catch { /* non-critical — purge failure doesn't block anything */ }
+
+            trackBGTaskError({ step: 'sync_rejected', error: 'stale_tracking_deactivated_after_' + rejectCount + '_rejections' });
+            return;
+          }
+
+          // Apply cooldown: skip sync for SYNC_REJECT_COOLDOWN_MS after a rejection
+          await storage.set(SYNC_REJECT_TS_KEY, Date.now().toString());
         }
       }
     } catch (flushError) {
@@ -854,6 +920,15 @@ export async function ensureTrackingForLoad(params: {
 }> {
   const state = await getTrackingState();
   if (!state?.isActive) {
+    // If the previous session for this exact load was deactivated after the server
+    // repeatedly rejected all GPS pings (stale loadId referencing a deleted load),
+    // do NOT restart it — the same loadId would generate the same rejections.
+    if (state?.rejectDeactivated && state.loadId === params.loadId) {
+      console.warn(
+        `[LocationTracking] ensureTrackingForLoad: skipping restart for load=${params.loadId.slice(0, 12)}... (rejectDeactivated)`,
+      );
+      return { success: false, action: 'continued', message: 'Tracking disabled after server rejections for this load' };
+    }
     const result = await startLocationTracking(params);
     return { success: result.success, action: 'started', message: result.message };
   }
@@ -1340,6 +1415,22 @@ async function syncUnsyncedToConvex(
   const MAX_AUTH_RETRIES = 2;
   const AUTH_RETRY_DELAYS = [1000, 3000];
 
+  // Skip sync if we're in a rejection cooldown (shared with the BG task path).
+  // This prevents the foreground periodic sync from hammering the server every 2 min
+  // with requests that are known to be rejected (org mismatch, stale loadId, etc.).
+  if (retryAttempt === 0) {
+    try {
+      const rejectTsStr = await storage.getString(SYNC_REJECT_TS_KEY);
+      if (rejectTsStr) {
+        const rejectTs = parseInt(rejectTsStr, 10);
+        if (Date.now() - rejectTs < SYNC_REJECT_COOLDOWN_MS) {
+          console.log('[LocationTracking] Foreground sync skipped — in reject cooldown');
+          return { success: true, synced: 0 };
+        }
+      }
+    } catch { /* non-critical */ }
+  }
+
   try {
     const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
     if (unsynced.length === 0) {
@@ -1395,6 +1486,46 @@ async function syncUnsyncedToConvex(
         `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — NOT marking synced, will retry`,
       );
       trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
+
+      // Increment rejection counter and apply cooldown (shared with BG task path).
+      let rejectCount = 1;
+      try {
+        const countStr = await storage.getString(SYNC_REJECT_COUNT_KEY);
+        rejectCount = countStr ? parseInt(countStr, 10) + 1 : 1;
+        await storage.set(SYNC_REJECT_COUNT_KEY, rejectCount.toString());
+        await storage.set(SYNC_REJECT_TS_KEY, Date.now().toString());
+      } catch { /* non-critical */ }
+
+      if (rejectCount > MAX_CONSECUTIVE_REJECTIONS) {
+        // Stale tracking state — server consistently rejects all points.
+        // Deactivate to stop the infinite retry loop.
+        console.warn(
+          `[LocationTracking] Foreground sync: ${rejectCount} consecutive rejections — deactivating stale tracking state`,
+        );
+        try {
+          const staleState = await storage.getString(TRACKING_STATE_KEY);
+          if (staleState) {
+            const parsed = JSON.parse(staleState);
+            await storage.set(TRACKING_STATE_KEY, JSON.stringify({ ...parsed, isActive: false, rejectDeactivated: true }));
+          }
+          await storage.delete(SYNC_REJECT_TS_KEY);
+          await storage.delete(SYNC_REJECT_COUNT_KEY);
+        } catch { /* non-critical */ }
+
+        // Purge stale SQLite records — delete all GPS points whose loadId
+        // the server rejected. These reference loads that no longer exist in
+        // Convex (hard-deleted), permanently blocking newer valid records
+        // because getUnsyncedLocations returns oldest-first.
+        try {
+          const staleLoadIds = [...new Set(unsynced.map((r) => r.loadId))];
+          for (const loadId of staleLoadIds) {
+            const deleted = await deleteAllForLoad(String(loadId));
+            console.log(`[LocationTracking] Foreground purge: deleted ${deleted} stale GPS records for loadId=${loadId}`);
+          }
+        } catch { /* non-critical — purge failure doesn't block anything */ }
+
+        trackBGTaskError({ step: 'sync_rejected', error: 'stale_tracking_deactivated_after_' + rejectCount + '_rejections' });
+      }
     }
 
     return { success: true, synced: result.inserted };
