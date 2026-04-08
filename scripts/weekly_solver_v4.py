@@ -3770,13 +3770,11 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                 dh_h = dh / 55.0
                 result = can_add_leg(drive, duty, clock, nl, dh_h, pre_post_h, max_wait_h)
                 if result:
-                    # SPAN CHECK: verify total span (first pickup to this finish) is under 14h
+                    # Check span-based duty won't exceed 14h
                     route_start = lane_map[route[0]].pickup_time or 0
                     leg_end = nl.finish_time or 0
-                    span_duty = (leg_end - route_start) + pre_post_h
-                    if span_duty > HOS_MAX_DUTY:
-                        continue  # span exceeds 14h duty — reject this leg
-
+                    if (leg_end - route_start) + pre_post_h > HOS_MAX_DUTY:
+                        continue
                     _, _, _, wait = result
                     score = dh + wait * 50 + pair_penalty
                     if score < best_score:
@@ -3795,10 +3793,9 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                     pdh_h = pdh / 55.0
                     presult = can_add_leg(drive, duty, clock, pl, pdh_h, pre_post_h, max_wait_h)
                     if presult:
-                        # SPAN CHECK on partner too
-                        partner_end = pl.finish_time or 0
-                        partner_span = (partner_end - (lane_map[route[0]].pickup_time or 0)) + pre_post_h
-                        if partner_span <= HOS_MAX_DUTY:
+                        p_end = pl.finish_time or 0
+                        p_span = (p_end - (lane_map[route[0]].pickup_time or 0)) + pre_post_h
+                        if p_span <= HOS_MAX_DUTY:
                             route.append(partner)
                             drive, duty, clock = presult[0], presult[1], presult[2]
                             used.add(partner)
