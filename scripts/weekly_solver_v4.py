@@ -3310,10 +3310,10 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
     return slots
 
 
-def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
+def _build_greedy_schedule_pairchain(n_drivers, lanes, lane_map, graph, lane_active_days,
                            day_lane_ids, working_days, day_names_map,
                            pre_post_h, max_legs, max_wait_h, base_city='colton'):
-    """Pair-chain greedy: build routes as chains of outbound→return pairs.
+    """Pair-chain greedy — kept for reference. Use _build_greedy_schedule instead.
 
     Key insight: all outbound legs start in Colton, all return legs end in Colton.
     So Return→Outbound transitions are ALWAYS 0 DH regardless of corridor.
@@ -3461,8 +3461,15 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                             best_merge = (score, idx_a, idx_b, combined, chain_dh)
                         break  # found valid order, no need to try reverse
 
-                    # If no time-ordered concatenation works, try re-sequencing as fallback
-                    if best_merge is None or True:  # always check sequencer option
+            # If no 0-DH concatenation found, try sequencer as fallback
+            # This allows interleaving legs from overlapping routes
+            if best_merge is None:
+                for ai in range(len(non_excl)):
+                    if best_merge and best_merge[4] == 0:
+                        break  # found a 0-DH sequencer merge, stop
+                    for bi in range(ai + 1, len(non_excl)):
+                        idx_a, legs_a = non_excl[ai]
+                        idx_b, legs_b = non_excl[bi]
                         combined_any = list(legs_a) + list(legs_b)
                         if len(combined_any) > max_legs:
                             continue
@@ -3470,12 +3477,20 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                             combined_any, lane_map, graph, base_city, max_wait_h)
                         all_s = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time]
                         all_e = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time]
-                        if all_s and all_e:
-                            duty_seq = (max(all_e) - min(all_s)) + pre_post_h
-                            if drive_seq <= HOS_MAX_DRIVE and duty_seq <= HOS_MAX_DUTY:
-                                score_seq = dh_seq * 100 + 50  # small penalty for re-sequencing
-                                if best_merge is None or score_seq < best_merge[0]:
-                                    best_merge = (score_seq, idx_a, idx_b, ordered, dh_seq)
+                        if not all_s or not all_e:
+                            continue
+                        duty_seq = (max(all_e) - min(all_s)) + pre_post_h
+                        if drive_seq <= HOS_MAX_DRIVE and duty_seq <= HOS_MAX_DUTY:
+                            max_w = 0
+                            for k in range(1, len(ordered)):
+                                p, c = lane_map[ordered[k-1]], lane_map[ordered[k]]
+                                dh_h = _compute_dh(p, c) / 55.0
+                                if p.finish_time and c.pickup_time:
+                                    max_w = max(max_w, max(0, c.pickup_time - (p.finish_time + dh_h)))
+                            # Score: prefer low DH, then low wait
+                            score_seq = dh_seq * 100 + max_w * 50
+                            if best_merge is None or score_seq < best_merge[0]:
+                                best_merge = (score_seq, idx_a, idx_b, ordered, dh_seq)
 
             if best_merge is None:
                 break
@@ -3566,10 +3581,10 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
     }
 
 
-def _build_greedy_schedule_old(n_drivers, lanes, lane_map, graph, lane_active_days,
+def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                            day_lane_ids, working_days, day_names_map,
                            pre_post_h, max_legs, max_wait_h, base_city='colton'):
-    """OLD greedy — kept as fallback. See _build_greedy_schedule for pair-chain version.
+    """Slot-planning greedy with pair-aware routing and outbound-first preference.
 
     Strategy:
     1. Place exclusive pairs first (LV routes)
