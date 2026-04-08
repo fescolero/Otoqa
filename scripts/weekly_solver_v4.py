@@ -3413,6 +3413,7 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
             routes.append(([lid], False))
 
         # Step 3: Merge small routes to reach n_drivers
+        # PRESERVE pair-chain order: concatenate A+B by time, don't re-sequence
         n_local = n_drivers - sum(1 for _, excl in routes if excl)
 
         while sum(1 for _, excl in routes if not excl) > n_local:
@@ -3424,33 +3425,62 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                 for bi in range(ai + 1, len(non_excl)):
                     idx_a, legs_a = non_excl[ai]
                     idx_b, legs_b = non_excl[bi]
-                    combined = list(legs_a) + list(legs_b)
-                    if len(combined) > max_legs:
+                    if len(legs_a) + len(legs_b) > max_legs:
                         continue
-                    ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
-                        combined, lane_map, graph, base_city, max_wait_h)
-                    starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time]
-                    ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time]
-                    if not starts or not ends:
-                        continue
-                    duty = (max(ends) - min(starts)) + pre_post_h
-                    if drive > HOS_MAX_DRIVE or duty > HOS_MAX_DUTY:
-                        continue
-                    # Score: prefer lowest DH, then lowest max wait
-                    max_wait_val = 0
-                    for k in range(1, len(ordered)):
-                        p, c = lane_map[ordered[k-1]], lane_map[ordered[k]]
-                        dh_h = _compute_dh(p, c) / 55.0
-                        if p.finish_time and c.pickup_time:
-                            max_wait_val = max(max_wait_val, max(0, c.pickup_time - (p.finish_time + dh_h)))
-                    score = dh * 100 + max_wait_val * 10
-                    if best_merge is None or score < best_merge[0]:
-                        best_merge = (score, idx_a, idx_b, ordered)
+
+                    # Try both orders: A+B and B+A
+                    for first_legs, second_legs in [(legs_a, legs_b), (legs_b, legs_a)]:
+                        # Check: last leg of first finishes before first leg of second starts
+                        end_first = max((lane_map[lid].finish_time or 0) for lid in first_legs)
+                        start_second = min((lane_map[lid].pickup_time or 99) for lid in second_legs)
+                        if start_second < end_first - 0.25:
+                            continue  # second starts before first ends
+
+                        combined = list(first_legs) + list(second_legs)
+
+                        # Validate HOS
+                        all_starts = [lane_map[lid].pickup_time for lid in combined if lane_map[lid].pickup_time]
+                        all_ends = [lane_map[lid].finish_time for lid in combined if lane_map[lid].finish_time]
+                        if not all_starts or not all_ends:
+                            continue
+                        duty = (max(all_ends) - min(all_starts)) + pre_post_h
+                        if duty > HOS_MAX_DUTY:
+                            continue
+
+                        # Compute DH at the join point only
+                        last_of_first = lane_map[first_legs[-1]]
+                        first_of_second = lane_map[second_legs[0]]
+                        chain_dh = _compute_dh(last_of_first, first_of_second)
+                        drive = sum(lane_map[lid].route_duration_hours for lid in combined) + chain_dh / 55.0
+                        if drive > HOS_MAX_DRIVE:
+                            continue
+
+                        gap = start_second - end_first
+                        score = chain_dh * 100 + max(0, gap) * 10
+                        if best_merge is None or score < best_merge[0]:
+                            best_merge = (score, idx_a, idx_b, combined, chain_dh)
+                        break  # found valid order, no need to try reverse
+
+                    # If no time-ordered concatenation works, try re-sequencing as fallback
+                    if best_merge is None or True:  # always check sequencer option
+                        combined_any = list(legs_a) + list(legs_b)
+                        if len(combined_any) > max_legs:
+                            continue
+                        ordered, drive_seq, dh_seq, _, _ = _sequence_driver_day(
+                            combined_any, lane_map, graph, base_city, max_wait_h)
+                        all_s = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time]
+                        all_e = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time]
+                        if all_s and all_e:
+                            duty_seq = (max(all_e) - min(all_s)) + pre_post_h
+                            if drive_seq <= HOS_MAX_DRIVE and duty_seq <= HOS_MAX_DUTY:
+                                score_seq = dh_seq * 100 + 50  # small penalty for re-sequencing
+                                if best_merge is None or score_seq < best_merge[0]:
+                                    best_merge = (score_seq, idx_a, idx_b, ordered, dh_seq)
 
             if best_merge is None:
                 break
-            _, idx_a, idx_b, ordered = best_merge
-            routes[idx_a] = (ordered, False)
+            _, idx_a, idx_b, combined, merge_dh = best_merge
+            routes[idx_a] = (combined, False)
             routes[idx_b] = (None, None)
             routes = [(legs, excl) for legs, excl in routes if legs is not None]
 
