@@ -6,6 +6,7 @@ import { api } from '@/convex/_generated/api';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Id } from '@/convex/_generated/dataModel';
 import { toast } from 'sonner';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 import { TripsTable } from './trips-table';
 import { AssetsTable, CarrierPartnership } from './assets-table';
@@ -13,6 +14,7 @@ import { IntelligenceSidebar } from './intelligence-sidebar';
 import { OverlapNoticeModal, OverlapDetail } from './conflict-modal';
 import { CarrierAssignmentModal } from './carrier-assignment-modal';
 import { FilterToolbar, TripFiltersState } from './trip-filters';
+import { MobileDispatchPlanner } from './mobile-dispatch-planner';
 
 interface DispatchPlannerClientProps {
   organizationId: string;
@@ -221,6 +223,20 @@ export function DispatchPlannerClient({
     setOverlapData([]);
     setOverlapDriverName('');
   };
+
+  const isMobile = useIsMobile();
+
+  // Render mobile-optimised planner on small screens
+  if (isMobile) {
+    return (
+      <MobileDispatchPlanner
+        organizationId={organizationId}
+        userId={userId}
+        userName={userName}
+        initialSearch={initialSearch}
+      />
+    );
+  }
 
   // Calculate toolbar height (40px) for grid height
   const toolbarHeight = 40;
