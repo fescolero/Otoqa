@@ -420,14 +420,26 @@ export const runAnalysisWithExternalData = action({
     }
 
     // 6. Run base optimization (deadhead analysis)
-    await ctx.runMutation(internal.laneAnalyzerOptimization.optimizeBases, {
-      sessionId: args.sessionId,
-    });
+    try {
+      await ctx.runMutation(internal.laneAnalyzerOptimization.optimizeBases, {
+        sessionId: args.sessionId,
+      });
+    } catch (e) {
+      console.warn('Base optimization skipped (may timeout with large lane sets):', String(e));
+    }
 
-    // 7. Find lane pairing opportunities
-    await ctx.runMutation(internal.laneAnalyzerOptimization.findLaneCombinations, {
-      sessionId: args.sessionId,
-    });
+    // 7. Find lane pairing opportunities (skip for large lane sets — O(n²) operation)
+    if (entryCount <= 60) {
+      try {
+        await ctx.runMutation(internal.laneAnalyzerOptimization.findLaneCombinations, {
+          sessionId: args.sessionId,
+        });
+      } catch (e) {
+        console.warn('Lane combination analysis skipped:', String(e));
+      }
+    } else {
+      console.log(`Skipping lane combinations for ${entryCount} entries (>60, would timeout)`);
+    }
 
     return { success: true };
   },
