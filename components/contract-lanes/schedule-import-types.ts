@@ -29,9 +29,20 @@ export type ExtractedStop = {
   city: ExtractedField<string | null>;
   state: ExtractedField<string | null>;
   zip: ExtractedField<string | null>;
+  facilityName?: ExtractedField<string | null>;
+  nassCode?: ExtractedField<string | null>;
   stopOrder: ExtractedField<number>;
   stopType: ExtractedField<string | null>;
   _verification?: StopVerification;
+};
+
+export type FacilityDirectoryRow = {
+  facilityName: string;
+  nassCode?: string | null;
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
 };
 
 export type ExtractedLane = {

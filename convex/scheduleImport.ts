@@ -8,20 +8,12 @@ const extractionConfigValidator = v.object({
   includeLogistics: v.boolean(),
   includeFinancial: v.boolean(),
   extractDates: v.boolean(),
-  stopDetailLevel: v.union(
-    v.literal('full'),
-    v.literal('partial'),
-    v.literal('none'),
-  ),
+  stopDetailLevel: v.union(v.literal('full'), v.literal('partial'), v.literal('none')),
   includeEquipment: v.boolean(),
   includeFuelSurcharge: v.boolean(),
 });
 
-const confidenceValidator = v.union(
-  v.literal('high'),
-  v.literal('medium'),
-  v.literal('low'),
-);
+const confidenceValidator = v.union(v.literal('high'), v.literal('medium'), v.literal('low'));
 
 const extractedFieldValidator = v.object({
   value: v.any(),
@@ -33,6 +25,8 @@ const extractedStopValidator = v.object({
   city: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
   state: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
   zip: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
+  facilityName: v.optional(v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator })),
+  nassCode: v.optional(v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator })),
   stopOrder: v.object({ value: v.number(), confidence: confidenceValidator }),
   stopType: v.object({ value: v.union(v.string(), v.null()), confidence: confidenceValidator }),
 });
@@ -187,10 +181,37 @@ type OcrResult = {
   contract_header?: {
     hcr_number?: string;
   };
+  facility_directory?: Array<{
+    nass_code?: string;
+    facility_name?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+  }>;
 };
 
 function hi(val: unknown) {
   return { value: val ?? null, confidence: 'high' as const };
+}
+
+function cleanFacilityValue(val: string | undefined | null): string | null {
+  if (!val) return null;
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith('address for ') ||
+    lower.startsWith('city for ') ||
+    lower.startsWith('state for ') ||
+    lower.startsWith('zip for ') ||
+    lower.includes('string (from nass table)')
+  ) {
+    return null;
+  }
+
+  return trimmed;
 }
 
 function parseDate(dateStr: string | undefined | null): string | null {
@@ -205,13 +226,67 @@ function parseDate(dateStr: string | undefined | null): string | null {
 function convertOcrToExtractedLanes(ocr: OcrResult) {
   const hcr = ocr.hcr_number || ocr.contract_header?.hcr_number || null;
   const trips = ocr.trips || [];
+  const facilityDirectory = new Map<
+    string,
+    {
+      address?: string | null;
+      city?: string | null;
+      state?: string | null;
+      zip?: string | null;
+      facility_name?: string | null;
+      nass_code?: string | null;
+    }
+  >();
+
+  for (const trip of trips) {
+    for (const stop of trip.stops || []) {
+      const facilityName = cleanFacilityValue(stop.facility_name || stop.facility?.facility_name || null);
+      const nassCode = cleanFacilityValue(stop.nass_code || stop.facility?.nass_code || null);
+      const address = cleanFacilityValue(stop.address || stop.facility?.address || null);
+      const city = cleanFacilityValue(stop.city || stop.facility?.city || null);
+      const state = cleanFacilityValue(stop.state || stop.facility?.state || null);
+      const zip = cleanFacilityValue(stop.zip || stop.facility?.zip || null);
+
+      const entry = { address, city, state, zip, facility_name: facilityName, nass_code: nassCode };
+      if (nassCode) facilityDirectory.set(`nass:${nassCode.toLowerCase()}`, entry);
+      if (facilityName) facilityDirectory.set(`name:${facilityName.toLowerCase()}`, entry);
+    }
+  }
+
+  for (const facility of ocr.facility_directory || []) {
+    const facilityName = cleanFacilityValue(facility.facility_name || null);
+    const nassCode = cleanFacilityValue(facility.nass_code || null);
+    const entry = {
+      address: cleanFacilityValue(facility.address || null),
+      city: cleanFacilityValue(facility.city || null),
+      state: cleanFacilityValue(facility.state || null),
+      zip: cleanFacilityValue(facility.zip || null),
+      facility_name: facilityName,
+      nass_code: nassCode,
+    };
+    if (nassCode) facilityDirectory.set(`nass:${nassCode.toLowerCase()}`, entry);
+    if (facilityName) facilityDirectory.set(`name:${facilityName.toLowerCase()}`, entry);
+  }
 
   return trips.map((trip) => {
     const stops = (trip.stops || []).map((s, idx) => ({
-      address: hi(s.address || s.facility?.address || null),
-      city: hi(s.city || s.facility?.city || null),
-      state: hi(s.state || s.facility?.state || null),
-      zip: hi(s.zip || s.facility?.zip || null),
+      ...(() => {
+        const facilityName = cleanFacilityValue(s.facility_name || s.facility?.facility_name || null);
+        const nassCode = cleanFacilityValue(s.nass_code || s.facility?.nass_code || null);
+        const matched =
+          (nassCode && facilityDirectory.get(`nass:${nassCode.toLowerCase()}`)) ||
+          (facilityName && facilityDirectory.get(`name:${facilityName.toLowerCase()}`)) ||
+          null;
+
+        return {
+          address: hi(cleanFacilityValue(s.address || s.facility?.address || matched?.address || null)),
+          city: hi(cleanFacilityValue(s.city || s.facility?.city || matched?.city || null)),
+          state: hi(cleanFacilityValue(s.state || s.facility?.state || matched?.state || null)),
+          zip: hi(cleanFacilityValue(s.zip || s.facility?.zip || matched?.zip || null)),
+          facilityName: hi(facilityName),
+          nassCode: hi(nassCode),
+        };
+      })(),
       stopOrder: hi(idx + 1),
       stopType: hi(idx === 0 ? 'Pickup' : 'Delivery'),
     }));
@@ -305,11 +380,10 @@ export const extractLanesFromSchedule = action({
     const openai = new OpenAI({ apiKey });
     const systemPrompt = buildExtractionPrompt(args.config);
 
-    const imageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] =
-      args.imageUrls.map((url) => ({
-        type: 'image_url' as const,
-        image_url: { url, detail: 'auto' as const },
-      }));
+    const imageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = args.imageUrls.map((url) => ({
+      type: 'image_url' as const,
+      image_url: { url, detail: 'auto' as const },
+    }));
 
     const allTrips: OcrTrip[] = [];
     let hcrNumber: string | null = null;
@@ -325,11 +399,12 @@ export const extractLanesFromSchedule = action({
           return await openai.chat.completions.create(createParams);
         } catch (err: unknown) {
           const isRateLimit =
-            err instanceof Error &&
-            (err.message.includes('429') || err.message.includes('Rate limit'));
+            err instanceof Error && (err.message.includes('429') || err.message.includes('Rate limit'));
           if (!isRateLimit || attempt === RATE_LIMIT_RETRIES) throw err;
           const delayMs = Math.min(2000 * Math.pow(2, attempt), 15000);
-          console.log(`[extractLanes] Rate limited, retrying in ${delayMs}ms (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})...`);
+          console.log(
+            `[extractLanes] Rate limited, retrying in ${delayMs}ms (attempt ${attempt + 1}/${RATE_LIMIT_RETRIES})...`,
+          );
           await new Promise((r) => setTimeout(r, delayMs));
         }
       }
@@ -384,14 +459,12 @@ export const extractLanesFromSchedule = action({
       const initialTrips = parsed!.trips || [];
       allTrips.push(...initialTrips);
 
-      console.log(`[extractLanes] HCR: ${hcrNumber}, Expected: ${expectedTripCount}, Got: ${initialTrips.length} trips`);
+      console.log(
+        `[extractLanes] HCR: ${hcrNumber}, Expected: ${expectedTripCount}, Got: ${initialTrips.length} trips`,
+      );
 
       // Continuation: if we got truncated or expected more trips, request remaining
-      if (
-        expectedTripCount &&
-        allTrips.length < expectedTripCount &&
-        allTrips.length > 0
-      ) {
+      if (expectedTripCount && allTrips.length < expectedTripCount && allTrips.length > 0) {
         for (let round = 0; round < MAX_CONTINUATION_ROUNDS; round++) {
           const remaining = expectedTripCount - allTrips.length;
           if (remaining <= 0) break;
@@ -469,8 +542,7 @@ export const extractLanesFromSchedule = action({
 
       return { lanes, error: warning };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown error during extraction';
+      const message = error instanceof Error ? error.message : 'Unknown error during extraction';
       console.error(`[extractLanes] Error: ${message}`);
 
       if (allTrips.length > 0) {
@@ -544,8 +616,7 @@ export const verifyAndEnrichStops = action({
         let zip = '';
         for (const comp of components) {
           if (comp.types.includes('locality')) city = comp.long_name;
-          if (comp.types.includes('administrative_area_level_1'))
-            state = comp.short_name;
+          if (comp.types.includes('administrative_area_level_1')) state = comp.short_name;
           if (comp.types.includes('postal_code')) zip = comp.long_name;
         }
 
@@ -565,9 +636,7 @@ export const verifyAndEnrichStops = action({
       }
     }
 
-    async function calculateDistance(
-      stops: Array<{ latitude: number; longitude: number }>,
-    ) {
+    async function calculateDistance(stops: Array<{ latitude: number; longitude: number }>) {
       if (stops.length < 2) return null;
 
       let totalMeters = 0;
@@ -575,17 +644,9 @@ export const verifyAndEnrichStops = action({
         const origin = stops[i];
         const dest = stops[i + 1];
         try {
-          const url = new URL(
-            'https://maps.googleapis.com/maps/api/distancematrix/json',
-          );
-          url.searchParams.append(
-            'origins',
-            `${origin.latitude},${origin.longitude}`,
-          );
-          url.searchParams.append(
-            'destinations',
-            `${dest.latitude},${dest.longitude}`,
-          );
+          const url = new URL('https://maps.googleapis.com/maps/api/distancematrix/json');
+          url.searchParams.append('origins', `${origin.latitude},${origin.longitude}`);
+          url.searchParams.append('destinations', `${dest.latitude},${dest.longitude}`);
           url.searchParams.append('key', apiKey!);
           url.searchParams.append('units', 'imperial');
 
@@ -602,9 +663,7 @@ export const verifyAndEnrichStops = action({
         }
       }
 
-      return totalMeters > 0
-        ? Math.round(totalMeters * 0.000621371 * 100) / 100
-        : null;
+      return totalMeters > 0 ? Math.round(totalMeters * 0.000621371 * 100) / 100 : null;
     }
 
     const enrichedLanes = [];
@@ -622,12 +681,7 @@ export const verifyAndEnrichStops = action({
       const geocodedCoords: Array<{ latitude: number; longitude: number }> = [];
 
       for (const stop of stops) {
-        const parts = [
-          stop.address?.value,
-          stop.city?.value,
-          stop.state?.value,
-          stop.zip?.value,
-        ].filter(Boolean);
+        const parts = [stop.address?.value, stop.city?.value, stop.state?.value, stop.zip?.value].filter(Boolean);
 
         if (parts.length === 0) {
           stop._verification = { status: 'not_found', suggestedCorrection: null };
@@ -647,15 +701,9 @@ export const verifyAndEnrichStops = action({
           longitude: geocoded.longitude,
         });
 
-        const cityMatch =
-          !stop.city?.value ||
-          geocoded.city.toLowerCase() === stop.city.value.toLowerCase();
-        const stateMatch =
-          !stop.state?.value ||
-          geocoded.state.toLowerCase() === stop.state.value.toLowerCase();
-        const zipMatch =
-          !stop.zip?.value ||
-          geocoded.zip === stop.zip.value;
+        const cityMatch = !stop.city?.value || geocoded.city.toLowerCase() === stop.city.value.toLowerCase();
+        const stateMatch = !stop.state?.value || geocoded.state.toLowerCase() === stop.state.value.toLowerCase();
+        const zipMatch = !stop.zip?.value || geocoded.zip === stop.zip.value;
 
         if (cityMatch && stateMatch && zipMatch) {
           stop._verification = { status: 'verified', suggestedCorrection: null };
@@ -790,10 +838,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
       let updatedLanes = parsed.lanes || lanesForContext;
 
       if (truncated && args.lanes.length > MAX_ROWS_IN_CONTEXT) {
-        updatedLanes = [
-          ...updatedLanes,
-          ...args.lanes.slice(MAX_ROWS_IN_CONTEXT),
-        ];
+        updatedLanes = [...updatedLanes, ...args.lanes.slice(MAX_ROWS_IN_CONTEXT)];
       }
 
       console.log(`[applyChatCorrection] Success: ${parsed.changedCells?.length || 0} cells changed`);
@@ -803,8 +848,7 @@ ${truncated ? `\nNOTE: Only the first ${MAX_ROWS_IN_CONTEXT} of ${args.lanes.len
         changedCells: parsed.changedCells || [],
       };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[applyChatCorrection] Error: ${message}`);
       return {
         lanes: args.lanes,
