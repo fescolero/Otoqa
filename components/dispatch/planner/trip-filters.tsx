@@ -147,7 +147,8 @@ export function FilterToolbar({ filters, onFiltersChange, availableHCRs = [], av
   };
 
   return (
-    <div className="flex items-center gap-2 bg-muted/30 px-3 py-1.5 text-xs border-b">
+    <div className="bg-muted/30 border-b">
+      <div className="flex items-center gap-2 px-3 py-1.5 text-xs overflow-x-auto scrollbar-none">
       <span className="font-medium text-muted-foreground shrink-0">Filter by:</span>
 
       {/* HCR # Filter - Dropdown */}
@@ -306,12 +307,13 @@ export function FilterToolbar({ filters, onFiltersChange, availableHCRs = [], av
         <Button
           variant="ghost"
           size="sm"
-          className="h-7 text-xs text-primary hover:text-primary/80 px-2"
+          className="h-7 text-xs text-primary hover:text-primary/80 px-2 shrink-0"
           onClick={clearAll}
         >
           Clear all
         </Button>
       )}
+      </div>
     </div>
   );
 }

@@ -11,13 +11,14 @@ import { format } from 'date-fns';
 import { FilterToolbar, TripFiltersState } from './trip-filters';
 import { OverlapNoticeModal, OverlapDetail } from './conflict-modal';
 import { CarrierPartnership } from './assets-table';
+import { CarrierAssignmentModal } from './carrier-assignment-modal';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,12 +39,14 @@ import {
   ArrowRight,
   Truck,
   Users,
+  Building2,
   Clock,
   CheckCircle2,
   ChevronRight,
   ChevronLeft,
   X,
   AlertCircle,
+  DollarSign,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatDateOnly } from '@/lib/format-date-timezone';
@@ -57,7 +60,32 @@ interface MobileDispatchPlannerProps {
   initialSearch?: string;
 }
 
-type SheetView = 'load-detail' | 'driver-select';
+type SheetView = 'load-detail' | 'asset-select';
+type AssetType = 'driver' | 'carrier';
+
+interface DriverWithTruck {
+  _id: Id<'drivers'>;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  licenseState: string;
+  city?: string;
+  state?: string;
+  assignedTruck: {
+    _id: Id<'trucks'>;
+    unitId: string;
+    bodyType?: string;
+    lastLocationLat?: number;
+    lastLocationLng?: number;
+    lastLocationUpdatedAt?: number;
+  } | null;
+  overlap?: {
+    overlapMinutes: number;
+    orderNumber?: string;
+    loadId: string;
+  } | null;
+}
 
 // ─── Status helpers ───────────────────────────────────────────────────────────
 
@@ -103,10 +131,17 @@ export function MobileDispatchPlanner({
   const [sheetView, setSheetView] = useState<SheetView>('load-detail');
   const [selectedLoadId, setSelectedLoadId] = useState<Id<'loadInformation'> | null>(null);
 
+  // Asset type (driver vs carrier)
+  const [assetType, setAssetType] = useState<AssetType>('driver');
+
   // Driver selection & confirmation
   const [pendingDriverId, setPendingDriverId] = useState<Id<'drivers'> | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [isAssigning, setIsAssigning] = useState(false);
+
+  // Carrier assignment modal
+  const [pendingCarrierId, setPendingCarrierId] = useState<Id<'carrierPartnerships'> | null>(null);
+  const [carrierModalOpen, setCarrierModalOpen] = useState(false);
 
   // Overlap state
   const [showOverlapNotice, setShowOverlapNotice] = useState(false);
@@ -155,16 +190,26 @@ export function MobileDispatchPlanner({
     workosOrgId: organizationId,
   });
 
+  const activeCarriers = useAuthQuery(api.carrierPartnerships.getActiveForDispatch, {
+    brokerOrgId: organizationId,
+  });
+
   // ── Derived data ────────────────────────────────────────────────────────────
 
   const loads = loadsData?.page ?? [];
   const isLoadingLoads = loadsData === undefined;
-  const driversToShow: DriverWithTruck[] = loadDetails?.startTime != null ? (availableDrivers ?? []) : (allDrivers ?? []);
+  const driversToShow: DriverWithTruck[] =
+    loadDetails?.startTime != null ? (availableDrivers ?? []) : (allDrivers ?? []);
 
   const pendingDriver = useMemo(() => {
     if (!pendingDriverId) return null;
     return driversToShow.find((d) => d._id === pendingDriverId) ?? null;
   }, [pendingDriverId, driversToShow]);
+
+  const pendingCarrier = useMemo((): CarrierPartnership | null => {
+    if (!pendingCarrierId || !activeCarriers) return null;
+    return activeCarriers.find((c) => c._id === pendingCarrierId) ?? null;
+  }, [pendingCarrierId, activeCarriers]);
 
   // ── Mutations ───────────────────────────────────────────────────────────────
 
@@ -178,24 +223,33 @@ export function MobileDispatchPlanner({
     setSheetOpen(true);
   };
 
-  const handleOpenDriverSelect = () => {
-    setSheetView('driver-select');
+  const handleOpenAssetSelect = () => {
+    setSheetView('asset-select');
   };
 
   const handleBackToDetail = () => {
     setSheetView('load-detail');
     setPendingDriverId(null);
+    setPendingCarrierId(null);
   };
 
   const handleSheetClose = () => {
     setSheetOpen(false);
     setSheetView('load-detail');
     setPendingDriverId(null);
+    setPendingCarrierId(null);
   };
 
   const handleDriverTap = (driverId: Id<'drivers'>) => {
     setPendingDriverId(driverId);
     setConfirmOpen(true);
+  };
+
+  const handleCarrierTap = (carrierId: Id<'carrierPartnerships'>) => {
+    setPendingCarrierId(carrierId);
+    // Close the sheet first, then open carrier modal
+    setSheetOpen(false);
+    setCarrierModalOpen(true);
   };
 
   const handleConfirmAssign = async () => {
@@ -241,6 +295,11 @@ export function MobileDispatchPlanner({
     }
   };
 
+  const handleCarrierAssignSuccess = () => {
+    setPendingCarrierId(null);
+    setCarrierModalOpen(false);
+  };
+
   const handleStatusChange = (value: string) => {
     setStatusFilter(value);
     setSelectedLoadId(null);
@@ -265,7 +324,7 @@ export function MobileDispatchPlanner({
 
   return (
     <div className="flex flex-col h-[calc(100dvh-64px)] overflow-hidden bg-background">
-      {/* Filter toolbar (HCR, Trip #, Date range) */}
+      {/* Filter toolbar — scrolls horizontally on mobile */}
       <FilterToolbar
         filters={filters}
         onFiltersChange={setFilters}
@@ -313,10 +372,16 @@ export function MobileDispatchPlanner({
       <div className="px-3 pb-2 shrink-0">
         <Tabs value={statusFilter} onValueChange={handleStatusChange}>
           <TabsList className="w-full">
-            <TabsTrigger value="Open" className="flex-1 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+            <TabsTrigger
+              value="Open"
+              className="flex-1 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+            >
               Open {loadCounts?.Open !== undefined ? `(${loadCounts.Open})` : ''}
             </TabsTrigger>
-            <TabsTrigger value="Assigned" className="flex-1 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+            <TabsTrigger
+              value="Assigned"
+              className="flex-1 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+            >
               Assigned {loadCounts?.Assigned !== undefined ? `(${loadCounts.Assigned})` : ''}
             </TabsTrigger>
           </TabsList>
@@ -382,9 +447,7 @@ export function MobileDispatchPlanner({
               </div>
 
               <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
-                {load.effectiveMiles != null && (
-                  <span>{load.effectiveMiles} mi</span>
-                )}
+                {load.effectiveMiles != null && <span>{load.effectiveMiles} mi</span>}
                 {load.firstStopDate && (
                   <span>Pickup: {formatDateOnly(load.firstStopDate).display}</span>
                 )}
@@ -393,27 +456,31 @@ export function MobileDispatchPlanner({
           ))}
       </div>
 
-      {/* ── Load Detail / Driver Select Sheet ─────────────────────────────── */}
+      {/* ── Load Detail / Asset Select Sheet ──────────────────────────────── */}
       <Sheet open={sheetOpen} onOpenChange={(open) => { if (!open) handleSheetClose(); }}>
         <SheetContent side="bottom" className="h-[85dvh] flex flex-col p-0 rounded-t-2xl">
           {sheetView === 'load-detail' ? (
             <LoadDetailView
               loadDetails={loadDetails ?? null}
-              onAssignDriver={handleOpenDriverSelect}
+              onAssignAsset={handleOpenAssetSelect}
               onClose={handleSheetClose}
             />
           ) : (
-            <DriverSelectView
+            <AssetSelectView
               drivers={driversToShow}
+              carriers={activeCarriers ?? []}
               loadDetails={loadDetails ?? null}
+              assetType={assetType}
+              onAssetTypeChange={setAssetType}
               onDriverTap={handleDriverTap}
+              onCarrierTap={handleCarrierTap}
               onBack={handleBackToDetail}
             />
           )}
         </SheetContent>
       </Sheet>
 
-      {/* ── Confirm Assignment Dialog ──────────────────────────────────────── */}
+      {/* ── Confirm Driver Assignment Dialog ──────────────────────────────── */}
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -444,7 +511,27 @@ export function MobileDispatchPlanner({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Overlap notice (shown after successful assignment) */}
+      {/* ── Carrier Assignment Modal ───────────────────────────────────────── */}
+      <CarrierAssignmentModal
+        open={carrierModalOpen}
+        onOpenChange={setCarrierModalOpen}
+        carrier={pendingCarrier}
+        load={
+          loadDetails
+            ? {
+                _id: loadDetails._id,
+                orderNumber: loadDetails.orderNumber,
+                effectiveMiles: loadDetails.effectiveMiles,
+                customerName: loadDetails.customerName,
+              }
+            : null
+        }
+        organizationId={organizationId}
+        userId={userId}
+        onSuccess={handleCarrierAssignSuccess}
+      />
+
+      {/* ── Overlap Notice ─────────────────────────────────────────────────── */}
       <OverlapNoticeModal
         open={showOverlapNotice}
         onOpenChange={setShowOverlapNotice}
@@ -477,11 +564,11 @@ interface LoadDetailViewProps {
     destination?: { city?: string; state?: string; address?: string } | null;
     assignedDriver?: { _id: Id<'drivers'>; name: string; phone?: string } | null;
   } | null;
-  onAssignDriver: () => void;
+  onAssignAsset: () => void;
   onClose: () => void;
 }
 
-function LoadDetailView({ loadDetails, onAssignDriver, onClose }: LoadDetailViewProps) {
+function LoadDetailView({ loadDetails, onAssignAsset, onClose }: LoadDetailViewProps) {
   if (!loadDetails) {
     return (
       <div className="flex-1 flex flex-col">
@@ -503,7 +590,6 @@ function LoadDetailView({ loadDetails, onAssignDriver, onClose }: LoadDetailView
   }
 
   const isAssigned = loadDetails.assignedDriver != null || loadDetails.status === 'Assigned';
-
   const pickupTime = loadDetails.startTime
     ? format(new Date(loadDetails.startTime), 'MMM d, yyyy')
     : null;
@@ -530,7 +616,6 @@ function LoadDetailView({ loadDetails, onAssignDriver, onClose }: LoadDetailView
       {/* Scrollable details */}
       <ScrollArea className="flex-1">
         <div className="px-4 py-4 space-y-4">
-          {/* Customer */}
           {loadDetails.customerName && (
             <div>
               <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">Customer</p>
@@ -617,58 +702,41 @@ function LoadDetailView({ loadDetails, onAssignDriver, onClose }: LoadDetailView
 
       {/* Action button */}
       <div className="px-4 py-4 border-t shrink-0">
-        <Button
-          className="w-full"
-          size="lg"
-          onClick={onAssignDriver}
-        >
+        <Button className="w-full" size="lg" onClick={onAssignAsset}>
           <Users className="h-4 w-4 mr-2" />
-          {isAssigned ? 'Reassign Driver' : 'Assign Driver'}
+          {isAssigned ? 'Reassign' : 'Assign Driver or Carrier'}
         </Button>
       </div>
     </div>
   );
 }
 
-// ─── Driver Select View ───────────────────────────────────────────────────────
+// ─── Asset Select View (Driver + Carrier tabs) ────────────────────────────────
 
-interface DriverWithTruck {
-  _id: Id<'drivers'>;
-  firstName: string;
-  lastName: string;
-  email: string;
-  phone: string;
-  licenseState: string;
-  city?: string;
-  state?: string;
-  assignedTruck: {
-    _id: Id<'trucks'>;
-    unitId: string;
-    bodyType?: string;
-    lastLocationLat?: number;
-    lastLocationLng?: number;
-    lastLocationUpdatedAt?: number;
-  } | null;
-  overlap?: {
-    overlapMinutes: number;
-    orderNumber?: string;
-    loadId: string;
-  } | null;
-}
-
-interface DriverSelectViewProps {
+interface AssetSelectViewProps {
   drivers: DriverWithTruck[];
-  loadDetails: {
-    equipmentType?: string;
-  } | null;
+  carriers: CarrierPartnership[];
+  loadDetails: { equipmentType?: string } | null;
+  assetType: AssetType;
+  onAssetTypeChange: (type: AssetType) => void;
   onDriverTap: (driverId: Id<'drivers'>) => void;
+  onCarrierTap: (carrierId: Id<'carrierPartnerships'>) => void;
   onBack: () => void;
 }
 
-function DriverSelectView({ drivers, loadDetails, onDriverTap, onBack }: DriverSelectViewProps) {
+function AssetSelectView({
+  drivers,
+  carriers,
+  loadDetails,
+  assetType,
+  onAssetTypeChange,
+  onDriverTap,
+  onCarrierTap,
+  onBack,
+}: AssetSelectViewProps) {
   const [search, setSearch] = useState('');
 
-  const filtered = useMemo(() => {
+  const filteredDrivers = useMemo(() => {
     if (!search.trim()) return drivers;
     const q = search.toLowerCase();
     return drivers.filter(
@@ -678,6 +746,18 @@ function DriverSelectView({ drivers, loadDetails, onDriverTap, onBack }: DriverS
         d.assignedTruck?.unitId?.toLowerCase().includes(q)
     );
   }, [drivers, search]);
+
+  const filteredCarriers = useMemo(() => {
+    if (!search.trim()) return carriers;
+    const q = search.toLowerCase();
+    return carriers.filter(
+      (c) =>
+        c.carrierName.toLowerCase().includes(q) ||
+        c.mcNumber.toLowerCase().includes(q) ||
+        c.contactFirstName?.toLowerCase().includes(q) ||
+        c.contactLastName?.toLowerCase().includes(q)
+    );
+  }, [carriers, search]);
 
   const isEquipmentMatch = (bodyType?: string) => {
     if (!loadDetails?.equipmentType || !bodyType) return false;
@@ -691,18 +771,31 @@ function DriverSelectView({ drivers, loadDetails, onDriverTap, onBack }: DriverS
         <button onClick={onBack} className="text-muted-foreground shrink-0">
           <ChevronLeft className="h-5 w-5" />
         </button>
-        <SheetTitle className="text-base font-semibold flex-1">Select Driver</SheetTitle>
-        <Badge variant="outline" className="text-xs shrink-0">
-          {drivers.length} available
-        </Badge>
+        <SheetTitle className="text-base font-semibold flex-1">Assign To</SheetTitle>
       </div>
 
-      {/* Driver search */}
-      <div className="px-4 py-2 shrink-0 border-b">
+      {/* Driver / Carrier tabs */}
+      <div className="px-4 pt-3 pb-2 shrink-0">
+        <Tabs value={assetType} onValueChange={(v) => { onAssetTypeChange(v as AssetType); setSearch(''); }}>
+          <TabsList className="w-full">
+            <TabsTrigger value="driver" className="flex-1">
+              <Users className="h-4 w-4 mr-1.5" />
+              Drivers ({drivers.length})
+            </TabsTrigger>
+            <TabsTrigger value="carrier" className="flex-1">
+              <Building2 className="h-4 w-4 mr-1.5" />
+              Carriers ({carriers.length})
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
+
+      {/* Search */}
+      <div className="px-4 pb-2 shrink-0">
         <div className="relative">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Search drivers..."
+            placeholder={assetType === 'driver' ? 'Search drivers...' : 'Search carriers...'}
             className="pl-9 h-9"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -710,82 +803,132 @@ function DriverSelectView({ drivers, loadDetails, onDriverTap, onBack }: DriverS
         </div>
       </div>
 
-      {/* Driver list */}
+      {/* List */}
       <ScrollArea className="flex-1">
         <div className="py-1">
-          {filtered.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-              <Users className="h-10 w-10 mb-2 opacity-40" />
-              <p className="text-sm">No drivers found</p>
-            </div>
-          )}
-
-          {filtered.map((driver) => {
-            const hasOverlap = !!driver.overlap;
-            const equipMatch = isEquipmentMatch(driver.assignedTruck?.bodyType);
-
-            return (
-              <button
-                key={driver._id}
-                onClick={() => onDriverTap(driver._id)}
-                className={cn(
-                  'w-full text-left px-4 py-3 border-b flex items-center gap-3 active:bg-muted/60 transition-colors',
-                  hasOverlap && 'bg-amber-50/60'
-                )}
-              >
-                {/* Avatar placeholder */}
-                <div className="h-9 w-9 rounded-full bg-muted flex items-center justify-center shrink-0 text-sm font-semibold text-muted-foreground">
-                  {driver.firstName[0]}{driver.lastName[0]}
+          {assetType === 'driver' ? (
+            <>
+              {filteredDrivers.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                  <Users className="h-10 w-10 mb-2 opacity-40" />
+                  <p className="text-sm">No drivers found</p>
                 </div>
+              )}
+              {filteredDrivers.map((driver) => {
+                const hasOverlap = !!driver.overlap;
+                const equipMatch = isEquipmentMatch(driver.assignedTruck?.bodyType);
 
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-sm font-medium">
-                      {driver.firstName} {driver.lastName}
-                    </span>
-                    {hasOverlap && (
-                      <Badge
-                        variant="outline"
-                        className="text-[10px] px-1 h-4 bg-amber-100 text-amber-700 border-amber-200"
-                      >
-                        <Clock className="h-2.5 w-2.5 mr-0.5" />
-                        {driver.overlap!.overlapMinutes}m overlap
-                      </Badge>
+                return (
+                  <button
+                    key={driver._id}
+                    onClick={() => onDriverTap(driver._id)}
+                    className={cn(
+                      'w-full text-left px-4 py-3 border-b flex items-center gap-3 active:bg-muted/60 transition-colors',
+                      hasOverlap && 'bg-amber-50/60'
                     )}
-                  </div>
-                  <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground flex-wrap">
-                    {driver.assignedTruck?.unitId && (
-                      <span className="flex items-center gap-0.5">
-                        <Truck className="h-3 w-3" />
-                        {driver.assignedTruck.unitId}
-                      </span>
-                    )}
-                    {driver.assignedTruck?.bodyType && (
-                      <Badge
-                        variant={equipMatch ? 'default' : 'secondary'}
-                        className={cn(
-                          'text-[10px] px-1 h-4',
-                          equipMatch && 'bg-green-100 text-green-800 border-green-200'
+                  >
+                    <div className="h-9 w-9 rounded-full bg-muted flex items-center justify-center shrink-0 text-sm font-semibold text-muted-foreground">
+                      {driver.firstName[0]}{driver.lastName[0]}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-sm font-medium">
+                          {driver.firstName} {driver.lastName}
+                        </span>
+                        {hasOverlap && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] px-1 h-4 bg-amber-100 text-amber-700 border-amber-200"
+                          >
+                            <Clock className="h-2.5 w-2.5 mr-0.5" />
+                            {driver.overlap!.overlapMinutes}m overlap
+                          </Badge>
                         )}
-                      >
-                        {equipMatch && <CheckCircle2 className="h-2.5 w-2.5 mr-0.5" />}
-                        {driver.assignedTruck.bodyType}
-                      </Badge>
-                    )}
-                    {(driver.city || driver.state) && (
-                      <span className="flex items-center gap-0.5">
-                        <MapPin className="h-3 w-3" />
-                        {driver.city}, {driver.state}
-                      </span>
-                    )}
-                  </div>
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground flex-wrap">
+                        {driver.assignedTruck?.unitId && (
+                          <span className="flex items-center gap-0.5">
+                            <Truck className="h-3 w-3" />
+                            {driver.assignedTruck.unitId}
+                          </span>
+                        )}
+                        {driver.assignedTruck?.bodyType && (
+                          <Badge
+                            variant={equipMatch ? 'default' : 'secondary'}
+                            className={cn(
+                              'text-[10px] px-1 h-4',
+                              equipMatch && 'bg-green-100 text-green-800 border-green-200'
+                            )}
+                          >
+                            {equipMatch && <CheckCircle2 className="h-2.5 w-2.5 mr-0.5" />}
+                            {driver.assignedTruck.bodyType}
+                          </Badge>
+                        )}
+                        {(driver.city || driver.state) && (
+                          <span className="flex items-center gap-0.5">
+                            <MapPin className="h-3 w-3" />
+                            {driver.city}, {driver.state}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                  </button>
+                );
+              })}
+            </>
+          ) : (
+            <>
+              {filteredCarriers.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                  <Building2 className="h-10 w-10 mb-2 opacity-40" />
+                  <p className="text-sm">No carriers found</p>
                 </div>
-
-                <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-              </button>
-            );
-          })}
+              )}
+              {filteredCarriers.map((carrier) => (
+                <button
+                  key={carrier._id}
+                  onClick={() => onCarrierTap(carrier._id)}
+                  className="w-full text-left px-4 py-3 border-b flex items-center gap-3 active:bg-muted/60 transition-colors"
+                >
+                  <div className="h-9 w-9 rounded-full bg-muted flex items-center justify-center shrink-0">
+                    <Building2 className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-sm font-medium truncate">{carrier.carrierName}</span>
+                      {carrier.isOwnerOperator && (
+                        <Badge variant="outline" className="text-[10px] px-1 h-4 shrink-0">
+                          Owner-Op
+                        </Badge>
+                      )}
+                      {carrier.hasDefaultRate && (
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] px-1 h-4 bg-green-50 text-green-700 border-green-200 shrink-0"
+                        >
+                          <DollarSign className="h-2.5 w-2.5" />
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground flex-wrap">
+                      <span>MC# {carrier.mcNumber}</span>
+                      {(carrier.city || carrier.state) && (
+                        <span className="flex items-center gap-0.5">
+                          <MapPin className="h-3 w-3" />
+                          {carrier.city}, {carrier.state}
+                        </span>
+                      )}
+                      {carrier.contactFirstName && (
+                        <span>{carrier.contactFirstName} {carrier.contactLastName}</span>
+                      )}
+                    </div>
+                  </div>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                </button>
+              ))}
+            </>
+          )}
         </div>
       </ScrollArea>
     </div>
