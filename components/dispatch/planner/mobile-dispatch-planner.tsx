@@ -159,7 +159,7 @@ export function MobileDispatchPlanner({
 
   const loads = loadsData?.page ?? [];
   const isLoadingLoads = loadsData === undefined;
-  const driversToShow = loadDetails?.startTime != null ? (availableDrivers ?? []) : (allDrivers ?? []);
+  const driversToShow: DriverWithTruck[] = loadDetails?.startTime != null ? (availableDrivers ?? []) : (allDrivers ?? []);
 
   const pendingDriver = useMemo(() => {
     if (!pendingDriverId) return null;
