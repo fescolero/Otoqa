@@ -3255,19 +3255,13 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
     if pair_map is None:
         pair_map = {}
 
-    # Group by HUB first, then by corridor within each hub
-    hub_groups = {}
-    for lid in local_lids:
-        l = lane_map[lid]
-        hub = _hub_of_leg(l, pair_map, lane_map)
-        hub_groups.setdefault(hub, []).append(lid)
-
-    # Within each hub, group by corridor
+    # Group by CORRIDOR (not hub) — the corridor IS the grouping unit.
+    # Hub awareness comes from ensuring paired legs stay together:
+    # both directions of a corridor (A→B and B→A) go in the same group.
     corr_groups = {}
-    for hub, hub_lids in hub_groups.items():
-        for lid in hub_lids:
-            c = hub + ':' + _corridor_of_leg(lane_map[lid])
-            corr_groups.setdefault(c, []).append(lid)
+    for lid in local_lids:
+        c = _corridor_of_leg(lane_map[lid])  # normalized: sorted city pair
+        corr_groups.setdefault(c, []).append(lid)
     for c in corr_groups:
         corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
 
@@ -3331,20 +3325,18 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
     for corr, lids in big:
         slots.append(list(lids))
 
-    # Track which hub each slot belongs to (for same-hub preference)
-    slot_hubs = []
-    for corr, lids in big:
-        hub = corr.split(':')[0] if ':' in corr else ''
-        slot_hubs.append(hub)
-
     # Merge small corridors into compatible slots or create new ones
     for corr, lids, span in small:
         merged = False
-        small_hub = corr.split(':')[0] if ':' in corr else ''
         small_start = min(lane_map[lid].pickup_time or 0 for lid in lids)
         small_end = max(lane_map[lid].finish_time or 0 for lid in lids)
+        # Get cities in the small corridor for hub affinity
+        small_cities = set()
+        for lid in lids:
+            small_cities.add(lane_map[lid].origin_city.lower().strip())
+            small_cities.add(lane_map[lid].dest_city.lower().strip())
 
-        # Try to fit into existing slot with room — prefer same hub
+        # Try to fit into existing slot with room — prefer shared cities (=same hub)
         best_slot = None
         best_slot_score = 9999
         for si, slot_lids in enumerate(slots):
@@ -3359,9 +3351,13 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
             combined_span = combined_end - combined_start
             if combined_span + pre_post_h > HOS_MAX_DUTY:
                 continue
-            # Score: prefer same hub (0 bonus) over cross-hub (+500 penalty)
-            slot_hub = slot_hubs[si] if si < len(slot_hubs) else ''
-            hub_penalty = 0 if slot_hub == small_hub else 500
+            # Score: prefer shared cities (same hub = 0 DH transition)
+            slot_cities = set()
+            for lid in slot_lids:
+                slot_cities.add(lane_map[lid].origin_city.lower().strip())
+                slot_cities.add(lane_map[lid].dest_city.lower().strip())
+            shared = len(small_cities & slot_cities)
+            hub_penalty = 0 if shared > 0 else 300  # prefer overlapping cities
             slot_last = lane_map[slot_lids[-1]]
             small_first = lane_map[lids[0]]
             dh = _compute_dh(slot_last, small_first)
@@ -3372,13 +3368,8 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
 
         if best_slot is not None:
             slots[best_slot].extend(lids)
-            # Update hub tracking
-            if best_slot < len(slot_hubs):
-                if slot_hubs[best_slot] != small_hub:
-                    slot_hubs[best_slot] = 'mixed'  # multi-hub slot
         else:
             slots.append(list(lids))
-            slot_hubs.append(small_hub)
 
     return slots
 
