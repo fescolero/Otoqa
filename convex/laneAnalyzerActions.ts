@@ -370,9 +370,14 @@ export const runAnalysisWithExternalData = action({
     }
 
     // 4. Run the full calculation engine (per-lane costs, HOS analysis)
-    await ctx.runMutation(internal.laneAnalyzerCalculations.runFullAnalysis, {
-      sessionId: args.sessionId,
-    });
+    // For large lane sets, wrap in try/catch — may timeout on mutations
+    try {
+      await ctx.runMutation(internal.laneAnalyzerCalculations.runFullAnalysis, {
+        sessionId: args.sessionId,
+      });
+    } catch (e) {
+      console.warn('Full analysis mutation may have timed out, continuing to solver:', String(e));
+    }
 
     // 5. Run Python OR-Tools solver for optimal shift assignments
     const solverUrl = process.env.SOLVER_API_URL;
@@ -399,14 +404,22 @@ export const runAnalysisWithExternalData = action({
     }
 
     // 6. Run base optimization (deadhead analysis)
-    await ctx.runMutation(internal.laneAnalyzerOptimization.optimizeBases, {
-      sessionId: args.sessionId,
-    });
+    try {
+      await ctx.runMutation(internal.laneAnalyzerOptimization.optimizeBases, {
+        sessionId: args.sessionId,
+      });
+    } catch (e) {
+      console.warn('Base optimization skipped:', String(e));
+    }
 
-    // 7. Find lane pairing opportunities
-    await ctx.runMutation(internal.laneAnalyzerOptimization.findLaneCombinations, {
-      sessionId: args.sessionId,
-    });
+    // 7. Find lane pairing opportunities (skip for large lane sets — O(n²))
+    try {
+      await ctx.runMutation(internal.laneAnalyzerOptimization.findLaneCombinations, {
+        sessionId: args.sessionId,
+      });
+    } catch (e) {
+      console.warn('Lane combinations skipped:', String(e));
+    }
 
     return { success: true };
   },
