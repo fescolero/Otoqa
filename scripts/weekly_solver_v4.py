@@ -3205,10 +3205,49 @@ def _count_sequential_capacity(lids, lane_map, max_legs, pre_post_h, max_wait_h)
     return len(used), remaining
 
 
-def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h, pair_map=None):
-    """Plan driver slots by grouping corridors based on size and time compatibility.
+def _hub_of_leg(lane, pair_map=None, lane_map=None):
+    """Determine which hub a lane belongs to.
 
-    Pair-aware: never splits paired legs across different slots.
+    The hub is where the driver returns to after the route.
+    For a paired return leg: hub = destination city (where driver ends up = base).
+    For a paired outbound leg: hub = origin city (where driver starts = base).
+    For unpaired legs: hub = the city that appears in BOTH origin and dest of the corridor
+    (i.e., the base city, typically Colton/Ontario/Anaheim).
+    """
+    if pair_map and lane_map:
+        partner_id = pair_map.get(lane.id)
+        if partner_id:
+            partner = lane_map.get(partner_id)
+            if partner:
+                # Outbound: Base→Remote (origin=base, dest=remote)
+                # Return: Remote→Base (origin=remote, dest=base)
+                # Hub = Base = outbound.origin = return.dest
+                # Check: if my dest matches partner's origin, I'm outbound (my origin is hub)
+                # If my origin matches partner's dest, I'm return (my dest is hub)
+                my_o = lane.origin_city.lower().strip()
+                my_d = lane.dest_city.lower().strip()
+                p_o = partner.origin_city.lower().strip()
+                p_d = partner.dest_city.lower().strip()
+                if my_d == p_o and my_o == p_d:
+                    # Reverse pair — determine which is outbound by pickup time
+                    if (lane.pickup_time or 99) <= (partner.pickup_time or 99):
+                        return my_o  # I'm outbound, hub = my origin
+                    else:
+                        return my_d  # I'm return, hub = my dest
+    # Unpaired: check if this looks like a return leg (destination is a common hub)
+    # Return legs go Dest→Base, so hub = destination
+    # Outbound legs go Base→Dest, so hub = origin
+    # Heuristic: if origin appears less often than destination in the lane set,
+    # this is likely a return (origin is the remote city, dest is the base)
+    # For now, use the SHORTER route endpoint as hub (bases are closer to each other)
+    return lane.origin_city.lower().strip()  # fallback for unpaired
+
+
+def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h, pair_map=None):
+    """Plan driver slots by grouping lanes by HUB then corridor.
+
+    Multi-hub aware: lanes from Ontario hub stay with Ontario lanes,
+    Colton hub with Colton lanes, etc. This prevents cross-hub DH.
     """
     from lane_solver import can_add_leg
     DUTY_LIMIT = HOS_MAX_DUTY - 1.0
@@ -3216,11 +3255,19 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
     if pair_map is None:
         pair_map = {}
 
-    # Group by corridor
-    corr_groups = {}
+    # Group by HUB first, then by corridor within each hub
+    hub_groups = {}
     for lid in local_lids:
-        c = _corridor_of_leg(lane_map[lid])
-        corr_groups.setdefault(c, []).append(lid)
+        l = lane_map[lid]
+        hub = _hub_of_leg(l, pair_map, lane_map)
+        hub_groups.setdefault(hub, []).append(lid)
+
+    # Within each hub, group by corridor
+    corr_groups = {}
+    for hub, hub_lids in hub_groups.items():
+        for lid in hub_lids:
+            c = hub + ':' + _corridor_of_leg(lane_map[lid])
+            corr_groups.setdefault(c, []).append(lid)
     for c in corr_groups:
         corr_groups[c].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
 
@@ -3284,15 +3331,22 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
     for corr, lids in big:
         slots.append(list(lids))
 
+    # Track which hub each slot belongs to (for same-hub preference)
+    slot_hubs = []
+    for corr, lids in big:
+        hub = corr.split(':')[0] if ':' in corr else ''
+        slot_hubs.append(hub)
+
     # Merge small corridors into compatible slots or create new ones
     for corr, lids, span in small:
         merged = False
+        small_hub = corr.split(':')[0] if ':' in corr else ''
         small_start = min(lane_map[lid].pickup_time or 0 for lid in lids)
         small_end = max(lane_map[lid].finish_time or 0 for lid in lids)
 
-        # Try to fit into existing slot with room
+        # Try to fit into existing slot with room — prefer same hub
         best_slot = None
-        best_slot_dh = 9999
+        best_slot_score = 9999
         for si, slot_lids in enumerate(slots):
             combined_all = list(slot_lids) + list(lids)
             if len(combined_all) > max_legs:
@@ -3305,18 +3359,26 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
             combined_span = combined_end - combined_start
             if combined_span + pre_post_h > HOS_MAX_DUTY:
                 continue
-            # Estimate DH
+            # Score: prefer same hub (0 bonus) over cross-hub (+500 penalty)
+            slot_hub = slot_hubs[si] if si < len(slot_hubs) else ''
+            hub_penalty = 0 if slot_hub == small_hub else 500
             slot_last = lane_map[slot_lids[-1]]
             small_first = lane_map[lids[0]]
             dh = _compute_dh(slot_last, small_first)
-            if dh < best_slot_dh:
-                best_slot_dh = dh
+            score = dh + hub_penalty
+            if score < best_slot_score:
+                best_slot_score = score
                 best_slot = si
 
         if best_slot is not None:
             slots[best_slot].extend(lids)
+            # Update hub tracking
+            if best_slot < len(slot_hubs):
+                if slot_hubs[best_slot] != small_hub:
+                    slot_hubs[best_slot] = 'mixed'  # multi-hub slot
         else:
             slots.append(list(lids))
+            slot_hubs.append(small_hub)
 
     return slots
 
