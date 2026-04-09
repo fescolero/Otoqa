@@ -2237,6 +2237,8 @@ export default defineSchema({
       v.literal('flexible'), // allow up to 14h/day, manage 70h across the week (realistic)
     )),
     allowSameLaneRepeat: v.optional(v.boolean()), // allow same lane to run multiple times per driver shift
+    targetDriverCount: v.optional(v.number()), // target number of drivers for solver
+    solverVersion: v.optional(v.union(v.literal('v4'), v.literal('v5_hybrid'), v.literal('greedy'))),
 
     // Analysis scope
     analysisYear: v.number(), // e.g. 2026
