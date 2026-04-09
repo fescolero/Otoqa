@@ -1933,6 +1933,180 @@ function parseTimeToHours(time: string): number | null {
 // ---- CONVEX INTERNAL FUNCTIONS ----
 
 /**
+ * Clear old results for a session (used before batch processing).
+ */
+export const clearResults = internalMutation({
+  args: { sessionId: v.id('laneAnalysisSessions') },
+  handler: async (ctx, args) => {
+    const oldResults = await ctx.db
+      .query('laneAnalysisResults')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+    for (const r of oldResults) {
+      await ctx.db.delete(r._id);
+    }
+  },
+});
+
+/**
+ * Process a batch of entries for analysis. Called by runAnalysisWithExternalData
+ * for large lane sets (>50 entries).
+ */
+export const runAnalysisBatch = internalMutation({
+  args: {
+    sessionId: v.id('laneAnalysisSessions'),
+    batchStart: v.number(),
+    batchSize: v.number(),
+    isLastBatch: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.isDeleted) throw new Error('Session not found');
+
+    const allEntries = await ctx.db
+      .query('laneAnalysisEntries')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+
+    const entries = allEntries.slice(args.batchStart, args.batchStart + args.batchSize);
+    if (entries.length === 0) return;
+
+    const fuelPrices = await ctx.db.query('fuelPriceCache').collect();
+    const fuelPriceMap = new Map(fuelPrices.map((fp) => [fp.region, fp.pricePerGallon]));
+    const tollEstimates = await ctx.db.query('tollEstimateCache').collect();
+    const tollMap = new Map(
+      tollEstimates.map((t) => [`${t.originHash}:${t.destinationHash}`, t.tollCost]),
+    );
+
+    const now = Date.now();
+    const schedulePatternParsed = parseSchedulePattern(
+      session.driverSchedulePattern,
+      session.customScheduleOnDays,
+      session.customScheduleOffDays,
+    );
+
+    for (const entry of entries) {
+      const scheduleDates = calculateScheduleForYear(
+        entry.scheduleRule,
+        session.analysisYear,
+        entry.contractPeriodStart,
+        entry.contractPeriodEnd,
+      );
+      const annualRunCount = entry.isRoundTrip ? scheduleDates.length * 2 : scheduleDates.length;
+      const numStops = 2 + (entry.intermediateStops?.length ?? 0);
+      const originAppt = entry.originAppointmentType ?? 'APPT';
+      const destAppt = entry.destinationAppointmentType ?? 'APPT';
+      const allStopTypes = [originAppt, ...(entry.intermediateStops?.map((s) => s.type) ?? []), destAppt];
+
+      const apptWindows = [
+        { start: entry.originScheduledTime, end: entry.originScheduledEndTime },
+        ...(entry.intermediateStops?.map((s) => ({ start: s.arrivalTime, end: s.arrivalEndTime })) ?? []),
+        { start: entry.destinationScheduledTime, end: entry.destinationScheduledEndTime },
+      ];
+
+      const stopDwellOverrides = buildStopDwell({
+        dwellTimeApptMinutes: session.dwellTimeApptMinutes,
+        dwellTimeLiveMinutes: session.dwellTimeLiveMinutes,
+        dwellTimeFcfsMinutes: session.dwellTimeFcfsMinutes,
+      });
+
+      const hosResult = hosAnalyzeRoute(
+        entry.routeDurationHours ?? 0, numStops, allStopTypes,
+        {
+          stopDwellOverrides,
+          prePostTripHours: session.prePostTripMinutes != null ? session.prePostTripMinutes / 60 : undefined,
+          apptWindows,
+          useApptWindowsForDwell: session.useApptWindowsForDwell ?? false,
+        },
+      );
+
+      const mpg = entry.mpgOverride ?? (entry.isCityRoute ? session.defaultMpgCity : session.defaultMpgHighway);
+      const paddRegion = getPaddRegion(entry.originState);
+      const fuelPrice = session.defaultFuelPricePerGallon ?? fuelPriceMap.get(paddRegion) ?? fuelPriceMap.get('US_AVERAGE') ?? 4.0;
+      const routeMiles = entry.routeMiles ?? 0;
+      const fuelCostPerRun = calculateFuelCost(entry.isRoundTrip ? routeMiles * 2 : routeMiles, mpg, fuelPrice);
+
+      const originHash = `${entry.originLat?.toFixed(2)},${entry.originLng?.toFixed(2)}`;
+      const destHash = `${entry.destinationLat?.toFixed(2)},${entry.destinationLng?.toFixed(2)}`;
+      const tollCostPerRun = tollMap.get(`${originHash}:${destHash}`) ?? 0;
+
+      const payType = entry.driverPayTypeOverride ?? session.defaultDriverPayType;
+      const payRate = entry.driverPayRateOverride ?? session.defaultDriverPayRate;
+      const effectiveMiles = entry.isRoundTrip ? routeMiles * 2 : routeMiles;
+      const driverPayPerRun = calculateDriverPay(payType, payRate, effectiveMiles, hosResult.dutyTimePerRun);
+
+      const totalCostPerRun = fuelCostPerRun + tollCostPerRun + driverPayPerRun;
+      const revenuePerRun = calculateRevenuePerRun({
+        ratePerRun: entry.ratePerRun, rateType: entry.rateType, ratePerMile: entry.ratePerMile,
+        routeMiles: entry.routeMiles, minimumRate: entry.minimumRate,
+        fuelSurchargeType: entry.fuelSurchargeType, fuelSurchargeValue: entry.fuelSurchargeValue,
+        stopOffRate: entry.stopOffRate, includedStops: entry.includedStops, numStops,
+      });
+
+      const marginPerRun = revenuePerRun - totalCostPerRun;
+      const marginPercent = revenuePerRun > 0 ? (marginPerRun / revenuePerRun) * 100 : 0;
+      const runsPerWeek = scheduleDates.length / 52;
+
+      await ctx.db.insert('laneAnalysisResults', {
+        sessionId: args.sessionId,
+        workosOrgId: session.workosOrgId,
+        entryId: entry._id,
+        resultType: 'PER_LANE',
+        computedAt: now,
+        annualRunCount: scheduleDates.length,
+        fuelCostPerRun: Math.round(fuelCostPerRun * 100) / 100,
+        tollCostPerRun: Math.round(tollCostPerRun * 100) / 100,
+        driverPayPerRun: Math.round(driverPayPerRun * 100) / 100,
+        totalCostPerRun: Math.round(totalCostPerRun * 100) / 100,
+        revenuePerRun: Math.round(revenuePerRun * 100) / 100,
+        marginPerRun: Math.round(marginPerRun * 100) / 100,
+        marginPercent: Math.round(marginPercent * 10) / 10,
+        costPerWeek: Math.round(totalCostPerRun * runsPerWeek * 100) / 100,
+        costPerMonth: Math.round(totalCostPerRun * (scheduleDates.length / 12) * 100) / 100,
+        costPerYear: Math.round(totalCostPerRun * scheduleDates.length * 100) / 100,
+        revenuePerYear: Math.round(revenuePerRun * scheduleDates.length * 100) / 100,
+        hosAnalysis: JSON.stringify(hosResult),
+      });
+    }
+
+    // On last batch, compute and write aggregate
+    if (args.isLastBatch) {
+      const allResults = await ctx.db
+        .query('laneAnalysisResults')
+        .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+        .filter((q) => q.eq(q.field('resultType'), 'PER_LANE'))
+        .collect();
+
+      const baseDocs = await ctx.db
+        .query('laneAnalysisBases')
+        .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+        .collect();
+      const basesForShifts = baseDocs.map((b) => ({
+        id: b._id as string, name: b.name,
+        lat: b.latitude ?? 0, lng: b.longitude ?? 0,
+        city: b.city ?? '', state: b.state ?? '',
+      }));
+
+      const totalCostPerYear = allResults.reduce((s, r) => s + (r.costPerYear ?? 0), 0);
+      const totalRevenuePerYear = allResults.reduce((s, r) => s + (r.revenuePerYear ?? 0), 0);
+
+      await ctx.db.insert('laneAnalysisResults', {
+        sessionId: args.sessionId,
+        workosOrgId: session.workosOrgId,
+        resultType: 'AGGREGATE',
+        computedAt: Date.now(),
+        annualRunCount: allResults.reduce((s, r) => s + (r.annualRunCount ?? 0), 0),
+        costPerYear: Math.round(totalCostPerYear * 100) / 100,
+        revenuePerYear: Math.round(totalRevenuePerYear * 100) / 100,
+        marginPerRun: Math.round(((totalRevenuePerYear - totalCostPerYear) / Math.max(allEntries.length, 1)) * 100) / 100,
+        marginPercent: totalRevenuePerYear > 0
+          ? Math.round(((totalRevenuePerYear - totalCostPerYear) / totalRevenuePerYear) * 1000) / 10 : 0,
+      });
+    }
+  },
+});
+
+/**
  * Run full analysis for a session — computes all lane costs, driver counts, and aggregates.
  */
 export const runFullAnalysis = internalMutation({

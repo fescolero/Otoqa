@@ -370,9 +370,30 @@ export const runAnalysisWithExternalData = action({
     }
 
     // 4. Run the full calculation engine (per-lane costs, HOS analysis)
-    await ctx.runMutation(internal.laneAnalyzerCalculations.runFullAnalysis, {
-      sessionId: args.sessionId,
-    });
+    // For large lane sets (>50), clear results first then process in batches
+    const entryDocs = await ctx.runQuery(internal.laneAnalyzerActions.getEntryCount, { sessionId: args.sessionId });
+    const entryCount = entryDocs;
+    if (entryCount > 50) {
+      console.log(`Large lane set (${entryCount}), running in batches...`);
+      // Clear old results first
+      await ctx.runMutation(internal.laneAnalyzerCalculations.clearResults, {
+        sessionId: args.sessionId,
+      });
+      // Process in batches
+      const BATCH_SIZE = 40;
+      for (let i = 0; i < entryCount; i += BATCH_SIZE) {
+        await ctx.runMutation(internal.laneAnalyzerCalculations.runAnalysisBatch, {
+          sessionId: args.sessionId,
+          batchStart: i,
+          batchSize: BATCH_SIZE,
+          isLastBatch: i + BATCH_SIZE >= entryCount,
+        });
+      }
+    } else {
+      await ctx.runMutation(internal.laneAnalyzerCalculations.runFullAnalysis, {
+        sessionId: args.sessionId,
+      });
+    }
 
     // 5. Run Python OR-Tools solver for optimal shift assignments
     const solverUrl = process.env.SOLVER_API_URL;
@@ -916,6 +937,17 @@ export const getSessionConfig = internalQuery({
   args: { sessionId: v.id('laneAnalysisSessions') },
   handler: async (ctx, args) => {
     return await ctx.db.get(args.sessionId);
+  },
+});
+
+export const getEntryCount = internalQuery({
+  args: { sessionId: v.id('laneAnalysisSessions') },
+  handler: async (ctx, args) => {
+    const entries = await ctx.db
+      .query('laneAnalysisEntries')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+    return entries.length;
   },
 });
 
