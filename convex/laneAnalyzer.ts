@@ -140,8 +140,10 @@ export const updateSession = mutation({
     maxChainingLegs: v.optional(v.number()),
     maxDeadheadMiles: v.optional(v.number()),
     maxWaitHours: v.optional(v.number()),
+    targetDriverCount: v.optional(v.number()),
     weeklyHosMode: v.optional(v.union(v.literal('uniform'), v.literal('flexible'))),
     allowSameLaneRepeat: v.optional(v.boolean()),
+    solverVersion: v.optional(v.union(v.literal('v4'), v.literal('v5_hybrid'))),
   },
   handler: async (ctx, args) => {
     const { id, ...updates } = args;

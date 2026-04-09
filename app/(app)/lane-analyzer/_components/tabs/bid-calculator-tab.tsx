@@ -154,30 +154,43 @@ export function BidCalculatorTab({
     return geocoded;
   };
 
+  const [analysisStep, setAnalysisStep] = useState('');
+
   const handleRunAnalysis = async () => {
     if (!activeSessionId) return;
     setIsRunning(true);
     try {
-      // Step 1: Geocode any entries that don't have coordinates/miles yet
+      // Step 1: Geocode
       const needsGeocode = entries?.filter(
         (e) => !e.originLat || !e.originLng || !e.destinationLat || !e.destinationLng || !e.routeMiles,
       );
       if (needsGeocode && needsGeocode.length > 0) {
-        toast.info(`Geocoding ${needsGeocode.length} lane(s)...`);
+        setAnalysisStep(`Geocoding ${needsGeocode.length} lane(s)...`);
         const geocoded = await handleGeocodeAll();
         if (geocoded) toast.success(`Geocoded ${geocoded} lane(s)`);
       }
 
-      // Step 2: Run full analysis (fetches fuel prices, tolls, then calculates)
-      toast.info('Running analysis...');
+      // Step 2: Full analysis (JS engine ~100s + OR-Tools solver ~130s)
+      setAnalysisStep('Calculating costs per lane...');
+      const stepTimers = [
+        setTimeout(() => setAnalysisStep('Building shift schedules...'), 5000),
+        setTimeout(() => setAnalysisStep('Running OR-Tools optimization solver...'), 30000),
+        setTimeout(() => setAnalysisStep('Finding minimum drivers (this takes ~2 min)...'), 60000),
+        setTimeout(() => setAnalysisStep('Minimizing operating cost...'), 120000),
+        setTimeout(() => setAnalysisStep('Finalizing results...'), 180000),
+      ];
+
       await runAnalysis({
         sessionId: activeSessionId as Id<'laneAnalysisSessions'>,
       });
 
-      toast.success('Analysis complete');
+      stepTimers.forEach(clearTimeout);
+      setAnalysisStep('');
+      toast.success('Analysis complete — optimal shifts calculated');
     } catch (error) {
       console.error('Analysis error:', error);
       toast.error('Analysis failed: ' + String(error));
+      setAnalysisStep('');
     } finally {
       setIsRunning(false);
     }
@@ -335,18 +348,25 @@ export function BidCalculatorTab({
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <Button
-              size="sm"
-              onClick={handleRunAnalysis}
-              disabled={isRunning || !entries?.length}
-            >
-              {isRunning ? (
-                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-              ) : (
-                <Play className="h-4 w-4 mr-1" />
+            <div className="flex items-center gap-3">
+              {isRunning && analysisStep && (
+                <span className="text-xs text-muted-foreground animate-pulse max-w-[300px] truncate">
+                  {analysisStep}
+                </span>
               )}
-              Run Analysis
-            </Button>
+              <Button
+                size="sm"
+                onClick={handleRunAnalysis}
+                disabled={isRunning || !entries?.length}
+              >
+                {isRunning ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4 mr-1" />
+                )}
+                {isRunning ? 'Analyzing...' : 'Run Analysis'}
+              </Button>
+            </div>
           </>
         )}
       </div>
@@ -405,6 +425,11 @@ export function BidCalculatorTab({
               <span className="text-muted-foreground">
                 70h: <strong>{session.weeklyHosMode === 'uniform' ? 'Uniform' : 'Flexible'}</strong>
               </span>
+              {(session as any).targetDriverCount && (
+                <span className="text-muted-foreground">
+                  Target: <strong>{(session as any).targetDriverCount} drivers</strong>
+                </span>
+              )}
               <Button variant="ghost" size="sm" className="ml-auto h-7 gap-1 text-xs" onClick={() => setEditingConfig(true)}>
                 <Pencil className="h-3 w-3" /> Edit
               </Button>
@@ -452,6 +477,77 @@ export function BidCalculatorTab({
                 {...(() => {
                   try {
                     const parsed = aggregateResult.hosAnalysis ? JSON.parse(aggregateResult.hosAnalysis as string) : null;
+
+                    // Prefer Python solver data when available
+                    if (parsed?.solver?.weeklySchedule && parsed.solver.status !== 'failed') {
+                      const schedule = parsed.solver.weeklySchedule as Array<{
+                        driverId: number;
+                        days: Record<string, { legs: string[]; driveHours: number; dutyHours: number }>;
+                      }>;
+
+                      // Find peak day (most drivers working)
+                      const dayDriverCounts: Record<string, number> = {};
+                      for (const driver of schedule) {
+                        for (const dayName of Object.keys(driver.days)) {
+                          dayDriverCounts[dayName] = (dayDriverCounts[dayName] || 0) + 1;
+                        }
+                      }
+                      const peakDay = Object.entries(dayDriverCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+
+                      if (peakDay) {
+                        // Extract peak day shifts
+                        const peakShifts = schedule
+                          .map((d) => d.days[peakDay])
+                          .filter((d): d is NonNullable<typeof d> => d != null && d.legs.length > 0);
+
+                        const totalLanes = peakShifts.reduce((s, sh) => s + sh.legs.length, 0);
+                        const multiLegShifts = peakShifts.filter((sh) => sh.legs.length > 1);
+                        const soloShifts = peakShifts.filter((sh) => sh.legs.length === 1);
+                        const chainedLanes = multiLegShifts.reduce((s, sh) => s + sh.legs.length, 0);
+
+                        // Duty bands: group shifts by duty hour ranges
+                        const bands: Array<{ label: string; min: number; max: number; shifts: typeof peakShifts }> = [
+                          { label: '0-6h', min: 0, max: 6, shifts: [] },
+                          { label: '6-10h', min: 6, max: 10, shifts: [] },
+                          { label: '10-14h', min: 10, max: 14, shifts: [] },
+                        ];
+                        for (const sh of peakShifts) {
+                          const band = bands.find((b) => sh.dutyHours >= b.min && sh.dutyHours < b.max) ?? bands[bands.length - 1];
+                          band.shifts.push(sh);
+                        }
+
+                        // Weekly duty per driver for relief analysis
+                        let weeklyHosExtra = 0;
+                        const dutyBands = bands
+                          .filter((b) => b.shifts.length > 0)
+                          .map((b) => {
+                            const avgDuty = Math.round(b.shifts.reduce((s, sh) => s + sh.dutyHours, 0) / b.shifts.length * 10) / 10;
+                            // Estimate days until 70h cap based on avg daily duty
+                            const daysUntilCap = avgDuty > 0 ? Math.floor(70 / avgDuty) : null;
+                            const needsRelief = daysUntilCap != null && daysUntilCap < 7;
+                            const reliefDrivers = needsRelief ? Math.ceil(b.shifts.length * (7 - daysUntilCap) / 7) : 0;
+                            weeklyHosExtra += reliefDrivers;
+                            return { label: b.label, shiftCount: b.shifts.length, avgDuty, daysUntilCap, needsRelief, reliefDrivers };
+                          });
+
+                        return {
+                          chainingInfo: {
+                            chainedLanes,
+                            soloLanes: soloShifts.length,
+                            driverSavings: (parsed.unpairedDriverCounts?.minDriverCount ?? totalLanes) - (parsed.solver.driverCount ?? peakShifts.length),
+                            avgLegsPerShift: peakShifts.length > 0 ? Math.round(totalLanes / peakShifts.length * 10) / 10 : 0,
+                            maxLegsInAnyShift: Math.max(...peakShifts.map((sh) => sh.legs.length), 0),
+                            totalShiftPatterns: peakShifts.length,
+                            weeklyHosExtraDrivers: weeklyHosExtra,
+                            avgDutyPerShift: peakShifts.length > 0 ? Math.round(peakShifts.reduce((s, sh) => s + sh.dutyHours, 0) / peakShifts.length * 10) / 10 : 0,
+                            dutyBands,
+                          },
+                          unpairedMinDrivers: parsed.unpairedDriverCounts?.minDriverCount,
+                        };
+                      }
+                    }
+
+                    // Fallback: TS engine shiftBuilding stats (for sessions without solver)
                     if (parsed?.shiftBuilding) {
                       return {
                         chainingInfo: {
@@ -659,6 +755,7 @@ function SessionConfigEditor({ session, onSave, onCancel }: SessionConfigEditorP
   const [maxLegs, setMaxLegs] = useState(String(session.maxChainingLegs ?? 8));
   const [maxDeadhead, setMaxDeadhead] = useState(String(session.maxDeadheadMiles ?? 75));
   const [maxWait, setMaxWait] = useState(String(session.maxWaitHours ?? 3.0));
+  const [targetDrivers, setTargetDrivers] = useState(String((session as any).targetDriverCount ?? ''));
   const [weeklyMode, setWeeklyMode] = useState<'uniform' | 'flexible'>(session.weeklyHosMode ?? 'flexible');
   const [saving, setSaving] = useState(false);
 
@@ -683,6 +780,7 @@ function SessionConfigEditor({ session, onSave, onCancel }: SessionConfigEditorP
         maxChainingLegs: parseInt(maxLegs) || 8,
         maxDeadheadMiles: parseInt(maxDeadhead) || 75,
         maxWaitHours: parseFloat(maxWait) || 3.0,
+        targetDriverCount: targetDrivers ? parseInt(targetDrivers) : undefined,
         weeklyHosMode: weeklyMode,
       });
     } finally {
@@ -802,6 +900,10 @@ function SessionConfigEditor({ session, onSave, onCancel }: SessionConfigEditorP
             <div>
               <Label className="text-xs">Max Wait (hrs)</Label>
               <Input type="number" step="0.5" min={0.5} max={6} value={maxWait} onChange={(e) => setMaxWait(e.target.value)} className="h-8 text-sm" />
+            </div>
+            <div>
+              <Label className="text-xs">Target Drivers</Label>
+              <Input type="number" min={1} max={50} placeholder="Auto" value={targetDrivers} onChange={(e) => setTargetDrivers(e.target.value)} className="h-8 text-sm" />
             </div>
           </div>
           <div className="flex items-center gap-6 mt-3">

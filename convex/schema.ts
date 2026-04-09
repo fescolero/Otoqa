@@ -2232,6 +2232,8 @@ export default defineSchema({
     maxChainingLegs: v.optional(v.number()), // max legs per driver shift (default 8)
     maxDeadheadMiles: v.optional(v.number()), // max deadhead between chained legs (default 75)
     maxWaitHours: v.optional(v.number()), // max idle wait between legs (default 3.0)
+    targetDriverCount: v.optional(v.number()), // target driver count (if set, solver uses this instead of auto-search)
+    solverVersion: v.optional(v.union(v.literal('v4'), v.literal('v5_hybrid'))), // solver opt-in: 'v4' (default) or 'v5_hybrid' (experimental)
     weeklyHosMode: v.optional(v.union(
       v.literal('uniform'),  // distribute 70h evenly across on-days (conservative)
       v.literal('flexible'), // allow up to 14h/day, manage 70h across the week (realistic)
