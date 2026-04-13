@@ -230,6 +230,55 @@ const LAST_HEARTBEAT_KEY = 'location_last_heartbeat';
 const BG_TASK_ALIVE_KEY = 'bg_task_last_alive';
 const BG_FALLBACK_LOCATIONS_KEY = 'bg_fallback_locations';
 
+// ============================================
+// CROSS-CONTEXT SYNC LOCK
+//
+// The background task (expo-task-manager, headless JS) and the foreground
+// sync (Convex React client) both call different Convex mutations that both
+// read+write the same `driverLocations` documents. Running them concurrently
+// triggers Convex OCC write conflicts → both return inserted=0 → GPS never
+// reaches the server.
+//
+// Fix: a lightweight AsyncStorage timestamp lock. Both paths check the lock
+// before starting a sync. If the lock is held (set within SYNC_LOCK_TTL_MS),
+// the competing path skips and lets the current sync finish. The TTL prevents
+// a crash from leaving the lock held permanently.
+//
+// Note: AsyncStorage reads are not truly atomic — two contexts could both
+// read "no lock" within a ~1 ms window. This is harmless: the worst case is
+// an occasional OCC conflict (identical to the current behavior), whereas
+// the common case eliminates conflicts entirely.
+// ============================================
+const SYNC_LOCK_KEY = 'otoqa_sync_lock';
+const SYNC_LOCK_TTL_MS = 30_000; // 30 s — longer than any single sync should take
+
+async function acquireSyncLock(): Promise<boolean> {
+  try {
+    const existing = await storage.getString(SYNC_LOCK_KEY);
+    if (existing) {
+      const heldAt = parseInt(existing, 10);
+      if (!isNaN(heldAt) && Date.now() - heldAt < SYNC_LOCK_TTL_MS) {
+        return false; // lock is live — don't acquire
+      }
+      // Lock is stale (crash / TTL expired) — safe to clobber
+    }
+    await storage.set(SYNC_LOCK_KEY, Date.now().toString());
+    return true;
+  } catch {
+    // If AsyncStorage itself fails, allow the sync to proceed unguarded
+    // rather than permanently blocking GPS uploads.
+    return true;
+  }
+}
+
+async function releaseSyncLock(): Promise<void> {
+  try {
+    await storage.delete(SYNC_LOCK_KEY);
+  } catch {
+    // Best-effort release — TTL will expire it if delete fails.
+  }
+}
+
 /**
  * Save locations to AsyncStorage as a fallback when SQLite is unavailable.
  * These get recovered and inserted into SQLite on the next foreground return.
@@ -518,49 +567,61 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
   // Step 6: Sync to Convex via the HTTP endpoint (no Clerk JWT needed).
   // Uses a static API key that works regardless of auth state.
+  //
+  // Guarded by acquireSyncLock() to prevent concurrent writes with the
+  // foreground batchInsertLocations mutation. Both paths read+write the
+  // same driverLocations documents; running simultaneously causes Convex
+  // OCC write conflicts that return inserted=0 for both sides.
   let syncAttempted = false;
   let syncSuccess = false;
   let syncCount = 0;
   if (sqliteAvailable && MOBILE_LOCATION_API_KEY) {
-    try {
-      const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
-      if (unsynced.length > 0) {
-        syncAttempted = true;
-        const payload = unsynced.map((loc) => ({
-          driverId: loc.driverId as Id<'drivers'>,
-          loadId: loc.loadId as Id<'loadInformation'>,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-          accuracy: loc.accuracy ?? undefined,
-          speed: loc.speed ?? undefined,
-          heading: loc.heading ?? undefined,
-          trackingType: 'LOAD_ROUTE' as const,
-          recordedAt: loc.recordedAt,
-        }));
+    const bgLockAcquired = await acquireSyncLock();
+    if (!bgLockAcquired) {
+      console.log('[LocationTracking] BG sync skipped: foreground sync holds the lock');
+    } else {
+      try {
+        const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
+        if (unsynced.length > 0) {
+          syncAttempted = true;
+          const payload = unsynced.map((loc) => ({
+            driverId: loc.driverId as Id<'drivers'>,
+            loadId: loc.loadId as Id<'loadInformation'>,
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            accuracy: loc.accuracy ?? undefined,
+            speed: loc.speed ?? undefined,
+            heading: loc.heading ?? undefined,
+            trackingType: 'LOAD_ROUTE' as const,
+            recordedAt: loc.recordedAt,
+          }));
 
-        const result = await syncViaHttpEndpoint(payload, state.organizationId);
-        syncSuccess = true;
-        syncCount = result.inserted;
+          const result = await syncViaHttpEndpoint(payload, state.organizationId);
+          syncSuccess = true;
+          syncCount = result.inserted;
 
-        if (result.inserted > 0) {
-          // Only mark synced if the server actually accepted points.
-          // If inserted === 0, the server rejected everything (org mismatch,
-          // driver deleted, etc.) — retaining as unsynced lets us retry later
-          // or investigate why points are rejected.
-          await markAsSynced(unsynced.map((r) => r.id));
-          console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
-        } else {
-          console.warn(
-            `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
-          );
-          trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+          if (result.inserted > 0) {
+            // Only mark synced if the server actually accepted points.
+            // If inserted === 0, the server rejected everything (org mismatch,
+            // driver deleted, etc.) — retaining as unsynced lets us retry later
+            // or investigate why points are rejected.
+            await markAsSynced(unsynced.map((r) => r.id));
+            console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
+          } else {
+            console.warn(
+              `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
+            );
+            trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+          }
         }
+      } catch (flushError) {
+        const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
+        console.warn(`[LocationTracking] BG HTTP sync failed (points safe in SQLite): ${errMsg}`);
+        syncAttempted = true;
+        trackBGTaskError({ step: 'sync', error: errMsg });
+      } finally {
+        await releaseSyncLock();
       }
-    } catch (flushError) {
-      const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
-      console.warn(`[LocationTracking] BG HTTP sync failed (points safe in SQLite): ${errMsg}`);
-      syncAttempted = true;
-      trackBGTaskError({ step: 'sync', error: errMsg });
     }
   } else if (!MOBILE_LOCATION_API_KEY) {
     console.warn('[LocationTracking] BG sync skipped: MOBILE_LOCATION_API_KEY not configured');
@@ -1337,6 +1398,16 @@ async function syncUnsyncedToConvex(
   organizationId: string,
   retryAttempt = 0,
 ): Promise<{ success: boolean; synced: number }> {
+  // Only acquire the lock on the first attempt (not on auth retries) to avoid
+  // re-entering the lock path on recursive retry calls.
+  if (retryAttempt === 0) {
+    const fgLockAcquired = await acquireSyncLock();
+    if (!fgLockAcquired) {
+      console.log('[LocationTracking] FG sync skipped: background sync holds the lock');
+      return { success: true, synced: 0 };
+    }
+  }
+
   const MAX_AUTH_RETRIES = 2;
   const AUTH_RETRY_DELAYS = [1000, 3000];
 
@@ -1384,10 +1455,14 @@ async function syncUnsyncedToConvex(
 
       // Only continue batching when the server accepted points; if inserted===0
       // the same records would be selected again causing infinite recursion.
+      // Pass retryAttempt=-1 sentinel so recursive calls skip the lock acquire
+      // (current call already holds it).
       const remaining = await getUnsyncedCount();
       if (remaining > 0) {
         console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
-        const nextResult = await syncUnsyncedToConvex(organizationId);
+        // Use retryAttempt=1 so the recursive call skips lock re-acquisition
+        // (we still hold the lock from this call's acquire above).
+        const nextResult = await syncUnsyncedToConvex(organizationId, 1);
         return { success: true, synced: result.inserted + nextResult.synced };
       }
     } else {
@@ -1409,6 +1484,8 @@ async function syncUnsyncedToConvex(
         `[LocationTracking] Sync auth failed (attempt ${retryAttempt + 1}/${MAX_AUTH_RETRIES}), retrying in ${delay / 1000}s... (SQLite data safe)`,
       );
       await new Promise((r) => setTimeout(r, delay));
+      // Increment retryAttempt so we skip lock re-acquisition on retry
+      // (we still hold the lock from attempt 0).
       return syncUnsyncedToConvex(organizationId, retryAttempt + 1);
     }
 
@@ -1417,6 +1494,13 @@ async function syncUnsyncedToConvex(
       `[LocationTracking] Sync failed (attempt ${retryAttempt + 1}): ${errorMsg} — ${remaining} points retained in SQLite for later`,
     );
     return { success: false, synced: 0 };
+  } finally {
+    // Release the lock only when the top-level call exits (retryAttempt === 0).
+    // Recursive calls (auth retries, batch continuation) leave releasing to
+    // the top-level call's finally block so the lock stays held throughout.
+    if (retryAttempt === 0) {
+      await releaseSyncLock();
+    }
   }
 }
 

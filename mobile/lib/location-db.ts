@@ -13,9 +13,36 @@ import * as SQLite from 'expo-sqlite';
 
 const DB_NAME = 'otoqa_locations.db';
 
+// ============================================
+// CONNECTION STRATEGY — ALWAYS OPEN FRESH
+//
+// We intentionally do NOT cache the SQLiteDatabase handle across operations.
+//
+// Root cause of the recurring NullPointerException (NativeDatabase.execAsync):
+//   Android's JVM GC destroys the native NativeDatabase object while the JS/JSI
+//   reference remains alive. On Android 16 (Samsung SM-S911U, OS version 16) this
+//   happens aggressively, triggering NPE bursts every 50–60 minutes during a shift.
+//   Retrying with the same cached handle only delays the same failure.
+//
+// Fix 1 (current): getDb() closes the previous connection and calls openDatabaseAsync
+//   fresh on every operation. The connection lives only for the duration of the fn()
+//   call, then goes out of scope. No stale handle, no GC problem.
+//   All ops run through opQueue so close/open is always sequential — no concurrent
+//   handle races, no leaked file descriptors.
+//
+// If NPE bursts continue after this fix, escalate to:
+//   Fix 2: Switch to openDatabaseSync() — synchronous connections bypass the async
+//     JNI boundary that is susceptible to Android GC. expo-sqlite 16 supports it via
+//     SQLite.openDatabaseSync(DB_NAME). Requires wrapping callers in withExclusiveTransactionSync.
+//     See: https://docs.expo.dev/versions/latest/sdk/sqlite/#sqliteopendatabasesyncname
+//
+//   Fix 3: Upgrade expo-sqlite — 16.0.x has open Android NPE issues tracked in the
+//     Expo repo (expo-sqlite Android NullPointerException). A patch release or upgrade
+//     to 17.x may include a native fix for NativeDatabase GC on Android 16+.
+//     Monitor: https://github.com/expo/expo/issues?q=sqlite+NullPointerException
+// ============================================
+
 let db: SQLite.SQLiteDatabase | null = null;
-// Mutex for concurrent getDb() callers — prevents two concurrent openAndInit() races.
-let dbInitPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 function isRecoverableDbError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -24,44 +51,6 @@ function isRecoverableDbError(error: unknown): boolean {
     message.includes('NullPointerException') ||
     message.includes('Access to closed')
   );
-}
-
-async function resetDbHandle(): Promise<void> {
-  dbInitPromise = null; // cancel any in-flight init so next getDb() starts fresh
-  if (db) {
-    try {
-      await db.closeAsync();
-    } catch {
-      // ignore dead native handles
-    }
-    db = null;
-  }
-}
-
-async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
-    if (!isRecoverableDbError(error)) throw error;
-    console.warn('[LocationDB] Recoverable DB error, reopening and retrying once');
-    await resetDbHandle();
-    return await fn();
-  }
-}
-
-export interface LocationRow {
-  id: number;
-  driverId: string;
-  loadId: string;
-  organizationId: string;
-  latitude: number;
-  longitude: number;
-  accuracy: number | null;
-  speed: number | null;
-  heading: number | null;
-  recordedAt: number;
-  createdAt: number;
-  synced: number; // 0 = unsynced, 1 = synced
 }
 
 const SCHEMA_SQL = `
@@ -91,56 +80,102 @@ async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   return newDb;
 }
 
+// Always opens a fresh connection. Closes the previous one first to prevent
+// file-descriptor accumulation. Because all callers run through opQueue, this
+// close→open is always sequential — no concurrent handle access.
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
-  // Join any in-flight init first — prevents two concurrent openAndInit() calls.
-  if (dbInitPromise) return dbInitPromise;
-
   if (db) {
-    // Verify the native handle is still alive. Android can destroy it after
-    // long background periods while the JS reference remains cached.
     try {
-      await db.execAsync('SELECT 1');
-      // Re-check after the yield: another caller may have started a reinit.
-      if (dbInitPromise) return dbInitPromise;
-      return db;
+      await db.closeAsync();
     } catch {
-      console.warn('[LocationDB] Stale DB handle detected, reopening...');
-      // Fall through to claim the mutex below.
+      // Already dead — safe to ignore, we're replacing it anyway.
     }
+    db = null;
   }
+  const newDb = await openAndInit();
+  db = newDb;
+  return newDb;
+}
 
-  // Claim mutex synchronously (no await before assignment) so concurrent
-  // callers that reach here after the probe-yield all join the same promise.
-  if (!dbInitPromise) {
-    const staleDb = db;
-    db = null; // clear immediately so concurrent probes fail fast
-    dbInitPromise = (async () => {
-      if (staleDb) {
+// Serializes all SQLite operations through a single promise chain.
+// Ensures close→open in getDb() is never concurrent with another operation.
+let opQueue: Promise<unknown> = Promise.resolve();
+
+// Circuit breaker: trips when all retry attempts fail (native layer unrecoverable).
+// Prevents a dead native module from cascading — callers skip to AsyncStorage
+// fallback immediately instead of each burning through 3 retry cycles.
+// Cleared by reopenDb() on foreground resume.
+let dbDead = false;
+
+async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const queued = opQueue.then(async (): Promise<T> => {
+    if (dbDead) {
+      throw new Error('[LocationDB] DB unavailable, using fallback');
+    }
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isRecoverableDbError(error)) throw error;
+      // getDb() always opens fresh, so retrying fn() automatically uses a new
+      // native connection — no explicit handle reset needed between attempts.
+      console.warn('[LocationDB] Recoverable DB error (attempt 1), retrying with fresh connection...');
+      try {
+        return await fn();
+      } catch (retryError) {
+        if (!isRecoverableDbError(retryError)) throw retryError;
+        console.warn('[LocationDB] Recoverable DB error (attempt 2), waiting 300ms...');
+        await new Promise<void>((r) => setTimeout(r, 300));
         try {
-          await staleDb.closeAsync();
-        } catch {
-          /* already dead */
+          return await fn();
+        } catch (finalError) {
+          // All 3 attempts exhausted — trip the circuit breaker.
+          // Subsequent ops skip immediately to AsyncStorage fallback until
+          // reopenDb() confirms the native layer is healthy again.
+          dbDead = true;
+          throw finalError;
         }
       }
-      const newDb = await openAndInit();
-      db = newDb;
-      return newDb;
-    })().finally(() => {
-      dbInitPromise = null;
-    });
-  }
-  return dbInitPromise;
+    }
+  });
+  // Absorb errors in the chain so a failed op doesn't block subsequent ones.
+  opQueue = queued.catch(() => {});
+  return queued;
+}
+
+export interface LocationRow {
+  id: number;
+  driverId: string;
+  loadId: string;
+  organizationId: string;
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  speed: number | null;
+  heading: number | null;
+  recordedAt: number;
+  createdAt: number;
+  synced: number; // 0 = unsynced, 1 = synced
 }
 
 /**
- * Force-close and reopen the database connection.
- * Call on foreground resume to proactively replace handles that Android
- * may have invalidated while the app was backgrounded.
+ * Verify the database connection is healthy and clear the circuit breaker.
+ * Routes through opQueue so it cannot race with an in-flight insert.
+ * Call on foreground resume to allow ops to resume after a dead-native-layer event.
  */
 export async function reopenDb(): Promise<void> {
-  await resetDbHandle();
-  await getDb(); // uses mutex so concurrent callers share one openAndInit()
-  console.log('[LocationDB] Database connection refreshed');
+  const queued = opQueue.then(async () => {
+    dbDead = false;
+    try {
+      // getDb() closes any stale handle and opens fresh — acts as a health probe.
+      await getDb();
+      console.log('[LocationDB] Database connection verified OK');
+    } catch (err) {
+      dbDead = true; // native layer still broken — stay dead until next foreground resume
+      console.warn('[LocationDB] DB still unavailable after reopen:', err);
+    }
+  });
+  opQueue = queued.catch(() => {});
+  await queued;
 }
 
 // ============================================
@@ -342,7 +377,11 @@ export async function deleteAllForLoad(loadId: string): Promise<number> {
 
 export async function closeDb(): Promise<void> {
   if (db) {
-    await db.closeAsync();
+    try {
+      await db.closeAsync();
+    } catch {
+      // ignore
+    }
     db = null;
   }
 }

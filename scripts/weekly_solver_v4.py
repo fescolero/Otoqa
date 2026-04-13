@@ -658,15 +658,47 @@ def solve_weekly_v4(entries, config={}, n_drivers_override=None):
         print(f"  ❌ {v} violation(s)")
 
 
+# Road-distance correction factor for reporting: haversine → road miles.
+# Solver uses haversine internally (for timing accuracy), applies correction
+# only for output reporting and city-pair cache.
+_ROAD_CORRECTION = 1.15
+
+# Known city-pair distances (haversine miles) for common transitions.
+# Avoids the 150mi fallback when lat/lng is missing.
+_CITY_PAIR_CACHE = {}
+
+def _city_key(a, b):
+    """Normalized city pair key for distance cache."""
+    return tuple(sorted([a.lower().strip(), b.lower().strip()]))
+
 def _compute_dh(la, lb):
-    """Compute deadhead miles between two lanes using haversine."""
+    """Compute deadhead miles between two lanes using haversine.
+
+    Returns haversine miles for internal use (timing, HOS checks).
+    Use _ROAD_CORRECTION for reporting only.
+    """
     from lane_solver import haversine as hav
-    if la.dest_lat and la.dest_lng and lb.origin_lat and lb.origin_lng:
-        return hav(la.dest_lat, la.dest_lng, lb.origin_lat, lb.origin_lng)
-    elif la.dest_city.lower().strip() == lb.origin_city.lower().strip():
+    dest_city = la.dest_city.lower().strip()
+    orig_city = lb.origin_city.lower().strip()
+
+    if dest_city == orig_city:
         return 0.0
-    else:
-        return 150.0  # unknown locations, assume moderate
+
+    if la.dest_lat and la.dest_lng and lb.origin_lat and lb.origin_lng:
+        hav_miles = hav(la.dest_lat, la.dest_lng, lb.origin_lat, lb.origin_lng)
+        # Cache for future lookups when coords might be missing
+        key = _city_key(dest_city, orig_city)
+        if key not in _CITY_PAIR_CACHE or hav_miles < _CITY_PAIR_CACHE[key]:
+            _CITY_PAIR_CACHE[key] = hav_miles
+        return hav_miles
+
+    # Try cached city-pair distance (avoids 150mi fallback)
+    key = _city_key(dest_city, orig_city)
+    if key in _CITY_PAIR_CACHE:
+        return _CITY_PAIR_CACHE[key]
+
+    # Unknown — use moderate fallback
+    return 150.0
 
 
 def _greedy_time_order(lane_ids, lane_map):
@@ -3234,13 +3266,21 @@ def _hub_of_leg(lane, pair_map=None, lane_map=None):
                         return my_o  # I'm outbound, hub = my origin
                     else:
                         return my_d  # I'm return, hub = my dest
-    # Unpaired: check if this looks like a return leg (destination is a common hub)
-    # Return legs go Dest→Base, so hub = destination
-    # Outbound legs go Base→Dest, so hub = origin
-    # Heuristic: if origin appears less often than destination in the lane set,
-    # this is likely a return (origin is the remote city, dest is the base)
-    # For now, use the SHORTER route endpoint as hub (bases are closer to each other)
-    return lane.origin_city.lower().strip()  # fallback for unpaired
+    # Unpaired: check if origin or destination is a known hub city.
+    # Known hubs for SoCal IE contracts (extend as needed).
+    _KNOWN_HUBS = {'colton', 'ontario', 'anaheim', 'fontana', 'riverside',
+                   'san bernardino', 'rancho cucamonga', 'corona', 'jurupa valley'}
+    origin = lane.origin_city.lower().strip()
+    dest = lane.dest_city.lower().strip()
+
+    # If dest is a known hub but origin isn't → this is a return leg, hub = dest
+    # If origin is a known hub but dest isn't → this is outbound, hub = origin
+    # If both are known hubs → pick origin (outbound-style)
+    origin_is_hub = origin in _KNOWN_HUBS
+    dest_is_hub = dest in _KNOWN_HUBS
+    if dest_is_hub and not origin_is_hub:
+        return dest  # return leg: Remote → Base
+    return origin  # outbound or both hubs: use origin
 
 
 def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h, pair_map=None):
@@ -3358,8 +3398,12 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
                 slot_cities.add(lane_map[lid].dest_city.lower().strip())
             shared = len(small_cities & slot_cities)
             hub_penalty = 0 if shared > 0 else 300  # prefer overlapping cities
-            slot_last = lane_map[slot_lids[-1]]
-            small_first = lane_map[lids[0]]
+            # Use chronologically last leg in slot (not last by insertion order)
+            slot_last_lid = max(slot_lids, key=lambda lid: lane_map[lid].finish_time or 0)
+            slot_last = lane_map[slot_last_lid]
+            # Use chronologically first leg in small corridor
+            small_first_lid = min(lids, key=lambda lid: lane_map[lid].pickup_time or 0)
+            small_first = lane_map[small_first_lid]
             dh = _compute_dh(slot_last, small_first)
             score = dh + hub_penalty
             if score < best_slot_score:
@@ -3368,6 +3412,8 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
 
         if best_slot is not None:
             slots[best_slot].extend(lids)
+            # Re-sort by pickup time so future DH scoring uses correct ordering
+            slots[best_slot].sort(key=lambda lid: lane_map[lid].pickup_time or 99)
         else:
             slots.append(list(lids))
 
@@ -3982,42 +4028,77 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                             built_routes[ri_b] = (None, None)  # mark for removal
             built_routes = [(r, c) for r, c in built_routes if r is not None]
 
-        # Now do all-pairs merge
+        # Now do all-pairs merge with best-of-N orderings
+        # Running the greedy merge with different sort orders avoids
+        # locally optimal but globally suboptimal merge decisions
         n_local = n_drivers - len(routes)
 
-        while len(built_routes) > n_local:
-            best_merge = None  # (i, j, ordered, dh)
+        def _run_all_pairs_merge(candidate_routes, n_target):
+            """Run greedy all-pairs merge, return (routes, total_dh)."""
+            working = list(candidate_routes)  # copy
+            total_merge_dh = 0
+            while len(working) > n_target:
+                best_merge = None  # (i, j, ordered, dh)
 
-            for dh_limit, corr_limit in [(MAX_ROUTE_DH, 2), (160, 3)]:
-                if best_merge:
+                for dh_limit, corr_limit in [(MAX_ROUTE_DH, 2), (160, 3)]:
+                    if best_merge:
+                        break
+                    for i in range(len(working)):
+                        for j in range(i + 1, len(working)):
+                            combined = list(working[i][0]) + list(working[j][0])
+                            if len(combined) > max_legs:
+                                continue
+                            ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
+                                combined, lane_map, graph, base_city, max_wait_h)
+                            starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+                            ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+                            if not starts or not ends:
+                                continue
+                            duty_h = (max(ends) - min(starts)) + pre_post_h
+                            if drive > HOS_MAX_DRIVE or duty_h > HOS_MAX_DUTY:
+                                continue
+                            merged_corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered)
+                            if len(merged_corrs) > corr_limit or dh > dh_limit:
+                                continue
+                            if best_merge is None or dh < best_merge[3]:
+                                best_merge = (i, j, ordered, dh)
+
+                if best_merge is None:
                     break
-                for i in range(len(built_routes)):
-                    for j in range(i + 1, len(built_routes)):
-                        combined = list(built_routes[i][0]) + list(built_routes[j][0])
-                        if len(combined) > max_legs:
-                            continue
-                        ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
-                            combined, lane_map, graph, base_city, max_wait_h)
-                        starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
-                        ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
-                        if not starts or not ends:
-                            continue
-                        duty_h = (max(ends) - min(starts)) + pre_post_h
-                        if drive > HOS_MAX_DRIVE or duty_h > HOS_MAX_DUTY:
-                            continue
-                        merged_corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered)
-                        if len(merged_corrs) > corr_limit or dh > dh_limit:
-                            continue
-                        if best_merge is None or dh < best_merge[3]:
-                            best_merge = (i, j, ordered, dh)
+                i, j, ordered, dh = best_merge
+                merged_corr = working[i][1] + '+' + working[j][1]
+                working.pop(j)
+                working.pop(i)
+                working.append((ordered, merged_corr))
+                working.sort(key=lambda x: len(x[0]))
+                total_merge_dh += dh
+            return working, total_merge_dh
 
-            if best_merge is None:
-                break
-            i, j, ordered, dh = best_merge
-            merged_corr = built_routes[i][1] + '+' + built_routes[j][1]
-            built_routes.pop(j)  # remove higher index first
-            built_routes.pop(i)
-            built_routes.append((ordered, merged_corr))
+        if len(built_routes) > n_local:
+            # Try multiple sort orderings and keep the best result
+            orderings = [
+                # Default: by leg count (smallest first)
+                sorted(built_routes, key=lambda x: len(x[0])),
+                # By leg count descending (largest first)
+                sorted(built_routes, key=lambda x: -len(x[0])),
+                # By earliest pickup time
+                sorted(built_routes, key=lambda x: min(
+                    (lane_map[lid].pickup_time or 99 for lid in x[0]), default=99)),
+            ]
+
+            best_result = None
+            best_total_dh = float('inf')
+            for ordering in orderings:
+                merged, total_dh = _run_all_pairs_merge(ordering, n_local)
+                if len(merged) <= n_local and total_dh < best_total_dh:
+                    best_total_dh = total_dh
+                    best_result = merged
+                elif best_result is None:
+                    best_result = merged
+                    best_total_dh = total_dh
+
+            built_routes = best_result if best_result else built_routes
+        else:
             built_routes.sort(key=lambda x: len(x[0]))
 
         for route_legs, _ in built_routes:
@@ -4081,7 +4162,77 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                                 best_filler = (lid, total_new_dh)
                                 best_filler_src = rj
 
-                    if best_filler and best_filler_src is not None:
+                    # Also try pair moves: if a filler leg's partner is on the same
+                    # source route, try moving BOTH together
+                    best_pair_filler = None
+                    best_pair_src = None
+                    for rj, (rj_legs, rj_excl) in enumerate(routes):
+                        if ri == rj or rj_excl:
+                            continue
+                        if len(r_legs) + 2 > max_legs:
+                            continue  # need room for pair
+                        for lid in rj_legs:
+                            fl = lane_map[lid]
+                            partner_lid = pair_map.get(lid)
+                            if not partner_lid or partner_lid not in rj_legs:
+                                continue  # only interested in paired legs here
+                            pl = lane_map[partner_lid]
+                            if not fl.pickup_time or not fl.finish_time:
+                                continue
+                            if not pl.pickup_time or not pl.finish_time:
+                                continue
+                            # Both legs must fit in the gap
+                            pair_start = min(fl.pickup_time, pl.pickup_time)
+                            pair_end = max(fl.finish_time, pl.finish_time)
+                            if pair_start < gap_start - 0.5 or pair_end > gap_end + 0.5:
+                                continue  # pair doesn't fit in gap
+                            # DH cost to reach first of pair and leave last
+                            first_of_pair = lid if fl.pickup_time <= pl.pickup_time else partner_lid
+                            last_of_pair = partner_lid if first_of_pair == lid else lid
+                            dh_to = _compute_dh(prev, lane_map[first_of_pair])
+                            dh_from = _compute_dh(lane_map[last_of_pair], curr)
+                            total_new_dh = dh_to + dh_from
+                            if total_new_dh > 80:
+                                continue
+                            if best_pair_filler is None or total_new_dh < best_pair_filler[1]:
+                                best_pair_filler = ((lid, partner_lid), total_new_dh)
+                                best_pair_src = rj
+
+                    # Decide: use single filler or pair filler (prefer lower DH)
+                    use_single = best_filler and best_filler_src is not None
+                    use_pair = best_pair_filler and best_pair_src is not None
+                    # If both available, pick the one with lower DH per leg
+                    if use_single and use_pair:
+                        single_dh = best_filler[1]
+                        pair_dh = best_pair_filler[1]
+                        if pair_dh <= single_dh * 1.5:  # pair acceptable if not much worse
+                            use_single = False  # prefer pair (removes 2 legs from source)
+                        else:
+                            use_pair = False
+
+                    if use_pair:
+                        pair_lids = best_pair_filler[0]
+                        new_legs = list(r_legs) + list(pair_lids)
+                        src_legs = [l for l in routes[best_pair_src][0] if l not in pair_lids]
+                        new_ordered, _, new_dh, _, _ = _sequence_driver_day(new_legs, lane_map, graph, base_city, max_wait_h)
+                        if src_legs:
+                            src_ordered, _, _, _, _ = _sequence_driver_day(src_legs, lane_map, graph, base_city, max_wait_h)
+                        else:
+                            src_ordered = []
+                        ns = [lane_map[l].pickup_time for l in new_ordered if lane_map[l].pickup_time]
+                        ne = [lane_map[l].finish_time for l in new_ordered if lane_map[l].finish_time]
+                        if ns and ne:
+                            new_duty = (max(ne) - min(ns)) + pre_post_h
+                            new_drive = sum(lane_map[l].route_duration_hours for l in new_ordered) + new_dh/55.0
+                            if new_drive <= HOS_MAX_DRIVE and new_duty <= HOS_MAX_DUTY:
+                                routes[ri] = (new_ordered, False)
+                                if src_ordered:
+                                    routes[best_pair_src] = (src_ordered, False)
+                                else:
+                                    routes[best_pair_src] = ([], False)
+                                improved = True
+                                break
+                    elif use_single:
                         filler_lid = best_filler[0]
                         # Insert filler into this route at position k
                         new_legs = list(r_legs[:k]) + [filler_lid] + list(r_legs[k:])
@@ -4143,7 +4294,7 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
             day_route_data[dn].append({
                 'legs': ordered, 'legNames': names, 'legCount': len(ordered),
                 'driveHours': round(drive, 1), 'dutyHours': round(duty_h, 1),
-                'miles': round(miles), 'deadheadMiles': dh,
+                'miles': round(miles), 'deadheadMiles': round(dh * _ROAD_CORRECTION),
                 'startTime': earliest, 'endTime': latest,
                 'isExact': is_exact, 'legGaps': gaps,
             })
