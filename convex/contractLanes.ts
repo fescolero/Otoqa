@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
+import { scheduleRuleValidator } from './lib/validators';
 
 // List unique HCR/Trip combinations for route assignments
 export const listUniqueRoutes = query({
@@ -126,6 +127,9 @@ export const create = mutation({
     minimumRate: v.optional(v.number()),
     minimumQuantity: v.optional(v.number()),
 
+    // Schedule / Frequency
+    scheduleRule: v.optional(scheduleRuleValidator),
+
     // Additional Info
     subsidiary: v.optional(v.string()),
     isActive: v.optional(v.boolean()),
@@ -165,6 +169,9 @@ export const create = mutation({
       currency: (args.currency as "USD" | "CAD" | "MXN") || 'USD',
       minimumRate: args.minimumRate,
       minimumQuantity: args.minimumQuantity,
+
+      // Schedule / Frequency
+      scheduleRule: args.scheduleRule,
 
       // Additional Info
       subsidiary: args.subsidiary,
@@ -236,6 +243,9 @@ export const update = mutation({
     currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
     minimumRate: v.optional(v.number()),
     minimumQuantity: v.optional(v.number()),
+
+    // Schedule / Frequency
+    scheduleRule: v.optional(scheduleRuleValidator),
 
     // Additional Info
     subsidiary: v.optional(v.string()),

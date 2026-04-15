@@ -801,7 +801,7 @@ export const runExternalSolver = internalAction({
         target_drivers: session?.targetDriverCount ?? undefined,
         enable_local_optimize: true,
         best_of_n: 3,
-        solver_version: 'greedy',
+        // solver_version omitted → defaults to OR-Tools CP-SAT in solve_weekly_v4_api
         bases: data.bases,
       },
     });
@@ -975,6 +975,36 @@ export const storeSolverResults = internalMutation({
     if (aggregateResult) {
       const existing = aggregateResult.hosAnalysis ? JSON.parse(aggregateResult.hosAnalysis) : {};
 
+      // Helper: sum deadheadMiles across all driver-day rows
+      const totalDH = (schedule: Array<{ days: Record<string, { deadheadMiles?: number }> }>) =>
+        schedule.reduce((tot, d) =>
+          tot + Object.values(d.days ?? {}).reduce((s, day) => s + (day?.deadheadMiles ?? 0), 0), 0);
+
+      // If we already have a stored weeklySchedule, only replace it when the
+      // incoming solution is strictly better (lower total deadhead miles).
+      // This prevents a temporarily-reachable solver from overwriting a
+      // manually-patched or higher-quality schedule.
+      const existingSchedule: Array<any> | undefined = existing.solver?.weeklySchedule;
+      if (existingSchedule?.length) {
+        const existingDH = totalDH(existingSchedule);
+        const newDH = totalDH(args.weeklySchedule);
+        if (newDH >= existingDH) {
+          // New solution is not an improvement — update metadata only, keep weeklySchedule
+          existing.solver = {
+            ...existing.solver,
+            status: 'success' as const,
+            source: 'weekly_solver_v4',
+            solvedAt: Date.now(),
+            // Overwrite quality so UI shows latest solver metrics
+            quality: args.quality,
+            qualitySummary: args.qualitySummary,
+          };
+          await ctx.db.patch(aggregateResult._id, { hosAnalysis: JSON.stringify(existing) });
+          return;
+        }
+      }
+
+      // New solution is genuinely better (or no prior schedule) — store it fully
       existing.solver = {
         status: 'success' as const,
         driverCount: args.driverCount,
@@ -1019,6 +1049,7 @@ export const storeSolverStatus = internalMutation({
       const existing = aggregateResult.hosAnalysis ? JSON.parse(aggregateResult.hosAnalysis) : {};
 
       existing.solver = {
+        ...existing.solver,   // preserve weeklySchedule and any other stored fields
         status: args.status,
         error: args.error,
         source: args.source,
@@ -1031,3 +1062,4 @@ export const storeSolverStatus = internalMutation({
     }
   },
 });
+

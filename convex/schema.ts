@@ -1,5 +1,6 @@
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
+import { scheduleRuleValidator } from './lib/validators';
 
 export default defineSchema({
   // Organization settings for multi-tenant configuration
@@ -780,6 +781,9 @@ export default defineSchema({
       ),
     ),
     fuelSurchargeValue: v.optional(v.number()), // 22 (for 22%) or 150 (for $150)
+
+    // Schedule / Frequency
+    scheduleRule: v.optional(scheduleRuleValidator),
 
     // Additional Info
     subsidiary: v.optional(v.string()),
@@ -2311,11 +2315,7 @@ export default defineSchema({
     isCityRoute: v.boolean(), // toggles MPG: city (10) vs highway (6)
 
     // Schedule rule (mirrors recurringLoadTemplates pattern)
-    scheduleRule: v.object({
-      activeDays: v.array(v.number()), // 0=Sun, 1=Mon, ..., 6=Sat
-      excludeFederalHolidays: v.boolean(),
-      customExclusions: v.array(v.string()), // YYYY-MM-DD dates to skip
-    }),
+    scheduleRule: scheduleRuleValidator,
 
     // Contract period (limits schedule expansion)
     contractPeriodStart: v.optional(v.string()), // YYYY-MM-DD

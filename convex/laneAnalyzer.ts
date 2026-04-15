@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { scheduleRuleValidator } from './lib/validators';
 import {
   calculateScheduleForYear,
   hosAnalyzeRoute,
@@ -208,12 +209,6 @@ const entryStopValidator = v.object({
   type: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
   arrivalTime: v.optional(v.string()), // HH:MM format (window start)
   arrivalEndTime: v.optional(v.string()), // HH:MM format (window end)
-});
-
-const scheduleRuleValidator = v.object({
-  activeDays: v.array(v.number()),
-  excludeFederalHolidays: v.boolean(),
-  customExclusions: v.array(v.string()),
 });
 
 export const createEntry = mutation({
@@ -684,7 +679,7 @@ export const getShiftsForWeek = query({
     }
 
     // ---- Tier 1: Full weekly schedule from Python solver ----
-    if (solverData?.weeklySchedule && solverData.weeklySchedule.length > 0 && solverData.status !== 'failed') {
+    if (solverData?.weeklySchedule && solverData.weeklySchedule.length > 0) {
       const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       const days: Array<{
         date: string;
@@ -808,7 +803,7 @@ export const getShiftsForWeek = query({
     }
 
     // ---- Tier 2: Legacy peak-day shifts (old sessions before weekly schedule storage) ----
-    if (solverData?.shifts && solverData.shifts.length > 0 && solverData.status !== 'failed') {
+    if (solverData?.shifts && solverData.shifts.length > 0) {
       const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       const days: Array<{
         date: string; dayName: string; lanesRunning: number;
@@ -1102,9 +1097,9 @@ export const importLanesFromContract = mutation({
         isRoundTrip: false,
         isCityRoute: false,
 
-        // Default schedule: daily, exclude holidays
-        scheduleRule: {
-          activeDays: [1, 2, 3, 4, 5], // Mon-Fri default
+        // Schedule from contract lane, or default Mon-Fri
+        scheduleRule: lane.scheduleRule ?? {
+          activeDays: [1, 2, 3, 4, 5], // Mon-Fri default for lanes without schedule
           excludeFederalHolidays: true,
           customExclusions: [],
         },

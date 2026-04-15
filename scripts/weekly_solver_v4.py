@@ -20,7 +20,8 @@ Plus ordering: order[day][lane][driver] = position of this lane in the driver's 
 import json, sys, time
 from collections import defaultdict
 
-sys.path.insert(0, '/Users/hydra/Documents/Claude-Development/ProductionReady/Otoqa/scripts')
+import os as _os
+sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from lane_solver import Lane, build_graph, DEFAULT_MAX_DEADHEAD, DEFAULT_MAX_LEGS
 from solver_api import lanes_from_json
 from ortools.sat.python import cp_model
@@ -817,6 +818,28 @@ def _metrics_from_chain(ordered_ids, lane_map):
             'earliestArrival': round(earliest_arr, 2) if earliest_arr is not None else None,
         })
     return drive, int(dh_total), gaps
+
+
+def _fast_merge_check(lane_ids, lane_map, pre_post_h, max_wait_h=3.0):
+    """Fast merge feasibility check using greedy ordering.
+
+    Returns (ordered_ids, dh_miles, feasible) without CP-SAT.
+    ~100x faster than _sequence_driver_day for merge feasibility testing.
+    """
+    ordered = _greedy_time_order(lane_ids, lane_map)
+    drive, dh, gaps = _metrics_from_chain(ordered, lane_map)
+    starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+    ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+    if not starts or not ends:
+        return ordered, dh, False
+    duty = (max(ends) - min(starts)) + pre_post_h
+    if drive > HOS_MAX_DRIVE or duty > HOS_MAX_DUTY:
+        return ordered, dh, False
+    # 30-min slack: fast check is greedy, exact Tier 2 re-validates if needed
+    for g in gaps:
+        if g['waitHours'] is not None and g['waitHours'] > max_wait_h + 0.5:
+            return ordered, dh, False
+    return ordered, dh, True
 
 
 def _corridor_of_leg(lane):
@@ -1959,13 +1982,13 @@ def _sequence_driver_day(lane_ids, lane_map, graph, base_city, max_wait_h=3.0):
                 arrival_at_b = la.finish_time + dh_h
                 pe_b = lb.pickup_end_time
                 if pe_b < la.finish_time: pe_b += 24.0  # handle wrap
-                if arrival_at_b > pe_b + 0.25: continue  # can't arrive in time
+                if arrival_at_b > pe_b + max_wait_h: continue  # can't arrive in time
 
             # Timing: B must start after A finishes (+ deadhead), and wait must be reasonable
             if la.finish_time is not None and lb.pickup_time is not None:
                 wait = lb.pickup_time - (la.finish_time + dh_h)
                 if wait < -0.25: continue  # B starts before A finishes — impossible sequence
-                if wait > max_wait_h: continue  # too long to wait
+                if wait > HOS_MAX_DUTY: continue  # physically impossible within a single duty window
 
             pair_dh[(i, j)] = (dh_h, dh_mi)
 
@@ -3374,374 +3397,6 @@ def _plan_day_slots(local_lids, lane_map, n_local_drivers, max_legs, pre_post_h,
     return slots
 
 
-def _build_greedy_schedule_pairchain(n_drivers, lanes, lane_map, graph, lane_active_days,
-                           day_lane_ids, working_days, day_names_map,
-                           pre_post_h, max_legs, max_wait_h, base_city='colton'):
-    """Pair-chain greedy — kept for reference. Use _build_greedy_schedule instead.
-
-    Key insight: all outbound legs start in Colton, all return legs end in Colton.
-    So Return→Outbound transitions are ALWAYS 0 DH regardless of corridor.
-    Build routes by chaining pairs by tightest time fit → 0 DH + minimal waits.
-    """
-    import time as _t
-    from lane_solver import can_add_leg
-    start = _t.time()
-
-    day_routes = {}
-
-    for day in working_days:
-        lids = day_lane_ids[day]
-        if not lids:
-            continue
-
-        # Step 1: Detect all pairs (outbound→return, tightest timing)
-        sorted_lids = sorted(lids, key=lambda lid: lane_map[lid].pickup_time or 99)
-        pairs = []  # (out_lid, ret_lid, pair_start, pair_end)
-        excl_pairs = []
-        used = set()
-
-        for lid_a in sorted_lids:
-            if lid_a in used:
-                continue
-            la = lane_map[lid_a]
-            if la.origin_city.lower().strip() != 'colton':
-                continue  # only start from outbound legs
-            # Find tightest return partner
-            best_ret = None
-            best_gap = 999
-            for lid_b in sorted_lids:
-                if lid_b in used or lid_b == lid_a:
-                    continue
-                lb = lane_map[lid_b]
-                if lb.dest_city.lower().strip() != 'colton':
-                    continue
-                if la.dest_city.lower().strip() != lb.origin_city.lower().strip():
-                    continue
-                if lb.pickup_time and la.finish_time:
-                    gap = lb.pickup_time - la.finish_time
-                    if 0 <= gap < best_gap:
-                        best_gap = gap
-                        best_ret = lid_b
-            if best_ret:
-                combined_drive = la.route_duration_hours + lane_map[best_ret].route_duration_hours
-                pair_end = lane_map[best_ret].finish_time or 0
-                if combined_drive > 5.0:
-                    excl_pairs.append((lid_a, best_ret))
-                else:
-                    pairs.append((lid_a, best_ret, la.pickup_time or 0, pair_end))
-                used.add(lid_a)
-                used.add(best_ret)
-
-        singletons = [lid for lid in lids if lid not in used]
-        pairs.sort(key=lambda p: p[2])  # by start time
-
-        # Step 2: Chain pairs by tightest time fit
-        available = list(range(len(pairs)))
-        routes = []
-
-        for o, r in excl_pairs:
-            routes.append(([o, r], True))
-
-        while available:
-            idx = available[0]
-            available.remove(idx)
-            out, ret, p_start, p_end = pairs[idx]
-            chain = [out, ret]
-            chain_end = p_end
-
-            while len(chain) < max_legs:
-                best_next = None
-                best_wait = 999
-                for ai in available:
-                    o2, r2, s2, e2 = pairs[ai]
-                    wait = s2 - chain_end
-                    if wait < -0.25:
-                        continue
-                    if wait > max_wait_h:
-                        continue
-                    if len(chain) + 2 > max_legs:
-                        continue
-                    if wait < best_wait:
-                        best_wait = wait
-                        best_next = ai
-                if best_next is not None:
-                    o2, r2, s2, e2 = pairs[best_next]
-                    chain.extend([o2, r2])
-                    chain_end = e2
-                    available.remove(best_next)
-                else:
-                    break
-            routes.append((chain, False))
-
-        for lid in singletons:
-            routes.append(([lid], False))
-
-        # Step 3: Merge small routes to reach n_drivers
-        # PRESERVE pair-chain order: concatenate A+B by time, don't re-sequence
-        n_local = n_drivers - sum(1 for _, excl in routes if excl)
-
-        while sum(1 for _, excl in routes if not excl) > n_local:
-            non_excl = [(i, legs) for i, (legs, excl) in enumerate(routes) if not excl]
-            non_excl.sort(key=lambda x: len(x[1]))
-
-            best_merge = None
-            for ai in range(len(non_excl)):
-                for bi in range(ai + 1, len(non_excl)):
-                    idx_a, legs_a = non_excl[ai]
-                    idx_b, legs_b = non_excl[bi]
-                    if len(legs_a) + len(legs_b) > max_legs:
-                        continue
-
-                    # Try both orders: A+B and B+A
-                    for first_legs, second_legs in [(legs_a, legs_b), (legs_b, legs_a)]:
-                        # Check: last leg of first finishes before first leg of second starts
-                        end_first = max((lane_map[lid].finish_time or 0) for lid in first_legs)
-                        start_second = min((lane_map[lid].pickup_time or 99) for lid in second_legs)
-                        if start_second < end_first - 0.25:
-                            continue  # second starts before first ends
-
-                        combined = list(first_legs) + list(second_legs)
-
-                        # Validate HOS
-                        all_starts = [lane_map[lid].pickup_time for lid in combined if lane_map[lid].pickup_time]
-                        all_ends = [lane_map[lid].finish_time for lid in combined if lane_map[lid].finish_time]
-                        if not all_starts or not all_ends:
-                            continue
-                        duty = (max(all_ends) - min(all_starts)) + pre_post_h
-                        if duty > HOS_MAX_DUTY:
-                            continue
-
-                        # Compute DH at the join point only
-                        last_of_first = lane_map[first_legs[-1]]
-                        first_of_second = lane_map[second_legs[0]]
-                        chain_dh = _compute_dh(last_of_first, first_of_second)
-                        drive = sum(lane_map[lid].route_duration_hours for lid in combined) + chain_dh / 55.0
-                        if drive > HOS_MAX_DRIVE:
-                            continue
-
-                        gap = start_second - end_first
-                        score = chain_dh * 100 + max(0, gap) * 10
-                        if best_merge is None or score < best_merge[0]:
-                            best_merge = (score, idx_a, idx_b, combined, chain_dh)
-                        break  # found valid order, no need to try reverse
-
-            # If no 0-DH concatenation found, try sequencer as fallback
-            # This allows interleaving legs from overlapping routes
-            if best_merge is None:
-                for ai in range(len(non_excl)):
-                    if best_merge and best_merge[4] == 0:
-                        break  # found a 0-DH sequencer merge, stop
-                    for bi in range(ai + 1, len(non_excl)):
-                        idx_a, legs_a = non_excl[ai]
-                        idx_b, legs_b = non_excl[bi]
-                        combined_any = list(legs_a) + list(legs_b)
-                        if len(combined_any) > max_legs:
-                            continue
-                        ordered, drive_seq, dh_seq, _, _ = _sequence_driver_day(
-                            combined_any, lane_map, graph, base_city, max_wait_h)
-                        all_s = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time]
-                        all_e = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time]
-                        if not all_s or not all_e:
-                            continue
-                        duty_seq = (max(all_e) - min(all_s)) + pre_post_h
-                        if drive_seq <= HOS_MAX_DRIVE and duty_seq <= HOS_MAX_DUTY:
-                            max_w = 0
-                            for k in range(1, len(ordered)):
-                                p, c = lane_map[ordered[k-1]], lane_map[ordered[k]]
-                                dh_h = _compute_dh(p, c) / 55.0
-                                if p.finish_time and c.pickup_time:
-                                    max_w = max(max_w, max(0, c.pickup_time - (p.finish_time + dh_h)))
-                            # Score: prefer low DH, then low wait
-                            score_seq = dh_seq * 100 + max_w * 50
-                            if best_merge is None or score_seq < best_merge[0]:
-                                best_merge = (score_seq, idx_a, idx_b, ordered, dh_seq)
-
-            if best_merge is None:
-                break
-            _, idx_a, idx_b, combined, merge_dh = best_merge
-            routes[idx_a] = (combined, False)
-            routes[idx_b] = (None, None)
-            routes = [(legs, excl) for legs, excl in routes if legs is not None]
-
-        day_routes[day] = routes
-
-    max_routes_day = max(len(r) for r in day_routes.values()) if day_routes else 0
-    print(f"  Greedy: max_routes_any_day={max_routes_day} (target={n_drivers})")
-
-    # Build and sequence all daily routes first
-    _DAY_ORDER = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
-    day_route_data = {}  # day -> list of {legs, drive, dh, duty, start, end, ...}
-
-    all_exact = True
-    for day in working_days:
-        dn = day_names_map[day]
-        day_route_data[dn] = []
-        for ri, (route_legs, _) in enumerate(day_routes.get(day, [])):
-            ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
-                route_legs, lane_map, graph, base_city, max_wait_h)
-            if not is_exact:
-                all_exact = False
-            miles = sum(lane_map[lid].route_miles for lid in ordered) + dh
-            starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
-            ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
-            earliest = min(starts) if starts else 0
-            latest = max(ends) if ends else 0
-            duty_h = (latest - earliest) + pre_post_h
-            names = [lane_map[lid].name for lid in ordered]
-            day_route_data[dn].append({
-                'legs': ordered, 'legNames': names, 'legCount': len(ordered),
-                'driveHours': round(drive, 1), 'dutyHours': round(duty_h, 1),
-                'miles': round(miles), 'deadheadMiles': dh,
-                'startTime': earliest, 'endTime': latest,
-                'isExact': is_exact, 'legGaps': gaps,
-            })
-
-    # Weekly rotation optimizer: assign daily routes to drivers using CP-SAT
-    # Respects: 10h off-duty between consecutive days, 70h weekly cap
-    from ortools.sat.python import cp_model
-    model = cp_model.CpModel()
-
-    ordered_days = sorted([dn for dn in day_route_data if day_route_data[dn]],
-                          key=lambda d: _DAY_ORDER.get(d, 99))
-    # Allow extra driver slots for rotation (some drivers take days off)
-    # With 9 routes/day and off-duty constraints, some drivers need rest days
-    n_actual = max(n_drivers + 2, max_routes_day + 2)  # extra slots for rotation
-
-    # Variables: y[day][route_idx][driver] = BoolVar
-    y = {}
-    for dn in ordered_days:
-        y[dn] = {}
-        for ri in range(len(day_route_data[dn])):
-            y[dn][ri] = {}
-            for d in range(n_actual):
-                y[dn][ri][d] = model.NewBoolVar(f'y_{dn}_{ri}_{d}')
-
-    # Each route assigned to exactly 1 driver
-    for dn in ordered_days:
-        for ri in range(len(day_route_data[dn])):
-            model.Add(sum(y[dn][ri][d] for d in range(n_actual)) == 1)
-
-    # Each driver at most 1 route per day
-    for dn in ordered_days:
-        for d in range(n_actual):
-            model.Add(sum(y[dn][ri][d] for ri in range(len(day_route_data[dn]))) <= 1)
-
-    # 10h off-duty between consecutive working days
-    for k in range(len(ordered_days) - 1):
-        dn_k = ordered_days[k]
-        dn_k1 = ordered_days[k + 1]
-        for d in range(n_actual):
-            for ri_k, rd_k in enumerate(day_route_data[dn_k]):
-                for ri_k1, rd_k1 in enumerate(day_route_data[dn_k1]):
-                    off_duty = (rd_k1['startTime'] + 24) - rd_k['endTime']
-                    if off_duty < OFF_DUTY_HOURS:
-                        # These two routes can't be on the same driver
-                        model.Add(y[dn_k][ri_k][d] + y[dn_k1][ri_k1][d] <= 1)
-
-    # 70h weekly duty cap per driver
-    for d in range(n_actual):
-        weekly_terms = []
-        for dn in ordered_days:
-            for ri, rd in enumerate(day_route_data[dn]):
-                weekly_terms.append(y[dn][ri][d] * int(rd['dutyHours'] * 10))
-        model.Add(sum(weekly_terms) <= int(MAX_WEEKLY_DUTY * 10))
-
-    # Minimize drivers used + balance duty
-    driver_used = [model.NewBoolVar(f'du_{d}') for d in range(n_actual)]
-    for d in range(n_actual):
-        has_work = []
-        for dn in ordered_days:
-            for ri in range(len(day_route_data[dn])):
-                has_work.append(y[dn][ri][d])
-        model.AddMaxEquality(driver_used[d], has_work + [model.NewConstant(0)])
-
-    model.Minimize(sum(du * 1000 for du in driver_used))
-
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 30
-    solver.parameters.num_workers = 8
-    solver.parameters.random_seed = 42
-    status = solver.Solve(model)
-
-    weekly_schedule = []
-    hos_violations = []
-
-    print(f"  Weekly rotation: status={solver.StatusName(status)} ({status})")
-    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        print(f"  Weekly rotation: {sum(solver.Value(du) for du in driver_used)} drivers")
-
-        for d in range(n_actual):
-            if not solver.Value(driver_used[d]):
-                continue
-            days = {}
-            for dn in ordered_days:
-                for ri, rd in enumerate(day_route_data[dn]):
-                    if solver.Value(y[dn][ri][d]):
-                        days[dn] = rd
-                        if rd['driveHours'] > HOS_MAX_DRIVE:
-                            hos_violations.append(f'D{d+1} {dn}: {rd["driveHours"]}h drive')
-                        if rd['dutyHours'] > HOS_MAX_DUTY:
-                            hos_violations.append(f'D{d+1} {dn}: {rd["dutyHours"]}h duty')
-
-            weekly_duty = sum(v['dutyHours'] for v in days.values())
-            if weekly_duty > MAX_WEEKLY_DUTY:
-                hos_violations.append(f'D{d+1}: {weekly_duty:.1f}h weekly')
-
-            sorted_dns = sorted(days.keys(), key=lambda dn: _DAY_ORDER.get(dn, 99))
-            prev_end = None; prev_dn = None
-            for dn in sorted_dns:
-                dd = days[dn]
-                if prev_end is not None and dd.get('startTime') is not None:
-                    off = (dd['startTime'] + 24) - prev_end
-                    if off < OFF_DUTY_HOURS:
-                        hos_violations.append(f'D{d+1} {prev_dn}->{dn}: {off:.1f}h off')
-                prev_end = dd.get('endTime'); prev_dn = dn
-
-            weekly_schedule.append({
-                'driverId': len(weekly_schedule) + 1, 'days': days,
-                'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
-                'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
-                'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
-                'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
-                'daysWorked': len(days),
-            })
-    else:
-        print(f"  Weekly rotation INFEASIBLE — falling back to index assignment")
-        # Fallback to naive assignment (same as before)
-        driver_days_map = {d: {} for d in range(n_actual)}
-        for day in working_days:
-            dn = day_names_map[day]
-            for ri, rd in enumerate(day_route_data.get(dn, [])):
-                if ri < len(driver_days_map):
-                    driver_days_map[ri][dn] = rd
-        for d_idx in sorted(driver_days_map.keys()):
-            days = driver_days_map[d_idx]
-            if not days: continue
-            weekly_schedule.append({
-                'driverId': d_idx + 1, 'days': days,
-                'totalDriveHours': round(sum(v['driveHours'] for v in days.values()), 1),
-                'totalDutyHours': round(sum(v['dutyHours'] for v in days.values()), 1),
-                'totalMiles': round(sum(v.get('miles', 0) for v in days.values())),
-                'totalDeadheadMiles': round(sum(v.get('deadheadMiles', 0) for v in days.values())),
-                'daysWorked': len(days),
-            })
-
-    elapsed = _t.time() - start
-    hos_compliant = len(hos_violations) == 0
-    print(f"  Greedy: {len(weekly_schedule)} drivers, {elapsed:.1f}s")
-
-    return {
-        'success': True, 'driverCount': len(weekly_schedule),
-        'weeklySchedule': weekly_schedule,
-        'hosCompliant': hos_compliant,
-        'hosViolations': hos_violations if not hos_compliant else [],
-        'allExact': all_exact,
-        'constraints': {'offDutyHours': OFF_DUTY_HOURS, 'maxWeeklyDuty': MAX_WEEKLY_DUTY,
-                        'maxDailyDrive': HOS_MAX_DRIVE, 'maxDailyDuty': HOS_MAX_DUTY},
-        'solverVersion': 'greedy',
-    }
-
-
 def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                            day_lane_ids, working_days, day_names_map,
                            pre_post_h, max_legs, max_wait_h, base_city='colton'):
@@ -3949,6 +3604,16 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
         for lid in sorted(unassigned, key=lambda l: lane_map[l].pickup_time or 99):
             built_routes.append(([lid], _corridor_of_leg(lane_map[lid])))
 
+        # Safety pass: ensure no lane ID appears more than once across all routes for this day
+        day_seen: set = set()
+        deduped_routes = []
+        for r_legs, r_corr in built_routes:
+            clean = [l for l in r_legs if l not in day_seen]
+            day_seen.update(clean)
+            if clean:
+                deduped_routes.append((clean, r_corr))
+        built_routes = deduped_routes
+
         # Step 4: Redistribute legs to enable merging
         # If we have too many routes, try moving legs between same-corridor
         # routes to create one large (7-8 legs) and one small (1-2 legs)
@@ -3969,7 +3634,10 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                 if total_legs <= max_legs and len(legs_lists) == 2:
                     ri_a, legs_a = legs_lists[0]
                     ri_b, legs_b = legs_lists[1]
-                    combined = list(legs_a) + list(legs_b)
+                    # Deduplicate: a lane can only appear once across both routes
+                    seen = set(legs_a)
+                    legs_b_deduped = [l for l in legs_b if l not in seen]
+                    combined = list(legs_a) + legs_b_deduped
                     ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
                         combined, lane_map, graph, base_city, max_wait_h)
                     starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
@@ -3982,43 +3650,144 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                             built_routes[ri_b] = (None, None)  # mark for removal
             built_routes = [(r, c) for r, c in built_routes if r is not None]
 
-        # Now do all-pairs merge
+        # Now do all-pairs merge with best-of-N orderings
+        # Running merge with different sort orders avoids locally-optimal
+        # but globally-suboptimal decisions
         n_local = n_drivers - len(routes)
 
-        while len(built_routes) > n_local:
-            best_merge = None  # (i, j, ordered, dh)
+        def _do_all_pairs_merge(working, n_target):
+            """Two-tier greedy all-pairs merge.
 
-            for dh_limit, corr_limit in [(MAX_ROUTE_DH, 2), (160, 3)]:
-                if best_merge:
+            Tier 1: fast feasibility check (greedy ordering) — handles easy merges
+            Tier 2: CP-SAT check — handles hard interleaving merges
+            Skip routes with duty > 12h (structurally unmergeable).
+            """
+            working = list(working)
+            total_dh = 0
+
+            while len(working) > n_target:
+                # Pre-compute duty spans for skip logic
+                w_duty = {}
+                for wi, (w_legs, _) in enumerate(working):
+                    ss = [lane_map[lid].pickup_time for lid in w_legs if lane_map[lid].pickup_time]
+                    ee = [lane_map[lid].finish_time for lid in w_legs if lane_map[lid].finish_time]
+                    w_duty[wi] = (max(ee) - min(ss) + pre_post_h) if ss and ee else 0
+
+                best_merge = None
+                # Tier 1: fast check
+                for dh_limit, corr_limit in [(MAX_ROUTE_DH, 2), (160, 3)]:
+                    if best_merge:
+                        break
+                    for i in range(len(working)):
+                        if w_duty.get(i, 0) > 12.0:
+                            continue
+                        for j in range(i + 1, len(working)):
+                            if w_duty.get(j, 0) > 12.0:
+                                continue
+                            combined = list(working[i][0]) + list(working[j][0])
+                            if len(combined) > max_legs:
+                                continue
+                            ordered, dh, feasible = _fast_merge_check(
+                                combined, lane_map, pre_post_h, max_wait_h)
+                            if not feasible:
+                                continue
+                            merged_corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered)
+                            if len(merged_corrs) > corr_limit or dh > dh_limit:
+                                continue
+                            if best_merge is None or dh < best_merge[3]:
+                                best_merge = (i, j, ordered, dh)
+
+                # Tier 2: CP-SAT check (only if fast check found nothing)
+                if best_merge is None:
+                    for dh_limit, corr_limit in [(MAX_ROUTE_DH, 2), (160, 3)]:
+                        if best_merge:
+                            break
+                        for i in range(len(working)):
+                            if w_duty.get(i, 0) > 12.0:
+                                continue
+                            for j in range(i + 1, len(working)):
+                                if w_duty.get(j, 0) > 12.0:
+                                    continue
+                                combined = list(working[i][0]) + list(working[j][0])
+                                if len(combined) > max_legs:
+                                    continue
+                                ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
+                                    combined, lane_map, graph, base_city, max_wait_h)
+                                starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
+                                ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
+                                if not starts or not ends:
+                                    continue
+                                duty_h = (max(ends) - min(starts)) + pre_post_h
+                                if drive > HOS_MAX_DRIVE or duty_h > HOS_MAX_DUTY:
+                                    continue
+                                merged_corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered)
+                                if len(merged_corrs) > corr_limit or dh > dh_limit:
+                                    continue
+                                if best_merge is None or dh < best_merge[3]:
+                                    best_merge = (i, j, ordered, dh)
+
+                if best_merge is None:
                     break
-                for i in range(len(built_routes)):
-                    for j in range(i + 1, len(built_routes)):
-                        combined = list(built_routes[i][0]) + list(built_routes[j][0])
-                        if len(combined) > max_legs:
-                            continue
-                        ordered, drive, dh, is_exact, gaps = _sequence_driver_day(
-                            combined, lane_map, graph, base_city, max_wait_h)
-                        starts = [lane_map[lid].pickup_time for lid in ordered if lane_map[lid].pickup_time is not None]
-                        ends = [lane_map[lid].finish_time for lid in ordered if lane_map[lid].finish_time is not None]
-                        if not starts or not ends:
-                            continue
-                        duty_h = (max(ends) - min(starts)) + pre_post_h
-                        if drive > HOS_MAX_DRIVE or duty_h > HOS_MAX_DUTY:
-                            continue
-                        merged_corrs = set(_corridor_of_leg(lane_map[lid]) for lid in ordered)
-                        if len(merged_corrs) > corr_limit or dh > dh_limit:
-                            continue
-                        if best_merge is None or dh < best_merge[3]:
-                            best_merge = (i, j, ordered, dh)
+                i, j, ordered, dh = best_merge
+                merged_corr = working[i][1] + '+' + working[j][1]
+                working.pop(j)
+                working.pop(i)
+                working.append((ordered, merged_corr))
+                working.sort(key=lambda x: len(x[0]))
+                total_dh += dh
+            return working, total_dh
 
-            if best_merge is None:
+        if len(built_routes) > n_local:
+            orderings = [
+                sorted(built_routes, key=lambda x: len(x[0])),
+                sorted(built_routes, key=lambda x: -len(x[0])),
+                sorted(built_routes, key=lambda x: min(
+                    (lane_map[lid].pickup_time or 99 for lid in x[0]), default=99)),
+            ]
+            best_result = None
+            best_total_dh = float('inf')
+            for ordering in orderings:
+                merged, total_dh = _do_all_pairs_merge(ordering, n_local)
+                if len(merged) <= n_local and total_dh < best_total_dh:
+                    best_total_dh = total_dh
+                    best_result = merged
+                elif best_result is None:
+                    best_result = merged
+                    best_total_dh = total_dh
+            built_routes = best_result if best_result else built_routes
+
+        # Step 5b: Absorb singletons — force 1-2 leg routes into larger routes
+        # Skip routes with duty > 12h (structurally unmergeable)
+        absorbed = True
+        while absorbed:
+            absorbed = False
+            small_routes = [(i, r, c) for i, (r, c) in enumerate(built_routes) if len(r) <= 2]
+            if not small_routes:
                 break
-            i, j, ordered, dh = best_merge
-            merged_corr = built_routes[i][1] + '+' + built_routes[j][1]
-            built_routes.pop(j)  # remove higher index first
-            built_routes.pop(i)
-            built_routes.append((ordered, merged_corr))
-            built_routes.sort(key=lambda x: len(x[0]))
+            for si, s_legs, s_corr in reversed(small_routes):
+                # Check if this small route is unmergeable (duty > 12h)
+                s_starts = [lane_map[lid].pickup_time for lid in s_legs if lane_map[lid].pickup_time]
+                s_ends = [lane_map[lid].finish_time for lid in s_legs if lane_map[lid].finish_time]
+                s_duty = (max(s_ends) - min(s_starts) + pre_post_h) if s_starts and s_ends else 0
+                if s_duty > 12.0:
+                    continue  # can't absorb — duty too wide
+                best_absorb = None
+                for ti, (t_legs, t_corr) in enumerate(built_routes):
+                    if ti == si or len(t_legs) + len(s_legs) > max_legs:
+                        continue
+                    combined = list(t_legs) + list(s_legs)
+                    ordered, dh, feasible = _fast_merge_check(
+                        combined, lane_map, pre_post_h, max_wait_h)
+                    if not feasible:
+                        continue
+                    if best_absorb is None or dh < best_absorb[2]:
+                        best_absorb = (ti, ordered, dh, t_corr)
+                if best_absorb:
+                    ti, ordered, dh, t_corr = best_absorb
+                    built_routes[ti] = (ordered, t_corr + '+' + s_corr)
+                    built_routes.pop(si)
+                    absorbed = True
+                    break  # restart scan after mutation
 
         for route_legs, _ in built_routes:
             routes.append((route_legs, False))
@@ -4118,6 +3887,22 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
 
     max_routes_day = max(len(r) for r in day_routes.values()) if day_routes else 0
     print(f"  Greedy: max_routes_any_day={max_routes_day} (target={n_drivers})")
+    if _os.environ.get('SOLVER_DEBUG'):
+        _day_order = {'Mon':0,'Tue':1,'Wed':2,'Thu':3,'Fri':4,'Sat':5,'Sun':6}
+        for _dd in sorted(day_routes.keys(), key=lambda d: _day_order.get(d, 99)):
+            _dr = day_routes[_dd]
+            _lc = sorted([len(r[0]) for r in _dr], reverse=True)
+            _tl = sum(len(r[0]) for r in _dr)
+            _sm_info = []
+            for r_legs, _ in _dr:
+                if len(r_legs) <= 2:
+                    _starts = [lane_map[lid].pickup_time for lid in r_legs if lane_map[lid].pickup_time is not None]
+                    _ends = [lane_map[lid].finish_time for lid in r_legs if lane_map[lid].finish_time is not None]
+                    _duty = (max(_ends) - min(_starts) + pre_post_h) if _starts and _ends else 0
+                    _names = [lane_map[lid].name for lid in r_legs]
+                    _sm_info.append(f"{len(r_legs)}leg({_names[0]},duty={_duty:.1f}h)")
+            print(f"    {_dd}: {len(_dr)} routes, {_tl} legs, sizes={_lc}" +
+                  (f" small={_sm_info}" if _sm_info else ""))
 
     # (compression is now integrated into step 5 merge above)
 
@@ -4147,6 +3932,11 @@ def _build_greedy_schedule(n_drivers, lanes, lane_map, graph, lane_active_days,
                 'startTime': earliest, 'endTime': latest,
                 'isExact': is_exact, 'legGaps': gaps,
             })
+
+    # Early exit: if any day has more routes than target, skip expensive rotation
+    if max_routes_day > n_drivers:
+        print(f"  Greedy: {max_routes_day} routes on peak day > target {n_drivers}, skipping rotation")
+        return None  # signal infeasible at this driver count
 
     # Weekly rotation optimizer: CP-SAT assigns daily routes to drivers
     # Ensures: 10h off-duty between consecutive days, 70h weekly cap

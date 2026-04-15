@@ -24,6 +24,7 @@ import { useRouter, useParams } from 'next/navigation';
 import { useState, useEffect, FormEvent } from 'react';
 import { Loader2 } from 'lucide-react';
 import { StopInput } from '@/components/contract-lanes/stop-input';
+import { DaysOfWeekSelector } from '@/components/contract-lanes/days-of-week-selector';
 import { Id } from '@/convex/_generated/dataModel';
 
 type Stop = {
@@ -51,11 +52,15 @@ export default function EditContractLanePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [stops, setStops] = useState<Stop[]>([]);
   const [isActive, setIsActive] = useState(true);
+  const [activeDays, setActiveDays] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [excludeHolidays, setExcludeHolidays] = useState(true);
 
   useEffect(() => {
     if (lane) {
       setStops(lane.stops);
       setIsActive(lane.isActive ?? true);
+      setActiveDays(lane.scheduleRule?.activeDays ?? [1, 2, 3, 4, 5]);
+      setExcludeHolidays(lane.scheduleRule?.excludeFederalHolidays ?? true);
     }
   }, [lane]);
 
@@ -125,6 +130,11 @@ export default function EditContractLanePage() {
         minimumQuantity: formData.get('minimumQuantity')
           ? Number(formData.get('minimumQuantity'))
           : undefined,
+        scheduleRule: {
+          activeDays,
+          excludeFederalHolidays: excludeHolidays,
+          customExclusions: lane?.scheduleRule?.customExclusions ?? [],
+        },
         subsidiary: (formData.get('subsidiary') as string) || undefined,
         isActive: isActive,
       });
@@ -329,6 +339,20 @@ export default function EditContractLanePage() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+            </Card>
+
+            {/* Operating Schedule */}
+            <Card className="p-6 mb-6">
+              <h2 className="text-xl font-semibold mb-4">Operating Schedule</h2>
+              <div className="space-y-2">
+                <Label>Operating Days</Label>
+                <DaysOfWeekSelector
+                  value={activeDays}
+                  onChange={setActiveDays}
+                  excludeHolidays={excludeHolidays}
+                  onExcludeHolidaysChange={setExcludeHolidays}
+                />
               </div>
             </Card>
 

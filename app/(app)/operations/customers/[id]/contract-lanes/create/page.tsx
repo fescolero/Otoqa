@@ -25,6 +25,7 @@ import { useState, FormEvent } from 'react';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { Loader2 } from 'lucide-react';
 import { StopInput } from '@/components/contract-lanes/stop-input';
+import { DaysOfWeekSelector } from '@/components/contract-lanes/days-of-week-selector';
 import { Id } from '@/convex/_generated/dataModel';
 
 type Stop = {
@@ -62,6 +63,8 @@ export default function CreateContractLanePage() {
     },
   ]);
   const [isActive, setIsActive] = useState(true);
+  const [activeDays, setActiveDays] = useState<number[]>([1, 2, 3, 4, 5]); // Mon-Fri default
+  const [excludeHolidays, setExcludeHolidays] = useState(true);
 
   const getUserInitials = (name?: string, email?: string) => {
     if (name) {
@@ -124,6 +127,11 @@ export default function CreateContractLanePage() {
         minimumQuantity: formData.get('minimumQuantity')
           ? Number(formData.get('minimumQuantity'))
           : undefined,
+        scheduleRule: {
+          activeDays,
+          excludeFederalHolidays: excludeHolidays,
+          customExclusions: [],
+        },
         subsidiary: (formData.get('subsidiary') as string) || undefined,
         isActive: isActive,
         workosOrgId,
@@ -306,6 +314,20 @@ export default function CreateContractLanePage() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+            </Card>
+
+            {/* Operating Schedule */}
+            <Card className="p-6 mb-6">
+              <h2 className="text-xl font-semibold mb-4">Operating Schedule</h2>
+              <div className="space-y-2">
+                <Label>Operating Days</Label>
+                <DaysOfWeekSelector
+                  value={activeDays}
+                  onChange={setActiveDays}
+                  excludeHolidays={excludeHolidays}
+                  onExcludeHolidaysChange={setExcludeHolidays}
+                />
               </div>
             </Card>
 

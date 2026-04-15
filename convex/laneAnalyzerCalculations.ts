@@ -1974,13 +1974,25 @@ export const runFullAnalysis = internalMutation({
       state: b.state ?? '',
     }));
 
-    // Clear old results for this session
+    // Find the existing AGGREGATE record (will be patched in-place, not deleted).
+    // Keeping AGGREGATE in place means the solver.weeklySchedule stored there
+    // survives re-analysis — fuel price refreshes, geocoding updates, etc. never
+    // discard an optimized schedule.
+    const existingAggregate = await ctx.db
+      .query('laneAnalysisResults')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .filter((q) => q.eq(q.field('resultType'), 'AGGREGATE'))
+      .first();
+
+    // Clear only PER_LANE and OPTIMIZATION_SUGGESTION results — leave AGGREGATE intact.
     const oldResults = await ctx.db
       .query('laneAnalysisResults')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
       .collect();
     for (const r of oldResults) {
-      await ctx.db.delete(r._id);
+      if (r.resultType !== 'AGGREGATE') {
+        await ctx.db.delete(r._id);
+      }
     }
 
     const now = Date.now();
@@ -2296,11 +2308,28 @@ export const runFullAnalysis = internalMutation({
       };
     });
 
-    // Write aggregate result
-    await ctx.db.insert('laneAnalysisResults', {
-      sessionId: args.sessionId,
-      workosOrgId: session.workosOrgId,
-      resultType: 'AGGREGATE',
+    // Build the fresh hosAnalysis payload (cost/driver metrics only).
+    // The solver.weeklySchedule key is NOT included here — it lives separately
+    // in the AGGREGATE record and is never touched by re-analysis.
+    const freshHosAnalysisMetrics = {
+      driverCounts,
+      unpairedDriverCounts,
+      schedulePattern: schedulePatternParsed,
+      shiftBuilding: {
+        chainedLanes: driverCounts.chainedLaneCount,
+        soloLanes: driverCounts.soloLaneCount,
+        driverSavings: driverCounts.driverSavings,
+        avgLegsPerShift: driverCounts.avgLegsPerShift,
+        maxLegsInAnyShift: driverCounts.maxLegsInAnyShift,
+        totalShiftPatterns: driverCounts.totalShiftPatterns,
+        weeklyHosExtraDrivers: driverCounts.weeklyHosExtraDrivers,
+        avgDutyPerShift: driverCounts.avgDutyPerShift,
+        dutyBands: driverCounts.dutyBands,
+        peakDayShifts: peakDayShiftSummary,
+      },
+    };
+
+    const freshFields = {
       computedAt: now,
       annualRunCount: entryAnalyses.reduce((sum, ea) => sum + ea.annualRunCount, 0),
       costPerYear: Math.round(totalCostPerYear * 100) / 100,
@@ -2315,24 +2344,32 @@ export const runFullAnalysis = internalMutation({
       realisticDriverCount: driverCounts.realisticDriverCount,
       minTruckCount: driverCounts.truckCount,
       realisticTruckCount: driverCounts.truckCount,
-      hosAnalysis: JSON.stringify({
-        driverCounts,
-        unpairedDriverCounts,
-        schedulePattern: schedulePatternParsed,
-        shiftBuilding: {
-          chainedLanes: driverCounts.chainedLaneCount,
-          soloLanes: driverCounts.soloLaneCount,
-          driverSavings: driverCounts.driverSavings,
-          avgLegsPerShift: driverCounts.avgLegsPerShift,
-          maxLegsInAnyShift: driverCounts.maxLegsInAnyShift,
-          totalShiftPatterns: driverCounts.totalShiftPatterns,
-          weeklyHosExtraDrivers: driverCounts.weeklyHosExtraDrivers,
-          avgDutyPerShift: driverCounts.avgDutyPerShift,
-          dutyBands: driverCounts.dutyBands,
-          peakDayShifts: peakDayShiftSummary,
-        },
-      }),
-    });
+    };
+
+    if (existingAggregate) {
+      // Patch in-place: merge fresh metrics into hosAnalysis while preserving
+      // any solver.weeklySchedule that was stored there.
+      const existingParsed = existingAggregate.hosAnalysis
+        ? (() => { try { return JSON.parse(existingAggregate.hosAnalysis as string); } catch { return {}; } })()
+        : {};
+      await ctx.db.patch(existingAggregate._id, {
+        ...freshFields,
+        hosAnalysis: JSON.stringify({
+          ...freshHosAnalysisMetrics,
+          // Carry solver key forward untouched if present
+          ...(existingParsed?.solver ? { solver: existingParsed.solver } : {}),
+        }),
+      });
+    } else {
+      // First analysis run for this session — no existing AGGREGATE to patch
+      await ctx.db.insert('laneAnalysisResults', {
+        sessionId: args.sessionId,
+        workosOrgId: session.workosOrgId,
+        resultType: 'AGGREGATE',
+        ...freshFields,
+        hosAnalysis: JSON.stringify(freshHosAnalysisMetrics),
+      });
+    }
   },
 });
 
