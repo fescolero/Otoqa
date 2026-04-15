@@ -54,7 +54,6 @@ import type * as fourKitesSyncHelpers from "../fourKitesSyncHelpers.js";
 import type * as fourKitesTest from "../fourKitesTest.js";
 import type * as fuelEntries from "../fuelEntries.js";
 import type * as fuelReceiptImport from "../fuelReceiptImport.js";
-import type * as fuelReceiptImportState from "../fuelReceiptImportState.js";
 import type * as fuelReports from "../fuelReports.js";
 import type * as fuelVendors from "../fuelVendors.js";
 import type * as getContractLaneFull from "../getContractLaneFull.js";
@@ -160,7 +159,6 @@ declare const fullApi: ApiFromModules<{
   fourKitesTest: typeof fourKitesTest;
   fuelEntries: typeof fuelEntries;
   fuelReceiptImport: typeof fuelReceiptImport;
-  fuelReceiptImportState: typeof fuelReceiptImportState;
   fuelReports: typeof fuelReports;
   fuelVendors: typeof fuelVendors;
   getContractLaneFull: typeof getContractLaneFull;

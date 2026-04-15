@@ -41,6 +41,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Local ops logs (not for the repo)
+scripts/autofix-log.md
+
 # Internal documentation (keep only README.md and convex/README.md)
 /docs/
 /*_COMPLETE.md
