@@ -27,14 +27,19 @@ function isRecoverableDbError(error: unknown): boolean {
 }
 
 async function resetDbHandle(): Promise<void> {
-  dbInitPromise = null; // cancel any in-flight init so next getDb() starts fresh
-  if (db) {
-    try {
-      await db.closeAsync();
-    } catch {
-      // ignore dead native handles
-    }
-    db = null;
+  const stale = db;
+  // Null both module-level refs immediately — before any await — so concurrent
+  // getDb() callers that run during the close see a clean slate and open a
+  // fresh handle rather than getting the (about-to-be-closed) stale one.
+  db = null;
+  dbInitPromise = null;
+  if (stale) {
+    // Fire-and-forget: do NOT await closeAsync(). Concurrent callers may hold a
+    // direct reference to `stale` with an in-flight runAsync(); awaiting close
+    // here would destroy the native handle while their operation is executing,
+    // causing NullPointerException. Releasing the module reference now lets the
+    // GC reclaim the native handle once all in-flight operations complete.
+    stale.closeAsync().catch(() => {});
   }
 }
 

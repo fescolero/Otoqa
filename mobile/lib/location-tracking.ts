@@ -283,7 +283,16 @@ export async function recoverFallbackLocations(): Promise<number> {
       }
     }
 
-    await storage.delete(BG_FALLBACK_LOCATIONS_KEY);
+    // Only clear the fallback once we've confirmed at least one record made it
+    // into SQLite. If inserted===0, SQLite may be broken (NullPointerException
+    // surviving withDbRetry) and clearing here would silently discard GPS data.
+    if (inserted > 0 || locations.length === 0) {
+      await storage.delete(BG_FALLBACK_LOCATIONS_KEY);
+    } else {
+      console.warn(
+        '[LocationTracking] Fallback recovery: 0 records inserted (SQLite may be broken), keeping fallback for retry',
+      );
+    }
     console.log(
       `[LocationTracking] Recovered ${inserted}/${locations.length} fallback locations from AsyncStorage to SQLite`,
     );
