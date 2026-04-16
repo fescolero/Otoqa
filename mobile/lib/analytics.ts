@@ -289,6 +289,8 @@ export function trackWatchLocationReceived(context: {
   age_ms: number;
   speed_mps: number | null;
   heading_deg: number | null;
+  loadId?: string;
+  driverId?: string;
 }) {
   capture('watch_location_received', context);
 }
@@ -299,6 +301,8 @@ export function trackWatchLocationFiltered(context: {
   age_ms: number;
   distance_m?: number | null;
   gap_ms?: number | null;
+  loadId?: string;
+  driverId?: string;
 }) {
   capture('watch_location_filtered', context);
 }
@@ -309,11 +313,18 @@ export function trackWatchLocationSaved(context: {
   distance_m: number | null;
   gap_ms: number | null;
   used_fallback: boolean;
+  loadId?: string;
+  driverId?: string;
 }) {
   capture('watch_location_saved', context);
 }
 
-export function trackWatchLocationError(context: { step: 'callback' | 'insert' | 'sync'; error: string }) {
+export function trackWatchLocationError(context: {
+  step: 'callback' | 'insert' | 'sync';
+  error: string;
+  loadId?: string;
+  driverId?: string;
+}) {
   capture('watch_location_error', context);
 }
 
@@ -327,6 +338,8 @@ export function trackBGTaskFired(context: {
   ages: string;
   sqliteAvailable: boolean;
   trackingActive: boolean;
+  loadId?: string;
+  driverId?: string;
 }) {
   capture('bg_task_fired', context);
 }
@@ -342,12 +355,28 @@ export function trackBGTaskResult(context: {
   syncSuccess?: boolean;
   syncCount?: number;
   durationMs: number;
+  loadId?: string;
+  driverId?: string;
 }) {
   capture('bg_task_result', context);
 }
 
-export function trackBGTaskError(context: { step: string; error: string }) {
+export function trackBGTaskError(context: {
+  step: string;
+  error: string;
+  loadId?: string;
+  driverId?: string;
+}) {
   capture('bg_task_error', context);
+}
+
+export function trackZombieClearance(context: {
+  loadId: string;
+  driverId: string;
+  recordsCleared: number;
+  rejectionDurationMs: number;
+}) {
+  capture('zombie_clearance', context);
 }
 
 export function trackBGTaskReregistered(context: {

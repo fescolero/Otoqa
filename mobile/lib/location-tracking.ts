@@ -26,6 +26,7 @@ import {
   trackWatchLocationFiltered,
   trackWatchLocationSaved,
   trackWatchLocationError,
+  trackZombieClearance,
 } from './analytics';
 
 // ============================================
@@ -379,7 +380,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       '[LocationTracking] BG task: SQLite NOT available in background:',
       dbErr instanceof Error ? dbErr.message : dbErr,
     );
-    trackBGTaskError({ step: 'sqlite_init', error: dbErr instanceof Error ? dbErr.message : String(dbErr) });
+    trackBGTaskError({ step: 'sqlite_init', error: dbErr instanceof Error ? dbErr.message : String(dbErr), loadId: state.loadId, driverId: state.driverId });
   }
 
   trackBGTaskFired({
@@ -388,6 +389,8 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     ages,
     sqliteAvailable,
     trackingActive: true,
+    loadId: state.loadId,
+    driverId: state.driverId,
   });
 
   // Step 4: Filter and save locations
@@ -515,6 +518,8 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         trackBGTaskError({
           step: 'sqlite_insert',
           error: sqliteErr instanceof Error ? sqliteErr.message : String(sqliteErr),
+          loadId: state.loadId,
+          driverId: state.driverId,
         });
         usedFallback = true;
         await saveFallbackLocations(locationsToSave);
@@ -570,6 +575,12 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
               // 5 min of continuous rejection — mark as synced to break the loop
               const idsForLoad = unsynced.filter((r) => r.loadId === lid).map((r) => r.id);
               await markAsSynced(idsForLoad);
+              trackZombieClearance({
+                loadId: lid,
+                driverId: state.driverId,
+                recordsCleared: idsForLoad.length,
+                rejectionDurationMs: now - firstSeen,
+              });
               _syncRejectionFirstSeen.delete(lid);
               cleared = true;
               console.warn(
@@ -582,14 +593,14 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
               `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — will retry (zombie timer running)`,
             );
           }
-          trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
+          trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}`, loadId: state.loadId, driverId: state.driverId });
         }
       }
     } catch (flushError) {
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
       console.warn(`[LocationTracking] BG HTTP sync failed (points safe in SQLite): ${errMsg}`);
       syncAttempted = true;
-      trackBGTaskError({ step: 'sync', error: errMsg });
+      trackBGTaskError({ step: 'sync', error: errMsg, loadId: state.loadId, driverId: state.driverId });
     }
   } else if (!MOBILE_LOCATION_API_KEY) {
     console.warn('[LocationTracking] BG sync skipped: MOBILE_LOCATION_API_KEY not configured');
@@ -606,6 +617,8 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     syncAttempted,
     syncSuccess: syncAttempted ? syncSuccess : undefined,
     syncCount: syncAttempted ? syncCount : undefined,
+    loadId: state.loadId,
+    driverId: state.driverId,
     durationMs,
   });
 
@@ -1166,14 +1179,19 @@ async function startForegroundPolling(organizationId: string) {
         try {
           const now = Date.now();
           const ageMs = now - location.timestamp;
+
+          // Read state first so we can include loadId/driverId in all analytics
+          const state = await getTrackingState();
+
           trackWatchLocationReceived({
             accuracy_m: location.coords.accuracy ?? null,
             age_ms: ageMs,
             speed_mps: location.coords.speed ?? null,
             heading_deg: location.coords.heading ?? null,
+            loadId: state?.loadId,
+            driverId: state?.driverId,
           });
 
-          const state = await getTrackingState();
           if (!state?.isActive) {
             trackWatchLocationFiltered({
               reason: 'inactive',
@@ -1189,6 +1207,8 @@ async function startForegroundPolling(organizationId: string) {
               reason: 'accuracy',
               accuracy_m: location.coords.accuracy,
               age_ms: ageMs,
+              loadId: state.loadId,
+              driverId: state.driverId,
             });
             return;
           }
@@ -1214,6 +1234,8 @@ async function startForegroundPolling(organizationId: string) {
               age_ms: ageMs,
               distance_m: Number.isFinite(distance) ? distance : null,
               gap_ms: Number.isFinite(timeSinceLast) ? timeSinceLast : null,
+              loadId: state.loadId,
+              driverId: state.driverId,
             });
             return;
           }
@@ -1230,6 +1252,8 @@ async function startForegroundPolling(organizationId: string) {
               age_ms: ageMs,
               distance_m: Number.isFinite(distance) ? distance : null,
               gap_ms: Number.isFinite(timeSinceLast) ? timeSinceLast : null,
+              loadId: state.loadId,
+              driverId: state.driverId,
             });
             return;
           }
@@ -1257,6 +1281,8 @@ async function startForegroundPolling(organizationId: string) {
             trackWatchLocationError({
               step: 'insert',
               error: insertError instanceof Error ? insertError.message : String(insertError),
+              loadId: state.loadId,
+              driverId: state.driverId,
             });
             await saveFallbackLocations([locationRecord]);
             usedFallback = true;
@@ -1275,6 +1301,8 @@ async function startForegroundPolling(organizationId: string) {
             distance_m: Number.isFinite(distance) ? distance : null,
             gap_ms: Number.isFinite(timeSinceLast) ? timeSinceLast : null,
             used_fallback: usedFallback,
+            loadId: state.loadId,
+            driverId: state.driverId,
           });
           console.log(
             `[LocationTracking] Watch: saved (acc=${location.coords.accuracy?.toFixed(0)}m, dist=${distance.toFixed(0)}m, gap=${(timeSinceLast / 1000).toFixed(0)}s, reason=${reason})`,
@@ -1289,6 +1317,8 @@ async function startForegroundPolling(organizationId: string) {
               trackWatchLocationError({
                 step: 'sync',
                 error: syncErr instanceof Error ? syncErr.message : String(syncErr),
+                loadId: state.loadId,
+                driverId: state.driverId,
               });
               console.warn(
                 '[LocationTracking] Watch: sync failed, will retry:',
@@ -1443,8 +1473,15 @@ async function syncUnsyncedToConvex(
         if (!firstSeen) {
           _syncRejectionFirstSeen.set(lid, now);
         } else if (now - firstSeen > ZOMBIE_CLEARANCE_TIMEOUT_MS) {
-          const idsForLoad = unsynced.filter((r) => r.loadId === lid).map((r) => r.id);
+          const recordsForLoad = unsynced.filter((r) => r.loadId === lid);
+          const idsForLoad = recordsForLoad.map((r) => r.id);
           await markAsSynced(idsForLoad);
+          trackZombieClearance({
+            loadId: lid,
+            driverId: recordsForLoad[0]?.driverId ?? 'unknown',
+            recordsCleared: idsForLoad.length,
+            rejectionDurationMs: now - firstSeen,
+          });
           _syncRejectionFirstSeen.delete(lid);
           cleared = true;
           console.warn(
@@ -1452,12 +1489,14 @@ async function syncUnsyncedToConvex(
           );
         }
       }
+      const sampleDriverId = unsynced[0]?.driverId;
+      const sampleLoadId = unsynced[0]?.loadId;
       if (!cleared) {
         console.warn(
           `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — will retry (zombie timer running)`,
         );
       }
-      trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
+      trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}`, loadId: sampleLoadId, driverId: sampleDriverId });
     }
 
     return { success: true, synced: result.inserted };
