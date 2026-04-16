@@ -552,16 +552,36 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         syncCount = result.inserted;
 
         if (result.inserted > 0) {
-          // Only mark synced if the server actually accepted points.
-          // If inserted === 0, the server rejected everything (org mismatch,
-          // driver deleted, etc.) — retaining as unsynced lets us retry later
-          // or investigate why points are rejected.
           await markAsSynced(unsynced.map((r) => r.id));
+          // Server accepted points — clear any rejection tracker for this load
+          const acceptedLoadIds = new Set(unsynced.map((r) => r.loadId));
+          for (const lid of acceptedLoadIds) _syncRejectionFirstSeen.delete(lid);
           console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
         } else {
-          console.warn(
-            `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
-          );
+          // Server rejected everything. Start or check the zombie clearance timer.
+          const rejectedLoadIds = new Set(unsynced.map((r) => r.loadId));
+          const now = Date.now();
+          let cleared = false;
+          for (const lid of rejectedLoadIds) {
+            const firstSeen = _syncRejectionFirstSeen.get(lid);
+            if (!firstSeen) {
+              _syncRejectionFirstSeen.set(lid, now);
+            } else if (now - firstSeen > ZOMBIE_CLEARANCE_TIMEOUT_MS) {
+              // 5 min of continuous rejection — mark as synced to break the loop
+              const idsForLoad = unsynced.filter((r) => r.loadId === lid).map((r) => r.id);
+              await markAsSynced(idsForLoad);
+              _syncRejectionFirstSeen.delete(lid);
+              cleared = true;
+              console.warn(
+                `[LocationTracking] BG zombie clearance: marked ${idsForLoad.length} records synced for load ${lid.substring(0, 12)}... (rejected for ${Math.round((now - firstSeen) / 1000)}s)`,
+              );
+            }
+          }
+          if (!cleared) {
+            console.warn(
+              `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — will retry (zombie timer running)`,
+            );
+          }
           trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
         }
       }
@@ -1107,6 +1127,20 @@ let foregroundWatchSubscription: Location.LocationSubscription | null = null;
 let lastForegroundLocation: { latitude: number; longitude: number; time: number } | null = null;
 let isSyncing = false;
 
+// ============================================
+// ZOMBIE CLEARANCE
+// Tracks when the server first rejected all points (inserted=0) for a given
+// batch. After 5 minutes of continuous rejection, marks the records as synced
+// to break the infinite retry loop. Non-destructive: records stay in SQLite
+// with synced=1 for forensics, they just stop being retried.
+//
+// Module-level Map (not AsyncStorage) — synchronous reads, no race conditions
+// under concurrent BG task invocations. Resets on app restart which is fine
+// (fresh 5-min window).
+// ============================================
+const ZOMBIE_CLEARANCE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const _syncRejectionFirstSeen = new Map<string, number>();
+
 /**
  * Start foreground location watching with continuous real-time updates
  * Uses watchPositionAsync for better accuracy than interval polling
@@ -1379,10 +1413,10 @@ async function syncUnsyncedToConvex(
     const syncedIds = unsynced.map((r) => r.id);
 
     if (result.inserted > 0) {
-      // Only mark synced if the server actually accepted some/all points.
-      // This prevents permanent data loss when the server rejects everything
-      // (e.g. org mismatch, deleted driver, missing load).
       await markAsSynced(syncedIds);
+      // Server accepted points — clear rejection tracker for these loads
+      const acceptedLoadIds = new Set(unsynced.map((r) => r.loadId));
+      for (const lid of acceptedLoadIds) _syncRejectionFirstSeen.delete(lid);
       console.log(`[LocationTracking] Synced ${result.inserted} locations, marked ${syncedIds.length} rows`);
 
       if (result.inserted < syncedIds.length) {
@@ -1400,9 +1434,29 @@ async function syncUnsyncedToConvex(
         return { success: true, synced: result.inserted + nextResult.synced };
       }
     } else {
-      console.warn(
-        `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — NOT marking synced, will retry`,
-      );
+      // Server rejected everything. Start or check the zombie clearance timer.
+      const rejectedLoadIds = new Set(unsynced.map((r) => r.loadId));
+      const now = Date.now();
+      let cleared = false;
+      for (const lid of rejectedLoadIds) {
+        const firstSeen = _syncRejectionFirstSeen.get(lid);
+        if (!firstSeen) {
+          _syncRejectionFirstSeen.set(lid, now);
+        } else if (now - firstSeen > ZOMBIE_CLEARANCE_TIMEOUT_MS) {
+          const idsForLoad = unsynced.filter((r) => r.loadId === lid).map((r) => r.id);
+          await markAsSynced(idsForLoad);
+          _syncRejectionFirstSeen.delete(lid);
+          cleared = true;
+          console.warn(
+            `[LocationTracking] Zombie clearance: marked ${idsForLoad.length} records synced for load ${lid.substring(0, 12)}... (rejected for ${Math.round((now - firstSeen) / 1000)}s)`,
+          );
+        }
+      }
+      if (!cleared) {
+        console.warn(
+          `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — will retry (zombie timer running)`,
+        );
+      }
       trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
     }
 
