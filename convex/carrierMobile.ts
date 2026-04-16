@@ -678,7 +678,7 @@ export const getLoadRouteHistory = query({
   handler: async (ctx, args) => {
     // Auth: verify caller belongs to this organization
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
-    if (!auth) throw new Error('Not authenticated');
+    if (!auth) return [];
 
     // Verify this load belongs to this carrier
     const assignment = await ctx.db
@@ -944,12 +944,26 @@ export const getActiveBrokers = query({
  */
 export const getUserRoles = query({
   args: {
+    // clerkUserId arg is accepted for backward-compatibility but IGNORED.
+    // The actual user ID is always derived from the authenticated JWT so that
+    // a carrier cannot supply an arbitrary clerkUserId to impersonate another user.
     clerkUserId: v.string(),
     clerkOrgId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Get user identity to extract phone number
+    // Get user identity — derive clerkUserId from the JWT, not the arg
     const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return {
+        isDriver: false, driverId: null, driverOrgId: null,
+        isCarrierOwner: false, carrierOrgId: null, carrierOrgConvexId: null,
+        carrierOrgName: null, orgType: null, isOwnerOperator: false,
+        isBroker: false, orgStatus: 'not_found' as const,
+        orgDeletionReason: null, orgDeletedAt: null,
+      };
+    }
+    // Override the client-supplied clerkUserId with the one from the verified JWT
+    const resolvedClerkUserId = identity.subject;
     const userPhone = (identity as any)?.phoneNumber || (identity as any)?.phone_number;
     const normalizedUserPhone = userPhone ? normalizePhoneForMatch(userPhone) : null;
     
@@ -965,10 +979,10 @@ export const getUserRoles = query({
     let orgDeletionReason: string | null = null;
     let orgDeletedAt: number | null = null;
 
-    // Method 1: Check identity link by clerkUserId
+    // Method 1: Check identity link by clerkUserId (derived from JWT, not the arg)
     const identityLink = await ctx.db
       .query('userIdentityLinks')
-      .withIndex('by_clerk', (q) => q.eq('clerkUserId', args.clerkUserId))
+      .withIndex('by_clerk', (q) => q.eq('clerkUserId', resolvedClerkUserId))
       .first();
 
     if (identityLink) {
@@ -1168,9 +1182,9 @@ export const createDriver = mutation({
     notes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated and belongs to this organization
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    // Auth: verify caller belongs to this organization (IDOR guard)
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) throw new Error('Not authorized for this organization');
 
     const now = Date.now();
 
@@ -1268,9 +1282,9 @@ export const updateDriver = mutation({
     notes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    // Auth: verify caller belongs to this organization (IDOR guard)
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) throw new Error('Not authorized for this organization');
 
     const { driverId, carrierOrgId, ...updates } = args;
 
@@ -1378,9 +1392,9 @@ export const deleteDriver = mutation({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    // Auth: verify caller belongs to this organization (IDOR guard)
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) throw new Error('Not authorized for this organization');
 
     const driver = await ctx.db.get(args.driverId);
     if (!driver) {
@@ -1416,15 +1430,16 @@ export const getDriverById = query({
     driverId: v.id('drivers'),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return null;
-
+    // Load the driver first so we know which org it belongs to
     const driver = await ctx.db.get(args.driverId);
-    
+
     if (!driver || driver.isDeleted) {
       return null;
     }
+
+    // Auth: verify caller belongs to the driver's organization (IDOR guard)
+    const auth = await requireCarrierAuth(ctx, driver.organizationId);
+    if (!auth) return null;
 
     return {
       _id: driver._id,
@@ -1474,9 +1489,9 @@ export const createOwnerDriver = mutation({
     licenseExpiration: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    // Auth: verify caller belongs to this organization (IDOR guard)
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) throw new Error('Not authorized for this organization');
 
     const now = Date.now();
 
@@ -1584,9 +1599,9 @@ export const needsDriverProfile = query({
     carrierOrgId: v.string(),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return { needsProfile: false, reason: 'Not authenticated' };
+    // Auth: verify caller belongs to this organization (IDOR guard)
+    const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
+    if (!auth) return { needsProfile: false, reason: 'Not authenticated' };
 
     const org = await ctx.db.get(args.carrierOrgId as Id<'organizations'>);
     if (!org) {

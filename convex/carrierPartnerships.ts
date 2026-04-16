@@ -433,25 +433,6 @@ export const getByBrokerAndMc = query({
   },
 });
 
-/**
- * Find all partnerships for an MC number
- * (Used when carrier signs up to auto-link existing partnerships)
- */
-export const findByMcNumber = query({
-  args: {
-    mcNumber: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
-    const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
-    const all = await ctx.db
-      .query('carrierPartnerships')
-      .withIndex('by_mc', (q) => q.eq('mcNumber', normalizedMcNumber))
-      .collect();
-    return all.filter((p) => p.brokerOrgId === callerOrgId);
-  },
-});
-
 // ==========================================
 // MUTATIONS
 // ==========================================

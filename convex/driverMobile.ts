@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
-import { query, mutation } from './_generated/server';
+import { query, mutation, QueryCtx, MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
-import { Id } from './_generated/dataModel';
+import { Id, Doc } from './_generated/dataModel';
 
 // ============================================
 // DRIVER MOBILE API
@@ -70,6 +70,46 @@ function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2:
 }
 
 /**
+ * Resolve the authenticated driver from the Clerk JWT phone claim.
+ * If claimedDriverId is provided, verify it matches the phone-resolved driver.
+ * Throws if unauthenticated, no phone on identity, or driver not found.
+ */
+async function resolveAuthenticatedDriver(
+  ctx: QueryCtx | MutationCtx,
+  claimedDriverId?: Id<'drivers'>,
+): Promise<Doc<'drivers'>> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error('Unauthenticated');
+
+  const phone = extractPhoneFromIdentity(identity as any);
+  if (!phone) throw new Error('No phone number in identity');
+
+  const normalizedPhone = normalizePhoneForMatch(phone);
+  const phoneVariants = [normalizedPhone, `+1${normalizedPhone}`, `1${normalizedPhone}`];
+
+  let driver: Doc<'drivers'> | null = null;
+  for (const variant of phoneVariants) {
+    const match = await ctx.db
+      .query('drivers')
+      .withIndex('by_phone', (q) => q.eq('phone', variant))
+      .first();
+    if (match && !match.isDeleted) {
+      driver = match;
+      break;
+    }
+  }
+
+  if (!driver) throw new Error('Driver not found');
+
+  // If a specific driverId was claimed, verify it matches
+  if (claimedDriverId && claimedDriverId !== driver._id) {
+    throw new Error('Driver not found');
+  }
+
+  return driver;
+}
+
+/**
  * Get the authenticated driver's profile by matching phone number
  * This is the main entry point for driver authentication
  */
@@ -100,43 +140,11 @@ export const getMyProfile = query({
     v.null(),
   ),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return null;
-    }
-
-    let driver = null;
-
-    // If driverId is provided (e.g. owner-operator with known driver record), look up directly
-    if (args.driverId) {
-      driver = await ctx.db.get(args.driverId);
-    }
-
-    // Fallback: find driver by phone number match
-    // Uses by_phone index to avoid full table scan (which causes reactive invalidation storms)
-    if (!driver || driver.isDeleted) {
-      const phone = extractPhoneFromIdentity(identity as any);
-      if (!phone) {
-        console.error('No phone number in identity token');
-        return null;
-      }
-
-      const normalizedPhone = normalizePhoneForMatch(phone);
-      const phoneVariants = [normalizedPhone, `+1${normalizedPhone}`, `1${normalizedPhone}`];
-
-      for (const variant of phoneVariants) {
-        const match = await ctx.db
-          .query('drivers')
-          .withIndex('by_phone', (q) => q.eq('phone', variant))
-          .first();
-        if (match && !match.isDeleted) {
-          driver = match;
-          break;
-        }
-      }
-    }
-
-    if (!driver || driver.isDeleted) {
+    // Resolve driver from JWT phone claim; if driverId provided, verify it matches
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return null;
     }
 
@@ -213,16 +221,11 @@ export const getMyAssignedLoads = query({
     }),
   ),
   handler: async (ctx, args) => {
-    // Verify the driver is authenticated and matches
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return [];
-    }
-
-    // Get driver to verify access and get organizationId
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
-      console.log('[getMyAssignedLoads] Driver not found:', args.driverId);
+    // Verify the driver is authenticated and that args.driverId matches their JWT phone claim
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return [];
     }
 
@@ -436,15 +439,11 @@ export const getLoadWithStops = query({
     v.null(),
   ),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return null;
-    }
-
-    // Verify driver access
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
+    // Resolve driver from JWT phone; verify args.driverId matches
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return null;
     }
 
@@ -456,7 +455,7 @@ export const getLoadWithStops = query({
 
     // Verify this driver is assigned to the load
     // Check 1: Direct assignment via primaryDriverId (broker's own drivers)
-    let hasAccess = load.primaryDriverId === args.driverId;
+    let hasAccess = load.primaryDriverId === driver._id;
 
     // Check 2: Carrier assignment via loadCarrierAssignments
     if (!hasAccess) {
@@ -465,7 +464,7 @@ export const getLoadWithStops = query({
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
         .first();
 
-      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
         hasAccess = true;
       }
     }
@@ -562,21 +561,12 @@ export const checkInAtStop = mutation({
     distanceFromStop: v.optional(v.number()), // meters
   }),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    // Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return { success: false, message: 'Not authenticated' };
-    }
-
-    // Security: Verify this is a Clerk token (driver), not WorkOS (admin)
-    if (!isDriverToken(identity as any)) {
-      return { success: false, message: 'Invalid token type for driver operations' };
-    }
-
-    // Verify driver
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
-      return { success: false, message: 'Driver not found' };
     }
 
     // Get stop
@@ -592,13 +582,13 @@ export const checkInAtStop = mutation({
     }
 
     // Check driver access - either via primaryDriverId or carrier assignment
-    let hasAccess = load.primaryDriverId === args.driverId;
+    let hasAccess = load.primaryDriverId === driver._id;
     if (!hasAccess) {
       const carrierAssignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
         .first();
-      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
         hasAccess = true;
       }
     }
@@ -668,21 +658,12 @@ export const checkOutFromStop = mutation({
     message: v.string(),
   }),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    // Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return { success: false, message: 'Not authenticated' };
-    }
-
-    // Security: Verify this is a Clerk token (driver), not WorkOS (admin)
-    if (!isDriverToken(identity as any)) {
-      return { success: false, message: 'Invalid token type for driver operations' };
-    }
-
-    // Verify driver
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
-      return { success: false, message: 'Driver not found' };
     }
 
     // Get stop
@@ -698,13 +679,13 @@ export const checkOutFromStop = mutation({
     }
 
     // Check driver access - either via primaryDriverId or carrier assignment
-    let hasAccess = load.primaryDriverId === args.driverId;
+    let hasAccess = load.primaryDriverId === driver._id;
     if (!hasAccess) {
       const carrierAssignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
         .first();
-      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
         hasAccess = true;
       }
     }
@@ -805,21 +786,12 @@ export const updateStopStatus = mutation({
     message: v.string(),
   }),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    // Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return { success: false, message: 'Not authenticated' };
-    }
-
-    // Security: Verify this is a Clerk token (driver)
-    if (!isDriverToken(identity as any)) {
-      return { success: false, message: 'Invalid token type for driver operations' };
-    }
-
-    // Verify driver
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
-      return { success: false, message: 'Driver not found' };
     }
 
     // Get stop
@@ -835,13 +807,13 @@ export const updateStopStatus = mutation({
     }
 
     // Check driver access - either via primaryDriverId or carrier assignment
-    let hasAccess = load.primaryDriverId === args.driverId;
+    let hasAccess = load.primaryDriverId === driver._id;
     if (!hasAccess) {
       const carrierAssignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
         .first();
-      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
         hasAccess = true;
       }
     }
@@ -883,21 +855,12 @@ export const recordPOD = mutation({
     message: v.string(),
   }),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    // Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return { success: false, message: 'Not authenticated' };
-    }
-
-    // Security: Verify this is a Clerk token (driver)
-    if (!isDriverToken(identity as any)) {
-      return { success: false, message: 'Invalid token type for driver operations' };
-    }
-
-    // Verify driver
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
-      return { success: false, message: 'Driver not found' };
     }
 
     // Get stop
@@ -913,13 +876,13 @@ export const recordPOD = mutation({
     }
 
     // Check driver access - either via primaryDriverId or carrier assignment
-    let hasAccess = load.primaryDriverId === args.driverId;
+    let hasAccess = load.primaryDriverId === driver._id;
     if (!hasAccess) {
       const carrierAssignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
         .first();
-      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
         hasAccess = true;
       }
     }
@@ -951,20 +914,16 @@ export const updateDriverLocation = mutation({
     success: v.boolean(),
   }),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    // Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return { success: false };
     }
 
-    // Security: Verify this is a Clerk token (driver)
-    if (!isDriverToken(identity as any)) {
-      return { success: false };
-    }
-
-    // Get driver and their truck
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted || !driver.currentTruckId) {
+    // Require an assigned truck to update location
+    if (!driver.currentTruckId) {
       return { success: false };
     }
 
@@ -1002,24 +961,12 @@ export const switchTruck = mutation({
     ),
   }),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    // Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return { success: false, message: 'Not authenticated' };
-    }
-
-    // Security: Verify this is a Clerk token (driver), not WorkOS (admin)
-    if (!isDriverToken(identity as any)) {
-      return { success: false, message: 'Invalid token type for driver operations' };
-    }
-
-    // Verify driver exists and is active
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver) {
-      return { success: false, message: 'Driver not found' };
-    }
-    if (driver.isDeleted) {
-      return { success: false, message: 'Driver account is deactivated' };
     }
 
     // Get truck
@@ -1102,15 +1049,11 @@ export const getTruckForSwitch = query({
     v.null(),
   ),
   handler: async (ctx, args) => {
-    // Verify authentication
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return null;
-    }
-
-    // Get driver to verify org
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
+    // Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return null;
     }
 
@@ -1186,34 +1129,27 @@ export const addDetourStops = mutation({
     stopIds: v.optional(v.array(v.id('loadStops'))),
   }),
   handler: async (ctx, args) => {
-    // 1. Auth check
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    // 1. Verify the JWT phone claim matches args.driverId
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
       return { success: false, message: 'Not authenticated' };
     }
-    if (!isDriverToken(identity as any)) {
-      return { success: false, message: 'Invalid token type for driver operations' };
-    }
 
-    // 2. Verify driver
-    const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.isDeleted) {
-      return { success: false, message: 'Driver not found' };
-    }
-
-    // 3. Verify load and driver access
+    // 2. Verify load and driver access
     const load = await ctx.db.get(args.loadId);
     if (!load) {
       return { success: false, message: 'Load not found' };
     }
 
-    let hasAccess = load.primaryDriverId === args.driverId;
+    let hasAccess = load.primaryDriverId === driver._id;
     if (!hasAccess) {
       const carrierAssignment = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
         .first();
-      if (carrierAssignment && carrierAssignment.assignedDriverId === args.driverId) {
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
         hasAccess = true;
       }
     }
@@ -1241,7 +1177,7 @@ export const addDetourStops = mutation({
     const baseSequence = afterStop ? afterStop.sequenceNumber : existingStops.length;
 
     const now = Date.now();
-    const driverUserId = identity.subject; // Clerk user ID
+    const driverUserId = driver._id; // Use driver's Convex ID
     const stopIds: Id<'loadStops'>[] = [];
 
     const reasonLabels: Record<string, string> = {
