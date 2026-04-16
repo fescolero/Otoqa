@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 // Count customers by status
 export const countCustomersByStatus = query({
@@ -165,7 +165,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
 
     const customerId = await ctx.db.insert('customers', {
@@ -204,7 +204,7 @@ export const create = mutation({
       
       // WorkOS Integration
       workosOrgId: args.workosOrgId,
-      createdBy: args.createdBy,
+      createdBy: userId,
       
       // Timestamps
       createdAt: now,
@@ -279,13 +279,13 @@ export const deactivate = mutation({
     userName: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
     if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
-      deletedBy: args.userId,
+      deletedBy: userId,
       updatedAt: Date.now(),
     });
 
@@ -335,7 +335,7 @@ export const bulkDeactivate = mutation({
     userName: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const now = Date.now();
 
     for (const customerId of args.customerIds) {
@@ -344,7 +344,7 @@ export const bulkDeactivate = mutation({
       await ctx.db.patch(customerId, {
         isDeleted: true,
         deletedAt: now,
-        deletedBy: args.userId,
+        deletedBy: userId,
         updatedAt: now,
       });
     }

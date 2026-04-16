@@ -48,8 +48,9 @@ export async function requireCallerOrgId(ctx: AnyCtx): Promise<string> {
  */
 export async function requireCallerIdentity(ctx: AnyCtx): Promise<{
   orgId: string;
-  subject: string;
-  identity: IdentityWithOrg;
+  userId: string;
+  userName: string | undefined;
+  userEmail: string | undefined;
 }> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error('Unauthenticated');
@@ -60,7 +61,12 @@ export async function requireCallerIdentity(ctx: AnyCtx): Promise<{
   if (!orgId || typeof orgId !== 'string') {
     throw new Error('No organization claim on identity');
   }
-  return { orgId, subject: identity.subject, identity: claims };
+  return {
+    orgId,
+    userId: identity.subject,
+    userName: identity.name ?? undefined,
+    userEmail: identity.email ?? undefined,
+  };
 }
 
 /**
@@ -74,10 +80,10 @@ export async function requireCallerIdentity(ctx: AnyCtx): Promise<{
 export async function assertCallerOwnsOrg(
   ctx: AnyCtx,
   claimedOrgId: string,
-): Promise<string> {
-  const callerOrgId = await requireCallerOrgId(ctx);
-  if (callerOrgId !== claimedOrgId) {
+): Promise<{ orgId: string; userId: string; userName: string | undefined; userEmail: string | undefined }> {
+  const result = await requireCallerIdentity(ctx);
+  if (result.orgId !== claimedOrgId) {
     throw new Error('Not authorized for this organization');
   }
-  return callerOrgId;
+  return result;
 }

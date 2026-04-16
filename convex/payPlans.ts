@@ -761,7 +761,7 @@ export const create = mutation({
   },
   returns: v.id('payPlans'),
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Validate frequency-specific fields
     if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !args.periodStartDayOfWeek) {
@@ -798,7 +798,7 @@ export const create = mutation({
       includeStandaloneAdjustments: args.includeStandaloneAdjustments,
       isActive: true,
       createdAt: now,
-      createdBy: args.userId,
+      createdBy: userId,
     });
 
     return planId;

@@ -6,7 +6,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { updateInvoiceCount } from "./stats_helpers";
-import { assertCallerOwnsOrg } from "./lib/auth";
+import { assertCallerOwnsOrg, requireCallerIdentity } from "./lib/auth";
 
 /**
  * Preview Backfill Impact
@@ -123,7 +123,7 @@ export const createLaneAndBackfill = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Step 1: Ensure customer exists
     let finalCustomerId = args.customerId;
     
@@ -155,7 +155,7 @@ export const createLaneAndBackfill = mutation({
           zip: "00000",
           country: "USA",
           workosOrgId: args.workosOrgId,
-          createdBy: args.createdBy,
+          createdBy: createdBy,
           createdAt: Date.now(),
           updatedAt: Date.now(),
           isDeleted: false,
@@ -184,7 +184,7 @@ export const createLaneAndBackfill = mutation({
         stops: [], // User can add stops later
         isActive: true,
         isDeleted: false,
-        createdBy: args.createdBy,
+        createdBy: createdBy,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       });
@@ -364,7 +364,7 @@ export const voidUnmappedGroup = mutation({
     customerId: v.optional(v.id("customers")),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Step 1: Resolve customer if provided
     let finalCustomerId = args.customerId;
 
@@ -373,14 +373,14 @@ export const voidUnmappedGroup = mutation({
       const existingCustomer = await ctx.db
         .query("customers")
         .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
-        .filter((q) => 
+        .filter((q) =>
           q.and(
             q.eq(q.field("name"), args.customerName),
             q.eq(q.field("office"), args.customerOffice || undefined)
           )
         )
         .first();
-      
+
       if (existingCustomer) {
         finalCustomerId = existingCustomer._id;
       } else {
@@ -396,14 +396,14 @@ export const voidUnmappedGroup = mutation({
           zip: "00000",
           country: "USA",
           workosOrgId: args.workosOrgId,
-          createdBy: args.createdBy,
+          createdBy: createdBy,
           createdAt: Date.now(),
           updatedAt: Date.now(),
           isDeleted: false,
         });
       }
     }
-    
+
     // Step 2: Find all loads matching this HCR+Trip pattern
     const loads = await ctx.db
       .query("loadInformation")

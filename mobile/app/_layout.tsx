@@ -264,7 +264,7 @@ export default function RootLayout() {
         <SafeAreaProvider>
           <LanguageProvider>
             <PostHogProvider
-              apiKey={process.env.EXPO_PUBLIC_POSTHOG_KEY || 'phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X'}
+              apiKey={process.env.EXPO_PUBLIC_POSTHOG_KEY ?? ''}
               options={{
                 host: process.env.EXPO_PUBLIC_POSTHOG_HOST || 'https://us.i.posthog.com',
                 enableSessionReplay: true,

@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Carrier Partnerships API
@@ -466,7 +466,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
     const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
     const normalizedCarrierName = normalizeWhitespace(args.carrierName);
@@ -602,7 +602,7 @@ export const create = mutation({
       trackFuelConsumption: args.trackFuelConsumption,
       createdAt: now,
       updatedAt: now,
-      createdBy: args.createdBy,
+      createdBy: userId,
       linkedAt,
     });
 
@@ -1545,7 +1545,7 @@ export const bulkTerminate = mutation({
     let totalReleasedAssignments = 0;
     let totalLoadsReopened = 0;
 
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     for (const partnershipId of args.partnershipIds) {
       try {
@@ -1568,8 +1568,8 @@ export const bulkTerminate = mutation({
         const { releasedCount, loadsReopened } = await releasePartnershipAssignments(
           ctx,
           { ...partnership, _id: partnershipId },
-          args.userId,
-          args.userName,
+          userId,
+          userName,
         );
         totalReleasedAssignments += releasedCount;
         totalLoadsReopened += loadsReopened;
@@ -1612,7 +1612,7 @@ export const bulkTerminate = mutation({
                 await ctx.db.patch(driver._id, {
                   isDeleted: true,
                   deletedAt: now,
-                  deletedBy: args.userId,
+                  deletedBy: userId,
                   employmentStatus: 'Inactive',
                   updatedAt: now,
                 });
@@ -1624,7 +1624,7 @@ export const bulkTerminate = mutation({
             await ctx.db.patch(carrierOrg._id, {
               isDeleted: true,
               deletedAt: now,
-              deletedBy: args.userId,
+              deletedBy: userId,
               deletionReason: `Partnership terminated by broker`,
               updatedAt: now,
             });
@@ -1663,8 +1663,8 @@ export const bulkTerminate = mutation({
           entityId: partnershipId,
           entityName: partnership.carrierName,
           action: 'terminated',
-          performedBy: args.userId,
-          performedByName: args.userName,
+          performedBy: userId,
+          performedByName: userName,
           description: `Terminated partnership with ${partnership.carrierName} (MC# ${partnership.mcNumber}). Released ${releasedCount} assignments, reopened ${loadsReopened} loads. ${orgDeactivated ? `Deactivated carrier org and ${driversDeactivated} drivers. Clerk user deleted.` : ''}`,
         });
 
@@ -1696,7 +1696,7 @@ export const bulkReactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const now = Date.now();
     const results: {
       id: string;
@@ -1922,8 +1922,8 @@ export const bulkReactivate = mutation({
           entityId: partnershipId,
           entityName: partnership.carrierName,
           action: 'reactivated',
-          performedBy: args.userId,
-          performedByName: args.userName,
+          performedBy: userId,
+          performedByName: userName,
           description: `Reactivated partnership with ${partnership.carrierName} (MC# ${partnership.mcNumber})`,
         });
 
@@ -1963,7 +1963,7 @@ export const permanentlyDelete = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const results: {
       id: string;
       success: boolean;
@@ -2121,8 +2121,8 @@ export const permanentlyDelete = mutation({
           entityId: partnershipId,
           entityName: partnership.carrierName,
           action: 'permanently_deleted',
-          performedBy: args.userId,
-          performedByName: args.userName,
+          performedBy: userId,
+          performedByName: userName,
           description: `Permanently deleted carrier ${partnership.carrierName} (MC# ${partnership.mcNumber}). Deleted: org=${deletedOrg}, drivers=${deletedDrivers}, assignments=${deletedAssignments}, clerkUser=${clerkUserDeleted}`,
         });
 

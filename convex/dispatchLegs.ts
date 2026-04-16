@@ -4,7 +4,7 @@ import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLegTimeRange, doTimeRangesOverlap, calculateOverlapMinutes, detectDriverOverlaps } from './_helpers/timeUtils';
 import type { OverlapInfo } from './_helpers/timeUtils';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Dispatch Legs - The atomic unit of work
@@ -157,7 +157,7 @@ export const create = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
@@ -199,8 +199,8 @@ export const create = mutation({
       entityId: legId,
       entityName: `Leg ${maxSequence + 1} for Load ${load.internalId}`,
       action: 'created',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Created leg ${maxSequence + 1} for load ${load.internalId}`,
     });
 
@@ -208,7 +208,7 @@ export const create = mutation({
     if (args.driverId) {
       await ctx.runMutation(internal.driverPayCalculation.calculateDriverPay, {
         legId,
-        userId: args.userId,
+        userId,
       });
     }
 
@@ -230,12 +230,12 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
     if (leg.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
-    const { legId, userId, userName, ...updates } = args;
+    const { legId, userId: _argUserId, userName: _argUserName, ...updates } = args;
     const now = Date.now();
 
     // Build update object
@@ -290,7 +290,7 @@ export const assignDriver = mutation({
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // 1. Validate driver exists, is active, and not deleted
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
@@ -411,15 +411,15 @@ export const assignDriver = mutation({
       entityId: args.loadId as string,
       entityName: `Load ${load.internalId}`,
       action: 'ASSIGN_DRIVER',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Assigned driver ${driver.firstName} ${driver.lastName} to load ${load.orderNumber} (${legs.length} leg${legs.length !== 1 ? 's' : ''} updated)${overlapNote}`,
     });
 
     // 9. Trigger pay recalculation
     await ctx.runMutation(internal.driverPayCalculation.recalculateForLoad, {
       loadId: args.loadId,
-      userId: args.userId,
+      userId,
     });
 
     // 10. Return success with overlap insight
@@ -704,7 +704,7 @@ export const assignCarrier = mutation({
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // 1. Validate carrier partnership exists and is active
     const partnership = await ctx.db.get(args.carrierPartnershipId);
     if (!partnership || partnership.status !== 'ACTIVE') {
@@ -806,7 +806,7 @@ export const assignCarrier = mutation({
         offeredAt: now,
         acceptedAt: now,
         awardedAt: now,
-        createdBy: args.userId,
+        createdBy: userId,
       });
     }
 
@@ -817,8 +817,8 @@ export const assignCarrier = mutation({
       entityId: args.loadId as string,
       entityName: `Load ${load.internalId}`,
       action: 'ASSIGN_CARRIER',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Assigned carrier ${partnership.carrierName} to load ${load.orderNumber}${args.trailerId ? ' (Power Only)' : ''} (${assignableLegs.length} leg${assignableLegs.length !== 1 ? 's' : ''} updated)`,
     });
 
@@ -826,7 +826,7 @@ export const assignCarrier = mutation({
     for (const leg of assignableLegs) {
       await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
         legId: leg._id,
-        userId: args.userId,
+        userId,
       });
     }
 
@@ -845,7 +845,7 @@ export const unassignResource = mutation({
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // 1. Validate load exists
     const load = await ctx.db.get(args.loadId);
     if (!load) {
@@ -906,8 +906,8 @@ export const unassignResource = mutation({
       entityId: args.loadId as string,
       entityName: `Load ${load.internalId}`,
       action: 'UNASSIGN_RESOURCE',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Unassigned all resources from load ${load.orderNumber} (${clearedLegCount} leg${clearedLegCount !== 1 ? 's' : ''} cleared)`,
     });
 
@@ -928,7 +928,7 @@ export const splitAtStop = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
@@ -1010,8 +1010,8 @@ export const splitAtStop = mutation({
       entityId: args.loadId,
       entityName: `Load ${load.internalId}`,
       action: 'split',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Split load ${load.internalId} at stop ${splitStop.sequenceNumber}. Leg 1: ${driverA?.firstName ?? 'Unassigned'}, Leg 2: ${driverB?.firstName}`,
     });
 
@@ -1019,13 +1019,13 @@ export const splitAtStop = mutation({
     if (existingLeg.driverId) {
       await ctx.runMutation(internal.driverPayCalculation.calculateDriverPay, {
         legId: existingLeg._id,
-        userId: args.userId,
+        userId,
       });
     }
 
     await ctx.runMutation(internal.driverPayCalculation.calculateDriverPay, {
       legId: legBId,
-      userId: args.userId,
+      userId,
     });
 
     return { legAId: existingLeg._id, legBId };
@@ -1054,7 +1054,7 @@ export const removeDriver = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
     if (leg.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
@@ -1097,8 +1097,8 @@ export const removeDriver = mutation({
       entityType: 'dispatchLeg',
       entityId: args.legId,
       action: 'driver_removed',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Removed driver from leg ${leg.sequence}`,
     });
 

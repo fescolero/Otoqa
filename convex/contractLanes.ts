@@ -3,7 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { scheduleRuleValidator } from './lib/validators';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 // List unique HCR/Trip combinations for route assignments
 export const listUniqueRoutes = query({
@@ -150,7 +150,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
 
     const laneId = await ctx.db.insert('contractLanes', {
@@ -191,7 +191,7 @@ export const create = mutation({
 
       // WorkOS Integration
       workosOrgId: args.workosOrgId,
-      createdBy: args.createdBy,
+      createdBy: createdBy,
 
       // Timestamps
       createdAt: now,
@@ -287,7 +287,7 @@ export const deactivate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
       throw new Error('Not authorized for this lane');
@@ -295,7 +295,7 @@ export const deactivate = mutation({
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
-      deletedBy: args.userId,
+      deletedBy: userId,
       updatedAt: Date.now(),
     });
 
@@ -495,7 +495,7 @@ export const bulkUpsert = mutation({
     restoreLaneIds: v.array(v.id('contractLanes')),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     let created = 0;
     let updated = 0;
@@ -508,7 +508,7 @@ export const bulkUpsert = mutation({
         customerCompanyId: args.customerId,
         isActive: true,
         workosOrgId: args.workosOrgId,
-        createdBy: args.userId,
+        createdBy: userId,
         createdAt: now,
         updatedAt: now,
         isDeleted: false,
@@ -563,7 +563,7 @@ export const bulkImport = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     let imported = 0;
     let skipped = 0;
@@ -609,7 +609,7 @@ export const bulkImport = mutation({
         currency: 'USD' as const,
         isActive: true,
         workosOrgId: args.workosOrgId,
-        createdBy: args.userId,
+        createdBy: userId,
         createdAt: now,
         updatedAt: now,
         isDeleted: false,

@@ -5,7 +5,7 @@
 
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { assertCallerOwnsOrg, requireCallerOrgId } from "./lib/auth";
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from "./lib/auth";
 
 /**
  * OPTION A: Confirm Spot Load
@@ -50,7 +50,7 @@ export const convertToContract = mutation({
     rate: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) {
       throw new Error("Load not found");
@@ -108,7 +108,7 @@ export const convertToContract = mutation({
         stops: [], // Empty - can be filled later
         isActive: true,
         isDeleted: false,
-        createdBy: args.userId,
+        createdBy: userId,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       });

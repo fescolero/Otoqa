@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Driver Settlement Engine
@@ -1085,7 +1085,7 @@ export const generateStatement = mutation({
     grossTotal: v.float64(),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.organizationId !== callerOrgId) {
       throw new Error('Driver not found');
@@ -1146,7 +1146,7 @@ export const generateStatement = mutation({
       status: 'DRAFT',
       statementNumber,
       createdAt: now,
-      createdBy: args.userId,
+      createdBy: userId,
       updatedAt: now,
     });
 
@@ -1189,7 +1189,7 @@ export const updateSettlementStatus = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
@@ -1230,7 +1230,7 @@ export const updateSettlementStatus = mutation({
       updates.totalMiles = totalMiles;
       updates.totalLoads = uniqueLoadIds.size;
       updates.totalManualAdjustments = totalManualAdjustments;
-      updates.approvedBy = args.userId;
+      updates.approvedBy = userId;
       updates.approvedAt = now;
 
       // Set approvedAt on all payables (for APPROVAL_DATE trigger in Pay Plans)
@@ -1246,7 +1246,7 @@ export const updateSettlementStatus = mutation({
       updates.paidMethod = args.paidMethod;
       updates.paidReference = args.paidReference;
     } else if (args.newStatus === 'VOID') {
-      updates.voidedBy = args.userId;
+      updates.voidedBy = userId;
       updates.voidedAt = now;
       updates.voidReason = args.voidReason;
     }
@@ -1278,7 +1278,7 @@ export const addManualAdjustment = mutation({
   },
   returns: v.id('loadPayables'),
   handler: async (ctx, args) => {
-    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
@@ -1306,7 +1306,7 @@ export const addManualAdjustment = mutation({
       isRebillable: args.isRebillable,
       workosOrgId: args.workosOrgId,
       createdAt: now,
-      createdBy: args.userId,
+      createdBy: userId,
       updatedAt: now,
     });
 
@@ -1606,7 +1606,7 @@ export const generateStatementFromPlan = mutation({
     planName: v.string(),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const driver = await ctx.db.get(args.driverId);
     if (!driver) throw new Error('Driver not found');
     if (driver.organizationId !== callerOrgId) {
@@ -1748,7 +1748,7 @@ export const generateStatementFromPlan = mutation({
       status: 'DRAFT',
       statementNumber,
       createdAt: now,
-      createdBy: args.userId,
+      createdBy: userId,
       updatedAt: now,
     });
 
@@ -1797,7 +1797,7 @@ export const bulkGenerateByPlan = mutation({
     })),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     console.log(`[BULK_SETTLE] v3 | Plan: ${args.planId} | Drivers on plan: pending...`);
 
     const plan = await ctx.db.get(args.planId);
@@ -2022,7 +2022,7 @@ export const bulkGenerateByPlan = mutation({
           status: 'DRAFT',
           statementNumber,
           createdAt: now,
-          createdBy: args.userId,
+          createdBy: userId,
           updatedAt: now,
         });
 

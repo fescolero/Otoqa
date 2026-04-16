@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Load Hold Workflow
@@ -198,7 +198,7 @@ export const holdLoad = mutation({
     payablesUnassigned: v.optional(v.number()),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load || load.workosOrgId !== callerOrgId) {
       return {
@@ -253,7 +253,7 @@ export const holdLoad = mutation({
       isHeld: true,
       heldReason: args.reason,
       heldAt: now,
-      heldBy: args.userId,
+      heldBy: userId,
       updatedAt: now,
     });
 

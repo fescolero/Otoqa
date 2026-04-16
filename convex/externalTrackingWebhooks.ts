@@ -13,6 +13,152 @@ import { filterLoadsBySource, shouldRunInterval } from './_helpers/cronUtils';
 import { assertCallerOwnsOrg } from './lib/auth';
 
 // ============================================
+// URL SAFETY VALIDATION
+// ============================================
+
+/**
+ * Parse a hostname into an IPv4 address (4 octets) if it represents one.
+ * Handles dotted-decimal, decimal-encoded (e.g. 2130706433 = 127.0.0.1),
+ * octal (0177.0.0.1), and hex (0x7f.0.0.1) notations.
+ * Returns null if the hostname is not an IP address.
+ */
+function parseIPv4(hostname: string): [number, number, number, number] | null {
+  // Strip brackets from IPv6 notation
+  const h = hostname.replace(/^\[|\]$/g, '');
+
+  // Pure decimal integer (e.g. 2130706433 = 127.0.0.1)
+  if (/^\d+$/.test(h)) {
+    const n = parseInt(h, 10);
+    if (n >= 0 && n <= 0xFFFFFFFF) {
+      return [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF];
+    }
+  }
+
+  // Dotted notation: each octet can be decimal, 0-prefixed octal, or 0x hex
+  const parts = h.split('.');
+  if (parts.length === 4) {
+    const octets: number[] = [];
+    for (const part of parts) {
+      let val: number;
+      if (part.startsWith('0x') || part.startsWith('0X')) {
+        val = parseInt(part, 16);
+      } else if (part.startsWith('0') && part.length > 1) {
+        val = parseInt(part, 8);
+      } else {
+        val = parseInt(part, 10);
+      }
+      if (isNaN(val) || val < 0 || val > 255) return null;
+      octets.push(val);
+    }
+    return octets as [number, number, number, number];
+  }
+
+  return null;
+}
+
+/**
+ * Extract an IPv4 address from an IPv6-mapped representation.
+ * Handles ::ffff:127.0.0.1 and ::ffff:7f00:1 forms.
+ */
+function extractIPv4FromIPv6(hostname: string): [number, number, number, number] | null {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+
+  // ::ffff:a.b.c.d
+  const mappedDotted = h.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mappedDotted) return parseIPv4(mappedDotted[1]);
+
+  // ::ffff:XXXX:XXXX (two 16-bit hex groups encoding IPv4)
+  const mappedHex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) {
+    const high = parseInt(mappedHex[1], 16);
+    const low = parseInt(mappedHex[2], 16);
+    return [(high >> 8) & 0xFF, high & 0xFF, (low >> 8) & 0xFF, low & 0xFF];
+  }
+
+  return null;
+}
+
+/**
+ * Check if an IPv4 address falls in a private, reserved, or loopback range.
+ */
+function isPrivateIPv4(ip: [number, number, number, number]): boolean {
+  const [a, b, c, d] = ip;
+  if (a === 0) return true;                             // 0.0.0.0/8 (current network)
+  if (a === 10) return true;                            // 10.0.0.0/8
+  if (a === 100 && b >= 64 && b <= 127) return true;    // 100.64.0.0/10 (carrier-grade NAT)
+  if (a === 127) return true;                           // 127.0.0.0/8 (loopback)
+  if (a === 169 && b === 254) return true;              // 169.254.0.0/16 (link-local / metadata)
+  if (a === 172 && b >= 16 && b <= 31) return true;     // 172.16.0.0/12
+  if (a === 192 && b === 0 && c === 0) return true;     // 192.0.0.0/24 (IETF protocol)
+  if (a === 192 && b === 0 && c === 2) return true;     // 192.0.2.0/24 (documentation)
+  if (a === 192 && b === 88 && c === 99) return true;   // 192.88.99.0/24 (6to4 relay)
+  if (a === 192 && b === 168) return true;              // 192.168.0.0/16
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 (benchmark)
+  if (a === 198 && b === 51 && c === 100) return true;  // 198.51.100.0/24 (documentation)
+  if (a === 203 && b === 0 && c === 113) return true;   // 203.0.113.0/24 (documentation)
+  if (a >= 224) return true;                            // 224.0.0.0+ (multicast & reserved)
+  return false;
+}
+
+/**
+ * Validate a webhook URL is safe to fetch.
+ * Checks for HTTPS, blocks private/reserved IPs (including encoded forms),
+ * internal hostnames, and IPv6-mapped IPv4 loopback.
+ *
+ * Call at BOTH subscription creation AND delivery time to defend against
+ * DNS rebinding (hostname resolves to public IP at creation, private at delivery).
+ *
+ * NOTE: This cannot catch DNS rebinding where a public hostname resolves to a
+ * private IP at fetch time — that requires DNS-resolved IP checking which isn't
+ * available in Convex's serverless runtime. This is defense-in-depth.
+ */
+function validateWebhookUrl(url: string): void {
+  if (!url.startsWith('https://')) {
+    throw new Error('Webhook URL must use HTTPS');
+  }
+
+  let urlObj: URL;
+  try {
+    urlObj = new URL(url);
+  } catch {
+    throw new Error('Invalid webhook URL');
+  }
+
+  const hostname = urlObj.hostname.toLowerCase();
+
+  // Block internal domain patterns
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.local') ||
+    hostname.endsWith('.internal') ||
+    hostname.endsWith('.corp') ||
+    hostname.endsWith('.lan') ||
+    hostname === 'metadata.google.internal' ||
+    hostname === 'metadata.google.com'
+  ) {
+    throw new Error('Webhook URL must not point to an internal domain');
+  }
+
+  // IPv6 loopback
+  if (hostname === '[::1]' || hostname === '[0:0:0:0:0:0:0:1]') {
+    throw new Error('Webhook URL must not point to a loopback address');
+  }
+
+  // Check for IPv4 in any encoding (decimal, octal, hex, dotted)
+  const ipv4 = parseIPv4(hostname) ?? extractIPv4FromIPv6(hostname);
+  if (ipv4 && isPrivateIPv4(ipv4)) {
+    throw new Error('Webhook URL must not point to a private or reserved IP address');
+  }
+
+  // Block pure-numeric hostnames that didn't parse as valid IPv4
+  // (prevents novel decimal-encoding bypasses)
+  if (/^\d+$/.test(hostname)) {
+    throw new Error('Webhook URL must not use a numeric hostname');
+  }
+}
+
+// ============================================
 // WEBHOOK SUBSCRIPTION MANAGEMENT
 // ============================================
 
@@ -38,63 +184,8 @@ export const createSubscription = action({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
-    // Validate URL is HTTPS
-    if (!args.url.startsWith('https://')) {
-      throw new Error('Webhook URL must use HTTPS');
-    }
-
-    // Validate URL is not a private/reserved IP or internal hostname
-    try {
-      const urlObj = new URL(args.url);
-      const hostname = urlObj.hostname.toLowerCase();
-
-      // Block loopback addresses
-      if (
-        hostname === 'localhost' ||
-        hostname === '127.0.0.1' ||
-        hostname === '[::1]' ||
-        hostname === '0.0.0.0' ||
-        hostname.endsWith('.localhost')
-      ) {
-        throw new Error('Webhook URL must not point to a loopback address');
-      }
-
-      // Block private RFC 1918 ranges
-      if (
-        hostname.startsWith('10.') ||
-        hostname.startsWith('192.168.') ||
-        hostname.match(/^172\.(1[6-9]|2\d|3[01])\./)
-      ) {
-        throw new Error('Webhook URL must not point to a private IP address');
-      }
-
-      // Block link-local (169.254.x.x), cloud metadata endpoints
-      if (hostname.startsWith('169.254.') || hostname === 'metadata.google.internal') {
-        throw new Error('Webhook URL must not point to a link-local or metadata address');
-      }
-
-      // Block other reserved ranges
-      if (
-        hostname.startsWith('0.') ||
-        hostname.match(/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./) ||
-        hostname.match(/^198\.1[89]\./)
-      ) {
-        throw new Error('Webhook URL must not point to a reserved IP address');
-      }
-
-      // Block internal domain patterns
-      if (
-        hostname.endsWith('.local') ||
-        hostname.endsWith('.internal') ||
-        hostname.endsWith('.corp') ||
-        hostname.endsWith('.lan')
-      ) {
-        throw new Error('Webhook URL must not point to an internal domain');
-      }
-    } catch (e: any) {
-      if (e.message.includes('Webhook URL must not')) throw e;
-      throw new Error('Invalid webhook URL');
-    }
+    // Validate URL against private/reserved IPs, internal hostnames, etc.
+    validateWebhookUrl(args.url);
 
     // Validate events
     const validEvents = ['position.update', 'status.changed', 'tracking.started', 'tracking.ended'];
@@ -493,6 +584,11 @@ export const deliverPendingWebhooks = internalAction({
 
       // Deliver
       try {
+        // Re-validate URL at delivery time (defense against DNS rebinding:
+        // hostname may have resolved to a public IP at creation but now
+        // points to an internal IP via DNS change)
+        validateWebhookUrl(sub.url);
+
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10_000); // 10s timeout
 

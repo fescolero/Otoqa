@@ -28,7 +28,7 @@ export const create = mutation({
     _id: v.id('loadDocuments'),
   }),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, subject } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId: subject } = await requireCallerIdentity(ctx);
 
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');

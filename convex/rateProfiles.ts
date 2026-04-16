@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Rate Profiles - Pay package definitions
@@ -89,7 +89,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const now = Date.now();
 
@@ -117,7 +117,7 @@ export const create = mutation({
       isDefault: args.isDefault ?? false,
       isActive: true,
       createdAt: now,
-      createdBy: args.createdBy,
+      createdBy: userId,
     });
 
     // If this is the org default for DRIVER profiles, assign to all drivers
@@ -125,7 +125,7 @@ export const create = mutation({
       await ctx.runMutation(internal.rateProfiles.assignOrgDefaultToAllDrivers, {
         profileId,
         workosOrgId: args.workosOrgId,
-        userId: args.createdBy,
+        userId,
       });
     }
 
@@ -136,7 +136,7 @@ export const create = mutation({
       entityId: profileId,
       entityName: args.name,
       action: 'created',
-      performedBy: args.createdBy,
+      performedBy: userId,
       description: `Created ${args.profileType.toLowerCase()} rate profile "${args.name}"`,
     });
 
@@ -163,13 +163,13 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
     if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
-    const { profileId, userId, userName, ...updates } = args;
+    const { profileId, userId: _argUserId, userName: _argUserName, ...updates } = args;
 
     // If setting as org default, unset other defaults of same profileType
     if (updates.isDefault === true) {
@@ -236,7 +236,7 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
@@ -254,8 +254,8 @@ export const deactivate = mutation({
       entityId: args.profileId,
       entityName: profile.name,
       action: 'deactivated',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Deactivated rate profile "${profile.name}"`,
     });
 
@@ -271,7 +271,7 @@ export const reactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
@@ -288,8 +288,8 @@ export const reactivate = mutation({
       entityId: args.profileId,
       entityName: profile.name,
       action: 'reactivated',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Reactivated rate profile "${profile.name}"`,
     });
 

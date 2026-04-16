@@ -74,7 +74,7 @@ export const upsertIntegration = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Check if integration already exists
     const existing = await ctx.db
@@ -111,7 +111,7 @@ export const upsertIntegration = mutation({
           recordsProcessed: undefined,
           errorMessage: undefined,
         },
-        createdBy: args.createdBy,
+        createdBy: userId,
         createdAt: now,
         updatedAt: now,
       });

@@ -3,7 +3,7 @@ import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 const paymentMethodValidator = v.optional(
   v.union(
@@ -354,7 +354,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const now = Date.now();
     const totalCost = Math.round(args.gallons * args.pricePerGallon * 100) / 100;
@@ -379,7 +379,7 @@ export const create = mutation({
       receiptStorageId: args.receiptStorageId,
       createdAt: now,
       updatedAt: now,
-      createdBy: args.createdBy,
+      createdBy: userId,
     });
 
     await ctx.runMutation(internal.auditLog.logAction, {
@@ -387,7 +387,7 @@ export const create = mutation({
       entityType: 'fuelEntry',
       entityId: entryId,
       action: 'CREATE',
-      performedBy: args.createdBy,
+      performedBy: userId,
       description: `Created fuel entry: ${args.gallons} gal @ $${args.pricePerGallon}/gal = $${totalCost}`,
     });
 
@@ -416,7 +416,7 @@ export const update = mutation({
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
 
     const existing = await ctx.db.get(args.entryId);
     if (!existing) throw new Error('Fuel entry not found');
@@ -424,7 +424,7 @@ export const update = mutation({
       throw new Error('Fuel entry not found');
     }
 
-    const { entryId, updatedBy, ...updates } = args;
+    const { entryId, updatedBy: _updatedBy, ...updates } = args;
     const changedFields: Array<string> = [];
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};
@@ -453,7 +453,7 @@ export const update = mutation({
         entityType: 'fuelEntry',
         entityId: args.entryId,
         action: 'UPDATE',
-        performedBy: updatedBy,
+        performedBy: userId,
         description: `Updated fuel entry`,
         changesBefore: JSON.stringify(before),
         changesAfter: JSON.stringify(after),
@@ -471,7 +471,7 @@ export const remove = mutation({
     deletedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
 
     const existing = await ctx.db.get(args.entryId);
     if (!existing) throw new Error('Fuel entry not found');
@@ -486,7 +486,7 @@ export const remove = mutation({
       entityType: 'fuelEntry',
       entityId: args.entryId,
       action: 'DELETE',
-      performedBy: args.deletedBy,
+      performedBy: userId,
       description: `Deleted fuel entry: ${existing.gallons} gal @ $${existing.pricePerGallon}/gal`,
       changesBefore: JSON.stringify({
         entryDate: existing.entryDate,
@@ -522,7 +522,7 @@ export const bulkCreate = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const now = Date.now();
     const ids: Array<string> = [];
@@ -535,7 +535,7 @@ export const bulkCreate = mutation({
         totalCost,
         createdAt: now,
         updatedAt: now,
-        createdBy: args.createdBy,
+        createdBy: userId,
       });
       ids.push(entryId);
     }
@@ -545,7 +545,7 @@ export const bulkCreate = mutation({
       entityType: 'fuelEntry',
       entityId: 'bulk',
       action: 'BULK_CREATE',
-      performedBy: args.createdBy,
+      performedBy: userId,
       description: `Bulk imported ${args.entries.length} fuel entries`,
     });
 

@@ -3,7 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { updateLoadCount } from './stats_helpers';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Load Carrier Assignments API
@@ -392,7 +392,7 @@ export const offerLoad = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     // Verify load exists
@@ -464,7 +464,7 @@ export const offerLoad = mutation({
       usePayProfile: args.usePayProfile,
       status: 'OFFERED',
       offeredAt: now,
-      createdBy: args.createdBy,
+      createdBy: createdBy,
     });
 
     return {
@@ -496,7 +496,7 @@ export const directAssign = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     // Verify load exists and is assignable
@@ -592,7 +592,7 @@ export const directAssign = mutation({
         await ctx.db.patch(stale._id, {
           status: 'CANCELED',
           canceledAt: now,
-          canceledBy: args.createdBy,
+          canceledBy: createdBy,
           canceledByParty: 'BROKER',
           cancellationReason: 'OTHER',
           cancellationNotes: 'Auto-canceled: stale assignment on open load during reassignment',
@@ -628,7 +628,7 @@ export const directAssign = mutation({
       offeredAt: now,
       acceptedAt: now, // Direct assign = immediately accepted
       awardedAt: now,
-      createdBy: args.createdBy,
+      createdBy: createdBy,
     });
 
     // Update load status to Assigned and link carrier partnership
@@ -664,7 +664,7 @@ export const directAssign = mutation({
 
         await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
           legId: leg._id,
-          userId: args.createdBy,
+          userId: createdBy,
         });
       }
     } else {
@@ -696,7 +696,7 @@ export const directAssign = mutation({
 
         await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
           legId,
-          userId: args.createdBy,
+          userId: createdBy,
         });
       }
     }

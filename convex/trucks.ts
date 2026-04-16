@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 // Helper function to determine expiration status
 const getExpirationStatus = (dateString?: string) => {
@@ -186,11 +186,12 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
 
     const truckId = await ctx.db.insert('trucks', {
       ...args,
+      createdBy: userId,
       createdAt: now,
       updatedAt: now,
     });
@@ -202,7 +203,7 @@ export const create = mutation({
       entityId: truckId,
       entityName: `${args.unitId}`,
       action: 'created',
-      performedBy: args.createdBy,
+      performedBy: userId,
       description: `Created truck ${args.unitId}`,
     });
 
@@ -249,8 +250,8 @@ export const update = mutation({
     engineManufacturer: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
-    const { id, userId, userName, organizationId, ...updates } = args;
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { id, userId: _argUserId, userName: _argUserName, organizationId, ...updates } = args;
 
     // Get current truck data for audit log
     const truck = await ctx.db.get(id);
@@ -261,11 +262,11 @@ export const update = mutation({
       updatedAt: Date.now(),
     });
 
-    // Log the update if audit info provided
-    if (userId && truck && organizationId) {
+    // Log the update
+    {
       const changedFields = Object.keys(updates).filter((key) => key !== 'updatedAt');
       await ctx.runMutation(internal.auditLog.logAction, {
-        organizationId,
+        organizationId: callerOrgId,
         entityType: 'truck',
         entityId: id,
         entityName: `${truck.unitId}`,
@@ -290,7 +291,7 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     // Get truck data before deactivation
     const truck = await ctx.db.get(args.id);
     if (!truck || truck.organizationId !== callerOrgId) throw new Error('Truck not found');
@@ -298,7 +299,7 @@ export const deactivate = mutation({
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
-      deletedBy: args.userId,
+      deletedBy: userId,
       status: 'Sold', // Change status when deactivated
       updatedAt: Date.now(),
     });
@@ -310,8 +311,8 @@ export const deactivate = mutation({
       entityId: args.id,
       entityName: `${truck.unitId}`,
       action: 'deactivated',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Deactivated truck ${truck.unitId}`,
     });
 
@@ -356,7 +357,7 @@ export const bulkDeactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const results = [];
     for (const id of args.ids) {
       try {
@@ -370,7 +371,7 @@ export const bulkDeactivate = mutation({
         await ctx.db.patch(id, {
           isDeleted: true,
           deletedAt: Date.now(),
-          deletedBy: args.userId,
+          deletedBy: userId,
           status: 'Sold', // Change status when deactivated
           updatedAt: Date.now(),
         });
@@ -382,8 +383,8 @@ export const bulkDeactivate = mutation({
           entityId: id,
           entityName: `${truck.unitId}`,
           action: 'deactivated',
-          performedBy: args.userId,
-          performedByName: args.userName,
+          performedBy: userId,
+          performedByName: userName,
           description: `Deactivated truck ${truck.unitId}`,
         });
 

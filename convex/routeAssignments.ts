@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Route Assignments - Maps recurring routes (HCR+Trip) to drivers/carriers
@@ -293,7 +293,7 @@ export const create = mutation({
   },
   returns: v.id('routeAssignments'),
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Validate that either driver or carrier is set (not both, not neither)
     if (!args.driverId && !args.carrierPartnershipId) {
@@ -357,7 +357,7 @@ export const create = mutation({
       isActive: true,
       name: args.name,
       notes: args.notes,
-      createdBy: args.createdBy,
+      createdBy: userId,
       createdAt: now,
       updatedAt: now,
     });
@@ -529,7 +529,7 @@ export const updateSettings = mutation({
   },
   returns: v.id('autoAssignmentSettings'),
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const existing = await ctx.db
       .query('autoAssignmentSettings')
@@ -541,7 +541,7 @@ export const updateSettings = mutation({
     if (existing) {
       // Update existing
       const updateData: Record<string, unknown> = {
-        updatedBy: args.updatedBy,
+        updatedBy: userId,
         updatedAt: now,
       };
 
@@ -561,7 +561,7 @@ export const updateSettings = mutation({
         triggerOnCreate: args.triggerOnCreate ?? false,
         scheduledEnabled: args.scheduledEnabled ?? false,
         scheduleIntervalMinutes: args.scheduleIntervalMinutes,
-        updatedBy: args.updatedBy,
+        updatedBy: userId,
         updatedAt: now,
       });
     }

@@ -44,6 +44,9 @@ next-env.d.ts
 # Local ops logs (not for the repo)
 scripts/autofix-log.md
 
+# Solver test data (contains real customer lane data)
+scripts/entries.json
+
 # Internal documentation (keep only README.md and convex/README.md)
 /docs/
 /*_COMPLETE.md

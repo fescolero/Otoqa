@@ -78,7 +78,7 @@ export const assign = mutation({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId, userName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Verify carrier partnership and profile exist
     const [partnership, profile] = await Promise.all([
       ctx.db.get(args.carrierPartnershipId),

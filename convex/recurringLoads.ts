@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation, internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { updateLoadCount } from './stats_helpers';
 import {
   addDaysToUtcDateString,
@@ -199,7 +199,7 @@ export const createFromLoad = mutation({
   },
   returns: v.id('recurringLoadTemplates'),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     // 1. Get the source load
     const sourceLoad = await ctx.db.get(args.sourceLoadId);
     if (!sourceLoad) {
@@ -295,7 +295,7 @@ export const createFromLoad = mutation({
       deliveryDayOffset: args.deliveryDayOffset,
       endDate: args.endDate,
       isActive: true,
-      createdBy: args.createdBy,
+      createdBy: userId,
       createdAt: now,
       updatedAt: now,
     });

@@ -483,8 +483,14 @@ function FilterInput<T = unknown>({
   // Validation function to check if input matches pattern
   const validateInput = (value: string, pattern?: string): boolean => {
     if (!pattern || !value) return true;
-    const regex = new RegExp(pattern);
-    return regex.test(value);
+    try {
+      const regex = new RegExp(pattern);
+      return regex.test(value);
+    } catch {
+      // Invalid regex pattern in field config — treat as valid to avoid
+      // blocking user input on a misconfiguration
+      return true;
+    }
   };
 
   // Get validation message for field type

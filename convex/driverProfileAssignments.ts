@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Driver Profile Assignments
@@ -104,7 +104,7 @@ export const assign = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     // Verify driver and profile exist
     const [driver, profile] = await Promise.all([
       ctx.db.get(args.driverId),
@@ -159,8 +159,8 @@ export const assign = mutation({
       entityId: assignmentId,
       entityName: `${driver.firstName} ${driver.lastName} - ${profile.name}`,
       action: 'created',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Assigned profile "${profile.name}" to driver ${driver.firstName} ${driver.lastName}${shouldBeDefault ? ' (default)' : ''}`,
     });
 
@@ -177,7 +177,7 @@ export const remove = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
@@ -197,8 +197,8 @@ export const remove = mutation({
       entityId: args.assignmentId,
       entityName: `${driver?.firstName} ${driver?.lastName} - ${profile?.name}`,
       action: 'deleted',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Removed profile "${profile?.name}" from driver ${driver?.firstName} ${driver?.lastName}`,
     });
 
@@ -216,7 +216,7 @@ export const setDefault = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
@@ -250,8 +250,8 @@ export const setDefault = mutation({
       entityId: args.assignmentId,
       entityName: `${driver?.firstName} ${driver?.lastName} - ${profile?.name}`,
       action: 'set_default',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Set "${profile?.name}" as default profile for ${driver?.firstName} ${driver?.lastName}`,
     });
 
@@ -267,7 +267,7 @@ export const unsetDefault = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
@@ -293,8 +293,8 @@ export const unsetDefault = mutation({
       entityId: args.assignmentId,
       entityName: `${driver?.firstName} ${driver?.lastName} - ${profile?.name}`,
       action: 'unset_default',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Removed "${profile?.name}" as default profile for ${driver?.firstName} ${driver?.lastName}`,
     });
 

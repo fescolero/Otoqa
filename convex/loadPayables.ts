@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Load Payables - Calculated pay line items
@@ -148,7 +148,7 @@ export const addManual = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new Error('Load not found');
@@ -168,7 +168,7 @@ export const addManual = mutation({
       isLocked: true, // Manual items are always locked
       workosOrgId: load.workosOrgId,
       createdAt: now,
-      createdBy: args.userId,
+      createdBy: userId,
     });
 
     // Get driver name for logging
@@ -180,8 +180,8 @@ export const addManual = mutation({
       entityId: payableId,
       entityName: args.description,
       action: 'created',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Added manual pay "${args.description}" ($${totalAmount.toFixed(2)}) for ${driver?.firstName} ${driver?.lastName}`,
     });
 
@@ -201,12 +201,12 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Payable not found');
     if (payable.workosOrgId !== callerOrgId) throw new Error('Payable not found');
 
-    const { payableId, userId, userName, ...updates } = args;
+    const { payableId, userId: _argUserId, userName: _argUserName, ...updates } = args;
 
     // Calculate new total if qty or rate changed
     let newTotal = payable.totalAmount;
@@ -258,7 +258,7 @@ export const remove = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Payable not found');
     if (payable.workosOrgId !== callerOrgId) throw new Error('Payable not found');
@@ -274,8 +274,8 @@ export const remove = mutation({
       entityId: args.payableId,
       entityName: payable.description,
       action: 'deleted',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Deleted pay "${payable.description}" ($${payable.totalAmount.toFixed(2)})`,
     });
 
@@ -292,7 +292,7 @@ export const recalculate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
     if (leg.workosOrgId !== callerOrgId) throw new Error('Leg not found');
@@ -304,7 +304,7 @@ export const recalculate = mutation({
     // Trigger recalculation
     await ctx.runMutation(internal.driverPayCalculation.calculateDriverPay, {
       legId: args.legId,
-      userId: args.userId,
+      userId,
     });
 
     return args.legId;
@@ -374,7 +374,7 @@ export const unlock = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Payable not found');
     if (payable.workosOrgId !== callerOrgId) throw new Error('Payable not found');
@@ -389,8 +389,8 @@ export const unlock = mutation({
       entityId: args.payableId,
       entityName: payable.description,
       action: 'unlocked',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Unlocked pay "${payable.description}" for recalculation`,
     });
 

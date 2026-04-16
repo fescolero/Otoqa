@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import type { MutationCtx } from './_generated/server';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
@@ -894,7 +894,7 @@ export const createLoad = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId: createdBy, userName: createdByName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     if (args.stops.length === 0) throw new Error('At least one stop is required');
 
@@ -914,7 +914,7 @@ export const createLoad = mutation({
 
     const loadId = await ctx.db.insert('loadInformation', {
       workosOrgId: args.workosOrgId,
-      createdBy: args.createdBy,
+      createdBy: createdBy,
       internalId: args.internalId,
       orderNumber: args.orderNumber,
       poNumber: args.poNumber,
@@ -959,7 +959,7 @@ export const createLoad = mutation({
     for (const stop of args.stops) {
       await ctx.db.insert('loadStops', {
         workosOrgId: args.workosOrgId,
-        createdBy: args.createdBy,
+        createdBy: createdBy,
         loadId: loadId as Id<'loadInformation'>,
         internalId: args.internalId,
 
@@ -1012,8 +1012,8 @@ export const createLoad = mutation({
               loadId: loadId as Id<'loadInformation'>,
               driverId: args.assignDriverId,
               truckId: driver.currentTruckId,
-              assignedBy: args.createdBy,
-              assignedByName: args.createdByName,
+              assignedBy: createdBy,
+              assignedByName: createdByName,
             });
           }
         } else if (args.assignCarrierId) {
@@ -1024,8 +1024,8 @@ export const createLoad = mutation({
               loadId: loadId as Id<'loadInformation'>,
               carrierPartnershipId: args.assignCarrierId,
               carrierRate: carrier.defaultRate,
-              assignedBy: args.createdBy,
-              assignedByName: args.createdByName,
+              assignedBy: createdBy,
+              assignedByName: createdByName,
             });
           }
         }
@@ -1040,8 +1040,8 @@ export const createLoad = mutation({
         await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
           loadId: loadId as Id<'loadInformation'>,
           workosOrgId: args.workosOrgId,
-          userId: args.createdBy,
-          userName: args.createdByName,
+          userId: createdBy,
+          userName: createdByName,
         });
       } catch (error) {
         // Log but don't fail load creation
@@ -1265,13 +1265,13 @@ export const updateStopTimes = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const stop = await ctx.db.get(args.stopId);
     if (!stop) throw new Error('Stop not found');
     const stopLoad = await ctx.db.get(stop.loadId);
     if (!stopLoad || stopLoad.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
-    const { stopId, userId, ...updates } = args;
+    const { stopId, userId: _argUserId, ...updates } = args;
     const now = Date.now();
 
     // Build update object
@@ -1482,12 +1482,12 @@ export const updateLoadAttributes = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
-    const { loadId, userId, ...updates } = args;
+    const { loadId, userId: _argUserId, ...updates } = args;
     const now = Date.now();
 
     // Build update object

@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { scheduleRuleValidator } from './lib/validators';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import {
   calculateScheduleForYear,
   hosAnalyzeRoute,
@@ -85,7 +85,7 @@ export const createSession = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     return ctx.db.insert('laneAnalysisSessions', {
       workosOrgId: args.workosOrgId,
@@ -102,7 +102,7 @@ export const createSession = mutation({
       customScheduleOnDays: args.customScheduleOnDays,
       customScheduleOffDays: args.customScheduleOffDays,
       analysisYear: args.analysisYear,
-      createdBy: args.createdBy,
+      createdBy: userId,
       createdAt: now,
       updatedAt: now,
       isDeleted: false,
@@ -170,13 +170,13 @@ export const archiveSession = mutation({
     deletedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await requireCallerOrgId(ctx);
+    const { userId } = await requireCallerIdentity(ctx);
     const session = await ctx.db.get(args.id);
     if (!session || session.isDeleted) throw new Error('Session not found');
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
-      deletedBy: args.deletedBy,
+      deletedBy: userId,
       updatedAt: Date.now(),
     });
   },
@@ -445,10 +445,11 @@ export const createBase = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     return ctx.db.insert('laneAnalysisBases', {
       ...args,
+      createdBy: userId,
       isActive: true,
       createdAt: now,
       updatedAt: now,

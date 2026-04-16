@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
-import { requireCallerOrgId } from './lib/auth';
+import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
 /**
  * Rate Rules - Logic engine rules
@@ -85,7 +85,7 @@ export const create = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     // Verify profile exists and caller owns the org
     const profile = await ctx.db.get(args.profileId);
@@ -112,8 +112,8 @@ export const create = mutation({
       entityId: ruleId,
       entityName: args.name,
       action: 'created',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Created rate rule "${args.name}" in profile "${profile.name}"`,
     });
 
@@ -137,13 +137,13 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     const rule = await ctx.db.get(args.ruleId);
     if (!rule) throw new Error('Rate rule not found');
     if (rule.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
-    const { ruleId, userId, userName, ...updates } = args;
+    const { ruleId, userId: _argUserId, userName: _argUserName, ...updates } = args;
 
     // Build update object with only provided fields
     const updateData: Record<string, unknown> = {};
@@ -185,7 +185,7 @@ export const remove = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     const rule = await ctx.db.get(args.ruleId);
     if (!rule) throw new Error('Rate rule not found');
@@ -198,8 +198,8 @@ export const remove = mutation({
       entityId: args.ruleId,
       entityName: rule.name,
       action: 'deleted',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `Deleted rate rule "${rule.name}"`,
       changesBefore: JSON.stringify(rule),
     });
@@ -218,7 +218,7 @@ export const toggleActive = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
 
     const rule = await ctx.db.get(args.ruleId);
     if (!rule) throw new Error('Rate rule not found');
@@ -237,8 +237,8 @@ export const toggleActive = mutation({
       entityId: args.ruleId,
       entityName: rule.name,
       action: newStatus ? 'activated' : 'deactivated',
-      performedBy: args.userId,
-      performedByName: args.userName,
+      performedBy: userId,
+      performedByName: userName,
       description: `${newStatus ? 'Activated' : 'Deactivated'} rate rule "${rule.name}"`,
     });
 
@@ -264,7 +264,7 @@ export const bulkCreate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
 
     // Verify profile exists and caller owns the org
     const profile = await ctx.db.get(args.profileId);
@@ -296,7 +296,7 @@ export const bulkCreate = mutation({
       entityId: args.profileId,
       entityName: profile.name,
       action: 'bulk_created',
-      performedBy: args.userId,
+      performedBy: userId,
       description: `Created ${args.rules.length} rules for profile "${profile.name}"`,
     });
 
