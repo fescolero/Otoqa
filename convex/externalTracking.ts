@@ -174,9 +174,18 @@ async function resolveSandboxLoad(
   };
 }
 
+/** Round a number to n decimal places, returning undefined if input is undefined. */
+function round(value: number | undefined, decimals: number): number | undefined {
+  if (value === undefined) return undefined;
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
 function autoDetectRefType(ref: string): 'external' | 'internal' | 'order' {
-  if (ref.startsWith('FK-') || ref.startsWith('fk-')) return 'external';
-  if (ref.startsWith('LD-') || ref.startsWith('ld-')) return 'internal';
+  // FK- and LD- prefixes are internalId formats (e.g. FK-96790533, LD-12345)
+  if (ref.startsWith('FK-') || ref.startsWith('fk-') || ref.startsWith('LD-') || ref.startsWith('ld-')) return 'internal';
+  // Pure numeric strings are likely order numbers or external IDs
+  if (/^\d+$/.test(ref)) return 'order';
   return 'internal'; // Default
 }
 
@@ -276,11 +285,11 @@ export const getPositions = internalQuery({
 
     return {
       positions: page.map((p) => ({
-        latitude: p.latitude,
-        longitude: p.longitude,
-        speed: p.speed,
-        heading: p.heading,
-        accuracy: p.accuracy,
+        latitude: round(p.latitude, 6)!,
+        longitude: round(p.longitude, 6)!,
+        speed: round(p.speed, 2),
+        heading: round(p.heading, 2),
+        accuracy: round(p.accuracy, 2),
         recordedAt: new Date(p.recordedAt).toISOString(),
       })),
       hasMore,
@@ -322,11 +331,11 @@ export const getLatestPosition = internalQuery({
     if (!position) return null;
 
     return {
-      latitude: position.latitude,
-      longitude: position.longitude,
-      speed: position.speed ?? undefined,
-      heading: position.heading ?? undefined,
-      accuracy: position.accuracy ?? undefined,
+      latitude: round(position.latitude, 6)!,
+      longitude: round(position.longitude, 6)!,
+      speed: round(position.speed, 2),
+      heading: round(position.heading, 2),
+      accuracy: round(position.accuracy, 2),
       recordedAt: new Date(position.recordedAt).toISOString(),
     };
   },
@@ -421,8 +430,8 @@ export const getStatusEvents = internalQuery({
             eventType: 'ARRIVED',
             stopNumber: stop.sequenceNumber,
             timestamp: stop.checkedInAt,
-            latitude: stop.latitude,
-            longitude: stop.longitude,
+            latitude: round(stop.latitude, 6),
+            longitude: round(stop.longitude, 6),
           });
         }
         if (stop.checkedOutAt) {
@@ -431,8 +440,8 @@ export const getStatusEvents = internalQuery({
             eventType: isLastStop ? 'DELIVERED' : 'DEPARTED',
             stopNumber: stop.sequenceNumber,
             timestamp: stop.checkedOutAt,
-            latitude: stop.latitude,
-            longitude: stop.longitude,
+            latitude: round(stop.latitude, 6),
+            longitude: round(stop.longitude, 6),
           });
         }
       }
@@ -453,8 +462,8 @@ export const getStatusEvents = internalQuery({
             eventType: 'ARRIVED',
             stopNumber: stop.sequenceNumber,
             timestamp: stop.checkedInAt,
-            latitude: stop.checkinLatitude,
-            longitude: stop.checkinLongitude,
+            latitude: round(stop.checkinLatitude, 6),
+            longitude: round(stop.checkinLongitude, 6),
           });
         }
         if (stop.checkedOutAt) {
@@ -463,8 +472,8 @@ export const getStatusEvents = internalQuery({
             eventType: isLastStop ? 'DELIVERED' : 'DEPARTED',
             stopNumber: stop.sequenceNumber,
             timestamp: stop.checkedOutAt,
-            latitude: stop.checkoutLatitude,
-            longitude: stop.checkoutLongitude,
+            latitude: round(stop.checkoutLatitude, 6),
+            longitude: round(stop.checkoutLongitude, 6),
           });
         }
       }
