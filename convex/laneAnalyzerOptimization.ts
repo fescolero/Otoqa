@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { internalMutation, internalQuery, query } from './_generated/server';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { Doc, Id } from './_generated/dataModel';
 import {
   haversineDistance,
@@ -450,6 +451,7 @@ export const findLaneCombinations = internalMutation({
 export const getOptimizationResults = query({
   args: { sessionId: v.id('laneAnalysisSessions') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     return ctx.db
       .query('laneAnalysisResults')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
@@ -501,6 +503,7 @@ export const analyzeLanePerformance = query({
     dateRangeEnd: v.string(),
   },
   handler: async (ctx, args): Promise<LanePerformanceResult[]> => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const results: LanePerformanceResult[] = [];
 
     // Limit lanes processed per query to stay under Convex read limits

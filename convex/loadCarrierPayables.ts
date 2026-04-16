@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Load Carrier Payables - Calculated carrier pay line items
@@ -15,6 +16,12 @@ export const getByLoad = query({
     loadId: v.id('loadInformation'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) {
+      return { payables: [], grouped: {}, total: 0, hasWarnings: false };
+    }
+
     const payables = await ctx.db
       .query('loadCarrierPayables')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -68,6 +75,12 @@ export const getByCarrierPartnership = query({
     endDate: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const partnership = await ctx.db.get(args.carrierPartnershipId);
+    if (!partnership || partnership.brokerOrgId !== callerOrgId) {
+      return { payables: [], total: 0, count: 0 };
+    }
+
     const payablesQuery = ctx.db
       .query('loadCarrierPayables')
       .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId));
@@ -120,7 +133,10 @@ export const get = query({
     payableId: v.id('loadCarrierPayables'),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.payableId);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const payable = await ctx.db.get(args.payableId);
+    if (!payable || payable.workosOrgId !== callerOrgId) return null;
+    return payable;
   },
 });
 
@@ -137,8 +153,10 @@ export const addManual = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new Error('Load not found');
 
     const partnership = await ctx.db.get(args.carrierPartnershipId);
     if (!partnership) throw new Error('Carrier partnership not found');
@@ -188,8 +206,10 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Carrier payable not found');
+    if (payable.workosOrgId !== callerOrgId) throw new Error('Carrier payable not found');
 
     const { payableId, userId, userName, ...updates } = args;
 
@@ -244,8 +264,10 @@ export const remove = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Carrier payable not found');
+    if (payable.workosOrgId !== callerOrgId) throw new Error('Carrier payable not found');
 
     // Only allow deleting manual items
     if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
@@ -276,8 +298,10 @@ export const recalculate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
+    if (leg.workosOrgId !== callerOrgId) throw new Error('Leg not found');
 
     if (!leg.carrierPartnershipId) {
       throw new Error('Cannot recalculate carrier pay: no carrier assigned');
@@ -301,6 +325,7 @@ export const getOrgSummary = query({
     endDate: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const payables = await ctx.db
       .query('loadCarrierPayables')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -344,6 +369,12 @@ export const getUnassigned = query({
     carrierPartnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const partnership = await ctx.db.get(args.carrierPartnershipId);
+    if (!partnership || partnership.brokerOrgId !== callerOrgId) {
+      return { payables: [], total: 0, count: 0 };
+    }
+
     // Query all payables for this carrier
     const allPayables = await ctx.db
       .query('loadCarrierPayables')
@@ -383,8 +414,10 @@ export const assignToSettlement = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) throw new Error('Settlement not found');
 
     // Only allow assigning to DRAFT settlements
     if (settlement.status !== 'DRAFT') {
@@ -436,6 +469,7 @@ export const removeFromSettlement = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const now = Date.now();
     let totalRemoved = 0;
     let settlementId: Id<'carrierSettlements'> | null = null;
@@ -443,6 +477,7 @@ export const removeFromSettlement = mutation({
     for (const payableId of args.payableIds) {
       const payable = await ctx.db.get(payableId);
       if (!payable || !payable.settlementId) continue;
+      if (payable.workosOrgId !== callerOrgId) continue;
 
       // Track the settlement for updating totals
       if (!settlementId) {

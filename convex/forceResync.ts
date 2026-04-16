@@ -1,5 +1,6 @@
 import { mutation } from "./_generated/server";
 import { v } from "convex/values";
+import { assertCallerOwnsOrg } from "./lib/auth";
 
 /**
  * Clear all FourKites loads to force a fresh sync
@@ -9,6 +10,7 @@ export const clearFourKitesLoads = mutation({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Find all FK loads
     const loads = await ctx.db
       .query("loadInformation")

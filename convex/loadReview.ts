@@ -5,6 +5,7 @@
 
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { assertCallerOwnsOrg, requireCallerOrgId } from "./lib/auth";
 
 /**
  * OPTION A: Confirm Spot Load
@@ -16,8 +17,12 @@ export const confirmSpotLoad = mutation({
     loadId: v.id("loadInformation"),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) {
+      throw new Error("Load not found");
+    }
+    if (load.workosOrgId !== callerOrgId) {
       throw new Error("Load not found");
     }
 
@@ -45,8 +50,12 @@ export const convertToContract = mutation({
     rate: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) {
+      throw new Error("Load not found");
+    }
+    if (load.workosOrgId !== callerOrgId) {
       throw new Error("Load not found");
     }
 
@@ -153,6 +162,7 @@ export const countMatchingSpotLoads = query({
     tripNumber: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const loads = await ctx.db
       .query("loadInformation")
       .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
@@ -177,6 +187,7 @@ export const countReviewNeeded = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const loads = await ctx.db
       .query("loadInformation")
       .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))

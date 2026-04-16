@@ -7,6 +7,7 @@ import { mutation, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount } from "./stats_helpers";
+import { requireCallerOrgId } from "./lib/auth";
 
 /**
  * Check a single load and promote if specific lane exists
@@ -17,8 +18,10 @@ export const checkAndPromoteLoad = mutation({
     loadId: v.id("loadInformation"),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) return { promoted: false };
+    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     // Only check SPOT loads that need review
     if (load.loadType !== "SPOT" || !load.requiresManualReview) {

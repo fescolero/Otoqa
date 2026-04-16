@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Load Payables - Calculated pay line items
@@ -13,6 +14,12 @@ export const getByLoad = query({
     loadId: v.id('loadInformation'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) {
+      return { payables: [], grouped: {} as Record<string, never[]>, total: 0, hasWarnings: false };
+    }
+
     const payables = await ctx.db
       .query('loadPayables')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -65,6 +72,10 @@ export const getByDriver = query({
     endDate: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return [];
+
     let payablesQuery = ctx.db
       .query('loadPayables')
       .withIndex('by_driver', (q) => q.eq('driverId', args.driverId));
@@ -117,7 +128,10 @@ export const get = query({
     payableId: v.id('loadPayables'),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.payableId);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const payable = await ctx.db.get(args.payableId);
+    if (!payable || payable.workosOrgId !== callerOrgId) return null;
+    return payable;
   },
 });
 
@@ -134,8 +148,10 @@ export const addManual = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new Error('Load not found');
 
     const totalAmount = args.quantity * args.rate;
     const now = Date.now();
@@ -185,8 +201,10 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Payable not found');
+    if (payable.workosOrgId !== callerOrgId) throw new Error('Payable not found');
 
     const { payableId, userId, userName, ...updates } = args;
 
@@ -240,8 +258,10 @@ export const remove = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Payable not found');
+    if (payable.workosOrgId !== callerOrgId) throw new Error('Payable not found');
 
     // Only allow deleting manual items
     if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
@@ -272,8 +292,10 @@ export const recalculate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
+    if (leg.workosOrgId !== callerOrgId) throw new Error('Leg not found');
 
     if (!leg.driverId) {
       throw new Error('Cannot recalculate pay: no driver assigned');
@@ -297,6 +319,7 @@ export const getOrgSummary = query({
     endDate: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const payables = await ctx.db
       .query('loadPayables')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -351,8 +374,10 @@ export const unlock = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (!payable) throw new Error('Payable not found');
+    if (payable.workosOrgId !== callerOrgId) throw new Error('Payable not found');
 
     await ctx.db.patch(args.payableId, {
       isLocked: false,

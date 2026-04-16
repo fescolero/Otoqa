@@ -3,6 +3,7 @@ import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 const paymentMethodValidator = v.optional(
   v.union(
@@ -130,9 +131,7 @@ export const list = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const filters: DefListFilters = args;
     const result = await buildDefEntriesQuery(ctx, filters).paginate(args.paginationOpts);
     const filtered = result.page.filter((entry: any) => matchesDefFilters(entry, filters));
@@ -150,9 +149,7 @@ export const list = query({
 export const count = query({
   args: listArgs,
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const filters: DefListFilters = args;
     const entries = await buildDefEntriesQuery(ctx, filters).collect();
     const filtered = entries.filter((entry: any) => matchesDefFilters(entry, filters));
@@ -166,11 +163,9 @@ export const get = query({
     entryId: v.id('defEntries'),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    const callerOrgId = await requireCallerOrgId(ctx);
     const entry = await ctx.db.get(args.entryId);
-    if (!entry) return null;
+    if (!entry || entry.organizationId !== callerOrgId) return null;
 
     const [vendor, driver, carrier, truck, load] = await Promise.all([
       ctx.db.get(entry.vendorId),
@@ -218,9 +213,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
     const totalCost = Math.round(args.gallons * args.pricePerGallon * 100) / 100;
 
@@ -281,11 +274,9 @@ export const update = mutation({
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    const callerOrgId = await requireCallerOrgId(ctx);
     const existing = await ctx.db.get(args.entryId);
-    if (!existing) throw new Error('DEF entry not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new Error('DEF entry not found');
 
     const { entryId, updatedBy, ...updates } = args;
     const changedFields: Array<string> = [];
@@ -334,11 +325,9 @@ export const remove = mutation({
     deletedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    const callerOrgId = await requireCallerOrgId(ctx);
     const existing = await ctx.db.get(args.entryId);
-    if (!existing) throw new Error('DEF entry not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new Error('DEF entry not found');
 
     await ctx.db.delete(args.entryId);
 
@@ -383,9 +372,7 @@ export const bulkCreate = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
     const ids: Array<string> = [];
 
@@ -418,8 +405,7 @@ export const bulkCreate = mutation({
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await requireCallerOrgId(ctx);
     return await ctx.storage.generateUploadUrl();
   },
 });

@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Manual Adjustment Templates
@@ -42,6 +43,7 @@ export const listTemplates = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Get all active profiles for this org
     let profilesQuery = ctx.db
       .query('rateProfiles')
@@ -115,7 +117,8 @@ export const getCommonAdjustmentTypes = query({
       requiresReceipt: v.boolean(),
     })
   ),
-  handler: async () => {
+  handler: async (ctx) => {
+    await requireCallerOrgId(ctx);
     return [
       {
         type: 'LAYOVER',
@@ -198,6 +201,7 @@ export const requiresReceipt = query({
     reason: v.optional(v.string()),
   }),
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     // Types that always require receipts
     const requiresReceiptTypes = ['LUMPER', 'FUEL_ADVANCE', 'SCALE_TICKET', 'TOLL'];
 

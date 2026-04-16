@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { getExpirationStatus } from './_helpers/dateUtils';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // Count trailers by status for tab badges
 export const countTrailersByStatus = query({
@@ -9,6 +10,7 @@ export const countTrailersByStatus = query({
     organizationId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const trailers = await ctx.db
       .query('trailers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
@@ -56,6 +58,7 @@ export const list = query({
     bodyType: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const todayStr = args.todayDateStr ?? '9999-12-31';
 
     let trailers = await ctx.db
@@ -124,7 +127,10 @@ export const get = query({
     id: v.id('trailers'),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.id);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const trailer = await ctx.db.get(args.id);
+    if (!trailer || trailer.organizationId !== callerOrgId) return null;
+    return trailer;
   },
 });
 
@@ -161,6 +167,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
 
     const trailerId = await ctx.db.insert('trailers', {
@@ -215,10 +222,12 @@ export const update = mutation({
     lienholder: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const { id, userId, userName, organizationId, ...updates } = args;
 
     // Get current trailer data for audit log
     const trailer = await ctx.db.get(id);
+    if (!trailer || trailer.organizationId !== callerOrgId) throw new Error('Trailer not found');
 
     await ctx.db.patch(id, {
       ...updates,
@@ -254,9 +263,10 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     // Get trailer data before deactivation
     const trailer = await ctx.db.get(args.id);
-    if (!trailer) throw new Error('Trailer not found');
+    if (!trailer || trailer.organizationId !== callerOrgId) throw new Error('Trailer not found');
 
     await ctx.db.patch(args.id, {
       isDeleted: true,
@@ -290,12 +300,13 @@ export const bulkDeactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const results = [];
     for (const id of args.ids) {
       try {
         // Get trailer data before deactivation
         const trailer = await ctx.db.get(id);
-        if (!trailer) {
+        if (!trailer || trailer.organizationId !== callerOrgId) {
           results.push({ id, success: false, error: 'Trailer not found' });
           continue;
         }

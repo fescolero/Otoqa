@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg } from './lib/auth';
 
 export const fuelByDriver = query({
   args: {
@@ -9,9 +10,7 @@ export const fuelByDriver = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const entries = await ctx.db
       .query('fuelEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -59,9 +58,7 @@ export const fuelByCarrier = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const entries = await ctx.db
       .query('fuelEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -109,9 +106,7 @@ export const fuelByTruck = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const entries = await ctx.db
       .query('fuelEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -161,9 +156,7 @@ export const fuelByVendor = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const entries = await ctx.db
       .query('fuelEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -210,9 +203,7 @@ export const costPerMile = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const entries = await ctx.db
       .query('fuelEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -308,9 +299,7 @@ export const defUsage = query({
     groupBy: v.optional(v.union(v.literal('driver'), v.literal('carrier'), v.literal('truck'))),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const entries = await ctx.db
       .query('defEntries')
       .withIndex('by_organization_and_date', (q) =>
@@ -375,9 +364,7 @@ export const monthlySummary = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const fuelEntries = await ctx.db
       .query('fuelEntries')
       .withIndex('by_organization_and_date', (q) =>

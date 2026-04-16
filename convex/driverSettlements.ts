@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Driver Settlement Engine
@@ -394,6 +395,7 @@ export const listForOrganization = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     let dbQuery = ctx.db
       .query('driverSettlements')
       .withIndex('by_org_status', (q) => q.eq('workosOrgId', args.workosOrgId));
@@ -509,6 +511,10 @@ export const listForDriver = query({
     })
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return [];
+
     let query = ctx.db
       .query('driverSettlements')
       .withIndex('by_driver', (q) => q.eq('driverId', args.driverId));
@@ -647,8 +653,12 @@ export const getSettlementDetails = query({
     }),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
 
     // Get driver info
     const driver = await ctx.db.get(settlement.driverId);
@@ -875,12 +885,16 @@ export const updateManualPayable = mutation({
     isRebillable: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
-    
+
     if (!payable) {
       throw new Error('Payable not found');
     }
-    
+    if (payable.workosOrgId !== callerOrgId) {
+      throw new Error('Payable not found');
+    }
+
     if (payable.sourceType !== 'MANUAL') {
       throw new Error('Can only edit manual adjustments');
     }
@@ -918,9 +932,13 @@ export const deleteManualPayable = mutation({
     payableId: v.id('loadPayables'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
-    
+
     if (!payable) {
+      throw new Error('Payable not found');
+    }
+    if (payable.workosOrgId !== callerOrgId) {
       throw new Error('Payable not found');
     }
     
@@ -979,6 +997,12 @@ export const getUnassignedPayables = query({
     totalHeld: v.float64(),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) {
+      return { unassignedPayables: [], heldPayables: [], totalUnassigned: 0, totalHeld: 0 };
+    }
+
     // Get all payables without a settlement
     const allUnassigned = await ctx.db
       .query('loadPayables')
@@ -1061,6 +1085,12 @@ export const generateStatement = mutation({
     grossTotal: v.float64(),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
+
     const now = Date.now();
 
     // Generate statement number
@@ -1159,8 +1189,12 @@ export const updateSettlementStatus = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
 
     const now = Date.now();
     const updates: Partial<Doc<'driverSettlements'>> = {
@@ -1244,8 +1278,12 @@ export const addManualAdjustment = mutation({
   },
   returns: v.id('loadPayables'),
   handler: async (ctx, args) => {
+    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
 
     // Cannot add to approved/paid settlements
     if (settlement.status === 'APPROVED' || settlement.status === 'PAID') {
@@ -1285,7 +1323,11 @@ export const removePayableFromSettlement = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
+    if (payable && payable.workosOrgId !== callerOrgId) {
+      throw new Error('Payable not found');
+    }
     if (!payable) throw new Error('Payable not found');
 
     if (!payable.settlementId) {
@@ -1320,8 +1362,12 @@ export const deleteSettlement = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
 
     // Can only delete DRAFT or VOID settlements
     if (settlement.status !== 'DRAFT' && settlement.status !== 'VOID') {
@@ -1373,8 +1419,12 @@ export const refreshDraftSettlement = mutation({
     grossTotal: v.float64(),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
 
     // Can only refresh DRAFT settlements
     if (settlement.status !== 'DRAFT') {
@@ -1556,8 +1606,12 @@ export const generateStatementFromPlan = mutation({
     planName: v.string(),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const driver = await ctx.db.get(args.driverId);
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
     if (!driver.payPlanId) throw new Error('Driver has no Pay Plan assigned');
 
     const plan = await ctx.db.get(driver.payPlanId);
@@ -1743,10 +1797,12 @@ export const bulkGenerateByPlan = mutation({
     })),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     console.log(`[BULK_SETTLE] v3 | Plan: ${args.planId} | Drivers on plan: pending...`);
-    
+
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay Plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new Error('Pay Plan not found');
     if (!plan.isActive) throw new Error('Pay Plan is inactive');
 
     // Get all drivers on this plan

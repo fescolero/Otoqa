@@ -4,6 +4,7 @@ import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLegTimeRange, doTimeRangesOverlap, calculateOverlapMinutes, detectDriverOverlaps } from './_helpers/timeUtils';
 import type { OverlapInfo } from './_helpers/timeUtils';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Dispatch Legs - The atomic unit of work
@@ -36,6 +37,10 @@ export const getByLoad = query({
     loadId: v.id('loadInformation'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+
     const legs = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -77,6 +82,10 @@ export const getByDriver = query({
     status: v.optional(legStatusValidator),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return [];
+
     let legsQuery = ctx.db
       .query('dispatchLegs')
       .withIndex('by_driver', (q) => {
@@ -111,8 +120,10 @@ export const get = query({
     legId: v.id('dispatchLegs'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) return null;
+    if (leg.workosOrgId !== callerOrgId) return null;
 
     const [driver, truck, trailer, load] = await Promise.all([
       leg.driverId ? ctx.db.get(leg.driverId) : null,
@@ -146,8 +157,10 @@ export const create = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     // Get existing legs to determine sequence
     const existingLegs = await ctx.db
@@ -217,8 +230,10 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
+    if (leg.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const { legId, userId, userName, ...updates } = args;
     const now = Date.now();
@@ -275,6 +290,7 @@ export const assignDriver = mutation({
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // 1. Validate driver exists, is active, and not deleted
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || driver.employmentStatus !== 'Active') {
@@ -688,6 +704,7 @@ export const assignCarrier = mutation({
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // 1. Validate carrier partnership exists and is active
     const partnership = await ctx.db.get(args.carrierPartnershipId);
     if (!partnership || partnership.status !== 'ACTIVE') {
@@ -828,6 +845,7 @@ export const unassignResource = mutation({
   },
   returns: assignmentResponseValidator,
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // 1. Validate load exists
     const load = await ctx.db.get(args.loadId);
     if (!load) {
@@ -910,8 +928,10 @@ export const splitAtStop = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     // Get all stops
     const stops = await ctx.db
@@ -1034,8 +1054,10 @@ export const removeDriver = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
+    if (leg.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const now = Date.now();
 
@@ -1094,6 +1116,7 @@ export const getAvailableDrivers = query({
     excludeLoadId: v.optional(v.id('loadInformation')),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // 1. Get all legs with drivers in PENDING/ACTIVE status for this org
     const allOrgLegs = await ctx.db
       .query('dispatchLegs')
@@ -1210,6 +1233,10 @@ export const getDriverSchedule = query({
     endDate: v.optional(v.number()), // Unix timestamp (ms)
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return [];
+
     // 1. Get all legs for this driver
     const legs = await ctx.db
       .query('dispatchLegs')
@@ -1305,6 +1332,7 @@ export const getAllActiveDrivers = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Get all active drivers for the org
     const allDrivers = await ctx.db
       .query('drivers')

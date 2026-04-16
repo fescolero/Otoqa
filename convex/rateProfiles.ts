@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Rate Profiles - Pay package definitions
@@ -15,14 +16,16 @@ export const list = query({
     includeInactive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     let profiles;
-    
+
     if (args.profileType) {
       // Filter by type - assign to local var for TypeScript narrowing
       const profileType = args.profileType;
       profiles = await ctx.db
         .query('rateProfiles')
-        .withIndex('by_org_type', (q) => 
+        .withIndex('by_org_type', (q) =>
           q.eq('workosOrgId', args.workosOrgId).eq('profileType', profileType)
         )
         .collect();
@@ -49,8 +52,11 @@ export const get = query({
     profileId: v.id('rateProfiles'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const profile = await ctx.db.get(args.profileId);
     if (!profile) return null;
+    if (profile.workosOrgId !== callerOrgId) return null;
 
     // Fetch associated rules
     const rules = await ctx.db
@@ -83,13 +89,15 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     const now = Date.now();
 
     // If setting as org default, unset other defaults of same profileType
     if (args.isDefault) {
       const existingDefaults = await ctx.db
         .query('rateProfiles')
-        .withIndex('by_org_type', (q) => 
+        .withIndex('by_org_type', (q) =>
           q.eq('workosOrgId', args.workosOrgId).eq('profileType', args.profileType)
         )
         .filter((q) => q.eq(q.field('isDefault'), true))
@@ -155,8 +163,11 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const { profileId, userId, userName, ...updates } = args;
 
@@ -164,10 +175,10 @@ export const update = mutation({
     if (updates.isDefault === true) {
       const existingDefaults = await ctx.db
         .query('rateProfiles')
-        .withIndex('by_org_type', (q) => 
+        .withIndex('by_org_type', (q) =>
           q.eq('workosOrgId', profile.workosOrgId).eq('profileType', profile.profileType)
         )
-        .filter((q) => 
+        .filter((q) =>
           q.and(
             q.eq(q.field('isDefault'), true),
             q.neq(q.field('_id'), profileId)
@@ -225,8 +236,11 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     await ctx.db.patch(args.profileId, {
       isActive: false,
@@ -257,8 +271,11 @@ export const reactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     await ctx.db.patch(args.profileId, {
       isActive: true,
@@ -286,10 +303,12 @@ export const getDefault = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     const defaultProfile = await ctx.db
       .query('rateProfiles')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
-      .filter((q) => 
+      .filter((q) =>
         q.and(
           q.eq(q.field('isDefault'), true),
           q.eq(q.field('isActive'), true)

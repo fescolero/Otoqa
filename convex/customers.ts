@@ -1,12 +1,16 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // Count customers by status
 export const countCustomersByStatus = query({
   args: {},
   handler: async (ctx) => {
-    const customers = await ctx.db.query('customers').collect();
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const customers = (await ctx.db.query('customers').collect()).filter(
+      (c) => c.workosOrgId === callerOrgId,
+    );
 
     const counts = {
       all: 0,
@@ -43,12 +47,10 @@ export const list = query({
     loadingType: v.optional(v.union(v.literal('Live Load'), v.literal('Drop & Hook'), v.literal('Appointment'))),
   },
   handler: async (ctx, args) => {
-    let customers = await ctx.db.query('customers').collect();
-
-    // Filter by organization if provided
-    if (args.workosOrgId) {
-      customers = customers.filter((c) => c.workosOrgId === args.workosOrgId);
-    }
+    const callerOrgId = await requireCallerOrgId(ctx);
+    let customers = (await ctx.db.query('customers').collect()).filter(
+      (c) => c.workosOrgId === callerOrgId,
+    );
 
     // Filter out deleted customers unless explicitly requested
     if (args.includeDeleted) {
@@ -102,7 +104,9 @@ export const get = query({
     id: v.id('customers'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const customer = await ctx.db.get(args.id);
+    if (!customer || customer.workosOrgId !== callerOrgId) return null;
     return customer;
   },
 });
@@ -113,7 +117,10 @@ export const getById = query({
     customerId: v.id('customers'),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.customerId);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const customer = await ctx.db.get(args.customerId);
+    if (!customer || customer.workosOrgId !== callerOrgId) return null;
+    return customer;
   },
 });
 
@@ -158,6 +165,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
 
     const customerId = await ctx.db.insert('customers', {
@@ -214,13 +222,13 @@ export const create = mutation({
 export const update = mutation({
   args: {
     id: v.id('customers'),
-    
+
     // Customer Information
     name: v.optional(v.string()),
     companyType: v.optional(v.union(v.literal('Shipper'), v.literal('Broker'), v.literal('Manufacturer'), v.literal('Distributor'))),
     status: v.optional(v.union(v.literal('Active'), v.literal('Inactive'), v.literal('Prospect'))),
     office: v.optional(v.string()),
-    
+
     // Address
     addressLine1: v.optional(v.string()),
     addressLine2: v.optional(v.string()),
@@ -228,27 +236,30 @@ export const update = mutation({
     state: v.optional(v.string()),
     zip: v.optional(v.string()),
     country: v.optional(v.string()),
-    
+
     // Primary Contact
     primaryContactName: v.optional(v.string()),
     primaryContactTitle: v.optional(v.string()),
     primaryContactEmail: v.optional(v.string()),
     primaryContactPhone: v.optional(v.string()),
-    
+
     // Secondary Contact
     secondaryContactName: v.optional(v.string()),
     secondaryContactEmail: v.optional(v.string()),
     secondaryContactPhone: v.optional(v.string()),
-    
+
     // Operations
     loadingType: v.optional(v.union(v.literal('Live Load'), v.literal('Drop & Hook'), v.literal('Appointment'))),
     locationScheduleType: v.optional(v.union(v.literal('24/7'), v.literal('Business Hours'), v.literal('Appointment Only'), v.literal('Specific Hours'))),
     instructions: v.optional(v.string()),
-    
+
     // Internal
     internalNotes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const existing = await ctx.db.get(args.id);
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     const { id, ...updates } = args;
     
     await ctx.db.patch(id, {
@@ -268,6 +279,9 @@ export const deactivate = mutation({
     userName: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const existing = await ctx.db.get(args.id);
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
@@ -285,6 +299,9 @@ export const restore = mutation({
     id: v.id('customers'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const existing = await ctx.db.get(args.id);
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     await ctx.db.patch(args.id, {
       isDeleted: false,
       deletedAt: undefined,
@@ -302,6 +319,9 @@ export const permanentDelete = mutation({
     id: v.id('customers'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const existing = await ctx.db.get(args.id);
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     await ctx.db.delete(args.id);
     return args.id;
   },
@@ -315,9 +335,12 @@ export const bulkDeactivate = mutation({
     userName: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const now = Date.now();
-    
+
     for (const customerId of args.customerIds) {
+      const customer = await ctx.db.get(customerId);
+      if (!customer || customer.workosOrgId !== callerOrgId) throw new Error('Not authorized');
       await ctx.db.patch(customerId, {
         isDeleted: true,
         deletedAt: now,

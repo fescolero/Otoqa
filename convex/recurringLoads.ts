@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation, internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { updateLoadCount } from './stats_helpers';
 import {
   addDaysToUtcDateString,
@@ -91,6 +92,7 @@ export const list = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     let templates = await ctx.db
       .query('recurringLoadTemplates')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -169,7 +171,11 @@ export const get = query({
   },
   returns: v.union(templateValidator, v.null()),
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.id);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const template = await ctx.db.get(args.id);
+    if (!template) return null;
+    if (template.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    return template;
   },
 });
 
@@ -193,11 +199,13 @@ export const createFromLoad = mutation({
   },
   returns: v.id('recurringLoadTemplates'),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     // 1. Get the source load
     const sourceLoad = await ctx.db.get(args.sourceLoadId);
     if (!sourceLoad) {
       throw new Error('Source load not found');
     }
+    if (sourceLoad.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     // 2. Get the stops for the source load
     const stops = await ctx.db
@@ -301,10 +309,12 @@ export const toggleActive = mutation({
   },
   returns: v.boolean(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const template = await ctx.db.get(args.id);
     if (!template) {
       throw new Error('Template not found');
     }
+    if (template.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const newStatus = !template.isActive;
 
@@ -324,10 +334,12 @@ export const remove = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const template = await ctx.db.get(args.id);
     if (!template) {
       throw new Error('Template not found');
     }
+    if (template.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     await ctx.db.delete(args.id);
 

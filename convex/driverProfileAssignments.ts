@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Driver Profile Assignments
@@ -14,6 +15,10 @@ export const getForDriver = query({
     driverId: v.id('drivers'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return [];
+
     const assignments = await ctx.db
       .query('driverProfileAssignments')
       .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
@@ -63,6 +68,7 @@ export const listByOrg = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const assignments = await ctx.db
       .query('driverProfileAssignments')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -98,6 +104,7 @@ export const assign = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     // Verify driver and profile exist
     const [driver, profile] = await Promise.all([
       ctx.db.get(args.driverId),
@@ -105,7 +112,9 @@ export const assign = mutation({
     ]);
 
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) throw new Error('Driver not found');
     if (!profile) throw new Error('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new Error('Rate profile not found');
 
     // Verify profile is for DRIVER type
     if (profile.profileType !== 'DRIVER') {
@@ -168,8 +177,12 @@ export const remove = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Assignment not found');
+    }
 
     // Get driver and profile for logging
     const [driver, profile] = await Promise.all([
@@ -203,8 +216,12 @@ export const setDefault = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Assignment not found');
+    }
 
     // Unset other defaults for this driver
     const otherAssignments = await ctx.db
@@ -250,8 +267,12 @@ export const unsetDefault = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Assignment not found');
+    }
 
     if (!assignment.isDefault) {
       return args.assignmentId; // Already not default
@@ -287,6 +308,10 @@ export const hasAssignments = query({
     driverId: v.id('drivers'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return false;
+
     const assignment = await ctx.db
       .query('driverProfileAssignments')
       .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))

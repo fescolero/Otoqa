@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Carrier Profile Assignments
@@ -19,6 +20,10 @@ export const getForCarrierPartnership = query({
     carrierPartnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const partnership = await ctx.db.get(args.carrierPartnershipId);
+    if (!partnership || partnership.brokerOrgId !== callerOrgId) return [];
+
     const assignments = await ctx.db
       .query('carrierProfileAssignments')
       .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
@@ -73,6 +78,7 @@ export const assign = mutation({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Verify carrier partnership and profile exist
     const [partnership, profile] = await Promise.all([
       ctx.db.get(args.carrierPartnershipId),
@@ -80,7 +86,13 @@ export const assign = mutation({
     ]);
 
     if (!partnership) throw new Error('Carrier partnership not found');
+    if (partnership.brokerOrgId !== callerOrgId) {
+      throw new Error('Carrier partnership not found');
+    }
     if (!profile) throw new Error('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) {
+      throw new Error('Rate profile not found');
+    }
 
     // Verify profile is for CARRIER type
     if (profile.profileType !== 'CARRIER') {
@@ -143,8 +155,12 @@ export const update = mutation({
     effectiveDate: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Assignment not found');
+    }
 
     // Validate threshold for DISTANCE_THRESHOLD
     const newStrategy = args.selectionStrategy ?? assignment.selectionStrategy;
@@ -188,8 +204,12 @@ export const remove = mutation({
     assignmentId: v.id('carrierProfileAssignments'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Assignment not found');
+    }
 
     const wasDefault = assignment.isDefault;
 
@@ -218,8 +238,12 @@ export const setDefault = mutation({
     assignmentId: v.id('carrierProfileAssignments'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Assignment not found');
+    }
 
     if (assignment.isDefault) {
       return { success: true, message: 'Already the default' };
@@ -250,6 +274,10 @@ export const hasAssignments = query({
     carrierPartnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const partnership = await ctx.db.get(args.carrierPartnershipId);
+    if (!partnership || partnership.brokerOrgId !== callerOrgId) return false;
+
     const assignment = await ctx.db
       .query('carrierProfileAssignments')
       .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
@@ -265,6 +293,10 @@ export const getDefaultProfile = query({
     carrierPartnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const partnership = await ctx.db.get(args.carrierPartnershipId);
+    if (!partnership || partnership.brokerOrgId !== callerOrgId) return null;
+
     const assignments = await ctx.db
       .query('carrierProfileAssignments')
       .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
@@ -298,6 +330,10 @@ export const selectProfileForLoad = query({
     loadMiles: v.number(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const partnership = await ctx.db.get(args.carrierPartnershipId);
+    if (!partnership || partnership.brokerOrgId !== callerOrgId) return null;
+
     const assignments = await ctx.db
       .query('carrierProfileAssignments')
       .withIndex('by_carrier_partnership', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))

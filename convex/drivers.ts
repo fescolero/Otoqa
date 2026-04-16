@@ -3,6 +3,7 @@ import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { getDateStatus } from './_helpers/dateUtils';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // Count drivers by status for tab badges
 export const countDriversByStatus = query({
@@ -11,9 +12,7 @@ export const countDriversByStatus = query({
     todayDateStr: v.string(),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const allDrivers = await ctx.db
       .query('drivers')
@@ -80,9 +79,7 @@ export const list = query({
     includeSensitive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const drivers = await ctx.db
       .query('drivers')
@@ -135,12 +132,11 @@ export const get = query({
     includeSensitive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    const callerOrgId = await requireCallerOrgId(ctx);
 
     const driver = await ctx.db.get(args.id);
     if (!driver) return null;
+    if (driver.organizationId !== callerOrgId) return null;
 
     // If sensitive data is not requested, return only non-sensitive data
     if (!args.includeSensitive) {
@@ -212,9 +208,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const now = Date.now();
 
@@ -345,11 +339,15 @@ export const update = mutation({
     emergencyContactPhone: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const { id, userId, userName, organizationId, ssn, licenseNumber, dateOfBirth, payPlanId, ...updates } = args;
 
     // Get current driver data for audit log
     const driver = await ctx.db.get(id);
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
 
     // Handle payPlanId separately (it's an Id type, not a string)
     if (payPlanId !== undefined) {
@@ -475,9 +473,13 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     // Get driver data before deactivation
     const driver = await ctx.db.get(args.id);
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
 
     await ctx.db.patch(args.id, {
       isDeleted: true,
@@ -511,9 +513,13 @@ export const restore = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     // Get driver data before restoration
     const driver = await ctx.db.get(args.id);
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
 
     await ctx.db.patch(args.id, {
       isDeleted: false,
@@ -549,11 +555,19 @@ export const updateCurrentTruck = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     const driver = await ctx.db.get(args.driverId);
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
 
     const truck = await ctx.db.get(args.truckId);
     if (!truck) throw new Error('Truck not found');
+    if (truck.organizationId !== callerOrgId) {
+      throw new Error('Truck not found');
+    }
 
     // Update driver with current truck
     await ctx.db.patch(args.driverId, {
@@ -587,9 +601,13 @@ export const permanentDelete = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     // Get driver data before deletion
     const driver = await ctx.db.get(args.id);
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
 
     // Delete sensitive info first
     const sensitiveInfo = await ctx.db

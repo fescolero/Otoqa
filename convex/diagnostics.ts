@@ -1,5 +1,6 @@
 import { query } from "./_generated/server";
 import { v } from "convex/values";
+import { assertCallerOwnsOrg } from "./lib/auth";
 
 /**
  * Count loads, stops, and invoices for an organization
@@ -9,6 +10,7 @@ export const countLoadsAndStops = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Count loads
     const loads = await ctx.db
       .query("loadInformation")

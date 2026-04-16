@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Settings Management for Multi-Tenant Organizations
@@ -13,8 +14,7 @@ import { mutation, query } from './_generated/server';
  */
 export const generateUploadUrl = mutation({
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Unauthenticated');
+    await requireCallerOrgId(ctx);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -26,8 +26,7 @@ export const generateUploadUrl = mutation({
 export const getOrgSettings = query({
   args: { workosOrgId: v.string() },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Unauthenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const org = await ctx.db
       .query('organizations')
@@ -79,16 +78,9 @@ export const updateOrgSettings = mutation({
     }),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Unauthenticated');
-
-    // SECURITY: Verify the authenticated user belongs to this organization.
-    // The WorkOS JWT org_id claim (if present) must match the target org,
-    // or the identity must be associated with this org in our system.
-    const identityOrgId = (identity as any).org_id || (identity as any).organizationId;
-    if (identityOrgId && identityOrgId !== args.workosOrgId) {
-      throw new Error('Not authorized to update this organization');
-    }
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    // assertCallerOwnsOrg already throws on unauthenticated, so identity is non-null
+    const identity = (await ctx.auth.getUserIdentity())!;
 
     const existing = await ctx.db
       .query('organizations')
@@ -170,8 +162,8 @@ export const updateOrgSettings = mutation({
 export const getUserPreferences = query({
   args: { workosOrgId: v.string() },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Unauthenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const identity = (await ctx.auth.getUserIdentity())!;
 
     return await ctx.db
       .query('userPreferences')
@@ -195,8 +187,8 @@ export const updateUserPreferences = mutation({
     timezone: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Unauthenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const identity = (await ctx.auth.getUserIdentity())!;
 
     const existing = await ctx.db
       .query('userPreferences')

@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { action, mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // ============================================
 // PARTNER API KEY MANAGEMENT
@@ -30,8 +31,8 @@ export const createKey = action({
     rawKey: v.string(),
   }),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const identity = (await ctx.auth.getUserIdentity())!;
 
     // Generate key via node action
     const keyGenResult: { rawKey: string; keyPrefix: string; keyHash: string } =
@@ -121,8 +122,7 @@ export const listKeys = query({
     expiresAt: v.optional(v.number()),
   })),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return [];
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const keys = await ctx.db
       .query('partnerApiKeys')
@@ -154,8 +154,8 @@ export const revokeKey = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const identity = (await ctx.auth.getUserIdentity())!;
 
     const key = await ctx.db.get(args.keyId);
     if (!key) throw new Error('Key not found');
@@ -204,8 +204,7 @@ export const getAuditLogs = query({
     partnerKeyId: v.id('partnerApiKeys'),
   })),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return [];
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const maxLimit = Math.min(args.limit ?? 50, 200);
 

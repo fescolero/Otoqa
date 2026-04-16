@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 export const list = query({
   args: {
@@ -8,8 +9,7 @@ export const list = query({
     activeOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.organizationId);
 
     if (args.activeOnly) {
       return await ctx.db
@@ -32,10 +32,10 @@ export const get = query({
     vendorId: v.id('fuelVendors'),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
-    return await ctx.db.get(args.vendorId);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const vendor = await ctx.db.get(args.vendorId);
+    if (!vendor || vendor.organizationId !== callerOrgId) return null;
+    return vendor;
   },
 });
 
@@ -58,9 +58,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
     const vendorId = await ctx.db.insert('fuelVendors', {
       organizationId: args.organizationId,
@@ -115,11 +113,9 @@ export const update = mutation({
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    const callerOrgId = await requireCallerOrgId(ctx);
     const existing = await ctx.db.get(args.vendorId);
-    if (!existing) throw new Error('Vendor not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new Error('Vendor not found');
 
     const { vendorId, updatedBy, ...updates } = args;
     const changedFields: Array<string> = [];
@@ -163,11 +159,9 @@ export const toggleActive = mutation({
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
-
+    const callerOrgId = await requireCallerOrgId(ctx);
     const existing = await ctx.db.get(args.vendorId);
-    if (!existing) throw new Error('Vendor not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new Error('Vendor not found');
 
     const newStatus = !existing.isActive;
     await ctx.db.patch(args.vendorId, {

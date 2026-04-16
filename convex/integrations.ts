@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query, internalQuery, internalMutation } from './_generated/server';
+import { assertCallerOwnsOrg } from './lib/auth';
 
 // Get all integrations for an organization
 export const getIntegrations = query({
@@ -7,6 +8,7 @@ export const getIntegrations = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const integrations = await ctx.db
       .query('orgIntegrations')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -28,6 +30,7 @@ export const getIntegrationByProvider = query({
     provider: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const integration = await ctx.db
       .query('orgIntegrations')
       .withIndex('by_provider', (q) => q.eq('workosOrgId', args.workosOrgId).eq('provider', args.provider))
@@ -71,9 +74,7 @@ export const upsertIntegration = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Check if integration already exists
     const existing = await ctx.db
@@ -143,9 +144,7 @@ export const updateSyncSettings = mutation({
     }),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const integration = await ctx.db
       .query('orgIntegrations')
@@ -198,9 +197,7 @@ export const deleteIntegration = mutation({
     provider: v.string(),
   },
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const integration = await ctx.db
       .query('orgIntegrations')
@@ -272,8 +269,7 @@ export const getCredentialFields = query({
     provider: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const integration = await ctx.db
       .query('orgIntegrations')

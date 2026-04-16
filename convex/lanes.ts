@@ -6,6 +6,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { updateInvoiceCount } from "./stats_helpers";
+import { assertCallerOwnsOrg } from "./lib/auth";
 
 /**
  * Preview Backfill Impact
@@ -21,6 +22,7 @@ export const previewBackfillImpact = query({
     contractEndDate: v.string(),   // YYYY-MM-DD
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Find all loads matching this HCR+Trip pattern
     const candidateLoads = await ctx.db
       .query("loadInformation")
@@ -121,6 +123,7 @@ export const createLaneAndBackfill = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Step 1: Ensure customer exists
     let finalCustomerId = args.customerId;
     
@@ -361,9 +364,10 @@ export const voidUnmappedGroup = mutation({
     customerId: v.optional(v.id("customers")),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Step 1: Resolve customer if provided
     let finalCustomerId = args.customerId;
-    
+
     if (!finalCustomerId && args.customerName) {
       // Check if customer already exists by name AND office
       const existingCustomer = await ctx.db
@@ -464,6 +468,7 @@ export const rePromoteStuckLoads = mutation({
     batchSize: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const limit = args.batchSize ?? 50;
     const now = Date.now();
 

@@ -1,5 +1,6 @@
 import { action } from './_generated/server';
 import { v } from 'convex/values';
+import { requireCallerOrgId } from './lib/auth';
 
 // NHTSA VIN Decoder API integration
 // https://vpic.nhtsa.dot.gov/api/
@@ -18,7 +19,8 @@ export const decodeVIN = action({
   args: {
     vin: v.string(),
   },
-  handler: async (_, args): Promise<VINDecodeResponse> => {
+  handler: async (ctx, args): Promise<VINDecodeResponse> => {
+    await requireCallerOrgId(ctx);
     const { vin } = args;
 
     // Validate VIN length (should be 17 characters)

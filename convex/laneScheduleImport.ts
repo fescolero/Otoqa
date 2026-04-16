@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { action } from './_generated/server';
 import OpenAI from 'openai';
+import { requireCallerOrgId } from './lib/auth';
 
 // ==========================================
 // LANE SCHEDULE OCR IMPORT
@@ -147,6 +148,7 @@ export const extractLanesFromDocument = action({
     ),
   },
   handler: async (ctx, args): Promise<{ entries: ExtractedLaneEntry[]; error?: string }> => {
+    await requireCallerOrgId(ctx);
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return { entries: [], error: 'OPENAI_API_KEY not configured' };

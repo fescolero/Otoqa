@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Route Assignments - Maps recurring routes (HCR+Trip) to drivers/carriers
@@ -35,6 +36,8 @@ export const list = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     let assignments = await ctx.db
       .query('routeAssignments')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -116,8 +119,11 @@ export const get = query({
     v.null()
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const assignment = await ctx.db.get(args.id);
     if (!assignment) return null;
+    if (assignment.workosOrgId !== callerOrgId) return null;
 
     let driverName: string | undefined;
     let carrierName: string | undefined;
@@ -171,6 +177,8 @@ export const getByRoute = query({
     v.null()
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     // First try exact match (HCR + Trip)
     if (args.tripNumber) {
       const exactMatch = await ctx.db
@@ -224,10 +232,14 @@ export const getByDriver = query({
     })
   ),
   handler: async (ctx, args) => {
-    return await ctx.db
+    const callerOrgId = await requireCallerOrgId(ctx);
+
+    const assignments = await ctx.db
       .query('routeAssignments')
       .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
       .collect();
+
+    return assignments.filter((a) => a.workosOrgId === callerOrgId);
   },
 });
 
@@ -255,10 +267,14 @@ export const getByCarrier = query({
     })
   ),
   handler: async (ctx, args) => {
-    return await ctx.db
+    const callerOrgId = await requireCallerOrgId(ctx);
+
+    const assignments = await ctx.db
       .query('routeAssignments')
       .withIndex('by_carrier', (q) => q.eq('carrierPartnershipId', args.carrierPartnershipId))
       .collect();
+
+    return assignments.filter((a) => a.workosOrgId === callerOrgId);
   },
 });
 
@@ -277,6 +293,8 @@ export const create = mutation({
   },
   returns: v.id('routeAssignments'),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     // Validate that either driver or carrier is set (not both, not neither)
     if (!args.driverId && !args.carrierPartnershipId) {
       throw new Error('Either driverId or carrierPartnershipId must be provided');
@@ -361,11 +379,16 @@ export const update = mutation({
   },
   returns: v.id('routeAssignments'),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const { id, ...updates } = args;
 
     const existing = await ctx.db.get(id);
     if (!existing) {
       throw new Error('Route assignment not found');
+    }
+    if (existing.workosOrgId !== callerOrgId) {
+      throw new Error('Not authorized for this organization');
     }
 
     // Validate driver if being updated
@@ -420,9 +443,14 @@ export const toggleActive = mutation({
   },
   returns: v.boolean(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const assignment = await ctx.db.get(args.id);
     if (!assignment) {
       throw new Error('Route assignment not found');
+    }
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Not authorized for this organization');
     }
 
     const newStatus = !assignment.isActive;
@@ -443,9 +471,14 @@ export const remove = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const assignment = await ctx.db.get(args.id);
     if (!assignment) {
       throw new Error('Route assignment not found');
+    }
+    if (assignment.workosOrgId !== callerOrgId) {
+      throw new Error('Not authorized for this organization');
     }
 
     await ctx.db.delete(args.id);
@@ -475,6 +508,8 @@ export const getSettings = query({
     v.null()
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     return await ctx.db
       .query('autoAssignmentSettings')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -494,6 +529,8 @@ export const updateSettings = mutation({
   },
   returns: v.id('autoAssignmentSettings'),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     const existing = await ctx.db
       .query('autoAssignmentSettings')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))

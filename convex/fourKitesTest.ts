@@ -1,6 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
+import { assertCallerOwnsOrg, requireCallerOrgId } from "./lib/auth";
 
 /**
  * Manually trigger a FourKites sync for testing
@@ -11,6 +12,7 @@ export const triggerManualSync = mutation({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Find the FourKites integration for this org
     const integration = await ctx.db
       .query("orgIntegrations")
@@ -55,6 +57,7 @@ export const getSyncStatus = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const integration = await ctx.db
       .query("orgIntegrations")
       .withIndex("by_provider", (q) =>
@@ -117,6 +120,7 @@ export const getSyncStatus = query({
 export const listFourKitesOrgs = query({
   args: {},
   handler: async (ctx) => {
+    await requireCallerOrgId(ctx);
     const integrations = await ctx.db
       .query("orgIntegrations")
       .collect();
@@ -143,6 +147,7 @@ export const getContractLanes = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const lanes = await ctx.db
       .query("contractLanes")
       .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))

@@ -3,6 +3,7 @@
 import OpenAI from 'openai';
 import { v } from 'convex/values';
 import { action } from './_generated/server';
+import { requireCallerOrgId } from './lib/auth';
 
 const confidenceValidator = v.union(v.literal('high'), v.literal('medium'), v.literal('low'));
 
@@ -414,7 +415,8 @@ export const extractFuelEntriesFromReceipts = action({
     entries: v.array(extractedFuelEntryValidator),
     error: v.optional(v.string()),
   }),
-  handler: async (_ctx, args) => {
+  handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return { entries: [], error: 'OPENAI_API_KEY environment variable is not set' };

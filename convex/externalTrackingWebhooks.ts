@@ -10,6 +10,7 @@ import {
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { filterLoadsBySource, shouldRunInterval } from './_helpers/cronUtils';
+import { assertCallerOwnsOrg } from './lib/auth';
 
 // ============================================
 // WEBHOOK SUBSCRIPTION MANAGEMENT
@@ -35,8 +36,7 @@ export const createSubscription = action({
     rawSecret: v.string(),
   }),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Validate URL is HTTPS
     if (!args.url.startsWith('https://')) {
@@ -187,8 +187,7 @@ export const listSubscriptions = query({
     createdAt: v.number(),
   })),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return [];
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const subs = await ctx.db
       .query('webhookSubscriptions')
@@ -221,8 +220,7 @@ export const updateSubscriptionStatus = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const sub = await ctx.db.get(args.subscriptionId);
     if (!sub || sub.workosOrgId !== args.workosOrgId) throw new Error('Subscription not found');

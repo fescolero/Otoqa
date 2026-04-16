@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { scheduleRuleValidator } from './lib/validators';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import {
   calculateScheduleForYear,
   hosAnalyzeRoute,
@@ -27,6 +28,7 @@ export const listSessions = query({
     ),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     if (args.status) {
       return ctx.db
         .query('laneAnalysisSessions')
@@ -47,6 +49,7 @@ export const listSessions = query({
 export const getSession = query({
   args: { id: v.id('laneAnalysisSessions') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const session = await ctx.db.get(args.id);
     if (!session || session.isDeleted) return null;
     return session;
@@ -82,6 +85,7 @@ export const createSession = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     return ctx.db.insert('laneAnalysisSessions', {
       workosOrgId: args.workosOrgId,
@@ -147,6 +151,7 @@ export const updateSession = mutation({
     solverVersion: v.optional(v.union(v.literal('v4'), v.literal('v5_hybrid'))),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const { id, ...updates } = args;
     const session = await ctx.db.get(id);
     if (!session || session.isDeleted) throw new Error('Session not found');
@@ -165,6 +170,7 @@ export const archiveSession = mutation({
     deletedBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const session = await ctx.db.get(args.id);
     if (!session || session.isDeleted) throw new Error('Session not found');
     await ctx.db.patch(args.id, {
@@ -181,6 +187,7 @@ export const archiveSession = mutation({
 export const listEntries = query({
   args: { sessionId: v.id('laneAnalysisSessions') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     return ctx.db
       .query('laneAnalysisEntries')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
@@ -191,6 +198,7 @@ export const listEntries = query({
 export const getEntry = query({
   args: { id: v.id('laneAnalysisEntries') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     return ctx.db.get(args.id);
   },
 });
@@ -287,6 +295,7 @@ export const createEntry = mutation({
     baseId: v.optional(v.id('laneAnalysisBases')),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     return ctx.db.insert('laneAnalysisEntries', {
       ...args,
@@ -359,6 +368,7 @@ export const updateEntry = mutation({
     baseId: v.optional(v.id('laneAnalysisBases')),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const { id, ...updates } = args;
     const entry = await ctx.db.get(id);
     if (!entry) throw new Error('Entry not found');
@@ -374,6 +384,7 @@ export const updateEntry = mutation({
 export const deleteEntry = mutation({
   args: { id: v.id('laneAnalysisEntries') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     await ctx.db.delete(args.id);
   },
 });
@@ -386,6 +397,7 @@ export const listBases = query({
     sessionId: v.optional(v.id('laneAnalysisSessions')),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     if (args.sessionId) {
       // Get session-specific bases + org-wide bases
       const sessionBases = await ctx.db
@@ -409,6 +421,7 @@ export const listBases = query({
 export const getBase = query({
   args: { id: v.id('laneAnalysisBases') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     return ctx.db.get(args.id);
   },
 });
@@ -432,6 +445,7 @@ export const createBase = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     return ctx.db.insert('laneAnalysisBases', {
       ...args,
@@ -460,6 +474,7 @@ export const updateBase = mutation({
     isActive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const { id, ...updates } = args;
     const base = await ctx.db.get(id);
     if (!base) throw new Error('Base not found');
@@ -475,6 +490,7 @@ export const updateBase = mutation({
 export const deleteBase = mutation({
   args: { id: v.id('laneAnalysisBases') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     await ctx.db.delete(args.id);
   },
 });
@@ -484,6 +500,7 @@ export const deleteBase = mutation({
 export const getResults = query({
   args: { sessionId: v.id('laneAnalysisSessions') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     return ctx.db
       .query('laneAnalysisResults')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
@@ -502,6 +519,7 @@ export const getShiftsForDate = query({
     date: v.string(), // YYYY-MM-DD
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const session = await ctx.db.get(args.sessionId);
     if (!session || session.isDeleted) return { shifts: [], lanesRunning: 0 };
 
@@ -621,6 +639,7 @@ export const getShiftsForWeek = query({
     weekStartDate: v.string(), // YYYY-MM-DD (Monday)
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const session = await ctx.db.get(args.sessionId);
     if (!session || session.isDeleted) return { days: [] };
 
@@ -1036,6 +1055,7 @@ export const getShiftsForWeek = query({
 export const getEntryResults = query({
   args: { entryId: v.id('laneAnalysisEntries') },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     return ctx.db
       .query('laneAnalysisResults')
       .withIndex('by_entry', (q) => q.eq('entryId', args.entryId))
@@ -1052,6 +1072,7 @@ export const importLanesFromContract = mutation({
     contractLaneIds: v.array(v.id('contractLanes')),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const imported: string[] = [];
 
     for (const laneId of args.contractLaneIds) {
@@ -1144,6 +1165,7 @@ export const exportEntriesForSolver = query({
     sessionId: v.id('laneAnalysisSessions'),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const entries = await ctx.db
       .query('laneAnalysisEntries')
       .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))

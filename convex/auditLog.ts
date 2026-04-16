@@ -1,9 +1,13 @@
 import { v } from 'convex/values';
-import { mutation, query, internalMutation } from './_generated/server';
+import { query, internalMutation } from './_generated/server';
+import { requireCallerOrgId } from './lib/auth';
 
 /**
  * Universal audit logging utility for tracking all actions across the project
- * Supports multi-tenant isolation via WorkOS organization IDs
+ * Supports multi-tenant isolation via WorkOS organization IDs.
+ *
+ * All read queries derive the caller's org from the authenticated identity
+ * via `requireCallerOrgId` — clients cannot supply an `organizationId` arg.
  */
 
 // Helper function to create an audit log entry (internal use only)
@@ -36,7 +40,7 @@ export const logAction = internalMutation({
   },
 });
 
-// Get audit logs for a specific entity
+// Get audit logs for a specific entity (scoped to caller's org)
 export const getEntityAuditLog = query({
   args: {
     entityType: v.string(),
@@ -44,34 +48,38 @@ export const getEntityAuditLog = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const limit = args.limit || 50;
 
-    const logs = await ctx.db
+    // by_entity index is not org-scoped, so filter results to the caller's org.
+    // Over-fetch a small buffer to reduce the chance of returning fewer rows
+    // than requested after the org filter.
+    const raw = await ctx.db
       .query('auditLog')
       .withIndex('by_entity', (q) => q.eq('entityType', args.entityType).eq('entityId', args.entityId))
       .order('desc')
-      .take(limit);
+      .take(limit * 4);
 
-    return logs;
+    return raw.filter((log) => log.organizationId === callerOrgId).slice(0, limit);
   },
 });
 
-// Get audit logs for an organization
+// Get audit logs for the caller's organization
 export const getOrganizationAuditLog = query({
   args: {
-    organizationId: v.string(),
     limit: v.optional(v.number()),
     entityType: v.optional(v.string()),
     action: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const limit = args.limit || 100;
 
     // Filter by entity type if provided
     if (args.entityType !== undefined) {
       const logs = await ctx.db
         .query('auditLog')
-        .withIndex('by_entity_type', (q) => q.eq('organizationId', args.organizationId).eq('entityType', args.entityType!))
+        .withIndex('by_entity_type', (q) => q.eq('organizationId', callerOrgId).eq('entityType', args.entityType!))
         .order('desc')
         .take(limit);
       return logs;
@@ -81,7 +89,7 @@ export const getOrganizationAuditLog = query({
     if (args.action !== undefined) {
       const logs = await ctx.db
         .query('auditLog')
-        .withIndex('by_action', (q) => q.eq('organizationId', args.organizationId).eq('action', args.action!))
+        .withIndex('by_action', (q) => q.eq('organizationId', callerOrgId).eq('action', args.action!))
         .order('desc')
         .take(limit);
       return logs;
@@ -90,7 +98,7 @@ export const getOrganizationAuditLog = query({
     // Get all logs for organization
     const logs = await ctx.db
       .query('auditLog')
-      .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
       .order('desc')
       .take(limit);
 
@@ -98,19 +106,19 @@ export const getOrganizationAuditLog = query({
   },
 });
 
-// Get audit logs for a specific user
+// Get audit logs for a specific user within the caller's org
 export const getUserAuditLog = query({
   args: {
-    organizationId: v.string(),
     userId: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const limit = args.limit || 50;
 
     const logs = await ctx.db
       .query('auditLog')
-      .withIndex('by_user', (q) => q.eq('organizationId', args.organizationId).eq('performedBy', args.userId))
+      .withIndex('by_user', (q) => q.eq('organizationId', callerOrgId).eq('performedBy', args.userId))
       .order('desc')
       .take(limit);
 
@@ -118,20 +126,20 @@ export const getUserAuditLog = query({
   },
 });
 
-// Get recent activity summary
+// Get recent activity summary for the caller's org
 export const getRecentActivity = query({
   args: {
-    organizationId: v.string(),
     hours: v.optional(v.number()),
     nowMs: v.number(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const hoursAgo = args.hours || 24;
     const cutoffTime = args.nowMs - hoursAgo * 60 * 60 * 1000;
 
     const logs = await ctx.db
       .query('auditLog')
-      .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
       .order('desc')
       .filter((q) => q.gte(q.field('timestamp'), cutoffTime))
       .take(100);

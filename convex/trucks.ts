@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // Helper function to determine expiration status
 const getExpirationStatus = (dateString?: string) => {
@@ -26,6 +27,7 @@ export const countTrucksByStatus = query({
     organizationId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const trucks = await ctx.db
       .query('trucks')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
@@ -72,6 +74,7 @@ export const list = query({
     yearMax: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     let trucks = await ctx.db
       .query('trucks')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))
@@ -134,7 +137,10 @@ export const get = query({
     id: v.id('trucks'),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.id);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const truck = await ctx.db.get(args.id);
+    if (!truck || truck.organizationId !== callerOrgId) return null;
+    return truck;
   },
 });
 
@@ -180,6 +186,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
 
     const truckId = await ctx.db.insert('trucks', {
@@ -242,10 +249,12 @@ export const update = mutation({
     engineManufacturer: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const { id, userId, userName, organizationId, ...updates } = args;
 
     // Get current truck data for audit log
     const truck = await ctx.db.get(id);
+    if (!truck || truck.organizationId !== callerOrgId) throw new Error('Truck not found');
 
     await ctx.db.patch(id, {
       ...updates,
@@ -281,9 +290,10 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     // Get truck data before deactivation
     const truck = await ctx.db.get(args.id);
-    if (!truck) throw new Error('Truck not found');
+    if (!truck || truck.organizationId !== callerOrgId) throw new Error('Truck not found');
 
     await ctx.db.patch(args.id, {
       isDeleted: true,
@@ -315,6 +325,7 @@ export const getAvailableTrucks = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const trucks = await ctx.db
       .query('trucks')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
@@ -345,12 +356,13 @@ export const bulkDeactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const results = [];
     for (const id of args.ids) {
       try {
         // Get truck data before deactivation
         const truck = await ctx.db.get(id);
-        if (!truck) {
+        if (!truck || truck.organizationId !== callerOrgId) {
           results.push({ id, success: false, error: 'Truck not found' });
           continue;
         }

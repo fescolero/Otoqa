@@ -8,6 +8,7 @@ import {
 } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // ============================================
 // DRIVER LOCATION TRACKING
@@ -222,6 +223,7 @@ export const getActiveDriverLocations = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
     // Get locations from last 30 minutes (active tracking)
     const cutoff = args.nowMs - 30 * 60 * 1000;
 
@@ -308,6 +310,10 @@ export const getRouteHistoryForLoad = query({
     })
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+
     const locations = await ctx.db
       .query('driverLocations')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -343,6 +349,10 @@ export const getDetailedRouteHistoryForLoad = query({
     })
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+
     const locations = await ctx.db
       .query('driverLocations')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -381,6 +391,10 @@ export const getRecentRouteForDriver = query({
     })
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return [];
+
     const hours = args.hoursBack ?? 24;
     const cutoff = args.nowMs - hours * 60 * 60 * 1000;
 
@@ -418,6 +432,10 @@ export const isDriverBeingTracked = query({
     ),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return { isTracking: false };
+
     // Check for location in last 10 minutes
     const cutoff = args.nowMs - 10 * 60 * 1000;
 

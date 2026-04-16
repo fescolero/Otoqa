@@ -11,6 +11,7 @@
  */
 
 import { action, internalQuery, query } from './_generated/server';
+import { assertCallerOwnsOrg } from './lib/auth';
 import { internal } from './_generated/api';
 import { paginationOptsValidator } from 'convex/server';
 import { v } from 'convex/values';
@@ -75,6 +76,7 @@ export const getReceivablesSummary = query({
     customerId: v.optional(v.id('customers')),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
 
     // Fetch outstanding invoices with date range on index
@@ -191,6 +193,7 @@ export const getReceivablesDetail = query({
     overdueOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const MAX_DETAIL = 200;
 
@@ -286,6 +289,7 @@ export const getDiscrepancySummary = query({
     direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const paidInvoices = await ctx.db
       .query('loadInvoices')
       .withIndex('by_org_status_created', (q) => {
@@ -410,6 +414,7 @@ export const getDiscrepancyIntelligence = action({
     direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     let cursor: string | null = null;
     let isDone = false;
 
@@ -567,6 +572,7 @@ export const getDiscrepancyDetailSorted = action({
     sortDir: v.optional(v.union(v.literal('asc'), v.literal('desc'))),
   },
   handler: async (ctx, args): Promise<{ rows: DiscrepancyDetailRow[]; total: number; hasMore: boolean }> => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     let cursor: string | null = null;
     let isDone = false;
     const invoices: Array<Doc<'loadInvoices'>> = [];
@@ -711,6 +717,7 @@ export const getDiscrepancyDetail = query({
     direction: v.optional(v.union(v.literal('underpaid'), v.literal('overpaid'), v.literal('all'))),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const results = await ctx.db
       .query('loadInvoices')
       .withIndex('by_org_status_created', (q) => {
@@ -793,6 +800,7 @@ export const getRevenueSummary = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const allStats = await ctx.db
       .query('accountingPeriodStats')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -856,6 +864,7 @@ export const getRevenueByCustomer = query({
     dateRangeEnd: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Fetch finalized invoices with date range filtering
     const statuses = ['BILLED', 'PENDING_PAYMENT', 'PAID'] as const;
     const allInvoices = [];
@@ -921,6 +930,7 @@ export const getRevenueOverTime = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const allStats = await ctx.db
       .query('accountingPeriodStats')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -956,6 +966,7 @@ export const getCostSummary = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const driverPayables = await ctx.db
       .query('loadPayables')
       .withIndex('by_org_created', (q) =>
@@ -1038,6 +1049,7 @@ export const getCostByDriver = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const payables = await ctx.db
       .query('loadPayables')
       .withIndex('by_org_created', (q) =>
@@ -1087,6 +1099,7 @@ export const getCostByCarrier = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const payables = await ctx.db
       .query('loadCarrierPayables')
       .withIndex('by_org_created', (q) =>
@@ -1137,6 +1150,7 @@ export const getProfitabilitySummary = query({
     dateRangeEnd: v.number(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Revenue from pre-computed stats
     const allStats = await ctx.db
       .query('accountingPeriodStats')
@@ -1218,6 +1232,7 @@ export const getProfitabilityByLoad = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const maxResults = Math.min(args.limit ?? 50, 50); // Hard cap at 50 for read limit safety
 
     // Get completed loads using date range on index

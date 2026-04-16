@@ -8,6 +8,7 @@
 import { mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { updateInvoiceCount } from "./stats_helpers";
+import { assertCallerOwnsOrg } from "./lib/auth";
 
 /**
  * One-time batch promotion of UNMAPPED/SPOT loads
@@ -19,6 +20,7 @@ export const triggerCleanup = mutation({
     batchSize: v.optional(v.number()), // Default 50, max 100
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const BATCH_SIZE = Math.min(args.batchSize || 50, 100);
     
     console.log(`[Manual Cleanup] One-time batch for org ${args.workosOrgId}, batch size: ${BATCH_SIZE}`);

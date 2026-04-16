@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // ============================================
 // HELPER FUNCTIONS - Period Calculations
@@ -85,22 +86,22 @@ function calculateBiweeklyPeriodStart(
   // Use a fixed anchor date (Jan 1, 2024 was a Monday)
   const anchorDate = new Date('2024-01-01T00:00:00');
   const anchorDayOfWeek = anchorDate.getDay();
-  
+
   // Adjust anchor to the configured start day
   const daysToAdjust = (startDayOfWeek - anchorDayOfWeek + 7) % 7;
   anchorDate.setDate(anchorDate.getDate() + daysToAdjust);
-  
+
   // Calculate weeks since anchor
   const msPerWeek = 7 * 24 * 60 * 60 * 1000;
   const weeksSinceAnchor = Math.floor((referenceDate.getTime() - anchorDate.getTime()) / msPerWeek);
-  
+
   // Round down to nearest even number of weeks (bi-weekly)
   const biweeklyPeriods = Math.floor(weeksSinceAnchor / 2);
-  
+
   const periodStart = new Date(anchorDate);
   periodStart.setDate(periodStart.getDate() + biweeklyPeriods * 14);
   periodStart.setHours(0, 0, 0, 0);
-  
+
   return periodStart;
 }
 
@@ -111,7 +112,7 @@ function calculateBiweeklyPeriodStart(
 function calculateSemimonthlyPeriodStart(referenceDate: Date): Date {
   const date = new Date(referenceDate);
   const dayOfMonth = date.getDate();
-  
+
   if (dayOfMonth <= 15) {
     // First half: 1st of current month
     date.setDate(1);
@@ -119,7 +120,7 @@ function calculateSemimonthlyPeriodStart(referenceDate: Date): Date {
     // Second half: 16th of current month
     date.setDate(16);
   }
-  
+
   date.setHours(0, 0, 0, 0);
   return date;
 }
@@ -133,21 +134,21 @@ function calculateMonthlyPeriodStart(
 ): Date {
   const date = new Date(referenceDate);
   const currentDay = date.getDate();
-  
+
   // Clamp to valid day (handle months with fewer days)
   const lastDayOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
   const effectiveStartDay = Math.min(startDayOfMonth, lastDayOfMonth);
-  
+
   if (currentDay < effectiveStartDay) {
     // Go to previous month
     date.setMonth(date.getMonth() - 1);
   }
-  
+
   // Set to the start day
   const lastDayOfTargetMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
   date.setDate(Math.min(startDayOfMonth, lastDayOfTargetMonth));
   date.setHours(0, 0, 0, 0);
-  
+
   return date;
 }
 
@@ -259,10 +260,10 @@ export function calculateNextPeriods(
 
   for (let i = 0; i < count; i++) {
     const period = calculateCurrentPeriod(plan, referenceDate);
-    
+
     const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     const label = `${formatDate(period.periodStart)} - ${formatDate(period.periodEnd)}`;
-    
+
     periods.push({
       ...period,
       label,
@@ -324,6 +325,8 @@ export const list = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     let plans;
 
     if (args.includeInactive) {
@@ -427,8 +430,11 @@ export const get = query({
     v.null()
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const plan = await ctx.db.get(args.planId);
     if (!plan) return null;
+    if (plan.workosOrgId !== callerOrgId) return null;
 
     const resolvedTimezone = await resolveTimezone(ctx, plan);
     const currentPeriod = calculateCurrentPeriod(plan);
@@ -478,8 +484,12 @@ export const getForDriver = query({
     v.null()
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const driver = await ctx.db.get(args.driverId);
-    if (!driver || !driver.payPlanId) return null;
+    if (!driver) return null;
+    if (driver.organizationId !== callerOrgId) return null;
+    if (!driver.payPlanId) return null;
 
     const plan = await ctx.db.get(driver.payPlanId);
     if (!plan) return null;
@@ -526,16 +536,19 @@ export const getCurrentPeriodForPlan = query({
     v.null()
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const plan = await ctx.db.get(args.planId);
     if (!plan || !plan.isActive) return null;
+    if (plan.workosOrgId !== callerOrgId) return null;
 
     const currentPeriod = calculateCurrentPeriod(plan);
-    
+
     // Calculate period number (periods since start of year)
     const yearStart = new Date(currentPeriod.periodStart.getFullYear(), 0, 1);
     const msPerDay = 24 * 60 * 60 * 1000;
     const daysSinceYearStart = Math.floor((currentPeriod.periodStart.getTime() - yearStart.getTime()) / msPerDay);
-    
+
     let periodNumber: number;
     switch (plan.frequency) {
       case 'WEEKLY':
@@ -592,6 +605,8 @@ export const getDriversForPlan = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     const drivers = await ctx.db
       .query('drivers')
       .filter((q) =>
@@ -644,6 +659,8 @@ export const previewPeriods = query({
     })
   ),
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
+
     // Calculate periods directly without creating a full Doc object
     const periods: Array<{ periodStart: Date; periodEnd: Date; payDate: Date; label: string }> = [];
     let referenceDate = new Date();
@@ -687,10 +704,10 @@ export const previewPeriods = query({
 
       const periodEnd = calculatePeriodEnd(periodStart, args.frequency, args.periodStartDayOfMonth);
       const payDate = calculatePayDate(periodEnd, args.paymentLagDays);
-      
+
       const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       const label = `${formatDate(periodStart)} - ${formatDate(periodEnd)}`;
-      
+
       periods.push({ periodStart, periodEnd, payDate, label });
 
       // Move reference to after this period for next iteration
@@ -744,6 +761,8 @@ export const create = mutation({
   },
   returns: v.id('payPlans'),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     // Validate frequency-specific fields
     if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !args.periodStartDayOfWeek) {
       throw new Error('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
@@ -819,8 +838,11 @@ export const update = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const updates: Partial<Doc<'payPlans'>> = {
       updatedAt: Date.now(),
@@ -865,8 +887,11 @@ export const archive = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     // Check if any drivers are using this plan
     const driversUsingPlan = await ctx.db
@@ -898,8 +923,11 @@ export const restore = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     await ctx.db.patch(args.planId, {
       isActive: true,
@@ -920,8 +948,11 @@ export const assignToDriver = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const driver = await ctx.db.get(args.driverId);
     if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     if (args.planId) {
       const plan = await ctx.db.get(args.planId);
@@ -951,8 +982,11 @@ export const bulkAssignToDrivers = mutation({
     failed: v.number(),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
     if (!plan.isActive) throw new Error('Cannot assign inactive pay plan');
 
     let success = 0;
@@ -961,7 +995,7 @@ export const bulkAssignToDrivers = mutation({
     for (const driverId of args.driverIds) {
       try {
         const driver = await ctx.db.get(driverId);
-        if (driver) {
+        if (driver && driver.organizationId === callerOrgId) {
           await ctx.db.patch(driverId, {
             payPlanId: args.planId,
             updatedAt: Date.now(),
@@ -995,17 +1029,23 @@ export const getDriversOnPlan = query({
     })
   ),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
+    const plan = await ctx.db.get(args.planId);
+    if (!plan || plan.workosOrgId !== callerOrgId) return [];
+
     const drivers = await ctx.db
       .query('drivers')
       .filter((q) => q.eq(q.field('payPlanId'), args.planId))
       .collect();
 
-    return drivers.map((d) => ({
-      _id: d._id,
-      firstName: d.firstName,
-      lastName: d.lastName,
-      email: d.email,
-    }));
+    return drivers
+      .filter((d) => d.organizationId === callerOrgId)
+      .map((d) => ({
+        _id: d._id,
+        firstName: d.firstName,
+        lastName: d.lastName,
+        email: d.email,
+      }));
   },
 });
-

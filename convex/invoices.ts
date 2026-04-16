@@ -19,6 +19,7 @@ import {
   reverseInvoice,
   reversePaymentAndInvoice,
 } from './accountingStatsHelpers';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Helper: Calculate invoice amounts dynamically
@@ -98,6 +99,7 @@ export const getInvoices = query({
     customerId: v.optional(v.id('customers')),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     let query = ctx.db.query('loadInvoices').withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId));
 
     if (args.status) {
@@ -151,8 +153,10 @@ export const getInvoice = query({
     invoiceId: v.id('loadInvoices'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const invoice = await ctx.db.get(args.invoiceId);
     if (!invoice) return null;
+    if (invoice.workosOrgId !== callerOrgId) return null;
 
     // Calculate amounts dynamically
     const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
@@ -201,6 +205,10 @@ export const getInvoiceByLoad = query({
     loadId: v.id('loadInformation'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return null;
+
     const invoice = await ctx.db
       .query('loadInvoices')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -236,6 +244,7 @@ export const countInvoicesByStatus = query({
     total: v.number(),
   }),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Read from organizationStats aggregate table (1 read)
     const stats = await ctx.db
       .query('organizationStats')
@@ -276,7 +285,10 @@ export const countInvoicesByStatus = query({
 export const getById = query({
   args: { invoiceId: v.id('loadInvoices') },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.invoiceId);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const invoice = await ctx.db.get(args.invoiceId);
+    if (!invoice || invoice.workosOrgId !== callerOrgId) return null;
+    return invoice;
   },
 });
 
@@ -286,8 +298,10 @@ export const getById = query({
 export const getLineItems = query({
   args: { invoiceId: v.id('loadInvoices') },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const invoice = await ctx.db.get(args.invoiceId);
     if (!invoice) return [];
+    if (invoice.workosOrgId !== callerOrgId) return [];
 
     // For finalized invoices, try stored line items first
     const isFinalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(invoice.status);
@@ -391,6 +405,7 @@ export const listInvoices = query({
     dateRangeEnd: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const result = await ctx.db
       .query('loadInvoices')
       .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status))
@@ -485,6 +500,7 @@ export const getFilterOptions = query({
     ),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const invoices = await ctx.db
       .query('loadInvoices')
       .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status))
@@ -526,6 +542,7 @@ export const bulkUpdateStatus = mutation({
     updatedBy: v.string(), // WorkOS user ID
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = { success: 0, failed: 0, errors: [] as string[] };
     const finalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'];
@@ -656,6 +673,7 @@ export const bulkVoidInvoices = mutation({
     updatedBy: v.string(), // WorkOS user ID
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = { success: 0, failed: 0, errors: [] as string[] };
 
@@ -843,6 +861,7 @@ export const processPaymentChunk = internalMutation({
 export const confirmPaymentChunk = mutation({
   args: paymentBatchArgs,
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = {
       success: 0,
@@ -1071,6 +1090,7 @@ export const bulkUpdateLoadType = mutation({
     updatedBy: v.string(), // WorkOS user ID
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = { success: 0, failed: 0, errors: [] as string[] };
 
@@ -1120,6 +1140,7 @@ export const debugLoadLookup = query({
     searchValue: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const val = args.searchValue.trim();
     const results: Record<string, unknown> = { searchValue: val };
 
@@ -1235,6 +1256,7 @@ export const resetPaidToDraft = mutation({
     batchSize: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const limit = args.batchSize ?? 100;
     const now = Date.now();
 

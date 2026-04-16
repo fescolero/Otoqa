@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import type { MutationCtx } from './_generated/server';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
@@ -177,9 +178,7 @@ export const countLoadsByStatus = query({
     Expired: v.number(),
   }),
   handler: async (ctx, args) => {
-    // Auth: verify caller is authenticated
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Read from organizationStats aggregate table (1 read)
     const stats = await ctx.db
@@ -287,6 +286,7 @@ export const getDistinctFilterValues = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const hcrs = new Set<string>();
     const trips = new Set<string>();
 
@@ -322,6 +322,8 @@ export const getLoads = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
     // ── SEARCH PATH: bypass pagination, use index lookups ──
     // When searching, we do direct index lookups first (instant), then a
     // broader scan with a cap. This guarantees the load is found regardless
@@ -577,8 +579,10 @@ export const getLoads = query({
 export const getLoad = query({
   args: { loadId: v.id('loadInformation') },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) return null;
+    if (load.workosOrgId !== callerOrgId) return null;
 
     const stops = await ctx.db
       .query('loadStops')
@@ -672,8 +676,10 @@ export const getLoad = query({
 export const getByIdWithRange = query({
   args: { loadId: v.id('loadInformation') },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) return null;
+    if (load.workosOrgId !== callerOrgId) return null;
 
     const stops = await ctx.db
       .query('loadStops')
@@ -888,6 +894,7 @@ export const createLoad = mutation({
     ),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     if (args.stops.length === 0) throw new Error('At least one stop is required');
 
@@ -1059,6 +1066,10 @@ export const updateLoadStatus = mutation({
     canceledBy: v.optional(v.string()), // WorkOS user ID
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
     const result = await applyLoadStatusUpdate(ctx, args);
 
     await updateLoadCount(ctx, result.load.workosOrgId, result.previousStatus, result.nextStatus);
@@ -1090,6 +1101,7 @@ export const bulkUpdateLoadStatus = mutation({
     canceledBy: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     if (args.loadIds.length === 0) return { success: 0, failed: 0 };
 
     const now = Date.now();
@@ -1109,6 +1121,10 @@ export const bulkUpdateLoadStatus = mutation({
       try {
         const load = await ctx.db.get(loadId);
         if (!load) {
+          failed++;
+          continue;
+        }
+        if (load.workosOrgId !== callerOrgId) {
           failed++;
           continue;
         }
@@ -1187,8 +1203,10 @@ export const updateLoadMiles = mutation({
     manualMiles: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const updatedContractMiles = args.contractMiles ?? load.contractMiles;
     const updatedImportedMiles = args.importedMiles ?? load.importedMiles;
@@ -1218,6 +1236,10 @@ export const updateLoadMiles = mutation({
 export const deleteLoad = mutation({
   args: { loadId: v.id('loadInformation') },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const loadToDelete = await ctx.db.get(args.loadId);
+    if (!loadToDelete) throw new Error('Load not found');
+    if (loadToDelete.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
     const stops = await ctx.db
       .query('loadStops')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -1243,8 +1265,11 @@ export const updateStopTimes = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const stop = await ctx.db.get(args.stopId);
     if (!stop) throw new Error('Stop not found');
+    const stopLoad = await ctx.db.get(stop.loadId);
+    if (!stopLoad || stopLoad.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const { stopId, userId, ...updates } = args;
     const now = Date.now();
@@ -1299,6 +1324,7 @@ export const validateBulkStatusChange = query({
     bufferHours: v.optional(v.number()), // Imminent threshold, defaults to 4
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const now = Date.now();
     const bufferMs = (args.bufferHours ?? 4) * 60 * 60 * 1000; // Default 4 hours
 
@@ -1327,6 +1353,7 @@ export const validateBulkStatusChange = query({
     for (const loadId of args.loadIds) {
       const load = await ctx.db.get(loadId);
       if (!load) continue;
+      if (load.workosOrgId !== callerOrgId) continue;
 
       // 1. Check if load is already finalized (Completed/Canceled/Expired)
       if (load.status === 'Completed' || load.status === 'Canceled' || load.status === 'Expired') {
@@ -1455,8 +1482,10 @@ export const updateLoadAttributes = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const { loadId, userId, ...updates } = args;
     const now = Date.now();
@@ -1602,8 +1631,9 @@ export const getByDriver = query({
     status: assignedLoadStatusValidator,
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);
     const seenLoadIds = new Set<string>();
@@ -1721,8 +1751,11 @@ export const getByCarrierPartnership = query({
     status: assignedLoadStatusValidator,
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const partnership = await ctx.db.get(args.partnershipId);
+    if (!partnership || (partnership.brokerOrgId !== callerOrgId && partnership.carrierOrgId !== callerOrgId)) {
+      throw new Error('Not authorized for this organization');
+    }
 
     const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);
     const seenLoadIds = new Set<string>();
@@ -1779,8 +1812,7 @@ export const getByCarrierPartnership = query({
     // --- Fallback: loadCarrierAssignments for loads not found via dispatch legs ---
     // This catches loads where the carrier was assigned but no dispatch leg
     // has this carrier's ID (e.g., all legs were COMPLETED/CANCELED at assignment time).
-    const partnership = await ctx.db.get(args.partnershipId);
-    if (!partnership) return enrichedLoads;
+    // Note: `partnership` was already fetched and validated at the top of this handler.
 
     const carrierAssignments = partnership.carrierOrgId
       ? await ctx.db

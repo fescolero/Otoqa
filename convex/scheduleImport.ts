@@ -3,6 +3,7 @@
 import { v } from 'convex/values';
 import { action } from './_generated/server';
 import OpenAI from 'openai';
+import { requireCallerOrgId } from './lib/auth';
 
 const extractionConfigValidator = v.object({
   includeLogistics: v.boolean(),
@@ -293,7 +294,8 @@ export const extractLanesFromSchedule = action({
     lanes: v.array(v.any()),
     error: v.optional(v.string()),
   }),
-  handler: async (_ctx, args) => {
+  handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const totalChars = args.imageUrls.reduce((sum, u) => sum + u.length, 0);
     console.log(`[extractLanes] ${args.imageUrls.length} images, ~${Math.round(totalChars / 1024)}KB total`);
 
@@ -495,7 +497,8 @@ export const verifyAndEnrichStops = action({
     lanes: v.array(v.any()),
     error: v.optional(v.string()),
   }),
-  handler: async (_ctx, args) => {
+  handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) {
       return { lanes: args.lanes, error: 'GOOGLE_MAPS_API_KEY not configured' };
@@ -708,7 +711,8 @@ export const applyChatCorrection = action({
     ),
     error: v.optional(v.string()),
   }),
-  handler: async (_ctx, args) => {
+  handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const inputSize = JSON.stringify(args.lanes).length;
     console.log(`[applyChatCorrection] ${args.lanes.length} lanes, ${inputSize} chars, message: "${args.userMessage}"`);
 

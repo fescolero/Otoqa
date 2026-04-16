@@ -1,5 +1,6 @@
 import { query } from "./_generated/server";
 import { v } from "convex/values";
+import { assertCallerOwnsOrg } from "./lib/auth";
 
 /**
  * Diagnostic query to check loads requiring review
@@ -9,6 +10,7 @@ export const checkReviewLoads = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const loads = await ctx.db
       .query("loadInformation")
       .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))

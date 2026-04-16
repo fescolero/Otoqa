@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Load Hold Workflow
@@ -42,6 +43,7 @@ export const listHeldLoads = query({
     })
   ),
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     let loadsQuery = ctx.db
       .query('loadInformation')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId));
@@ -111,8 +113,9 @@ export const canHoldLoad = query({
     ),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) {
+    if (!load || load.workosOrgId !== callerOrgId) {
       return {
         canHold: false,
         reason: 'Load not found',
@@ -195,8 +198,9 @@ export const holdLoad = mutation({
     payablesUnassigned: v.optional(v.number()),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) {
+    if (!load || load.workosOrgId !== callerOrgId) {
       return {
         success: false,
         message: 'Load not found',
@@ -274,8 +278,9 @@ export const releaseLoad = mutation({
     message: v.string(),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) {
+    if (!load || load.workosOrgId !== callerOrgId) {
       return {
         success: false,
         message: 'Load not found',
@@ -328,6 +333,7 @@ export const bulkHoldLoads = mutation({
     ),
   }),
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     let successful = 0;
     let failed = 0;
     const errors: Array<{ loadId: Id<'loadInformation'>; error: string }> = [];
@@ -381,6 +387,7 @@ export const bulkReleaseLoads = mutation({
     ),
   }),
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     let successful = 0;
     let failed = 0;
     const errors: Array<{ loadId: Id<'loadInformation'>; error: string }> = [];
@@ -430,8 +437,9 @@ export const uploadPod = mutation({
     wasReleased: v.boolean(),
   }),
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) {
+    if (!load || load.workosOrgId !== callerOrgId) {
       return {
         success: false,
         message: 'Load not found',

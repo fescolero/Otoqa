@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { internalQuery, query } from './_generated/server';
+import { requireCallerOrgId } from './lib/auth';
 
 /**
  * US Federal Holidays
@@ -137,6 +138,7 @@ export const getFederalHolidays = query({
     })
   ),
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const startYear = parseInt(args.startDate.substring(0, 4));
     const endYear = parseInt(args.endDate.substring(0, 4));
     
@@ -188,9 +190,10 @@ export const isHoliday = query({
     holidayName: v.optional(v.string()),
   }),
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const year = parseInt(args.date.substring(0, 4));
     const holidays = getHolidaySet(year);
-    
+
     if (!holidays.has(args.date)) {
       return { isHoliday: false };
     }

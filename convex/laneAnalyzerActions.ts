@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { action, internalAction, internalMutation, internalQuery } from './_generated/server';
 import { internal, api } from './_generated/api';
+import { requireCallerOrgId } from './lib/auth';
 
 // ==========================================
 // LANE ANALYZER — External API Actions
@@ -15,6 +16,7 @@ import { internal, api } from './_generated/api';
 export const fetchFuelPrices = action({
   args: {},
   handler: async (ctx) => {
+    await requireCallerOrgId(ctx);
     const apiKey = process.env.EIA_API_KEY;
 
     // PADD region series IDs for weekly retail diesel prices
@@ -85,6 +87,7 @@ export const fetchTollEstimate = action({
     destinationLng: v.number(),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const apiKey = process.env.TOLLGURU_API_KEY;
 
     if (!apiKey) {
@@ -156,6 +159,7 @@ export const geocodeAndCalculateRoute = action({
     entryId: v.id('laneAnalysisEntries'),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) {
       return { success: false, error: 'Google Maps API key not configured' };
@@ -251,6 +255,7 @@ export const runAnalysisWithExternalData = action({
     sessionId: v.id('laneAnalysisSessions'),
   },
   handler: async (ctx, args) => {
+    await requireCallerOrgId(ctx);
     // 1. Fetch latest fuel prices and write to cache
     await fetchAndCacheFuelPrices(ctx);
 

@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Carrier Partnerships API
@@ -165,6 +166,7 @@ export const listForBroker = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     let query = ctx.db.query('carrierPartnerships').withIndex('by_broker', (q) => {
       if (args.status) {
         return q.eq('brokerOrgId', args.brokerOrgId).eq('status', args.status);
@@ -223,6 +225,7 @@ export const countPartnershipsByStatus = query({
     brokerOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const partnerships = await ctx.db
       .query('carrierPartnerships')
       .filter((q) => q.eq(q.field('brokerOrgId'), args.brokerOrgId))
@@ -270,6 +273,7 @@ export const getActiveForDispatch = query({
     brokerOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const partnerships = await ctx.db
       .query('carrierPartnerships')
       .withIndex('by_broker', (q) => q.eq('brokerOrgId', args.brokerOrgId).eq('status', 'ACTIVE'))
@@ -354,8 +358,10 @@ export const get = query({
     partnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) return null;
+    if (partnership.brokerOrgId !== callerOrgId) return null;
 
     // Enrich with carrier org info if linked
     let carrierOrg = null;
@@ -418,6 +424,7 @@ export const getByBrokerAndMc = query({
     mcNumber: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
     return ctx.db
       .query('carrierPartnerships')
@@ -435,11 +442,13 @@ export const findByMcNumber = query({
     mcNumber: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
-    return ctx.db
+    const all = await ctx.db
       .query('carrierPartnerships')
       .withIndex('by_mc', (q) => q.eq('mcNumber', normalizedMcNumber))
       .collect();
+    return all.filter((p) => p.brokerOrgId === callerOrgId);
   },
 });
 
@@ -476,6 +485,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
     const normalizedMcNumber = normalizeMcNumber(args.mcNumber);
     const normalizedCarrierName = normalizeWhitespace(args.carrierName);
@@ -673,10 +683,14 @@ export const update = mutation({
     ownerDriverLicenseExpiration: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const { partnershipId, ...updates } = args;
 
     const partnership = await ctx.db.get(partnershipId);
     if (!partnership) {
+      throw new Error('Partnership not found');
+    }
+    if (partnership.brokerOrgId !== callerOrgId) {
       throw new Error('Partnership not found');
     }
     const now = Date.now();
@@ -931,8 +945,12 @@ export const updateStatus = mutation({
     ),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
+      throw new Error('Partnership not found');
+    }
+    if (partnership.brokerOrgId !== callerOrgId) {
       throw new Error('Partnership not found');
     }
 
@@ -1147,8 +1165,12 @@ export const retryClerkSync = mutation({
     partnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
+      throw new Error('Partnership not found');
+    }
+    if (partnership.brokerOrgId !== callerOrgId) {
       throw new Error('Partnership not found');
     }
 
@@ -1200,8 +1222,12 @@ export const createOwnerDriverRecord = mutation({
     partnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
+      throw new Error('Partnership not found');
+    }
+    if (partnership.brokerOrgId !== callerOrgId) {
       throw new Error('Partnership not found');
     }
 
@@ -1538,10 +1564,16 @@ export const bulkTerminate = mutation({
     let totalReleasedAssignments = 0;
     let totalLoadsReopened = 0;
 
+    const callerOrgId = await requireCallerOrgId(ctx);
+
     for (const partnershipId of args.partnershipIds) {
       try {
         const partnership = await ctx.db.get(partnershipId);
         if (!partnership) {
+          results.push({ id: partnershipId, success: false, error: 'Partnership not found' });
+          continue;
+        }
+        if (partnership.brokerOrgId !== callerOrgId) {
           results.push({ id: partnershipId, success: false, error: 'Partnership not found' });
           continue;
         }
@@ -1683,6 +1715,7 @@ export const bulkReactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const now = Date.now();
     const results: {
       id: string;
@@ -1697,6 +1730,10 @@ export const bulkReactivate = mutation({
       try {
         const partnership = await ctx.db.get(partnershipId);
         if (!partnership) {
+          results.push({ id: partnershipId, success: false, error: 'Partnership not found' });
+          continue;
+        }
+        if (partnership.brokerOrgId !== callerOrgId) {
           results.push({ id: partnershipId, success: false, error: 'Partnership not found' });
           continue;
         }
@@ -1945,6 +1982,7 @@ export const permanentlyDelete = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const results: {
       id: string;
       success: boolean;
@@ -1959,6 +1997,10 @@ export const permanentlyDelete = mutation({
       try {
         const partnership = await ctx.db.get(partnershipId);
         if (!partnership) {
+          results.push({ id: partnershipId, success: false, error: 'Partnership not found' });
+          continue;
+        }
+        if (partnership.brokerOrgId !== callerOrgId) {
           results.push({ id: partnershipId, success: false, error: 'Partnership not found' });
           continue;
         }
@@ -2135,8 +2177,12 @@ export const sendInvite = mutation({
     partnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
+      throw new Error('Partnership not found');
+    }
+    if (partnership.brokerOrgId !== callerOrgId) {
       throw new Error('Partnership not found');
     }
 
@@ -2168,8 +2214,12 @@ export const syncPartnershipForMobileAccess = mutation({
     partnershipId: v.id('carrierPartnerships'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
+      throw new Error('Partnership not found');
+    }
+    if (partnership.brokerOrgId !== callerOrgId) {
       throw new Error('Partnership not found');
     }
 

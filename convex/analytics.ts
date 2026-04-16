@@ -5,6 +5,7 @@
 
 import { query } from "./_generated/server";
 import { v } from "convex/values";
+import { assertCallerOwnsOrg } from "./lib/auth";
 
 /**
  * Group unmapped loads by HCR + Trip Number
@@ -16,6 +17,7 @@ export const getUnmappedLoadGroups = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Get UNMAPPED loads with limit (prevents reading thousands of loads)
     // ✅ Changed from .collect() to .take(100) for 98% read reduction
     const unmappedLoads = await ctx.db

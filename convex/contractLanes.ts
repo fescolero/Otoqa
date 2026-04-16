@@ -3,6 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { scheduleRuleValidator } from './lib/validators';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 // List unique HCR/Trip combinations for route assignments
 export const listUniqueRoutes = query({
@@ -10,6 +11,7 @@ export const listUniqueRoutes = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const lanes = await ctx.db
       .query('contractLanes')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -52,6 +54,11 @@ export const listByCustomer = query({
     includeDeleted: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const customer = await ctx.db.get(args.customerCompanyId);
+    if (!customer || customer.workosOrgId !== callerOrgId) {
+      return [];
+    }
     const lanes = await ctx.db
       .query('contractLanes')
       .withIndex('by_customer', (q) => q.eq('customerCompanyId', args.customerCompanyId))
@@ -72,7 +79,11 @@ export const get = query({
     id: v.id('contractLanes'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const lane = await ctx.db.get(args.id);
+    if (!lane || lane.workosOrgId !== callerOrgId) {
+      return null;
+    }
     return lane;
   },
 });
@@ -139,6 +150,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
 
     const laneId = await ctx.db.insert('contractLanes', {
@@ -252,6 +264,11 @@ export const update = mutation({
     isActive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const lane = await ctx.db.get(args.id);
+    if (!lane || lane.workosOrgId !== callerOrgId) {
+      throw new Error('Not authorized for this lane');
+    }
     const { id, ...updates } = args;
 
     await ctx.db.patch(id, {
@@ -270,6 +287,11 @@ export const deactivate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const lane = await ctx.db.get(args.id);
+    if (!lane || lane.workosOrgId !== callerOrgId) {
+      throw new Error('Not authorized for this lane');
+    }
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
@@ -287,6 +309,11 @@ export const restore = mutation({
     id: v.id('contractLanes'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const lane = await ctx.db.get(args.id);
+    if (!lane || lane.workosOrgId !== callerOrgId) {
+      throw new Error('Not authorized for this lane');
+    }
     await ctx.db.patch(args.id, {
       isDeleted: false,
       deletedAt: undefined,
@@ -304,6 +331,11 @@ export const permanentDelete = mutation({
     id: v.id('contractLanes'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const lane = await ctx.db.get(args.id);
+    if (!lane || lane.workosOrgId !== callerOrgId) {
+      throw new Error('Not authorized for this lane');
+    }
     await ctx.db.delete(args.id);
     return args.id;
   },
@@ -331,6 +363,7 @@ export const checkExistingLanes = query({
     ),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const results: Record<
       string,
       {
@@ -462,6 +495,7 @@ export const bulkUpsert = mutation({
     restoreLaneIds: v.array(v.id('contractLanes')),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     let created = 0;
     let updated = 0;
@@ -529,6 +563,7 @@ export const bulkImport = mutation({
     ),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     let imported = 0;
     let skipped = 0;

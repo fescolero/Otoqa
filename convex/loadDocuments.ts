@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { requireCallerIdentity, requireCallerOrgId } from './lib/auth';
 
 /**
  * Generate a signed upload URL for load documents.
@@ -7,8 +8,7 @@ import { mutation, query } from './_generated/server';
  */
 export const generateUploadUrl = mutation({
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Unauthenticated');
+    await requireCallerOrgId(ctx);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -28,11 +28,13 @@ export const create = mutation({
     _id: v.id('loadDocuments'),
   }),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Unauthenticated');
+    const { orgId: callerOrgId, subject } = await requireCallerIdentity(ctx);
 
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== callerOrgId) {
+      throw new Error('Load not found');
+    }
 
     const now = Date.now();
     const docId = await ctx.db.insert('loadDocuments', {
@@ -42,7 +44,7 @@ export const create = mutation({
       fileName: args.fileName,
       contentType: args.contentType,
       uploadedAt: now,
-      uploadedBy: identity.subject,
+      uploadedBy: subject,
       workosOrgId: load.workosOrgId,
     });
 
@@ -72,8 +74,10 @@ export const listForLoad = query({
     })
   ),
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return [];
+    const callerOrgId = await requireCallerOrgId(ctx);
+
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
 
     const type = args.type;
     const docs = type

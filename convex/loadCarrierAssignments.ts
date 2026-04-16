@@ -3,6 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { updateLoadCount } from './stats_helpers';
+import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 
 /**
  * Load Carrier Assignments API
@@ -23,6 +24,10 @@ export const listByLoad = query({
     loadId: v.id('loadInformation'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+
     const assignments = await ctx.db
       .query('loadCarrierAssignments')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -65,6 +70,10 @@ export const getActiveForLoad = query({
     loadId: v.id('loadInformation'),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return null;
+
     const assignments = await ctx.db
       .query('loadCarrierAssignments')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -100,6 +109,7 @@ export const listForBroker = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     let query;
     if (args.status) {
       query = ctx.db
@@ -279,7 +289,10 @@ export const get = query({
     assignmentId: v.id('loadCarrierAssignments'),
   },
   handler: async (ctx, args) => {
-    return ctx.db.get(args.assignmentId);
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const assignment = await ctx.db.get(args.assignmentId);
+    if (!assignment || assignment.brokerOrgId !== callerOrgId) return null;
+    return assignment;
   },
 });
 
@@ -379,6 +392,7 @@ export const offerLoad = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     // Verify load exists
@@ -482,6 +496,7 @@ export const directAssign = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     // Verify load exists and is assignable
@@ -765,6 +780,7 @@ export const awardToCarrier = mutation({
     brokerOrgId: v.string(), // For verification
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     const assignment = await ctx.db.get(args.assignmentId);
@@ -819,6 +835,7 @@ export const withdrawOffer = mutation({
     brokerOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
       throw new Error('Assignment not found');
@@ -1014,11 +1031,17 @@ export const cancelAssignment = mutation({
     cancellationNotes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
     const now = Date.now();
 
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
       throw new Error('Assignment not found');
+    }
+
+    // Verify caller belongs to either the broker or carrier org on the assignment
+    if (assignment.brokerOrgId !== callerOrgId && assignment.carrierOrgId !== callerOrgId) {
+      throw new Error('Not authorized to cancel this assignment');
     }
 
     // Can only cancel awarded or in-progress loads
@@ -1073,6 +1096,7 @@ export const updatePaymentStatus = mutation({
     paymentNotes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
       throw new Error('Assignment not found');
