@@ -21,6 +21,7 @@ import {
   trackBGTaskResult,
   trackBGTaskError,
   trackBGTaskReregistered,
+  trackBGTaskHealth,
   trackForegroundResume,
   trackWatchLocationReceived,
   trackWatchLocationFiltered,
@@ -1117,11 +1118,28 @@ export async function resumeTracking(): Promise<{
 
     console.log('[LocationTracking] Resuming tracking for load:', state.loadId);
 
-    // Check permissions first
-    const { status } = await Location.getForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      console.warn('[LocationTracking] Location permission not granted, cannot resume');
+    // Re-check permissions. Users can revoke location permission in Android
+    // Settings while the app is closed — checking at resume time catches
+    // silent failures where the BG task re-registers but the OS refuses to
+    // fire it because permission is no longer granted.
+    const { status: fgStatus } = await Location.getForegroundPermissionsAsync();
+    if (fgStatus !== 'granted') {
+      console.warn('[LocationTracking] Foreground location permission not granted, cannot resume');
       return { resumed: false, message: 'Location permission not granted', state };
+    }
+
+    const { status: bgStatus } = await Location.getBackgroundPermissionsAsync();
+    if (bgStatus !== 'granted') {
+      console.warn('[LocationTracking] Background location permission revoked — BG task will not fire');
+      // Re-request — this prompts the user if appropriate, otherwise returns the same denied status
+      const { status: bgStatusAfter } = await Location.requestBackgroundPermissionsAsync();
+      if (bgStatusAfter !== 'granted') {
+        return {
+          resumed: false,
+          message: 'Background location permission required. Please enable "Always allow" in Settings → Apps → Otoqa → Location.',
+          state,
+        };
+      }
     }
 
     // Restart sync interval
@@ -1710,12 +1728,25 @@ export async function restartForegroundServices(): Promise<void> {
       const isSuspect = wasRegistered && bgTaskLastAliveAgoSec !== null && bgTaskLastAliveAgoSec > 3 * 60; // > 3 min = likely zombie (should fire every ~30s-2min)
       const neverFired = wasRegistered && (bgTaskLastAliveAgoSec === null || bgTaskLastAliveAgoSec === 0);
 
-      const healthStatus = isZombie ? 'zombie' : isSuspect ? 'suspect' : neverFired ? 'never_fired' : 'alive';
+      const healthStatus: 'alive' | 'suspect' | 'zombie' | 'never_fired' =
+        isZombie ? 'zombie' : isSuspect ? 'suspect' : neverFired ? 'never_fired' : 'alive';
 
       console.log(
         `[LocationTracking] BG task isRegistered=${wasRegistered}, ` +
           `lastAliveAgo=${bgTaskLastAliveAgoSec}s, health=${healthStatus}`,
       );
+
+      // Emit a targeted health event. This lets the autofix pipeline see when
+      // the BG task is zombied on a specific device/load — signal that
+      // in-app force-cycle alone is not enough and the user needs OS-level
+      // intervention (battery whitelist, reinstall with proper FGS type, etc.).
+      trackBGTaskHealth({
+        status: healthStatus,
+        lastAliveAgoSec: bgTaskLastAliveAgoSec,
+        wasRegistered,
+        loadId: state.loadId,
+        driverId: state.driverId,
+      });
 
       // Always stop first if registered — ensures native layer reconnects to current JS callback
       if (wasRegistered) {

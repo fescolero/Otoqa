@@ -10,12 +10,28 @@ import * as SQLite from 'expo-sqlite';
 //
 // Points are only deleted AFTER confirmed synced to Convex.
 // ============================================
+//
+// ANDROID 16 GC NOTE (Fix #8 — merged to main 2026-04-17)
+// -------------------------------------------------------
+// On Samsung devices running Android 16, the JVM garbage collector
+// aggressively destroys the NativeDatabase object between operations.
+// expo-sqlite's JSI bridge only stores a numeric handleId; when the JVM
+// destroys the backing object, subsequent calls via that handleId throw
+// "NativeDatabase.execAsync has been rejected → NullPointerException".
+//
+// A module-level cache (`let db`) cannot solve this — the handle can be
+// probed successfully with `SELECT 1`, then GC fires, then the next op
+// fails. Retries against the same cached handle fail the same way.
+//
+// The fix: open a fresh connection on every operation. The pattern is
+// open → run → (let the native layer release). There is no module-level
+// cache. Each operation gets a new handleId that cannot be dead yet.
+//
+// Performance: ~5–10ms per open on Android. At ~3 ops/min this is
+// negligible and far cheaper than silently dropping GPS data.
+// ============================================
 
 const DB_NAME = 'otoqa_locations.db';
-
-let db: SQLite.SQLiteDatabase | null = null;
-// Mutex for concurrent getDb() callers — prevents two concurrent openAndInit() races.
-let dbInitPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 function isRecoverableDbError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -26,31 +42,33 @@ function isRecoverableDbError(error: unknown): boolean {
   );
 }
 
-async function resetDbHandle(): Promise<void> {
-  const stale = db;
-  // Null both module-level refs immediately — before any await — so concurrent
-  // getDb() callers that run during the close see a clean slate and open a
-  // fresh handle rather than getting the (about-to-be-closed) stale one.
-  db = null;
-  dbInitPromise = null;
-  if (stale) {
-    // Fire-and-forget: do NOT await closeAsync(). Concurrent callers may hold a
-    // direct reference to `stale` with an in-flight runAsync(); awaiting close
-    // here would destroy the native handle while their operation is executing,
-    // causing NullPointerException. Releasing the module reference now lets the
-    // GC reclaim the native handle once all in-flight operations complete.
-    stale.closeAsync().catch(() => {});
-  }
-}
-
-async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Run a DB operation with a fresh connection, close it after, retry once
+ * on recoverable errors.
+ *
+ * The caller receives the opened `database` as an argument. This ensures
+ * each operation has its own live handle for the duration of the op —
+ * no shared/cached handle that Android GC can destroy between calls.
+ *
+ * The close is fire-and-forget (no await) so the next op doesn't wait
+ * on the close. If there are concurrent ops, each one has its own
+ * independent handle.
+ */
+async function withDbRetry<T>(fn: (database: SQLite.SQLiteDatabase) => Promise<T>): Promise<T> {
+  const runOnce = async (): Promise<T> => {
+    const database = await getDb();
+    try {
+      return await fn(database);
+    } finally {
+      database.closeAsync().catch(() => {});
+    }
+  };
   try {
-    return await fn();
+    return await runOnce();
   } catch (error) {
     if (!isRecoverableDbError(error)) throw error;
-    console.warn('[LocationDB] Recoverable DB error, reopening and retrying once');
-    await resetDbHandle();
-    return await fn();
+    console.warn('[LocationDB] Recoverable DB error, retrying with fresh handle');
+    return await runOnce();
   }
 }
 
@@ -90,62 +108,28 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_locations_recorded ON locations (recordedAt);
 `;
 
-async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
+/**
+ * Open a fresh database connection and run the idempotent schema setup.
+ * Called on EVERY operation — there is no module-level cache. This is the
+ * Fix #8 approach to Android 16's aggressive JVM GC destroying the
+ * NativeDatabase object between operations.
+ *
+ * `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` make the
+ * schema setup idempotent and ~fast after the first invocation.
+ */
+async function getDb(): Promise<SQLite.SQLiteDatabase> {
   const newDb = await SQLite.openDatabaseAsync(DB_NAME);
   await newDb.execAsync(SCHEMA_SQL);
   return newDb;
 }
 
-async function getDb(): Promise<SQLite.SQLiteDatabase> {
-  // Join any in-flight init first — prevents two concurrent openAndInit() calls.
-  if (dbInitPromise) return dbInitPromise;
-
-  if (db) {
-    // Verify the native handle is still alive. Android can destroy it after
-    // long background periods while the JS reference remains cached.
-    try {
-      await db.execAsync('SELECT 1');
-      // Re-check after the yield: another caller may have started a reinit.
-      if (dbInitPromise) return dbInitPromise;
-      return db;
-    } catch {
-      console.warn('[LocationDB] Stale DB handle detected, reopening...');
-      // Fall through to claim the mutex below.
-    }
-  }
-
-  // Claim mutex synchronously (no await before assignment) so concurrent
-  // callers that reach here after the probe-yield all join the same promise.
-  if (!dbInitPromise) {
-    const staleDb = db;
-    db = null; // clear immediately so concurrent probes fail fast
-    dbInitPromise = (async () => {
-      if (staleDb) {
-        try {
-          await staleDb.closeAsync();
-        } catch {
-          /* already dead */
-        }
-      }
-      const newDb = await openAndInit();
-      db = newDb;
-      return newDb;
-    })().finally(() => {
-      dbInitPromise = null;
-    });
-  }
-  return dbInitPromise;
-}
-
 /**
- * Force-close and reopen the database connection.
- * Call on foreground resume to proactively replace handles that Android
- * may have invalidated while the app was backgrounded.
+ * No-op. Preserved for API compatibility with callers from the pre-Fix-#8
+ * cache-based design. There is no cached handle to reopen; every operation
+ * opens fresh.
  */
 export async function reopenDb(): Promise<void> {
-  await resetDbHandle();
-  await getDb(); // uses mutex so concurrent callers share one openAndInit()
-  console.log('[LocationDB] Database connection refreshed');
+  // intentional no-op — fresh connection per op, see module comment
 }
 
 // ============================================
@@ -176,8 +160,7 @@ export async function insertLocation(loc: {
     Date.now(),
   ] as const;
 
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const result = await database.runAsync(
       `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
@@ -202,8 +185,7 @@ export async function insertLocationBatch(
 ): Promise<number> {
   if (locations.length === 0) return 0;
 
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const now = Date.now();
     let inserted = 0;
 
@@ -241,8 +223,7 @@ export async function insertLocationBatch(
 // ============================================
 
 export async function getUnsyncedLocations(limit = 100): Promise<LocationRow[]> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     return database.getAllAsync<LocationRow>(
       'SELECT * FROM locations WHERE synced = 0 ORDER BY recordedAt ASC LIMIT ?',
       limit,
@@ -251,8 +232,7 @@ export async function getUnsyncedLocations(limit = 100): Promise<LocationRow[]> 
 }
 
 export async function getUnsyncedForLoad(loadId: string, limit = 500): Promise<LocationRow[]> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     return database.getAllAsync<LocationRow>(
       'SELECT * FROM locations WHERE loadId = ? AND synced = 0 ORDER BY recordedAt ASC LIMIT ?',
       loadId,
@@ -262,8 +242,7 @@ export async function getUnsyncedForLoad(loadId: string, limit = 500): Promise<L
 }
 
 export async function getUnsyncedCount(): Promise<number> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const row = await database.getFirstAsync<{ count: number }>(
       'SELECT COUNT(*) as count FROM locations WHERE synced = 0',
     );
@@ -272,8 +251,7 @@ export async function getUnsyncedCount(): Promise<number> {
 }
 
 export async function getUnsyncedCountForLoad(loadId: string): Promise<number> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const row = await database.getFirstAsync<{ count: number }>(
       'SELECT COUNT(*) as count FROM locations WHERE loadId = ? AND synced = 0',
       loadId,
@@ -283,8 +261,7 @@ export async function getUnsyncedCountForLoad(loadId: string): Promise<number> {
 }
 
 export async function getTotalCountForLoad(loadId: string): Promise<number> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const row = await database.getFirstAsync<{ count: number }>(
       'SELECT COUNT(*) as count FROM locations WHERE loadId = ?',
       loadId,
@@ -299,16 +276,14 @@ export async function getTotalCountForLoad(loadId: string): Promise<number> {
 
 export async function markAsSynced(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
-  await withDbRetry(async () => {
-    const database = await getDb();
+  await withDbRetry(async (database) => {
     const placeholders = ids.map(() => '?').join(',');
     await database.runAsync(`UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
   });
 }
 
 export async function deleteOldSyncedLocations(olderThanMs: number = 7 * 24 * 60 * 60 * 1000): Promise<number> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const cutoff = Date.now() - olderThanMs;
     const result = await database.runAsync('DELETE FROM locations WHERE synced = 1 AND createdAt < ?', cutoff);
     return result.changes;
@@ -322,8 +297,7 @@ export async function deleteOldSyncedLocations(olderThanMs: number = 7 * 24 * 60
 export async function getLastLocationForLoad(
   loadId: string,
 ): Promise<{ latitude: number; longitude: number; recordedAt: number } | null> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const row = await database.getFirstAsync<{
       latitude: number;
       longitude: number;
@@ -338,16 +312,13 @@ export async function getLastLocationForLoad(
 // ============================================
 
 export async function deleteAllForLoad(loadId: string): Promise<number> {
-  return withDbRetry(async () => {
-    const database = await getDb();
+  return withDbRetry(async (database) => {
     const result = await database.runAsync('DELETE FROM locations WHERE loadId = ?', loadId);
     return result.changes;
   });
 }
 
 export async function closeDb(): Promise<void> {
-  if (db) {
-    await db.closeAsync();
-    db = null;
-  }
+  // No-op — fresh connection per op means nothing to close at the module level.
+  // Preserved for API compatibility.
 }

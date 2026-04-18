@@ -388,6 +388,22 @@ export function trackBGTaskReregistered(context: {
   capture('bg_task_reregistered', { ...context, ...getAppVersionContext() });
 }
 
+/**
+ * Fires when the BG task is re-registered but hasn't fired in a long time,
+ * signaling an OS-level zombie (Android Doze / Samsung Device Care / missing
+ * foreground service type declaration). In-app force-cycle is not enough —
+ * the user may need to reinstall the app or whitelist it in battery settings.
+ */
+export function trackBGTaskHealth(context: {
+  status: 'alive' | 'suspect' | 'zombie' | 'never_fired';
+  lastAliveAgoSec: number | null;
+  wasRegistered: boolean;
+  loadId?: string;
+  driverId?: string;
+}) {
+  capture('bg_task_health', { ...context, ...getAppVersionContext() });
+}
+
 export function trackForegroundResume(context: {
   bgTaskLastAliveAgoSec: number | null;
   fallbackRecovered: number;
