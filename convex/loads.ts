@@ -3,10 +3,16 @@ import { mutation, query, internalMutation } from './_generated/server';
 import type { MutationCtx } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { internal } from './_generated/api';
-import { Id } from './_generated/dataModel';
+import { Doc, Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
 import { parseStopDateTime } from './_helpers/timeUtils';
 import { updateLoadCount } from './stats_helpers';
+import {
+  setLoadTag,
+  removeAllTagsForLoad,
+  syncFirstStopDateToTags,
+  getLoadFacets,
+} from './lib/loadFacets';
 
 const loadStatusValidator = v.union(
   v.literal('Open'),
@@ -235,35 +241,49 @@ function calculateEffectiveMiles(
  * @returns The synced firstStopDate value (or undefined if no valid date)
  */
 async function syncFirstStopDate(
-  ctx: { db: { query: any; patch: any; get: any } },
+  ctx: MutationCtx,
   loadId: Id<'loadInformation'>,
 ): Promise<string | undefined> {
-  // Get the first stop (sequenceNumber = 1)
-  const firstStop = await ctx.db
+  // Fetch all stops once — used to derive every denormalized field below.
+  // This replaces the per-list-row N+1 queries that used to happen on
+  // getLoads / enrichLoadFromLeg / enrichLoadDirectly just to compute
+  // origin/destination/stopsCount on render.
+  const allStops = await ctx.db
     .query('loadStops')
-    .withIndex('by_sequence', (q: any) => q.eq('loadId', loadId).eq('sequenceNumber', 1))
-    .first();
+    .withIndex('by_load', (q: any) => q.eq('loadId', loadId))
+    .collect();
+  allStops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
-  // Extract and sanitize the date
+  const firstStop = allStops.find((s) => s.sequenceNumber === 1) ?? allStops[0];
+  const firstPickup = allStops.find((s) => s.stopType === 'PICKUP');
+  const lastDelivery = [...allStops].reverse().find((s) => s.stopType === 'DELIVERY');
+
+  // Extract and sanitize the date (YYYY-MM-DD, reject TBD / malformed).
   let firstStopDate: string | undefined = undefined;
-
   if (firstStop?.windowBeginDate) {
     const rawDate = firstStop.windowBeginDate;
-
-    // Handle TBD or empty values
     if (rawDate && rawDate !== 'TBD') {
-      // Extract YYYY-MM-DD from potential ISO string
       const dateOnly = rawDate.split('T')[0];
-
-      // Validate format (must be YYYY-MM-DD)
       if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) {
         firstStopDate = dateOnly;
       }
     }
   }
 
-  // Update the load with the synced date
-  await ctx.db.patch(loadId, { firstStopDate });
+  // Patch all denormalized fields in one call.
+  await ctx.db.patch(loadId, {
+    firstStopDate,
+    originCity: firstPickup?.city,
+    originState: firstPickup?.state,
+    originAddress: firstPickup?.address,
+    destinationCity: lastDelivery?.city,
+    destinationState: lastDelivery?.state,
+    destinationAddress: lastDelivery?.address,
+    stopsCountDenorm: allStops.length,
+  });
+
+  // Propagate firstStopDate to loadTags (facet index depends on it).
+  await syncFirstStopDateToTags(ctx, loadId, firstStopDate);
 
   return firstStopDate;
 }
@@ -281,22 +301,73 @@ export const syncFirstStopDateMutation = internalMutation({
   },
 });
 
+/**
+ * Distinct filter values for the dropdown UI.
+ *
+ * Reads from the facetValues registry (~hundreds of rows) rather than
+ * scanning loadInformation (~thousands to millions of rows). Previous
+ * implementation triggered Convex Health "Nearing documents read limit"
+ * warnings at ~13K loads; the facet path is O(distinct facet count)
+ * regardless of load volume.
+ *
+ * Safety fallback: if facetValues returns empty for an org (e.g. the
+ * backfill hasn't completed yet for a newly-provisioned org), fall
+ * through to the legacy full scan so the dropdown is never empty when
+ * loads exist. Remove the fallback in Phase 5 after all orgs are
+ * confirmed backfilled.
+ *
+ * Return shape unchanged: `{ hcrs: string[], trips: string[] }`.
+ * Callers (planner, filter-bar) require no changes.
+ */
 export const getDistinctFilterValues = query({
   args: {
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    const hcrs = new Set<string>();
-    const trips = new Set<string>();
 
-    for await (const load of ctx.db
-      .query('loadInformation')
-      .withIndex('by_hcr_trip', (q) => q.eq('workosOrgId', args.workosOrgId))) {
-      if (load.parsedHcr) hcrs.add(load.parsedHcr);
-      if (load.parsedTripNumber) trips.add(load.parsedTripNumber);
+    // Fast path: read aggregated values from the facetValues registry.
+    const [hcrFacets, tripFacets] = await Promise.all([
+      ctx.db
+        .query('facetValues')
+        .withIndex('by_org_key', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'HCR'),
+        )
+        .collect(),
+      ctx.db
+        .query('facetValues')
+        .withIndex('by_org_key', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'TRIP'),
+        )
+        .collect(),
+    ]);
+
+    if (hcrFacets.length > 0 || tripFacets.length > 0) {
+      return {
+        hcrs: hcrFacets.map((f) => f.value).sort(),
+        trips: tripFacets.map((f) => f.value).sort(),
+      };
     }
 
+    // Fallback: scan loadTags directly. Only hits when facetValues is
+    // empty for the org (drift or fresh org with no loads). Stays
+    // valid after Phase 5 drops the parsedHcr/parsedTripNumber columns.
+    const hcrs = new Set<string>();
+    const trips = new Set<string>();
+    for await (const tag of ctx.db
+      .query('loadTags')
+      .withIndex('by_org_key_canonical_date', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'HCR'),
+      )) {
+      hcrs.add(tag.value);
+    }
+    for await (const tag of ctx.db
+      .query('loadTags')
+      .withIndex('by_org_key_canonical_date', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'TRIP'),
+      )) {
+      trips.add(tag.value);
+    }
     return {
       hcrs: Array.from(hcrs).sort(),
       trips: Array.from(trips).sort(),
@@ -330,16 +401,23 @@ export const getLoads = query({
     // of which page it would normally be on.
     if (args.search) {
       const searchLower = args.search.toLowerCase().trim();
+      const searchCanonical = searchLower.toUpperCase();
+      const canonicalHcrArg = args.hcr?.trim().toUpperCase();
+      const canonicalTripArg = args.tripNumber?.trim().toUpperCase();
       const seenIds = new Set<string>();
       const matchedLoads: any[] = [];
       const MAX_SEARCH_RESULTS = 50;
 
+      // `load` here is pre-enriched with parsedHcr / parsedTripNumber
+      // from tag lookup, so the existing field accesses continue to work.
       const matchesFilters = (load: any) => {
         if (args.status && load.status !== args.status) return false;
         if (args.trackingStatus && load.trackingStatus !== args.trackingStatus) return false;
         if (args.customerId && load.customerId !== args.customerId) return false;
-        if (args.hcr && load.parsedHcr !== args.hcr) return false;
-        if (args.tripNumber && load.parsedTripNumber !== args.tripNumber) return false;
+        if (canonicalHcrArg && (load.parsedHcr ?? '').trim().toUpperCase() !== canonicalHcrArg)
+          return false;
+        if (canonicalTripArg && (load.parsedTripNumber ?? '').trim().toUpperCase() !== canonicalTripArg)
+          return false;
         if (args.requiresManualReview !== undefined && load.requiresManualReview !== args.requiresManualReview)
           return false;
         if (args.loadType && load.loadType !== args.loadType) return false;
@@ -366,11 +444,25 @@ export const getLoads = query({
         return true;
       };
 
-      const addIfMatch = (load: any) => {
+      // Enrich a raw load doc with its facet values from tags.
+      // After Phase 5 drops the columns, these are the only sources.
+      const enrichWithFacets = async (load: any) => {
+        const facets = await getLoadFacets(ctx, load._id);
+        return {
+          ...load,
+          parsedHcr: facets.hcr,
+          parsedTripNumber: facets.trip,
+          _hcrCanonical: facets.hcrCanonical,
+          _tripCanonical: facets.tripCanonical,
+        };
+      };
+
+      const addIfMatch = async (load: any) => {
         if (!load || seenIds.has(load._id) || load.workosOrgId !== args.workosOrgId) return;
         seenIds.add(load._id);
-        if (!matchesFilters(load)) return;
-        matchedLoads.push(load);
+        const enriched = await enrichWithFacets(load);
+        if (!matchesFilters(enriched)) return;
+        matchedLoads.push(enriched);
       };
 
       // 1. Exact index lookups (O(1) reads — fastest path)
@@ -387,8 +479,8 @@ export const getLoads = query({
           .first(),
       ]);
 
-      addIfMatch(byOrder);
-      addIfMatch(byInternal);
+      await addIfMatch(byOrder);
+      await addIfMatch(byInternal);
 
       // 2. If we don't have enough results, do a broader scan
       if (matchedLoads.length < MAX_SEARCH_RESULTS) {
@@ -411,44 +503,62 @@ export const getLoads = query({
           if (matchedLoads.length >= MAX_SEARCH_RESULTS) break;
           if (seenIds.has(load._id)) continue;
 
-          const matchesSearch =
+          // Quick match on fields that live on loadInformation. If this
+          // hits AND no HCR/Trip filter is set, skip the tag lookup entirely.
+          const matchesOnLoadFields =
             load.orderNumber?.toLowerCase().includes(searchLower) ||
             load.customerName?.toLowerCase().includes(searchLower) ||
-            load.internalId?.toLowerCase().includes(searchLower) ||
-            load.parsedHcr?.toLowerCase().includes(searchLower) ||
-            load.parsedTripNumber?.toLowerCase().includes(searchLower);
+            load.internalId?.toLowerCase().includes(searchLower);
 
-          if (!matchesSearch) continue;
+          const needsFacets =
+            !matchesOnLoadFields ||
+            !!canonicalHcrArg ||
+            !!canonicalTripArg;
+
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let enrichedLoad: any = load;
+          let facetsMatched = false;
+          if (needsFacets) {
+            enrichedLoad = await enrichWithFacets(load);
+            facetsMatched =
+              (enrichedLoad._hcrCanonical ?? '').includes(searchCanonical) ||
+              (enrichedLoad._tripCanonical ?? '').includes(searchCanonical);
+          }
+
+          if (!matchesOnLoadFields && !facetsMatched) continue;
           seenIds.add(load._id);
-          if (!matchesFilters(load)) continue;
-          matchedLoads.push(load);
+          if (!matchesFilters(enrichedLoad)) continue;
+          matchedLoads.push(enrichedLoad);
         }
       }
 
-      // Enrich with stops
-      const enriched = await Promise.all(
-        matchedLoads.map(async (load) => {
-          const stops = await ctx.db
-            .query('loadStops')
-            .withIndex('by_load', (q) => q.eq('loadId', load._id))
-            .collect();
-          stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-          const firstPickup = stops.find((s) => s.stopType === 'PICKUP');
-          const lastDelivery = stops.filter((s) => s.stopType === 'DELIVERY').pop();
-          const firstStop = stops[0];
-          return {
-            ...load,
-            origin: firstPickup
-              ? { city: firstPickup.city, state: firstPickup.state, address: firstPickup.address }
-              : null,
-            destination: lastDelivery
-              ? { city: lastDelivery.city, state: lastDelivery.state, address: lastDelivery.address }
-              : null,
-            stopsCount: stops.length,
-            firstStopDate: firstStop?.windowBeginDate,
-          };
-        }),
-      );
+      // Project denormalized fields into the legacy shape. No per-row
+      // loadStops query; origin/destination/count come from columns.
+      const enriched = matchedLoads.map((load) => ({
+        ...load,
+        origin:
+          load.originCity !== undefined ||
+          load.originState !== undefined ||
+          load.originAddress !== undefined
+            ? {
+                city: load.originCity,
+                state: load.originState,
+                address: load.originAddress ?? '',
+              }
+            : null,
+        destination:
+          load.destinationCity !== undefined ||
+          load.destinationState !== undefined ||
+          load.destinationAddress !== undefined
+            ? {
+                city: load.destinationCity,
+                state: load.destinationState,
+                address: load.destinationAddress ?? '',
+              }
+            : null,
+        stopsCount: load.stopsCountDenorm ?? 0,
+        firstStopDate: load.firstStopDate,
+      }));
 
       enriched.sort((a, b) => {
         const dateA = a.firstStopDate || '';
@@ -464,109 +574,266 @@ export const getLoads = query({
     }
 
     // ── NORMAL PATH: paginated query (no search) ──
-    // Always use by_org_first_stop_date for consistent date ordering.
-    // Status and other filters are post-index .filter() calls which run
-    // inside .paginate(), guaranteeing full pages.
-    let loadsQuery;
+    //
+    // Two pagination strategies depending on whether a facet filter is present:
+    //
+    //  - With HCR or TRIP filter: paginate the loadTags index
+    //    (by_org_key_canonical_date) and fetch loads by ID. Date range and
+    //    facet value are both indexable; remaining filters (status, customer,
+    //    miles, etc.) are post-filtered in app code.
+    //
+    //  - Without facet filter: paginate loadInformation by_org_first_stop_date
+    //    with all filters applied via Convex .filter() — same as before.
+    //
+    // The facet path replaces the previous parsedHcr/parsedTripNumber column
+    // .filter() calls. It works after Phase 5 drops those columns.
+    const canonicalHcr = args.hcr?.trim().toUpperCase();
+    const canonicalTrip = args.tripNumber?.trim().toUpperCase();
+    const useFacetIndex = !!(canonicalHcr || canonicalTrip);
 
-    if (args.startDate && args.endDate) {
-      loadsQuery = ctx.db
-        .query('loadInformation')
-        .withIndex('by_org_first_stop_date', (q) =>
-          q
-            .eq('workosOrgId', args.workosOrgId)
-            .gte('firstStopDate', args.startDate!)
-            .lte('firstStopDate', args.endDate!),
-        );
-    } else if (args.startDate) {
-      loadsQuery = ctx.db
-        .query('loadInformation')
-        .withIndex('by_org_first_stop_date', (q) =>
-          q.eq('workosOrgId', args.workosOrgId).gte('firstStopDate', args.startDate!),
-        );
-    } else if (args.endDate) {
-      loadsQuery = ctx.db
-        .query('loadInformation')
-        .withIndex('by_org_first_stop_date', (q) =>
-          q.eq('workosOrgId', args.workosOrgId).lte('firstStopDate', args.endDate!),
-        );
-    } else {
-      loadsQuery = ctx.db
-        .query('loadInformation')
-        .withIndex('by_org_first_stop_date', (q) => q.eq('workosOrgId', args.workosOrgId));
-    }
+    let paginatedResult: {
+      page: Array<Doc<'loadInformation'>>;
+      isDone: boolean;
+      continueCursor: string;
+    };
 
-    // All remaining filters are post-index .filter() calls.
-    // Convex .filter() runs inside .paginate(), so pages are always full.
-    if (args.status) {
-      loadsQuery = loadsQuery.filter((q) => q.eq(q.field('status'), args.status));
-    }
-    if (args.trackingStatus) {
-      loadsQuery = loadsQuery.filter((q) => q.eq(q.field('trackingStatus'), args.trackingStatus));
-    }
-    if (args.customerId) {
-      loadsQuery = loadsQuery.filter((q) => q.eq(q.field('customerId'), args.customerId));
-    }
-    if (args.hcr) {
-      loadsQuery = loadsQuery.filter((q) => q.eq(q.field('parsedHcr'), args.hcr));
-    }
-    if (args.tripNumber) {
-      loadsQuery = loadsQuery.filter((q) => q.eq(q.field('parsedTripNumber'), args.tripNumber));
-    }
-    if (args.requiresManualReview !== undefined) {
-      loadsQuery = loadsQuery.filter((q) => q.eq(q.field('requiresManualReview'), args.requiresManualReview));
-    }
-    if (args.loadType) {
-      loadsQuery = loadsQuery.filter((q) => q.eq(q.field('loadType'), args.loadType));
-    }
-    if (args.mileRange && args.mileRange !== 'all') {
-      switch (args.mileRange) {
-        case '0-100':
-          loadsQuery = loadsQuery
-            .filter((q) => q.gte(q.field('effectiveMiles'), 0))
-            .filter((q) => q.lte(q.field('effectiveMiles'), 100));
-          break;
-        case '100-250':
-          loadsQuery = loadsQuery
-            .filter((q) => q.gt(q.field('effectiveMiles'), 100))
-            .filter((q) => q.lte(q.field('effectiveMiles'), 250));
-          break;
-        case '250-500':
-          loadsQuery = loadsQuery
-            .filter((q) => q.gt(q.field('effectiveMiles'), 250))
-            .filter((q) => q.lte(q.field('effectiveMiles'), 500));
-          break;
-        case '500+':
-          loadsQuery = loadsQuery.filter((q) => q.gt(q.field('effectiveMiles'), 500));
-          break;
-      }
-    }
+    if (useFacetIndex) {
+      // Helper — in-memory row filter shared across both combined and
+      // single-facet paths.
+      const passesNonIndexedFilters = (load: Doc<'loadInformation'>): boolean => {
+        if (load.workosOrgId !== args.workosOrgId) return false;
+        if (args.status && load.status !== args.status) return false;
+        if (args.trackingStatus && load.trackingStatus !== args.trackingStatus) return false;
+        if (args.customerId && load.customerId !== args.customerId) return false;
+        if (
+          args.requiresManualReview !== undefined &&
+          load.requiresManualReview !== args.requiresManualReview
+        )
+          return false;
+        if (args.loadType && load.loadType !== args.loadType) return false;
+        if (args.mileRange && args.mileRange !== 'all') {
+          const miles = load.effectiveMiles;
+          if (miles === undefined) return false;
+          const inRange =
+            (args.mileRange === '0-100' && miles >= 0 && miles <= 100) ||
+            (args.mileRange === '100-250' && miles > 100 && miles <= 250) ||
+            (args.mileRange === '250-500' && miles > 250 && miles <= 500) ||
+            (args.mileRange === '500+' && miles > 500);
+          if (!inRange) return false;
+        }
+        return true;
+      };
 
-    const paginatedResult = await loadsQuery.order('desc').paginate(args.paginationOpts);
-
-    const loadsWithStops = await Promise.all(
-      paginatedResult.page.map(async (load) => {
-        const stops = await ctx.db
-          .query('loadStops')
-          .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      if (canonicalHcr && canonicalTrip) {
+        // ─ COMBINED HCR + TRIP: full intersection, in-memory paginate ─
+        //
+        // Previously we paginated the primary tag set and post-filtered by
+        // secondary. That shrunk pages dramatically when the specific
+        // (HCR, TRIP) pair was narrow within the primary set (e.g. filtering
+        // 5K+ HCR=917DK loads by a specific TRIP returned 0-2 per page).
+        //
+        // The intersection is by definition small (user is drilling in),
+        // so fetching all matching primary tags + checking secondary per
+        // load is cheap (~250 reads for 125 primary tags) and gives
+        // correct pagination with full pages.
+        //
+        // Primary key: TRIP when both are specified. In typical data trips
+        // are far more numerous per-org (~566 distinct) than HCRs (~9),
+        // so an individual trip filter yields a far smaller load set.
+        const primaryTags = await ctx.db
+          .query('loadTags')
+          .withIndex('by_org_key_canonical_date', (q) => {
+            const base = q
+              .eq('workosOrgId', args.workosOrgId)
+              .eq('facetKey', 'TRIP')
+              .eq('canonicalValue', canonicalTrip);
+            if (args.startDate && args.endDate) {
+              return base
+                .gte('firstStopDate', args.startDate)
+                .lte('firstStopDate', args.endDate);
+            }
+            if (args.startDate) return base.gte('firstStopDate', args.startDate);
+            if (args.endDate) return base.lte('firstStopDate', args.endDate);
+            return base;
+          })
+          .order('desc')
           .collect();
-        stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-        const firstPickup = stops.find((s) => s.stopType === 'PICKUP');
-        const lastDelivery = stops.filter((s) => s.stopType === 'DELIVERY').pop();
-        const firstStop = stops[0];
-        return {
-          ...load,
-          origin: firstPickup
-            ? { city: firstPickup.city, state: firstPickup.state, address: firstPickup.address }
-            : null,
-          destination: lastDelivery
-            ? { city: lastDelivery.city, state: lastDelivery.state, address: lastDelivery.address }
-            : null,
-          stopsCount: stops.length,
-          firstStopDate: firstStop?.windowBeginDate,
+
+        // Secondary check: per-load HCR tag lookup.
+        const secondaryTags = await Promise.all(
+          primaryTags.map((t) =>
+            ctx.db
+              .query('loadTags')
+              .withIndex('by_load_key', (q) =>
+                q.eq('loadId', t.loadId).eq('facetKey', 'HCR'),
+              )
+              .unique(),
+          ),
+        );
+        const intersectionLoadIds = primaryTags
+          .filter(
+            (_, i) => secondaryTags[i]?.canonicalValue === canonicalHcr,
+          )
+          .map((t) => t.loadId);
+
+        const loads = (
+          await Promise.all(intersectionLoadIds.map((id) => ctx.db.get(id)))
+        ).filter((l): l is Doc<'loadInformation'> => l !== null);
+
+        const filtered = loads.filter(passesNonIndexedFilters);
+
+        // In-memory pagination — numeric-offset cursor. Stable since the
+        // intersection ordering is deterministic (primary tag order desc).
+        const offset = args.paginationOpts.cursor
+          ? parseInt(args.paginationOpts.cursor, 10) || 0
+          : 0;
+        const pageSize = args.paginationOpts.numItems;
+        const page = filtered.slice(offset, offset + pageSize);
+        const next = offset + pageSize;
+        const isDone = next >= filtered.length;
+
+        paginatedResult = {
+          page,
+          isDone,
+          continueCursor: isDone ? '' : String(next),
         };
-      }),
-    );
+      } else {
+        // ─ SINGLE FACET: paginate the tag index directly ─
+        const primaryKey = canonicalHcr ? 'HCR' : 'TRIP';
+        const primaryValue = canonicalHcr ?? canonicalTrip!;
+
+        const tagQuery = ctx.db
+          .query('loadTags')
+          .withIndex('by_org_key_canonical_date', (q) => {
+            const base = q
+              .eq('workosOrgId', args.workosOrgId)
+              .eq('facetKey', primaryKey)
+              .eq('canonicalValue', primaryValue);
+            if (args.startDate && args.endDate) {
+              return base
+                .gte('firstStopDate', args.startDate)
+                .lte('firstStopDate', args.endDate);
+            }
+            if (args.startDate) return base.gte('firstStopDate', args.startDate);
+            if (args.endDate) return base.lte('firstStopDate', args.endDate);
+            return base;
+          });
+
+        const tagPage = await tagQuery.order('desc').paginate(args.paginationOpts);
+
+        const fetched = await Promise.all(
+          tagPage.page.map((t) => ctx.db.get(t.loadId)),
+        );
+        const filtered = fetched.filter(
+          (l): l is Doc<'loadInformation'> =>
+            l !== null && passesNonIndexedFilters(l),
+        );
+
+        paginatedResult = {
+          page: filtered,
+          isDone: tagPage.isDone,
+          continueCursor: tagPage.continueCursor,
+        };
+      }
+    } else {
+      // Unfiltered (or only date-range): existing loadInformation path.
+      let loadsQuery;
+      if (args.startDate && args.endDate) {
+        loadsQuery = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_first_stop_date', (q) =>
+            q
+              .eq('workosOrgId', args.workosOrgId)
+              .gte('firstStopDate', args.startDate!)
+              .lte('firstStopDate', args.endDate!),
+          );
+      } else if (args.startDate) {
+        loadsQuery = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_first_stop_date', (q) =>
+            q.eq('workosOrgId', args.workosOrgId).gte('firstStopDate', args.startDate!),
+          );
+      } else if (args.endDate) {
+        loadsQuery = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_first_stop_date', (q) =>
+            q.eq('workosOrgId', args.workosOrgId).lte('firstStopDate', args.endDate!),
+          );
+      } else {
+        loadsQuery = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_first_stop_date', (q) => q.eq('workosOrgId', args.workosOrgId));
+      }
+
+      if (args.status) {
+        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('status'), args.status));
+      }
+      if (args.trackingStatus) {
+        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('trackingStatus'), args.trackingStatus));
+      }
+      if (args.customerId) {
+        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('customerId'), args.customerId));
+      }
+      if (args.requiresManualReview !== undefined) {
+        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('requiresManualReview'), args.requiresManualReview));
+      }
+      if (args.loadType) {
+        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('loadType'), args.loadType));
+      }
+      if (args.mileRange && args.mileRange !== 'all') {
+        switch (args.mileRange) {
+          case '0-100':
+            loadsQuery = loadsQuery
+              .filter((q) => q.gte(q.field('effectiveMiles'), 0))
+              .filter((q) => q.lte(q.field('effectiveMiles'), 100));
+            break;
+          case '100-250':
+            loadsQuery = loadsQuery
+              .filter((q) => q.gt(q.field('effectiveMiles'), 100))
+              .filter((q) => q.lte(q.field('effectiveMiles'), 250));
+            break;
+          case '250-500':
+            loadsQuery = loadsQuery
+              .filter((q) => q.gt(q.field('effectiveMiles'), 250))
+              .filter((q) => q.lte(q.field('effectiveMiles'), 500));
+            break;
+          case '500+':
+            loadsQuery = loadsQuery.filter((q) => q.gt(q.field('effectiveMiles'), 500));
+            break;
+        }
+      }
+
+      paginatedResult = await loadsQuery.order('desc').paginate(args.paginationOpts);
+    }
+
+    // Project denormalized fields into the legacy shape the UI expects.
+    // No per-row loadStops query — origin / destination / stopsCount all
+    // come from columns maintained by syncFirstStopDate.
+    const loadsWithStops = paginatedResult.page.map((load) => ({
+      ...load,
+      origin:
+        load.originCity !== undefined ||
+        load.originState !== undefined ||
+        load.originAddress !== undefined
+          ? {
+              city: load.originCity,
+              state: load.originState,
+              address: load.originAddress ?? '',
+            }
+          : null,
+      destination:
+        load.destinationCity !== undefined ||
+        load.destinationState !== undefined ||
+        load.destinationAddress !== undefined
+          ? {
+              city: load.destinationCity,
+              state: load.destinationState,
+              address: load.destinationAddress ?? '',
+            }
+          : null,
+      stopsCount: load.stopsCountDenorm ?? 0,
+      firstStopDate: load.firstStopDate,
+    }));
 
     return {
       ...paginatedResult,
@@ -928,9 +1195,10 @@ export const createLoad = mutation({
       externalLoadId: undefined,
       lastExternalUpdatedAt: undefined,
 
-      // Route identification (for auto-assignment)
-      parsedHcr,
-      parsedTripNumber,
+      // HCR / TRIP are no longer stored on loadInformation — they live
+      // in loadTags, registered via setLoadTag below. args.parsedHcr /
+      // args.parsedTripNumber are still accepted for API compatibility
+      // and feed into the tag writes.
 
       customerId: args.customerId,
       customerName: customer.name,
@@ -999,7 +1267,27 @@ export const createLoad = mutation({
     }
 
     // Sync firstStopDate after all stops are created
-    await syncFirstStopDate(ctx, loadId as Id<'loadInformation'>);
+    const firstStopDate = await syncFirstStopDate(ctx, loadId as Id<'loadInformation'>);
+
+    // Register HCR / TRIP facet tags. Source of truth for the dropdown
+    // and (Phase 5+) the load filter index. setLoadTag is a no-op for
+    // undefined/empty/wildcard values.
+    await setLoadTag(ctx, {
+      loadId: loadId as Id<'loadInformation'>,
+      workosOrgId: args.workosOrgId,
+      facetKey: 'HCR',
+      value: parsedHcr,
+      source: 'LOAD_MANUAL',
+      firstStopDate,
+    });
+    await setLoadTag(ctx, {
+      loadId: loadId as Id<'loadInformation'>,
+      workosOrgId: args.workosOrgId,
+      facetKey: 'TRIP',
+      value: parsedTripNumber,
+      source: 'LOAD_MANUAL',
+      firstStopDate,
+    });
 
     // Handle direct assignment if driver or carrier was selected
     if (args.assignDriverId || args.assignCarrierId) {
@@ -1248,6 +1536,9 @@ export const deleteLoad = mutation({
     for (const stop of stops) {
       await ctx.db.delete(stop._id);
     }
+    // Remove facet tags BEFORE deleting the load. facetValues rows are not
+    // touched here — they're pruned by the nightly cleanup cron.
+    await removeAllTagsForLoad(ctx, args.loadId);
     await ctx.db.delete(args.loadId);
   },
 });
@@ -1523,7 +1814,8 @@ const assignedLoadStatusValidator = v.union(
 );
 
 async function enrichLoadFromLeg(
-  ctx: { db: any },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
   leg: {
     loadId: Id<'loadInformation'>;
     status: string;
@@ -1535,15 +1827,9 @@ async function enrichLoadFromLeg(
   const load = await ctx.db.get(leg.loadId);
   if (!load) return null;
 
-  const stops = await ctx.db
-    .query('loadStops')
-    .withIndex('by_load', (q: any) => q.eq('loadId', leg.loadId))
-    .collect();
-
-  stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
-
-  const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
-  const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
+  // HCR/Trip from facet tags. Origin/destination/stopsCount from
+  // denormalized columns (syncFirstStopDate keeps them fresh).
+  const facets = await getLoadFacets(ctx, leg.loadId);
 
   return {
     _id: load._id as Id<'loadInformation'>,
@@ -1551,16 +1837,18 @@ async function enrichLoadFromLeg(
     customerName: load.customerName as string | undefined,
     status: load.status as string,
     trackingStatus: load.trackingStatus as string,
-    stopsCount: stops.length,
-    origin: firstPickup
-      ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
-      : null,
-    destination: lastDelivery
-      ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
-      : null,
+    stopsCount: load.stopsCountDenorm ?? 0,
+    origin:
+      load.originCity !== undefined || load.originState !== undefined
+        ? { city: load.originCity, state: load.originState }
+        : null,
+    destination:
+      load.destinationCity !== undefined || load.destinationState !== undefined
+        ? { city: load.destinationCity, state: load.destinationState }
+        : null,
     firstStopDate: load.firstStopDate as string | undefined,
-    parsedHcr: load.parsedHcr as string | undefined,
-    parsedTripNumber: load.parsedTripNumber as string | undefined,
+    parsedHcr: facets.hcr,
+    parsedTripNumber: facets.trip,
     legStatus: leg.status,
     legLoadedMiles: leg.legLoadedMiles,
     createdAt: load._creationTime as number,
@@ -1571,16 +1859,9 @@ async function enrichLoadFromLeg(
  * Enrich a load document directly (without a dispatch leg).
  * Used by fallback paths when the load is found via primaryDriverId or carrier assignments.
  */
-async function enrichLoadDirectly(ctx: { db: any }, load: any) {
-  const stops = await ctx.db
-    .query('loadStops')
-    .withIndex('by_load', (q: any) => q.eq('loadId', load._id))
-    .collect();
-
-  stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
-
-  const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
-  const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function enrichLoadDirectly(ctx: any, load: any) {
+  const facets = await getLoadFacets(ctx, load._id);
 
   return {
     _id: load._id as Id<'loadInformation'>,
@@ -1588,16 +1869,18 @@ async function enrichLoadDirectly(ctx: { db: any }, load: any) {
     customerName: load.customerName as string | undefined,
     status: load.status as string,
     trackingStatus: load.trackingStatus as string,
-    stopsCount: stops.length,
-    origin: firstPickup
-      ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
-      : null,
-    destination: lastDelivery
-      ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
-      : null,
+    stopsCount: load.stopsCountDenorm ?? 0,
+    origin:
+      load.originCity !== undefined || load.originState !== undefined
+        ? { city: load.originCity, state: load.originState }
+        : null,
+    destination:
+      load.destinationCity !== undefined || load.destinationState !== undefined
+        ? { city: load.destinationCity, state: load.destinationState }
+        : null,
     firstStopDate: load.firstStopDate as string | undefined,
-    parsedHcr: load.parsedHcr as string | undefined,
-    parsedTripNumber: load.parsedTripNumber as string | undefined,
+    parsedHcr: facets.hcr,
+    parsedTripNumber: facets.trip,
     legStatus: 'PENDING',
     legLoadedMiles: load.effectiveMiles ?? 0,
     createdAt: load._creationTime as number,
@@ -1848,31 +2131,25 @@ export const getByCarrierPartnership = query({
         (args.status === 'Expired' && load.status === 'Expired');
       if (!loadStatusMatchesFilter) continue;
 
-      const stops = await ctx.db
-        .query('loadStops')
-        .withIndex('by_load', (q: any) => q.eq('loadId', assignment.loadId))
-        .collect();
-      stops.sort((a: any, b: any) => a.sequenceNumber - b.sequenceNumber);
-
-      const firstPickup = stops.find((s: any) => s.stopType === 'PICKUP');
-      const lastDelivery = stops.filter((s: any) => s.stopType === 'DELIVERY').pop();
-
+      const facets = await getLoadFacets(ctx, load._id);
       enrichedLoads.push({
         _id: load._id as Id<'loadInformation'>,
         orderNumber: load.orderNumber as string,
         customerName: load.customerName as string | undefined,
         status: load.status as string,
         trackingStatus: load.trackingStatus as string,
-        stopsCount: stops.length,
-        origin: firstPickup
-          ? { city: firstPickup.city as string | undefined, state: firstPickup.state as string | undefined }
-          : null,
-        destination: lastDelivery
-          ? { city: lastDelivery.city as string | undefined, state: lastDelivery.state as string | undefined }
-          : null,
+        stopsCount: load.stopsCountDenorm ?? 0,
+        origin:
+          load.originCity !== undefined || load.originState !== undefined
+            ? { city: load.originCity, state: load.originState }
+            : null,
+        destination:
+          load.destinationCity !== undefined || load.destinationState !== undefined
+            ? { city: load.destinationCity, state: load.destinationState }
+            : null,
         firstStopDate: load.firstStopDate as string | undefined,
-        parsedHcr: load.parsedHcr as string | undefined,
-        parsedTripNumber: load.parsedTripNumber as string | undefined,
+        parsedHcr: facets.hcr,
+        parsedTripNumber: facets.trip,
         legStatus: 'PENDING',
         legLoadedMiles: load.effectiveMiles ?? 0,
         createdAt: load._creationTime as number,

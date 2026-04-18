@@ -15,8 +15,14 @@ export interface FourKitesAuthCredentials {
 
 interface FourKitesShipment {
   id: string;
-  hcr?: string; // Extracted from referenceNumbers
-  trip?: string; // Extracted from referenceNumbers
+  hcr?: string; // Extracted from referenceNumbers via pattern classifier
+  trip?: string; // Extracted from referenceNumbers via pattern classifier
+  /**
+   * The full referenceNumbers array as received, preserved so downstream
+   * code (custom per-org facets, future filters) can inspect tokens that
+   * weren't classified as HCR or Trip without re-fetching from FourKites.
+   */
+  referenceNumbers?: string[];
   status: string;
   updated_at: string;
   loadNumber?: string; // Used for orderNumber
@@ -47,9 +53,65 @@ interface FourKitesShipment {
     }>;
   }>;
   identifiers?: {
-    referenceNumbers?: string[]; // Array of strings like ["108", "917DK", "CarrierCode:000227710"]
+    referenceNumbers?: string[];
   };
   [key: string]: any; // Allow additional fields
+}
+
+/**
+ * Classify a single referenceNumbers token as HCR, TRIP, or junk.
+ *
+ * Exported for unit tests and reused by the cleanup migration so that
+ * "what counts as junk" stays defined in exactly one place.
+ *
+ * Patterns derived from real production data (~19K loads, 9 distinct HCRs):
+ *
+ *   HCR shapes:
+ *     - 3+ digits + letters + optional digits  (917DK, 952L5, 925L0, 945L4)
+ *     - 5+ pure digits                          (95236, 95632, 96036)
+ *
+ *   TRIP shapes:
+ *     - 1-4 pure digits                         (108, 1, 205, 8)
+ *     - 1-4 letters + 1-3 digits                (FOR2, T01)
+ *     - 4-8 pure letters                        (FMTXT)
+ *
+ *   Junk markers:
+ *     - contains `_`                            (BTF_DIESEL)
+ *     - contains `.`                            (88.5)
+ *     - contains `:`                            (CarrierCode:000227710)
+ *     - 1-3 letter pure-letter abbreviation     (MPG, AB, FG)
+ *     - known junk words                        (DIESEL, FUEL, GAS)
+ *
+ * The 4+ letter pure-letter TRIP branch is real: FMTXT is a valid Trip
+ * code in production. We reject short (1-3 letter) pure-letter tokens
+ * because those are overwhelmingly unit abbreviations (MPG, PSI, RPM),
+ * plus maintain a small denylist for longer known junk words.
+ */
+export type RefTokenKind = 'HCR' | 'TRIP' | null;
+
+// Tokens longer than 3 letters that are definitively junk despite
+// matching the pure-letter TRIP pattern. Extend as more are discovered.
+const KNOWN_JUNK_WORDS = new Set(['DIESEL', 'FUEL', 'GAS', 'GASOLINE']);
+
+export function classifyRefToken(rawToken: unknown): RefTokenKind {
+  if (typeof rawToken !== 'string') return null;
+  const t = rawToken.trim().toUpperCase();
+  if (!t || t === '*') return null;
+  if (t.includes(':')) return null; // CarrierCode:..., etc.
+  if (/[_.]/.test(t)) return null; // BTF_DIESEL, 88.5
+  if (/^[A-Z]{1,3}$/.test(t)) return null; // MPG, AB — short abbreviations
+  if (KNOWN_JUNK_WORDS.has(t)) return null; // DIESEL, FUEL
+
+  // HCR — order matters: more specific patterns first
+  if (/^\d{3,}[A-Z]+\d*$/.test(t)) return 'HCR'; // 917DK, 952L5, 925L0
+  if (/^\d{5,}$/.test(t)) return 'HCR';           // 95236, 96036
+
+  // TRIP
+  if (/^\d{1,4}$/.test(t)) return 'TRIP';         // 108, 8, 205
+  if (/^[A-Z]{1,4}\d{1,3}$/.test(t)) return 'TRIP'; // FOR2, T01
+  if (/^[A-Z]{4,8}$/.test(t)) return 'TRIP';      // FMTXT
+
+  return null;
 }
 
 function buildBaseHeaders(): Record<string, string> {
@@ -157,46 +219,55 @@ async function buildAuthHeaders(credentials: FourKitesAuthCredentials): Promise<
 }
 
 /**
- * Maps FourKites shipment fields to our expected format
- * Extracts HCR and Trip from identifiers.referenceNumbers array
+ * Maps FourKites shipment fields to our expected format.
+ *
+ * Pattern-based classifier: every referenceNumbers token is independently
+ * classified by shape (see classifyRefToken). The first HCR-shaped token
+ * wins; the first TRIP-shaped token wins. Position is no longer relied on
+ * — the previous `validRefs[0] = trip, validRefs[1] = hcr` heuristic
+ * mis-classified loads whose payloads led with extra metadata tokens
+ * (e.g. `["BTF_DIESEL", "MPG", "FOR2", "88.5", "95236", "CarrierCode:..."]`
+ * for "Unplanned Volume" loads, where the real HCR is "95236" and Trip
+ * is "FOR2", not "BTF_DIESEL"/"MPG").
+ *
+ * Also preserves the raw referenceNumbers array on the mapped shipment
+ * so downstream sync code can persist it for future custom-facet
+ * extraction without re-fetching from FourKites.
  */
 function mapShipmentFields(rawShipment: any): FourKitesShipment {
   const mapped = { ...rawShipment };
-  
-  // Extract HCR and Trip from referenceNumbers
-  // referenceNumbers is an array of strings: ["108", "917DK", "CarrierCode:000227710"]
-  // HEURISTIC: Based on observed data, Trip typically comes FIRST, HCR comes SECOND
-  if (rawShipment.identifiers?.referenceNumbers && Array.isArray(rawShipment.identifiers.referenceNumbers)) {
-    const refs = rawShipment.identifiers.referenceNumbers;
-    
-    // Filter out invalid entries (colons, empty strings)
-    const validRefs = refs.filter(
-      (ref: any) => typeof ref === 'string' && ref.trim() && !ref.includes(':')
-    ).map((ref: string) => ref.trim());
-    
-    // Strategy: Use array position as primary heuristic
-    // Index 0 = Trip, Index 1 = HCR
-    if (validRefs.length >= 2) {
-      mapped.trip = validRefs[0];
-      mapped.hcr = validRefs[1];
-    } else if (validRefs.length === 1) {
-      // Only one value - try to guess if it's HCR or Trip
-      const val = validRefs[0];
-      // Short numeric = likely Trip
-      if (/^\d{1,4}$/.test(val)) {
-        mapped.trip = val;
-      } else {
-        // Everything else = likely HCR
-        mapped.hcr = val;
+
+  if (
+    rawShipment.identifiers?.referenceNumbers &&
+    Array.isArray(rawShipment.identifiers.referenceNumbers)
+  ) {
+    const refs: unknown[] = rawShipment.identifiers.referenceNumbers;
+    let hcr: string | undefined;
+    let trip: string | undefined;
+    for (const ref of refs) {
+      const kind = classifyRefToken(ref);
+      if (kind === 'HCR' && hcr === undefined) {
+        hcr = (ref as string).trim();
+      } else if (kind === 'TRIP' && trip === undefined) {
+        trip = (ref as string).trim();
       }
+      if (hcr && trip) break;
     }
+    if (hcr) mapped.hcr = hcr;
+    if (trip) mapped.trip = trip;
+
+    // Preserve the full raw array (filtered to strings) so the sync
+    // helper can persist it onto loadInformation. Future per-org facets
+    // can mine this without changing the FourKites integration.
+    mapped.referenceNumbers = refs.filter(
+      (r): r is string => typeof r === 'string',
+    );
   }
-  
-  // Map other common field names
+
   mapped.id = rawShipment.fourKitesShipmentID || rawShipment.id;
   mapped.updated_at = rawShipment.updatedAt || rawShipment.updated_at;
-  mapped.loadNumber = rawShipment.loadNumber; // For orderNumber field
-  
+  mapped.loadNumber = rawShipment.loadNumber;
+
   return mapped as FourKitesShipment;
 }
 

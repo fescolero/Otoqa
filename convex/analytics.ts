@@ -6,6 +6,7 @@
 import { query } from "./_generated/server";
 import { v } from "convex/values";
 import { assertCallerOwnsOrg } from "./lib/auth";
+import { getLoadFacets } from "./lib/loadFacets";
 
 /**
  * Group unmapped loads by HCR + Trip Number
@@ -27,21 +28,27 @@ export const getUnmappedLoadGroups = query({
       )
       .take(100); // Limit to 100 most recent unmapped loads
 
+    // Enrich with facets from tags (Phase 5 drops the columns).
+    const enriched = await Promise.all(
+      unmappedLoads.map(async (load) => {
+        const facets = await getLoadFacets(ctx, load._id);
+        return { load, hcr: facets.hcr ?? "UNKNOWN", trip: facets.trip ?? "UNKNOWN" };
+      }),
+    );
+
     // Group by HCR + Trip Number in a single pass
     const groupsMap = new Map<string, {
       loads: typeof unmappedLoads;
       totalRevenue: number;
     }>();
-    
-    for (const load of unmappedLoads) {
-      const hcr = load.parsedHcr || "UNKNOWN";
-      const trip = load.parsedTripNumber || "UNKNOWN";
+
+    for (const { load, hcr, trip } of enriched) {
       const key = `${hcr}|${trip}`;
-      
+
       if (!groupsMap.has(key)) {
         groupsMap.set(key, { loads: [], totalRevenue: 0 });
       }
-      
+
       const group = groupsMap.get(key)!;
       group.loads.push(load);
     }

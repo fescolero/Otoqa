@@ -1054,9 +1054,15 @@ export default defineSchema({
     // Instructions
     generalInstructions: v.optional(v.string()),
 
-    // Parsed Contract Lane Data (from FourKites)
-    parsedHcr: v.optional(v.string()),
-    parsedTripNumber: v.optional(v.string()),
+    // HCR / TRIP live in the loadTags table — not on this document.
+    // Migrations 004-007 moved them into the facet system. Use
+    // getLoadFacets(ctx, loadId) to read, setLoadTag(ctx, {...}) to write.
+
+    // Raw FourKites identifiers.referenceNumbers array, preserved as-is
+    // so future per-org facet extraction can mine tokens beyond HCR/Trip
+    // without re-fetching the FourKites payload. Only populated for
+    // FourKites-sourced loads.
+    externalReferenceNumbers: v.optional(v.array(v.string())),
 
     // Load Classification (Ops needs to know type even if billing is separate)
     loadType: v.optional(
@@ -1086,6 +1092,19 @@ export default defineSchema({
     // Source of truth: loadStops where sequenceNumber = 1, windowBeginDate
     // Format: YYYY-MM-DD string (undefined if no stops or TBD)
     firstStopDate: v.optional(v.string()),
+
+    // Denormalized origin / destination / stops count for list rendering.
+    // Source of truth: loadStops (first PICKUP, last DELIVERY).
+    // Maintained by syncFirstStopDate in convex/loads.ts — any mutation
+    // that changes loadStops must re-run that helper so these stay fresh.
+    // Eliminates the per-row N+1 loadStops query on list/search results.
+    originCity: v.optional(v.string()),
+    originState: v.optional(v.string()),
+    originAddress: v.optional(v.string()),
+    destinationCity: v.optional(v.string()),
+    destinationState: v.optional(v.string()),
+    destinationAddress: v.optional(v.string()),
+    stopsCountDenorm: v.optional(v.number()),
 
     // Cancellation Tracking (when status = 'Canceled')
     cancellationReason: v.optional(
@@ -1133,7 +1152,8 @@ export default defineSchema({
     .index('by_external_id', ['externalSource', 'externalLoadId'])
     .index('by_internal_id', ['workosOrgId', 'internalId'])
     .index('by_order_number', ['workosOrgId', 'orderNumber'])
-    .index('by_hcr_trip', ['workosOrgId', 'parsedHcr', 'parsedTripNumber'])
+    // by_hcr_trip removed in Phase 5b — replaced by
+    // loadTags.by_org_key_canonical_date (facet-indexed lookup).
     .index('by_org_first_stop_date', ['workosOrgId', 'firstStopDate'])
     .index('by_org_tracking_status', ['workosOrgId', 'trackingStatus'])
     .index('by_primary_driver_status', ['primaryDriverId', 'status'])
@@ -2470,4 +2490,65 @@ export default defineSchema({
     fetchedAt: v.number(),
     expiresAt: v.number(),
   }).index('by_route', ['originHash', 'destinationHash']),
+
+  // ==========================================
+  // FACET SYSTEM
+  // Per-org extensible filter facets (HCR, TRIP, and future custom keys).
+  // Source of truth for filterable load attributes; powers dropdown UIs
+  // and facet-based load filtering without full-table scans.
+  // ==========================================
+
+  // Per-org catalog of facet types.
+  // Bootstrapped with HCR + TRIP for every org. Additional custom keys
+  // (e.g. PROJECT_CODE, REGION) can be added per org without schema changes.
+  facetDefinitions: defineTable({
+    workosOrgId: v.string(),
+    key: v.string(), // 'HCR', 'TRIP', or custom org-defined key
+    label: v.string(), // Display label for UI
+    isFilterable: v.boolean(), // Show in load filter dropdowns
+    status: v.union(v.literal('active'), v.literal('archived')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org', ['workosOrgId'])
+    .index('by_org_key', ['workosOrgId', 'key']),
+
+  // Every (load, facetKey) tuple. Source of truth for a load's facet values.
+  // firstStopDate is the only denormalized field; it exists to enable
+  // paginated date-ordered facet-filtered load queries via the
+  // by_org_key_canonical_date index without full-table scans.
+  loadTags: defineTable({
+    workosOrgId: v.string(),
+    loadId: v.id('loadInformation'),
+    facetKey: v.string(),
+    canonicalValue: v.string(), // Normalized (trim + upper) for matching
+    value: v.string(), // Original display casing preserved
+    firstStopDate: v.optional(v.string()), // YYYY-MM-DD mirror from load
+  })
+    // Tag enrichment for load payloads (mobile/web responses).
+    .index('by_load', ['loadId'])
+    // Uniqueness + O(1) read of the existing tag for a (load, facetKey) pair.
+    .index('by_load_key', ['loadId', 'facetKey'])
+    // The load-filter hot path: filter by facet value, ordered by firstStopDate,
+    // paginated. Replaces loadInformation.by_hcr_trip after Phase 5.
+    .index('by_org_key_canonical_date', [
+      'workosOrgId',
+      'facetKey',
+      'canonicalValue',
+      'firstStopDate',
+    ]),
+
+  // Dropdown source: distinct values per (org, facetKey) currently in use.
+  // Upsert-on-tag-insert (no refcount → no OCC hotspot on bulk writes);
+  // pruned by a nightly cron that checks for any remaining loadTags match.
+  facetValues: defineTable({
+    workosOrgId: v.string(),
+    facetKey: v.string(),
+    canonicalValue: v.string(),
+    value: v.string(), // First-seen display casing
+    firstSeenAt: v.number(),
+  })
+    .index('by_org_key', ['workosOrgId', 'facetKey'])
+    // Idempotent upsert lookup during tag writes.
+    .index('by_org_key_canonical', ['workosOrgId', 'facetKey', 'canonicalValue']),
 });

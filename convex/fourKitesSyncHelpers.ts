@@ -9,6 +9,7 @@ import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
+import { setLoadTag, getLoadFacets } from "./lib/loadFacets";
 
 // Read-only lane lookup using the compound index (reads ~1 doc instead of full table scan)
 export const findContractLane = internalQuery({
@@ -302,8 +303,8 @@ export const importLoadFromShipment = internalMutation({
       customerName,
       externalLoadId: shipment.id,
       externalSource: "FourKites",
-      parsedHcr: shipment.hcr,
-      parsedTripNumber: shipment.trip,
+      // HCR / TRIP are written only as loadTags via setLoadTag below.
+      externalReferenceNumbers: shipment.referenceNumbers,
       status: "Open",
       ...loadData,
       internalId: `FK-${shipment.loadNumber || shipment.id}`,
@@ -364,6 +365,23 @@ export const importLoadFromShipment = internalMutation({
         // Don't throw - continue with other stops
       }
     }
+
+    // Register HCR / TRIP facet tags. firstStopDate is filled in by the
+    // subsequent syncFirstStopDateMutation via syncFirstStopDateToTags.
+    await setLoadTag(ctx, {
+      loadId: loadId as Id<"loadInformation">,
+      workosOrgId,
+      facetKey: "HCR",
+      value: shipment.hcr,
+      source: "LOAD_FOURKITES",
+    });
+    await setLoadTag(ctx, {
+      loadId: loadId as Id<"loadInformation">,
+      workosOrgId,
+      facetKey: "TRIP",
+      value: shipment.trip,
+      source: "LOAD_FOURKITES",
+    });
 
     // Sync firstStopDate after all stops are created
     await ctx.runMutation(internal.loads.syncFirstStopDateMutation, { loadId });
@@ -491,10 +509,9 @@ export const importUnmappedLoad = internalMutation({
       status: "Open",
       trackingStatus: mapTrackingStatus(shipment.status),
       
-      // Parsed Data
-      parsedHcr: shipment.hcr,
-      parsedTripNumber: shipment.trip,
-      
+      // HCR / TRIP stored only via setLoadTag (loadTags table).
+      externalReferenceNumbers: shipment.referenceNumbers,
+
       // Load Classification
       loadType: "UNMAPPED",          // No billing lane yet
       requiresManualReview: true,
@@ -558,6 +575,23 @@ export const importUnmappedLoad = internalMutation({
         console.error(`Failed to create stop for unmapped shipment ${shipment.id}:`, stopErr);
       }
     }
+
+    // Register HCR / TRIP facet tags. firstStopDate is filled in by the
+    // subsequent syncFirstStopDateMutation via syncFirstStopDateToTags.
+    await setLoadTag(ctx, {
+      loadId: loadId as Id<"loadInformation">,
+      workosOrgId,
+      facetKey: "HCR",
+      value: shipment.hcr,
+      source: "LOAD_FOURKITES",
+    });
+    await setLoadTag(ctx, {
+      loadId: loadId as Id<"loadInformation">,
+      workosOrgId,
+      facetKey: "TRIP",
+      value: shipment.trip,
+      source: "LOAD_FOURKITES",
+    });
 
     // Sync firstStopDate after all stops are created
     await ctx.runMutation(internal.loads.syncFirstStopDateMutation, { loadId });
@@ -683,8 +717,10 @@ export const promoteUnmappedLoad = internalMutation({
       });
     }
 
-    // Trigger auto-assignment after promotion (load now has proper HCR)
-    if (load.parsedHcr && load.status === "Open" && !load.primaryDriverId && !load.primaryCarrierPartnershipId) {
+    // Trigger auto-assignment after promotion (load now has proper HCR).
+    // Read HCR from tags (Phase 5 will drop the column).
+    const promotedFacets = await getLoadFacets(ctx, loadId);
+    if (promotedFacets.hcr && load.status === "Open" && !load.primaryDriverId && !load.primaryCarrierPartnershipId) {
       try {
         await ctx.runMutation(internal.autoAssignment.triggerAutoAssignmentForLoad, {
           loadId,

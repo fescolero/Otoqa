@@ -24,6 +24,7 @@ import {
   estimateFuelCostForLoad,
 } from './accountingHelpers';
 import { getPeriodKey } from './accountingStatsHelpers';
+import { getLoadFacets } from './lib/loadFacets';
 
 // ============================================
 // SHARED HELPERS
@@ -416,8 +417,9 @@ export const getLoadHcrMap = internalQuery({
   handler: async (ctx, args) => {
     const entries = await Promise.all(
       args.loadIds.map(async (loadId) => {
-        const load = await ctx.db.get(loadId);
-        return [loadId.toString(), load?.parsedHcr ?? 'Unknown HCR'] as const;
+        // HCR now sourced from facet tags (Phase 5 drops the column).
+        const facets = await getLoadFacets(ctx, loadId);
+        return [loadId.toString(), facets.hcr ?? 'Unknown HCR'] as const;
       }),
     );
     return Object.fromEntries(entries);
@@ -443,11 +445,12 @@ export const getLoadDetailsMap = internalQuery({
     const entries = await Promise.all(
       args.loadIds.map(async (loadId) => {
         const load = await ctx.db.get(loadId);
+        const facets = await getLoadFacets(ctx, loadId);
         return [
           loadId.toString(),
           {
             orderNumber: load?.orderNumber ?? 'N/A',
-            hcr: load?.parsedHcr ?? 'Unknown HCR',
+            hcr: facets.hcr ?? 'Unknown HCR',
             effectiveMiles: load?.effectiveMiles,
           },
         ] as const;
@@ -670,7 +673,8 @@ export const getDiscrepancyDetail = query({
       filtered = filtered.filter((inv) => (inv.paymentDifference ?? 0) > 0);
     }
 
-    // Batch-fetch customers and loads for this page
+    // Batch-fetch customers, loads, and load HCR values for this page.
+    // HCR comes from facet tags (Phase 5 drops the parsedHcr column).
     const customerMap = await batchFetchCustomers(
       ctx,
       filtered.map((inv) => inv.customerId),
@@ -679,16 +683,29 @@ export const getDiscrepancyDetail = query({
       ctx,
       filtered.map((inv) => inv.loadId),
     );
+    const hcrMap = new Map<string, string | undefined>();
+    await Promise.all(
+      [...new Set(filtered.map((inv) => inv.loadId.toString()))].map(
+        async (idStr) => {
+          const facets = await getLoadFacets(
+            ctx,
+            idStr as Id<'loadInformation'>,
+          );
+          hcrMap.set(idStr, facets.hcr);
+        },
+      ),
+    );
 
     // Transform page with enriched data
     const enrichedPage = filtered.map((inv) => {
       const customer = customerMap.get(inv.customerId.toString());
       const load = loadMap.get(inv.loadId.toString());
+      const hcr = hcrMap.get(inv.loadId.toString());
       return {
         _id: inv._id,
         invoiceNumber: inv.invoiceNumber,
         customerName: customer?.name ?? 'Unknown',
-        hcr: load?.parsedHcr ?? 'Unknown HCR',
+        hcr: hcr ?? 'Unknown HCR',
         loadOrderNumber: load?.orderNumber ?? 'N/A',
         invoicedAmount: inv.totalAmount ?? 0,
         paidAmount: inv.paidAmount ?? 0,

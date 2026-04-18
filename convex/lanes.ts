@@ -7,6 +7,8 @@ import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { updateInvoiceCount } from "./stats_helpers";
 import { assertCallerOwnsOrg, requireCallerIdentity } from "./lib/auth";
+import { findLoadIdsByFacets, getLoadFacets } from "./lib/loadFacets";
+import type { Doc } from "./_generated/dataModel";
 
 /**
  * Preview Backfill Impact
@@ -23,16 +25,17 @@ export const previewBackfillImpact = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // Find all loads matching this HCR+Trip pattern
-    const candidateLoads = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_hcr_trip", (q) =>
-        q.eq("workosOrgId", args.workosOrgId)
-         .eq("parsedHcr", args.hcr)
-         .eq("parsedTripNumber", args.tripNumber)
-      )
-      .filter((q) => q.eq(q.field("loadType"), "UNMAPPED"))
-      .collect();
+    // Find all loads matching this HCR+Trip pattern via the facet system.
+    const matchedLoadIds = await findLoadIdsByFacets(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      trip: args.tripNumber,
+    });
+    const candidateLoads = (
+      await Promise.all(matchedLoadIds.map((id) => ctx.db.get(id)))
+    ).filter(
+      (l): l is Doc<"loadInformation"> => l !== null && l.loadType === "UNMAPPED",
+    );
 
     // Convert date strings to timestamps for comparison
     const startTimestamp = new Date(args.contractStartDate).getTime();
@@ -193,16 +196,17 @@ export const createLaneAndBackfill = mutation({
     // Step 3: Find affected loads
     const startTimestamp = new Date(args.contractStartDate).getTime();
     const endTimestamp = new Date(args.contractEndDate).getTime();
-    
-    const candidateLoads = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_hcr_trip", (q) =>
-        q.eq("workosOrgId", args.workosOrgId)
-         .eq("parsedHcr", args.hcr)
-         .eq("parsedTripNumber", args.tripNumber)
-      )
-      .filter((q) => q.eq(q.field("loadType"), "UNMAPPED"))
-      .collect();
+
+    const matchedLoadIds = await findLoadIdsByFacets(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      trip: args.tripNumber,
+    });
+    const candidateLoads = (
+      await Promise.all(matchedLoadIds.map((id) => ctx.db.get(id)))
+    ).filter(
+      (l): l is Doc<"loadInformation"> => l !== null && l.loadType === "UNMAPPED",
+    );
 
     // Filter by date range using the load's operational date (firstStopDate),
     // falling back to createdAt. Contract period dates define when the lane is valid,
@@ -405,15 +409,16 @@ export const voidUnmappedGroup = mutation({
     }
 
     // Step 2: Find all loads matching this HCR+Trip pattern
-    const loads = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_hcr_trip", (q) =>
-        q.eq("workosOrgId", args.workosOrgId)
-         .eq("parsedHcr", args.hcr)
-         .eq("parsedTripNumber", args.tripNumber)
-      )
-      .filter((q) => q.eq(q.field("loadType"), "UNMAPPED"))
-      .collect();
+    const matchedLoadIds = await findLoadIdsByFacets(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      trip: args.tripNumber,
+    });
+    const loads = (
+      await Promise.all(matchedLoadIds.map((id) => ctx.db.get(id)))
+    ).filter(
+      (l): l is Doc<"loadInformation"> => l !== null && l.loadType === "UNMAPPED",
+    );
 
     let voidedCount = 0;
 
@@ -483,18 +488,21 @@ export const rePromoteStuckLoads = mutation({
     let skipped = 0;
 
     for (const load of unmappedLoads) {
-      if (!load.parsedHcr || !load.parsedTripNumber) {
+      // Read HCR/Trip from facet tags (Phase 5 will drop the columns).
+      const facets = await getLoadFacets(ctx, load._id);
+      if (!facets.hcr || !facets.trip) {
         skipped++;
         continue;
       }
 
-      // Try exact match
+      // Try exact match. contractLanes still has its own hcr/tripNumber
+      // columns + by_org_hcr_trip index — those aren't being dropped.
       let lane = await ctx.db
         .query("contractLanes")
         .withIndex("by_org_hcr_trip", (q) =>
           q.eq("workosOrgId", args.workosOrgId)
-           .eq("hcr", load.parsedHcr)
-           .eq("tripNumber", load.parsedTripNumber)
+           .eq("hcr", facets.hcr)
+           .eq("tripNumber", facets.trip)
         )
         .filter((q) =>
           q.and(
@@ -512,7 +520,7 @@ export const rePromoteStuckLoads = mutation({
           .query("contractLanes")
           .withIndex("by_org_hcr_trip", (q) =>
             q.eq("workosOrgId", args.workosOrgId)
-             .eq("hcr", load.parsedHcr)
+             .eq("hcr", facets.hcr)
              .eq("tripNumber", "*")
           )
           .filter((q) =>

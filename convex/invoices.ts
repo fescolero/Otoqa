@@ -13,6 +13,7 @@ import { internal } from './_generated/api';
 import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from './invoiceCalculations';
 import { Doc } from './_generated/dataModel';
 import { updateInvoiceCount } from './stats_helpers';
+import { getLoadFacets } from './lib/loadFacets';
 import {
   recordInvoiceFinalized,
   recordPaymentCollected,
@@ -165,6 +166,9 @@ export const getInvoice = query({
     const load = await ctx.db.get(invoice.loadId);
     const customer = await ctx.db.get(invoice.customerId);
     const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
+    const loadFacets = load
+      ? await getLoadFacets(ctx, load._id)
+      : { hcr: undefined, trip: undefined };
 
     return {
       ...invoice,
@@ -176,8 +180,8 @@ export const getInvoice = query({
             orderNumber: load.orderNumber,
             status: load.status,
             loadType: load.loadType,
-            parsedHcr: load.parsedHcr,
-            parsedTripNumber: load.parsedTripNumber,
+            parsedHcr: loadFacets.hcr,
+            parsedTripNumber: loadFacets.trip,
             effectiveMiles: load.effectiveMiles,
             contractMiles: load.contractMiles,
             googleMiles: load.googleMiles,
@@ -324,14 +328,15 @@ export const getLineItems = query({
 
     if (amounts.subtotal > 0 && contractLane && load) {
       const isWildcard = contractLane.tripNumber === '*';
+      const loadFacets = await getLoadFacets(ctx, load._id);
       let description: string;
 
       if (isWildcard) {
-        description = `Extra Trips - ${load.parsedHcr || 'Unknown HCR'} ${load.parsedTripNumber || 'Unknown Trip'}`;
+        description = `Extra Trips - ${loadFacets.hcr || 'Unknown HCR'} ${loadFacets.trip || 'Unknown Trip'}`;
       } else {
         description =
           contractLane.contractName ||
-          `${load.parsedHcr || 'Unknown HCR'} - ${load.parsedTripNumber || 'Unknown Trip'}`;
+          `${loadFacets.hcr || 'Unknown HCR'} - ${loadFacets.trip || 'Unknown Trip'}`;
       }
 
       lineItems.push({
@@ -417,6 +422,9 @@ export const listInvoices = query({
         const load = await ctx.db.get(invoice.loadId);
         const customer = await ctx.db.get(invoice.customerId);
         const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
+        const loadFacets = load
+          ? await getLoadFacets(ctx, load._id)
+          : { hcr: undefined, trip: undefined, hcrCanonical: undefined, tripCanonical: undefined };
 
         return {
           ...invoice,
@@ -428,8 +436,12 @@ export const listInvoices = query({
                 orderNumber: load.orderNumber,
                 status: load.status,
                 loadType: load.loadType,
-                parsedHcr: load.parsedHcr,
-                parsedTripNumber: load.parsedTripNumber,
+                parsedHcr: loadFacets.hcr,
+                parsedTripNumber: loadFacets.trip,
+                // Canonical values attached for filter comparison below,
+                // not exposed in the response payload shape.
+                _hcrCanonical: loadFacets.hcrCanonical,
+                _tripCanonical: loadFacets.tripCanonical,
               }
             : null,
           customer: customer
@@ -462,10 +474,12 @@ export const listInvoices = query({
     }
 
     if (args.hcr) {
-      filtered = filtered.filter((inv) => inv.load?.parsedHcr === args.hcr);
+      const canonical = args.hcr.trim().toUpperCase();
+      filtered = filtered.filter((inv) => inv.load?._hcrCanonical === canonical);
     }
     if (args.trip) {
-      filtered = filtered.filter((inv) => inv.load?.parsedTripNumber === args.trip);
+      const canonical = args.trip.trim().toUpperCase();
+      filtered = filtered.filter((inv) => inv.load?._tripCanonical === canonical);
     }
     if (args.loadType) {
       filtered = filtered.filter((inv) => inv.load?.loadType === args.loadType);
@@ -477,9 +491,26 @@ export const listInvoices = query({
       filtered = filtered.filter((inv) => inv.createdAt <= args.dateRangeEnd!);
     }
 
+    // Strip internal canonical-helper fields before returning.
+    const pageOut = filtered.map(({ load, ...rest }) => ({
+      ...rest,
+      load: load
+        ? (() => {
+            const { _hcrCanonical: _h, _tripCanonical: _t, ...publicLoad } =
+              load as typeof load & {
+                _hcrCanonical?: string;
+                _tripCanonical?: string;
+              };
+            void _h;
+            void _t;
+            return publicLoad;
+          })()
+        : null,
+    }));
+
     return {
       ...result,
-      page: filtered,
+      page: pageOut,
     };
   },
 });
@@ -511,9 +542,9 @@ export const getFilterOptions = query({
 
     await Promise.all(
       invoices.map(async (invoice) => {
-        const load = await ctx.db.get(invoice.loadId);
-        if (load?.parsedHcr) hcrs.add(load.parsedHcr);
-        if (load?.parsedTripNumber) trips.add(load.parsedTripNumber);
+        const facets = await getLoadFacets(ctx, invoice.loadId);
+        if (facets.hcr) hcrs.add(facets.hcr);
+        if (facets.trip) trips.add(facets.trip);
       }),
     );
 
@@ -577,10 +608,11 @@ export const bulkUpdateStatus = mutation({
 
             if (amounts.subtotal > 0 && contractLane && load) {
               const isWildcard = (contractLane as any).tripNumber === '*';
+              const loadFacets = await getLoadFacets(ctx, load._id);
               const desc = isWildcard
-                ? `Extra Trips - ${(load as any).parsedHcr || 'Unknown HCR'} ${(load as any).parsedTripNumber || 'Unknown Trip'}`
+                ? `Extra Trips - ${loadFacets.hcr || 'Unknown HCR'} ${loadFacets.trip || 'Unknown Trip'}`
                 : (contractLane as any).contractName ||
-                  `${(load as any).parsedHcr || 'Unknown HCR'} - ${(load as any).parsedTripNumber || 'Unknown Trip'}`;
+                  `${loadFacets.hcr || 'Unknown HCR'} - ${loadFacets.trip || 'Unknown Trip'}`;
 
               await ctx.db.insert('invoiceLineItems', {
                 invoiceId,
@@ -981,10 +1013,11 @@ export const confirmPaymentChunk = mutation({
 
           if (amounts.subtotal > 0 && contractLane && load) {
             const isWildcard = (contractLane as any).tripNumber === '*';
+            const loadFacets = await getLoadFacets(ctx, load._id);
             const desc = isWildcard
-              ? `Extra Trips - ${(load as any).parsedHcr || 'Unknown HCR'} ${(load as any).parsedTripNumber || 'Unknown Trip'}`
+              ? `Extra Trips - ${loadFacets.hcr || 'Unknown HCR'} ${loadFacets.trip || 'Unknown Trip'}`
               : (contractLane as any).contractName ||
-                `${(load as any).parsedHcr || 'Unknown HCR'} - ${(load as any).parsedTripNumber || 'Unknown Trip'}`;
+                `${loadFacets.hcr || 'Unknown HCR'} - ${loadFacets.trip || 'Unknown Trip'}`;
 
             await ctx.db.insert('invoiceLineItems', {
               invoiceId: invoice._id,

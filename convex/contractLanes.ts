@@ -4,6 +4,7 @@ import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { scheduleRuleValidator } from './lib/validators';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { registerContractLaneFacet } from './lib/loadFacets';
 
 // List unique HCR/Trip combinations for route assignments
 export const listUniqueRoutes = query({
@@ -201,6 +202,16 @@ export const create = mutation({
       isDeleted: false,
     });
 
+    // Register HCR / TRIP into facetValues so they appear in the dropdown
+    // even before any matching load is created. Wildcards skipped by helper.
+    await registerContractLaneFacet(ctx, args.workosOrgId, 'HCR', args.hcr);
+    await registerContractLaneFacet(
+      ctx,
+      args.workosOrgId,
+      'TRIP',
+      args.tripNumber,
+    );
+
     return laneId;
   },
 });
@@ -275,6 +286,21 @@ export const update = mutation({
       ...updates,
       updatedAt: Date.now(),
     });
+
+    // Register the (possibly new) HCR/TRIP values. The old value is not
+    // decremented — facetValues has no refcount; the nightly cron prunes
+    // values with zero remaining loadTags + zero contract lanes.
+    if (updates.hcr !== undefined) {
+      await registerContractLaneFacet(ctx, callerOrgId, 'HCR', updates.hcr);
+    }
+    if (updates.tripNumber !== undefined) {
+      await registerContractLaneFacet(
+        ctx,
+        callerOrgId,
+        'TRIP',
+        updates.tripNumber,
+      );
+    }
 
     return id;
   },
@@ -513,6 +539,13 @@ export const bulkUpsert = mutation({
         updatedAt: now,
         isDeleted: false,
       });
+      await registerContractLaneFacet(ctx, args.workosOrgId, 'HCR', lane.hcr);
+      await registerContractLaneFacet(
+        ctx,
+        args.workosOrgId,
+        'TRIP',
+        lane.tripNumber,
+      );
       created++;
     }
 
@@ -526,6 +559,8 @@ export const bulkUpsert = mutation({
       }
       cleanUpdates.updatedAt = now;
       await ctx.db.patch(existingId, cleanUpdates);
+      // Note: bulkUpsert update path doesn't accept hcr/tripNumber changes,
+      // so no facet registration needed here.
       updated++;
     }
 
@@ -614,6 +649,14 @@ export const bulkImport = mutation({
         updatedAt: now,
         isDeleted: false,
       });
+
+      await registerContractLaneFacet(ctx, args.workosOrgId, 'HCR', lane.hcr);
+      await registerContractLaneFacet(
+        ctx,
+        args.workosOrgId,
+        'TRIP',
+        lane.tripNumber,
+      );
 
       imported++;
     }

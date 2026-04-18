@@ -9,6 +9,7 @@ import { mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { updateInvoiceCount } from "./stats_helpers";
 import { assertCallerOwnsOrg } from "./lib/auth";
+import { getLoadFacets } from "./lib/loadFacets";
 
 /**
  * One-time batch promotion of UNMAPPED/SPOT loads
@@ -52,15 +53,18 @@ export const triggerCleanup = mutation({
     let promoted = 0;
 
     for (const load of loadsToCheck) {
-      if (!load.parsedHcr || !load.parsedTripNumber) continue;
+      // Read HCR/Trip from facet tags (Phase 5 will drop the columns).
+      const facets = await getLoadFacets(ctx, load._id);
+      if (!facets.hcr || !facets.trip) continue;
 
-      // Check for specific lane (using efficient compound index)
+      // Check for specific lane (contractLanes still uses by_org_hcr_trip
+      // — that index is on contractLanes, not loadInformation, and stays).
       const specificLane = await ctx.db
         .query("contractLanes")
-        .withIndex("by_org_hcr_trip", (q) => 
+        .withIndex("by_org_hcr_trip", (q) =>
           q.eq("workosOrgId", args.workosOrgId)
-           .eq("hcr", load.parsedHcr)
-           .eq("tripNumber", load.parsedTripNumber)
+           .eq("hcr", facets.hcr)
+           .eq("tripNumber", facets.trip)
         )
         .filter((q) => q.eq(q.field("isDeleted"), false))
         .first();

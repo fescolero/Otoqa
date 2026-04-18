@@ -4,6 +4,7 @@ import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { updateLoadCount } from './stats_helpers';
+import { setLoadTag, getLoadFacets } from './lib/loadFacets';
 import {
   addDaysToUtcDateString,
   getUtcDateStringFromMs,
@@ -255,9 +256,11 @@ export const createFromLoad = mutation({
       };
     });
 
-    // 4. Determine HCR/Trip from route assignment if provided
-    let hcr = sourceLoad.parsedHcr;
-    let tripNumber = sourceLoad.parsedTripNumber;
+    // 4. Determine HCR/Trip from route assignment if provided.
+    // Source load values come from facet tags (Phase 5 drops the columns).
+    const sourceFacets = await getLoadFacets(ctx, sourceLoad._id);
+    let hcr = sourceFacets.hcr;
+    let tripNumber = sourceFacets.trip;
 
     if (args.routeAssignmentId) {
       const routeAssignment = await ctx.db.get(args.routeAssignmentId);
@@ -383,8 +386,7 @@ export const generateLoadFromTemplate = internalMutation({
       orderNumber: internalId,
       status: 'Open',
       trackingStatus: 'Pending',
-      parsedHcr: template.hcr,
-      parsedTripNumber: template.tripNumber,
+      // HCR / TRIP written only as loadTags via setLoadTag below.
       customerId: template.customerId,
       customerName: customer.name,
       fleet: template.fleet ?? 'Default',
@@ -451,12 +453,29 @@ export const generateLoadFromTemplate = internalMutation({
       .query('loadStops')
       .withIndex('by_sequence', (q) => q.eq('loadId', loadId).eq('sequenceNumber', 1))
       .first();
-    
+
+    const firstStopDate = firstStop?.windowBeginDate;
     if (firstStop) {
-      await ctx.db.patch(loadId, {
-        firstStopDate: firstStop.windowBeginDate,
-      });
+      await ctx.db.patch(loadId, { firstStopDate });
     }
+
+    // 7b. Register HCR / TRIP facet tags with the just-computed firstStopDate.
+    await setLoadTag(ctx, {
+      loadId,
+      workosOrgId: template.workosOrgId,
+      facetKey: 'HCR',
+      value: template.hcr,
+      source: 'LOAD_RECURRING',
+      firstStopDate,
+    });
+    await setLoadTag(ctx, {
+      loadId,
+      workosOrgId: template.workosOrgId,
+      facetKey: 'TRIP',
+      value: template.tripNumber,
+      source: 'LOAD_RECURRING',
+      firstStopDate,
+    });
 
     // 8. Trigger auto-assignment
     try {
