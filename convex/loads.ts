@@ -889,8 +889,13 @@ export const getLoad = query({
 
     const trailer = firstLeg?.trailerId ? await ctx.db.get(firstLeg.trailerId) : null;
 
+    // HCR / TRIP from facet tags (columns removed in Phase 5b).
+    const facets = await getLoadFacets(ctx, load._id);
+
     return {
       ...load,
+      parsedHcr: facets.hcr,
+      parsedTripNumber: facets.trip,
       stops,
       // Enriched assignment data
       assignedDriver: primaryDriver
