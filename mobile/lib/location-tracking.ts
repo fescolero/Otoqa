@@ -264,6 +264,80 @@ async function saveFallbackLocations(
 }
 
 /**
+ * Drain AsyncStorage fallback locations DIRECTLY to Convex via the HTTP endpoint.
+ * Does NOT depend on SQLite — used to preserve GPS data when SQLite is broken.
+ *
+ * Called at the start of every sync cycle (foreground and BG). Records that
+ * reached AsyncStorage because SQLite failed now have a direct path to the
+ * server rather than waiting for SQLite to recover (which may never happen).
+ *
+ * On SQLite recovery, `recoverFallbackLocations` still migrates any remaining
+ * AsyncStorage records into SQLite for long-term storage and historical
+ * queries. This function and that one are complementary.
+ */
+async function drainAsyncStorageFallback(organizationId: string): Promise<number> {
+  if (!MOBILE_LOCATION_API_KEY) return 0;
+  try {
+    const json = await storage.getString(BG_FALLBACK_LOCATIONS_KEY);
+    if (!json) return 0;
+    const fallback = JSON.parse(json);
+    if (!Array.isArray(fallback) || fallback.length === 0) return 0;
+
+    const batch = fallback.slice(0, SYNC_BATCH_SIZE);
+    const payload = batch.map((loc: {
+      driverId: string;
+      loadId: string;
+      latitude: number;
+      longitude: number;
+      accuracy: number | null;
+      speed: number | null;
+      heading: number | null;
+      recordedAt: number;
+    }) => ({
+      driverId: loc.driverId as Id<'drivers'>,
+      loadId: loc.loadId as Id<'loadInformation'>,
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      accuracy: loc.accuracy ?? undefined,
+      speed: loc.speed ?? undefined,
+      heading: loc.heading ?? undefined,
+      trackingType: 'LOAD_ROUTE' as const,
+      recordedAt: loc.recordedAt,
+    }));
+
+    const result = await syncViaHttpEndpoint(payload, organizationId);
+
+    if (result.inserted > 0) {
+      // Conservative: drop the whole batch from the fallback only when the
+      // server accepted at least one. `skippedDuplicate` scenarios still count
+      // as "inserted>0" from Convex's point of view for the batch that succeeded.
+      const remaining = fallback.slice(batch.length);
+      if (remaining.length === 0) {
+        await storage.delete(BG_FALLBACK_LOCATIONS_KEY);
+      } else {
+        await storage.set(BG_FALLBACK_LOCATIONS_KEY, JSON.stringify(remaining));
+      }
+      console.log(
+        `[LocationTracking] Fallback drain: synced ${result.inserted}/${batch.length} directly to Convex (${remaining.length} fallback records remain)`,
+      );
+      return result.inserted;
+    }
+
+    // inserted=0 means the server rejected everything. Leave the batch in
+    // AsyncStorage so the zombie clearance logic in the SQLite sync paths
+    // can still see the pattern and decide. The 500-record cap in
+    // saveFallbackLocations prevents unbounded growth.
+    return 0;
+  } catch (err) {
+    console.warn(
+      '[LocationTracking] Fallback drain failed (records remain in AsyncStorage):',
+      err instanceof Error ? err.message : err,
+    );
+    return 0;
+  }
+}
+
+/**
  * Recover fallback locations from AsyncStorage into SQLite.
  * Called on foreground return.
  */
@@ -535,6 +609,16 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   let syncAttempted = false;
   let syncSuccess = false;
   let syncCount = 0;
+
+  // Drain AsyncStorage fallback first — SQLite-independent path. Preserves
+  // data when this task's insert fell through to fallback or prior tasks did.
+  const fallbackSynced = await drainAsyncStorageFallback(state.organizationId);
+  if (fallbackSynced > 0) {
+    syncAttempted = true;
+    syncCount += fallbackSynced;
+    syncSuccess = true;
+  }
+
   if (sqliteAvailable && MOBILE_LOCATION_API_KEY) {
     try {
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
@@ -554,7 +638,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
         const result = await syncViaHttpEndpoint(payload, state.organizationId);
         syncSuccess = true;
-        syncCount = result.inserted;
+        syncCount += result.inserted;
 
         if (result.inserted > 0) {
           await markAsSynced(unsynced.map((r) => r.id));
@@ -1413,10 +1497,15 @@ async function syncUnsyncedToConvex(
   const MAX_AUTH_RETRIES = 2;
   const AUTH_RETRY_DELAYS = [1000, 3000];
 
+  // Drain AsyncStorage fallback first — this path is independent of SQLite
+  // health. If SQLite is broken, records that fell through to AsyncStorage on
+  // failed inserts still reach Convex via this call. No-op if fallback is empty.
+  const fallbackSynced = retryAttempt === 0 ? await drainAsyncStorageFallback(organizationId) : 0;
+
   try {
     const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
     if (unsynced.length === 0) {
-      return { success: true, synced: 0 };
+      return { success: true, synced: fallbackSynced };
     }
 
     console.log(
@@ -1499,7 +1588,7 @@ async function syncUnsyncedToConvex(
       trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}`, loadId: sampleLoadId, driverId: sampleDriverId });
     }
 
-    return { success: true, synced: result.inserted };
+    return { success: true, synced: result.inserted + fallbackSynced };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     const isAuthError =
@@ -1514,11 +1603,19 @@ async function syncUnsyncedToConvex(
       return syncUnsyncedToConvex(organizationId, retryAttempt + 1);
     }
 
-    const remaining = await getUnsyncedCount();
+    // SQLite read failed (or other error). Fallback drain may still have
+    // succeeded above, so the sync isn't a total loss.
+    let remaining = -1;
+    try {
+      remaining = await getUnsyncedCount();
+    } catch {
+      // SQLite unavailable; count unknown
+    }
     console.error(
-      `[LocationTracking] Sync failed (attempt ${retryAttempt + 1}): ${errorMsg} — ${remaining} points retained in SQLite for later`,
+      `[LocationTracking] Sync failed (attempt ${retryAttempt + 1}): ${errorMsg}` +
+        (remaining >= 0 ? ` — ${remaining} points retained in SQLite for later` : ' — SQLite unreadable, fallback drain attempted'),
     );
-    return { success: false, synced: 0 };
+    return { success: fallbackSynced > 0, synced: fallbackSynced };
   }
 }
 
