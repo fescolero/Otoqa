@@ -73,11 +73,15 @@ export const batchInsertLocations = mutation({
       }
 
       // Server-side dedup: skip if a point with the same loadId and
-      // recordedAt already exists (catches duplicate syncs from client)
+      // recordedAt already exists (catches duplicate syncs from client).
+      // Uses the (loadId, recordedAt) compound index for an exact lookup —
+      // a loadId-only scan would read the load's entire history and create
+      // a read-range that conflicts with concurrent inserts on the same load.
       const existing = await ctx.db
         .query('driverLocations')
-        .withIndex('by_load', (q) => q.eq('loadId', loc.loadId))
-        .filter((q) => q.eq(q.field('recordedAt'), loc.recordedAt))
+        .withIndex('by_load', (q) =>
+          q.eq('loadId', loc.loadId).eq('recordedAt', loc.recordedAt)
+        )
         .first();
       if (existing) {
         skippedDuplicate++;
@@ -161,8 +165,9 @@ export const internalBatchInsertLocations = internalMutation({
 
       const existing = await ctx.db
         .query('driverLocations')
-        .withIndex('by_load', (q) => q.eq('loadId', loc.loadId))
-        .filter((q) => q.eq(q.field('recordedAt'), loc.recordedAt))
+        .withIndex('by_load', (q) =>
+          q.eq('loadId', loc.loadId).eq('recordedAt', loc.recordedAt)
+        )
         .first();
       if (existing) {
         skippedDuplicate++;
