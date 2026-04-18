@@ -1,7 +1,7 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import Constants from 'expo-constants';
-import { Platform } from 'react-native';
+import { Platform, Linking } from 'react-native';
 import { storage } from './storage';
 import { convex } from './convex';
 import { ConvexHttpClient } from 'convex/browser';
@@ -1818,6 +1818,36 @@ export async function restartForegroundServices(): Promise<void> {
 /**
  * Check if location tracking is available on this device
  */
+/**
+ * Open Android battery optimization settings so the user can whitelist the
+ * app. On Samsung Galaxy devices, Device Care's "Sleeping apps" / aggressive
+ * battery optimization is the #1 reason BG tasks stop firing despite being
+ * registered. This deep-links to the system settings page where the user can
+ * choose "Unrestricted" / disable battery optimization for Otoqa.
+ *
+ * Returns true if the intent was dispatched, false if not applicable (iOS or
+ * the intent couldn't be resolved).
+ */
+export async function openBatteryOptimizationSettings(): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  try {
+    // Preferred: direct to battery optimization list (Android M+)
+    const batteryOptIntent = 'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS';
+    await Linking.sendIntent(batteryOptIntent);
+    return true;
+  } catch (err) {
+    console.warn('[LocationTracking] Failed to open battery optimization intent:', err);
+    // Fallback: open the app's generic settings page where user can find Battery
+    try {
+      await Linking.openSettings();
+      return true;
+    } catch (err2) {
+      console.error('[LocationTracking] Failed to open settings:', err2);
+      return false;
+    }
+  }
+}
+
 export async function checkLocationServicesEnabled(): Promise<boolean> {
   return await Location.hasServicesEnabledAsync();
 }
