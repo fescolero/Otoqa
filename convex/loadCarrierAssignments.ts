@@ -4,6 +4,7 @@ import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { updateLoadCount } from './stats_helpers';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { getLoadFacets } from './lib/loadFacets';
 
 /**
  * Load Carrier Assignments API
@@ -325,6 +326,10 @@ export const getWithDetails = query({
     const pickupStop = sortedStops.find((s) => s.stopType === 'PICKUP');
     const deliveryStop = [...sortedStops].reverse().find((s) => s.stopType === 'DELIVERY');
 
+    // Source HCR/Trip from facet tags. Response shape unchanged so the
+    // mobile/web client doesn't need any update.
+    const facets = await getLoadFacets(ctx, load._id);
+
     return {
       ...assignment,
       load: {
@@ -337,8 +342,8 @@ export const getWithDetails = query({
         effectiveMiles: load.effectiveMiles,
         equipmentType: load.equipmentType,
         commodityDescription: load.commodityDescription,
-        parsedHcr: load.parsedHcr,
-        parsedTripNumber: load.parsedTripNumber,
+        parsedHcr: facets.hcr,
+        parsedTripNumber: facets.trip,
       },
       pickup: pickupStop
         ? {

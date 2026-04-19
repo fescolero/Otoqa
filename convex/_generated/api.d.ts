@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as _devTools_facetSimulator from "../_devTools/facetSimulator.js";
 import type * as _helpers_cronUtils from "../_helpers/cronUtils.js";
 import type * as _helpers_dateUtils from "../_helpers/dateUtils.js";
 import type * as _helpers_timeUtils from "../_helpers/timeUtils.js";
@@ -20,7 +21,6 @@ import type * as auditLog from "../auditLog.js";
 import type * as autoAssignment from "../autoAssignment.js";
 import type * as autoAssignmentCron from "../autoAssignmentCron.js";
 import type * as carrierMobile from "../carrierMobile.js";
-import type * as carrierOrg from "../carrierOrg.js";
 import type * as carrierPartnerships from "../carrierPartnerships.js";
 import type * as carrierPayCalculation from "../carrierPayCalculation.js";
 import type * as carrierProfileAssignments from "../carrierProfileAssignments.js";
@@ -38,6 +38,7 @@ import type * as driverLocations from "../driverLocations.js";
 import type * as driverMobile from "../driverMobile.js";
 import type * as driverPayCalculation from "../driverPayCalculation.js";
 import type * as driverProfileAssignments from "../driverProfileAssignments.js";
+import type * as driverSessions from "../driverSessions.js";
 import type * as driverSettlements from "../driverSettlements.js";
 import type * as drivers from "../drivers.js";
 import type * as externalTracking from "../externalTracking.js";
@@ -45,6 +46,7 @@ import type * as externalTrackingAuth from "../externalTrackingAuth.js";
 import type * as externalTrackingAuthCrypto from "../externalTrackingAuthCrypto.js";
 import type * as externalTrackingPartnerKeys from "../externalTrackingPartnerKeys.js";
 import type * as externalTrackingWebhooks from "../externalTrackingWebhooks.js";
+import type * as facetMaintenance from "../facetMaintenance.js";
 import type * as forceResync from "../forceResync.js";
 import type * as fourKitesApiClient from "../fourKitesApiClient.js";
 import type * as fourKitesGpsPush from "../fourKitesGpsPush.js";
@@ -64,6 +66,7 @@ import type * as http from "../http.js";
 import type * as integrations from "../integrations.js";
 import type * as invoiceCalculations from "../invoiceCalculations.js";
 import type * as invoices from "../invoices.js";
+import type * as knownLocations from "../knownLocations.js";
 import type * as laneAnalyzer from "../laneAnalyzer.js";
 import type * as laneAnalyzerActions from "../laneAnalyzerActions.js";
 import type * as laneAnalyzerCalculations from "../laneAnalyzerCalculations.js";
@@ -71,6 +74,9 @@ import type * as laneAnalyzerOptimization from "../laneAnalyzerOptimization.js";
 import type * as laneScheduleImport from "../laneScheduleImport.js";
 import type * as lanes from "../lanes.js";
 import type * as lazyLoadPromotion from "../lazyLoadPromotion.js";
+import type * as lib_auth from "../lib/auth.js";
+import type * as lib_geo from "../lib/geo.js";
+import type * as lib_loadFacets from "../lib/loadFacets.js";
 import type * as lib_validators from "../lib/validators.js";
 import type * as loadCarrierAssignments from "../loadCarrierAssignments.js";
 import type * as loadCarrierPayables from "../loadCarrierPayables.js";
@@ -85,6 +91,11 @@ import type * as manualTemplates from "../manualTemplates.js";
 import type * as migrations_001_backfill_contract_lanes from "../migrations/001_backfill_contract_lanes.js";
 import type * as migrations_002_clear_load_data from "../migrations/002_clear_load_data.js";
 import type * as migrations_003_update_wildcard_line_items from "../migrations/003_update_wildcard_line_items.js";
+import type * as migrations_004_bootstrap_facet_definitions from "../migrations/004_bootstrap_facet_definitions.js";
+import type * as migrations_005_backfill_load_tags from "../migrations/005_backfill_load_tags.js";
+import type * as migrations_006_cleanup_junk_facets from "../migrations/006_cleanup_junk_facets.js";
+import type * as migrations_007_strip_parsed_columns from "../migrations/007_strip_parsed_columns.js";
+import type * as migrations_008_backfill_stop_denorm from "../migrations/008_backfill_stop_denorm.js";
 import type * as migrations_backfillDispatchLegs from "../migrations/backfillDispatchLegs.js";
 import type * as migrations_backfillFirstStopDate from "../migrations/backfillFirstStopDate.js";
 import type * as migrations_backfillOrgType from "../migrations/backfillOrgType.js";
@@ -113,6 +124,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  "_devTools/facetSimulator": typeof _devTools_facetSimulator;
   "_helpers/cronUtils": typeof _helpers_cronUtils;
   "_helpers/dateUtils": typeof _helpers_dateUtils;
   "_helpers/timeUtils": typeof _helpers_timeUtils;
@@ -125,7 +137,6 @@ declare const fullApi: ApiFromModules<{
   autoAssignment: typeof autoAssignment;
   autoAssignmentCron: typeof autoAssignmentCron;
   carrierMobile: typeof carrierMobile;
-  carrierOrg: typeof carrierOrg;
   carrierPartnerships: typeof carrierPartnerships;
   carrierPayCalculation: typeof carrierPayCalculation;
   carrierProfileAssignments: typeof carrierProfileAssignments;
@@ -143,6 +154,7 @@ declare const fullApi: ApiFromModules<{
   driverMobile: typeof driverMobile;
   driverPayCalculation: typeof driverPayCalculation;
   driverProfileAssignments: typeof driverProfileAssignments;
+  driverSessions: typeof driverSessions;
   driverSettlements: typeof driverSettlements;
   drivers: typeof drivers;
   externalTracking: typeof externalTracking;
@@ -150,6 +162,7 @@ declare const fullApi: ApiFromModules<{
   externalTrackingAuthCrypto: typeof externalTrackingAuthCrypto;
   externalTrackingPartnerKeys: typeof externalTrackingPartnerKeys;
   externalTrackingWebhooks: typeof externalTrackingWebhooks;
+  facetMaintenance: typeof facetMaintenance;
   forceResync: typeof forceResync;
   fourKitesApiClient: typeof fourKitesApiClient;
   fourKitesGpsPush: typeof fourKitesGpsPush;
@@ -169,6 +182,7 @@ declare const fullApi: ApiFromModules<{
   integrations: typeof integrations;
   invoiceCalculations: typeof invoiceCalculations;
   invoices: typeof invoices;
+  knownLocations: typeof knownLocations;
   laneAnalyzer: typeof laneAnalyzer;
   laneAnalyzerActions: typeof laneAnalyzerActions;
   laneAnalyzerCalculations: typeof laneAnalyzerCalculations;
@@ -176,6 +190,9 @@ declare const fullApi: ApiFromModules<{
   laneScheduleImport: typeof laneScheduleImport;
   lanes: typeof lanes;
   lazyLoadPromotion: typeof lazyLoadPromotion;
+  "lib/auth": typeof lib_auth;
+  "lib/geo": typeof lib_geo;
+  "lib/loadFacets": typeof lib_loadFacets;
   "lib/validators": typeof lib_validators;
   loadCarrierAssignments: typeof loadCarrierAssignments;
   loadCarrierPayables: typeof loadCarrierPayables;
@@ -190,6 +207,11 @@ declare const fullApi: ApiFromModules<{
   "migrations/001_backfill_contract_lanes": typeof migrations_001_backfill_contract_lanes;
   "migrations/002_clear_load_data": typeof migrations_002_clear_load_data;
   "migrations/003_update_wildcard_line_items": typeof migrations_003_update_wildcard_line_items;
+  "migrations/004_bootstrap_facet_definitions": typeof migrations_004_bootstrap_facet_definitions;
+  "migrations/005_backfill_load_tags": typeof migrations_005_backfill_load_tags;
+  "migrations/006_cleanup_junk_facets": typeof migrations_006_cleanup_junk_facets;
+  "migrations/007_strip_parsed_columns": typeof migrations_007_strip_parsed_columns;
+  "migrations/008_backfill_stop_denorm": typeof migrations_008_backfill_stop_denorm;
   "migrations/backfillDispatchLegs": typeof migrations_backfillDispatchLegs;
   "migrations/backfillFirstStopDate": typeof migrations_backfillFirstStopDate;
   "migrations/backfillOrgType": typeof migrations_backfillOrgType;
@@ -239,138 +261,5 @@ export declare const internal: FilterApi<
 >;
 
 export declare const components: {
-  rateLimiter: {
-    lib: {
-      checkRateLimit: FunctionReference<
-        "query",
-        "internal",
-        {
-          config:
-            | {
-                capacity?: number;
-                kind: "token bucket";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: null;
-              }
-            | {
-                capacity?: number;
-                kind: "fixed window";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: number;
-              };
-          count?: number;
-          key?: string;
-          name: string;
-          reserve?: boolean;
-          throws?: boolean;
-        },
-        { ok: true; retryAfter?: number } | { ok: false; retryAfter: number }
-      >;
-      clearAll: FunctionReference<
-        "mutation",
-        "internal",
-        { before?: number },
-        null
-      >;
-      getServerTime: FunctionReference<"mutation", "internal", {}, number>;
-      getValue: FunctionReference<
-        "query",
-        "internal",
-        {
-          config:
-            | {
-                capacity?: number;
-                kind: "token bucket";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: null;
-              }
-            | {
-                capacity?: number;
-                kind: "fixed window";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: number;
-              };
-          key?: string;
-          name: string;
-          sampleShards?: number;
-        },
-        {
-          config:
-            | {
-                capacity?: number;
-                kind: "token bucket";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: null;
-              }
-            | {
-                capacity?: number;
-                kind: "fixed window";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: number;
-              };
-          shard: number;
-          ts: number;
-          value: number;
-        }
-      >;
-      rateLimit: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          config:
-            | {
-                capacity?: number;
-                kind: "token bucket";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: null;
-              }
-            | {
-                capacity?: number;
-                kind: "fixed window";
-                maxReserved?: number;
-                period: number;
-                rate: number;
-                shards?: number;
-                start?: number;
-              };
-          count?: number;
-          key?: string;
-          name: string;
-          reserve?: boolean;
-          throws?: boolean;
-        },
-        { ok: true; retryAfter?: number } | { ok: false; retryAfter: number }
-      >;
-      resetRateLimit: FunctionReference<
-        "mutation",
-        "internal",
-        { key?: string; name: string },
-        null
-      >;
-    };
-    time: {
-      getServerTime: FunctionReference<"mutation", "internal", {}, number>;
-    };
-  };
+  rateLimiter: import("@convex-dev/rate-limiter/_generated/component.js").ComponentApi<"rateLimiter">;
 };

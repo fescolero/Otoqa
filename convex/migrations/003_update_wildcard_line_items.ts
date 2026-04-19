@@ -62,8 +62,12 @@ export const updateWildcardLineItems = internalMutation({
             
             if (!hasHcrTripFormat && (newDescription.includes("Wildcard") || newDescription.length < 50)) {
               // Replace with HCR - TRIP format
-              const hcr = load.parsedHcr || "Unknown HCR";
-              const trip = load.parsedTripNumber || "Unknown TRIP";
+              // Historic migration: reads stale column data still on
+              // docs that existed before migration 007 ran. Cast to a
+              // loose shape because the schema no longer declares these.
+              const staleLoad = load as { parsedHcr?: string; parsedTripNumber?: string };
+              const hcr = staleLoad.parsedHcr || "Unknown HCR";
+              const trip = staleLoad.parsedTripNumber || "Unknown TRIP";
               newDescription = `${hcr} - ${trip}`;
               needsUpdate = true;
             }
@@ -143,8 +147,12 @@ export const previewWildcardLineItems = internalMutation({
             const hasHcrTripFormat = /\w+\s*-\s*\w+/.test(newDescription);
             
             if (!hasHcrTripFormat && (newDescription.includes("Wildcard") || newDescription.length < 50)) {
-              const hcr = load.parsedHcr || "Unknown HCR";
-              const trip = load.parsedTripNumber || "Unknown TRIP";
+              // Historic migration: reads stale column data still on
+              // docs that existed before migration 007 ran. Cast to a
+              // loose shape because the schema no longer declares these.
+              const staleLoad = load as { parsedHcr?: string; parsedTripNumber?: string };
+              const hcr = staleLoad.parsedHcr || "Unknown HCR";
+              const trip = staleLoad.parsedTripNumber || "Unknown TRIP";
               newDescription = `${hcr} - ${trip}`;
               needsUpdate = true;
             }

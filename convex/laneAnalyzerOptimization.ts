@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { internalMutation, internalQuery, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { Doc, Id } from './_generated/dataModel';
+import { findLoadIdsByFacets } from './lib/loadFacets';
 import {
   haversineDistance,
   calculateScheduleForYear,
@@ -513,19 +514,26 @@ export const analyzeLanePerformance = query({
       const lane = await ctx.db.get(laneId);
       if (!lane || lane.isDeleted) continue;
 
-      // Fetch loads matching this lane by HCR + Trip
+      // Fetch loads matching this lane by HCR + Trip via the facet system.
+      // findLoadIdsByFacets handles the (HCR, optional TRIP) intersection;
+      // we then post-filter for date range + status in app code.
       let loads: Doc<'loadInformation'>[] = [];
       if (lane.hcr) {
-        const hcrLoads = await ctx.db
-          .query('loadInformation')
-          .withIndex('by_hcr_trip', (q) =>
-            q.eq('workosOrgId', args.workosOrgId).eq('parsedHcr', lane.hcr!),
-          )
-          .take(MAX_LOADS_PER_LANE);
+        const matchedIds = await findLoadIdsByFacets(ctx, {
+          workosOrgId: args.workosOrgId,
+          hcr: lane.hcr,
+          // Wildcard tripNumber means "any trip" — pass undefined.
+          trip:
+            lane.tripNumber && lane.tripNumber !== '*'
+              ? lane.tripNumber
+              : undefined,
+        });
 
-        // Filter by trip number if set, date range, and completed status
-        loads = hcrLoads.filter((l) => {
-          if (lane.tripNumber && l.parsedTripNumber !== lane.tripNumber) return false;
+        const fetched = await Promise.all(
+          matchedIds.slice(0, MAX_LOADS_PER_LANE).map((id) => ctx.db.get(id)),
+        );
+        loads = fetched.filter((l): l is Doc<'loadInformation'> => {
+          if (!l) return false;
           if (!l.firstStopDate) return false;
           if (l.firstStopDate < args.dateRangeStart || l.firstStopDate > args.dateRangeEnd) return false;
           if (l.status !== 'Completed') return false;

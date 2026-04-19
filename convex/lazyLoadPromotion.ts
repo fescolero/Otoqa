@@ -8,6 +8,7 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount } from "./stats_helpers";
 import { requireCallerOrgId } from "./lib/auth";
+import { getLoadFacets } from "./lib/loadFacets";
 
 /**
  * Check a single load and promote if specific lane exists
@@ -28,17 +29,19 @@ export const checkAndPromoteLoad = mutation({
       return { promoted: false };
     }
 
-    if (!load.parsedHcr || !load.parsedTripNumber) {
+    // Read HCR/Trip from facet tags (Phase 5 drops the columns).
+    const facets = await getLoadFacets(ctx, load._id);
+    if (!facets.hcr || !facets.trip) {
       return { promoted: false };
     }
 
-    // Check if specific lane exists (using efficient compound index)
+    // Check if specific lane exists (contractLanes keeps its own hcr/tripNumber).
     const specificLane = await ctx.db
       .query("contractLanes")
-      .withIndex("by_org_hcr_trip", (q) => 
+      .withIndex("by_org_hcr_trip", (q) =>
         q.eq("workosOrgId", load.workosOrgId)
-         .eq("hcr", load.parsedHcr)
-         .eq("tripNumber", load.parsedTripNumber)
+         .eq("hcr", facets.hcr)
+         .eq("tripNumber", facets.trip)
       )
       .filter((q) => q.eq(q.field("isDeleted"), false))
       .first();

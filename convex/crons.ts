@@ -98,4 +98,20 @@ crons.cron('external-tracking-sandbox-refresh', '0 4 * * *', internal.sandboxDat
 // Phase 2: Marks In Transit loads as Expired when no activity for 3+ days
 crons.cron('auto-expire-stale-loads', '0 1 * * *', internal.loads.autoExpireStaleLoads, {});
 
+// ==========================================
+// FACET SYSTEM MAINTENANCE
+// ==========================================
+
+// ✅ Prune orphaned facetValues (daily at 5 AM UTC)
+// facetValues is a presence-only cache with no refcount — load deletions
+// and tag value changes leave orphan rows behind. This cron reconciles
+// the drift so the filter dropdown only shows values that still have
+// at least one matching loadTag.
+crons.cron(
+  'prune-orphaned-facet-values',
+  '0 5 * * *',
+  internal.facetMaintenance.pruneOrphanedFacetValues,
+  {},
+);
+
 export default crons;

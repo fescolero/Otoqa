@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { internalMutation, internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
+import { getLoadFacets } from './lib/loadFacets';
 
 /**
  * Auto-Assignment System
@@ -135,8 +136,11 @@ export const autoAssignLoad = internalMutation({
       };
     }
 
-    // 3. Skip if no HCR
-    if (!load.parsedHcr) {
+    // 3. Read facets from tags. Skip if no HCR.
+    // (routeAssignments still uses its own hcr/tripNumber columns + indexes
+    // — we're only swapping the read of the load's own facets.)
+    const loadFacets = await getLoadFacets(ctx, load._id);
+    if (!loadFacets.hcr) {
       return {
         success: false,
         loadId: args.loadId,
@@ -164,14 +168,14 @@ export const autoAssignLoad = internalMutation({
     // Priority: exact HCR+Trip > HCR-only rule > any route for this HCR
     let routeAssignment: Doc<'routeAssignments'> | null = null;
 
-    if (load.parsedTripNumber) {
+    if (loadFacets.trip) {
       routeAssignment = await ctx.db
         .query('routeAssignments')
         .withIndex('by_org_hcr_trip', (q) =>
           q
             .eq('workosOrgId', load.workosOrgId)
-            .eq('hcr', load.parsedHcr!)
-            .eq('tripNumber', load.parsedTripNumber)
+            .eq('hcr', loadFacets.hcr!)
+            .eq('tripNumber', loadFacets.trip)
         )
         .filter((q) => q.eq(q.field('isActive'), true))
         .first();
@@ -180,7 +184,7 @@ export const autoAssignLoad = internalMutation({
     if (!routeAssignment) {
       routeAssignment = await ctx.db
         .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', load.parsedHcr!))
+        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
         .filter((q) =>
           q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
         )
@@ -190,7 +194,7 @@ export const autoAssignLoad = internalMutation({
     if (!routeAssignment) {
       routeAssignment = await ctx.db
         .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', load.parsedHcr!))
+        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
         .filter((q) => q.eq(q.field('isActive'), true))
         .first();
     }
@@ -200,7 +204,7 @@ export const autoAssignLoad = internalMutation({
         success: false,
         loadId: args.loadId,
         action: 'NO_MATCH',
-        message: `No route assignment found for HCR ${load.parsedHcr}${load.parsedTripNumber ? ` / Trip ${load.parsedTripNumber}` : ''}`,
+        message: `No route assignment found for HCR ${loadFacets.hcr}${loadFacets.trip ? ` / Trip ${loadFacets.trip}` : ''}`,
       };
     }
 
@@ -426,13 +430,23 @@ export const getOpenLoadsWithHcr = internalQuery({
       .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'Open'))
       .collect();
 
-    return loads
-      .filter((load) => load.parsedHcr)
+    // Enrich with facet values from tags. Filter to loads that have HCR.
+    // O(N) tag lookups across the org's open loads — acceptable here
+    // because Open-status loads are typically a small slice.
+    const enriched = await Promise.all(
+      loads.map(async (load) => {
+        const facets = await getLoadFacets(ctx, load._id);
+        return { load, facets };
+      }),
+    );
+
+    return enriched
+      .filter(({ facets }) => !!facets.hcr)
       .slice(0, AUTO_ASSIGN_BATCH_SIZE)
-      .map((load) => ({
+      .map(({ load, facets }) => ({
         _id: load._id,
-        parsedHcr: load.parsedHcr!,
-        parsedTripNumber: load.parsedTripNumber,
+        parsedHcr: facets.hcr!,
+        parsedTripNumber: facets.trip,
       }));
   },
 });
@@ -480,8 +494,9 @@ export const triggerAutoAssignmentForLoad = internalMutation({
       };
     }
 
-    // Skip if no HCR
-    if (!load.parsedHcr) {
+    // Read facets from tags. Skip if no HCR.
+    const loadFacets = await getLoadFacets(ctx, load._id);
+    if (!loadFacets.hcr) {
       return {
         success: false,
         loadId: args.loadId,
@@ -494,14 +509,14 @@ export const triggerAutoAssignmentForLoad = internalMutation({
     // Priority: exact HCR+Trip > HCR-only rule > any route for this HCR
     let routeAssignment: Doc<'routeAssignments'> | null = null;
 
-    if (load.parsedTripNumber) {
+    if (loadFacets.trip) {
       routeAssignment = await ctx.db
         .query('routeAssignments')
         .withIndex('by_org_hcr_trip', (q) =>
           q
             .eq('workosOrgId', load.workosOrgId)
-            .eq('hcr', load.parsedHcr!)
-            .eq('tripNumber', load.parsedTripNumber)
+            .eq('hcr', loadFacets.hcr!)
+            .eq('tripNumber', loadFacets.trip)
         )
         .filter((q) => q.eq(q.field('isActive'), true))
         .first();
@@ -510,7 +525,7 @@ export const triggerAutoAssignmentForLoad = internalMutation({
     if (!routeAssignment) {
       routeAssignment = await ctx.db
         .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', load.parsedHcr!))
+        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
         .filter((q) =>
           q.and(q.eq(q.field('isActive'), true), q.eq(q.field('tripNumber'), undefined))
         )
@@ -520,7 +535,7 @@ export const triggerAutoAssignmentForLoad = internalMutation({
     if (!routeAssignment) {
       routeAssignment = await ctx.db
         .query('routeAssignments')
-        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', load.parsedHcr!))
+        .withIndex('by_org_hcr', (q) => q.eq('workosOrgId', load.workosOrgId).eq('hcr', loadFacets.hcr!))
         .filter((q) => q.eq(q.field('isActive'), true))
         .first();
     }
@@ -530,7 +545,7 @@ export const triggerAutoAssignmentForLoad = internalMutation({
         success: false,
         loadId: args.loadId,
         action: 'NO_MATCH',
-        message: `No route assignment found for HCR ${load.parsedHcr}`,
+        message: `No route assignment found for HCR ${loadFacets.hcr}`,
       };
     }
 

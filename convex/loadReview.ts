@@ -6,6 +6,8 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from "./lib/auth";
+import { getLoadFacets, findLoadIdsByFacets } from "./lib/loadFacets";
+import type { Doc } from "./_generated/dataModel";
 
 /**
  * OPTION A: Confirm Spot Load
@@ -59,18 +61,21 @@ export const convertToContract = mutation({
       throw new Error("Load not found");
     }
 
-    if (!load.parsedHcr || !load.parsedTripNumber) {
+    // Read HCR/Trip from facet tags (Phase 5 drops the columns).
+    const loadFacets = await getLoadFacets(ctx, load._id);
+    if (!loadFacets.hcr || !loadFacets.trip) {
       throw new Error("Cannot convert: Load missing HCR or Trip information");
     }
 
-    // Check if specific lane already exists
+    // Check if specific lane already exists. contractLanes still has its
+    // own hcr/tripNumber columns — those stay.
     const existingLane = await ctx.db
       .query("contractLanes")
       .withIndex("by_organization", (q) => q.eq("workosOrgId", load.workosOrgId))
       .filter((q) =>
         q.and(
-          q.eq(q.field("hcr"), load.parsedHcr),
-          q.eq(q.field("tripNumber"), load.parsedTripNumber),
+          q.eq(q.field("hcr"), loadFacets.hcr),
+          q.eq(q.field("tripNumber"), loadFacets.trip),
           q.eq(q.field("isDeleted"), false)
         )
       )
@@ -78,7 +83,7 @@ export const convertToContract = mutation({
 
     // 1. Create the specific Contract Lane (only if it doesn't exist)
     let contractLaneId = existingLane?._id;
-    
+
     if (!existingLane) {
       // Get customer info for defaults
       const customer = await ctx.db.get(load.customerId);
@@ -96,16 +101,16 @@ export const convertToContract = mutation({
       contractLaneId = await ctx.db.insert("contractLanes", {
         workosOrgId: load.workosOrgId,
         customerCompanyId: load.customerId,
-        hcr: load.parsedHcr,
-        tripNumber: load.parsedTripNumber,
-        contractName: args.contractName || `Lane: ${customer.name} - ${load.parsedTripNumber}`,
+        hcr: loadFacets.hcr,
+        tripNumber: loadFacets.trip,
+        contractName: args.contractName || `Lane: ${customer.name} - ${loadFacets.trip}`,
         contractPeriodStart: today,
         contractPeriodEnd,
         rateType: (args.rateType || "Flat Rate") as "Per Mile" | "Flat Rate" | "Per Stop",
         rate: args.rate ?? 0,
-        currency: "USD" as const, // Default to USD
+        currency: "USD" as const,
         miles: load.contractMiles,
-        stops: [], // Empty - can be filled later
+        stops: [],
         isActive: true,
         isDeleted: false,
         createdBy: userId,
@@ -114,18 +119,18 @@ export const convertToContract = mutation({
       });
     }
 
-    // 2. Find ALL existing loads with the same HCR+Trip that are SPOT
-    const matchingLoads = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_organization", (q) => q.eq("workosOrgId", load.workosOrgId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field("parsedHcr"), load.parsedHcr),
-          q.eq(q.field("parsedTripNumber"), load.parsedTripNumber),
-          q.eq(q.field("loadType"), "SPOT")
-        )
-      )
-      .collect();
+    // 2. Find ALL existing loads with the same HCR+Trip that are SPOT.
+    // findLoadIdsByFacets replaces the old parsedHcr/parsedTripNumber filter.
+    const matchedIds = await findLoadIdsByFacets(ctx, {
+      workosOrgId: load.workosOrgId,
+      hcr: loadFacets.hcr,
+      trip: loadFacets.trip,
+    });
+    const matchingLoads = (
+      await Promise.all(matchedIds.map((id) => ctx.db.get(id)))
+    ).filter(
+      (l): l is Doc<"loadInformation"> => l !== null && l.loadType === "SPOT",
+    );
 
     // 3. Bulk update all matching SPOT loads to CONTRACT
     const updatePromises = matchingLoads.map((matchingLoad) =>
@@ -141,8 +146,8 @@ export const convertToContract = mutation({
     const loadsConverted = matchingLoads.length;
     const laneAction = existingLane ? "Using existing" : "Created";
     const message = loadsConverted === 1
-      ? `${laneAction} contract lane for ${load.parsedHcr}/${load.parsedTripNumber}. Load converted to CONTRACT.`
-      : `${laneAction} contract lane for ${load.parsedHcr}/${load.parsedTripNumber}. ${loadsConverted} loads converted to CONTRACT.`;
+      ? `${laneAction} contract lane for ${loadFacets.hcr}/${loadFacets.trip}. Load converted to CONTRACT.`
+      : `${laneAction} contract lane for ${loadFacets.hcr}/${loadFacets.trip}. ${loadsConverted} loads converted to CONTRACT.`;
 
     return {
       success: true,
@@ -163,17 +168,16 @@ export const countMatchingSpotLoads = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    const loads = await ctx.db
-      .query("loadInformation")
-      .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field("parsedHcr"), args.hcr),
-          q.eq(q.field("parsedTripNumber"), args.tripNumber),
-          q.eq(q.field("loadType"), "SPOT")
-        )
-      )
-      .collect();
+    const matchedIds = await findLoadIdsByFacets(ctx, {
+      workosOrgId: args.workosOrgId,
+      hcr: args.hcr,
+      trip: args.tripNumber,
+    });
+    const loads = (
+      await Promise.all(matchedIds.map((id) => ctx.db.get(id)))
+    ).filter(
+      (l): l is Doc<"loadInformation"> => l !== null && l.loadType === "SPOT",
+    );
 
     return loads.length;
   },

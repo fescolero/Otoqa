@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { query, mutation, QueryCtx, MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
+import { getLoadFacets } from './lib/loadFacets';
 
 // ============================================
 // DRIVER MOBILE API
@@ -329,12 +330,14 @@ export const getMyAssignedLoads = query({
         const firstPickup = pickups[0];
         const lastDelivery = deliveries[deliveries.length - 1];
 
+        const facets = await getLoadFacets(ctx, load._id);
+
         return {
           _id: load._id,
           internalId: load.internalId,
           orderNumber: load.orderNumber,
-          parsedHcr: load.parsedHcr,
-          parsedTripNumber: load.parsedTripNumber,
+          parsedHcr: facets.hcr,
+          parsedTripNumber: facets.trip,
           status: load.status,
           trackingStatus: load.trackingStatus,
           customerName: load.customerName,

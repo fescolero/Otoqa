@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import { getLoadFacets } from './lib/loadFacets';
 
 /**
  * Carrier Mobile API
@@ -284,7 +285,10 @@ export const getOfferedLoads = query({
               .collect()
           : [];
 
-        // Safe load data (no broker pricing)
+        // Safe load data (no broker pricing). HCR/Trip from facet tags.
+        const facets = load
+          ? await getLoadFacets(ctx, load._id)
+          : { hcr: undefined, trip: undefined };
         const safeLoad = load
           ? {
               _id: load._id,
@@ -296,8 +300,8 @@ export const getOfferedLoads = query({
               effectiveMiles: load.effectiveMiles,
               isHazmat: load.isHazmat,
               requiresTarp: load.requiresTarp,
-              tripNumber: load.parsedTripNumber,
-              hcr: load.parsedHcr,
+              tripNumber: facets.trip,
+              hcr: facets.hcr,
             }
           : null;
 
@@ -375,6 +379,9 @@ export const getActiveLoads = query({
             .first();
         }
 
+        const facets = load
+          ? await getLoadFacets(ctx, load._id)
+          : { hcr: undefined, trip: undefined };
         return {
           ...assignment,
           load: load
@@ -385,8 +392,8 @@ export const getActiveLoads = query({
                 trackingStatus: load.trackingStatus,
                 effectiveMiles: load.effectiveMiles,
                 equipmentType: load.equipmentType,
-                tripNumber: load.parsedTripNumber,
-                hcr: load.parsedHcr,
+                tripNumber: facets.trip,
+                hcr: facets.hcr,
               }
             : null,
           stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
@@ -445,6 +452,9 @@ export const getCompletedLoads = query({
     return Promise.all(
       limited.map(async (assignment) => {
         const load = await ctx.db.get(assignment.loadId);
+        const facets = load
+          ? await getLoadFacets(ctx, load._id)
+          : { hcr: undefined, trip: undefined };
         return {
           ...assignment,
           load: load
@@ -453,8 +463,8 @@ export const getCompletedLoads = query({
                 internalId: load.internalId,
                 customerName: load.customerName,
                 equipmentType: load.equipmentType,
-                tripNumber: load.parsedTripNumber,
-                hcr: load.parsedHcr,
+                tripNumber: facets.trip,
+                hcr: facets.hcr,
               }
             : null,
         };
