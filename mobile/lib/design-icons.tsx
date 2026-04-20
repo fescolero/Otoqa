@@ -20,7 +20,6 @@ import {
   Tick01Icon,
   PackageIcon,
   Home01Icon,
-  HomeSmileIcon,
   Message01Icon,
   UserIcon,
   MoreHorizontalIcon,
@@ -66,7 +65,11 @@ const ICON_MAP = {
   check: Tick01Icon,
   package: PackageIcon,
   home: Home01Icon,
-  'home-solid': HomeSmileIcon,
+  // Free HugeIcons has no true filled home glyph; HomeSmileIcon is a
+  // novelty variant. The nav expresses active state via a tinted pill +
+  // thicker stroke rather than swapping icons, so `-solid` keys below
+  // alias to the same outlined glyph.
+  'home-solid': Home01Icon,
   message: Message01Icon,
   'message-solid': Message01Icon,
   user: UserIcon,

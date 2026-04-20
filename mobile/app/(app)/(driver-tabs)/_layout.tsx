@@ -20,15 +20,17 @@ type TabKey = 'index' | 'messages' | 'settings' | 'more';
 type TabSpec = {
   name: TabKey;
   icon: IconName;
-  iconSolid: IconName;
   labelKey: 'nav.home' | 'nav.messages' | 'nav.profile' | 'nav.more';
 };
 
+// Free HugeIcons ships outlined-only — no filled variants for home/user/message/
+// more. Active state is expressed via a tinted pill + thicker stroke + accent
+// color instead of swapping to a solid glyph.
 const TAB_SPECS: readonly TabSpec[] = [
-  { name: 'index', icon: 'home', iconSolid: 'home-solid', labelKey: 'nav.home' },
-  { name: 'messages', icon: 'message', iconSolid: 'message-solid', labelKey: 'nav.messages' },
-  { name: 'settings', icon: 'user', iconSolid: 'user-solid', labelKey: 'nav.profile' },
-  { name: 'more', icon: 'more-h', iconSolid: 'more-h-solid', labelKey: 'nav.more' },
+  { name: 'index', icon: 'home', labelKey: 'nav.home' },
+  { name: 'messages', icon: 'message', labelKey: 'nav.messages' },
+  { name: 'settings', icon: 'user', labelKey: 'nav.profile' },
+  { name: 'more', icon: 'more-h', labelKey: 'nav.more' },
 ];
 
 function DriverTabBar({ state, navigation }: BottomTabBarProps) {
@@ -75,12 +77,19 @@ function DriverTabBar({ state, navigation }: BottomTabBarProps) {
               pressed && { opacity: 0.7 },
             ]}
           >
-            <Icon
-              name={isActive ? spec.iconSolid : spec.icon}
-              size={24}
-              color={color}
-              strokeWidth={isActive ? 0 : 1.5}
-            />
+            <View
+              style={[
+                styles.iconWrap,
+                isActive && { backgroundColor: palette.accentTint },
+              ]}
+            >
+              <Icon
+                name={spec.icon}
+                size={22}
+                color={color}
+                strokeWidth={isActive ? 2.2 : 1.5}
+              />
+            </View>
             <Text
               maxFontSizeMultiplier={1.2}
               style={[styles.label, { color }]}
@@ -129,12 +138,19 @@ const makeStyles = (palette: Palette) =>
     },
     tab: {
       flex: 1,
-      paddingVertical: 6,
+      paddingVertical: 4,
       paddingHorizontal: 4,
       borderRadius: radii.lg,
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 4,
+      gap: 2,
+    },
+    iconWrap: {
+      width: 40,
+      height: 28,
+      borderRadius: 999,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     label: {
       fontSize: 11,
