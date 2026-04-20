@@ -121,27 +121,66 @@ function formatTime(timeStr?: string): string | null {
   }
 }
 
-// Build the display string list for a load's facet tags. Prefer the
-// generic `facets` array from the server; fall back to the legacy
-// parsedHcr/parsedTripNumber pair for any response that pre-dates the
-// facets migration. TRIP values get a "Trip " prefix so the badge reads
-// "Trip 12345" instead of a bare number.
+// Build the display string list for a load's badges.
+//
+// Pulls from two sources:
+//
+//   1. The facet system (`facets` array from the server, or the legacy
+//      parsedHcr / parsedTripNumber pair if the response pre-dates the
+//      facet migration). TRIP values get a "Trip " prefix so the badge
+//      reads "Trip 12345" instead of a bare number.
+//
+//   2. Fields on the load document that classify it but aren't stored
+//      as loadTags: equipment type (REEF / FLAT / DRY / …), isHazmat
+//      (HAZ), requiresTarp (TARP). Without these, loads that never got
+//      HCR/TRIP tags written show up with no badges at all.
+//
+// Result is de-duped while preserving order.
 function loadFacetTags(load: {
   facets?: Array<{ key: string; value: string }>;
   parsedHcr?: string;
   parsedTripNumber?: string;
+  equipmentType?: string;
+  isHazmat?: boolean;
+  requiresTarp?: boolean;
 }): string[] {
+  const tags: string[] = [];
+
   if (load.facets && load.facets.length > 0) {
-    return load.facets
-      .map(({ key, value }) =>
-        key === 'TRIP' ? `Trip ${value}` : value,
-      )
-      .filter((s) => s.trim().length > 0);
+    for (const { key, value } of load.facets) {
+      if (!value || !value.trim()) continue;
+      tags.push(key === 'TRIP' ? `Trip ${value}` : value);
+    }
+  } else {
+    if (load.parsedHcr) tags.push(load.parsedHcr);
+    if (load.parsedTripNumber) tags.push(`Trip ${load.parsedTripNumber}`);
   }
-  return [
-    load.parsedHcr,
-    load.parsedTripNumber && `Trip ${load.parsedTripNumber}`,
-  ].filter(Boolean) as string[];
+
+  const eq = equipmentShortCode(load.equipmentType);
+  if (eq) tags.push(eq);
+  if (load.isHazmat) tags.push('HAZ');
+  if (load.requiresTarp) tags.push('TARP');
+
+  return Array.from(new Set(tags));
+}
+
+// Shorten equipment types into the 3-4 char tokens the design's
+// TAG_STYLES palette is keyed on (REEF, DRY, FLAT, …). Unknown types
+// fall back to the uppercased source string so nothing is silently
+// dropped.
+function equipmentShortCode(raw?: string): string | null {
+  if (!raw) return null;
+  const up = raw.trim().toUpperCase();
+  if (!up) return null;
+  if (up.includes('REEF')) return 'REEF';
+  if (up.includes('FLAT')) return 'FLAT';
+  if (up.includes('DRY')) return 'DRY';
+  if (up.includes('STEP')) return 'STEP';
+  if (up.includes('TANK')) return 'TANK';
+  if (up.includes('CONEST')) return 'CONE';
+  if (up.includes('LTL')) return 'LTL';
+  if (up.includes('OVERSIZE') || up.includes('OVR')) return 'OVR';
+  return up.slice(0, 6);
 }
 
 // Soft caps for shift duration — banners only, never forced actions.
