@@ -1,170 +1,144 @@
+/**
+ * Driver bottom tabs — Otoqa Driver design system.
+ *
+ * Flat bar with 4 tabs: Home, Messages, Profile, More. Icons are HugeIcons
+ * via the design-system `Icon` wrapper, palette comes from ThemeContext so
+ * the bar follows the user's light/dark/system preference.
+ */
+import React, { useMemo } from 'react';
 import { Tabs } from 'expo-router';
-import { View, StyleSheet, Text } from 'react-native';
-import { Ionicons, Feather } from '@expo/vector-icons';
-import { colors, isIOS } from '../../../lib/theme';
+import { View, StyleSheet, Text, Pressable, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { useLanguage } from '../../../lib/LanguageContext';
+import { useTheme } from '../../../lib/ThemeContext';
+import { Icon, type IconName } from '../../../lib/design-icons';
+import { radii, type Palette } from '../../../lib/design-tokens';
 
-const androidTabBarStyle = {
-  position: 'absolute' as const,
-  bottom: 28,
-  left: 0,
-  right: 0,
-  marginHorizontal: 24,
-  backgroundColor: colors.card,
-  borderRadius: 35,
-  height: 70,
-  paddingTop: 10,
-  paddingBottom: 10,
-  borderTopWidth: 0,
-  borderWidth: 1,
-  borderColor: 'rgba(63, 69, 82, 0.5)',
-  elevation: 8,
+type TabKey = 'index' | 'messages' | 'settings' | 'more';
+
+type TabSpec = {
+  name: TabKey;
+  icon: IconName;
+  iconSolid: IconName;
+  labelKey: 'nav.home' | 'nav.messages' | 'nav.profile' | 'nav.more';
 };
 
-const iosTabBarStyle = {
-  backgroundColor: colors.background,
-  borderTopColor: colors.background,
-  height: 90,
-  paddingTop: 4,
-  paddingBottom: 26,
-  paddingHorizontal: 40,
-};
+const TAB_SPECS: readonly TabSpec[] = [
+  { name: 'index', icon: 'home', iconSolid: 'home-solid', labelKey: 'nav.home' },
+  { name: 'messages', icon: 'message', iconSolid: 'message-solid', labelKey: 'nav.messages' },
+  { name: 'settings', icon: 'user', iconSolid: 'user-solid', labelKey: 'nav.profile' },
+  { name: 'more', icon: 'more-h', iconSolid: 'more-h-solid', labelKey: 'nav.more' },
+];
 
-function IOSTabBarBackground() {
+function DriverTabBar({ state, navigation }: BottomTabBarProps) {
+  const { palette } = useTheme();
+  const { t } = useLanguage();
+  const insets = useSafeAreaInsets();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
+
   return (
-    <View style={iosBackgroundStyles.container}>
-      <View style={iosBackgroundStyles.pill} />
+    <View
+      style={[
+        styles.bar,
+        { paddingBottom: Math.max(insets.bottom, 12) },
+      ]}
+    >
+      {state.routes.map((route, index) => {
+        const spec = TAB_SPECS.find((s) => s.name === route.name);
+        if (!spec) return null;
+
+        const isActive = state.index === index;
+
+        const onPress = () => {
+          const event = navigation.emit({
+            type: 'tabPress',
+            target: route.key,
+            canPreventDefault: true,
+          });
+          if (!isActive && !event.defaultPrevented) {
+            navigation.navigate(route.name, route.params);
+          }
+        };
+
+        const color = isActive ? palette.accent : palette.textTertiary;
+
+        return (
+          <Pressable
+            key={route.key}
+            accessibilityRole="button"
+            accessibilityState={isActive ? { selected: true } : {}}
+            accessibilityLabel={t(spec.labelKey)}
+            onPress={onPress}
+            style={({ pressed }) => [
+              styles.tab,
+              pressed && { opacity: 0.7 },
+            ]}
+          >
+            <Icon
+              name={isActive ? spec.iconSolid : spec.icon}
+              size={24}
+              color={color}
+              strokeWidth={isActive ? 0 : 1.5}
+            />
+            <Text
+              maxFontSizeMultiplier={1.2}
+              style={[styles.label, { color }]}
+            >
+              {t(spec.labelKey)}
+            </Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
 
-const iosBackgroundStyles = StyleSheet.create({
-  container: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 90,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    paddingTop: 0,
-    backgroundColor: colors.background,
-    borderTopWidth: 2,
-    borderTopColor: colors.background,
-  },
-  pill: {
-    backgroundColor: colors.card,
-    borderRadius: 30,
-    height: 60,
-    marginHorizontal: 20,
-    width: '100%',
-    maxWidth: 400,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-});
-
 export default function DriverTabs() {
-  const { t } = useLanguage();
-
   return (
     <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarStyle: isIOS ? iosTabBarStyle : androidTabBarStyle,
-        tabBarBackground: isIOS ? () => <IOSTabBarBackground /> : undefined,
-        tabBarActiveTintColor: colors.primary,
-        tabBarInactiveTintColor: colors.foregroundMuted,
-        tabBarItemStyle: {
-          height: 50,
-          justifyContent: 'center',
-          alignItems: 'center',
-        },
-        tabBarLabelStyle: {
-          fontSize: 10,
-          fontWeight: '500',
-        },
-      }}
+      screenOptions={{ headerShown: false }}
+      tabBar={(props) => <DriverTabBar {...props} />}
     >
-      <Tabs.Screen
-        name="index"
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-              {t('nav.home')}
-            </Text>
-          ),
-          tabBarIcon: ({ focused }) => (
-            <View style={styles.tabIconContainer}>
-              <Ionicons name={focused ? 'home' : 'home-outline'} size={28} color={focused ? colors.primary : colors.foregroundMuted} />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="messages"
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-              {t('nav.messages')}
-            </Text>
-          ),
-          tabBarIcon: ({ focused }) => (
-            <View style={styles.tabIconContainer}>
-              <Ionicons name={focused ? 'chatbubble' : 'chatbubble-outline'} size={28} color={focused ? colors.primary : colors.foregroundMuted} />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-              {t('nav.profile')}
-            </Text>
-          ),
-          tabBarIcon: ({ focused }) => (
-            <View style={styles.tabIconContainer}>
-              <Ionicons name={focused ? 'person' : 'person-outline'} size={28} color={focused ? colors.primary : colors.foregroundMuted} />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="more"
-        options={{
-          tabBarLabel: ({ focused }) => (
-            <Text maxFontSizeMultiplier={1.2} style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-              {t('nav.more')}
-            </Text>
-          ),
-          tabBarIcon: ({ focused }) => (
-            <View style={styles.tabIconContainer}>
-              <Feather name="more-horizontal" size={28} color={focused ? colors.primary : colors.foregroundMuted} />
-            </View>
-          ),
-        }}
-      />
+      <Tabs.Screen name="index" />
+      <Tabs.Screen name="messages" />
+      <Tabs.Screen name="settings" />
+      <Tabs.Screen name="more" />
     </Tabs>
   );
 }
 
-const styles = StyleSheet.create({
-  tabIconContainer: {
-    width: 28,
-    height: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tabLabel: {
-    fontSize: 10,
-    fontWeight: '500',
-    color: colors.foregroundMuted,
-  },
-  tabLabelFocused: {
-    color: colors.primary,
-  },
-});
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+    bar: {
+      flexDirection: 'row',
+      paddingTop: 8,
+      paddingHorizontal: 8,
+      backgroundColor: palette.bgSurface,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: palette.borderSubtle,
+      ...Platform.select({
+        ios: {
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: -1 },
+          shadowOpacity: 0.04,
+          shadowRadius: 3,
+        },
+        android: { elevation: 0 },
+      }),
+    },
+    tab: {
+      flex: 1,
+      paddingVertical: 6,
+      paddingHorizontal: 4,
+      borderRadius: radii.lg,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 4,
+    },
+    label: {
+      fontSize: 11,
+      fontWeight: '500',
+      letterSpacing: 0.3,
+    },
+  });
