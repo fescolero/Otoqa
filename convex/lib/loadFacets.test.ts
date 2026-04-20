@@ -600,11 +600,17 @@ describe('getLoadFacets', () => {
       });
 
       const facets = await getLoadFacets(ctx, loadId);
+      // `all` field added in PR #11 — order matches tag insertion,
+      // which here is HCR first (set above at 917dk) then TRIP (108).
       expect(facets).toEqual({
         hcr: '917dk',
         trip: '108',
         hcrCanonical: '917DK',
         tripCanonical: '108',
+        all: [
+          { key: 'HCR', value: '917dk' },
+          { key: 'TRIP', value: '108' },
+        ],
       });
     });
   });
@@ -619,6 +625,7 @@ describe('getLoadFacets', () => {
         trip: undefined,
         hcrCanonical: undefined,
         tripCanonical: undefined,
+        all: [],
       });
     });
   });
