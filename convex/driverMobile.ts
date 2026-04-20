@@ -1580,3 +1580,45 @@ export const addDetourStops = mutation({
     };
   },
 });
+
+// ============================================
+// DEBUG — TEMPORARY DIAGNOSTIC
+// ============================================
+
+/**
+ * debugLoadTags — returns the raw loadTags rows for a specific loadId so
+ * we can confirm whether the facet data actually exists at the deployment
+ * mobile is hitting.
+ *
+ * Invoke from the CLI:
+ *   npx convex run driverMobile:debugLoadTags '{"loadId":"<id>"}'
+ *
+ * Remove once the facet rendering bug is closed.
+ */
+export const debugLoadTags = query({
+  args: { loadId: v.id('loadInformation') },
+  handler: async (ctx, { loadId }) => {
+    const load = await ctx.db.get(loadId);
+    const byLoad = await ctx.db
+      .query('loadTags')
+      .withIndex('by_load', (q) => q.eq('loadId', loadId))
+      .collect();
+    const byLoadKey = await ctx.db
+      .query('loadTags')
+      .withIndex('by_load_key', (q) => q.eq('loadId', loadId))
+      .collect();
+    return {
+      loadId,
+      loadExists: !!load,
+      loadOrgId: load?.workosOrgId,
+      byLoadCount: byLoad.length,
+      byLoadKeyCount: byLoadKey.length,
+      tags: byLoad.map((t) => ({
+        facetKey: t.facetKey,
+        value: t.value,
+        canonicalValue: t.canonicalValue,
+        orgId: t.workosOrgId,
+      })),
+    };
+  },
+});
