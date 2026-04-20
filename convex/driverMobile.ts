@@ -117,12 +117,13 @@ export const getMyProfile = query({
       organizationId: v.string(),
       currentTruckId: v.optional(v.id('trucks')),
       // License (non-sensitive). Used by the Profile screen's CDL-style
-      // hero and detail rows. Number is optional on the driver schema so
-      // it's optional here too; class / state / expiration are required.
+      // hero and detail rows. All optional here even where the schema
+      // marks them required — existing rows can have empty strings, and
+      // we'd rather render "—" than fail the whole query validator.
       licenseNumber: v.optional(v.string()),
-      licenseClass: v.string(),
-      licenseState: v.string(),
-      licenseExpiration: v.string(),
+      licenseClass: v.optional(v.string()),
+      licenseState: v.optional(v.string()),
+      licenseExpiration: v.optional(v.string()),
       medicalExpiration: v.optional(v.string()),
       // Truck info if assigned
       truck: v.optional(

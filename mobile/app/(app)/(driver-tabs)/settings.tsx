@@ -23,20 +23,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
-import * as Application from 'expo-application';
-import * as Updates from 'expo-updates';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
-import { useDriver, useAppMode } from '../_layout';
-import { useLanguage } from '../../../lib/LanguageContext';
-import { useTheme, type ThemePreference } from '../../../lib/ThemeContext';
-import { Icon, type IconName } from '../../../lib/design-icons';
-import { radii, typeScale, type Palette } from '../../../lib/design-tokens';
+import { useDriver } from '../_layout';
+import { useTheme } from '../../../lib/ThemeContext';
+import { Icon } from '../../../lib/design-icons';
+import { radii, type Palette } from '../../../lib/design-tokens';
 
 export default function ProfileScreen() {
-  const router = useRouter();
   const { palette } = useTheme();
   const styles = useMemo(() => makeStyles(palette), [palette]);
 
@@ -45,31 +40,6 @@ export default function ProfileScreen() {
     api.driverMobile.getMyProfile,
     driverId ? { driverId: driverId as Id<'drivers'> } : 'skip',
   );
-
-  const { canSwitchModes, setMode } = useAppMode();
-  const { currentLanguage, t } = useLanguage();
-  const { preference: themePreference, setPreference: setThemePreference } = useTheme();
-
-  const appVersion = Application.nativeApplicationVersion ?? '1.0.0';
-  const buildNumber = Application.nativeBuildVersion ?? '?';
-  const otaUpdateId = Updates.updateId;
-  const isEmbeddedLaunch = Updates.isEmbeddedLaunch;
-  const otaShortId = otaUpdateId ? otaUpdateId.slice(0, 8) : null;
-
-  const getLanguageDisplayName = () =>
-    currentLanguage === 'system' ? 'System' : currentLanguage === 'es' ? 'Español' : 'English';
-
-  const getThemeDisplayName = () =>
-    themePreference === 'system' ? 'System' : themePreference === 'light' ? 'Light' : 'Dark';
-
-  const handleThemePress = () => {
-    Alert.alert('Appearance', 'Choose how the driver app looks.', [
-      { text: 'System', onPress: () => setThemePreference('system' as ThemePreference) },
-      { text: 'Light', onPress: () => setThemePreference('light' as ThemePreference) },
-      { text: 'Dark', onPress: () => setThemePreference('dark' as ThemePreference) },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
-  };
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
@@ -94,62 +64,6 @@ export default function ProfileScreen() {
             Alert.alert('Documents', 'Documents are coming soon.')
           }
         />
-
-        {/* App preferences */}
-        <View style={styles.sectionHead}>
-          <Text style={styles.sectionLabel}>APP SETTINGS</Text>
-        </View>
-        <View style={styles.rowCard}>
-          <ProfileRow
-            palette={palette}
-            icon="message"
-            label="Language"
-            value={getLanguageDisplayName()}
-            onPress={() => router.push('/language')}
-          />
-          <RowDivider palette={palette} />
-          <ProfileRow
-            palette={palette}
-            icon="moon"
-            label="Appearance"
-            value={getThemeDisplayName()}
-            onPress={handleThemePress}
-          />
-          {canSwitchModes && (
-            <>
-              <RowDivider palette={palette} />
-              <ProfileRow
-                palette={palette}
-                icon="truck"
-                label={t('profile.switchToDispatcher')}
-                value=""
-                onPress={() => setMode('owner')}
-              />
-            </>
-          )}
-        </View>
-
-        {/* App info (read-only) */}
-        <View style={styles.sectionHead}>
-          <Text style={styles.sectionLabel}>APP INFO</Text>
-        </View>
-        <View style={styles.rowCard}>
-          <View style={styles.infoRow}>
-            <Text style={styles.infoKey}>Version</Text>
-            <Text style={styles.infoValue}>
-              v{appVersion} ({buildNumber})
-            </Text>
-          </View>
-          {!isEmbeddedLaunch && otaShortId && (
-            <>
-              <RowDivider palette={palette} />
-              <View style={styles.infoRow}>
-                <Text style={styles.infoKey}>OTA</Text>
-                <Text style={styles.infoValue}>{otaShortId}</Text>
-              </View>
-            </>
-          )}
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -353,37 +267,8 @@ function ProfileTiles({
 }
 
 // ============================================================================
-// ROW PRIMITIVES (used by App settings + App info)
+// ROW DIVIDER (used inside LicenseDetails)
 // ============================================================================
-
-function ProfileRow({
-  palette,
-  icon,
-  label,
-  value,
-  onPress,
-}: {
-  palette: Palette;
-  icon: IconName;
-  label: string;
-  value: string;
-  onPress: () => void;
-}) {
-  const styles = makeStyles(palette);
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [styles.row, pressed && { opacity: 0.85 }]}
-    >
-      <View style={styles.rowIcon}>
-        <Icon name={icon} size={18} color={palette.textSecondary} />
-      </View>
-      <Text style={styles.rowLabel}>{label}</Text>
-      {value ? <Text style={styles.rowValue}>{value}</Text> : null}
-      <Icon name="chevron-right" size={16} color={palette.textTertiary} />
-    </Pressable>
-  );
-}
 
 function RowDivider({ palette }: { palette: Palette }) {
   return (

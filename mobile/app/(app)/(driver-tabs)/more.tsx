@@ -31,12 +31,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
 import { useMutation } from 'convex/react';
+import * as Application from 'expo-application';
+import * as Updates from 'expo-updates';
 import { api } from '../../../../convex/_generated/api';
-import { useDriver } from '../_layout';
+import { useDriver, useAppMode } from '../_layout';
 import { useMyLoads } from '../../../lib/hooks/useMyLoads';
 import { stopSessionTracking } from '../../../lib/location-tracking';
+import { useLanguage } from '../../../lib/LanguageContext';
 import { Icon, type IconName } from '../../../lib/design-icons';
-import { useTheme } from '../../../lib/ThemeContext';
+import { useTheme, type ThemePreference } from '../../../lib/ThemeContext';
 import { radii, typeScale, type Palette } from '../../../lib/design-tokens';
 
 export default function MoreScreen() {
@@ -48,10 +51,32 @@ export default function MoreScreen() {
   const { driverId, truck } = useDriver();
   const { activeSession } = useMyLoads(driverId);
   const endSessionMutation = useMutation(api.driverSessions.endSession);
+  const { canSwitchModes, setMode } = useAppMode();
+  const { currentLanguage } = useLanguage();
+  const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [endShiftOpen, setEndShiftOpen] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
+
+  const appVersion = Application.nativeApplicationVersion ?? '1.0.0';
+  const buildNumber = Application.nativeBuildVersion ?? '?';
+  const otaUpdateId = Updates.updateId;
+  const isEmbeddedLaunch = Updates.isEmbeddedLaunch;
+  const otaShortId = otaUpdateId ? otaUpdateId.slice(0, 8) : null;
+
+  const languageLabel =
+    currentLanguage === 'system' ? 'System' : currentLanguage === 'es' ? 'Español' : 'English';
+  const themeLabel =
+    themePreference === 'system' ? 'System' : themePreference === 'light' ? 'Light' : 'Dark';
+
+  const pickTheme = () =>
+    Alert.alert('Appearance', 'Choose how the driver app looks.', [
+      { text: 'System', onPress: () => setThemePreference('system' as ThemePreference) },
+      { text: 'Light', onPress: () => setThemePreference('light' as ThemePreference) },
+      { text: 'Dark', onPress: () => setThemePreference('dark' as ThemePreference) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
 
   const onDuty = !!activeSession;
   const elapsedLabel = formatElapsed(activeSession?.startedAt);
@@ -191,32 +216,86 @@ export default function MoreScreen() {
           </Pressable>
         </View>
 
-        {/* Drill-in rows */}
-        <DrillRow
-          palette={palette}
-          icon="settings"
-          label="App settings"
-          meta="Language, notifications, permissions"
-          onPress={() => router.push('/(driver-tabs)/settings')}
-        />
-        <DrillRow
-          palette={palette}
-          icon="info"
-          label="Help & support"
-          meta="Help center · Report a bug"
-          onPress={() =>
-            Alert.alert('Help & support', 'Contact your dispatcher for assistance.')
-          }
-        />
-        <DrillRow
-          palette={palette}
-          icon="info"
-          label="About"
-          meta="v1.0 · Terms & Privacy"
-          onPress={() =>
-            Alert.alert('About Otoqa', 'Driver app · v1.0\nTerms and privacy at otoqa.com')
-          }
-        />
+        {/* App settings */}
+        <View style={styles.sectionHead}>
+          <Text style={styles.sectionLabel}>APP SETTINGS</Text>
+        </View>
+        <View style={styles.rowCard}>
+          <SettingsRow
+            palette={palette}
+            icon="message"
+            label="Language"
+            value={languageLabel}
+            onPress={() => router.push('/language')}
+          />
+          <RowDivider palette={palette} />
+          <SettingsRow
+            palette={palette}
+            icon="moon"
+            label="Appearance"
+            value={themeLabel}
+            onPress={pickTheme}
+          />
+          {canSwitchModes && (
+            <>
+              <RowDivider palette={palette} />
+              <SettingsRow
+                palette={palette}
+                icon="truck"
+                label="Switch to dispatcher"
+                value=""
+                onPress={() => setMode('owner')}
+              />
+            </>
+          )}
+        </View>
+
+        {/* Help + About */}
+        <View style={{ marginTop: 14, gap: 10 }}>
+          <DrillRow
+            palette={palette}
+            icon="info"
+            label="Help & support"
+            meta="Help center · Report a bug"
+            onPress={() =>
+              Alert.alert('Help & support', 'Contact your dispatcher for assistance.')
+            }
+          />
+          <DrillRow
+            palette={palette}
+            icon="info"
+            label="About"
+            meta={`v${appVersion} · Terms & Privacy`}
+            onPress={() =>
+              Alert.alert(
+                'About Otoqa',
+                `Driver app · v${appVersion} (${buildNumber})\nTerms and privacy at otoqa.com`,
+              )
+            }
+          />
+        </View>
+
+        {/* App info (read-only) */}
+        <View style={styles.sectionHead}>
+          <Text style={styles.sectionLabel}>APP INFO</Text>
+        </View>
+        <View style={styles.rowCard}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Version</Text>
+            <Text style={styles.infoValue}>
+              v{appVersion} ({buildNumber})
+            </Text>
+          </View>
+          {!isEmbeddedLaunch && otaShortId && (
+            <>
+              <RowDivider palette={palette} />
+              <View style={styles.infoRow}>
+                <Text style={styles.infoKey}>OTA</Text>
+                <Text style={styles.infoValue}>{otaShortId}</Text>
+              </View>
+            </>
+          )}
+        </View>
       </ScrollView>
 
       <SignOutSheet
@@ -277,6 +356,47 @@ function DrillRow({
         <Icon name="chevron-right" size={16} color={palette.textTertiary} />
       </Pressable>
     </View>
+  );
+}
+
+function SettingsRow({
+  palette,
+  icon,
+  label,
+  value,
+  onPress,
+}: {
+  palette: Palette;
+  icon: IconName;
+  label: string;
+  value: string;
+  onPress: () => void;
+}) {
+  const styles = makeStyles(palette);
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.settingsRow, pressed && { opacity: 0.85 }]}
+    >
+      <View style={styles.settingsRowIcon}>
+        <Icon name={icon} size={18} color={palette.textSecondary} />
+      </View>
+      <Text style={styles.settingsRowLabel}>{label}</Text>
+      {value ? <Text style={styles.settingsRowValue}>{value}</Text> : null}
+      <Icon name="chevron-right" size={16} color={palette.textTertiary} />
+    </Pressable>
+  );
+}
+
+function RowDivider({ palette }: { palette: Palette }) {
+  return (
+    <View
+      style={{
+        height: StyleSheet.hairlineWidth,
+        backgroundColor: palette.borderSubtle,
+        marginLeft: 54,
+      }}
+    />
   );
 }
 
@@ -606,6 +726,67 @@ const makeStyles = (palette: Palette) =>
       fontSize: 11,
       color: palette.textTertiary,
       marginTop: 2,
+    },
+
+    // App settings + App info sections
+    sectionHead: {
+      paddingTop: 24,
+      paddingBottom: 8,
+    },
+    sectionLabel: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.8,
+      color: palette.textTertiary,
+    },
+    rowCard: {
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      borderRadius: radii.lg,
+      overflow: 'hidden',
+    },
+    settingsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    settingsRowIcon: {
+      width: 28,
+      height: 28,
+      borderRadius: radii.md,
+      backgroundColor: palette.bgMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    settingsRowLabel: {
+      flex: 1,
+      fontSize: 14,
+      color: palette.textPrimary,
+      fontWeight: '500',
+    },
+    settingsRowValue: {
+      fontSize: 13,
+      color: palette.textTertiary,
+    },
+    infoRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    infoKey: {
+      fontSize: 13,
+      color: palette.textTertiary,
+    },
+    infoValue: {
+      fontSize: 13,
+      fontWeight: '500',
+      color: palette.textPrimary,
+      fontVariant: ['tabular-nums'],
     },
 
     // Sheets
