@@ -6,7 +6,7 @@
  * the bar follows the user's light/dark/system preference.
  */
 import React, { useMemo } from 'react';
-import { Tabs } from 'expo-router';
+import { Tabs, router } from 'expo-router';
 import { View, StyleSheet, Text, Pressable, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
@@ -19,6 +19,7 @@ type TabKey = 'index' | 'messages' | 'settings' | 'more';
 
 type TabSpec = {
   name: TabKey;
+  href: '/(driver-tabs)' | '/(driver-tabs)/messages' | '/(driver-tabs)/settings' | '/(driver-tabs)/more';
   icon: IconName;
   labelKey: 'nav.home' | 'nav.messages' | 'nav.profile' | 'nav.more';
 };
@@ -27,13 +28,13 @@ type TabSpec = {
 // message/more. Active state is expressed via a tinted pill + thicker stroke
 // + accent color instead of swapping to a solid glyph.
 const TAB_SPECS: readonly TabSpec[] = [
-  { name: 'index', icon: 'home', labelKey: 'nav.home' },
-  { name: 'messages', icon: 'message', labelKey: 'nav.messages' },
-  { name: 'settings', icon: 'user', labelKey: 'nav.profile' },
-  { name: 'more', icon: 'more-h', labelKey: 'nav.more' },
+  { name: 'index', href: '/(driver-tabs)', icon: 'home', labelKey: 'nav.home' },
+  { name: 'messages', href: '/(driver-tabs)/messages', icon: 'message', labelKey: 'nav.messages' },
+  { name: 'settings', href: '/(driver-tabs)/settings', icon: 'user', labelKey: 'nav.profile' },
+  { name: 'more', href: '/(driver-tabs)/more', icon: 'more-h', labelKey: 'nav.more' },
 ];
 
-function DriverTabBar({ state, navigation }: BottomTabBarProps) {
+function DriverTabBar({ state }: BottomTabBarProps) {
   const { palette } = useTheme();
   const { t } = useLanguage();
   const insets = useSafeAreaInsets();
@@ -52,15 +53,12 @@ function DriverTabBar({ state, navigation }: BottomTabBarProps) {
 
         const isActive = state.index === index;
 
+        // expo-router v6's navigation.navigate with a react-navigation route
+        // name silently no-ops under some Tabs configurations — `router.push`
+        // against the URL-based href is the reliable path.
         const onPress = () => {
-          const event = navigation.emit({
-            type: 'tabPress',
-            target: route.key,
-            canPreventDefault: true,
-          });
-          if (!isActive && !event.defaultPrevented) {
-            navigation.navigate(route.name, route.params);
-          }
+          if (isActive) return;
+          router.push(spec.href);
         };
 
         const color = isActive ? palette.accent : palette.textTertiary;
