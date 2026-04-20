@@ -21,7 +21,7 @@ import { useDriver } from '../_layout';
 import { useLanguage } from '../../../lib/LanguageContext';
 import { trackWeatherFetchFailed, trackScreen } from '../../../lib/analytics';
 import { stopSessionTracking } from '../../../lib/location-tracking';
-import { Icon } from '../../../lib/design-icons';
+import { Icon, type IconName } from '../../../lib/design-icons';
 import {
   typeScale,
   densitySpacing,
@@ -140,7 +140,8 @@ const greet = (): string => {
 export default function HomeScreen() {
   const router = useRouter();
   const { palette, styles } = useDesignStyles();
-  const { driverId } = useDriver();
+  const { driverId, driverName } = useDriver();
+  const firstName = driverName.trim().split(/\s+/)[0] || 'Driver';
   const {
     loads,
     isLoading,
@@ -374,13 +375,13 @@ export default function HomeScreen() {
 
       <TopHeader
         greeting={greet()}
+        driverFirstName={firstName}
         isSessionMode={isSessionMode}
         elapsedHours={elapsedHours}
         elapsedMinutes={elapsedMinutes}
         onEndShift={handleEndShift}
         isEndingShift={isEndingShift}
         weather={weather}
-        onScanTruck={() => router.push('/switch-truck')}
       />
 
       {!isSessionMode && (
@@ -435,9 +436,10 @@ export default function HomeScreen() {
           scheduledLoads.length === 0 &&
           completedLoads.length === 0 && (
             <EmptyState
-              isSessionMode={isSessionMode}
+              variant={isSessionMode ? 'session' : selectedDay}
               locale={locale}
-              onScanTruck={() => router.push('/switch-truck')}
+              onRefresh={handleRefresh}
+              isRefreshing={isRefetching}
             />
           )}
       </ScrollView>
@@ -451,24 +453,24 @@ export default function HomeScreen() {
 
 interface TopHeaderProps {
   greeting: string;
+  driverFirstName: string;
   isSessionMode: boolean;
   elapsedHours: number;
   elapsedMinutes: number;
   onEndShift: () => void;
   isEndingShift: boolean;
   weather: WeatherData | null;
-  onScanTruck: () => void;
 }
 
 const TopHeader: React.FC<TopHeaderProps> = ({
   greeting,
+  driverFirstName,
   isSessionMode,
   elapsedHours,
   elapsedMinutes,
   onEndShift,
   isEndingShift,
   weather,
-  onScanTruck,
 }) => {
   const { palette, styles } = useDesignStyles();
   return (
@@ -478,7 +480,7 @@ const TopHeader: React.FC<TopHeaderProps> = ({
         {isSessionMode ? 'Shift active' : greeting}
       </Text>
       <Text style={styles.headerTitle} numberOfLines={1}>
-        {isSessionMode ? `${elapsedHours}h ${elapsedMinutes}m on duty` : 'Driver'}
+        {isSessionMode ? `${elapsedHours}h ${elapsedMinutes}m on duty` : driverFirstName}
       </Text>
     </View>
 
@@ -515,16 +517,6 @@ const TopHeader: React.FC<TopHeaderProps> = ({
             ]}
           >
             <Icon name="search" size={22} color={palette.textPrimary} />
-          </Pressable>
-          <Pressable
-            onPress={onScanTruck}
-            accessibilityLabel="Scan truck QR"
-            style={({ pressed }) => [
-              styles.headerIconBtn,
-              pressed && { opacity: 0.7 },
-            ]}
-          >
-            <Icon name="truck" size={22} color={palette.textPrimary} />
           </Pressable>
         </>
       )}
@@ -879,54 +871,93 @@ const CompletedSection: React.FC<{ loads: any[]; isSessionMode: boolean }> = ({
 // EMPTY STATE + BANNERS
 // ============================================================================
 
-const EmptyState: React.FC<{
-  isSessionMode: boolean;
-  locale: string;
-  onScanTruck: () => void;
-}> = ({ isSessionMode, locale, onScanTruck }) => {
-  const { palette, styles } = useDesignStyles();
-  if (isSessionMode) {
-    return (
-      <View style={styles.emptyWrap}>
-        <View style={styles.emptyIcon}>
-          <Icon name="package" size={28} color={palette.accent} />
-        </View>
-        <Text style={styles.emptyTitle}>
-          {locale === 'es' ? 'Nada en tu turno aún' : 'Nothing on your shift yet'}
-        </Text>
-        <Text style={styles.emptyBody}>
-          {locale === 'es'
-            ? 'Los despachadores te asignarán cargas — aparecerán aquí.'
-            : "Dispatch will assign loads — they'll show up here."}
-        </Text>
-      </View>
-    );
+type EmptyVariant = 'session' | 'today' | 'yesterday' | 'tomorrow';
+
+interface EmptyCopy {
+  icon: IconName;
+  title: string;
+  body: string;
+  helper?: string;
+  action?: string;
+}
+
+const getEmptyCopy = (variant: EmptyVariant, locale: string): EmptyCopy => {
+  const isEs = locale === 'es';
+  switch (variant) {
+    case 'session':
+      return {
+        icon: 'package',
+        title: isEs ? 'Nada en tu turno aún' : 'Nothing on your shift yet',
+        body: isEs
+          ? 'Los despachadores te asignarán cargas — aparecerán aquí.'
+          : "Dispatch will assign loads here — you'll get a notification.",
+      };
+    case 'today':
+      return {
+        icon: 'truck',
+        title: isEs ? 'Sin cargas hoy' : 'No loads today',
+        body: isEs
+          ? 'Todo despejado. Cuando despacho asigne cargas, aparecerán aquí.'
+          : "You're all clear. Dispatch will push new loads here when they're assigned.",
+        action: isEs ? 'Revisar de nuevo' : 'Check again',
+      };
+    case 'yesterday':
+      return {
+        icon: 'clock',
+        title: isEs ? 'Nada entregado ayer' : 'Nothing delivered yesterday',
+        body: isEs
+          ? 'No tuviste cargas asignadas en tu último turno. El trabajo completado aparecerá aquí.'
+          : "You didn't have any assigned loads on your last shift. Completed work will show here.",
+      };
+    case 'tomorrow':
+      return {
+        icon: 'calendar',
+        title: isEs ? 'Nada programado aún' : 'Nothing scheduled yet',
+        body: isEs
+          ? 'Las cargas de mañana aparecerán aquí cuando despacho las finalice — normalmente antes de las 6 PM.'
+          : "Tomorrow's loads will appear here once dispatch finalizes the board — usually by 6:00 PM the night before.",
+        helper: isEs
+          ? 'Te avisaremos cuando se asignen'
+          : "We'll notify you when they're assigned",
+      };
   }
+};
+
+const EmptyState: React.FC<{
+  variant: EmptyVariant;
+  locale: string;
+  onRefresh: () => void;
+  isRefreshing?: boolean;
+}> = ({ variant, locale, onRefresh, isRefreshing }) => {
+  const { palette, styles } = useDesignStyles();
+  const copy = getEmptyCopy(variant, locale);
   return (
     <View style={styles.emptyWrap}>
-      <View style={styles.emptyIcon}>
-        <Icon name="truck" size={28} color={palette.accent} />
+      <View style={styles.emptyIllustration}>
+        <Icon name={copy.icon} size={40} color={palette.accent} strokeWidth={1.3} />
       </View>
-      <Text style={styles.emptyTitle}>
-        {locale === 'es' ? 'Sin cargas programadas' : 'No loads scheduled'}
-      </Text>
-      <Text style={styles.emptyBody}>
-        {locale === 'es'
-          ? 'Escanea un camión para iniciar tu turno y ver cargas en vivo.'
-          : 'Scan a truck to start your shift and see live loads.'}
-      </Text>
-      <Pressable
-        onPress={onScanTruck}
-        style={({ pressed }) => [
-          styles.emptyCta,
-          pressed && { opacity: 0.9 },
-        ]}
-      >
-        <Icon name="truck" size={18} color="#fff" />
-        <Text style={styles.emptyCtaText}>
-          {locale === 'es' ? 'Escanear camión' : 'Scan truck'}
-        </Text>
-      </Pressable>
+      <Text style={styles.emptyTitle}>{copy.title}</Text>
+      <Text style={styles.emptyBody}>{copy.body}</Text>
+      {copy.helper && (
+        <View style={styles.emptyHelper}>
+          <View style={[styles.emptyHelperDot, { backgroundColor: palette.success }]} />
+          <Text style={styles.emptyHelperText}>{copy.helper}</Text>
+        </View>
+      )}
+      {copy.action && (
+        <Pressable
+          onPress={onRefresh}
+          disabled={isRefreshing}
+          style={({ pressed }) => [
+            styles.emptyCta,
+            pressed && { opacity: 0.85 },
+            isRefreshing && { opacity: 0.6 },
+          ]}
+        >
+          <Icon name="refresh" size={14} color={palette.textSecondary} />
+          <Text style={styles.emptyCtaText}>{copy.action}</Text>
+        </Pressable>
+      )}
     </View>
   );
 };
@@ -1312,14 +1343,14 @@ const makeStyles = (palette: Palette) =>
   // Empty state
   emptyWrap: {
     alignItems: 'center',
-    paddingVertical: 48,
-    paddingHorizontal: 24,
-    gap: 12,
+    paddingTop: 48,
+    paddingBottom: 32,
+    paddingHorizontal: sp.screenPx,
   },
-  emptyIcon: {
-    width: 64,
-    height: 64,
-    borderRadius: radii.xl,
+  emptyIllustration: {
+    width: 88,
+    height: 88,
+    borderRadius: 999,
     backgroundColor: palette.accentTint,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1328,6 +1359,8 @@ const makeStyles = (palette: Palette) =>
     ...typeScale.headingSm,
     color: palette.textPrimary,
     textAlign: 'center',
+    marginTop: 24,
+    marginBottom: 6,
   },
   emptyBody: {
     fontSize: 14,
@@ -1336,20 +1369,37 @@ const makeStyles = (palette: Palette) =>
     textAlign: 'center',
     maxWidth: 280,
   },
+  emptyHelper: {
+    marginTop: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  emptyHelperDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+  },
+  emptyHelperText: {
+    fontSize: 12,
+    color: palette.textTertiary,
+  },
   emptyCta: {
-    marginTop: 12,
+    marginTop: 16,
     height: comp.btnMd.height,
     paddingHorizontal: comp.btnMd.paddingHorizontal,
     borderRadius: comp.btnMd.radius,
-    backgroundColor: palette.accent,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: palette.borderDefault,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
   },
   emptyCtaText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
+    color: palette.textPrimary,
+    fontSize: 14,
+    fontWeight: '500',
   },
 
   // Banners
