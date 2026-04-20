@@ -2035,6 +2035,35 @@ export default defineSchema({
     .index('by_load', ['loadId', 'triggeredAt']),
 
   /**
+   * gpsArchiveLog — audit table for the nightly GPS archive cron.
+   *
+   * One row per successful S3 upload chunk. Write-once, read for retrieval
+   * (signed URLs back to the original file) and for auditability during
+   * incident forensics. Keyed by the (orgId, date, hour) grouping used
+   * when writing the JSONL file.
+   */
+  gpsArchiveLog: defineTable({
+    organizationId: v.string(),
+    // The day the archived GPS belongs to (YYYY-MM-DD in UTC). Combined
+    // with `hour` this gives the exact file an operator would need to fetch.
+    date: v.string(),
+    hour: v.number(), // 0-23 UTC
+    // S3 object key path relative to bucket root.
+    s3Bucket: v.string(),
+    s3Key: v.string(),
+    rowCount: v.number(),
+    byteCount: v.number(),
+    // Oldest/newest recordedAt in the archived batch — lets retrieval pick
+    // the right files for a [from, to] range without downloading headers.
+    minRecordedAt: v.number(),
+    maxRecordedAt: v.number(),
+    archivedAt: v.number(),
+  })
+    .index('by_org_date', ['organizationId', 'date'])
+    .index('by_org_window', ['organizationId', 'maxRecordedAt'])
+    .index('by_archived', ['archivedAt']),
+
+  /**
    * sessionEndedWithActiveLoad — audit table. Written when a session ends
    * (via auto-timeout, dispatch override, or handoff) while the driver had
    * one or more active legs. Surfaces these cases to dispatchers for follow-up.

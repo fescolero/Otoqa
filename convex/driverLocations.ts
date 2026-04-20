@@ -4,7 +4,6 @@ import {
   mutation,
   internalQuery,
   internalMutation,
-  internalAction,
   MutationCtx,
 } from './_generated/server';
 import { internal } from './_generated/api';
@@ -606,108 +605,88 @@ export const deleteArchivedLocations = internalMutation({
 });
 
 // ============================================
-// ARCHIVAL ACTION (runs via cron)
-// Archives old location data and deletes from hot storage
+// ARCHIVAL — orchestrator moved to convex/gpsArchive.ts
+// This file keeps only the helper query + mutation it calls.
 // ============================================
 
-const RETENTION_DAYS = 90; // Keep 90 days in hot storage
-const BATCH_SIZE = 5000; // Process in batches to avoid timeouts
+/**
+ * Write an audit row after a successful archive upload. Internal; only the
+ * gpsArchive action calls this, between the S3 PUT and the row delete. If
+ * the process crashes between upload and this write, the next cron run
+ * will re-upload the same range — idempotent because S3 object keys are
+ * deterministic per (orgId, date, hour).
+ */
+export const logArchiveUpload = internalMutation({
+  args: {
+    organizationId: v.string(),
+    date: v.string(),
+    hour: v.number(),
+    s3Bucket: v.string(),
+    s3Key: v.string(),
+    rowCount: v.number(),
+    byteCount: v.number(),
+    minRecordedAt: v.number(),
+    maxRecordedAt: v.number(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await ctx.db.insert('gpsArchiveLog', {
+      ...args,
+      archivedAt: Date.now(),
+    });
+    return null;
+  },
+});
 
 /**
- * Archive old location data to cold storage (R2)
- * This action:
- * 1. Queries locations older than retention period
- * 2. Groups them by month
- * 3. Uploads to R2 as JSONL files (append mode)
- * 4. Deletes archived records from Convex
+ * Called by the retrieval action (gpsArchive.getArchivedPositionFiles) to
+ * find which archive files cover a requested [from, to] time window.
  *
- * Note: R2 upload is optional - if not configured, just deletes old records
+ * Lives here (not in gpsArchive.ts) because gpsArchive.ts uses `'use node'`
+ * and can only contain actions. Keeps the query close to the other archive
+ * database helpers.
  */
-export const archiveOldLocations = internalAction({
-  args: {},
-  returns: v.null(),
-  handler: async (ctx) => {
-    const cutoffTime = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+export const listArchivedFilesInWindow = internalQuery({
+  args: {
+    organizationId: v.string(),
+    from: v.number(),
+    to: v.number(),
+  },
+  returns: v.array(
+    v.object({
+      date: v.string(),
+      hour: v.number(),
+      s3Bucket: v.string(),
+      s3Key: v.string(),
+      rowCount: v.number(),
+      byteCount: v.number(),
+      minRecordedAt: v.number(),
+      maxRecordedAt: v.number(),
+    })
+  ),
+  handler: async (ctx, args) => {
+    // Range-scan by the archive log's maxRecordedAt — every file whose
+    // maxRecordedAt is ≥ args.from MIGHT overlap the window. We further
+    // filter by minRecordedAt in-memory to exclude files whose recorded
+    // range falls entirely past args.to.
+    const candidates = await ctx.db
+      .query('gpsArchiveLog')
+      .withIndex('by_org_window', (q) =>
+        q.eq('organizationId', args.organizationId).gte('maxRecordedAt', args.from)
+      )
+      .collect();
 
-    console.log(
-      `[LocationArchival] Starting archival for records older than ${new Date(cutoffTime).toISOString()}`
-    );
-
-    // Get old locations
-    const oldLocations = await ctx.runQuery(
-      internal.driverLocations.getLocationsOlderThan,
-      {
-        cutoffTime,
-        limit: BATCH_SIZE,
-      }
-    );
-
-    if (oldLocations.length === 0) {
-      console.log('[LocationArchival] No records to archive');
-      return null;
-    }
-
-    console.log(`[LocationArchival] Found ${oldLocations.length} records to archive`);
-
-    // Group by organization and month for organized archival
-    const groupedByOrgMonth = new Map<string, typeof oldLocations>();
-
-    for (const loc of oldLocations) {
-      const date = new Date(loc.recordedAt);
-      const monthKey = `${loc.organizationId}/${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-
-      if (!groupedByOrgMonth.has(monthKey)) {
-        groupedByOrgMonth.set(monthKey, []);
-      }
-      groupedByOrgMonth.get(monthKey)!.push(loc);
-    }
-
-    console.log(
-      `[LocationArchival] Grouped into ${groupedByOrgMonth.size} org/month buckets`
-    );
-
-    // For now, just log what would be archived
-    // R2 upload would happen here in production with proper credentials
-    for (const [monthKey, locations] of groupedByOrgMonth) {
-      console.log(
-        `[LocationArchival] Would archive ${locations.length} records to ${monthKey}.jsonl`
-      );
-
-      // TODO: Implement R2 upload when credentials are configured
-      // const jsonl = locations.map(l => JSON.stringify({
-      //   driverId: l.driverId,
-      //   loadId: l.loadId,
-      //   organizationId: l.organizationId,
-      //   latitude: l.latitude,
-      //   longitude: l.longitude,
-      //   accuracy: l.accuracy,
-      //   speed: l.speed,
-      //   heading: l.heading,
-      //   recordedAt: l.recordedAt,
-      //   archivedAt: Date.now(),
-      // })).join('\n');
-      //
-      // await uploadToR2(`location-archives/${monthKey}.jsonl`, jsonl);
-    }
-
-    // Delete archived records from Convex
-    const idsToDelete = oldLocations.map((l: { _id: Id<'driverLocations'> }) => l._id);
-    const deleteResult = await ctx.runMutation(
-      internal.driverLocations.deleteArchivedLocations,
-      { ids: idsToDelete }
-    );
-
-    console.log(
-      `[LocationArchival] Deleted ${deleteResult.deleted} records from hot storage`
-    );
-
-    // If there might be more records, schedule another run
-    if (oldLocations.length === BATCH_SIZE) {
-      console.log(
-        '[LocationArchival] Batch limit reached, more records may need archival'
-      );
-    }
-
-    return null;
+    return candidates
+      .filter((f) => f.minRecordedAt <= args.to)
+      .map((f) => ({
+        date: f.date,
+        hour: f.hour,
+        s3Bucket: f.s3Bucket,
+        s3Key: f.s3Key,
+        rowCount: f.rowCount,
+        byteCount: f.byteCount,
+        minRecordedAt: f.minRecordedAt,
+        maxRecordedAt: f.maxRecordedAt,
+      }));
   },
 });
