@@ -286,9 +286,11 @@ export const getOfferedLoads = query({
           : [];
 
         // Safe load data (no broker pricing). HCR/Trip from facet tags.
+        // Also surface the full facets array so the mobile card render
+        // can iterate every tag (see PR #11's loadFacetTags helper).
         const facets = load
           ? await getLoadFacets(ctx, load._id)
-          : { hcr: undefined, trip: undefined };
+          : { hcr: undefined, trip: undefined, all: [] };
         const safeLoad = load
           ? {
               _id: load._id,
@@ -302,6 +304,7 @@ export const getOfferedLoads = query({
               requiresTarp: load.requiresTarp,
               tripNumber: facets.trip,
               hcr: facets.hcr,
+              facets: facets.all,
             }
           : null;
 
@@ -381,7 +384,7 @@ export const getActiveLoads = query({
 
         const facets = load
           ? await getLoadFacets(ctx, load._id)
-          : { hcr: undefined, trip: undefined };
+          : { hcr: undefined, trip: undefined, all: [] };
         return {
           ...assignment,
           load: load
@@ -394,6 +397,7 @@ export const getActiveLoads = query({
                 equipmentType: load.equipmentType,
                 tripNumber: facets.trip,
                 hcr: facets.hcr,
+                facets: facets.all,
               }
             : null,
           stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
@@ -454,7 +458,7 @@ export const getCompletedLoads = query({
         const load = await ctx.db.get(assignment.loadId);
         const facets = load
           ? await getLoadFacets(ctx, load._id)
-          : { hcr: undefined, trip: undefined };
+          : { hcr: undefined, trip: undefined, all: [] };
         return {
           ...assignment,
           load: load
@@ -465,6 +469,7 @@ export const getCompletedLoads = query({
                 equipmentType: load.equipmentType,
                 tripNumber: facets.trip,
                 hcr: facets.hcr,
+                facets: facets.all,
               }
             : null,
         };

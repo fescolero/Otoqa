@@ -1559,10 +1559,26 @@ function LoadSummary({
   );
   const progressPct = Math.min((done / total) * 100, 100);
 
-  const tagValues: string[] = [
-    load.parsedHcr,
-    load.parsedTripNumber && `Trip ${load.parsedTripNumber}`,
-  ].filter(Boolean);
+  // Prefer the server's `facets` array (all tagged facets, not just
+  // HCR + TRIP) so per-org custom facets show up. Fall back to the
+  // legacy parsedHcr / parsedTripNumber pair for responses that
+  // pre-date the facet migration.
+  // TRIP values get a "Trip " prefix so badges read "Trip 12345"
+  // instead of a bare number — mirrors the driver tab's loadFacetTags
+  // helper at (driver-tabs)/index.tsx:139.
+  const tagValues: string[] = (() => {
+    if (Array.isArray(load.facets) && load.facets.length > 0) {
+      return load.facets
+        .filter((f: { value?: string }) => f.value && f.value.trim())
+        .map((f: { key: string; value: string }) =>
+          f.key === 'TRIP' ? `Trip ${f.value}` : f.value,
+        );
+    }
+    return [
+      load.parsedHcr,
+      load.parsedTripNumber && `Trip ${load.parsedTripNumber}`,
+    ].filter(Boolean);
+  })();
 
   return (
     <View
