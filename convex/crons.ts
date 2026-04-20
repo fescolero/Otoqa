@@ -35,12 +35,13 @@ crons.interval(
 );
 
 // ✅ Archive old driver location data daily
-// Moves location data older than 90 days to cold storage (R2)
-// Keeps hot storage costs low while maintaining historical data
+// Moves location data older than 30 days to S3 cold storage as gzipped
+// JSONL, groups by (orgId, date, hour). See convex/gpsArchive.ts for
+// the orchestrator and convex/driverLocations.ts for the DB helpers.
 crons.cron(
   'archive-old-locations',
   '0 3 * * *', // Run daily at 3 AM UTC
-  internal.driverLocations.archiveOldLocations,
+  internal.gpsArchive.archiveOldLocations,
   {},
 );
 
