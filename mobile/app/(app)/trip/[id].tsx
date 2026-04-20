@@ -19,7 +19,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useLoadDetail } from '../../../lib/hooks/useLoadDetail';
 import { useCheckIn } from '../../../lib/hooks/useCheckIn';
@@ -120,7 +120,6 @@ export default function TripDetailScreen() {
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRedirected, setIsRedirected] = useState(false);
-  const [showQuickActions, setShowQuickActions] = useState(false);
   const [showDetourModal, setShowDetourModal] = useState(false);
   const [detourStops, setDetourStops] = useState(1);
   const [detourReason, setDetourReason] = useState<
@@ -536,16 +535,7 @@ export default function TripDetailScreen() {
           >
             Load details
           </Text>
-          <Pressable
-            onPress={() => setShowQuickActions(true)}
-            accessibilityLabel="More actions"
-            style={({ pressed }) => [
-              { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: designRadii.full },
-              pressed && { opacity: 0.7 },
-            ]}
-          >
-            <Icon name="more-h" size={22} color={palette.textPrimary} />
-          </Pressable>
+          <View style={{ width: 44, height: 44 }} />
         </View>
 
         <ScrollView
@@ -612,23 +602,6 @@ export default function TripDetailScreen() {
             activeCheckedInStop={activeCheckedInStop}
             statusDisplay={statusDisplay}
           />
-
-          {/* Legacy Load ID Card — kept for continuity; the summary card
-              above is primary. Remove in the next design pass. */}
-          <View style={styles.card}>
-            <View style={styles.loadIdRow}>
-              <View style={styles.loadIdLeft}>
-                <MaterialCommunityIcons name="steering" size={20} color={colors.foregroundMuted} />
-                <View>
-                  <Text style={styles.loadIdLabel}>Load ID</Text>
-                  <Text style={styles.loadIdValue}>#{load.internalId}</Text>
-                </View>
-              </View>
-              <View style={[styles.statusBadge, { backgroundColor: `${statusDisplay.color}20` }]}>
-                <Text style={[styles.statusBadgeText, { color: statusDisplay.color }]}>{statusDisplay.text}</Text>
-              </View>
-            </View>
-          </View>
 
           {/* Route Timeline — design-aligned. Numbered dots per stop, dashed
               ring for detours, single inline action per current stop (check-
@@ -1081,24 +1054,79 @@ export default function TripDetailScreen() {
 
           {/* Contact Information */}
           {load.contactPersonName && (
-            <View style={styles.card}>
-              <Text style={styles.sectionTitleSimple}>Contact Information</Text>
-              <View style={styles.contactRow}>
-                <View style={styles.contactAvatar}>
-                  <Ionicons name="person" size={24} color={colors.foregroundMuted} />
+            <View
+              style={{
+                backgroundColor: palette.bgSurface,
+                borderWidth: 1,
+                borderColor: palette.borderSubtle,
+                borderRadius: designRadii.lg,
+                padding: 14,
+                marginBottom: 16,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  color: palette.textTertiary,
+                  marginBottom: 10,
+                }}
+              >
+                CONTACT
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                <View
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: designRadii.md,
+                    backgroundColor: palette.bgMuted,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Icon name="user" size={20} color={palette.textSecondary} />
                 </View>
-                <View style={styles.contactInfo}>
-                  <Text style={styles.contactName}>{load.contactPersonName}</Text>
-                  <Text style={styles.contactRole}>
-                    {load.customerName ? `Site Manager • ${load.customerName}` : 'Site Contact'}
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text
+                    style={{
+                      fontSize: 14,
+                      fontWeight: '600',
+                      color: palette.textPrimary,
+                    }}
+                    numberOfLines={1}
+                  >
+                    {load.contactPersonName}
+                  </Text>
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      color: palette.textTertiary,
+                      marginTop: 2,
+                    }}
+                    numberOfLines={1}
+                  >
+                    {load.customerName ? `Site Manager · ${load.customerName}` : 'Site Contact'}
                   </Text>
                 </View>
                 {load.contactPersonPhone && (
                   <Pressable
-                    style={styles.callButton}
                     onPress={() => Linking.openURL(`tel:${load.contactPersonPhone}`)}
+                    accessibilityLabel="Call contact"
+                    style={({ pressed }) => [
+                      {
+                        width: 40,
+                        height: 40,
+                        borderRadius: designRadii.full,
+                        backgroundColor: palette.accentTint,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      },
+                      pressed && { opacity: 0.7 },
+                    ]}
                   >
-                    <Ionicons name="call" size={24} color={colors.primary} />
+                    <Icon name="phone" size={20} color={palette.accent} />
                   </Pressable>
                 )}
               </View>
@@ -1107,131 +1135,55 @@ export default function TripDetailScreen() {
 
           {/* Special Instructions */}
           {load.generalInstructions && (
-            <View style={styles.card}>
-              <Text style={styles.sectionTitleSimple}>Special Instructions</Text>
-              <View style={styles.instructionsRow}>
-                <View style={styles.instructionsIcon}>
-                  <Ionicons name="document-text" size={20} color={colors.secondary} />
+            <View
+              style={{
+                backgroundColor: palette.bgSurface,
+                borderWidth: 1,
+                borderColor: palette.borderSubtle,
+                borderRadius: designRadii.lg,
+                padding: 14,
+                marginBottom: 16,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  color: palette.textTertiary,
+                  marginBottom: 10,
+                }}
+              >
+                INSTRUCTIONS
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: designRadii.md,
+                    backgroundColor: palette.bgMuted,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    marginTop: 1,
+                  }}
+                >
+                  <Icon name="info" size={16} color={palette.textSecondary} />
                 </View>
-                <Text style={styles.instructionsText}>{load.generalInstructions}</Text>
+                <Text
+                  style={{
+                    flex: 1,
+                    fontSize: 13,
+                    lineHeight: 18,
+                    color: palette.textPrimary,
+                  }}
+                >
+                  {load.generalInstructions}
+                </Text>
               </View>
             </View>
           )}
         </ScrollView>
-
-        {/* Bottom Action Bar — fixed at bottom, outside ScrollView */}
-        <View
-          style={[
-            styles.bottomBar,
-            { paddingBottom: insets.bottom + (Platform.OS === 'ios' ? spacing.sm : spacing.lg) },
-          ]}
-        >
-          <Pressable
-            style={({ pressed }) => [styles.menuButton, pressed && { opacity: 0.8 }]}
-            onPress={() => setShowQuickActions(true)}
-          >
-            <Ionicons name="ellipsis-horizontal" size={24} color={colors.foreground} />
-          </Pressable>
-          <Pressable style={({ pressed }) => [styles.completeButton, pressed && { opacity: 0.8 }]}>
-            <Ionicons name="checkmark-circle" size={24} color={colors.foreground} />
-            <Text style={styles.completeButtonText}>Complete Load</Text>
-          </Pressable>
-        </View>
-
-        {/* Quick Actions Modal */}
-        <Modal
-          visible={showQuickActions}
-          animationType="slide"
-          transparent
-          onRequestClose={() => setShowQuickActions(false)}
-        >
-          <View style={styles.quickActionsOverlay}>
-            <Pressable style={styles.quickActionsBackdrop} onPress={() => setShowQuickActions(false)} />
-            <View style={styles.quickActionsSheet}>
-              <View style={styles.sheetHandle} />
-
-              {/* Header */}
-              <View style={styles.quickActionsHeader}>
-                <View>
-                  <Text style={styles.quickActionsTitle}>Quick Actions</Text>
-                  <Text style={styles.quickActionsSubtitle}>Available tasks for this load</Text>
-                </View>
-                <Pressable style={styles.quickActionsCloseBtn} onPress={() => setShowQuickActions(false)}>
-                  <Ionicons name="close" size={18} color={colors.foregroundMuted} />
-                </Pressable>
-              </View>
-
-              {/* Action Grid */}
-              <View style={styles.quickActionsGrid}>
-                <Pressable
-                  style={styles.quickActionItem}
-                  onPress={() => {
-                    setShowQuickActions(false);
-                    const targetStop = displayStops[currentStopIndex] || displayStops[0];
-                    if (targetStop) {
-                      openMaps(targetStop.address, targetStop.city, targetStop.state);
-                    }
-                  }}
-                >
-                  <View style={styles.quickActionIconContainer}>
-                    <Ionicons name="navigate" size={26} color={colors.primary} />
-                  </View>
-                  <Text style={styles.quickActionLabel}>Navigate</Text>
-                </Pressable>
-
-                <Pressable style={[styles.quickActionItem, styles.quickActionItemDisabled]} disabled={true}>
-                  <View style={[styles.quickActionIconContainer, styles.quickActionIconContainerDisabled]}>
-                    <Ionicons name="call" size={26} color={colors.foregroundMuted} />
-                  </View>
-                  <Text style={[styles.quickActionLabel, styles.quickActionLabelDisabled]}>Call Site</Text>
-                </Pressable>
-
-                <Pressable style={styles.quickActionItem}>
-                  <View style={styles.quickActionIconContainer}>
-                    <Ionicons name="document-text" size={26} color={colors.primary} />
-                  </View>
-                  <Text style={styles.quickActionLabel}>Documents</Text>
-                </Pressable>
-
-                <Pressable
-                  style={styles.quickActionItem}
-                  onPress={() => {
-                    setShowQuickActions(false);
-                    setShowDetourModal(true);
-                  }}
-                >
-                  <View style={styles.quickActionIconContainer}>
-                    <Ionicons name="git-branch" size={26} color={colors.primary} />
-                  </View>
-                  <Text style={styles.quickActionLabel}>Add Detour</Text>
-                </Pressable>
-              </View>
-
-              {/* Bottom Actions */}
-              <View style={styles.quickActionsBottomSection}>
-                <Pressable style={styles.quickActionRowItem}>
-                  <View style={styles.quickActionRowLeft}>
-                    <View style={[styles.quickActionRowIcon, styles.quickActionRowIconRed]}>
-                      <Ionicons name="alert-circle" size={20} color={colors.destructive} />
-                    </View>
-                    <Text style={[styles.quickActionRowLabel, styles.quickActionRowLabelRed]}>Report an Issue</Text>
-                  </View>
-                  <Ionicons name="arrow-forward" size={20} color={colors.destructive} />
-                </Pressable>
-
-                <Pressable style={styles.quickActionRowItem}>
-                  <View style={styles.quickActionRowLeft}>
-                    <View style={[styles.quickActionRowIcon, styles.quickActionRowIconOrange]}>
-                      <Ionicons name="share-social" size={20} color={colors.primary} />
-                    </View>
-                    <Text style={[styles.quickActionRowLabel, styles.quickActionRowLabelOrange]}>Share Status</Text>
-                  </View>
-                  <Ionicons name="arrow-forward" size={20} color={colors.primary} />
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </Modal>
 
         {/* Check-in/out Modal */}
         <Modal visible={checkInModal.visible} animationType="slide" transparent onRequestClose={closeModal}>
