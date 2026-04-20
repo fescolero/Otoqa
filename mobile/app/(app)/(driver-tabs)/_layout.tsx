@@ -1,169 +1,139 @@
 /**
  * Driver bottom tabs — Otoqa Driver design system.
  *
- * Flat bar with 4 tabs: Home, Messages, Profile, More. Icons are HugeIcons
- * via the design-system `Icon` wrapper, palette comes from ThemeContext so
- * the bar follows the user's light/dark/system preference.
+ * Uses the stock `Tabs` bar from expo-router (react-navigation's bottom-tabs
+ * under the hood) and customizes the visuals via `screenOptions`. Three
+ * earlier attempts went custom on the tabBar — navigation.navigate,
+ * router.push, and CommonActions.dispatch — and all silently no-op'd
+ * under expo-router v6. The stock bar handles press + dispatch itself,
+ * so we only supply icons / labels / styles.
  */
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Tabs } from 'expo-router';
-import { View, StyleSheet, Text, Pressable, Platform } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { CommonActions } from '@react-navigation/native';
-import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
+import { View, StyleSheet, Text, Platform } from 'react-native';
 import { useLanguage } from '../../../lib/LanguageContext';
 import { useTheme } from '../../../lib/ThemeContext';
 import { Icon, type IconName } from '../../../lib/design-icons';
-import { radii, type Palette } from '../../../lib/design-tokens';
+import { type Palette } from '../../../lib/design-tokens';
 
-type TabKey = 'index' | 'messages' | 'settings' | 'more';
+const TabIcon: React.FC<{
+  name: IconName;
+  focused: boolean;
+  palette: Palette;
+}> = ({ name, focused, palette }) => (
+  <View
+    style={[
+      styles.iconWrap,
+      focused && { backgroundColor: palette.accentTint },
+    ]}
+  >
+    <Icon
+      name={name}
+      size={22}
+      color={focused ? palette.accent : palette.textTertiary}
+      strokeWidth={focused ? 2.2 : 1.5}
+    />
+  </View>
+);
 
-type TabSpec = {
-  name: TabKey;
-  icon: IconName;
-  labelKey: 'nav.home' | 'nav.messages' | 'nav.profile' | 'nav.more';
-};
-
-// Free HugeIcons ships outlined-only — no filled variants for home/user/
-// message/more. Active state is expressed via a tinted pill + thicker stroke
-// + accent color instead of swapping to a solid glyph.
-const TAB_SPECS: readonly TabSpec[] = [
-  { name: 'index', icon: 'home', labelKey: 'nav.home' },
-  { name: 'messages', icon: 'message', labelKey: 'nav.messages' },
-  { name: 'settings', icon: 'user', labelKey: 'nav.profile' },
-  { name: 'more', icon: 'more-h', labelKey: 'nav.more' },
-];
-
-function DriverTabBar({ state, navigation }: BottomTabBarProps) {
-  const { palette } = useTheme();
-  const { t } = useLanguage();
-  const insets = useSafeAreaInsets();
-  const styles = useMemo(() => makeStyles(palette), [palette]);
-
-  return (
-    <View
-      style={[
-        styles.bar,
-        { paddingBottom: Math.max(insets.bottom, 12) },
-      ]}
-    >
-      {state.routes.map((route, index) => {
-        const spec = TAB_SPECS.find((s) => s.name === route.name);
-        if (!spec) return null;
-
-        const isActive = state.index === index;
-
-        // Canonical tab switch: dispatch CommonActions.navigate with the
-        // navigator-relative route name. `navigation.navigate` and
-        // `router.push` both had edge cases that silently no-op'd here
-        // (route name resolution under expo-router v6's Tabs + Pressable
-        // interactions). The dispatch path is the documented pattern for
-        // custom bottom tab bars.
-        const onPress = () => {
-          const event = navigation.emit({
-            type: 'tabPress',
-            target: route.key,
-            canPreventDefault: true,
-          });
-          if (isActive || event.defaultPrevented) return;
-          navigation.dispatch({
-            ...CommonActions.navigate({ name: route.name, merge: true }),
-            target: state.key,
-          });
-        };
-
-        const color = isActive ? palette.accent : palette.textTertiary;
-
-        return (
-          <Pressable
-            key={route.key}
-            accessibilityRole="button"
-            accessibilityState={isActive ? { selected: true } : {}}
-            accessibilityLabel={t(spec.labelKey)}
-            onPress={onPress}
-            style={({ pressed }) => [
-              styles.tab,
-              pressed && { opacity: 0.7 },
-            ]}
-          >
-            <View
-              style={[
-                styles.iconWrap,
-                isActive && { backgroundColor: palette.accentTint },
-              ]}
-            >
-              <Icon
-                name={spec.icon}
-                size={22}
-                color={color}
-                strokeWidth={isActive ? 2.2 : 1.5}
-              />
-            </View>
-            <Text
-              maxFontSizeMultiplier={1.2}
-              style={[styles.label, { color }]}
-            >
-              {t(spec.labelKey)}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
+const TabLabel: React.FC<{ label: string; focused: boolean; palette: Palette }> = ({
+  label,
+  focused,
+  palette,
+}) => (
+  <Text
+    maxFontSizeMultiplier={1.2}
+    style={[
+      styles.label,
+      { color: focused ? palette.accent : palette.textTertiary },
+    ]}
+  >
+    {label}
+  </Text>
+);
 
 export default function DriverTabs() {
+  const { palette } = useTheme();
+  const { t } = useLanguage();
+
   return (
     <Tabs
-      screenOptions={{ headerShown: false }}
-      tabBar={(props) => <DriverTabBar {...props} />}
+      screenOptions={{
+        headerShown: false,
+        tabBarStyle: {
+          backgroundColor: palette.bgSurface,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          borderTopColor: palette.borderSubtle,
+          height: Platform.OS === 'ios' ? 84 : 68,
+          paddingTop: 8,
+          paddingBottom: Platform.OS === 'ios' ? 24 : 10,
+          elevation: 0,
+        },
+        tabBarItemStyle: {
+          paddingVertical: 2,
+        },
+      }}
     >
-      <Tabs.Screen name="index" />
-      <Tabs.Screen name="messages" />
-      <Tabs.Screen name="settings" />
-      <Tabs.Screen name="more" />
+      <Tabs.Screen
+        name="index"
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabIcon name="home" focused={focused} palette={palette} />
+          ),
+          tabBarLabel: ({ focused }) => (
+            <TabLabel label={t('nav.home')} focused={focused} palette={palette} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="messages"
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabIcon name="message" focused={focused} palette={palette} />
+          ),
+          tabBarLabel: ({ focused }) => (
+            <TabLabel label={t('nav.messages')} focused={focused} palette={palette} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="settings"
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabIcon name="user" focused={focused} palette={palette} />
+          ),
+          tabBarLabel: ({ focused }) => (
+            <TabLabel label={t('nav.profile')} focused={focused} palette={palette} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="more"
+        options={{
+          tabBarIcon: ({ focused }) => (
+            <TabIcon name="more-h" focused={focused} palette={palette} />
+          ),
+          tabBarLabel: ({ focused }) => (
+            <TabLabel label={t('nav.more')} focused={focused} palette={palette} />
+          ),
+        }}
+      />
     </Tabs>
   );
 }
 
-const makeStyles = (palette: Palette) =>
-  StyleSheet.create({
-    bar: {
-      flexDirection: 'row',
-      paddingTop: 8,
-      paddingHorizontal: 8,
-      backgroundColor: palette.bgSurface,
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: palette.borderSubtle,
-      ...Platform.select({
-        ios: {
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: -1 },
-          shadowOpacity: 0.04,
-          shadowRadius: 3,
-        },
-        android: { elevation: 0 },
-      }),
-    },
-    tab: {
-      flex: 1,
-      paddingVertical: 4,
-      paddingHorizontal: 4,
-      borderRadius: radii.lg,
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 2,
-    },
-    iconWrap: {
-      width: 40,
-      height: 28,
-      borderRadius: 999,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    label: {
-      fontSize: 11,
-      fontWeight: '500',
-      letterSpacing: 0.3,
-    },
-  });
+const styles = StyleSheet.create({
+  iconWrap: {
+    width: 40,
+    height: 28,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  label: {
+    fontSize: 11,
+    fontWeight: '500',
+    letterSpacing: 0.3,
+    marginTop: 2,
+  },
+});
