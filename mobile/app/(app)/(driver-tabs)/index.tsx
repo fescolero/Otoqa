@@ -508,6 +508,15 @@ const TopHeader: React.FC<TopHeaderProps> = ({
             </View>
           )}
           <Pressable
+            accessibilityLabel="Search"
+            style={({ pressed }) => [
+              styles.headerIconBtn,
+              pressed && { opacity: 0.7 },
+            ]}
+          >
+            <Icon name="search" size={22} color={palette.textPrimary} />
+          </Pressable>
+          <Pressable
             onPress={onScanTruck}
             accessibilityLabel="Scan truck QR"
             style={({ pressed }) => [
