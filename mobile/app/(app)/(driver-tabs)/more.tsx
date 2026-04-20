@@ -1,460 +1,695 @@
-import React from 'react';
-import { View, Text, StyleSheet, Pressable, ScrollView } from 'react-native';
+/**
+ * More tab — Otoqa Driver operational hub.
+ *
+ * Ports lib/more-screen.jsx from the design bundle. Shows shift status
+ * (hero), current truck, and drill-in rows for App settings / Help /
+ * About. Sign-out lives as the header kebab per design.
+ *
+ * Data sources (real, not mock):
+ *   - Active session + elapsed time: useMyLoads(driverId).activeSession
+ *   - Truck details: useDriver().truck
+ *   - End shift: api.driverSessions.endSession
+ *   - Sign out: useClerk().signOut
+ *
+ * Not ported yet (backend work pending):
+ *   - HOS clock + Sync state strip (design shows "Drive remaining" /
+ *     "Synced" tiles)
+ *   - Dispatcher quick-call card
+ *   - Shift summary stats (loads/miles/stops for the elapsed shift)
+ */
+import React, { useMemo, useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Pressable,
+  ScrollView,
+  Modal,
+  Alert,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { useClerk } from '@clerk/clerk-expo';
+import { useMutation } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
 import { useDriver } from '../_layout';
-import { useLanguage } from '../../../lib/LanguageContext';
-
-// ============================================
-// DESIGN SYSTEM
-// ============================================
-const colors = {
-  background: '#1a1d21',
-  foreground: '#f3f4f6',
-  foregroundMuted: '#9ca3af',
-  primary: '#ff6b00',
-  primaryForeground: '#1a1d21',
-  secondary: '#eab308',
-  muted: '#2d323b',
-  card: '#22262b',
-  cardForeground: '#f3f4f6',
-  border: '#3f4552',
-  destructive: '#ef4444',
-  success: '#10b981',
-};
-
-const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 20,
-  '2xl': 24,
-};
-
-const borderRadius = {
-  md: 8,
-  lg: 12,
-  xl: 16,
-  '2xl': 20,
-  full: 9999,
-};
-
-// ============================================
-// MORE SCREEN
-// Vehicle, Financials, Compliance & Support
-// ============================================
+import { useMyLoads } from '../../../lib/hooks/useMyLoads';
+import { stopSessionTracking } from '../../../lib/location-tracking';
+import { Icon, type IconName } from '../../../lib/design-icons';
+import { useTheme } from '../../../lib/ThemeContext';
+import { radii, typeScale, type Palette } from '../../../lib/design-tokens';
 
 export default function MoreScreen() {
   const router = useRouter();
-  const { truck } = useDriver();
-  const { t } = useLanguage();
+  const { palette } = useTheme();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
 
-  // Format truck info for display
-  const truckUnit = truck ? `Unit #${truck.unitId}` : t('more.noTruckAssigned');
-  const truckModel = truck 
-    ? [truck.make, truck.model].filter(Boolean).join(' ') || 'Unknown Model'
-    : t('more.scanQrToAssign');
-  const hasTruck = !!truck;
+  const { signOut } = useClerk();
+  const { driverId, truck } = useDriver();
+  const { activeSession } = useMyLoads(driverId);
+  const endSessionMutation = useMutation(api.driverSessions.endSession);
+
+  const [signOutOpen, setSignOutOpen] = useState(false);
+  const [endShiftOpen, setEndShiftOpen] = useState(false);
+  const [isEnding, setIsEnding] = useState(false);
+
+  const onDuty = !!activeSession;
+  const elapsedLabel = formatElapsed(activeSession?.startedAt);
+  const startedLabel = formatClock(activeSession?.startedAt);
+
+  const handleEndShift = async () => {
+    if (!activeSession) return;
+    setIsEnding(true);
+    try {
+      await endSessionMutation({ sessionId: activeSession._id });
+      await stopSessionTracking();
+      setEndShiftOpen(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to end shift';
+      Alert.alert('Error', msg);
+    } finally {
+      setIsEnding(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setSignOutOpen(false);
+    try {
+      await signOut();
+    } catch (err) {
+      console.error('[More] signOut failed:', err);
+    }
+  };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>{t('more.title')}</Text>
+        <Pressable
+          accessibilityLabel="Sign out"
+          onPress={() => setSignOutOpen(true)}
+          style={({ pressed }) => [styles.headerBtn, pressed && { opacity: 0.7 }]}
+        >
+          <Icon name="logout" size={22} color={palette.danger} />
+        </Pressable>
       </View>
 
-      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
-        {/* Vehicle Details Section */}
-        <Text style={styles.sectionTitle}>{t('more.vehicleDetails')}</Text>
-        <View style={styles.vehicleCard}>
-          <View style={styles.vehicleHeader}>
-            <View style={styles.vehicleIconContainer}>
-              <View style={styles.vehicleIcon}>
-                <MaterialCommunityIcons name="truck" size={20} color={colors.primary} />
-              </View>
-              <View>
-                <Text style={styles.vehicleUnit}>{truckUnit}</Text>
-                <Text style={styles.vehicleModel}>{truckModel}</Text>
-              </View>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={{ paddingBottom: 120 }}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Shift card — hero */}
+        <View
+          style={[
+            styles.card,
+            onDuty && { borderColor: 'rgba(16,185,129,0.35)' },
+          ]}
+        >
+          {onDuty && <View style={styles.onDutyGlow} />}
+          <View style={styles.shiftRow}>
+            <View
+              style={[
+                styles.shiftDot,
+                { backgroundColor: onDuty ? 'rgba(16,185,129,0.14)' : palette.bgMuted },
+              ]}
+            >
+              <View
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: 999,
+                  backgroundColor: onDuty ? palette.success : palette.textTertiary,
+                }}
+              />
             </View>
-            {hasTruck && (
-              <View style={styles.activeBadge}>
-                <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>{t('more.active')}</Text>
-              </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text
+                style={[
+                  styles.eyebrow,
+                  { color: onDuty ? palette.success : palette.textTertiary },
+                ]}
+              >
+                {onDuty ? 'ON DUTY' : 'OFF DUTY'}
+              </Text>
+              <Text style={styles.shiftTitle} numberOfLines={1}>
+                {onDuty ? `${elapsedLabel} elapsed` : 'Not tracking'}
+              </Text>
+              <Text style={styles.shiftMeta} numberOfLines={1}>
+                {onDuty ? `Started ${startedLabel}` : 'Ready when you are'}
+              </Text>
+            </View>
+            {onDuty ? (
+              <Pressable
+                onPress={() => setEndShiftOpen(true)}
+                style={({ pressed }) => [
+                  styles.endShiftBtn,
+                  pressed && { opacity: 0.85 },
+                ]}
+              >
+                <Text style={styles.endShiftBtnText}>End shift</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={() => router.push('/switch-truck')}
+                style={({ pressed }) => [
+                  styles.startShiftBtn,
+                  pressed && { opacity: 0.9 },
+                ]}
+              >
+                <Icon name="play" size={13} color="#fff" />
+                <Text style={styles.startShiftBtnText}>Start shift</Text>
+              </Pressable>
             )}
           </View>
+        </View>
 
-          {hasTruck && (
-            <View style={styles.vehicleInfoGrid}>
-              <View style={styles.vehicleInfoItem}>
-                <Text style={styles.vehicleInfoLabel}>UNIT ID</Text>
-                <Text style={styles.vehicleInfoValue}>{truck.unitId}</Text>
-              </View>
-              <View style={styles.vehicleInfoItem}>
-                <Text style={styles.vehicleInfoLabel}>MAKE</Text>
-                <Text style={styles.vehicleInfoValue}>{truck.make || '—'}</Text>
-              </View>
-              <View style={styles.vehicleInfoItem}>
-                <Text style={styles.vehicleInfoLabel}>MODEL</Text>
-                <Text style={styles.vehicleInfoValue}>{truck.model || '—'}</Text>
-              </View>
-              <View style={styles.vehicleInfoItem}>
-                <Text style={styles.vehicleInfoLabel}>STATUS</Text>
-                <Text style={styles.vehicleInfoValue}>Active</Text>
-              </View>
-            </View>
-          )}
-
-          <Pressable 
-            style={styles.switchTruckButton}
+        {/* Truck card */}
+        <View style={[styles.card, { marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
+          <View style={styles.truckIcon}>
+            <Icon name="truck" size={20} color={palette.accent} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.eyebrow}>CURRENT TRUCK</Text>
+            <Text style={styles.truckTitle} numberOfLines={1}>
+              {truck
+                ? [truck.make, truck.model].filter(Boolean).join(' ') || `Unit ${truck.unitId}`
+                : 'No truck assigned'}
+            </Text>
+            <Text style={styles.truckMeta} numberOfLines={1}>
+              {truck ? `Unit ${truck.unitId}` : 'Scan your truck QR to pair'}
+            </Text>
+          </View>
+          <Pressable
             onPress={() => router.push('/switch-truck')}
+            style={({ pressed }) => [
+              styles.changeBtn,
+              pressed && { opacity: 0.8 },
+            ]}
           >
-            <Ionicons name="swap-horizontal" size={18} color={colors.primary} />
-            <Text style={styles.switchTruckText}>{hasTruck ? t('more.switchTruck') : t('more.assignTruck')}</Text>
+            <Icon name="search" size={14} color={palette.accent} />
+            <Text style={styles.changeBtnText}>{truck ? 'Change' : 'Pair'}</Text>
           </Pressable>
         </View>
 
-        {/* Financials & History Section */}
-        <View style={styles.sectionTitleRow}>
-          <Text style={styles.sectionTitle}>{t('more.financialsHistory')}</Text>
-          <View style={styles.comingSoonBadge}>
-            <Text style={styles.comingSoonText}>{t('common.comingSoon')}</Text>
-          </View>
-        </View>
-        <View style={[styles.menuSection, styles.menuSectionDisabled]}>
-          <View style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="cash" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabelDisabled}>Current Payroll</Text>
-              <Text style={styles.menuSubtitle}>Period: May 1 - May 15</Text>
-            </View>
-            <Text style={styles.menuValueMuted}>--</Text>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </View>
-
-          <View style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="receipt" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabelDisabled}>Past Payroll</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </View>
-
-          <View style={[styles.menuRow, styles.menuRowLast]}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <MaterialCommunityIcons name="truck-delivery" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabelDisabled}>Load History</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </View>
-        </View>
-
-        {/* Compliance & Documents Section */}
-        <View style={styles.sectionTitleRow}>
-          <Text style={styles.sectionTitle}>{t('more.complianceDocuments')}</Text>
-          <View style={styles.comingSoonBadge}>
-            <Text style={styles.comingSoonText}>{t('common.comingSoon')}</Text>
-          </View>
-        </View>
-        <View style={[styles.menuSection, styles.menuSectionDisabled]}>
-          <View style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="alert-circle" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabelDisabled}>Compliance Status</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </View>
-
-          <View style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="ribbon" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabelDisabled}>Required Certifications</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </View>
-
-          <View style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="document-text" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabelDisabled}>Inspection Reports</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </View>
-
-          <View style={[styles.menuRow, styles.menuRowLast]}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="folder" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabelDisabled}>Company Policies</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.muted} />
-          </View>
-        </View>
-
-        {/* Safety & Support Section */}
-        <Text style={styles.sectionTitle}>{t('more.safetySupport')}</Text>
-        <View style={styles.menuSection}>
-          <Pressable style={[styles.menuRow, styles.menuRowLast]}>
-            <View style={[styles.menuIconContainer, styles.menuIconOrange]}>
-              <Ionicons name="warning" size={20} color={colors.primary} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>{t('more.reportAccident')}</Text>
-            </View>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </Pressable>
-        </View>
-
-        <View style={{ height: 120 }} />
+        {/* Drill-in rows */}
+        <DrillRow
+          palette={palette}
+          icon="settings"
+          label="App settings"
+          meta="Language, notifications, permissions"
+          onPress={() => router.push('/(driver-tabs)/settings')}
+        />
+        <DrillRow
+          palette={palette}
+          icon="info"
+          label="Help & support"
+          meta="Help center · Report a bug"
+          onPress={() =>
+            Alert.alert('Help & support', 'Contact your dispatcher for assistance.')
+          }
+        />
+        <DrillRow
+          palette={palette}
+          icon="info"
+          label="About"
+          meta="v1.0 · Terms & Privacy"
+          onPress={() =>
+            Alert.alert('About Otoqa', 'Driver app · v1.0\nTerms and privacy at otoqa.com')
+          }
+        />
       </ScrollView>
+
+      <SignOutSheet
+        visible={signOutOpen}
+        palette={palette}
+        onConfirm={handleSignOut}
+        onCancel={() => setSignOutOpen(false)}
+      />
+      <EndShiftSheet
+        visible={endShiftOpen}
+        palette={palette}
+        elapsedLabel={elapsedLabel}
+        startedLabel={startedLabel}
+        isEnding={isEnding}
+        onConfirm={handleEndShift}
+        onCancel={() => setEndShiftOpen(false)}
+      />
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  header: {
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.lg,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: colors.foreground,
-  },
-  scrollView: {
-    flex: 1,
-    paddingHorizontal: spacing.lg,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: colors.foreground,
-    marginTop: spacing.sm,
-    marginBottom: spacing.md,
-  },
-  sectionTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: spacing.sm,
-    marginBottom: spacing.md,
-    gap: spacing.sm,
-  },
-  comingSoonBadge: {
-    backgroundColor: `${colors.primary}20`,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: borderRadius.md,
-  },
-  comingSoonText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.primary,
-  },
+// ============================================================================
+// SUB-COMPONENTS
+// ============================================================================
 
-  // Vehicle Card
-  vehicleCard: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius['2xl'],
-    padding: spacing.md,
-    borderWidth: 1,
-    borderColor: `${colors.border}50`,
-  },
-  vehicleHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    marginBottom: spacing.md,
-  },
-  vehicleIconContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  vehicleIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: borderRadius.lg,
-    backgroundColor: `${colors.primary}25`,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  vehicleUnit: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-  vehicleModel: {
-    fontSize: 14,
-    color: colors.foregroundMuted,
-    marginTop: 2,
-  },
-  activeBadge: {
-    backgroundColor: `${colors.success}25`,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: borderRadius.md,
-  },
-  activeBadgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.success,
-    letterSpacing: 0.5,
-  },
-  vehicleInfoGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.md,
-    marginBottom: spacing.md,
-    paddingTop: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: `${colors.border}30`,
-  },
-  vehicleInfoItem: {
-    width: '45%',
-  },
-  vehicleInfoLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.foregroundMuted,
-    letterSpacing: 0.5,
-    marginBottom: spacing.xs,
-  },
-  vehicleInfoValue: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-  switchTruckButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.md,
-    marginHorizontal: -spacing.md,
-    marginBottom: -spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: `${colors.border}30`,
-  },
-  switchTruckText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.primary,
-  },
+function DrillRow({
+  palette,
+  icon,
+  label,
+  meta,
+  onPress,
+}: {
+  palette: Palette;
+  icon: IconName;
+  label: string;
+  meta: string;
+  onPress: () => void;
+}) {
+  const styles = makeStyles(palette);
+  return (
+    <View style={{ marginTop: 10 }}>
+      <Pressable
+        onPress={onPress}
+        style={({ pressed }) => [
+          styles.drillRow,
+          pressed && { opacity: 0.85 },
+        ]}
+      >
+        <View style={styles.drillIcon}>
+          <Icon name={icon} size={18} color={palette.textSecondary} />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.drillLabel}>{label}</Text>
+          <Text style={styles.drillMeta} numberOfLines={1}>
+            {meta}
+          </Text>
+        </View>
+        <Icon name="chevron-right" size={16} color={palette.textTertiary} />
+      </Pressable>
+    </View>
+  );
+}
 
-  // Menu Section
-  menuSection: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius['2xl'],
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: `${colors.border}50`,
-  },
-  menuSectionDisabled: {
-    opacity: 0.6,
-  },
-  menuRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: `${colors.border}30`,
-    gap: spacing.md,
-  },
-  menuRowLast: {
-    borderBottomWidth: 0,
-  },
-  menuIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: borderRadius.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  menuIconGreen: {
-    backgroundColor: `${colors.success}20`,
-  },
-  menuIconBlue: {
-    backgroundColor: '#3b82f620',
-  },
-  menuIconRed: {
-    backgroundColor: `${colors.destructive}20`,
-  },
-  menuIconOrange: {
-    backgroundColor: `${colors.primary}20`,
-  },
-  menuIconMuted: {
-    backgroundColor: `${colors.muted}80`,
-  },
-  menuTextContainer: {
-    flex: 1,
-  },
-  menuLabel: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: colors.foreground,
-  },
-  menuLabelDisabled: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: colors.foregroundMuted,
-  },
-  menuSubtitle: {
-    fontSize: 13,
-    color: colors.foregroundMuted,
-    marginTop: 2,
-  },
-  menuValueGreen: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.success,
-    marginRight: spacing.sm,
-  },
-  menuValueMuted: {
-    fontSize: 13,
-    color: colors.foregroundMuted,
-    textAlign: 'right',
-    marginRight: spacing.sm,
-  },
-  countBadge: {
-    backgroundColor: `${colors.muted}80`,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: borderRadius.md,
-    marginRight: spacing.sm,
-  },
-  countBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-  alertBadge: {
-    backgroundColor: `${colors.destructive}20`,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: borderRadius.md,
-    marginRight: spacing.sm,
-  },
-  alertBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.destructive,
-  },
-});
+function SheetFrame({
+  palette,
+  onCancel,
+  children,
+}: {
+  palette: Palette;
+  onCancel: () => void;
+  children: React.ReactNode;
+}) {
+  const styles = makeStyles(palette);
+  return (
+    <View style={styles.sheetOverlay}>
+      <Pressable style={styles.sheetBackdrop} onPress={onCancel} />
+      <View style={styles.sheetBody}>
+        <View style={styles.sheetHandle} />
+        {children}
+      </View>
+    </View>
+  );
+}
+
+function SignOutSheet({
+  visible,
+  palette,
+  onConfirm,
+  onCancel,
+}: {
+  visible: boolean;
+  palette: Palette;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const styles = makeStyles(palette);
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <SheetFrame palette={palette} onCancel={onCancel}>
+        <View
+          style={[
+            styles.sheetIcon,
+            { backgroundColor: 'rgba(239, 68, 68, 0.12)' },
+          ]}
+        >
+          <Icon name="logout" size={22} color={palette.danger} />
+        </View>
+        <Text style={styles.sheetTitle}>Sign out of Otoqa?</Text>
+        <Text style={styles.sheetBodyText}>
+          You&apos;ll need to scan your truck QR again when you sign back in.
+        </Text>
+        <View style={{ gap: 10, marginTop: 18 }}>
+          <Pressable
+            onPress={onConfirm}
+            style={({ pressed }) => [
+              styles.sheetCta,
+              { backgroundColor: palette.danger },
+              pressed && { opacity: 0.9 },
+            ]}
+          >
+            <Text style={styles.sheetCtaText}>Sign out</Text>
+          </Pressable>
+          <Pressable
+            onPress={onCancel}
+            style={({ pressed }) => [
+              styles.sheetCtaSecondary,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Text style={styles.sheetCtaSecondaryText}>Cancel</Text>
+          </Pressable>
+        </View>
+      </SheetFrame>
+    </Modal>
+  );
+}
+
+function EndShiftSheet({
+  visible,
+  palette,
+  elapsedLabel,
+  startedLabel,
+  isEnding,
+  onConfirm,
+  onCancel,
+}: {
+  visible: boolean;
+  palette: Palette;
+  elapsedLabel: string;
+  startedLabel: string;
+  isEnding: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const styles = makeStyles(palette);
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <SheetFrame palette={palette} onCancel={onCancel}>
+        <View
+          style={[
+            styles.sheetIcon,
+            { backgroundColor: 'rgba(16,185,129,0.12)' },
+          ]}
+        >
+          <Icon name="check" size={22} color={palette.success} strokeWidth={2.5} />
+        </View>
+        <Text style={styles.sheetTitle}>End shift?</Text>
+        <Text style={styles.sheetBodyText}>
+          Tracking will pause and your timesheet will log out. You&apos;ll stay signed
+          in and can start a new shift anytime.
+        </Text>
+        <View style={styles.shiftStats}>
+          <Text style={styles.shiftStatsText}>
+            Started {startedLabel} · {elapsedLabel} elapsed
+          </Text>
+        </View>
+        <View style={{ gap: 10, marginTop: 18 }}>
+          <Pressable
+            onPress={onConfirm}
+            disabled={isEnding}
+            style={({ pressed }) => [
+              styles.sheetCta,
+              { backgroundColor: palette.accent },
+              pressed && !isEnding && { opacity: 0.9 },
+              isEnding && { opacity: 0.6 },
+            ]}
+          >
+            <Text style={styles.sheetCtaText}>{isEnding ? 'Ending…' : 'End shift'}</Text>
+          </Pressable>
+          <Pressable
+            onPress={onCancel}
+            disabled={isEnding}
+            style={({ pressed }) => [
+              styles.sheetCtaSecondary,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Text style={styles.sheetCtaSecondaryText}>Cancel</Text>
+          </Pressable>
+        </View>
+      </SheetFrame>
+    </Modal>
+  );
+}
+
+// ============================================================================
+// UTILS
+// ============================================================================
+
+function formatClock(ms?: number): string {
+  if (!ms) return '';
+  const d = new Date(ms);
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${m.toString().padStart(2, '0')} ${ampm}`;
+}
+
+function formatElapsed(startedAtMs?: number): string {
+  if (!startedAtMs) return '0h 00m';
+  const diffMs = Date.now() - startedAtMs;
+  const hours = Math.floor(diffMs / 3_600_000);
+  const mins = Math.floor((diffMs % 3_600_000) / 60_000);
+  return `${hours}h ${mins.toString().padStart(2, '0')}m`;
+}
+
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: palette.bgCanvas,
+    },
+    header: {
+      height: 52,
+      paddingHorizontal: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+    },
+    headerBtn: {
+      width: 44,
+      height: 44,
+      borderRadius: radii.full,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    scroll: {
+      flex: 1,
+      paddingHorizontal: 16,
+    },
+    eyebrow: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.8,
+      color: palette.textTertiary,
+    },
+    card: {
+      borderRadius: radii.lg,
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      padding: 14,
+      position: 'relative',
+      overflow: 'hidden',
+    },
+    onDutyGlow: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      height: 2,
+      backgroundColor: palette.success,
+      opacity: 0.4,
+    },
+    shiftRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+    },
+    shiftDot: {
+      width: 36,
+      height: 36,
+      borderRadius: 999,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    shiftTitle: {
+      fontSize: 15,
+      fontWeight: '600',
+      color: palette.textPrimary,
+      marginTop: 2,
+      fontVariant: ['tabular-nums'],
+    },
+    shiftMeta: {
+      fontSize: 11,
+      color: palette.textTertiary,
+      marginTop: 1,
+    },
+    endShiftBtn: {
+      height: 38,
+      paddingHorizontal: 14,
+      borderRadius: radii.md,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    endShiftBtnText: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: palette.textPrimary,
+    },
+    startShiftBtn: {
+      height: 38,
+      paddingHorizontal: 16,
+      borderRadius: radii.md,
+      backgroundColor: palette.accent,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    startShiftBtnText: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: '#fff',
+    },
+    truckIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: radii.md,
+      backgroundColor: palette.accentTint,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    truckTitle: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: palette.textPrimary,
+      marginTop: 2,
+    },
+    truckMeta: {
+      fontSize: 11,
+      color: palette.textTertiary,
+      marginTop: 1,
+    },
+    changeBtn: {
+      height: 34,
+      paddingHorizontal: 12,
+      borderRadius: radii.md,
+      borderWidth: 1,
+      borderColor: palette.accent,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    changeBtnText: {
+      fontSize: 12,
+      fontWeight: '600',
+      color: palette.accent,
+    },
+    drillRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      padding: 14,
+      borderRadius: radii.lg,
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+    },
+    drillIcon: {
+      width: 32,
+      height: 32,
+      borderRadius: radii.md,
+      backgroundColor: palette.bgMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    drillLabel: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: palette.textPrimary,
+    },
+    drillMeta: {
+      fontSize: 11,
+      color: palette.textTertiary,
+      marginTop: 2,
+    },
+
+    // Sheets
+    sheetOverlay: {
+      flex: 1,
+      justifyContent: 'flex-end',
+    },
+    sheetBackdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0,0,0,0.45)',
+    },
+    sheetBody: {
+      backgroundColor: palette.bgSurface,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      padding: 18,
+      paddingBottom: 34,
+      alignItems: 'center',
+    },
+    sheetHandle: {
+      width: 38,
+      height: 4,
+      borderRadius: 99,
+      backgroundColor: palette.borderDefault,
+      marginBottom: 16,
+    },
+    sheetIcon: {
+      width: 52,
+      height: 52,
+      borderRadius: 999,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: 14,
+    },
+    sheetTitle: {
+      ...typeScale.headingSm,
+      color: palette.textPrimary,
+      textAlign: 'center',
+    },
+    sheetBodyText: {
+      fontSize: 13,
+      lineHeight: 18,
+      color: palette.textSecondary,
+      textAlign: 'center',
+      marginTop: 8,
+      paddingHorizontal: 8,
+    },
+    shiftStats: {
+      marginTop: 14,
+      padding: 12,
+      borderRadius: radii.md,
+      backgroundColor: palette.bgMuted,
+      alignSelf: 'stretch',
+      alignItems: 'center',
+    },
+    shiftStatsText: {
+      fontSize: 12,
+      color: palette.textSecondary,
+      fontVariant: ['tabular-nums'],
+    },
+    sheetCta: {
+      alignSelf: 'stretch',
+      height: 48,
+      borderRadius: radii.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    sheetCtaText: {
+      fontSize: 15,
+      fontWeight: '600',
+      color: '#fff',
+    },
+    sheetCtaSecondary: {
+      alignSelf: 'stretch',
+      height: 48,
+      borderRadius: radii.md,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    sheetCtaSecondaryText: {
+      fontSize: 15,
+      fontWeight: '500',
+      color: palette.textPrimary,
+    },
+  });
