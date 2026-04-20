@@ -389,15 +389,15 @@ export default function HomeScreen() {
           />
         )}
 
-        {!isLoading && completedLoads.length > 0 && (
-          <CompletedSection loads={completedLoads} />
-        )}
-
         {!isLoading && scheduledLoads.length > 0 && (
           <UpcomingSection
             loads={scheduledLoads}
             onPress={(id) => router.push(`/trip/${id}`)}
           />
+        )}
+
+        {!isLoading && completedLoads.length > 0 && (
+          <CompletedSection loads={completedLoads} />
         )}
 
         {!isLoading &&
