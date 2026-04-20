@@ -1584,6 +1584,22 @@ export default defineSchema({
 
     status: v.union(v.literal('PENDING'), v.literal('ACTIVE'), v.literal('COMPLETED'), v.literal('CANCELED')),
 
+    // Driver Session System (Phase 1) — optional because most historical rows predate sessions.
+    // sessionId stamped when the driver first checks in and the leg goes ACTIVE.
+    sessionId: v.optional(v.id('driverSessions')),
+    // Historical event times, separate from row-metadata createdAt/updatedAt.
+    startedAt: v.optional(v.float64()), // First check-in event time
+    endedAt: v.optional(v.float64()), // Last checkout / handoff / cancel event time
+    endReason: v.optional(
+      v.union(
+        v.literal('completed'),
+        v.literal('handoff'),
+        v.literal('unassigned'),
+        v.literal('session_ended')
+      )
+    ),
+    plannedStartAt: v.optional(v.float64()), // Dispatcher's scheduled start
+
     workosOrgId: v.string(),
     createdAt: v.float64(),
     updatedAt: v.float64(),
@@ -1887,7 +1903,14 @@ export default defineSchema({
   driverLocations: defineTable({
     // References
     driverId: v.id('drivers'),
-    loadId: v.id('loadInformation'), // Required - always tracking for a specific load
+    // loadId is optional: pre-check-in session pings have no attached load.
+    // Legacy rows (pre-session rollout) always have loadId. Enforcement of
+    // "required when load is active, absent when not" lives in the mutations.
+    loadId: v.optional(v.id('loadInformation')),
+    // sessionId tags pings to the driver's current work shift. Optional at the
+    // schema level so legacy rows (no sessions) remain valid; mutation-level
+    // validation requires it for flag-on orgs.
+    sessionId: v.optional(v.id('driverSessions')),
     organizationId: v.string(), // Same pattern as workosOrgId
 
     // GPS Data
@@ -1898,7 +1921,9 @@ export default defineSchema({
     heading: v.optional(v.float64()), // Direction 0-360 degrees
 
     // Tracking Context
-    trackingType: v.literal('LOAD_ROUTE'), // Continuous from first checkout to last checkout
+    // LOAD_ROUTE: between first check-in and last checkout (loadId attached).
+    // SESSION_ROUTE: on-shift but no active load (pre-check-in, between loads).
+    trackingType: v.union(v.literal('LOAD_ROUTE'), v.literal('SESSION_ROUTE')),
 
     // Timestamps
     recordedAt: v.float64(), // Device timestamp (when GPS captured)
@@ -1907,7 +1932,125 @@ export default defineSchema({
     .index('by_driver_time', ['driverId', 'recordedAt'])
     .index('by_org_time', ['organizationId', 'recordedAt'])
     .index('by_load', ['loadId', 'recordedAt'])
+    .index('by_session_time', ['sessionId', 'recordedAt'])
     .index('by_org_created', ['organizationId', 'createdAt']),
+
+  // ==========================================
+  // DRIVER SESSION SYSTEM (Phase 1)
+  // Work-shift lifecycle, per-load geofence progress, and geofence events.
+  // ==========================================
+
+  /**
+   * driverSessions — a driver's work-shift as a first-class server entity.
+   * Starts on manual "Start Shift" after truck QR scan; ends manually, on
+   * handoff, via dispatch override, or via auto-timeout safety-net cron.
+   *
+   * Intentionally lean: no frontier state here (it's in loadTrackingState),
+   * so dispatcher dashboard subscriptions don't invalidate on every GPS ping.
+   */
+  driverSessions: defineTable({
+    driverId: v.id('drivers'),
+    truckId: v.id('trucks'), // required — session is bound to a truck on start
+    organizationId: v.string(),
+
+    startedAt: v.float64(),
+    endedAt: v.optional(v.float64()),
+
+    endReason: v.optional(
+      v.union(
+        v.literal('driver_manual'),
+        v.literal('dispatch_override'),
+        v.literal('auto_timeout'),
+        v.literal('next_session_opened'),
+        v.literal('handoff_complete')
+      )
+    ),
+    endedByUserId: v.optional(v.string()), // WorkOS user ID for dispatch_override
+    endedByReasonCode: v.optional(
+      v.union(
+        v.literal('emergency'),
+        v.literal('unreachable_driver'),
+        v.literal('phone_issues')
+      )
+    ),
+
+    status: v.union(v.literal('active'), v.literal('completed')),
+
+    totalActiveMinutes: v.optional(v.float64()), // computed on end
+    softCap10hAt: v.optional(v.float64()), // stamped when 10h banner shown
+    softCap14hAt: v.optional(v.float64()), // stamped when 14h banner shown
+  })
+    .index('by_driver_status', ['driverId', 'status'])
+    .index('by_org_active', ['organizationId', 'status'])
+    .index('by_org_started', ['organizationId', 'startedAt'])
+    // Powers the daily auto-timeout cron. Scans only active sessions sorted
+    // by startedAt so we can short-circuit the moment we hit one inside the
+    // 18-hour window (status='active' first → tightest selectivity).
+    .index('by_status_started', ['status', 'startedAt']),
+
+  /**
+   * loadTrackingState — per-load geofence frontier. High-write, narrow-read.
+   * Only the geofence evaluator and check-in/out mutations touch this table;
+   * dispatcher dashboards read it lazily (per-load detail) or not at all.
+   *
+   * Kept separate from driverSessions so per-ping flag writes don't invalidate
+   * reactive query subscriptions on the session table.
+   */
+  loadTrackingState: defineTable({
+    loadId: v.id('loadInformation'),
+    sessionId: v.id('driverSessions'),
+    driverId: v.id('drivers'),
+    organizationId: v.string(),
+
+    currentStopSequenceNumber: v.float64(), // next unarrived stop
+    currentStopLat: v.float64(),
+    currentStopLng: v.float64(),
+
+    approachingFired: v.boolean(), // 5mi outer-ring event fired
+    arrivedFired: v.boolean(), // 0.5mi inner-ring event fired
+
+    updatedAt: v.float64(),
+  }).index('by_load', ['loadId']),
+
+  /**
+   * geofenceEvents — internal log of auto-generated APPROACHING/ARRIVED
+   * events from GPS pings. NOT exposed to external partners (they pull raw
+   * GPS positions and compute their own geofences).
+   */
+  geofenceEvents: defineTable({
+    sessionId: v.id('driverSessions'),
+    loadId: v.id('loadInformation'),
+    stopSequenceNumber: v.float64(),
+    driverId: v.id('drivers'),
+    organizationId: v.string(),
+
+    eventType: v.union(v.literal('APPROACHING'), v.literal('ARRIVED')),
+
+    triggeredAt: v.float64(),
+    latitude: v.float64(),
+    longitude: v.float64(),
+    distanceMeters: v.float64(),
+  })
+    .index('by_load_stop_event', ['loadId', 'stopSequenceNumber', 'eventType'])
+    .index('by_load', ['loadId', 'triggeredAt']),
+
+  /**
+   * sessionEndedWithActiveLoad — audit table. Written when a session ends
+   * (via auto-timeout, dispatch override, or handoff) while the driver had
+   * one or more active legs. Surfaces these cases to dispatchers for follow-up.
+   */
+  sessionEndedWithActiveLoad: defineTable({
+    sessionId: v.id('driverSessions'),
+    driverId: v.id('drivers'),
+    organizationId: v.string(),
+    endedAt: v.float64(),
+    endReason: v.string(), // mirror of driverSessions.endReason
+    affectedLegIds: v.array(v.id('dispatchLegs')),
+    acknowledgedAt: v.optional(v.float64()), // set when dispatcher resolves
+    acknowledgedBy: v.optional(v.string()),
+  })
+    .index('by_org_unacked', ['organizationId', 'acknowledgedAt'])
+    .index('by_session', ['sessionId']),
 
   // ==========================================
   // EXTERNAL TRACKING API

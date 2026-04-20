@@ -3,6 +3,7 @@ import { query, mutation, QueryCtx, MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
+import { calculateDistanceMeters } from './lib/geo';
 
 // ============================================
 // DRIVER MOBILE API
@@ -55,27 +56,14 @@ function isDriverToken(identity: { issuer?: string }): boolean {
   return identity.issuer.includes('clerk');
 }
 
-/**
- * Calculate distance between two GPS coordinates using Haversine formula
- * Returns distance in meters
- */
-function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371000; // Earth's radius in meters
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
+// calculateDistanceMeters lives in convex/lib/geo.ts (imported above).
 
 /**
  * Resolve the authenticated driver from the Clerk JWT phone claim.
  * If claimedDriverId is provided, verify it matches the phone-resolved driver.
  * Throws if unauthenticated, no phone on identity, or driver not found.
  */
-async function resolveAuthenticatedDriver(
+export async function resolveAuthenticatedDriver(
   ctx: QueryCtx | MutationCtx,
   claimedDriverId?: Id<'drivers'>,
 ): Promise<Doc<'drivers'>> {
@@ -381,6 +369,158 @@ export const getMyAssignedLoads = query({
 });
 
 /**
+ * Session-mode counterpart to getMyAssignedLoads.
+ *
+ * Returns three buckets keyed off the caller's dispatchLegs:
+ *   - inProgress:           legs with status=ACTIVE (the one they're driving now)
+ *   - upNext:               legs with status=PENDING, sorted by plannedStartAt asc
+ *   - completedThisSession: legs with status=COMPLETED whose endedAt falls inside
+ *                            the session window [session.startedAt, session.endedAt]
+ *
+ * Multi-day long-haul: a leg that started day 1 stays status=ACTIVE across
+ * sessions. It appears in In Progress on day 2's new session because the
+ * filter is status=ACTIVE, not sessionId. No writes between sessions.
+ *
+ * The leg's `sessionId` field is NOT used for filtering — it's a denorm of
+ * the session that first started the leg.
+ */
+export const getSessionLoads = query({
+  args: {
+    sessionId: v.id('driverSessions'),
+    nowMs: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx);
+    } catch {
+      return { inProgress: [], upNext: [], completedThisSession: [] };
+    }
+
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) {
+      return { inProgress: [], upNext: [], completedThisSession: [] };
+    }
+    if (session.driverId !== driver._id) {
+      return { inProgress: [], upNext: [], completedThisSession: [] };
+    }
+
+    const now = args.nowMs ?? Date.now();
+    const windowStart = session.startedAt;
+    const windowEnd = session.endedAt ?? now;
+
+    // Compound-index scans — one per status bucket we care about.
+    const [activeLegs, pendingLegs, completedLegs] = await Promise.all([
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'ACTIVE')
+        )
+        .collect(),
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'PENDING')
+        )
+        .collect(),
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'COMPLETED')
+        )
+        .collect(),
+    ]);
+
+    // Narrow COMPLETED to "ended during this session." A leg completed before
+    // this session started or after it ended is history from another shift.
+    const completedInWindow = completedLegs.filter(
+      (leg) =>
+        leg.endedAt !== undefined &&
+        leg.endedAt >= windowStart &&
+        leg.endedAt <= windowEnd
+    );
+
+    pendingLegs.sort((a, b) => {
+      const aPlan = a.plannedStartAt ?? Number.POSITIVE_INFINITY;
+      const bPlan = b.plannedStartAt ?? Number.POSITIVE_INFINITY;
+      return aPlan - bPlan;
+    });
+
+    // Enrich a leg with its load + stops for display. Matches the shape
+    // getMyAssignedLoads returns so the mobile load-card renderer can be
+    // shared between session mode and calendar mode.
+    const enrichLeg = async (leg: Doc<'dispatchLegs'>) => {
+      const load = await ctx.db.get(leg.loadId);
+      if (!load) return null;
+
+      const stops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect();
+      stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+
+      const pickups = stops.filter((s) => s.stopType === 'PICKUP');
+      const deliveries = stops.filter((s) => s.stopType === 'DELIVERY');
+      const firstPickup = pickups[0];
+      const lastDelivery = deliveries[deliveries.length - 1];
+
+      const facets = await getLoadFacets(ctx, load._id);
+
+      return {
+        legId: leg._id,
+        legStatus: leg.status,
+        legPlannedStartAt: leg.plannedStartAt,
+        legStartedAt: leg.startedAt,
+        legEndedAt: leg.endedAt,
+        _id: load._id,
+        internalId: load.internalId,
+        orderNumber: load.orderNumber,
+        parsedHcr: facets.hcr,
+        parsedTripNumber: facets.trip,
+        status: load.status,
+        trackingStatus: load.trackingStatus,
+        customerName: load.customerName,
+        firstStopDate: load.firstStopDate,
+        effectiveMiles: load.effectiveMiles,
+        stopCount: load.stopCount || stops.length,
+        equipmentType: load.equipmentType,
+        commodityDescription: load.commodityDescription,
+        firstPickup: firstPickup
+          ? {
+              city: firstPickup.city,
+              state: firstPickup.state,
+              windowBeginDate: firstPickup.windowBeginDate,
+              windowBeginTime: firstPickup.windowBeginTime,
+            }
+          : undefined,
+        lastDelivery: lastDelivery
+          ? {
+              city: lastDelivery.city,
+              state: lastDelivery.state,
+              windowBeginDate: lastDelivery.windowBeginDate,
+              windowEndTime: lastDelivery.windowEndTime,
+            }
+          : undefined,
+      };
+    };
+
+    const [inProgressEnriched, upNextEnriched, completedEnriched] = await Promise.all([
+      Promise.all(activeLegs.map(enrichLeg)),
+      Promise.all(pendingLegs.map(enrichLeg)),
+      Promise.all(completedInWindow.map(enrichLeg)),
+    ]);
+
+    return {
+      inProgress: inProgressEnriched.filter((r): r is NonNullable<typeof r> => r !== null),
+      upNext: upNextEnriched.filter((r): r is NonNullable<typeof r> => r !== null),
+      completedThisSession: completedEnriched.filter(
+        (r): r is NonNullable<typeof r> => r !== null
+      ),
+    };
+  },
+});
+
+/**
  * Get detailed load information with all stops
  */
 export const getLoadWithStops = query({
@@ -584,15 +724,45 @@ export const checkInAtStop = mutation({
       return { success: false, message: 'Load not found' };
     }
 
-    // Check driver access - either via primaryDriverId or carrier assignment
-    let hasAccess = load.primaryDriverId === driver._id;
+    // Auth: prefer dispatchLegs (source of truth after Phase 1). A driver is
+    // allowed to check into a stop if they have an ACTIVE or PENDING leg on
+    // this load. First check-in transitions PENDING → ACTIVE below.
+    //
+    // Transition fallback: during the rollout window before every load has
+    // a leg backfilled, we fall through to the legacy primaryDriverId /
+    // loadCarrierAssignments checks. Remove once backfillDispatchLegs is
+    // confirmed universal and we've soaked 2 weeks.
+    const [driverActiveLegs, driverPendingLegs] = await Promise.all([
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'ACTIVE')
+        )
+        .collect(),
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'PENDING')
+        )
+        .collect(),
+    ]);
+    const matchingLeg =
+      driverActiveLegs.find((l) => l.loadId === stop.loadId) ??
+      driverPendingLegs.find((l) => l.loadId === stop.loadId) ??
+      null;
+
+    let hasAccess = matchingLeg !== null;
     if (!hasAccess) {
-      const carrierAssignment = await ctx.db
-        .query('loadCarrierAssignments')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-        .first();
-      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
-        hasAccess = true;
+      // Legacy fallback — safe to remove after backfill is universal.
+      hasAccess = load.primaryDriverId === driver._id;
+      if (!hasAccess) {
+        const carrierAssignment = await ctx.db
+          .query('loadCarrierAssignments')
+          .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+          .first();
+        if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
+          hasAccess = true;
+        }
       }
     }
     if (!hasAccess) {
@@ -615,9 +785,43 @@ export const checkInAtStop = mutation({
       }
     }
 
+    // Bootstrap grace: if the driver hasn't started a shift, create one
+    // silently so they aren't blocked at a stop. Requires a currentTruckId
+    // (from a prior QR scan) — refuses otherwise so every session is bound
+    // to a truck. Mobile shows a one-time tip toast the next time they
+    // open the app.
+    let session = await ctx.db
+      .query('driverSessions')
+      .withIndex('by_driver_status', (q) =>
+        q.eq('driverId', driver._id).eq('status', 'active')
+      )
+      .first();
+    if (!session) {
+      if (!driver.currentTruckId) {
+        return { success: false, message: 'Scan your truck before checking in' };
+      }
+      const truck = await ctx.db.get(driver.currentTruckId);
+      if (!truck || truck.isDeleted || truck.organizationId !== driver.organizationId) {
+        return {
+          success: false,
+          message: 'Current truck is unavailable — rescan your truck',
+        };
+      }
+      const nowMs = Date.now();
+      const sessionId = await ctx.db.insert('driverSessions', {
+        driverId: driver._id,
+        truckId: driver.currentTruckId,
+        organizationId: driver.organizationId,
+        startedAt: nowMs,
+        status: 'active',
+      });
+      session = await ctx.db.get(sessionId);
+    }
+
     // Use driver's timestamp for check-in time (supports offline scenarios)
     // Server timestamp is recorded separately in updatedAt
     const checkinTime = args.driverTimestamp;
+    const serverNow = Date.now();
 
     await ctx.db.patch(args.stopId, {
       checkedInAt: checkinTime,
@@ -626,14 +830,83 @@ export const checkInAtStop = mutation({
       status: 'In Transit',
       driverNotes: args.notes || stop.driverNotes,
       ...(args.isRedirected ? { isRedirected: true } : {}),
-      updatedAt: Date.now(), // Server timestamp for audit
+      updatedAt: serverNow, // Server timestamp for audit
     });
 
-    // Update load tracking status if this is the first stop
+    // Transition the matching leg into the active state on first check-in.
+    // Idempotent: already-ACTIVE legs are untouched. Only stamps sessionId
+    // + startedAt when moving PENDING → ACTIVE.
+    if (matchingLeg && matchingLeg.status === 'PENDING' && stop.sequenceNumber === 1) {
+      await ctx.db.patch(matchingLeg._id, {
+        status: 'ACTIVE',
+        sessionId: session!._id,
+        startedAt: serverNow,
+        updatedAt: serverNow,
+      });
+    }
+
+    // Frontier state for the geofence evaluator. Stop 1 initializes; later
+    // stops advance the pointer and reset the APPROACHING/ARRIVED flags so
+    // the next stop's events can fire fresh.
+    if (stop.sequenceNumber === 1) {
+      const existingState = await ctx.db
+        .query('loadTrackingState')
+        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+        .first();
+      if (!existingState && stop.latitude !== undefined && stop.longitude !== undefined) {
+        await ctx.db.insert('loadTrackingState', {
+          loadId: stop.loadId,
+          sessionId: session!._id,
+          driverId: driver._id,
+          organizationId: driver.organizationId,
+          currentStopSequenceNumber: stop.sequenceNumber,
+          currentStopLat: stop.latitude,
+          currentStopLng: stop.longitude,
+          approachingFired: false,
+          arrivedFired: false,
+          updatedAt: serverNow,
+        });
+      }
+    } else {
+      // Advance frontier to the next non-detour, non-canceled stop after this one.
+      const siblingStops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+        .collect();
+      const upcoming = siblingStops
+        .filter(
+          (s) =>
+            s.sequenceNumber > stop.sequenceNumber &&
+            s.stopType !== 'DETOUR' &&
+            s.status !== 'Canceled'
+        )
+        .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
+
+      if (upcoming && upcoming.latitude !== undefined && upcoming.longitude !== undefined) {
+        const state = await ctx.db
+          .query('loadTrackingState')
+          .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+          .first();
+        if (state) {
+          await ctx.db.patch(state._id, {
+            currentStopSequenceNumber: upcoming.sequenceNumber,
+            currentStopLat: upcoming.latitude,
+            currentStopLng: upcoming.longitude,
+            approachingFired: false,
+            arrivedFired: false,
+            updatedAt: serverNow,
+          });
+        }
+      }
+    }
+
+    // Update load tracking status if this is the first stop.
+    // trackingStatus is partner-visible; leg.status is internal dispatch
+    // lifecycle. They move together on first check-in but diverge on handoff.
     if (stop.sequenceNumber === 1 && load.trackingStatus === 'Pending') {
       await ctx.db.patch(stop.loadId, {
         trackingStatus: 'In Transit',
-        updatedAt: Date.now(),
+        updatedAt: serverNow,
       });
     }
 
@@ -681,15 +954,29 @@ export const checkOutFromStop = mutation({
       return { success: false, message: 'Load not found' };
     }
 
-    // Check driver access - either via primaryDriverId or carrier assignment
-    let hasAccess = load.primaryDriverId === driver._id;
+    // Auth: mirror checkInAtStop — prefer dispatchLegs, fall back to legacy
+    // primaryDriverId / carrier assignment during backfill transition.
+    const driverActiveLegsForAuth = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) =>
+        q.eq('driverId', driver._id).eq('status', 'ACTIVE')
+      )
+      .collect();
+    const matchingActiveLeg = driverActiveLegsForAuth.find(
+      (l) => l.loadId === stop.loadId
+    );
+
+    let hasAccess = matchingActiveLeg !== undefined;
     if (!hasAccess) {
-      const carrierAssignment = await ctx.db
-        .query('loadCarrierAssignments')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-        .first();
-      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
-        hasAccess = true;
+      hasAccess = load.primaryDriverId === driver._id;
+      if (!hasAccess) {
+        const carrierAssignment = await ctx.db
+          .query('loadCarrierAssignments')
+          .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+          .first();
+        if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
+          hasAccess = true;
+        }
       }
     }
     if (!hasAccess) {
@@ -761,6 +1048,30 @@ export const checkOutFromStop = mutation({
         loadId: stop.loadId,
         status: 'Completed',
       });
+
+      // Close the active leg for this driver-load pair with endReason='completed'.
+      // Idempotent: completeLeg is a no-op if the leg is already COMPLETED.
+      // Only acts when a leg exists; legacy loads without a matching leg
+      // (pre-backfill) continue to work via the load-status path above.
+      if (matchingActiveLeg) {
+        const serverNow = Date.now();
+        await ctx.db.patch(matchingActiveLeg._id, {
+          status: 'COMPLETED',
+          endedAt: serverNow,
+          endReason: 'completed',
+          updatedAt: serverNow,
+        });
+      }
+
+      // Release the geofence frontier. Historical geofenceEvents stay —
+      // only the current-pointer state is removed.
+      const trackingState = await ctx.db
+        .query('loadTrackingState')
+        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+        .first();
+      if (trackingState) {
+        await ctx.db.delete(trackingState._id);
+      }
     }
 
     return { success: true, message: 'Checked out successfully' };

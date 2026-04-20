@@ -251,26 +251,109 @@ export const getPositions = internalQuery({
           recordedAt: p.recordedAt,
         }));
     } else {
-      const positions = await ctx.db
+      // Production path: union load-tagged pings (legacy + post-rollout
+      // post-check-in) with session-tagged pings (post-rollout pre-check-in).
+      //
+      // Why this matters: before Phase 1, every ping carried loadId because
+      // tracking only started at first check-in. After Phase 1, the driver
+      // is on shift before they reach the load — those pings carry sessionId
+      // only. The whole point of the rewrite was to surface those approach
+      // pings to partners (FourKites) so the route doesn't appear to start
+      // AT the location.
+      //
+      // For each leg of this load (handoffs may produce multiple), we look
+      // up the leg's session window and pull pings within it. Then we union
+      // with the load-tagged read and dedupe by _id.
+
+      const loadIdId = args.loadId as Id<'loadInformation'>;
+
+      // 1) All legs for this load — covers single-driver, relay, and any
+      //    historical legs from before this driver's session existed.
+      const legs = await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
+        .collect();
+
+      // 2) Build per-session windows. A leg without sessionId predates the
+      //    Driver Session System and contributes nothing to the session-pings
+      //    branch — its pings are picked up by the load-tagged read below.
+      const sessionWindows: Array<{
+        sessionId: Id<'driverSessions'>;
+        from: number;
+        to: number;
+      }> = [];
+      for (const leg of legs) {
+        if (!leg.sessionId) continue;
+        const session = await ctx.db.get(leg.sessionId);
+        if (!session) continue;
+        // Window: session start/end clipped to the requested [since, until]
+        // range. We want pre-check-in pings, so we open from session.startedAt
+        // — not leg.startedAt — to capture the approach.
+        const from = Math.max(since, session.startedAt);
+        const to = Math.min(effectiveUntil, session.endedAt ?? effectiveUntil);
+        if (from > to) continue;
+        sessionWindows.push({ sessionId: leg.sessionId, from, to });
+      }
+
+      // 3) Pull session-scoped pings. .take(5000) per session is a safety
+      //    ceiling — at 2-min cadence that's ~7 days of continuous tracking.
+      const sessionPingsArrays = await Promise.all(
+        sessionWindows.map((w) =>
+          ctx.db
+            .query('driverLocations')
+            .withIndex('by_session_time', (q: any) =>
+              q
+                .eq('sessionId', w.sessionId)
+                .gte('recordedAt', w.from)
+                .lte('recordedAt', w.to)
+            )
+            .order('asc')
+            .take(5000),
+        ),
+      );
+
+      // 4) Pull load-tagged pings. Captures legacy (pre-rollout) data AND
+      //    new post-check-in pings that have both loadId and sessionId.
+      const loadTaggedPings = await ctx.db
         .query('driverLocations')
         .withIndex('by_load', (q: any) =>
-          q
-            .eq('loadId', args.loadId as Id<'loadInformation'>)
-            .gte('recordedAt', since)
+          q.eq('loadId', loadIdId).gte('recordedAt', since)
         )
         .order('asc')
         .collect();
+      const loadTaggedFiltered = loadTaggedPings.filter(
+        (p) => p.recordedAt <= effectiveUntil,
+      );
 
-      rawPositions = positions
-        .filter((p) => p.recordedAt <= effectiveUntil)
-        .map((p) => ({
-          latitude: p.latitude,
-          longitude: p.longitude,
-          speed: p.speed ?? undefined,
-          heading: p.heading ?? undefined,
-          accuracy: p.accuracy ?? undefined,
-          recordedAt: p.recordedAt,
-        }));
+      // 5) Union by _id, then sort by recordedAt asc.
+      const seen = new Set<string>();
+      const merged: Array<{
+        latitude: number;
+        longitude: number;
+        speed?: number;
+        heading?: number;
+        accuracy?: number;
+        recordedAt: number;
+      }> = [];
+      const consume = (rows: typeof loadTaggedFiltered) => {
+        for (const p of rows) {
+          if (seen.has(p._id)) continue;
+          seen.add(p._id);
+          merged.push({
+            latitude: p.latitude,
+            longitude: p.longitude,
+            speed: p.speed ?? undefined,
+            heading: p.heading ?? undefined,
+            accuracy: p.accuracy ?? undefined,
+            recordedAt: p.recordedAt,
+          });
+        }
+      };
+      consume(loadTaggedFiltered);
+      for (const arr of sessionPingsArrays) consume(arr);
+      merged.sort((a, b) => a.recordedAt - b.recordedAt);
+
+      rawPositions = merged;
     }
 
     // Downsample to 5-minute intervals
@@ -319,13 +402,42 @@ export const getLatestPosition = internalQuery({
         .order('desc')
         .first();
     } else {
-      position = await ctx.db
+      // Production path: latest of (load-tagged latest, session-tagged
+      // latest across all legs' sessions). Same union pattern as getPositions
+      // but reduced to a single max — reads at most legCount + 1 candidate
+      // pings rather than the full history.
+      const loadIdId = args.loadId as Id<'loadInformation'>;
+
+      const loadTaggedLatest = await ctx.db
         .query('driverLocations')
-        .withIndex('by_load', (q: any) =>
-          q.eq('loadId', args.loadId as Id<'loadInformation'>)
-        )
+        .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
         .order('desc')
         .first();
+
+      const legs = await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
+        .collect();
+
+      const sessionLatestArr = await Promise.all(
+        legs
+          .filter((leg) => leg.sessionId)
+          .map((leg) =>
+            ctx.db
+              .query('driverLocations')
+              .withIndex('by_session_time', (q: any) => q.eq('sessionId', leg.sessionId!))
+              .order('desc')
+              .first(),
+          ),
+      );
+
+      const candidates = [loadTaggedLatest, ...sessionLatestArr].filter(
+        (p): p is NonNullable<typeof p> => p !== null && p !== undefined,
+      );
+      position = candidates.reduce<typeof candidates[number] | undefined>(
+        (best, cur) => (best === undefined || cur.recordedAt > best.recordedAt ? cur : best),
+        undefined,
+      );
     }
 
     if (!position) return null;

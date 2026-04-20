@@ -57,7 +57,8 @@ async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
 export interface LocationRow {
   id: number;
   driverId: string;
-  loadId: string;
+  loadId: string | null; // Session-only pings (pre-check-in) have no attached load
+  sessionId: string | null; // Phase 1+ pings always carry sessionId; legacy rows are null
   organizationId: string;
   latitude: number;
   longitude: number;
@@ -69,12 +70,17 @@ export interface LocationRow {
   synced: number; // 0 = unsynced, 1 = synced
 }
 
-const SCHEMA_SQL = `
-  PRAGMA journal_mode = WAL;
+// Schema version tracked via SQLite's user_version pragma.
+// v1: initial schema (loadId NOT NULL, no sessionId).
+// v2: loadId made nullable, sessionId column + index added.
+const CURRENT_SCHEMA_VERSION = 2;
+
+const SCHEMA_V2_SQL = `
   CREATE TABLE IF NOT EXISTS locations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     driverId TEXT NOT NULL,
-    loadId TEXT NOT NULL,
+    loadId TEXT,
+    sessionId TEXT,
     organizationId TEXT NOT NULL,
     latitude REAL NOT NULL,
     longitude REAL NOT NULL,
@@ -86,13 +92,92 @@ const SCHEMA_SQL = `
     synced INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_locations_load_synced ON locations (loadId, synced);
+  CREATE INDEX IF NOT EXISTS idx_locations_session_synced ON locations (sessionId, synced);
   CREATE INDEX IF NOT EXISTS idx_locations_synced ON locations (synced);
   CREATE INDEX IF NOT EXISTS idx_locations_recorded ON locations (recordedAt);
 `;
 
+/**
+ * v1 → v2 migration: add sessionId column, make loadId nullable.
+ *
+ * SQLite doesn't support `ALTER TABLE ... ALTER COLUMN` for constraint
+ * changes, so we rebuild the table: create v2 → copy v1 rows → drop v1 →
+ * rename. All inside a transaction so a mid-migration crash leaves the
+ * old table intact.
+ *
+ * Existing rows keep their loadId; sessionId backfills as NULL. Those rows
+ * will sync through the legacy loadId-based ingest path on next resume.
+ */
+async function migrateV1ToV2(database: SQLite.SQLiteDatabase): Promise<void> {
+  console.log('[LocationDB] Migrating schema v1 → v2');
+  await database.execAsync(`
+    BEGIN TRANSACTION;
+
+    CREATE TABLE locations_v2 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      driverId TEXT NOT NULL,
+      loadId TEXT,
+      sessionId TEXT,
+      organizationId TEXT NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      accuracy REAL,
+      speed REAL,
+      heading REAL,
+      recordedAt REAL NOT NULL,
+      createdAt REAL NOT NULL,
+      synced INTEGER NOT NULL DEFAULT 0
+    );
+
+    INSERT INTO locations_v2
+      (id, driverId, loadId, sessionId, organizationId, latitude, longitude,
+       accuracy, speed, heading, recordedAt, createdAt, synced)
+    SELECT
+      id, driverId, loadId, NULL, organizationId, latitude, longitude,
+      accuracy, speed, heading, recordedAt, createdAt, synced
+    FROM locations;
+
+    DROP TABLE locations;
+    ALTER TABLE locations_v2 RENAME TO locations;
+
+    CREATE INDEX idx_locations_load_synced ON locations (loadId, synced);
+    CREATE INDEX idx_locations_session_synced ON locations (sessionId, synced);
+    CREATE INDEX idx_locations_synced ON locations (synced);
+    CREATE INDEX idx_locations_recorded ON locations (recordedAt);
+
+    PRAGMA user_version = 2;
+
+    COMMIT;
+  `);
+  console.log('[LocationDB] Schema migration v1 → v2 complete');
+}
+
 async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   const newDb = await SQLite.openDatabaseAsync(DB_NAME);
-  await newDb.execAsync(SCHEMA_SQL);
+  await newDb.execAsync('PRAGMA journal_mode = WAL;');
+
+  const versionRow = await newDb.getFirstAsync<{ user_version: number }>(
+    'PRAGMA user_version'
+  );
+  const currentVersion = versionRow?.user_version ?? 0;
+
+  if (currentVersion === 0) {
+    // Fresh install — create v2 schema directly.
+    await newDb.execAsync(SCHEMA_V2_SQL);
+    await newDb.execAsync(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);
+    console.log('[LocationDB] Initialized fresh schema at v2');
+  } else if (currentVersion === 1) {
+    await migrateV1ToV2(newDb);
+  } else if (currentVersion === CURRENT_SCHEMA_VERSION) {
+    // Already current. No-op.
+  } else if (currentVersion > CURRENT_SCHEMA_VERSION) {
+    // Downgrade (user re-installed older app over newer data). Log and proceed;
+    // the schema is forward-compatible enough that inserts will still work.
+    console.warn(
+      `[LocationDB] DB at version ${currentVersion}, app expects ${CURRENT_SCHEMA_VERSION}. Proceeding.`
+    );
+  }
+
   return newDb;
 }
 
@@ -152,9 +237,11 @@ export async function reopenDb(): Promise<void> {
 // WRITE OPERATIONS
 // ============================================
 
-export async function insertLocation(loc: {
+export interface LocationInput {
   driverId: string;
-  loadId: string;
+  // Either loadId or sessionId (or both) must be present. Enforced below.
+  loadId?: string | null;
+  sessionId?: string | null;
   organizationId: string;
   latitude: number;
   longitude: number;
@@ -162,10 +249,20 @@ export async function insertLocation(loc: {
   speed: number | null;
   heading: number | null;
   recordedAt: number;
-}): Promise<number> {
+}
+
+function assertHasAnchor(loc: LocationInput): void {
+  if (!loc.loadId && !loc.sessionId) {
+    throw new Error('insertLocation: loadId or sessionId required');
+  }
+}
+
+export async function insertLocation(loc: LocationInput): Promise<number> {
+  assertHasAnchor(loc);
   const args = [
     loc.driverId,
-    loc.loadId,
+    loc.loadId ?? null,
+    loc.sessionId ?? null,
     loc.organizationId,
     loc.latitude,
     loc.longitude,
@@ -179,28 +276,17 @@ export async function insertLocation(loc: {
   return withDbRetry(async () => {
     const database = await getDb();
     const result = await database.runAsync(
-      `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      `INSERT INTO locations (driverId, loadId, sessionId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       ...args,
     );
     return result.lastInsertRowId;
   });
 }
 
-export async function insertLocationBatch(
-  locations: Array<{
-    driverId: string;
-    loadId: string;
-    organizationId: string;
-    latitude: number;
-    longitude: number;
-    accuracy: number | null;
-    speed: number | null;
-    heading: number | null;
-    recordedAt: number;
-  }>,
-): Promise<number> {
+export async function insertLocationBatch(locations: LocationInput[]): Promise<number> {
   if (locations.length === 0) return 0;
+  for (const loc of locations) assertHasAnchor(loc);
 
   return withDbRetry(async () => {
     const database = await getDb();
@@ -208,15 +294,16 @@ export async function insertLocationBatch(
     let inserted = 0;
 
     const stmt = await database.prepareAsync(
-      `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
-       VALUES ($driverId, $loadId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`,
+      `INSERT INTO locations (driverId, loadId, sessionId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
+       VALUES ($driverId, $loadId, $sessionId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`,
     );
 
     try {
       for (const loc of locations) {
         await stmt.executeAsync({
           $driverId: loc.driverId,
-          $loadId: loc.loadId,
+          $loadId: loc.loadId ?? null,
+          $sessionId: loc.sessionId ?? null,
           $orgId: loc.organizationId,
           $lat: loc.latitude,
           $lng: loc.longitude,
@@ -329,6 +416,28 @@ export async function getLastLocationForLoad(
       longitude: number;
       recordedAt: number;
     }>('SELECT latitude, longitude, recordedAt FROM locations WHERE loadId = ? ORDER BY recordedAt DESC LIMIT 1', loadId);
+    return row ?? null;
+  });
+}
+
+/**
+ * Last-point reader for session-scoped distance filtering. Used by the
+ * background task when the driver is on shift but not yet on a load —
+ * pings have sessionId but no loadId, so load-scoped lookup finds nothing.
+ */
+export async function getLastLocationForSession(
+  sessionId: string,
+): Promise<{ latitude: number; longitude: number; recordedAt: number } | null> {
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const row = await database.getFirstAsync<{
+      latitude: number;
+      longitude: number;
+      recordedAt: number;
+    }>(
+      'SELECT latitude, longitude, recordedAt FROM locations WHERE sessionId = ? ORDER BY recordedAt DESC LIMIT 1',
+      sessionId,
+    );
     return row ?? null;
   });
 }

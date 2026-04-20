@@ -56,6 +56,7 @@ import Link from 'next/link';
 import { Id } from '@/convex/_generated/dataModel';
 import { DriverPaySection, CarrierPaySection } from '@/components/driver-pay';
 import { LiveRouteMap } from '@/components/dispatch/live-route-map';
+import { ReassignDriverDialog } from '@/components/sessions/reassign-driver-dialog';
 import { formatTimeWindow } from '@/lib/format-date-timezone';
 import {
   Tooltip,
@@ -245,6 +246,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const [isEditingStatus, setIsEditingStatus] = useState(false);
   const [selectedStatus, setSelectedStatus] = useState<'Open' | 'Assigned' | 'Canceled' | 'Completed' | 'Expired'>('Open');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [reassignDialogOpen, setReassignDialogOpen] = useState(false);
   const [selectedStop, setSelectedStop] = useState<StopWithEvidence | null>(null);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxPhotos, setLightboxPhotos] = useState<string[]>([]);
@@ -1087,6 +1089,24 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
                       </span>
                     </div>
                   )}
+                  {/* Reassign — only show for in-flight loads where a real
+                      driverId exists. Cancelled / completed loads can't be
+                      handed off; carrier-only assignments don't have a
+                      direct driverId on this surface. */}
+                  {loadData.assignedDriver?._id &&
+                    loadData.status !== 'Completed' &&
+                    loadData.status !== 'Canceled' && (
+                      <div className="pt-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full"
+                          onClick={() => setReassignDialogOpen(true)}
+                        >
+                          Reassign Driver
+                        </Button>
+                      </div>
+                    )}
                   {loadData.assignedCarrier && (
                     <>
                       <div className="flex justify-between">
@@ -1199,6 +1219,18 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Mid-load handoff (Phase 6). Mounted lazily — only when the user
+          opens it and an assigned driver actually exists. */}
+      {reassignDialogOpen && loadData.assignedDriver?._id && (
+        <ReassignDriverDialog
+          open={reassignDialogOpen}
+          onOpenChange={setReassignDialogOpen}
+          loadId={loadId as Id<'loadInformation'>}
+          fromDriverId={loadData.assignedDriver._id as Id<'drivers'>}
+          fromDriverName={loadData.assignedDriver.name}
+        />
+      )}
     </div>
   );
 }

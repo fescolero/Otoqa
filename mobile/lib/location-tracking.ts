@@ -13,6 +13,7 @@ import {
   getUnsyncedCount,
   markAsSynced,
   getLastLocationForLoad,
+  getLastLocationForSession,
   deleteOldSyncedLocations,
   reopenDb,
 } from './location-db';
@@ -72,21 +73,28 @@ const MOBILE_LOCATION_API_KEY = process.env.EXPO_PUBLIC_MOBILE_LOCATION_API_KEY;
 const CONVEX_SITE_URL = CONVEX_URL.replace('.convex.cloud', '.convex.site');
 
 /**
+ * Wire shape of a single ping sent to the server. loadId and sessionId
+ * are both optional; mutation enforces at-least-one + trackingType match.
+ */
+type SyncPing = {
+  driverId: string;
+  loadId?: string;
+  sessionId?: string;
+  latitude: number;
+  longitude: number;
+  accuracy?: number;
+  speed?: number;
+  heading?: number;
+  trackingType: 'LOAD_ROUTE' | 'SESSION_ROUTE';
+  recordedAt: number;
+};
+
+/**
  * Sync locations directly via the Convex HTTP endpoint using a static API key.
  * Works in background tasks without Clerk auth.
  */
 async function syncViaHttpEndpoint(
-  locations: Array<{
-    driverId: string;
-    loadId: string;
-    latitude: number;
-    longitude: number;
-    accuracy?: number;
-    speed?: number;
-    heading?: number;
-    trackingType: 'LOAD_ROUTE';
-    recordedAt: number;
-  }>,
+  locations: SyncPing[],
   organizationId: string,
 ): Promise<{ inserted: number }> {
   if (!MOBILE_LOCATION_API_KEY) {
@@ -199,12 +207,26 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
 // TYPES
 // ============================================
 
+/**
+ * State persisted in AsyncStorage that the background task reads to know
+ * what's currently being tracked.
+ *
+ * Modes:
+ *   - Legacy load-only:  { loadId, no sessionId, trackingType: 'LOAD_ROUTE' }
+ *     Used by the existing useCheckIn → ensureTrackingForLoad path until
+ *     mobile fully migrates to session mode.
+ *   - Session, no load:  { sessionId, no loadId, trackingType: 'SESSION_ROUTE' }
+ *     Driver is on shift but hasn't checked in anywhere.
+ *   - Session + load:    { sessionId + loadId, trackingType: 'LOAD_ROUTE' }
+ *     Driver is on shift and currently between first check-in and last checkout.
+ */
 interface TrackingState {
   isActive: boolean;
   driverId: string;
-  loadId: string;
+  loadId?: string;
+  sessionId?: string;
   organizationId: string;
-  trackingType: 'LOAD_ROUTE';
+  trackingType: 'LOAD_ROUTE' | 'SESSION_ROUTE';
   startedAt: number;
 }
 
@@ -234,19 +256,20 @@ const BG_FALLBACK_LOCATIONS_KEY = 'bg_fallback_locations';
  * Save locations to AsyncStorage as a fallback when SQLite is unavailable.
  * These get recovered and inserted into SQLite on the next foreground return.
  */
-async function saveFallbackLocations(
-  locations: Array<{
-    driverId: string;
-    loadId: string;
-    organizationId: string;
-    latitude: number;
-    longitude: number;
-    accuracy: number | null;
-    speed: number | null;
-    heading: number | null;
-    recordedAt: number;
-  }>,
-): Promise<void> {
+type FallbackLocation = {
+  driverId: string;
+  loadId?: string | null;
+  sessionId?: string | null;
+  organizationId: string;
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  speed: number | null;
+  heading: number | null;
+  recordedAt: number;
+};
+
+async function saveFallbackLocations(locations: FallbackLocation[]): Promise<void> {
   try {
     const existingJson = await storage.getString(BG_FALLBACK_LOCATIONS_KEY);
     const existing = existingJson ? JSON.parse(existingJson) : [];
@@ -346,7 +369,14 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       console.log('[LocationTracking] BG task: tracking not active');
       return;
     }
-    console.log(`[LocationTracking] BG task: tracking active for load=${state.loadId.substring(0, 12)}...`);
+    if (!state.loadId && !state.sessionId) {
+      console.warn('[LocationTracking] BG task: state missing both loadId and sessionId — skipping');
+      return;
+    }
+    const anchor = state.sessionId
+      ? `session=${state.sessionId.substring(0, 12)}`
+      : `load=${(state.loadId ?? '').substring(0, 12)}`;
+    console.log(`[LocationTracking] BG task: tracking active for ${anchor}...`);
   } catch (stateErr) {
     console.error('[LocationTracking] BG task: FAILED to read tracking state:', stateErr);
     trackBGTaskError({ step: 'read_state', error: stateErr instanceof Error ? stateErr.message : String(stateErr) });
@@ -367,11 +397,18 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     `[LocationTracking] BG task: ${locations.length} location(s) received, accuracy=[${accuracies}], ages=[${ages}]`,
   );
 
-  // Step 3: Try to get last point from SQLite (may fail in headless context)
+  // Step 3: Try to get last point from SQLite (may fail in headless context).
+  // Prefer sessionId-keyed lookup when present — that's the new source of
+  // truth and works even before any check-in. Fall back to loadId for the
+  // legacy load-only path.
   let lastPoint: { latitude: number; longitude: number; recordedAt: number } | null = null;
   let sqliteAvailable = true;
   try {
-    lastPoint = await getLastLocationForLoad(state.loadId);
+    if (state.sessionId) {
+      lastPoint = await getLastLocationForSession(state.sessionId);
+    } else if (state.loadId) {
+      lastPoint = await getLastLocationForLoad(state.loadId);
+    }
     console.log(`[LocationTracking] BG task: SQLite available, lastPoint=${lastPoint ? 'yes' : 'none'}`);
   } catch (dbErr) {
     sqliteAvailable = false;
@@ -410,17 +447,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   let prevTimestamp = lastPoint?.recordedAt ?? 0;
   let savedHeartbeat = false;
 
-  const locationsToSave: Array<{
-    driverId: string;
-    loadId: string;
-    organizationId: string;
-    latitude: number;
-    longitude: number;
-    accuracy: number | null;
-    speed: number | null;
-    heading: number | null;
-    recordedAt: number;
-  }> = [];
+  const locationsToSave: FallbackLocation[] = [];
 
   for (const loc of locations) {
     if (loc.coords.accuracy && loc.coords.accuracy > MAX_ACCURACY_METERS) {
@@ -466,9 +493,12 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       continue;
     }
 
-    const locationData = {
+    const locationData: FallbackLocation = {
       driverId: state.driverId,
-      loadId: state.loadId,
+      // Both anchors written when present. State.loadId may be undefined in
+      // session-only mode; that's fine — server validates trackingType matches.
+      loadId: state.loadId ?? null,
+      sessionId: state.sessionId ?? null,
       organizationId: state.organizationId,
       latitude: loc.coords.latitude,
       longitude: loc.coords.longitude,
@@ -535,15 +565,17 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
       if (unsynced.length > 0) {
         syncAttempted = true;
-        const payload = unsynced.map((loc) => ({
-          driverId: loc.driverId as Id<'drivers'>,
-          loadId: loc.loadId as Id<'loadInformation'>,
+        const payload: SyncPing[] = unsynced.map((loc) => ({
+          driverId: loc.driverId,
+          loadId: loc.loadId ?? undefined,
+          sessionId: loc.sessionId ?? undefined,
           latitude: loc.latitude,
           longitude: loc.longitude,
           accuracy: loc.accuracy ?? undefined,
           speed: loc.speed ?? undefined,
           heading: loc.heading ?? undefined,
-          trackingType: 'LOAD_ROUTE' as const,
+          // Server enforces match: loadId↔LOAD_ROUTE, no-loadId↔SESSION_ROUTE.
+          trackingType: loc.loadId ? 'LOAD_ROUTE' : 'SESSION_ROUTE',
           recordedAt: loc.recordedAt,
         }));
 
@@ -841,9 +873,10 @@ export async function shouldStartTrackingForLoad(loadId: string): Promise<boolea
   const startedAt = typeof state.startedAt === 'number' ? state.startedAt : 0;
   const ageMs = startedAt > 0 ? Date.now() - startedAt : Infinity;
   if (ageMs > TRACKING_SESSION_MAX_AGE_MS) {
+    const stalePrev = state.loadId ? state.loadId.slice(0, 12) : '<none>';
     console.warn(
       `[LocationTracking] Active tracking session is stale ` +
-        `(load=${state.loadId.slice(0, 12)}..., age=${Math.round(ageMs / 3600000)}h) — allowing new load ${loadId.slice(0, 12)}... to start`,
+        `(load=${stalePrev}..., age=${Math.round(ageMs / 3600000)}h) — allowing new load ${loadId.slice(0, 12)}... to start`,
     );
     return true;
   }
@@ -875,8 +908,9 @@ export async function ensureTrackingForLoad(params: {
   const ageMs = startedAt > 0 ? Date.now() - startedAt : Infinity;
   const isStale = ageMs > TRACKING_SESSION_MAX_AGE_MS;
 
+  const fromLoadDisplay = state.loadId ? state.loadId.slice(0, 12) : '<none>';
   console.warn(
-    `[LocationTracking] Handing off tracking from load=${state.loadId.slice(0, 12)}... ` +
+    `[LocationTracking] Handing off tracking from load=${fromLoadDisplay}... ` +
       `to load=${params.loadId.slice(0, 12)}... (age=${Math.round(ageMs / 60000)}m, stale=${isStale})`,
   );
 
@@ -979,6 +1013,193 @@ export async function forceFlush(): Promise<{ success: boolean; synced: number }
   const remaining = await getUnsyncedCount();
   console.warn(`[LocationTracking] forceFlush: all retries exhausted, ${remaining} points still in SQLite`);
   return { success: false, synced: 0 };
+}
+
+// ============================================
+// SESSION-MODE PUBLIC API (Phase 3)
+//
+// These functions wrap the existing OS-level resources (background task,
+// foreground watch, sync interval) but track the driver's *shift* rather
+// than a specific load. Pings flow with sessionId; loadId attaches when
+// the driver checks into stop 1 and detaches after the last checkout.
+//
+// Coexists with startLocationTracking — both write the same TrackingState
+// in storage. The legacy load-only path keeps working for orgs/drivers
+// that haven't moved to session mode yet.
+// ============================================
+
+async function applyOSLevelTrackingResources(state: TrackingState): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  // Persist state first so the BG task can read it on next OS callback.
+  await storage.set(TRACKING_STATE_KEY, JSON.stringify(state));
+
+  if (isExpoGo) {
+    console.warn('[LocationTracking] Running in Expo Go — background location not supported');
+    await captureCurrentLocation(state);
+    startForegroundPolling(state.organizationId);
+    return { success: true, message: 'Tracking started (foreground only in Expo Go)' };
+  }
+
+  if (!isPhysicalDevice) {
+    console.warn('[LocationTracking] Running on simulator — background location may not work');
+  }
+
+  const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
+  if (fgStatus !== 'granted') {
+    return { success: false, message: 'Foreground location permission required' };
+  }
+  const { status: bgStatus } = await Location.requestBackgroundPermissionsAsync();
+  if (bgStatus !== 'granted') {
+    return {
+      success: false,
+      message:
+        'Background location permission required. Please enable "Always" location access in Settings.',
+    };
+  }
+
+  try {
+    await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+      accuracy: Location.Accuracy.High,
+      timeInterval: TRACKING_INTERVAL_MS,
+      distanceInterval: BG_DISTANCE_INTERVAL,
+      showsBackgroundLocationIndicator: true,
+      foregroundService: {
+        notificationTitle: 'Shift Active',
+        notificationBody: 'Recording your route while on shift',
+        notificationColor: '#22c55e',
+      },
+      activityType: Location.ActivityType.OtherNavigation,
+      pausesUpdatesAutomatically: false,
+    });
+    startSyncInterval(state.organizationId);
+    await captureCurrentLocation(state);
+    startForegroundPolling(state.organizationId);
+    return { success: true, message: 'Location tracking started' };
+  } catch (bgError) {
+    console.warn(
+      '[LocationTracking] Background tracking failed, falling back to foreground polling:',
+      bgError instanceof Error ? bgError.message : bgError,
+    );
+    await captureCurrentLocation(state);
+    startForegroundPolling(state.organizationId);
+    return {
+      success: true,
+      message: 'Tracking started (foreground only — background not available)',
+    };
+  }
+}
+
+/**
+ * Start session-mode tracking. GPS pings flow with sessionId and no loadId
+ * until the driver checks into a stop, then loadId attaches via
+ * attachLoadToSession().
+ *
+ * Closes any existing tracking state (load-mode or session-mode) first.
+ */
+export async function startSessionTracking(params: {
+  driverId: Id<'drivers'>;
+  sessionId: Id<'driverSessions'>;
+  organizationId: string;
+}): Promise<{ success: boolean; message: string }> {
+  try {
+    console.log(
+      `[LocationTracking] Starting session tracking: session=${(params.sessionId as string).substring(0, 12)}...`,
+    );
+
+    const existing = await getTrackingState();
+    if (existing?.isActive) {
+      console.log('[LocationTracking] Existing tracking session detected, stopping before session start');
+      await stopLocationTracking();
+    }
+
+    const state: TrackingState = {
+      isActive: true,
+      driverId: params.driverId as string,
+      sessionId: params.sessionId as string,
+      organizationId: params.organizationId,
+      trackingType: 'SESSION_ROUTE',
+      startedAt: Date.now(),
+    };
+
+    return await applyOSLevelTrackingResources(state);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Failed to start session tracking';
+    console.error('[LocationTracking] Session start failed:', errorMessage);
+    return { success: false, message: errorMessage };
+  }
+}
+
+/**
+ * Attach a load to the active session. Subsequent pings flow with both
+ * sessionId and loadId, and trackingType flips to LOAD_ROUTE.
+ *
+ * Called from useCheckIn after a successful first-stop check-in. Does NOT
+ * restart the OS-level tracking — the BG task and foreground watch keep
+ * running with the new state.
+ */
+export async function attachLoadToSession(loadId: Id<'loadInformation'>): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  const state = await getTrackingState();
+  if (!state?.isActive) {
+    return { success: false, message: 'No active tracking session to attach to' };
+  }
+  if (state.loadId === (loadId as string)) {
+    return { success: true, message: 'Load already attached' };
+  }
+  const updated: TrackingState = {
+    ...state,
+    loadId: loadId as string,
+    trackingType: 'LOAD_ROUTE',
+  };
+  await storage.set(TRACKING_STATE_KEY, JSON.stringify(updated));
+  console.log(
+    `[LocationTracking] Attached load=${(loadId as string).substring(0, 12)}... to session`,
+  );
+  return { success: true, message: 'Load attached to session' };
+}
+
+/**
+ * Detach the current load from the active session. Pings continue to flow
+ * with sessionId only, trackingType returns to SESSION_ROUTE.
+ *
+ * Called from useCheckIn after the last-stop checkout. Tracking continues
+ * until the driver explicitly ends the shift via stopSessionTracking.
+ */
+export async function detachLoadFromSession(): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  const state = await getTrackingState();
+  if (!state?.isActive) {
+    return { success: false, message: 'No active tracking session' };
+  }
+  if (!state.loadId) {
+    return { success: true, message: 'No load currently attached' };
+  }
+  const updated: TrackingState = {
+    isActive: state.isActive,
+    driverId: state.driverId,
+    sessionId: state.sessionId,
+    organizationId: state.organizationId,
+    trackingType: 'SESSION_ROUTE',
+    startedAt: state.startedAt,
+    // loadId omitted on purpose
+  };
+  await storage.set(TRACKING_STATE_KEY, JSON.stringify(updated));
+  console.log('[LocationTracking] Detached load from session');
+  return { success: true, message: 'Load detached from session' };
+}
+
+/**
+ * End session-mode tracking. Alias for stopLocationTracking — both tear
+ * down the same OS-level resources and flush any unsynced points.
+ */
+export async function stopSessionTracking(): Promise<{ success: boolean; message: string }> {
+  return stopLocationTracking();
 }
 
 /**
@@ -1202,7 +1423,8 @@ async function startForegroundPolling(organizationId: string) {
 
           const locationRecord = {
             driverId: state.driverId,
-            loadId: state.loadId,
+            loadId: state.loadId ?? null,
+            sessionId: state.sessionId ?? null,
             organizationId: state.organizationId,
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
@@ -1301,7 +1523,8 @@ async function captureCurrentLocation(state: TrackingState) {
 
     const rowId = await insertLocation({
       driverId: state.driverId,
-      loadId: state.loadId,
+      loadId: state.loadId ?? null,
+      sessionId: state.sessionId ?? null,
       organizationId: state.organizationId,
       latitude: location.coords.latitude,
       longitude: location.coords.longitude,
@@ -1359,15 +1582,17 @@ async function syncUnsyncedToConvex(
       `[LocationTracking] Syncing ${unsynced.length} unsynced points to Convex (orgId=${organizationId.substring(0, 12)}..., attempt=${retryAttempt})`,
     );
 
-    const locations = unsynced.map((loc) => ({
-      driverId: loc.driverId as Id<'drivers'>,
-      loadId: loc.loadId as Id<'loadInformation'>,
+    const locations: SyncPing[] = unsynced.map((loc) => ({
+      driverId: loc.driverId,
+      loadId: loc.loadId ?? undefined,
+      sessionId: loc.sessionId ?? undefined,
       latitude: loc.latitude,
       longitude: loc.longitude,
       accuracy: loc.accuracy ?? undefined,
       speed: loc.speed ?? undefined,
       heading: loc.heading ?? undefined,
-      trackingType: 'LOAD_ROUTE' as const,
+      // Server enforces match: loadId↔LOAD_ROUTE, no-loadId↔SESSION_ROUTE.
+      trackingType: loc.loadId ? 'LOAD_ROUTE' : 'SESSION_ROUTE',
       recordedAt: loc.recordedAt,
     }));
 

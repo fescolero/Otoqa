@@ -99,6 +99,22 @@ crons.cron('external-tracking-sandbox-refresh', '0 4 * * *', internal.sandboxDat
 crons.cron('auto-expire-stale-loads', '0 1 * * *', internal.loads.autoExpireStaleLoads, {});
 
 // ==========================================
+// DRIVER SESSION SYSTEM
+// ==========================================
+
+// ✅ Auto-timeout stale driver sessions (every 6 hours)
+// Safety net for drivers who forgot End Shift, lost their phone, or whose
+// app crashed. Sessions older than 18 hours are ended with reason 'auto_timeout'.
+// Soft-cap banners (10h amber, 14h red) appear in the mobile UI before this
+// fires, so reaching the threshold is genuinely abnormal.
+crons.interval(
+  'auto-timeout-driver-sessions',
+  { hours: 6 },
+  internal.driverSessions.sweepStaleSessionsForAutoTimeout,
+  {},
+);
+
+// ==========================================
 // FACET SYSTEM MAINTENANCE
 // ==========================================
 
