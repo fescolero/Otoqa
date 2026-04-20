@@ -1,7 +1,15 @@
 import { v } from 'convex/values';
 import { action, internalAction, internalMutation, internalQuery } from './_generated/server';
 import { internal, api } from './_generated/api';
+import type { Doc } from './_generated/dataModel';
 import { requireCallerOrgId } from './lib/auth';
+
+// Local aliases for the row shapes this module iterates over. Pin explicit
+// types on the inline lambdas below — Convex's fresh codegen infers the
+// runQuery/collect() return types as a `.any`-ish union otherwise, causing
+// implicit-any errors when parameters are destructured.
+type LaneEntryDoc = Doc<'laneAnalysisEntries'>;
+type LaneBaseDoc = Doc<'laneAnalysisBases'>;
 
 // ==========================================
 // LANE ANALYZER — External API Actions
@@ -260,15 +268,17 @@ export const runAnalysisWithExternalData = action({
     await fetchAndCacheFuelPrices(ctx);
 
     // 2. Get all entries for this session (mutable copy for in-place coord updates)
-    const entries = (await ctx.runQuery(internal.laneAnalyzerActions.listEntriesInternal, {
-      sessionId: args.sessionId,
-    })).map((e) => ({ ...e }));
+    const entries: LaneEntryDoc[] = (
+      await ctx.runQuery(internal.laneAnalyzerActions.listEntriesInternal, {
+        sessionId: args.sessionId,
+      })
+    ).map((e: LaneEntryDoc) => ({ ...e }));
 
     // 2.5. Parallel batch geocode entries missing coordinates + route distance
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     if (apiKey) {
       // Filter to entries that actually need work
-      const needsGeo = entries.filter((e) =>
+      const needsGeo = entries.filter((e: LaneEntryDoc) =>
         !e.originLat || !e.originLng || !e.destinationLat || !e.destinationLng || !e.routeMiles || !e.routeDurationHours
       );
 
@@ -276,7 +286,7 @@ export const runAnalysisWithExternalData = action({
       const BATCH_SIZE = 10;
       for (let b = 0; b < needsGeo.length; b += BATCH_SIZE) {
         const batch = needsGeo.slice(b, b + BATCH_SIZE);
-        await Promise.all(batch.map(async (entry) => {
+        await Promise.all(batch.map(async (entry: LaneEntryDoc) => {
           try {
             let oLat = entry.originLat, oLng = entry.originLng;
             let dLat = entry.destinationLat, dLng = entry.destinationLng;
@@ -330,9 +340,9 @@ export const runAnalysisWithExternalData = action({
       const baseDocs = await ctx.runQuery(internal.laneAnalyzerActions.listBasesInternal, {
         sessionId: args.sessionId,
       });
-      const basesNeedGeo = baseDocs.filter((b) => !b.latitude || !b.longitude);
+      const basesNeedGeo = baseDocs.filter((b: LaneBaseDoc) => !b.latitude || !b.longitude);
       if (basesNeedGeo.length > 0) {
-        await Promise.all(basesNeedGeo.map(async (base) => {
+        await Promise.all(basesNeedGeo.map(async (base: LaneBaseDoc) => {
           try {
             const geo = await geocodeAddress(
               [base.address, base.city, base.state, base.zip].filter(Boolean).join(', '), apiKey
@@ -349,12 +359,12 @@ export const runAnalysisWithExternalData = action({
 
     // 3. Fetch toll estimates (skip if no coords — tolls are optional)
     const entriesWithCoords = entries.filter(
-      (e) => e.originLat && e.originLng && e.destinationLat && e.destinationLng
+      (e: LaneEntryDoc) => e.originLat && e.originLng && e.destinationLat && e.destinationLng
     );
     // Parallel toll lookups in batches of 5
     for (let b = 0; b < entriesWithCoords.length; b += 5) {
       const batch = entriesWithCoords.slice(b, b + 5);
-      await Promise.all(batch.map(async (entry) => {
+      await Promise.all(batch.map(async (entry: LaneEntryDoc) => {
         const originHash = `${entry.originLat!.toFixed(2)},${entry.originLng!.toFixed(2)}`;
         const destHash = `${entry.destinationLat!.toFixed(2)},${entry.destinationLng!.toFixed(2)}`;
         const cached = await ctx.runQuery(internal.laneAnalyzerActions.getCachedToll, {

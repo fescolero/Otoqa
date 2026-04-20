@@ -43,10 +43,14 @@ export function isTimeOnOrAfterUtc(timestampMs: number, timeHHMM: string): boole
   return nowMinutes >= targetMinutes;
 }
 
-export function filterLoadsBySource<T extends { externalSource?: string | null }>(
-  loads: T[],
-  loadSourceFilter?: string
-): T[] {
+// Constraint widened to include `undefined` so callers whose externalSource
+// is `string | undefined` (e.g. from Convex v.optional(v.string()) returns)
+// don't have T narrowed to only the constraint shape during inference —
+// which would strip the rest of the caller's fields (loadRef, internalId,
+// etc.) from downstream code.
+export function filterLoadsBySource<
+  T extends { externalSource?: string | null | undefined },
+>(loads: T[], loadSourceFilter?: string): T[] {
   if (!loadSourceFilter) return loads;
   return loads.filter((load) => load.externalSource === loadSourceFilter);
 }

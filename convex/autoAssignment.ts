@@ -3,6 +3,7 @@ import { internalMutation, internalAction, internalQuery } from './_generated/se
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
+import type { OverlapInfo } from './_helpers/timeUtils';
 
 /**
  * Auto-Assignment System
@@ -233,7 +234,7 @@ export const autoAssignLoad = internalMutation({
 
       if (result.status === 'SUCCESS') {
         const overlapNote = result.overlaps && result.overlaps.length > 0
-          ? ` (schedule overlap with ${result.overlaps.map((o) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
+          ? ` (schedule overlap with ${result.overlaps.map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
           : '';
 
         return {
@@ -573,7 +574,7 @@ export const triggerAutoAssignmentForLoad = internalMutation({
 
       if (result.status === 'SUCCESS') {
         const overlapNote = result.overlaps && result.overlaps.length > 0
-          ? ` (schedule overlap with ${result.overlaps.map((o) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
+          ? ` (schedule overlap with ${result.overlaps.map((o: OverlapInfo) => `Load #${o.orderNumber ?? o.loadId}`).join(', ')})`
           : '';
 
         return {
