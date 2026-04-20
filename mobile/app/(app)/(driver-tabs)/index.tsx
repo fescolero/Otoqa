@@ -876,6 +876,21 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
     .join(' – ');
   const tags = loadFacetTags(load);
 
+  // Temporary facet diagnostic — see PR #23. Mirrors the log in
+  // ActiveLoadCard. Remove together once the fix lands.
+  if (__DEV__) {
+    console.log('[facet-debug][upcoming]', {
+      loadId: load._id,
+      hasFacetsArray: Array.isArray(load.facets),
+      facetsLen: Array.isArray(load.facets) ? load.facets.length : null,
+      facets: load.facets,
+      parsedHcr: load.parsedHcr,
+      parsedTripNumber: load.parsedTripNumber,
+      equipmentType: load.equipmentType,
+      derived: tags,
+    });
+  }
+
   return (
     <Pressable
       onPress={onPress}
@@ -909,6 +924,19 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
               <Tag key={v} value={v} />
             ))}
           </View>
+        )}
+        {__DEV__ && (
+          <Text
+            style={{
+              fontSize: 10,
+              color: palette.textTertiary,
+              fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+              marginTop: 2,
+            }}
+            numberOfLines={2}
+          >
+            facets={Array.isArray(load.facets) ? JSON.stringify(load.facets) : String(load.facets)}
+          </Text>
         )}
       </View>
       <Icon name="chevron-right" size={18} color={palette.textTertiary} />
