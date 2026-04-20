@@ -123,6 +123,8 @@ export default function TripDetailScreen() {
   const [showDetourModal, setShowDetourModal] = useState(false);
   const [showAccidentSheet, setShowAccidentSheet] = useState(false);
   const [showDocumentsSheet, setShowDocumentsSheet] = useState(false);
+  const [accidentKind, setAccidentKind] = useState<string>('Collision');
+  const [accidentNote, setAccidentNote] = useState('');
   const [detourStops, setDetourStops] = useState(1);
   const [detourReason, setDetourReason] = useState<
     'FUEL' | 'REST' | 'FOOD' | 'SCALE' | 'REPAIR' | 'REDIRECT' | 'CUSTOMER' | 'OTHER'
@@ -1494,9 +1496,20 @@ export default function TripDetailScreen() {
           visible={showAccidentSheet}
           palette={palette}
           contactPhone={load.contactPersonPhone}
+          kind={accidentKind}
+          setKind={setAccidentKind}
+          note={accidentNote}
+          setNote={setAccidentNote}
           onClose={() => setShowAccidentSheet(false)}
-          onCallDispatch={() => {
+          onPageOps={() => {
+            posthog?.capture('accident_reported', {
+              loadId: id,
+              kind: accidentKind,
+              hasNote: !!accidentNote,
+            });
             setShowAccidentSheet(false);
+            setAccidentKind('Collision');
+            setAccidentNote('');
             if (load.contactPersonPhone) {
               Linking.openURL(`tel:${load.contactPersonPhone}`);
             }
@@ -1814,7 +1827,7 @@ function QuickActionsGrid({
         <QuickActionTile
           palette={palette}
           icon="warning"
-          label="Report issue"
+          label="Report accident"
           sub="Escalate to ops"
           onPress={onAccident}
           danger
@@ -2169,62 +2182,162 @@ function DetourSheet({
   );
 }
 
+const ACCIDENT_KINDS = [
+  'Collision',
+  'Trailer damage',
+  'Cargo damage',
+  'Other driver at fault',
+  'Single-vehicle',
+] as const;
+
 function AccidentSheet({
   visible,
   palette,
   contactPhone,
+  kind,
+  setKind,
+  note,
+  setNote,
   onClose,
-  onCallDispatch,
+  onPageOps,
 }: {
   visible: boolean;
   palette: Palette;
   contactPhone?: string;
+  kind: string;
+  setKind: (k: string) => void;
+  note: string;
+  setNote: (n: string) => void;
   onClose: () => void;
-  onCallDispatch: () => void;
+  onPageOps: () => void;
 }) {
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <SheetFrame
-        palette={palette}
-        onClose={onClose}
-        title="Report an issue"
-        subtitle="Ops is paged immediately and will call you back."
-      >
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'flex-start',
-            gap: 10,
-            padding: 14,
-            borderRadius: designRadii.md,
-            backgroundColor: 'rgba(245, 158, 11, 0.10)',
-            borderWidth: 1,
-            borderColor: 'rgba(245, 158, 11, 0.28)',
-          }}
-        >
-          <Icon name="warning" size={18} color={palette.warning} />
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontSize: 14, fontWeight: '600', color: palette.textPrimary }}>
-              Everyone safe first.
-            </Text>
-            <Text style={{ fontSize: 13, lineHeight: 18, color: palette.textSecondary, marginTop: 2 }}>
-              If there are injuries, call 911 before continuing.
-            </Text>
-          </View>
-        </View>
-
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <SheetButton palette={palette} label="Cancel" variant="secondary" onPress={onClose} />
-          <SheetButton
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={{ flex: 1 }}>
+          <SheetFrame
             palette={palette}
-            label={contactPhone ? 'Call dispatch' : 'No number on file'}
-            variant="danger"
-            icon="phone"
-            disabled={!contactPhone}
-            onPress={onCallDispatch}
-          />
+            onClose={onClose}
+            title="Report an accident"
+            subtitle="Ops is paged immediately and will call you back."
+          >
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: 10,
+                padding: 14,
+                borderRadius: designRadii.md,
+                backgroundColor: 'rgba(245, 158, 11, 0.10)',
+                borderWidth: 1,
+                borderColor: 'rgba(245, 158, 11, 0.28)',
+              }}
+            >
+              <Icon name="warning" size={18} color={palette.warning} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: palette.textPrimary }}>
+                  Everyone safe first.
+                </Text>
+                <Text
+                  style={{ fontSize: 13, lineHeight: 18, color: palette.textSecondary, marginTop: 2 }}
+                >
+                  If there are injuries, call 911 before continuing.
+                </Text>
+              </View>
+            </View>
+
+            <View style={{ gap: 8 }}>
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  color: palette.textTertiary,
+                }}
+              >
+                WHAT HAPPENED?
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {ACCIDENT_KINDS.map((opt) => {
+                  const active = kind === opt;
+                  return (
+                    <Pressable
+                      key={opt}
+                      onPress={() => setKind(opt)}
+                      style={({ pressed }) => [
+                        {
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: designRadii.full,
+                          backgroundColor: active ? palette.accentTint : palette.bgMuted,
+                          borderWidth: 1,
+                          borderColor: active ? palette.accent : 'transparent',
+                        },
+                        pressed && { opacity: 0.8 },
+                      ]}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 13,
+                          fontWeight: '500',
+                          color: active ? palette.accent : palette.textPrimary,
+                        }}
+                      >
+                        {opt}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+
+            <View style={{ gap: 6 }}>
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  color: palette.textTertiary,
+                }}
+              >
+                BRIEF DESCRIPTION
+              </Text>
+              <TextInput
+                value={note}
+                onChangeText={setNote}
+                placeholder="Short description — ops will call for full report"
+                placeholderTextColor={palette.textPlaceholder}
+                multiline
+                maxLength={300}
+                style={{
+                  borderWidth: 1,
+                  borderColor: palette.borderSubtle,
+                  backgroundColor: palette.bgMuted,
+                  borderRadius: designRadii.md,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  minHeight: 72,
+                  fontSize: 14,
+                  color: palette.textPrimary,
+                  textAlignVertical: 'top',
+                }}
+              />
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <SheetButton palette={palette} label="Cancel" variant="secondary" onPress={onClose} />
+              <SheetButton
+                palette={palette}
+                label={contactPhone ? 'Page ops now' : 'No number on file'}
+                variant="danger"
+                icon="phone"
+                disabled={!contactPhone}
+                onPress={onPageOps}
+              />
+            </View>
+          </SheetFrame>
         </View>
-      </SheetFrame>
+      </TouchableWithoutFeedback>
     </Modal>
   );
 }
