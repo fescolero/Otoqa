@@ -300,6 +300,31 @@ export const archiveOldLocations = internalAction({
  * URL TTL is 15 minutes — long enough to download a few MB, short enough
  * to not leak access if the response is mishandled.
  */
+// Explicit type aliases break the circular inference between this action's
+// return type and the internal query's type (which comes from the same
+// generated api file that this action's type feeds into). Without these
+// annotations TypeScript reports all the downstream bindings as `any`.
+type ArchiveFileRow = {
+  date: string;
+  hour: number;
+  s3Bucket: string;
+  s3Key: string;
+  rowCount: number;
+  byteCount: number;
+  minRecordedAt: number;
+  maxRecordedAt: number;
+};
+type ArchiveSignedUrlRow = {
+  date: string;
+  hour: number;
+  s3Key: string;
+  signedUrl: string;
+  rowCount: number;
+  byteCount: number;
+  minRecordedAt: number;
+  maxRecordedAt: number;
+};
+
 export const getArchivedPositionFiles = action({
   args: {
     organizationId: v.string(),
@@ -318,13 +343,13 @@ export const getArchivedPositionFiles = action({
       maxRecordedAt: v.number(),
     })
   ),
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<ArchiveSignedUrlRow[]> => {
     const s3 = createArchiveS3Client();
     if (!s3) {
       throw new Error('Archive storage not configured');
     }
 
-    const files = await ctx.runQuery(
+    const files: ArchiveFileRow[] = await ctx.runQuery(
       internal.driverLocations.listArchivedFilesInWindow,
       {
         organizationId: args.organizationId,
@@ -337,8 +362,8 @@ export const getArchivedPositionFiles = action({
     // to sequentially download a handful of files; if they need longer they
     // can call this action again.
     const SIGNED_URL_TTL_SECONDS = 15 * 60;
-    const signed = await Promise.all(
-      files.map(async (f) => {
+    const signed: ArchiveSignedUrlRow[] = await Promise.all(
+      files.map(async (f: ArchiveFileRow): Promise<ArchiveSignedUrlRow> => {
         const url = await getSignedUrl(
           s3.client,
           new GetObjectCommand({ Bucket: f.s3Bucket, Key: f.s3Key }),
