@@ -8,6 +8,7 @@ import {
   Pressable,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -655,6 +656,22 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
 
   const tags = loadFacetTags(load);
 
+  // Temporary facet diagnostic — prints what the server actually returned
+  // so we can tell if `facets` is missing, empty, or present-but-wrong-key.
+  // Remove once we've confirmed tags render end-to-end.
+  if (__DEV__) {
+    console.log('[facet-debug]', {
+      loadId: load._id,
+      hasFacetsArray: Array.isArray(load.facets),
+      facetsLen: Array.isArray(load.facets) ? load.facets.length : null,
+      facets: load.facets,
+      parsedHcr: load.parsedHcr,
+      parsedTripNumber: load.parsedTripNumber,
+      equipmentType: load.equipmentType,
+      derived: tags,
+    });
+  }
+
   return (
     <Pressable
       onPress={onPress}
@@ -676,6 +693,20 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
             <Tag key={t} value={t} />
           ))}
         </View>
+      )}
+
+      {__DEV__ && (
+        <Text
+          style={{
+            fontSize: 10,
+            color: palette.textTertiary,
+            fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+            marginTop: 4,
+          }}
+          numberOfLines={2}
+        >
+          facets={Array.isArray(load.facets) ? JSON.stringify(load.facets) : String(load.facets)}
+        </Text>
       )}
 
       <View style={styles.activeCardBody}>
