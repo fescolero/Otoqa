@@ -1,28 +1,46 @@
-import { useState, useRef, useEffect } from 'react';
+/**
+ * OTP verification screen — Otoqa Driver design system.
+ *
+ * Port of lib/otp-screen.jsx from the design bundle: 6-box code display,
+ * masked phone helper, Resend countdown. Hidden TextInput captures the
+ * native keyboard input and drives the visible boxes; we keep the native
+ * keyboard (for SMS autofill on iOS) instead of the design's custom keypad.
+ *
+ * Clerk verify flow, analytics, and navigation are preserved verbatim.
+ */
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
+  Alert,
   KeyboardAvoidingView,
   Platform,
-  Alert,
-  ScrollView,
   Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSignIn, useAuth } from '@clerk/clerk-expo';
-import { useRouter, useLocalSearchParams } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
-import { LinearGradient } from 'expo-linear-gradient';
-import { trackVerificationStarted, trackVerificationSuccess, trackVerificationFailed, trackResendCode } from '../../lib/analytics';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Icon } from '../../lib/design-icons';
+import { useTheme } from '../../lib/ThemeContext';
+import { radii, typeScale, type Palette } from '../../lib/design-tokens';
+import {
+  trackResendCode,
+  trackScreen,
+  trackVerificationFailed,
+  trackVerificationStarted,
+  trackVerificationSuccess,
+} from '../../lib/analytics';
 
 export default function VerifyScreen() {
   const { signIn, setActive, isLoaded } = useSignIn();
   const { isSignedIn } = useAuth();
   const router = useRouter();
   const { phoneNumber } = useLocalSearchParams<{ phoneNumber: string }>();
+  const { palette } = useTheme();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
 
   const [code, setCode] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -32,21 +50,22 @@ export default function VerifyScreen() {
 
   const hiddenInputRef = useRef<TextInput | null>(null);
 
-  // Navigate to app once Clerk confirms sign-in is active
+  useEffect(() => {
+    trackScreen('Verify');
+  }, []);
+
   useEffect(() => {
     if (verificationComplete && isSignedIn) {
       router.replace('/(app)');
     }
   }, [verificationComplete, isSignedIn]);
 
-  // Safety net: if isSignedIn becomes true, navigate away
   useEffect(() => {
     if (isSignedIn && isLoaded) {
       router.replace('/(app)');
     }
   }, [isSignedIn, isLoaded]);
 
-  // Countdown timer for resend
   useEffect(() => {
     if (resendTimer > 0) {
       const timer = setTimeout(() => setResendTimer(resendTimer - 1), 1000);
@@ -76,7 +95,7 @@ export default function VerifyScreen() {
     if (!isLoaded) return;
 
     const codeToVerify = fullCode || code;
-    
+
     if (codeToVerify.length !== 6) {
       Alert.alert('Invalid Code', 'Please enter the 6-digit code');
       return;
@@ -99,7 +118,7 @@ export default function VerifyScreen() {
           console.error('[Verify] setActive failed:', activateError);
           Alert.alert(
             'Session Error',
-            'Verification succeeded but we couldn\'t activate your session. Please close and reopen the app.',
+            "Verification succeeded but we couldn't activate your session. Please close and reopen the app.",
           );
           return;
         }
@@ -113,17 +132,14 @@ export default function VerifyScreen() {
       const errorCode = error.errors?.[0]?.code;
       const errorMessage = error.errors?.[0]?.message;
       trackVerificationFailed(errorCode, errorMessage);
-      
+
       if (errorCode === 'form_code_incorrect') {
         Alert.alert('Invalid Code', 'The code you entered is incorrect. Please try again.');
         setCode('');
         setFocusedIndex(0);
         hiddenInputRef.current?.focus();
       } else {
-        Alert.alert(
-          'Error',
-          errorMessage || 'Verification failed'
-        );
+        Alert.alert('Error', errorMessage || 'Verification failed');
       }
     } finally {
       setIsLoading(false);
@@ -137,7 +153,7 @@ export default function VerifyScreen() {
       await signIn.prepareFirstFactor({
         strategy: 'phone_code',
         phoneNumberId: signIn.supportedFirstFactors?.find(
-          (factor) => factor.strategy === 'phone_code'
+          (factor) => factor.strategy === 'phone_code',
         )?.phoneNumberId as string,
       });
 
@@ -150,59 +166,61 @@ export default function VerifyScreen() {
     }
   };
 
-  const formattedPhone = phoneNumber
-    ? phoneNumber.replace(/(\+1)(\d{3})(\d{3})(\d{4})/, '$1 ($2) $3-$4')
-    : '';
+  // Mask the middle digits of the displayed phone: +1 (415) ••• 2847
+  const maskedPhone = (() => {
+    if (!phoneNumber) return '';
+    const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(phoneNumber);
+    if (!m) return phoneNumber;
+    const [, a, , d] = m;
+    return `+1 (${a}) ••• ${d}`;
+  })();
 
   return (
-    <View style={styles.container}>
-      <LinearGradient
-        colors={['rgba(255, 107, 0, 0.15)', 'transparent']}
-        style={styles.gradientTop}
-        start={{ x: 0.5, y: 0 }}
-        end={{ x: 0.5, y: 1 }}
-      />
+    <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
+      <View style={styles.topBar}>
+        <Pressable
+          onPress={() => router.back()}
+          accessibilityLabel="Back"
+          style={({ pressed }) => [
+            styles.iconBtn,
+            pressed && { opacity: 0.7 },
+          ]}
+        >
+          <Icon name="arrow-left" size={22} color={palette.textPrimary} />
+        </Pressable>
+      </View>
 
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.keyboardView}
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="always"
-          keyboardDismissMode="on-drag"
           showsVerticalScrollIndicator={false}
         >
-          {/* Back Button */}
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => router.back()}
-          >
-            <Ionicons name="arrow-back" size={24} color={colors.foreground} />
-          </TouchableOpacity>
-
           <Text style={styles.title}>Enter verification code</Text>
           <Text style={styles.subtitle}>
-            We sent a 6-digit code to{'\n'}
-            <Text style={styles.phoneText}>{formattedPhone}</Text>
+            Sent to <Text style={styles.subtitleStrong}>{maskedPhone}</Text>
           </Text>
 
-          {/* Code Input */}
-          <Pressable onPress={focusHiddenInput}>
-            <View style={styles.codeContainer}>
-              {codeDigits.map((digit, index) => (
+          <Pressable onPress={focusHiddenInput} style={styles.boxRow}>
+            {codeDigits.map((digit, index) => {
+              const isFilled = !!digit;
+              const isActive = index === focusedIndex && !isFilled;
+              return (
                 <View
                   key={index}
                   style={[
-                    styles.codeInput,
-                    digit ? styles.codeInputFilled : null,
-                    index === focusedIndex && !digit ? styles.codeInputFocused : null,
+                    styles.box,
+                    isFilled && styles.boxFilled,
+                    isActive && styles.boxActive,
                   ]}
                 >
-                  <Text style={styles.codeDigitText}>{digit}</Text>
+                  <Text style={styles.boxDigit}>{digit}</Text>
                 </View>
-              ))}
-            </View>
+              );
+            })}
           </Pressable>
           <TextInput
             ref={hiddenInputRef}
@@ -217,157 +235,148 @@ export default function VerifyScreen() {
             style={styles.hiddenInput}
           />
 
-          {/* Verify Button */}
-          <TouchableOpacity
-            style={[styles.button, isLoading && styles.buttonDisabled]}
-            onPress={() => handleVerify()}
-            disabled={isLoading || code.length !== 6}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.buttonText}>
-              {isLoading ? 'Verifying...' : 'Verify'}
-            </Text>
-            {!isLoading && (
-              <Ionicons name="checkmark" size={20} color={colors.primaryForeground} />
-            )}
-          </TouchableOpacity>
-
-          {/* Resend */}
-          <View style={styles.resendContainer}>
-            <Text style={styles.resendText}>Didn't receive the code? </Text>
+          <View style={styles.resendRow}>
+            <Text style={styles.resendLabel}>Didn&apos;t get it?</Text>
             {resendTimer > 0 ? (
-              <Text style={styles.timerText}>Resend in {resendTimer}s</Text>
+              <Text style={styles.resendTimer}>
+                Resend in 0:{resendTimer.toString().padStart(2, '0')}
+              </Text>
             ) : (
-              <TouchableOpacity onPress={handleResend}>
-                <Text style={styles.resendLink}>Resend Code</Text>
-              </TouchableOpacity>
+              <Pressable onPress={handleResend}>
+                <Text style={styles.resendLink}>Resend code</Text>
+              </Pressable>
             )}
           </View>
+
+          <View style={{ flex: 1, minHeight: 24 }} />
+
+          <Pressable
+            onPress={() => handleVerify()}
+            disabled={code.length !== 6 || isLoading}
+            style={({ pressed }) => [
+              styles.cta,
+              (code.length !== 6 || isLoading) && styles.ctaDisabled,
+              pressed && code.length === 6 && !isLoading && { opacity: 0.9 },
+            ]}
+          >
+            <Text style={styles.ctaText}>
+              {isLoading ? 'Verifying…' : 'Continue'}
+            </Text>
+          </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  gradientTop: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 300,
-  },
-  keyboardView: {
-    flex: 1,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    paddingHorizontal: spacing.xl,
-    paddingTop: 60,
-    paddingBottom: 40,
-  },
-  backButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: colors.card,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: spacing['2xl'],
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  title: {
-    fontSize: typography['3xl'],
-    fontWeight: typography.bold,
-    color: colors.foreground,
-    marginBottom: spacing.md,
-  },
-  subtitle: {
-    fontSize: typography.base,
-    color: colors.foregroundMuted,
-    lineHeight: 24,
-    marginBottom: spacing['2xl'],
-  },
-  phoneText: {
-    color: colors.foreground,
-    fontWeight: typography.semibold,
-  },
-  codeContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: spacing['2xl'],
-    gap: spacing.sm,
-  },
-  codeInput: {
-    flex: 1,
-    height: 56,
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.lg,
-    borderWidth: 2,
-    borderColor: colors.border,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  codeInputFilled: {
-    borderColor: colors.primary,
-    backgroundColor: colors.primary + '10',
-  },
-  codeInputFocused: {
-    borderColor: colors.primary,
-  },
-  codeDigitText: {
-    fontSize: typography['2xl'],
-    fontWeight: typography.bold,
-    color: colors.foreground,
-    textAlign: 'center',
-  },
-  hiddenInput: {
-    position: 'absolute',
-    opacity: 0,
-    height: 1,
-    width: 1,
-  },
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.primary,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.xl,
-    borderRadius: borderRadius.lg,
-    gap: spacing.sm,
-    marginBottom: spacing.xl,
-    ...shadows.md,
-  },
-  buttonDisabled: {
-    backgroundColor: colors.muted,
-  },
-  buttonText: {
-    fontSize: typography.md,
-    fontWeight: typography.semibold,
-    color: colors.primaryForeground,
-  },
-  resendContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  resendText: {
-    color: colors.foregroundMuted,
-    fontSize: typography.sm,
-  },
-  timerText: {
-    color: colors.foregroundSubtle,
-    fontSize: typography.sm,
-  },
-  resendLink: {
-    color: colors.primary,
-    fontSize: typography.sm,
-    fontWeight: typography.semibold,
-  },
-});
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: palette.bgCanvas,
+    },
+    topBar: {
+      height: 52,
+      paddingHorizontal: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+    iconBtn: {
+      width: 44,
+      height: 44,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: radii.full,
+    },
+    scroll: {
+      flexGrow: 1,
+      paddingHorizontal: 20,
+      paddingTop: 16,
+      paddingBottom: 24,
+    },
+    title: {
+      ...typeScale.headingLg,
+      color: palette.textPrimary,
+      marginBottom: 8,
+    },
+    subtitle: {
+      fontSize: 15,
+      lineHeight: 22,
+      color: palette.textSecondary,
+      marginBottom: 24,
+    },
+    subtitleStrong: {
+      fontWeight: '600',
+      color: palette.textPrimary,
+    },
+    boxRow: {
+      flexDirection: 'row',
+      gap: 10,
+      justifyContent: 'space-between',
+      marginBottom: 24,
+    },
+    box: {
+      flex: 1,
+      aspectRatio: 1 / 1.15,
+      maxWidth: 52,
+      borderRadius: radii.lg,
+      borderWidth: 1,
+      borderColor: palette.borderDefault,
+      backgroundColor: palette.bgSurface,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    boxActive: {
+      borderWidth: 2,
+      borderColor: palette.accent,
+    },
+    boxFilled: {
+      borderColor: palette.borderStrong,
+    },
+    boxDigit: {
+      fontSize: 28,
+      fontWeight: '600',
+      color: palette.textPrimary,
+      fontVariant: ['tabular-nums'],
+    },
+    hiddenInput: {
+      position: 'absolute',
+      opacity: 0,
+      height: 1,
+      width: 1,
+    },
+    resendRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    resendLabel: {
+      fontSize: 13,
+      color: palette.textTertiary,
+    },
+    resendTimer: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: palette.textTertiary,
+    },
+    resendLink: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: palette.accent,
+    },
+    cta: {
+      height: 56,
+      borderRadius: radii.md,
+      backgroundColor: palette.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    ctaDisabled: {
+      backgroundColor: palette.bgSubtle,
+    },
+    ctaText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+  });

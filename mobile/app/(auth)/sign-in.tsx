@@ -1,31 +1,56 @@
-import { useState, useRef, useEffect } from 'react';
+/**
+ * Phone sign-in screen — Otoqa Driver design system.
+ *
+ * Visuals follow lib/phone-screen.jsx from the design bundle: centered
+ * title + helper, country chip + number field, legal microcopy, and a
+ * big CTA. We use the native phone-pad keyboard rather than the design's
+ * custom keypad — on RN the native keyboard gives us paste, autofill,
+ * and accessibility for free.
+ *
+ * Clerk sign-in flow, analytics, and error branching are preserved
+ * verbatim from the previous version.
+ */
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View,
+  Alert,
+  KeyboardAvoidingView,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
-  ScrollView,
-  Linking,
+  View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSignIn } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { colors, typography, borderRadius, shadows, spacing } from '../../lib/theme';
-import { LinearGradient } from 'expo-linear-gradient';
-import { trackSignInStarted, trackSignInCodeSent, trackSignInFailed, trackScreen, trackLoadingGateTimeout } from '../../lib/analytics';
+import { Icon } from '../../lib/design-icons';
+import { useTheme } from '../../lib/ThemeContext';
+import { radii, typeScale, type Palette } from '../../lib/design-tokens';
+import {
+  trackLoadingGateTimeout,
+  trackScreen,
+  trackSignInCodeSent,
+  trackSignInFailed,
+  trackSignInStarted,
+} from '../../lib/analytics';
 
 export default function SignInScreen() {
   const { signIn, isLoaded } = useSignIn();
   const router = useRouter();
+  const { palette } = useTheme();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [navigateTo, setNavigateTo] = useState<string | null>(null);
   const phoneInputRef = useRef<TextInput>(null);
+
+  useEffect(() => {
+    trackScreen('SignIn');
+  }, []);
 
   const normalizeToDigits = (text: string): string => {
     let cleaned = text.trim();
@@ -34,13 +59,9 @@ export default function SignInScreen() {
   };
 
   const formatPhoneNumber = (digits: string) => {
-    if (digits.length <= 3) {
-      return digits;
-    } else if (digits.length <= 6) {
-      return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
-    } else {
-      return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
-    }
+    if (digits.length <= 3) return digits;
+    if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+    return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
   };
 
   const handlePhoneChange = (text: string) => {
@@ -48,8 +69,6 @@ export default function SignInScreen() {
     setPhoneNumber(formatPhoneNumber(digits));
   };
 
-  // State-driven navigation: when navigateTo is set, navigate in a useEffect
-  // so React has a full render cycle to process the state change.
   useEffect(() => {
     if (navigateTo) {
       router.push({
@@ -69,328 +88,296 @@ export default function SignInScreen() {
     }
 
     const rawPhone = normalizeToDigits(phoneNumber);
-    
+
     if (rawPhone.length < 10) {
       Alert.alert('Invalid Phone', 'Please enter a valid 10-digit phone number');
       return;
     }
 
     setIsLoading(true);
-    
+
     const fullPhoneNumber = `+1${rawPhone}`;
     const startTime = Date.now();
     trackSignInStarted(fullPhoneNumber);
 
     const SIGN_IN_TIMEOUT_MS = 15_000;
     const timeoutId = setTimeout(() => {
-      trackLoadingGateTimeout('sign_in_request', SIGN_IN_TIMEOUT_MS, { phone_masked: fullPhoneNumber.slice(-4) });
+      trackLoadingGateTimeout('sign_in_request', SIGN_IN_TIMEOUT_MS, {
+        phone_masked: fullPhoneNumber.slice(-4),
+      });
     }, SIGN_IN_TIMEOUT_MS);
 
     try {
-      const result = await signIn.create({
-        identifier: fullPhoneNumber,
-      });
-
+      const result = await signIn.create({ identifier: fullPhoneNumber });
       await signIn.prepareFirstFactor({
         strategy: 'phone_code',
         phoneNumberId: result.supportedFirstFactors?.find(
-          (factor) => factor.strategy === 'phone_code'
+          (factor) => factor.strategy === 'phone_code',
         )?.phoneNumberId as string,
       });
 
       clearTimeout(timeoutId);
       trackSignInCodeSent(fullPhoneNumber);
-
-      // Trigger navigation via state change so it happens in a fresh render cycle
       setNavigateTo(fullPhoneNumber);
     } catch (error: any) {
       clearTimeout(timeoutId);
       const elapsed = Date.now() - startTime;
       const errorCode = error.errors?.[0]?.code;
       const errorMessage = error.errors?.[0]?.message || error.errors?.[0]?.longMessage;
-      
+
       trackSignInFailed(fullPhoneNumber, errorCode, errorMessage);
-      
+
       if (elapsed >= SIGN_IN_TIMEOUT_MS) {
-        Alert.alert('Request Timed Out', 'The sign-in request took too long. Please check your connection and try again.');
+        Alert.alert(
+          'Request Timed Out',
+          'The sign-in request took too long. Please check your connection and try again.',
+        );
       } else if (errorCode === 'form_identifier_not_found') {
         Alert.alert(
           'Not Registered',
-          `This phone number (${fullPhoneNumber}) is not registered. This app is invite-only. Please contact your company administrator.`
+          `This phone number (${fullPhoneNumber}) is not registered. This app is invite-only. Please contact your company administrator.`,
         );
       } else if (errorCode === 'form_param_format_invalid') {
-        Alert.alert(
-          'Invalid Format',
-          'Please enter a valid phone number in the format (555) 000-0000'
-        );
+        Alert.alert('Invalid Format', 'Please enter a valid phone number.');
       } else if (errorCode === 'strategy_for_user_invalid') {
         Alert.alert(
           'Phone Sign-In Not Enabled',
-          'This account exists but is not set up for phone sign-in. Please contact your administrator.'
+          'This account exists but is not set up for phone sign-in. Please contact your administrator.',
         );
       } else {
-        Alert.alert(
-          'Error',
-          errorMessage || `Sign-in failed (${errorCode || 'unknown'})`
-        );
+        Alert.alert('Error', errorMessage || `Sign-in failed (${errorCode || 'unknown'})`);
       }
     } finally {
       setIsLoading(false);
     }
   };
 
-  const isButtonDisabled = isLoading || normalizeToDigits(phoneNumber).length < 10;
+  const rawDigits = normalizeToDigits(phoneNumber);
+  const isValid = rawDigits.length === 10;
+  const remaining = 10 - rawDigits.length;
 
   return (
-    <View style={styles.container}>
-      <LinearGradient
-        colors={['rgba(255, 107, 0, 0.15)', 'transparent']}
-        style={styles.gradientTop}
-        start={{ x: 0.5, y: 0 }}
-        end={{ x: 0.5, y: 1 }}
-      />
-      
-      <View style={styles.dotPattern} />
+    <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
+      <View style={styles.topBar}>
+        <View style={{ width: 44, height: 44 }} />
+      </View>
 
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.keyboardView}
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="always"
-          keyboardDismissMode="on-drag"
           showsVerticalScrollIndicator={false}
         >
-          {/* Invite Only Badge */}
-          <View style={styles.badge}>
-            <View style={styles.badgeDot} />
-            <Text style={styles.badgeText}>Invite Only Access</Text>
-          </View>
-
-          {/* Header */}
-          <Text style={styles.title}>Enter your number to continue</Text>
-          <Text style={styles.subtitle}>
-            This app is currently invite-only. Enter your mobile number to verify your invitation status and sign in.
+          <Text style={styles.title}>What&apos;s your number?</Text>
+          <Text style={styles.helper}>
+            We&apos;ll text a code to confirm it&apos;s you. We don&apos;t share driver data.
           </Text>
 
-          {/* Phone Input */}
-          <View style={styles.inputSection}>
-            <Text style={styles.label}>Mobile Number</Text>
-            <View style={styles.phoneInputContainer}>
-              <TouchableOpacity style={styles.countrySelector}>
-                <Text style={styles.flag}>🇺🇸</Text>
-                <Text style={styles.countryCode}>+1</Text>
-                <Ionicons name="chevron-down" size={16} color={colors.foregroundMuted} />
-              </TouchableOpacity>
-              
+          <View style={styles.fieldRow}>
+            <View style={styles.countryChip}>
+              <FlagUS />
+              <Text style={styles.countryChipText}>+1</Text>
+              <Icon name="chevron-down" size={14} color={palette.textTertiary} />
+            </View>
+            <Pressable
+              style={[styles.numberField, isValid && styles.numberFieldValid]}
+              onPress={() => phoneInputRef.current?.focus()}
+            >
               <TextInput
                 ref={phoneInputRef}
-                style={styles.phoneInput}
                 value={phoneNumber}
                 onChangeText={handlePhoneChange}
-                placeholder="(555) 000-0000"
-                placeholderTextColor={colors.foregroundSubtle}
+                placeholder="Phone number"
+                placeholderTextColor={palette.textPlaceholder}
                 keyboardType="phone-pad"
                 textContentType="telephoneNumber"
                 autoComplete="tel"
                 maxLength={14}
+                autoFocus
+                style={styles.numberFieldInput}
               />
-            </View>
-
-            <View style={styles.helperRow}>
-              <Ionicons name="shield-checkmark-outline" size={14} color={colors.foregroundMuted} />
-              <Text style={styles.helperText}>We'll send you a verification code</Text>
-            </View>
+            </Pressable>
           </View>
 
-          {/* Continue Button */}
-          <TouchableOpacity
-            style={[
-              styles.button,
-              isButtonDisabled && styles.buttonDisabled,
-            ]}
+          <View style={{ flex: 1, minHeight: 24 }} />
+
+          <Text style={styles.legal}>
+            By continuing you agree to Otoqa&apos;s{' '}
+            <Text
+              style={styles.legalLink}
+              onPress={() => Linking.openURL('https://otoqa.com/terms')}
+            >
+              Terms
+            </Text>{' '}
+            and{' '}
+            <Text
+              style={styles.legalLink}
+              onPress={() => Linking.openURL('https://otoqa.com/privacy')}
+            >
+              Privacy Policy
+            </Text>
+            .
+          </Text>
+
+          <Pressable
             onPress={handleSendCode}
-            disabled={isButtonDisabled}
-            activeOpacity={0.8}
+            disabled={!isValid || isLoading}
+            style={({ pressed }) => [
+              styles.cta,
+              (!isValid || isLoading) && styles.ctaDisabled,
+              pressed && isValid && !isLoading && { opacity: 0.9 },
+            ]}
           >
-            <Text style={styles.buttonText}>
-              {isLoading ? 'Sending code...' : 'Continue'}
+            <Text style={styles.ctaText}>
+              {isLoading
+                ? 'Sending code…'
+                : isValid
+                  ? 'Send code'
+                  : `Enter ${remaining} more digit${remaining === 1 ? '' : 's'}`}
             </Text>
-            {!isLoading && (
-              <Ionicons name="arrow-forward" size={20} color={colors.primaryForeground} />
-            )}
-          </TouchableOpacity>
-
-          {/* Footer - Terms */}
-          <View style={styles.footer}>
-            <Text style={styles.footerText}>
-              By continuing, you acknowledge that you have read and understood, and agree to our{' '}
-              <Text style={styles.link} onPress={() => Linking.openURL('https://otoqa.com/terms')}>
-                Terms of Service
-              </Text>
-              {' '}and{' '}
-              <Text style={styles.link} onPress={() => Linking.openURL('https://otoqa.com/privacy')}>
-                Privacy Policy
-              </Text>
-              .
-            </Text>
-          </View>
+          </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
+const FlagUS = () => (
+  <View style={flagStyles.wrap}>
+    <View style={flagStyles.redStripes} />
+    <View style={flagStyles.canton} />
+  </View>
+);
+
+const flagStyles = StyleSheet.create({
+  wrap: {
+    width: 22,
+    height: 16,
+    borderRadius: 3,
+    overflow: 'hidden',
+    backgroundColor: '#fff',
   },
-  gradientTop: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 300,
-  },
-  dotPattern: {
+  redStripes: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    opacity: 0.03,
+    backgroundColor: '#B22234',
+    opacity: 0.85,
   },
-  keyboardView: {
-    flex: 1,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    paddingHorizontal: spacing.xl,
-    paddingTop: 120,
-    paddingBottom: 40,
-  },
-  badge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.card,
-    alignSelf: 'flex-start',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.full,
-    marginBottom: spacing.xl,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  badgeDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.primary,
-    marginRight: spacing.sm,
-  },
-  badgeText: {
-    fontSize: typography.sm,
-    color: colors.primary,
-    fontWeight: typography.medium,
-  },
-  title: {
-    fontSize: typography['3xl'],
-    fontWeight: typography.bold,
-    color: colors.foreground,
-    marginBottom: spacing.md,
-    lineHeight: 38,
-  },
-  subtitle: {
-    fontSize: typography.base,
-    color: colors.foregroundMuted,
-    lineHeight: 22,
-    marginBottom: spacing['2xl'],
-  },
-  inputSection: {
-    marginBottom: spacing.xl,
-  },
-  label: {
-    fontSize: typography.sm,
-    fontWeight: typography.medium,
-    color: colors.foregroundMuted,
-    marginBottom: spacing.sm,
-  },
-  phoneInputContainer: {
-    flexDirection: 'row',
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: 'hidden',
-  },
-  countrySelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.muted,
-    borderRightWidth: 1,
-    borderRightColor: colors.border,
-    gap: spacing.xs,
-  },
-  flag: {
-    fontSize: 20,
-  },
-  countryCode: {
-    fontSize: typography.md,
-    color: colors.foreground,
-    fontWeight: typography.medium,
-  },
-  phoneInput: {
-    flex: 1,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    fontSize: typography.md,
-    color: colors.foreground,
-  },
-  helperRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: spacing.sm,
-    gap: spacing.xs,
-  },
-  helperText: {
-    fontSize: typography.xs,
-    color: colors.foregroundMuted,
-  },
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.primary,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.xl,
-    borderRadius: borderRadius.lg,
-    gap: spacing.sm,
-    ...shadows.md,
-  },
-  buttonDisabled: {
-    backgroundColor: colors.muted,
-  },
-  buttonText: {
-    fontSize: typography.md,
-    fontWeight: typography.semibold,
-    color: colors.primaryForeground,
-  },
-  footer: {
-    marginTop: 'auto',
-    paddingTop: spacing['2xl'],
-  },
-  footerText: {
-    fontSize: typography.xs,
-    color: colors.foregroundMuted,
-    textAlign: 'center',
-    lineHeight: 18,
-  },
-  link: {
-    color: colors.foreground,
-    textDecorationLine: 'underline',
+  canton: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 10,
+    height: 8.66,
+    backgroundColor: '#3C3B6E',
   },
 });
+
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: palette.bgCanvas,
+    },
+    topBar: {
+      height: 52,
+      paddingHorizontal: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    scroll: {
+      flexGrow: 1,
+      paddingHorizontal: 20,
+      paddingTop: 32,
+      paddingBottom: 24,
+    },
+    title: {
+      ...typeScale.headingLg,
+      color: palette.textPrimary,
+      textAlign: 'center',
+      marginBottom: 8,
+    },
+    helper: {
+      fontSize: 15,
+      lineHeight: 22,
+      color: palette.textSecondary,
+      textAlign: 'center',
+      maxWidth: 300,
+      alignSelf: 'center',
+    },
+    fieldRow: {
+      flexDirection: 'row',
+      gap: 10,
+      marginTop: 28,
+    },
+    countryChip: {
+      height: 56,
+      paddingHorizontal: 12,
+      borderRadius: radii.lg,
+      borderWidth: 1,
+      borderColor: palette.borderDefault,
+      backgroundColor: palette.bgSurface,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    countryChipText: {
+      fontSize: 15,
+      fontWeight: '600',
+      color: palette.textPrimary,
+    },
+    numberField: {
+      flex: 1,
+      height: 56,
+      borderRadius: radii.lg,
+      borderWidth: 1.5,
+      borderColor: palette.borderDefault,
+      backgroundColor: palette.bgSurface,
+      paddingHorizontal: 16,
+      justifyContent: 'center',
+    },
+    numberFieldValid: {
+      borderColor: palette.accent,
+    },
+    numberFieldInput: {
+      fontSize: 17,
+      fontWeight: '500',
+      color: palette.textPrimary,
+      fontVariant: ['tabular-nums'],
+      padding: 0,
+    },
+    legal: {
+      fontSize: 12,
+      lineHeight: 18,
+      color: palette.textTertiary,
+      textAlign: 'center',
+      marginBottom: 14,
+      paddingHorizontal: 12,
+    },
+    legalLink: {
+      color: palette.textSecondary,
+      textDecorationLine: 'underline',
+    },
+    cta: {
+      height: 56,
+      borderRadius: radii.md,
+      backgroundColor: palette.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    ctaDisabled: {
+      backgroundColor: palette.bgSubtle,
+    },
+    ctaText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+  });
