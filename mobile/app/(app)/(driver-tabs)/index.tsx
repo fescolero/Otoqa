@@ -121,6 +121,29 @@ function formatTime(timeStr?: string): string | null {
   }
 }
 
+// Build the display string list for a load's facet tags. Prefer the
+// generic `facets` array from the server; fall back to the legacy
+// parsedHcr/parsedTripNumber pair for any response that pre-dates the
+// facets migration. TRIP values get a "Trip " prefix so the badge reads
+// "Trip 12345" instead of a bare number.
+function loadFacetTags(load: {
+  facets?: Array<{ key: string; value: string }>;
+  parsedHcr?: string;
+  parsedTripNumber?: string;
+}): string[] {
+  if (load.facets && load.facets.length > 0) {
+    return load.facets
+      .map(({ key, value }) =>
+        key === 'TRIP' ? `Trip ${value}` : value,
+      )
+      .filter((s) => s.trim().length > 0);
+  }
+  return [
+    load.parsedHcr,
+    load.parsedTripNumber && `Trip ${load.parsedTripNumber}`,
+  ].filter(Boolean) as string[];
+}
+
 // Soft caps for shift duration — banners only, never forced actions.
 const SOFT_CAP_10H_MS = 10 * 60 * 60 * 1000;
 const SOFT_CAP_14H_MS = 14 * 60 * 60 * 1000;
@@ -591,8 +614,7 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
   const pickupTime = formatTime(load.firstPickup?.windowBeginDate);
   const dropoffTime = formatTime(load.lastDelivery?.windowBeginDate);
 
-  const tags = [load.parsedHcr, load.parsedTripNumber && `Trip ${load.parsedTripNumber}`]
-    .filter(Boolean) as string[];
+  const tags = loadFacetTags(load);
 
   return (
     <Pressable
@@ -611,8 +633,8 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
 
       {tags.length > 0 && (
         <View style={styles.tagRow}>
-          {tags.map((v) => (
-            <Tag key={v} value={v} />
+          {tags.map((t) => (
+            <Tag key={t} value={t} />
           ))}
         </View>
       )}
@@ -782,8 +804,7 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
   ]
     .filter(Boolean)
     .join(' – ');
-  const tags = [load.parsedHcr, load.parsedTripNumber && `Trip ${load.parsedTripNumber}`]
-    .filter(Boolean) as string[];
+  const tags = loadFacetTags(load);
 
   return (
     <Pressable

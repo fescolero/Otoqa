@@ -6,9 +6,10 @@
  * the bar follows the user's light/dark/system preference.
  */
 import React, { useMemo } from 'react';
-import { Tabs, router } from 'expo-router';
+import { Tabs } from 'expo-router';
 import { View, StyleSheet, Text, Pressable, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { CommonActions } from '@react-navigation/native';
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { useLanguage } from '../../../lib/LanguageContext';
 import { useTheme } from '../../../lib/ThemeContext';
@@ -19,7 +20,6 @@ type TabKey = 'index' | 'messages' | 'settings' | 'more';
 
 type TabSpec = {
   name: TabKey;
-  href: '/(driver-tabs)' | '/(driver-tabs)/messages' | '/(driver-tabs)/settings' | '/(driver-tabs)/more';
   icon: IconName;
   labelKey: 'nav.home' | 'nav.messages' | 'nav.profile' | 'nav.more';
 };
@@ -28,13 +28,13 @@ type TabSpec = {
 // message/more. Active state is expressed via a tinted pill + thicker stroke
 // + accent color instead of swapping to a solid glyph.
 const TAB_SPECS: readonly TabSpec[] = [
-  { name: 'index', href: '/(driver-tabs)', icon: 'home', labelKey: 'nav.home' },
-  { name: 'messages', href: '/(driver-tabs)/messages', icon: 'message', labelKey: 'nav.messages' },
-  { name: 'settings', href: '/(driver-tabs)/settings', icon: 'user', labelKey: 'nav.profile' },
-  { name: 'more', href: '/(driver-tabs)/more', icon: 'more-h', labelKey: 'nav.more' },
+  { name: 'index', icon: 'home', labelKey: 'nav.home' },
+  { name: 'messages', icon: 'message', labelKey: 'nav.messages' },
+  { name: 'settings', icon: 'user', labelKey: 'nav.profile' },
+  { name: 'more', icon: 'more-h', labelKey: 'nav.more' },
 ];
 
-function DriverTabBar({ state }: BottomTabBarProps) {
+function DriverTabBar({ state, navigation }: BottomTabBarProps) {
   const { palette } = useTheme();
   const { t } = useLanguage();
   const insets = useSafeAreaInsets();
@@ -53,12 +53,23 @@ function DriverTabBar({ state }: BottomTabBarProps) {
 
         const isActive = state.index === index;
 
-        // expo-router v6's navigation.navigate with a react-navigation route
-        // name silently no-ops under some Tabs configurations — `router.push`
-        // against the URL-based href is the reliable path.
+        // Canonical tab switch: dispatch CommonActions.navigate with the
+        // navigator-relative route name. `navigation.navigate` and
+        // `router.push` both had edge cases that silently no-op'd here
+        // (route name resolution under expo-router v6's Tabs + Pressable
+        // interactions). The dispatch path is the documented pattern for
+        // custom bottom tab bars.
         const onPress = () => {
-          if (isActive) return;
-          router.push(spec.href);
+          const event = navigation.emit({
+            type: 'tabPress',
+            target: route.key,
+            canPreventDefault: true,
+          });
+          if (isActive || event.defaultPrevented) return;
+          navigation.dispatch({
+            ...CommonActions.navigate({ name: route.name, merge: true }),
+            target: state.key,
+          });
         };
 
         const color = isActive ? palette.accent : palette.textTertiary;
