@@ -527,15 +527,24 @@ export const getLoads = query({
 
           if (!matchesOnLoadFields && !facetsMatched) continue;
           seenIds.add(load._id);
+          // Always enrich before pushing so the response has parsedHcr /
+          // parsedTripNumber for row badges, even when search matched on
+          // orderNumber/customerName and tag lookup was skipped above.
+          if (!needsFacets) {
+            enrichedLoad = await enrichWithFacets(load);
+          }
           if (!matchesFilters(enrichedLoad)) continue;
           matchedLoads.push(enrichedLoad);
         }
       }
 
-      // Project denormalized fields into the legacy shape. No per-row
-      // loadStops query; origin/destination/count come from columns.
+      // Search path: matchedLoads here were already enriched inside the
+      // scan loop via enrichWithFacets (which sets parsedHcr /
+      // parsedTripNumber). Project the denorm columns into the legacy
+      // origin / destination / stopsCount shape the UI expects.
       const enriched = matchedLoads.map((load) => ({
         ...load,
+        // parsedHcr / parsedTripNumber already set by enrichWithFacets
         origin:
           load.originCity !== undefined ||
           load.originState !== undefined ||
@@ -806,34 +815,43 @@ export const getLoads = query({
       paginatedResult = await loadsQuery.order('desc').paginate(args.paginationOpts);
     }
 
-    // Project denormalized fields into the legacy shape the UI expects.
-    // No per-row loadStops query — origin / destination / stopsCount all
-    // come from columns maintained by syncFirstStopDate.
-    const loadsWithStops = paginatedResult.page.map((load) => ({
-      ...load,
-      origin:
-        load.originCity !== undefined ||
-        load.originState !== undefined ||
-        load.originAddress !== undefined
-          ? {
-              city: load.originCity,
-              state: load.originState,
-              address: load.originAddress ?? '',
-            }
-          : null,
-      destination:
-        load.destinationCity !== undefined ||
-        load.destinationState !== undefined ||
-        load.destinationAddress !== undefined
-          ? {
-              city: load.destinationCity,
-              state: load.destinationState,
-              address: load.destinationAddress ?? '',
-            }
-          : null,
-      stopsCount: load.stopsCountDenorm ?? 0,
-      firstStopDate: load.firstStopDate,
-    }));
+    // Enrich each page row with parsedHcr / parsedTripNumber from facet
+    // tags. Callers (loads-table, virtualized-loads-table, filter-bar)
+    // still expect these field NAMES on the response — the values now
+    // come from loadTags instead of the (dropped) columns.
+    // One tag lookup per page row via by_load index (O(1) per row).
+    const loadsWithStops = await Promise.all(
+      paginatedResult.page.map(async (load) => {
+        const facets = await getLoadFacets(ctx, load._id);
+        return {
+          ...load,
+          parsedHcr: facets.hcr,
+          parsedTripNumber: facets.trip,
+          origin:
+            load.originCity !== undefined ||
+            load.originState !== undefined ||
+            load.originAddress !== undefined
+              ? {
+                  city: load.originCity,
+                  state: load.originState,
+                  address: load.originAddress ?? '',
+                }
+              : null,
+          destination:
+            load.destinationCity !== undefined ||
+            load.destinationState !== undefined ||
+            load.destinationAddress !== undefined
+              ? {
+                  city: load.destinationCity,
+                  state: load.destinationState,
+                  address: load.destinationAddress ?? '',
+                }
+              : null,
+          stopsCount: load.stopsCountDenorm ?? 0,
+          firstStopDate: load.firstStopDate,
+        };
+      }),
+    );
 
     return {
       ...paginatedResult,

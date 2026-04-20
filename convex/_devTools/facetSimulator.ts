@@ -425,6 +425,79 @@ export const summary = internalQuery({
 // ─────────────────────────────────────────────────────────────────────
 
 /**
+ * Cheap health check — counts rows per facet table for a given org without
+ * scanning load docs. Works under any table size because each query is
+ * bounded to the org + facetKey via the index.
+ *
+ * Run:
+ *   npx convex run _devTools/facetSimulator:facetHealthCheck \
+ *     '{"workosOrgId":"org_..."}'
+ */
+export const facetHealthCheck = internalQuery({
+  args: { workosOrgId: v.string() },
+  returns: v.object({
+    facetValuesHcr: v.number(),
+    facetValuesTrip: v.number(),
+    facetValuesTotal: v.number(),
+    loadTagsHcrSample: v.number(),
+    loadTagsTripSample: v.number(),
+    facetDefinitionsCount: v.number(),
+    firstFewHcrFacetValues: v.array(v.string()),
+    firstFewTripFacetValues: v.array(v.string()),
+  }),
+  handler: async (ctx, args) => {
+    const CAP = 500; // sample cap; if more exist, numbers shown as CAP
+
+    const hcrFacets = await ctx.db
+      .query('facetValues')
+      .withIndex('by_org_key', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'HCR'),
+      )
+      .take(CAP);
+    const tripFacets = await ctx.db
+      .query('facetValues')
+      .withIndex('by_org_key', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'TRIP'),
+      )
+      .take(CAP);
+    const totalFacets = await ctx.db
+      .query('facetValues')
+      .withIndex('by_org_key', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .take(CAP * 2);
+
+    const hcrTagsSample = await ctx.db
+      .query('loadTags')
+      .withIndex('by_org_key_canonical_date', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'HCR'),
+      )
+      .take(CAP);
+    const tripTagsSample = await ctx.db
+      .query('loadTags')
+      .withIndex('by_org_key_canonical_date', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('facetKey', 'TRIP'),
+      )
+      .take(CAP);
+
+    const defs = await ctx.db
+      .query('facetDefinitions')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+
+    return {
+      facetValuesHcr: hcrFacets.length,
+      facetValuesTrip: tripFacets.length,
+      facetValuesTotal: totalFacets.length,
+      loadTagsHcrSample: hcrTagsSample.length,
+      loadTagsTripSample: tripTagsSample.length,
+      facetDefinitionsCount: defs.length,
+      firstFewHcrFacetValues: hcrFacets.slice(0, 10).map((f) => f.value),
+      firstFewTripFacetValues: tripFacets.slice(0, 10).map((f) => f.value),
+    };
+  },
+});
+
+
+/**
  * Finds loads whose parsedHcr or parsedTripNumber matches a given value.
  * Useful when a facetValues row looks wrong ("MPG" in HCR, etc.) and you
  * want to trace which loads contributed it and where they came from.
@@ -585,31 +658,16 @@ export const scanDistinctFacetValues = internalQuery({
     }),
   }),
   handler: async (ctx, args) => {
-    // Post Phase 5b the source of truth is loadTags. We still scan loads
-    // to get a totalLoads count and a sample externalSource per facet
-    // value, but the value aggregation happens over tags.
-    const loads = args.workosOrgId
-      ? await ctx.db
-          .query('loadInformation')
-          .withIndex('by_organization', (q) =>
-            q.eq('workosOrgId', args.workosOrgId!),
-          )
-          .collect()
-      : await ctx.db.query('loadInformation').collect();
-
-    type Acc = Map<
-      string,
-      { value: string; count: number; sampleSource?: string }
-    >;
+    // Aggregate from loadTags only — DO NOT scan loadInformation. The
+    // earlier version .collected() all loads to sample externalSource
+    // per facet value, which blows the 16MB per-transaction read budget
+    // at ~20K loads (load docs are ~1-3KB each). Tag rows are tiny so
+    // this scales safely, and we just drop the externalSource sample
+    // from the diagnostic report — it wasn't load-bearing.
+    type Acc = Map<string, { value: string; count: number; sampleSource?: string }>;
     const hcrAcc: Acc = new Map();
     const tripAcc: Acc = new Map();
 
-    const loadsById = new Map<string, typeof loads[number]>();
-    for (const l of loads) loadsById.set(l._id, l);
-
-    // Pull the corresponding tags. If an org scope is set, we still need
-    // to iterate tags — the facet index requires facetKey + canonicalValue
-    // for a range scan, so we collect per-org via the index.
     const tagQuery = args.workosOrgId
       ? ctx.db
           .query('loadTags')
@@ -618,9 +676,13 @@ export const scanDistinctFacetValues = internalQuery({
           )
       : ctx.db.query('loadTags');
 
+    let totalLoadsSeen = 0;
+    const seenLoadIds = new Set<string>();
     for await (const tag of tagQuery) {
-      const load = loadsById.get(tag.loadId);
-      const sampleSource = load?.externalSource;
+      if (!seenLoadIds.has(tag.loadId)) {
+        seenLoadIds.add(tag.loadId);
+        totalLoadsSeen++;
+      }
       const acc = tag.facetKey === 'HCR' ? hcrAcc : tag.facetKey === 'TRIP' ? tripAcc : null;
       if (!acc) continue;
       const entry = acc.get(tag.canonicalValue);
@@ -629,9 +691,12 @@ export const scanDistinctFacetValues = internalQuery({
         acc.set(tag.canonicalValue, {
           value: tag.value,
           count: 1,
-          sampleSource,
         });
     }
+
+    // Bind totalLoadsSeen into a `loads`-shaped variable so the existing
+    // return expression (loads.length) continues to work.
+    const loads = { length: totalLoadsSeen };
 
     // Reuse the production classifier so the diagnostic and the parser
     // agree on what counts as a valid HCR/TRIP. SUSPICIOUS is reserved
