@@ -460,7 +460,26 @@ export const getSessionLoads = query({
         leg.endedAt <= windowEnd
     );
 
-    pendingLegs.sort((a, b) => {
+    // Keep PENDING legs that plausibly belong to this shift. Without this
+    // filter, a driver on a new session sees every unfinished assignment they
+    // ever had — including legs scheduled months out and stale ones from
+    // shifts that were never properly closed.
+    //
+    // Window: 2h before the session started (grace for slightly-early loads
+    // the dispatcher queued up) through 18h after (covers a 14h DOT shift
+    // plus buffer). Legs with no plannedStartAt stay in — we can't prove
+    // they're out of range, and they're typically the ones the driver is
+    // about to grab.
+    const SHIFT_GRACE_BEFORE_MS = 2 * 60 * 60 * 1000;
+    const SHIFT_GRACE_AFTER_MS = 18 * 60 * 60 * 1000;
+    const lowerBound = session.startedAt - SHIFT_GRACE_BEFORE_MS;
+    const upperBound = session.startedAt + SHIFT_GRACE_AFTER_MS;
+    const pendingInShift = pendingLegs.filter((leg) => {
+      if (leg.plannedStartAt === undefined) return true;
+      return leg.plannedStartAt >= lowerBound && leg.plannedStartAt <= upperBound;
+    });
+
+    pendingInShift.sort((a, b) => {
       const aPlan = a.plannedStartAt ?? Number.POSITIVE_INFINITY;
       const bPlan = b.plannedStartAt ?? Number.POSITIVE_INFINITY;
       return aPlan - bPlan;
@@ -529,7 +548,7 @@ export const getSessionLoads = query({
 
     const [inProgressEnriched, upNextEnriched, completedEnriched] = await Promise.all([
       Promise.all(activeLegs.map(enrichLeg)),
-      Promise.all(pendingLegs.map(enrichLeg)),
+      Promise.all(pendingInShift.map(enrichLeg)),
       Promise.all(completedInWindow.map(enrichLeg)),
     ]);
 
@@ -1577,48 +1596,6 @@ export const addDetourStops = mutation({
       success: true,
       message: `${label} added to route`,
       stopIds,
-    };
-  },
-});
-
-// ============================================
-// DEBUG — TEMPORARY DIAGNOSTIC
-// ============================================
-
-/**
- * debugLoadTags — returns the raw loadTags rows for a specific loadId so
- * we can confirm whether the facet data actually exists at the deployment
- * mobile is hitting.
- *
- * Invoke from the CLI:
- *   npx convex run driverMobile:debugLoadTags '{"loadId":"<id>"}'
- *
- * Remove once the facet rendering bug is closed.
- */
-export const debugLoadTags = query({
-  args: { loadId: v.id('loadInformation') },
-  handler: async (ctx, { loadId }) => {
-    const load = await ctx.db.get(loadId);
-    const byLoad = await ctx.db
-      .query('loadTags')
-      .withIndex('by_load', (q) => q.eq('loadId', loadId))
-      .collect();
-    const byLoadKey = await ctx.db
-      .query('loadTags')
-      .withIndex('by_load_key', (q) => q.eq('loadId', loadId))
-      .collect();
-    return {
-      loadId,
-      loadExists: !!load,
-      loadOrgId: load?.workosOrgId,
-      byLoadCount: byLoad.length,
-      byLoadKeyCount: byLoadKey.length,
-      tags: byLoad.map((t) => ({
-        facetKey: t.facetKey,
-        value: t.value,
-        canonicalValue: t.canonicalValue,
-        orgId: t.workosOrgId,
-      })),
     };
   },
 });

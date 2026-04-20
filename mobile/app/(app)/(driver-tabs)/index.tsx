@@ -8,7 +8,6 @@ import {
   Pressable,
   ActivityIndicator,
   Alert,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -30,7 +29,6 @@ import {
   radii,
   spacing,
   tagStyles,
-  tagFallback,
   type Palette,
 } from '../../../lib/design-tokens';
 import { useTheme } from '../../../lib/ThemeContext';
@@ -122,7 +120,12 @@ function formatTime(timeStr?: string): string | null {
   }
 }
 
-// Build the display string list for a load's badges.
+// A tag's `kind` drives its color. Values are display-ready; dedupe is
+// on label so HCR+TRIP variants don't clash with derived equipment tags.
+type TagKind = 'hcr' | 'trip' | 'equipment' | 'haz' | 'tarp' | 'default';
+export type FacetTag = { kind: TagKind; label: string };
+
+// Build the tag list for a load's badges.
 //
 // Pulls from two sources:
 //
@@ -136,7 +139,7 @@ function formatTime(timeStr?: string): string | null {
 //      (HAZ), requiresTarp (TARP). Without these, loads that never got
 //      HCR/TRIP tags written show up with no badges at all.
 //
-// Result is de-duped while preserving order.
+// Result is de-duped by label while preserving order.
 function loadFacetTags(load: {
   facets?: Array<{ key: string; value: string }>;
   parsedHcr?: string;
@@ -144,25 +147,33 @@ function loadFacetTags(load: {
   equipmentType?: string;
   isHazmat?: boolean;
   requiresTarp?: boolean;
-}): string[] {
-  const tags: string[] = [];
+}): FacetTag[] {
+  const out: FacetTag[] = [];
+  const seen = new Set<string>();
+  const push = (t: FacetTag) => {
+    if (!t.label || !t.label.trim() || seen.has(t.label)) return;
+    seen.add(t.label);
+    out.push(t);
+  };
 
   if (load.facets && load.facets.length > 0) {
     for (const { key, value } of load.facets) {
       if (!value || !value.trim()) continue;
-      tags.push(key === 'TRIP' ? `Trip ${value}` : value);
+      if (key === 'TRIP') push({ kind: 'trip', label: `Trip ${value}` });
+      else if (key === 'HCR') push({ kind: 'hcr', label: value });
+      else push({ kind: 'default', label: value });
     }
   } else {
-    if (load.parsedHcr) tags.push(load.parsedHcr);
-    if (load.parsedTripNumber) tags.push(`Trip ${load.parsedTripNumber}`);
+    if (load.parsedHcr) push({ kind: 'hcr', label: load.parsedHcr });
+    if (load.parsedTripNumber) push({ kind: 'trip', label: `Trip ${load.parsedTripNumber}` });
   }
 
   const eq = equipmentShortCode(load.equipmentType);
-  if (eq) tags.push(eq);
-  if (load.isHazmat) tags.push('HAZ');
-  if (load.requiresTarp) tags.push('TARP');
+  if (eq) push({ kind: 'equipment', label: eq });
+  if (load.isHazmat) push({ kind: 'haz', label: 'HAZ' });
+  if (load.requiresTarp) push({ kind: 'tarp', label: 'TARP' });
 
-  return Array.from(new Set(tags));
+  return out;
 }
 
 // Shorten equipment types into the 3-4 char tokens the design's
@@ -656,22 +667,6 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
 
   const tags = loadFacetTags(load);
 
-  // Temporary facet diagnostic — prints what the server actually returned
-  // so we can tell if `facets` is missing, empty, or present-but-wrong-key.
-  // Remove once we've confirmed tags render end-to-end.
-  if (__DEV__) {
-    console.log('[facet-debug]', {
-      loadId: load._id,
-      hasFacetsArray: Array.isArray(load.facets),
-      facetsLen: Array.isArray(load.facets) ? load.facets.length : null,
-      facets: load.facets,
-      parsedHcr: load.parsedHcr,
-      parsedTripNumber: load.parsedTripNumber,
-      equipmentType: load.equipmentType,
-      derived: tags,
-    });
-  }
-
   return (
     <Pressable
       onPress={onPress}
@@ -690,23 +685,9 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
       {tags.length > 0 && (
         <View style={styles.tagRow}>
           {tags.map((t) => (
-            <Tag key={t} value={t} />
+            <Tag key={t.label} tag={t} />
           ))}
         </View>
-      )}
-
-      {__DEV__ && (
-        <Text
-          style={{
-            fontSize: 10,
-            color: palette.textTertiary,
-            fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-            marginTop: 4,
-          }}
-          numberOfLines={2}
-        >
-          facets={Array.isArray(load.facets) ? JSON.stringify(load.facets) : String(load.facets)}
-        </Text>
       )}
 
       <View style={styles.activeCardBody}>
@@ -823,12 +804,45 @@ const statusTone = (status: string, palette: Palette): { bg: string; fg: string 
   return { bg: 'rgba(255,255,255,0.06)', fg: palette.textSecondary };
 };
 
-const Tag: React.FC<{ value: string }> = ({ value }) => {
-  const { styles } = useDesignStyles();
-  const s = tagStyles[value] ?? tagFallback;
+// Color tokens per tag kind. Pulled inline so they read the live palette
+// on each render — important for the theme switch to recolor them.
+const tagKindStyles = (
+  kind: TagKind,
+  value: string,
+  palette: Palette,
+): { bg: string; fg: string } => {
+  // Equipment tokens have first-class entries in design-tokens `tagStyles`
+  // keyed by the short code (REEF, FLAT, DRY, LTL, OVR, …). Prefer those.
+  if (kind === 'equipment') {
+    return tagStyles[value] ?? {
+      bg: 'rgba(107, 115, 133, 0.18)',
+      fg: palette.textPrimary,
+    };
+  }
+  if (kind === 'hcr') {
+    return { bg: 'rgba(124, 58, 237, 0.18)', fg: '#C4B5FD' };
+  }
+  if (kind === 'trip') {
+    return { bg: 'rgba(46, 92, 255, 0.18)', fg: '#A5B6FF' };
+  }
+  if (kind === 'haz') {
+    return { bg: 'rgba(234, 88, 12, 0.18)', fg: '#FDBA74' };
+  }
+  if (kind === 'tarp') {
+    return { bg: 'rgba(16, 185, 129, 0.18)', fg: '#6EE7B7' };
+  }
+  // Fallback for unknown custom facets — still readable, palette-aware.
+  const lookup = tagStyles[value];
+  if (lookup) return lookup;
+  return { bg: palette.accentTint, fg: palette.accent };
+};
+
+const Tag: React.FC<{ tag: FacetTag }> = ({ tag }) => {
+  const { palette, styles } = useDesignStyles();
+  const s = tagKindStyles(tag.kind, tag.label, palette);
   return (
     <View style={[styles.tag, { backgroundColor: s.bg }]}>
-      <Text style={[styles.tagText, { color: s.fg }]}>#{value}</Text>
+      <Text style={[styles.tagText, { color: s.fg }]}>{tag.label}</Text>
     </View>
   );
 };
@@ -876,21 +890,6 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
     .join(' – ');
   const tags = loadFacetTags(load);
 
-  // Temporary facet diagnostic — see PR #23. Mirrors the log in
-  // ActiveLoadCard. Remove together once the fix lands.
-  if (__DEV__) {
-    console.log('[facet-debug][upcoming]', {
-      loadId: load._id,
-      hasFacetsArray: Array.isArray(load.facets),
-      facetsLen: Array.isArray(load.facets) ? load.facets.length : null,
-      facets: load.facets,
-      parsedHcr: load.parsedHcr,
-      parsedTripNumber: load.parsedTripNumber,
-      equipmentType: load.equipmentType,
-      derived: tags,
-    });
-  }
-
   return (
     <Pressable
       onPress={onPress}
@@ -920,23 +919,10 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
         </Text>
         {tags.length > 0 && (
           <View style={styles.tagRow}>
-            {tags.map((v) => (
-              <Tag key={v} value={v} />
+            {tags.map((t) => (
+              <Tag key={t.label} tag={t} />
             ))}
           </View>
-        )}
-        {__DEV__ && (
-          <Text
-            style={{
-              fontSize: 10,
-              color: palette.textTertiary,
-              fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-              marginTop: 2,
-            }}
-            numberOfLines={2}
-          >
-            facets={Array.isArray(load.facets) ? JSON.stringify(load.facets) : String(load.facets)}
-          </Text>
         )}
       </View>
       <Icon name="chevron-right" size={18} color={palette.textTertiary} />
