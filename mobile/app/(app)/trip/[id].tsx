@@ -121,6 +121,8 @@ export default function TripDetailScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRedirected, setIsRedirected] = useState(false);
   const [showDetourModal, setShowDetourModal] = useState(false);
+  const [showAccidentSheet, setShowAccidentSheet] = useState(false);
+  const [showDocumentsSheet, setShowDocumentsSheet] = useState(false);
   const [detourStops, setDetourStops] = useState(1);
   const [detourReason, setDetourReason] = useState<
     'FUEL' | 'REST' | 'FOOD' | 'SCALE' | 'REPAIR' | 'REDIRECT' | 'CUSTOMER' | 'OTHER'
@@ -235,11 +237,27 @@ export default function TripDetailScreen() {
     [id],
   );
 
-  // Open maps for navigation
-  const openMaps = (address: string, city?: string, state?: string) => {
-    const query = encodeURIComponent(`${address}, ${city || ''} ${state || ''}`);
-    const url = `https://maps.apple.com/?q=${query}`;
-    Linking.openURL(url);
+  // Open the driver's default maps app natively (not a browser tab). On iOS
+  // the `http://maps.apple.com/` URL is intercepted by the system and opens
+  // Apple Maps directly; on Android the `geo:` intent hands off to whichever
+  // maps app the user has configured (Google Maps, Waze, etc.).
+  const openMaps = async (address: string, city?: string, state?: string) => {
+    const query = [address, city, state].filter(Boolean).join(', ');
+    const encoded = encodeURIComponent(query);
+    const url = Platform.select({
+      ios: `http://maps.apple.com/?q=${encoded}`,
+      android: `geo:0,0?q=${encoded}`,
+      default: `https://www.google.com/maps/search/?api=1&query=${encoded}`,
+    })!;
+    try {
+      await Linking.openURL(url);
+    } catch {
+      // Some Android devices have no geo: handler. Fall back to Google Maps
+      // web which every browser resolves.
+      await Linking.openURL(
+        `https://www.google.com/maps/search/?api=1&query=${encoded}`,
+      );
+    }
   };
 
   // Run a check-in or check-out directly — no modal. The mutation only
@@ -1104,35 +1122,9 @@ export default function TripDetailScreen() {
                 openMaps(target.address, target.city, target.state);
               }
             }}
-            onDocuments={() => {
-              // Route to the existing check-in modal in "out" mode targeting
-              // the current active stop — that's where photo + notes capture
-              // lives today. A dedicated Documents sheet is the next pass.
-              const target = activeCheckedInStop ?? displayStops[currentStopIndex];
-              if (target) {
-                setCheckInModal({ visible: true, stopId: target._id, type: activeCheckedInStop ? 'out' : 'in' });
-              }
-            }}
+            onDocuments={() => setShowDocumentsSheet(true)}
             onDetour={() => setShowDetourModal(true)}
-            onAccident={() => {
-              // Placeholder until the Accident sheet lands. For now, route
-              // through the existing Alert pattern so ops calls still happen.
-              Alert.alert(
-                'Report an issue',
-                'Tap OK to call dispatch. Ops will pick up immediately.',
-                [
-                  { text: 'Cancel', style: 'cancel' },
-                  {
-                    text: 'Call dispatch',
-                    onPress: () => {
-                      if (load.contactPersonPhone) {
-                        Linking.openURL(`tel:${load.contactPersonPhone}`);
-                      }
-                    },
-                  },
-                ],
-              );
-            }}
+            onAccident={() => setShowAccidentSheet(true)}
           />
 
           {/* Contact Information */}
@@ -1433,222 +1425,93 @@ export default function TripDetailScreen() {
           </KeyboardAvoidingView>
         </Modal>
 
-        {/* Add Detour Modal */}
-        <Modal
+        <DetourSheet
           visible={showDetourModal}
-          animationType="slide"
-          transparent
-          onRequestClose={() => setShowDetourModal(false)}
-        >
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-            <View style={styles.detourModalOverlay}>
-              <Pressable style={styles.detourModalBackdrop} onPress={() => setShowDetourModal(false)} />
-              <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-                <View style={styles.detourModalSheet}>
-                  <View style={styles.sheetHandle} />
+          palette={palette}
+          reason={detourReason}
+          setReason={setDetourReason}
+          notes={detourNotes}
+          setNotes={setDetourNotes}
+          isSubmitting={isAddingDetour}
+          onClose={() => {
+            setShowDetourModal(false);
+            setDetourReason('FUEL');
+            setDetourNotes('');
+          }}
+          onConfirm={async () => {
+            setIsAddingDetour(true);
+            try {
+              const loc = await getFreshLocation();
+              if (!driverId) {
+                Alert.alert(
+                  'Driver Unavailable',
+                  'Could not determine the current driver. Please reopen the trip and try again.',
+                );
+                setIsAddingDetour(false);
+                return;
+              }
+              if (!loc) {
+                Alert.alert('GPS Unavailable', 'Could not get your current location. Please try again.');
+                setIsAddingDetour(false);
+                return;
+              }
 
-                  {/* Header */}
-                  <View style={styles.detourModalHeader}>
-                    <View>
-                      <Text style={styles.detourModalTitle}>Add Detour</Text>
-                      <Text style={styles.detourModalSubtitle}>Log an unplanned stop on your route</Text>
-                    </View>
-                    <Pressable style={styles.detourModalCloseBtn} onPress={() => setShowDetourModal(false)}>
-                      <Ionicons name="close" size={16} color={colors.foreground} />
-                    </Pressable>
-                  </View>
+              const result = await addDetourStopsMutation({
+                loadId: id as Id<'loadInformation'>,
+                driverId,
+                numberOfStops: 1,
+                reason: detourReason,
+                notes: detourNotes || undefined,
+                latitude: loc.latitude,
+                longitude: loc.longitude,
+                driverTimestamp: new Date().toISOString(),
+              });
 
-                  {/* Reason Picker */}
-                  <View style={styles.detourStopsCard}>
-                    <Text style={styles.detourStopsLabel}>REASON</Text>
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      style={{ marginHorizontal: -spacing.sm }}
-                    >
-                      <View style={styles.detourReasonRow}>
-                        {(
-                          [
-                            { key: 'FUEL', icon: 'flame-outline' as const, label: 'Fuel' },
-                            { key: 'REST', icon: 'bed-outline' as const, label: 'Rest' },
-                            { key: 'FOOD', icon: 'restaurant-outline' as const, label: 'Food' },
-                            { key: 'SCALE', icon: 'speedometer-outline' as const, label: 'Scale' },
-                            { key: 'REPAIR', icon: 'build-outline' as const, label: 'Repair' },
-                            { key: 'REDIRECT', icon: 'swap-horizontal-outline' as const, label: 'Redirect' },
-                            { key: 'CUSTOMER', icon: 'people-outline' as const, label: 'Customer' },
-                            { key: 'OTHER', icon: 'ellipsis-horizontal-outline' as const, label: 'Other' },
-                          ] as const
-                        ).map((item) => (
-                          <Pressable
-                            key={item.key}
-                            style={[
-                              styles.detourReasonChip,
-                              detourReason === item.key && styles.detourReasonChipActive,
-                            ]}
-                            onPress={() => setDetourReason(item.key)}
-                          >
-                            <Ionicons
-                              name={item.icon}
-                              size={18}
-                              color={detourReason === item.key ? colors.primaryForeground : colors.foregroundMuted}
-                            />
-                            <Text
-                              style={[
-                                styles.detourReasonChipText,
-                                detourReason === item.key && styles.detourReasonChipTextActive,
-                              ]}
-                            >
-                              {item.label}
-                            </Text>
-                          </Pressable>
-                        ))}
-                      </View>
-                    </ScrollView>
-                  </View>
+              posthog?.capture('detour_confirmed', {
+                loadId: id,
+                numberOfStops: 1,
+                reason: detourReason,
+                success: result.success,
+              });
 
-                  {/* Number of Stops Selector */}
-                  <View style={styles.detourStopsCard}>
-                    <Text style={styles.detourStopsLabel}>NUMBER OF STOPS</Text>
-                    <View style={styles.detourStopsRow}>
-                      <Pressable
-                        style={[styles.detourStopsButton, detourStops <= 1 && styles.detourStopsButtonDisabled]}
-                        onPress={() => setDetourStops(Math.max(1, detourStops - 1))}
-                        disabled={detourStops <= 1}
-                      >
-                        <Ionicons
-                          name="remove"
-                          size={24}
-                          color={detourStops <= 1 ? colors.foregroundMuted : colors.foreground}
-                        />
-                      </Pressable>
+              setShowDetourModal(false);
+              setDetourReason('FUEL');
+              setDetourNotes('');
 
-                      <View style={styles.detourStopsCountContainer}>
-                        <Text style={styles.detourStopsCount}>{detourStops.toString().padStart(2, '0')}</Text>
-                        <Text style={styles.detourStopsTotalLabel}>STOPS</Text>
-                      </View>
+              if (!result.success) {
+                Alert.alert('Error', result.message);
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : 'Something went wrong';
+              Alert.alert('Error', msg);
+            } finally {
+              setIsAddingDetour(false);
+            }
+          }}
+        />
 
-                      <Pressable style={styles.detourStopsButton} onPress={() => setDetourStops(detourStops + 1)}>
-                        <Ionicons name="add" size={24} color={colors.primaryForeground} />
-                      </Pressable>
-                    </View>
-                  </View>
+        <AccidentSheet
+          visible={showAccidentSheet}
+          palette={palette}
+          contactPhone={load.contactPersonPhone}
+          onClose={() => setShowAccidentSheet(false)}
+          onCallDispatch={() => {
+            setShowAccidentSheet(false);
+            if (load.contactPersonPhone) {
+              Linking.openURL(`tel:${load.contactPersonPhone}`);
+            }
+          }}
+        />
 
-                  {/* Notes (optional) */}
-                  <TextInput
-                    style={styles.detourNotesInput}
-                    placeholder="Add notes (optional)"
-                    placeholderTextColor={colors.foregroundMuted}
-                    value={detourNotes}
-                    onChangeText={setDetourNotes}
-                    multiline
-                    numberOfLines={2}
-                    maxLength={200}
-                  />
-
-                  {/* GPS Info */}
-                  <View style={styles.detourGpsCard}>
-                    <View style={styles.detourGpsIconContainer}>
-                      <Ionicons name="locate" size={22} color={colors.primary} />
-                    </View>
-                    <View style={styles.detourGpsTextContainer}>
-                      <Text style={styles.detourGpsTitle}>GPS Auto-Logged</Text>
-                      <Text style={styles.detourGpsDescription}>
-                        Your current location and <Text style={styles.detourGpsBold}>check-in/out</Text> times will be
-                        recorded automatically.
-                      </Text>
-                    </View>
-                  </View>
-
-                  {/* Confirm Button */}
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.detourConfirmButton,
-                      pressed && { opacity: 0.8 },
-                      isAddingDetour && { opacity: 0.6 },
-                    ]}
-                    disabled={isAddingDetour}
-                    onPress={async () => {
-                      setIsAddingDetour(true);
-                      try {
-                        // Get fresh GPS for the detour location
-                        const loc = await getFreshLocation();
-                        if (!driverId) {
-                          Alert.alert(
-                            'Driver Unavailable',
-                            'Could not determine the current driver. Please reopen the trip and try again.',
-                          );
-                          setIsAddingDetour(false);
-                          return;
-                        }
-                        if (!loc) {
-                          Alert.alert('GPS Unavailable', 'Could not get your current location. Please try again.');
-                          setIsAddingDetour(false);
-                          return;
-                        }
-
-                        const result = await addDetourStopsMutation({
-                          loadId: id as Id<'loadInformation'>,
-                          driverId,
-                          numberOfStops: detourStops,
-                          reason: detourReason,
-                          notes: detourNotes || undefined,
-                          latitude: loc.latitude,
-                          longitude: loc.longitude,
-                          driverTimestamp: new Date().toISOString(),
-                        });
-
-                        posthog?.capture('detour_confirmed', {
-                          loadId: id,
-                          numberOfStops: detourStops,
-                          reason: detourReason,
-                          success: result.success,
-                        });
-
-                        setShowDetourModal(false);
-
-                        if (result.success) {
-                          Alert.alert('Detour Added', result.message, [{ text: 'OK' }]);
-                        } else {
-                          Alert.alert('Error', result.message);
-                        }
-                      } catch (err) {
-                        const msg = err instanceof Error ? err.message : 'Something went wrong';
-                        Alert.alert('Error', msg);
-                      } finally {
-                        setIsAddingDetour(false);
-                        setDetourStops(1);
-                        setDetourReason('FUEL');
-                        setDetourNotes('');
-                      }
-                    }}
-                  >
-                    {isAddingDetour ? (
-                      <ActivityIndicator color={colors.primaryForeground} size="small" />
-                    ) : (
-                      <>
-                        <Ionicons name="navigate" size={22} color={colors.primaryForeground} />
-                        <Text style={styles.detourConfirmButtonText}>Confirm Detour</Text>
-                      </>
-                    )}
-                  </Pressable>
-
-                  {/* Cancel Button */}
-                  <Pressable
-                    style={styles.detourCancelButton}
-                    onPress={() => {
-                      setShowDetourModal(false);
-                      setDetourStops(1);
-                      setDetourReason('FUEL');
-                      setDetourNotes('');
-                    }}
-                  >
-                    <Text style={styles.detourCancelButtonText}>Cancel</Text>
-                  </Pressable>
-                </View>
-              </KeyboardAvoidingView>
-            </View>
-          </TouchableWithoutFeedback>
-        </Modal>
+        <DocumentsSheet
+          visible={showDocumentsSheet}
+          palette={palette}
+          note={notes}
+          setNote={setNotes}
+          hasPhoto={!!photoUri}
+          onClose={() => setShowDocumentsSheet(false)}
+          onCapture={launchCamera}
+        />
       </View>
     </>
   );
@@ -2032,6 +1895,447 @@ function QuickActionTile({
         </Text>
       </View>
     </Pressable>
+  );
+}
+
+// ============================================================================
+// BOTTOM SHEETS — Detour / Accident / Documents
+//
+// Shared structure: backdrop (tap to dismiss) + rounded sheet with a handle,
+// title + subtitle, body, and primary/secondary actions. Uses the design
+// palette so they flip with the theme preference.
+// ============================================================================
+
+const SHEET_RADIUS = 20;
+
+function SheetFrame({
+  palette,
+  onClose,
+  title,
+  subtitle,
+  children,
+}: {
+  palette: Palette;
+  onClose: () => void;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' }}>
+      <Pressable style={{ flex: 1 }} onPress={onClose} />
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View
+          style={{
+            backgroundColor: palette.bgSurface,
+            borderTopLeftRadius: SHEET_RADIUS,
+            borderTopRightRadius: SHEET_RADIUS,
+            padding: 20,
+            paddingBottom: 32,
+            gap: 14,
+          }}
+        >
+          <View
+            style={{
+              alignSelf: 'center',
+              width: 36,
+              height: 4,
+              borderRadius: 2,
+              backgroundColor: palette.borderDefault,
+              marginBottom: 6,
+            }}
+          />
+          <View>
+            <Text
+              style={{ fontSize: 18, fontWeight: '700', color: palette.textPrimary, letterSpacing: -0.2 }}
+            >
+              {title}
+            </Text>
+            {subtitle ? (
+              <Text style={{ fontSize: 13, lineHeight: 18, color: palette.textSecondary, marginTop: 4 }}>
+                {subtitle}
+              </Text>
+            ) : null}
+          </View>
+          {children}
+        </View>
+      </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+function SheetButton({
+  palette,
+  label,
+  onPress,
+  variant = 'primary',
+  disabled,
+  loading,
+  icon,
+}: {
+  palette: Palette;
+  label: string;
+  onPress: () => void;
+  variant?: 'primary' | 'secondary' | 'danger';
+  disabled?: boolean;
+  loading?: boolean;
+  icon?: React.ComponentProps<typeof Icon>['name'];
+}) {
+  const bg =
+    variant === 'primary' ? palette.accent : variant === 'danger' ? palette.danger : 'transparent';
+  const border =
+    variant === 'secondary' ? palette.borderDefault : 'transparent';
+  const fg =
+    variant === 'secondary' ? palette.textPrimary : '#fff';
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled || loading}
+      style={({ pressed }) => [
+        {
+          flex: 1,
+          height: 48,
+          borderRadius: designRadii.md,
+          backgroundColor: bg,
+          borderWidth: variant === 'secondary' ? 1 : 0,
+          borderColor: border,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 8,
+        },
+        pressed && !disabled && { opacity: 0.85 },
+        (disabled || loading) && { opacity: 0.55 },
+      ]}
+    >
+      {loading ? (
+        <ActivityIndicator color={fg} size="small" />
+      ) : (
+        <>
+          {icon ? <Icon name={icon} size={16} color={fg} /> : null}
+          <Text style={{ color: fg, fontSize: 15, fontWeight: '600' }}>{label}</Text>
+        </>
+      )}
+    </Pressable>
+  );
+}
+
+const DETOUR_REASONS = [
+  { key: 'FUEL', icon: 'warning', label: 'Fuel' },
+  { key: 'REST', icon: 'clock', label: 'Rest' },
+  { key: 'FOOD', icon: 'package', label: 'Food' },
+  { key: 'SCALE', icon: 'gauge', label: 'Scale' },
+  { key: 'REPAIR', icon: 'settings', label: 'Repair' },
+  { key: 'REDIRECT', icon: 'arrow-right', label: 'Redirect' },
+  { key: 'CUSTOMER', icon: 'user', label: 'Customer' },
+  { key: 'OTHER', icon: 'more-h', label: 'Other' },
+] as const;
+
+function DetourSheet({
+  visible,
+  palette,
+  reason,
+  setReason,
+  notes,
+  setNotes,
+  isSubmitting,
+  onClose,
+  onConfirm,
+}: {
+  visible: boolean;
+  palette: Palette;
+  reason: string;
+  setReason: (r: any) => void;
+  notes: string;
+  setNotes: (n: string) => void;
+  isSubmitting: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={{ flex: 1 }}>
+          <SheetFrame
+            palette={palette}
+            onClose={onClose}
+            title="Start a detour"
+            subtitle="We'll track your check-in and check-out times for this off-plan stop. Dispatch is notified."
+          >
+            <View style={{ gap: 8 }}>
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.8,
+                  color: palette.textTertiary,
+                }}
+              >
+                REASON
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {DETOUR_REASONS.map((item) => {
+                  const active = reason === item.key;
+                  return (
+                    <Pressable
+                      key={item.key}
+                      onPress={() => setReason(item.key)}
+                      style={({ pressed }) => [
+                        {
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 6,
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: designRadii.full,
+                          backgroundColor: active ? palette.accentTint : palette.bgMuted,
+                          borderWidth: 1,
+                          borderColor: active ? palette.accent : 'transparent',
+                        },
+                        pressed && { opacity: 0.8 },
+                      ]}
+                    >
+                      <Icon
+                        name={item.icon}
+                        size={14}
+                        color={active ? palette.accent : palette.textSecondary}
+                      />
+                      <Text
+                        style={{
+                          fontSize: 13,
+                          fontWeight: '500',
+                          color: active ? palette.accent : palette.textPrimary,
+                        }}
+                      >
+                        {item.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+
+            <TextInput
+              value={notes}
+              onChangeText={setNotes}
+              placeholder="Add a note (optional)"
+              placeholderTextColor={palette.textPlaceholder}
+              multiline
+              maxLength={200}
+              style={{
+                borderWidth: 1,
+                borderColor: palette.borderSubtle,
+                backgroundColor: palette.bgMuted,
+                borderRadius: designRadii.md,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                minHeight: 60,
+                fontSize: 14,
+                color: palette.textPrimary,
+                textAlignVertical: 'top',
+              }}
+            />
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: 10,
+                padding: 12,
+                borderRadius: designRadii.md,
+                backgroundColor: palette.accentTint,
+              }}
+            >
+              <Icon name="location" size={16} color={palette.accent} strokeWidth={1.8} />
+              <Text style={{ flex: 1, fontSize: 12, lineHeight: 16, color: palette.textSecondary }}>
+                Your GPS location and check-in / check-out times are recorded automatically.
+              </Text>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <SheetButton palette={palette} label="Cancel" variant="secondary" onPress={onClose} />
+              <SheetButton
+                palette={palette}
+                label={isSubmitting ? 'Starting…' : 'Start detour'}
+                variant="primary"
+                loading={isSubmitting}
+                onPress={onConfirm}
+              />
+            </View>
+          </SheetFrame>
+        </View>
+      </TouchableWithoutFeedback>
+    </Modal>
+  );
+}
+
+function AccidentSheet({
+  visible,
+  palette,
+  contactPhone,
+  onClose,
+  onCallDispatch,
+}: {
+  visible: boolean;
+  palette: Palette;
+  contactPhone?: string;
+  onClose: () => void;
+  onCallDispatch: () => void;
+}) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <SheetFrame
+        palette={palette}
+        onClose={onClose}
+        title="Report an issue"
+        subtitle="Ops is paged immediately and will call you back."
+      >
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            gap: 10,
+            padding: 14,
+            borderRadius: designRadii.md,
+            backgroundColor: 'rgba(245, 158, 11, 0.10)',
+            borderWidth: 1,
+            borderColor: 'rgba(245, 158, 11, 0.28)',
+          }}
+        >
+          <Icon name="warning" size={18} color={palette.warning} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 14, fontWeight: '600', color: palette.textPrimary }}>
+              Everyone safe first.
+            </Text>
+            <Text style={{ fontSize: 13, lineHeight: 18, color: palette.textSecondary, marginTop: 2 }}>
+              If there are injuries, call 911 before continuing.
+            </Text>
+          </View>
+        </View>
+
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <SheetButton palette={palette} label="Cancel" variant="secondary" onPress={onClose} />
+          <SheetButton
+            palette={palette}
+            label={contactPhone ? 'Call dispatch' : 'No number on file'}
+            variant="danger"
+            icon="phone"
+            disabled={!contactPhone}
+            onPress={onCallDispatch}
+          />
+        </View>
+      </SheetFrame>
+    </Modal>
+  );
+}
+
+const DOC_KINDS = ['BOL', 'Seal', 'Pallet count', 'Damage'] as const;
+
+function DocumentsSheet({
+  visible,
+  palette,
+  note,
+  setNote,
+  hasPhoto,
+  onClose,
+  onCapture,
+}: {
+  visible: boolean;
+  palette: Palette;
+  note: string;
+  setNote: (n: string) => void;
+  hasPhoto: boolean;
+  onClose: () => void;
+  onCapture: () => void;
+}) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={{ flex: 1 }}>
+          <SheetFrame
+            palette={palette}
+            onClose={onClose}
+            title="Documents"
+            subtitle="Attach a photo and note to this load. They'll be saved with your next check-out."
+          >
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {DOC_KINDS.map((kind) => (
+                <Pressable
+                  key={kind}
+                  onPress={onCapture}
+                  style={({ pressed }) => [
+                    {
+                      flexBasis: '48%',
+                      flexGrow: 1,
+                      padding: 14,
+                      borderRadius: designRadii.lg,
+                      backgroundColor: palette.bgMuted,
+                      borderWidth: 1,
+                      borderColor: palette.borderSubtle,
+                      borderStyle: 'dashed',
+                      alignItems: 'center',
+                      gap: 6,
+                      minHeight: 92,
+                      justifyContent: 'center',
+                    },
+                    pressed && { opacity: 0.85 },
+                  ]}
+                >
+                  <Icon name="clipboard" size={22} color={palette.textSecondary} />
+                  <Text style={{ fontSize: 13, fontWeight: '500', color: palette.textPrimary }}>
+                    {kind}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: palette.textTertiary }}>
+                    Tap to capture
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {hasPhoto ? (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: 10,
+                  borderRadius: designRadii.md,
+                  backgroundColor: 'rgba(16,185,129,0.12)',
+                }}
+              >
+                <Icon name="check" size={16} color={palette.success} strokeWidth={2.5} />
+                <Text style={{ fontSize: 12, color: palette.textSecondary, flex: 1 }}>
+                  Photo ready — it will upload with your next check-out.
+                </Text>
+              </View>
+            ) : null}
+
+            <TextInput
+              value={note}
+              onChangeText={setNote}
+              placeholder="Add a note (optional)"
+              placeholderTextColor={palette.textPlaceholder}
+              multiline
+              maxLength={500}
+              style={{
+                borderWidth: 1,
+                borderColor: palette.borderSubtle,
+                backgroundColor: palette.bgMuted,
+                borderRadius: designRadii.md,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                minHeight: 80,
+                fontSize: 14,
+                color: palette.textPrimary,
+                textAlignVertical: 'top',
+              }}
+            />
+
+            <SheetButton palette={palette} label="Save to load" variant="primary" onPress={onClose} />
+          </SheetFrame>
+        </View>
+      </TouchableWithoutFeedback>
+    </Modal>
   );
 }
 
