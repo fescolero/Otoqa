@@ -22,6 +22,7 @@ import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
 import { uploadPODPhoto } from '../lib/s3-upload';
 import { LanguageProvider } from '../lib/LanguageContext';
+import { ThemeProvider } from '../lib/ThemeContext';
 import { setPostHogClient, trackErrorBoundary, trackOtaUpdateCheck, getAppVersionContext } from '../lib/analytics';
 
 // ============================================
@@ -263,6 +264,7 @@ export default function RootLayout() {
       <GestureHandlerRootView style={{ flex: 1 }}>
         <SafeAreaProvider>
           <LanguageProvider>
+           <ThemeProvider>
             <PostHogProvider
               apiKey={process.env.EXPO_PUBLIC_POSTHOG_KEY ?? ''}
               options={{
@@ -311,6 +313,7 @@ export default function RootLayout() {
                 </ClerkLoaded>
               </ClerkProvider>
             </PostHogProvider>
+           </ThemeProvider>
           </LanguageProvider>
         </SafeAreaProvider>
       </GestureHandlerRootView>

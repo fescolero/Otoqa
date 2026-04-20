@@ -6,6 +6,7 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useDriver, useAppMode } from '../_layout';
 import { useState } from 'react';
 import { useLanguage } from '../../../lib/LanguageContext';
+import { useTheme, type ThemePreference } from '../../../lib/ThemeContext';
 import * as Application from 'expo-application';
 import * as Updates from 'expo-updates';
 
@@ -55,6 +56,7 @@ export default function SettingsScreen() {
   const { driverName, driverId } = useDriver();
   const { canSwitchModes, setMode } = useAppMode();
   const { currentLanguage, t } = useLanguage();
+  const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
   const [lastSynced] = useState<string>('2 minutes ago');
 
@@ -77,6 +79,40 @@ export default function SettingsScreen() {
       default:
         return 'English';
     }
+  };
+
+  const getThemeDisplayName = () => {
+    switch (themePreference) {
+      case 'system':
+        return 'System';
+      case 'light':
+        return 'Light';
+      case 'dark':
+        return 'Dark';
+    }
+  };
+
+  const handleThemePress = () => {
+    Alert.alert(
+      'Appearance',
+      'Choose how the driver app looks.',
+      [
+        {
+          text: 'System',
+          onPress: () => setThemePreference('system' as ThemePreference),
+        },
+        {
+          text: 'Light',
+          onPress: () => setThemePreference('light' as ThemePreference),
+        },
+        {
+          text: 'Dark',
+          onPress: () => setThemePreference('dark' as ThemePreference),
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      { cancelable: true },
+    );
   };
 
   // Handle sign out
@@ -163,6 +199,15 @@ export default function SettingsScreen() {
             </View>
             <Text style={styles.menuLabel}>{t('profile.language')}</Text>
             <Text style={styles.menuValue}>{getLanguageDisplayName()}</Text>
+            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
+          </Pressable>
+
+          <Pressable style={styles.menuRow} onPress={handleThemePress}>
+            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
+              <Ionicons name="contrast" size={20} color={colors.foregroundMuted} />
+            </View>
+            <Text style={styles.menuLabel}>Appearance</Text>
+            <Text style={styles.menuValue}>{getThemeDisplayName()}</Text>
             <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
           </Pressable>
 

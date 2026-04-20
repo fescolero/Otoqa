@@ -11,7 +11,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Ionicons, Feather } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
@@ -19,46 +18,69 @@ import { useMyLoads } from '../../../lib/hooks/useMyLoads';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
 import { useDriver } from '../_layout';
-import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../../../lib/theme';
 import { useLanguage } from '../../../lib/LanguageContext';
-import { LinearGradient } from 'expo-linear-gradient';
 import { trackWeatherFetchFailed, trackScreen } from '../../../lib/analytics';
 import { stopSessionTracking } from '../../../lib/location-tracking';
+import { Icon } from '../../../lib/design-icons';
+import {
+  typeScale,
+  densitySpacing,
+  densityComponents,
+  radii,
+  spacing,
+  tagStyles,
+  tagFallback,
+  type Palette,
+} from '../../../lib/design-tokens';
+import { useTheme } from '../../../lib/ThemeContext';
 
-// Soft caps for shift tracking — banner thresholds, never enforced.
-const SOFT_CAP_10H_MS = 10 * 60 * 60 * 1000;
-const SOFT_CAP_14H_MS = 14 * 60 * 60 * 1000;
+// ============================================================================
+// DRIVER DASHBOARD — Otoqa Driver design
+//
+// Two modes:
+//   - Session mode:  driver started a shift. No day tabs; header shows shift
+//     status + End Shift. Loads derive from sessionLoads buckets.
+//   - Calendar mode: no active session. Yesterday/Today/Tomorrow tabs drive
+//     the load list.
+//
+// Locked to the dark palette for now — drivers use the app in-vehicle where
+// dark mode reduces glare. Flip to `palettes[useColorScheme()]` later if we
+// surface a theme preference.
+// ============================================================================
 
-// ============================================
-// HOME SCREEN - Dark Logistics Design
-// Professional Driver Dashboard
-// ============================================
+const density = 'dense'; // Drivers see more rows with dense; keeps 44pt hit targets.
+const sp = densitySpacing[density];
+const comp = densityComponents[density];
 
-// Weather types
+/**
+ * Tiny wrapper so sub-components inside this file get `palette` + memoized
+ * `styles` without each duplicating the hook-plus-useMemo boilerplate.
+ */
+function useDesignStyles() {
+  const { palette } = useTheme();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
+  return { palette, styles };
+}
+
+// Weather tooling
 interface WeatherData {
   temperature: number;
   description: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  iconColor: string;
 }
 
-// Weather code mapping to icons and descriptions
-const getWeatherInfo = (code: number): { description: string; icon: keyof typeof Ionicons.glyphMap; iconColor: string } => {
-  // WMO Weather interpretation codes
-  if (code === 0) return { description: 'Clear', icon: 'sunny', iconColor: '#FFB800' };
-  if (code === 1) return { description: 'Mostly Clear', icon: 'sunny', iconColor: '#FFB800' };
-  if (code === 2) return { description: 'Partly Cloudy', icon: 'partly-sunny', iconColor: '#FFB800' };
-  if (code === 3) return { description: 'Overcast', icon: 'cloudy', iconColor: '#9CA3AF' };
-  if (code >= 45 && code <= 48) return { description: 'Foggy', icon: 'cloud', iconColor: '#9CA3AF' };
-  if (code >= 51 && code <= 55) return { description: 'Drizzle', icon: 'rainy', iconColor: '#60A5FA' };
-  if (code >= 56 && code <= 57) return { description: 'Freezing Drizzle', icon: 'rainy', iconColor: '#60A5FA' };
-  if (code >= 61 && code <= 65) return { description: 'Rain', icon: 'rainy', iconColor: '#3B82F6' };
-  if (code >= 66 && code <= 67) return { description: 'Freezing Rain', icon: 'rainy', iconColor: '#3B82F6' };
-  if (code >= 71 && code <= 77) return { description: 'Snow', icon: 'snow', iconColor: '#E5E7EB' };
-  if (code >= 80 && code <= 82) return { description: 'Rain Showers', icon: 'rainy', iconColor: '#3B82F6' };
-  if (code >= 85 && code <= 86) return { description: 'Snow Showers', icon: 'snow', iconColor: '#E5E7EB' };
-  if (code >= 95 && code <= 99) return { description: 'Thunderstorm', icon: 'thunderstorm', iconColor: '#6366F1' };
-  return { description: 'Unknown', icon: 'cloud', iconColor: '#9CA3AF' };
+// Map WMO weather codes to a plain description. Icons come from the design icon set.
+const weatherDescription = (code: number): string => {
+  if (code === 0 || code === 1) return 'Clear';
+  if (code === 2) return 'Partly cloudy';
+  if (code === 3) return 'Overcast';
+  if (code >= 45 && code <= 48) return 'Foggy';
+  if (code >= 51 && code <= 57) return 'Drizzle';
+  if (code >= 61 && code <= 67) return 'Rain';
+  if (code >= 71 && code <= 77) return 'Snow';
+  if (code >= 80 && code <= 82) return 'Rain showers';
+  if (code >= 85 && code <= 86) return 'Snow showers';
+  if (code >= 95) return 'Thunderstorm';
+  return '';
 };
 
 type DayTab = 'yesterday' | 'today' | 'tomorrow';
@@ -71,20 +93,53 @@ function getDateStringForDay(day: DayTab): string {
   return `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
 }
 
+function getDayLabel(day: DayTab): string {
+  const d = new Date();
+  if (day === 'yesterday') d.setDate(d.getDate() - 1);
+  if (day === 'tomorrow') d.setDate(d.getDate() + 1);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 function getLoadPickupDate(load: any): string | null {
   const dateStr = load?.firstPickup?.windowBeginDate || load?.firstStopDate;
   if (!dateStr) return null;
   return dateStr.split('T')[0];
 }
 
-const DAY_TABS: { key: DayTab; labelEn: string; labelEs: string }[] = [
-  { key: 'yesterday', labelEn: 'Yesterday', labelEs: 'Ayer' },
-  { key: 'today', labelEn: 'Today', labelEs: 'Hoy' },
-  { key: 'tomorrow', labelEn: 'Tomorrow', labelEs: 'Mañana' },
-];
+function formatTime(timeStr?: string): string | null {
+  if (!timeStr) return null;
+  try {
+    const date = new Date(timeStr);
+    if (isNaN(date.getTime())) return null;
+    return date.toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Soft caps for shift duration — banners only, never forced actions.
+const SOFT_CAP_10H_MS = 10 * 60 * 60 * 1000;
+const SOFT_CAP_14H_MS = 14 * 60 * 60 * 1000;
+
+// Time-of-day greeting per design
+const greet = (): string => {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+};
+
+// ============================================================================
+// SCREEN
+// ============================================================================
 
 export default function HomeScreen() {
   const router = useRouter();
+  const { palette, styles } = useDesignStyles();
   const { driverId } = useDriver();
   const {
     loads,
@@ -99,98 +154,68 @@ export default function HomeScreen() {
   const { pendingCount } = useOfflineQueue();
   const { t, locale } = useLanguage();
 
-  // Driver Session System (Phase 3): End Shift mutation. Wrapped here so we
-  // can also tear down GPS tracking after the server-side session closes.
   const endSessionMutation = useMutation(api.driverSessions.endSession);
-  // Phase 4: stamp soft-cap timestamps when banners cross threshold so the
-  // dispatcher dashboard (Phase 6) can surface drivers who've been on shift
-  // too long. Mutation is idempotent server-side.
   const markSoftCapHit = useMutation(api.driverSessions.markSoftCapHit);
   const [isEndingShift, setIsEndingShift] = useState(false);
 
   const isSessionMode = mode === 'session';
-
   const [selectedDay, setSelectedDay] = useState<DayTab>('today');
 
   // Weather state
   const [weather, setWeather] = useState<WeatherData | null>(null);
-  const [weatherLoading, setWeatherLoading] = useState(true);
 
-  // Fetch weather based on user location
   const fetchWeather = useCallback(async (signal?: { cancelled: boolean }) => {
     try {
-      setWeatherLoading(true);
-      
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (signal?.cancelled) return;
-      if (status !== 'granted') {
-        setWeatherLoading(false);
-        return;
-      }
-      
+      if (status !== 'granted') return;
+
       const location = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
       if (signal?.cancelled) return;
-      
+
       const { latitude, longitude } = location.coords;
-      
       const response = await fetch(
         `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`
       );
       if (signal?.cancelled) return;
-      
-      if (!response.ok) {
-        throw new Error('Weather fetch failed');
-      }
-      
+      if (!response.ok) throw new Error('Weather fetch failed');
+
       const data = await response.json();
       if (signal?.cancelled) return;
-      
+
       if (data.current) {
-        const weatherInfo = getWeatherInfo(data.current.weather_code);
         setWeather({
           temperature: Math.round(data.current.temperature_2m),
-          description: weatherInfo.description,
-          icon: weatherInfo.icon,
-          iconColor: weatherInfo.iconColor,
+          description: weatherDescription(data.current.weather_code),
         });
       }
     } catch (error) {
       if (signal?.cancelled) return;
       const msg = error instanceof Error ? error.message : String(error);
       trackWeatherFetchFailed(msg);
-      console.error('Error fetching weather:', error);
-    } finally {
-      if (!signal?.cancelled) setWeatherLoading(false);
     }
   }, []);
 
-  // Fetch weather and track screen on mount
   useEffect(() => {
     const signal = { cancelled: false };
     trackScreen('Home');
     fetchWeather(signal);
-    return () => { signal.cancelled = true; };
+    return () => {
+      signal.cancelled = true;
+    };
   }, [fetchWeather]);
 
-  // Enhanced refetch that includes weather
   const handleRefresh = useCallback(async () => {
     await Promise.all([refetch(), fetchWeather()]);
   }, [refetch, fetchWeather]);
 
   const selectedDateStr = useMemo(() => getDateStringForDay(selectedDay), [selectedDay]);
 
-  // Bucket loads for rendering. Session mode uses server-bucketed data
-  // directly (In Progress / Up Next / Completed-this-session). Calendar
-  // mode (legacy, no active session) keeps the existing day-tab logic.
   const { activeLoad, scheduledLoads, completedLoads } = useMemo(() => {
     if (isSessionMode) {
-      if (!sessionLoads) {
-        return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
-      }
-      // Backend already sorted upNext by plannedStartAt and limited
-      // inProgress to the ACTIVE leg(s). No calendar filter applies.
+      if (!sessionLoads) return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
       return {
         activeLoad: sessionLoads.inProgress[0] ?? null,
         scheduledLoads: sessionLoads.upNext,
@@ -202,14 +227,19 @@ export default function HomeScreen() {
       return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
     }
 
-    const completed = loads.filter((l) => l.status === 'Completed' || l.trackingStatus === 'Completed');
-    const active = loads.filter((l) => l.status !== 'Completed' && l.trackingStatus !== 'Completed');
+    const completed = loads.filter(
+      (l) => l.status === 'Completed' || l.trackingStatus === 'Completed'
+    );
+    const active = loads.filter(
+      (l) => l.status !== 'Completed' && l.trackingStatus !== 'Completed'
+    );
 
     const inProgress = active.find(
-      (l) => l.trackingStatus === 'In Transit' ||
-             l.trackingStatus === 'At Pickup' ||
-             l.trackingStatus === 'At Delivery' ||
-             l.status === 'In Progress'
+      (l) =>
+        l.trackingStatus === 'In Transit' ||
+        l.trackingStatus === 'At Pickup' ||
+        l.trackingStatus === 'At Delivery' ||
+        l.status === 'In Progress'
     );
 
     const scheduled = active
@@ -221,7 +251,9 @@ export default function HomeScreen() {
         return timeA.localeCompare(timeB);
       });
 
-    const filteredCompleted = completed.filter((l) => getLoadPickupDate(l) === selectedDateStr);
+    const filteredCompleted = completed.filter(
+      (l) => getLoadPickupDate(l) === selectedDateStr
+    );
 
     return {
       activeLoad: inProgress,
@@ -230,8 +262,9 @@ export default function HomeScreen() {
     };
   }, [isSessionMode, sessionLoads, loads, selectedDateStr]);
 
-  // Session elapsed time + soft-cap state (drives the chrome/banner). Tick
-  // every minute; banners are render-time, not stored on the session doc.
+  // Session elapsed time tick (every minute). Banners are render-time, not
+  // stored on the session doc — softCap*At fields on the session are
+  // stamped by the markSoftCapHit mutation side-effect below.
   const [nowTick, setNowTick] = useState(() => Date.now());
   useEffect(() => {
     if (!isSessionMode) return;
@@ -244,20 +277,16 @@ export default function HomeScreen() {
   const overSoftCap10h = elapsedMs >= SOFT_CAP_10H_MS;
   const overSoftCap14h = elapsedMs >= SOFT_CAP_14H_MS;
 
-  // Stamp soft-cap timestamps server-side once per session per cap. Server
-  // is idempotent (only stamps if the field is null), so re-firing on every
-  // tick is safe — but we also gate via activeSession's existing softCap*At
-  // fields to avoid pointless mutations.
   useEffect(() => {
     if (!activeSession || !isSessionMode) return;
     if (overSoftCap10h && !activeSession.softCap10hAt) {
       markSoftCapHit({ sessionId: activeSession._id, cap: '10h' }).catch((e) =>
-        console.warn('[HomeScreen] markSoftCapHit(10h) failed:', e),
+        console.warn('[HomeScreen] markSoftCapHit(10h) failed:', e)
       );
     }
     if (overSoftCap14h && !activeSession.softCap14hAt) {
       markSoftCapHit({ sessionId: activeSession._id, cap: '14h' }).catch((e) =>
-        console.warn('[HomeScreen] markSoftCapHit(14h) failed:', e),
+        console.warn('[HomeScreen] markSoftCapHit(14h) failed:', e)
       );
     }
   }, [
@@ -270,9 +299,6 @@ export default function HomeScreen() {
     markSoftCapHit,
   ]);
 
-  // End Shift handler. Blocks via dialog if any leg is in progress (the
-  // backend will end them anyway, but we want the driver to confirm or
-  // contact dispatch for a handoff first).
   const handleEndShift = useCallback(async () => {
     if (!activeSession || isEndingShift) return;
     const inProgressCount = sessionLoads?.inProgress.length ?? 0;
@@ -300,996 +326,1055 @@ export default function HomeScreen() {
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'End Anyway', style: 'destructive', onPress: proceed },
-        ],
+        ]
       );
       return;
     }
 
-    Alert.alert('End Shift?', 'GPS tracking will stop. You can start a new shift any time.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'End Shift', onPress: proceed },
-    ]);
+    Alert.alert(
+      'End Shift?',
+      'GPS tracking will stop. You can start a new shift any time.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'End Shift', onPress: proceed },
+      ]
+    );
   }, [activeSession, sessionLoads, isEndingShift, endSessionMutation]);
 
-  // Format date for header
-  const formatHeaderDate = () => {
-    const now = new Date();
-    return now.toLocaleDateString(locale === 'es' ? 'es-ES' : 'en-US', { 
-      month: 'long', 
-      day: 'numeric', 
-      year: 'numeric' 
-    });
-  };
-
-  // Check if load is multi-day
-  const isMultiDay = (load: typeof activeLoad) => {
-    if (!load?.firstPickup?.windowBeginDate || !load?.lastDelivery?.windowBeginDate) return false;
-    const pickupDate = load.firstPickup.windowBeginDate.split('T')[0];
-    const deliveryDate = load.lastDelivery.windowBeginDate.split('T')[0];
-    return pickupDate !== deliveryDate;
-  };
-
-  // Get multi-day continuation date
-  const getMultiDayDate = (load: typeof activeLoad) => {
-    if (!load?.lastDelivery?.windowBeginDate) return null;
-    try {
-      const date = new Date(load.lastDelivery.windowBeginDate);
-      return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-    } catch {
-      return null;
-    }
-  };
-
-  // Format time only
-  const formatTime = (timeStr?: string) => {
-    if (!timeStr) return null;
-    try {
-      const date = new Date(timeStr);
-      if (isNaN(date.getTime())) return null;
-      return date.toLocaleTimeString('en-US', { 
-        hour: 'numeric', 
-        minute: '2-digit',
-        hour12: true 
-      });
-    } catch {
-      return null;
-    }
-  };
-
-  // Format date and time together
-  const formatDateTime = (dateStr?: string, timeStr?: string) => {
-    if (!dateStr && !timeStr) return null;
-    try {
-      // Try to get date from dateStr
-      const dateObj = dateStr ? new Date(dateStr) : null;
-      const timeObj = timeStr ? new Date(timeStr) : null;
-      
-      // Format date part (e.g., "Jan 15")
-      const datePart = dateObj && !isNaN(dateObj.getTime())
-        ? dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-        : null;
-      
-      // Format time part
-      const timePart = timeObj && !isNaN(timeObj.getTime())
-        ? timeObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-        : (dateObj && !isNaN(dateObj.getTime()) 
-            ? dateObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-            : null);
-      
-      if (datePart && timePart) {
-        return `${datePart}, ${timePart}`;
-      }
-      return datePart || timePart || null;
-    } catch {
-      return null;
-    }
-  };
-
-  // Format expected delivery
-  const formatExpectedDelivery = (load: typeof activeLoad) => {
-    if (!load?.lastDelivery?.windowBeginDate) return null;
-    try {
-      const date = new Date(load.lastDelivery.windowBeginDate);
-      const time = load.lastDelivery?.windowEndTime 
-        ? formatTime(load.lastDelivery.windowEndTime) 
-        : formatTime(load.lastDelivery.windowBeginDate);
-      const dateStr = date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
-      return `${dateStr}, ${time || ''}`;
-    } catch {
-      return null;
-    }
-  };
-
-  // Get pickup address
-  const getPickupAddress = (load: typeof activeLoad) => {
-    if (!load?.firstPickup) return 'Address pending';
-    const { address, city, state, postalCode } = load.firstPickup;
-    if (address && city && state) {
-      return `${address}, ${city}, ${state} ${postalCode || ''}`.trim();
-    }
-    if (city && state) return `${city}, ${state}`;
-    return 'Address pending';
-  };
-
-  // Get delivery address
-  const getDeliveryAddress = (load: typeof activeLoad) => {
-    if (!load?.lastDelivery) return 'Address pending';
-    const { address, city, state, postalCode } = load.lastDelivery;
-    if (address && city && state) {
-      return `${address}, ${city}, ${state} ${postalCode || ''}`.trim();
-    }
-    if (city && state) return `${city}, ${state}`;
-    return 'Address pending';
-  };
-
-  // Loading skeleton
-  const LoadingSkeleton = () => (
-    <View style={styles.skeletonContainer}>
-      <View style={[styles.skeletonBox, { height: 80, marginBottom: 16 }]} />
-      <View style={[styles.skeletonBox, { height: 200, marginBottom: 12 }]} />
-      <View style={[styles.skeletonBox, { height: 200 }]} />
-    </View>
-  );
+  // ============================================================================
+  // RENDER
+  // ============================================================================
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      {/* iOS Glass Background Gradient */}
-      {isIOS && (
-        <LinearGradient
-          colors={['#1A1D21', '#252A30', '#1F2328', '#1A1D21']}
-          locations={[0, 0.3, 0.7, 1]}
-          style={styles.backgroundGradient}
+    <SafeAreaView style={styles.screen} edges={['top']}>
+      {connectionQuality === 'offline' && (
+        <ConnectionBanner
+          label={
+            locale === 'es'
+              ? 'Sin conexión — Mostrando datos en caché'
+              : 'Offline — Showing cached data'
+          }
+          pending={pendingCount}
+          pendingLabel={locale === 'es' ? 'pendientes' : 'pending'}
+          tone="danger"
         />
       )}
-      
-      {/* Connection Quality Banners */}
-      {connectionQuality === 'offline' && (
-        <View style={styles.offlineBanner}>
-          <Ionicons name="wifi-outline" size={16} color={colors.background} />
-          <Text style={styles.offlineBannerText}>
-            {locale === 'es' ? 'Sin conexión — Mostrando datos en caché' : 'Offline — Showing cached data'}
-            {pendingCount > 0 ? ` (${pendingCount} ${locale === 'es' ? 'pendientes' : 'pending'})` : ''}
-          </Text>
-        </View>
-      )}
       {connectionQuality === 'poor' && (
-        <View style={[styles.offlineBanner, { backgroundColor: colors.secondary }]}>
-          <Ionicons name="cellular" size={16} color={colors.background} />
-          <Text style={styles.offlineBannerText}>
-            {locale === 'es' ? 'Señal débil — Usando datos en caché' : 'Weak signal — Using cached data'}
-            {pendingCount > 0 ? ` (${pendingCount} ${locale === 'es' ? 'pendientes' : 'pending'})` : ''}
-          </Text>
-        </View>
+        <ConnectionBanner
+          label={
+            locale === 'es'
+              ? 'Señal débil — Usando datos en caché'
+              : 'Weak signal — Using cached data'
+          }
+          pending={pendingCount}
+          pendingLabel={locale === 'es' ? 'pendientes' : 'pending'}
+          tone="warning"
+        />
+      )}
+
+      <TopHeader
+        greeting={greet()}
+        isSessionMode={isSessionMode}
+        elapsedHours={elapsedHours}
+        elapsedMinutes={elapsedMinutes}
+        onEndShift={handleEndShift}
+        isEndingShift={isEndingShift}
+        weather={weather}
+        onScanTruck={() => router.push('/switch-truck')}
+      />
+
+      {!isSessionMode && (
+        <DayTabs tab={selectedDay} setTab={setSelectedDay} />
       )}
 
       <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
             refreshing={isRefetching}
             onRefresh={handleRefresh}
-            tintColor={colors.primary}
-            colors={[colors.primary]}
+            tintColor={palette.accent}
+            colors={[palette.accent]}
           />
         }
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.dateContainer}>
-            <Ionicons name="calendar" size={36} color={colors.primary} />
-            <View style={styles.dateTextContainer}>
-              <Text style={styles.todayLabel}>{locale === 'es' ? 'Hoy' : 'Today'}</Text>
-              <Text style={styles.dateText}>{formatHeaderDate()}</Text>
-            </View>
-          </View>
-          <View style={styles.headerDivider} />
-          <View style={styles.weatherContainer}>
-            {weatherLoading ? (
-              <ActivityIndicator size="small" color={colors.foregroundMuted} />
-            ) : weather ? (
-              <>
-                <Ionicons name={weather.icon} size={28} color={weather.iconColor} />
-                <View>
-                  <Text style={styles.weatherLabel}>{weather.description}</Text>
-                  <Text style={styles.weatherText}>{weather.temperature}°F</Text>
-                </View>
-              </>
-            ) : (
-              <>
-                <Ionicons name="cloud-offline" size={28} color={colors.foregroundMuted} />
-                <View>
-                  <Text style={styles.weatherLabel}>{locale === 'es' ? 'Clima' : 'Weather'}</Text>
-                  <Text style={styles.weatherText}>N/A</Text>
-                </View>
-              </>
-            )}
-          </View>
-        </View>
-
-        {/* Session-mode header chrome — shown only when a shift is active */}
-        {isSessionMode && activeSession && (
-          <View style={sessionStyles.sessionHeader}>
-            <View style={sessionStyles.sessionHeaderRow}>
-              <View style={sessionStyles.sessionHeaderTextWrap}>
-                <Text style={sessionStyles.sessionHeaderTitle}>
-                  {locale === 'es' ? 'Turno Activo' : 'Shift Active'}
-                </Text>
-                <Text style={sessionStyles.sessionHeaderSub}>
-                  {`${elapsedHours}h ${elapsedMinutes}m`}
-                </Text>
-              </View>
-              <Pressable
-                style={({ pressed }) => [
-                  sessionStyles.endShiftButton,
-                  pressed && { opacity: 0.85 },
-                  isEndingShift && { opacity: 0.6 },
-                ]}
-                disabled={isEndingShift}
-                onPress={handleEndShift}
-              >
-                <Ionicons name="stop-circle-outline" size={18} color={colors.background} />
-                <Text style={sessionStyles.endShiftButtonText}>
-                  {isEndingShift
-                    ? locale === 'es'
-                      ? 'Terminando...'
-                      : 'Ending...'
-                    : locale === 'es'
-                      ? 'Terminar Turno'
-                      : 'End Shift'}
-                </Text>
-              </Pressable>
-            </View>
-            {overSoftCap14h && (
-              <View style={[sessionStyles.softCapBanner, sessionStyles.softCapBanner14h]}>
-                <Ionicons name="warning" size={14} color="#fff" />
-                <Text style={sessionStyles.softCapBannerText}>
-                  {locale === 'es'
-                    ? 'Has trabajado más de 14 horas. Considera terminar tu turno.'
-                    : "You've been on shift over 14 hours. Consider ending your shift."}
-                </Text>
-              </View>
-            )}
-            {!overSoftCap14h && overSoftCap10h && (
-              <View style={[sessionStyles.softCapBanner, sessionStyles.softCapBanner10h]}>
-                <Ionicons name="time-outline" size={14} color="#fff" />
-                <Text style={sessionStyles.softCapBannerText}>
-                  {locale === 'es'
-                    ? 'Llevas 10 horas en tu turno.'
-                    : "You've been on shift 10 hours."}
-                </Text>
-              </View>
-            )}
-          </View>
+        {isSessionMode && overSoftCap14h && (
+          <SoftCapBanner level="14h" locale={locale} />
+        )}
+        {isSessionMode && !overSoftCap14h && overSoftCap10h && (
+          <SoftCapBanner level="10h" locale={locale} />
         )}
 
-        {/* Day Switcher — calendar mode only. Session mode is shift-bounded. */}
-        {!isSessionMode && (
-          <View style={styles.daySwitcher}>
-            {DAY_TABS.map(({ key, labelEn, labelEs }) => (
-              <Pressable
-                key={key}
-                style={[styles.dayTab, selectedDay === key && styles.dayTabActive]}
-                onPress={() => setSelectedDay(key)}
-              >
-                <Text style={[styles.dayTabText, selectedDay === key && styles.dayTabTextActive]}>
-                  {locale === 'es' ? labelEs : labelEn}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        )}
-
-        {/* Section Header */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>
-            {isSessionMode
-              ? locale === 'es'
-                ? 'Cargas de Este Turno'
-                : 'Loads This Shift'
-              : locale === 'es'
-                ? selectedDay === 'today' ? 'Próximas Hoy' : selectedDay === 'yesterday' ? 'Ayer' : 'Mañana'
-                : selectedDay === 'today' ? 'Upcoming Today' : selectedDay === 'yesterday' ? 'Yesterday' : 'Tomorrow'}
-          </Text>
-        </View>
-
-        {/* Pending Sync */}
-        {pendingCount > 0 && (
-          <View style={styles.syncBanner}>
-            <Ionicons name="cloud-upload-outline" size={16} color={colors.foregroundMuted} />
-            <Text style={styles.syncText}>
-              {locale === 'es' 
-                ? `${pendingCount} actualización${pendingCount > 1 ? 'es' : ''} pendiente${pendingCount > 1 ? 's' : ''} de sincronizar`
-                : `${pendingCount} update${pendingCount > 1 ? 's' : ''} pending sync`}
-            </Text>
-          </View>
-        )}
-
-        {/* Loading State */}
         {isLoading && <LoadingSkeleton />}
 
-        {/* In Progress Card */}
         {!isLoading && activeLoad && (
-          <>
-            <View style={styles.inProgressLabel}>
-              <Text style={styles.inProgressLabelText}>{locale === 'es' ? 'EN PROGRESO' : 'IN PROGRESS'}</Text>
-            </View>
-            <Pressable
-              style={({ pressed }) => [styles.inProgressCard, pressed && { opacity: 0.9 }]}
-              onPress={() => router.push(`/trip/${activeLoad._id}`)}
-            >
-              <View style={styles.inProgressLeft}>
-                <Text style={styles.inProgressId}>#{activeLoad.internalId}</Text>
-                <Text style={styles.inProgressSub}>
-                  {[activeLoad.parsedHcr, activeLoad.trackingStatus === 'In Transit' ? 'On Route' : activeLoad.trackingStatus].filter(Boolean).join(' • ')}
-                </Text>
-              </View>
-              <View style={styles.inProgressRight}>
-                <Text style={styles.inProgressEtaTime}>
-                  {formatTime(activeLoad.lastDelivery?.windowEndTime) || 'TBD'}
-                </Text>
-                <Text style={styles.inProgressEtaLabel}>ETA</Text>
-              </View>
-              <View style={styles.inProgressArrow}>
-                <Ionicons name="arrow-forward" size={20} color={colors.primaryForeground} />
-              </View>
-            </Pressable>
-          </>
+          <ActiveLoadCard
+            load={activeLoad}
+            onPress={() => router.push(`/trip/${activeLoad._id}`)}
+          />
         )}
 
-        {/* Scheduled Load Cards */}
-        {!isLoading && scheduledLoads.map((load) => {
-          const multiDay = isMultiDay(load);
-          const multiDayDate = getMultiDayDate(load);
-          const expectedDelivery = formatExpectedDelivery(load);
-          
-          return (
-            <Pressable
-              key={load._id}
-              style={({ pressed }) => [styles.loadCard, pressed && { opacity: 0.8 }]}
-              onPress={() => router.push(`/trip/${load._id}`)}
-            >
-              {/* Card Header */}
-              <View style={styles.loadCardHeader}>
-                <View style={styles.loadCardHeaderLeft}>
-                  <Feather name="package" size={14} color={colors.foregroundMuted} />
-                  <Text style={styles.loadCardTitle}>Load #{load.internalId}</Text>
-                </View>
-                <View style={styles.statusBadge}>
-                  <Text style={styles.statusBadgeText} maxFontSizeMultiplier={1.2}>{locale === 'es' ? 'Programada' : 'Scheduled'}</Text>
-                </View>
-              </View>
-              
-              {/* Badge Row */}
-              {(load.parsedHcr || load.parsedTripNumber) && (
-                <View style={styles.badgeRow}>
-                  {load.parsedHcr && (
-                    <View style={styles.truckBadge}>
-                      <Text style={styles.truckBadgeText} maxFontSizeMultiplier={1.2}>{load.parsedHcr}</Text>
-                    </View>
-                  )}
-                  {load.parsedTripNumber && (
-                    <View style={styles.tripBadge}>
-                      <Text style={styles.tripBadgeText} maxFontSizeMultiplier={1.2}>Trip {load.parsedTripNumber}</Text>
-                    </View>
-                  )}
-                </View>
-              )}
-
-              {/* Multi-Day Indicator */}
-              {multiDay && multiDayDate && (
-                <View style={styles.multiDayBanner}>
-                  <Ionicons name="calendar-outline" size={16} color={colors.chart3} />
-                  <View>
-                    <Text style={styles.multiDayTitle}>{locale === 'es' ? 'Carga Multi-Día' : 'Multi-Day Load'}</Text>
-                    <Text style={styles.multiDayText}>{locale === 'es' ? `Continúa hasta ${multiDayDate}` : `Continues into ${multiDayDate}`}</Text>
-                  </View>
-                </View>
-              )}
-
-              {/* Time and Packages */}
-              <View style={styles.loadCardStats}>
-                <View style={styles.statLeft}>
-                  <Text style={styles.statLabel}>{t('driverHome.pickup')}</Text>
-                  <Text style={styles.statValue}>
-                    {formatDateTime(load.firstPickup?.windowBeginDate, load.firstPickup?.windowBeginTime) || 'TBD'}
-                  </Text>
-                </View>
-                <View style={styles.statRight}>
-                  <Text style={styles.statLabel}>{locale === 'es' ? 'Paradas' : 'Stops'}</Text>
-                  <Text style={styles.statValueMono}>{load.stopCount || '—'}</Text>
-                </View>
-              </View>
-
-              {/* Addresses */}
-              <View style={styles.addressSection}>
-                {/* Pickup */}
-                <View style={styles.addressRow}>
-                  <Ionicons name="location" size={16} color={colors.chart4} style={{ marginTop: 2 }} />
-                  <View style={styles.addressContent}>
-                    <Text style={styles.addressLabel}>{t('driverHome.pickup')}</Text>
-                    <Text style={styles.addressText}>{getPickupAddress(load)}</Text>
-                  </View>
-                </View>
-
-                {/* Delivery */}
-                <View style={styles.addressRow}>
-                  <Ionicons name="flag" size={16} color={colors.destructive} style={{ marginTop: 2 }} />
-                  <View style={styles.addressContent}>
-                    <Text style={styles.addressLabel}>{locale === 'es' ? 'Última Entrega' : 'Last Delivery'}</Text>
-                    <Text style={styles.addressText}>{getDeliveryAddress(load)}</Text>
-                    {expectedDelivery && (
-                      <Text style={styles.expectedText}>{locale === 'es' ? 'Esperado' : 'Expected'}: {expectedDelivery}</Text>
-                    )}
-                  </View>
-                </View>
-              </View>
-            </Pressable>
-          );
-        })}
-
-        {/* No Loads State */}
-        {!isLoading && scheduledLoads.length === 0 && completedLoads.length === 0 && (
-          <View style={styles.emptyStateCard}>
-            <View style={styles.emptyStateIconContainer}>
-              <Ionicons name="clipboard-outline" size={32} color={colors.foregroundMuted} />
-            </View>
-            <Text style={styles.emptyStateTitle}>{t('driverHome.noActiveLoads')}</Text>
-            <Text style={styles.emptyStateSubtitle}>
-              {t('driverHome.noActiveLoadsDesc')}
-            </Text>
-          </View>
+        {!isLoading && scheduledLoads.length > 0 && (
+          <UpcomingSection
+            loads={scheduledLoads}
+            isSessionMode={isSessionMode}
+            onPress={(id) => router.push(`/trip/${id}`)}
+          />
         )}
 
-        {/* Completed Loads (last 2 days) */}
-        {completedLoads.length > 0 && (
-          <>
-            <View style={styles.completedHeader}>
-              <Text style={styles.completedHeaderText}>
-                {locale === 'es' ? 'Completadas Recientes' : 'Recently Completed'} ({completedLoads.length})
-              </Text>
-            </View>
-            {completedLoads.map((load) => (
-              <Pressable
-                key={load._id}
-                style={({ pressed }) => [styles.completedCard, pressed && { opacity: 0.7 }]}
-                onPress={() => router.push(`/trip/${load._id}`)}
-              >
-                <View style={styles.completedContent}>
-                  <Ionicons name="checkmark-circle" size={20} color={colors.success} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.completedTitle}>Load #{load.internalId}</Text>
-                    <Text style={styles.completedSubtitle}>
-                      {[load.firstPickup?.city, load.lastDelivery?.city].filter(Boolean).join(' → ') || 'Completed'}
-                    </Text>
-                  </View>
-                  {load.firstStopDate && (
-                    <Text style={styles.completedDate}>
-                      {(() => {
-                        try {
-                          const [y, m, d] = load.firstStopDate.split('-');
-                          const date = new Date(Number(y), Number(m) - 1, Number(d));
-                          return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                        } catch { return ''; }
-                      })()}
-                    </Text>
-                  )}
-                </View>
-              </Pressable>
-            ))}
-          </>
+        {!isLoading && completedLoads.length > 0 && (
+          <CompletedSection
+            loads={completedLoads}
+            isSessionMode={isSessionMode}
+          />
         )}
 
-        {/* Bottom spacing for nav */}
-        <View style={{ height: 120 }} />
+        {!isLoading &&
+          !activeLoad &&
+          scheduledLoads.length === 0 &&
+          completedLoads.length === 0 && (
+            <EmptyState
+              isSessionMode={isSessionMode}
+              locale={locale}
+              onScanTruck={() => router.push('/switch-truck')}
+            />
+          )}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-// ============================================
-// DARK THEME STYLES
-// ============================================
+// ============================================================================
+// HEADER
+// ============================================================================
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  backgroundGradient: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: spacing.md,
-  },
+interface TopHeaderProps {
+  greeting: string;
+  isSessionMode: boolean;
+  elapsedHours: number;
+  elapsedMinutes: number;
+  onEndShift: () => void;
+  isEndingShift: boolean;
+  weather: WeatherData | null;
+  onScanTruck: () => void;
+}
 
-  // Offline Banner
-  offlineBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.warning,
-    paddingVertical: 10,
-    paddingHorizontal: spacing.md,
-    gap: 8,
+const TopHeader: React.FC<TopHeaderProps> = ({
+  greeting,
+  isSessionMode,
+  elapsedHours,
+  elapsedMinutes,
+  onEndShift,
+  isEndingShift,
+  weather,
+  onScanTruck,
+}) => {
+  const { palette, styles } = useDesignStyles();
+  return (
+  <View style={styles.header}>
+    <View style={{ flex: 1, minWidth: 0 }}>
+      <Text style={styles.headerGreeting}>
+        {isSessionMode ? 'Shift active' : greeting}
+      </Text>
+      <Text style={styles.headerTitle} numberOfLines={1}>
+        {isSessionMode ? `${elapsedHours}h ${elapsedMinutes}m on duty` : 'Driver'}
+      </Text>
+    </View>
+
+    <View style={styles.headerActions}>
+      {isSessionMode ? (
+        <Pressable
+          onPress={onEndShift}
+          disabled={isEndingShift}
+          accessibilityLabel="End shift"
+          style={({ pressed }) => [
+            styles.endShiftPill,
+            pressed && { opacity: 0.85 },
+            isEndingShift && { opacity: 0.6 },
+          ]}
+        >
+          <Icon name="stop" size={14} color="#fff" strokeWidth={2} />
+          <Text style={styles.endShiftPillText}>
+            {isEndingShift ? 'Ending…' : 'End'}
+          </Text>
+        </Pressable>
+      ) : (
+        <>
+          {weather && (
+            <View style={styles.headerWeatherChip}>
+              <Icon name="cloud" size={18} color={palette.textPrimary} />
+              <Text style={styles.headerWeatherTemp}>{weather.temperature}°</Text>
+            </View>
+          )}
+          <Pressable
+            onPress={onScanTruck}
+            accessibilityLabel="Scan truck QR"
+            style={({ pressed }) => [
+              styles.headerIconBtn,
+              pressed && { opacity: 0.7 },
+            ]}
+          >
+            <Icon name="truck" size={22} color={palette.textPrimary} />
+          </Pressable>
+        </>
+      )}
+    </View>
+  </View>
+  );
+};
+
+// ============================================================================
+// DAY TABS
+// ============================================================================
+
+interface DayTabsProps {
+  tab: DayTab;
+  setTab: (t: DayTab) => void;
+}
+
+const DayTabs: React.FC<DayTabsProps> = ({ tab, setTab }) => {
+  const { locale } = useLanguage();
+  const { styles } = useDesignStyles();
+  const tabs: { k: DayTab; labelEn: string; labelEs: string }[] = [
+    { k: 'yesterday', labelEn: 'Yesterday', labelEs: 'Ayer' },
+    { k: 'today', labelEn: 'Today', labelEs: 'Hoy' },
+    { k: 'tomorrow', labelEn: 'Tomorrow', labelEs: 'Mañana' },
+  ];
+  return (
+    <View style={styles.tabs}>
+      {tabs.map((t) => {
+        const active = tab === t.k;
+        return (
+          <Pressable
+            key={t.k}
+            onPress={() => setTab(t.k)}
+            style={[styles.tab, active && styles.tabActive]}
+          >
+            <Text
+              style={[styles.tabLabel, active && styles.tabLabelActive]}
+            >
+              {locale === 'es' ? t.labelEs : t.labelEn}
+            </Text>
+            <Text
+              style={[styles.tabSub, active && styles.tabSubActive]}
+            >
+              {getDayLabel(t.k)}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+};
+
+// ============================================================================
+// ACTIVE LOAD CARD
+// ============================================================================
+
+interface ActiveLoadCardProps {
+  load: any;
+  onPress: () => void;
+}
+
+const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
+  const { palette, styles } = useDesignStyles();
+  const pickupCity = load.firstPickup?.city;
+  const pickupAddr = [load.firstPickup?.city, load.firstPickup?.state]
+    .filter(Boolean)
+    .join(', ');
+  const dropoffCity = load.lastDelivery?.city;
+  const dropoffAddr = [load.lastDelivery?.city, load.lastDelivery?.state]
+    .filter(Boolean)
+    .join(', ');
+  const pickupTime = formatTime(load.firstPickup?.windowBeginDate);
+  const dropoffTime = formatTime(load.lastDelivery?.windowBeginDate);
+
+  const tags = [load.parsedHcr, load.parsedTripNumber && `Trip ${load.parsedTripNumber}`]
+    .filter(Boolean) as string[];
+
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.activeCard,
+        pressed && { opacity: 0.92 },
+      ]}
+    >
+      <View style={styles.activeCardStripe} />
+
+      <View style={styles.activeCardHeader}>
+        <StatusChip status={load.trackingStatus || load.status} />
+        <Icon name="chevron-right" size={18} color={palette.textTertiary} />
+      </View>
+
+      {tags.length > 0 && (
+        <View style={styles.tagRow}>
+          {tags.map((v) => (
+            <Tag key={v} value={v} />
+          ))}
+        </View>
+      )}
+
+      <View style={styles.activeCardBody}>
+        <RouteRail />
+        <View style={{ flex: 1, minWidth: 0, gap: sp.cardGap }}>
+          <StopRow
+            kind="pickup"
+            name={pickupCity ?? 'Pickup pending'}
+            addr={pickupAddr}
+            time={pickupTime}
+            done
+          />
+          <StopRow
+            kind="dropoff"
+            name={dropoffCity ?? 'Delivery pending'}
+            addr={dropoffAddr}
+            time={dropoffTime}
+            active
+          />
+        </View>
+      </View>
+    </Pressable>
+  );
+};
+
+const RouteRail: React.FC = () => {
+  const { palette, styles } = useDesignStyles();
+  return (
+    <View style={{ width: 18, position: 'relative' }}>
+      <View style={styles.railLine} />
+      <View style={[styles.railDot, { top: 4, backgroundColor: palette.bgSurface, borderColor: palette.success, borderWidth: 2 }]}>
+        <View style={[StyleSheet.absoluteFillObject, { borderRadius: 99, margin: 2, backgroundColor: palette.success }]} />
+      </View>
+      <View style={[styles.railDot, {
+        bottom: 4,
+        backgroundColor: palette.accent,
+        shadowColor: palette.accent,
+        shadowOpacity: 0.4,
+        shadowRadius: 4,
+      }]} />
+    </View>
+  );
+};
+
+interface StopRowProps {
+  kind: 'pickup' | 'dropoff';
+  name: string;
+  addr?: string;
+  time: string | null;
+  done?: boolean;
+  active?: boolean;
+}
+
+const StopRow: React.FC<StopRowProps> = ({ kind, name, addr, time, done, active }) => {
+  const { palette, styles } = useDesignStyles();
+  return (
+  <View style={{ minWidth: 0 }}>
+    <Text style={styles.stopLabel}>
+      {kind === 'pickup' ? 'PICKUP' : 'DROPOFF'}
+      {done ? ' · DONE' : ''}
+    </Text>
+    <Text
+      style={[
+        styles.stopName,
+        done && { color: palette.textSecondary, textDecorationLine: 'line-through' },
+      ]}
+      numberOfLines={1}
+    >
+      {name}
+    </Text>
+    <Text style={styles.stopAddr} numberOfLines={1}>
+      {addr ?? '—'}
+      {time && (
+        <>
+          {' · '}
+          <Text
+            style={{
+              color: active ? palette.accent : palette.textTertiary,
+              fontWeight: active ? '600' : '400',
+            }}
+          >
+            {time}
+          </Text>
+        </>
+      )}
+    </Text>
+  </View>
+  );
+};
+
+// ============================================================================
+// STATUS CHIP + TAG
+// ============================================================================
+
+const StatusChip: React.FC<{ status: string }> = ({ status }) => {
+  const { palette, styles } = useDesignStyles();
+  const s = status || 'Pending';
+  const tone = statusTone(s, palette);
+  return (
+    <View style={[styles.statusChip, { backgroundColor: tone.bg }]}>
+      <View style={[styles.statusDot, { backgroundColor: tone.fg }]} />
+      <Text style={[styles.statusChipText, { color: tone.fg }]}>{s}</Text>
+    </View>
+  );
+};
+
+const statusTone = (status: string, palette: Palette): { bg: string; fg: string } => {
+  if (status === 'In Transit' || status === 'In Progress')
+    return { bg: 'rgba(46,92,255,0.16)', fg: palette.accent };
+  if (status === 'Completed')
+    return { bg: 'rgba(16,185,129,0.14)', fg: palette.success };
+  if (status === 'At Pickup' || status === 'At Delivery')
+    return { bg: 'rgba(124,58,237,0.14)', fg: '#A78BFA' };
+  return { bg: 'rgba(255,255,255,0.06)', fg: palette.textSecondary };
+};
+
+const Tag: React.FC<{ value: string }> = ({ value }) => {
+  const { styles } = useDesignStyles();
+  const s = tagStyles[value] ?? tagFallback;
+  return (
+    <View style={[styles.tag, { backgroundColor: s.bg }]}>
+      <Text style={[styles.tagText, { color: s.fg }]}>#{value}</Text>
+    </View>
+  );
+};
+
+// ============================================================================
+// UPCOMING / COMPLETED SECTIONS
+// ============================================================================
+
+const UpcomingSection: React.FC<{
+  loads: any[];
+  isSessionMode: boolean;
+  onPress: (loadId: string) => void;
+}> = ({ loads, isSessionMode, onPress }) => {
+  const { locale } = useLanguage();
+  const { styles } = useDesignStyles();
+  return (
+    <View style={{ gap: sp.listGap }}>
+      <View style={styles.sectionHead}>
+        <Text style={styles.sectionLabel}>
+          {isSessionMode
+            ? locale === 'es'
+              ? `PRÓXIMAS · ${loads.length} CARGAS`
+              : `UP NEXT · ${loads.length} LOADS`
+            : locale === 'es'
+              ? `PROGRAMADAS · ${loads.length}`
+              : `SCHEDULED · ${loads.length}`}
+        </Text>
+      </View>
+      {loads.map((load) => (
+        <UpcomingRow key={load._id} load={load} onPress={() => onPress(load._id)} />
+      ))}
+    </View>
+  );
+};
+
+const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPress }) => {
+  const { palette, styles } = useDesignStyles();
+  const pickup = load.firstPickup?.city ?? 'Pickup';
+  const dropoff = load.lastDelivery?.city ?? 'Dropoff';
+  const window = [
+    formatTime(load.firstPickup?.windowBeginDate),
+    formatTime(load.lastDelivery?.windowBeginDate),
+  ]
+    .filter(Boolean)
+    .join(' – ');
+  const tags = [load.parsedHcr, load.parsedTripNumber && `Trip ${load.parsedTripNumber}`]
+    .filter(Boolean) as string[];
+
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.upcomingRow,
+        pressed && { opacity: 0.85 },
+      ]}
+    >
+      <View style={{ flex: 1, minWidth: 0, gap: sp.rowGap }}>
+        <View style={styles.upcomingRoute}>
+          <Text style={styles.upcomingCity} numberOfLines={1}>
+            {pickup}
+          </Text>
+          <Icon name="arrow-right" size={14} color={palette.textTertiary} />
+          <Text
+            style={[styles.upcomingCity, { color: palette.textSecondary }]}
+            numberOfLines={1}
+          >
+            {dropoff}
+          </Text>
+        </View>
+        <Text style={styles.upcomingMeta} numberOfLines={1}>
+          {window || 'Time TBD'}
+          {typeof load.stopCount === 'number'
+            ? ` · ${load.stopCount} stop${load.stopCount > 1 ? 's' : ''}`
+            : ''}
+        </Text>
+        {tags.length > 0 && (
+          <View style={styles.tagRow}>
+            {tags.map((v) => (
+              <Tag key={v} value={v} />
+            ))}
+          </View>
+        )}
+      </View>
+      <Icon name="chevron-right" size={18} color={palette.textTertiary} />
+    </Pressable>
+  );
+};
+
+const CompletedSection: React.FC<{ loads: any[]; isSessionMode: boolean }> = ({
+  loads,
+  isSessionMode,
+}) => {
+  const { locale } = useLanguage();
+  const { palette, styles } = useDesignStyles();
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <View style={{ gap: sp.listGap }}>
+      <Pressable
+        style={styles.completedFooter}
+        onPress={() => setExpanded((v) => !v)}
+      >
+        <View style={styles.completedLeft}>
+          <View style={styles.completedCheck}>
+            <Icon name="check" size={14} color="#fff" strokeWidth={2.5} />
+          </View>
+          <Text style={styles.completedLabel}>
+            {isSessionMode
+              ? locale === 'es'
+                ? 'Completadas en este turno'
+                : 'Completed this shift'
+              : locale === 'es'
+                ? 'Completadas'
+                : 'Completed'}
+          </Text>
+        </View>
+        <View style={styles.completedRight}>
+          <Text style={styles.completedCount}>{loads.length}</Text>
+          <Icon
+            name="chevron-down"
+            size={18}
+            color={palette.textTertiary}
+          />
+        </View>
+      </Pressable>
+      {expanded &&
+        loads.map((load) => <UpcomingRow key={load._id} load={load} onPress={() => {}} />)}
+    </View>
+  );
+};
+
+// ============================================================================
+// EMPTY STATE + BANNERS
+// ============================================================================
+
+const EmptyState: React.FC<{
+  isSessionMode: boolean;
+  locale: string;
+  onScanTruck: () => void;
+}> = ({ isSessionMode, locale, onScanTruck }) => {
+  const { palette, styles } = useDesignStyles();
+  if (isSessionMode) {
+    return (
+      <View style={styles.emptyWrap}>
+        <View style={styles.emptyIcon}>
+          <Icon name="package" size={28} color={palette.accent} />
+        </View>
+        <Text style={styles.emptyTitle}>
+          {locale === 'es' ? 'Nada en tu turno aún' : 'Nothing on your shift yet'}
+        </Text>
+        <Text style={styles.emptyBody}>
+          {locale === 'es'
+            ? 'Los despachadores te asignarán cargas — aparecerán aquí.'
+            : "Dispatch will assign loads — they'll show up here."}
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.emptyWrap}>
+      <View style={styles.emptyIcon}>
+        <Icon name="truck" size={28} color={palette.accent} />
+      </View>
+      <Text style={styles.emptyTitle}>
+        {locale === 'es' ? 'Sin cargas programadas' : 'No loads scheduled'}
+      </Text>
+      <Text style={styles.emptyBody}>
+        {locale === 'es'
+          ? 'Escanea un camión para iniciar tu turno y ver cargas en vivo.'
+          : 'Scan a truck to start your shift and see live loads.'}
+      </Text>
+      <Pressable
+        onPress={onScanTruck}
+        style={({ pressed }) => [
+          styles.emptyCta,
+          pressed && { opacity: 0.9 },
+        ]}
+      >
+        <Icon name="truck" size={18} color="#fff" />
+        <Text style={styles.emptyCtaText}>
+          {locale === 'es' ? 'Escanear camión' : 'Scan truck'}
+        </Text>
+      </Pressable>
+    </View>
+  );
+};
+
+const SoftCapBanner: React.FC<{ level: '10h' | '14h'; locale: string }> = ({
+  level,
+  locale,
+}) => {
+  const { palette, styles } = useDesignStyles();
+  const isCritical = level === '14h';
+  const bg = isCritical ? 'rgba(239,68,68,0.14)' : 'rgba(245,158,11,0.14)';
+  const fg = isCritical ? palette.danger : palette.warning;
+  const title =
+    level === '14h'
+      ? locale === 'es'
+        ? 'Más de 14 horas en turno'
+        : '14+ hours on shift'
+      : locale === 'es'
+        ? 'Más de 10 horas en turno'
+        : '10+ hours on shift';
+  const body =
+    level === '14h'
+      ? locale === 'es'
+        ? 'Considera terminar tu turno y descansar.'
+        : 'Consider ending your shift and resting.'
+      : locale === 'es'
+        ? 'Has estado trabajando 10 horas.'
+        : "You've been on shift 10 hours.";
+  return (
+    <View style={[styles.softCapBanner, { backgroundColor: bg }]}>
+      <Icon name={isCritical ? 'warning' : 'info'} size={18} color={fg} />
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.softCapTitle, { color: fg }]}>{title}</Text>
+        <Text style={styles.softCapBody}>{body}</Text>
+      </View>
+    </View>
+  );
+};
+
+const ConnectionBanner: React.FC<{
+  label: string;
+  pending: number;
+  pendingLabel: string;
+  tone: 'danger' | 'warning';
+}> = ({ label, pending, pendingLabel, tone }) => {
+  const { palette, styles } = useDesignStyles();
+  return (
+  <View
+    style={[
+      styles.connBanner,
+      {
+        backgroundColor:
+          tone === 'danger'
+            ? 'rgba(239,68,68,0.16)'
+            : 'rgba(245,158,11,0.16)',
+      },
+    ]}
+  >
+    <Text
+      style={[
+        styles.connBannerText,
+        {
+          color: tone === 'danger' ? palette.danger : palette.warning,
+        },
+      ]}
+    >
+      {label}
+      {pending > 0 ? ` · ${pending} ${pendingLabel}` : ''}
+    </Text>
+  </View>
+  );
+};
+
+const LoadingSkeleton: React.FC = () => {
+  const { styles } = useDesignStyles();
+  return (
+  <View style={{ gap: sp.sectionGap, paddingTop: spacing.s2 }}>
+    <View style={[styles.skeleton, { height: 220 }]} />
+    <View style={[styles.skeleton, { height: 90 }]} />
+    <View style={[styles.skeleton, { height: 90 }]} />
+  </View>
+  );
+};
+
+// ============================================================================
+// STYLES
+// ============================================================================
+
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: palette.bgCanvas,
   },
-  offlineBannerText: {
-    color: colors.background,
-    fontSize: typography.sm,
-    fontWeight: typography.semibold,
+  scroll: {
+    paddingHorizontal: sp.screenPx,
+    paddingVertical: sp.screenPy,
+    paddingBottom: 120,
+    gap: sp.sectionGap,
   },
 
   // Header
   header: {
+    paddingHorizontal: sp.screenPx,
+    paddingTop: sp.headerPy,
+    paddingBottom: sp.headerPy,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.lg,
+    backgroundColor: palette.bgCanvas, // per design-principles: header sits on canvas, no fill, no border
   },
-  dateContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flex: 1,
+  headerGreeting: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: palette.textTertiary,
+    fontWeight: '500',
   },
-  dateTextContainer: {
-    flex: 1,
-  },
-  todayLabel: {
-    fontSize: typography.sm,
-    fontWeight: typography.medium,
-    color: colors.foregroundMuted,
-    letterSpacing: 0.5,
-  },
-  dateText: {
-    fontSize: typography.xl,
-    fontWeight: typography.semibold,
-    color: colors.foreground,
-  },
-  headerDivider: {
-    width: 1,
-    height: 40,
-    backgroundColor: colors.border,
-    marginHorizontal: spacing.base,
-  },
-  weatherContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  weatherLabel: {
-    fontSize: typography.xs,
-    fontWeight: typography.medium,
-    color: colors.foregroundMuted,
-  },
-  weatherText: {
-    fontSize: typography.base,
-    fontWeight: typography.semibold,
-    color: colors.foreground,
-  },
-
-  // Day Switcher
-  daySwitcher: {
-    flexDirection: 'row',
-    backgroundColor: colors.muted,
-    borderRadius: borderRadius.xl,
-    padding: 3,
-    marginBottom: spacing.md,
-  },
-  dayTab: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderRadius: borderRadius.lg,
-  },
-  dayTabActive: {
-    backgroundColor: colors.card,
-  },
-  dayTabText: {
-    fontSize: typography.sm,
-    fontWeight: typography.semibold,
-    color: colors.foregroundMuted,
-  },
-  dayTabTextActive: {
-    color: colors.foreground,
-  },
-
-  // Section Header
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing.sm,
-  },
-  sectionTitle: {
-    fontSize: isIOS ? typography.lg : typography.xl,
-    fontWeight: typography.semibold,
-    color: colors.foreground,
-    flexShrink: 1,
-  },
-
-  // Sync Banner
-  syncBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.muted,
-    paddingVertical: 10,
-    paddingHorizontal: spacing.md,
-    borderRadius: borderRadius.lg,
-    marginBottom: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    gap: 8,
-  },
-  syncText: {
-    color: colors.foregroundMuted,
-    fontSize: typography.sm,
-    fontWeight: typography.medium,
-  },
-
-  // In Progress Card
-  inProgressLabel: {
-    marginBottom: spacing.xs,
-  },
-  inProgressLabelText: {
-    fontSize: typography.xs,
-    fontWeight: typography.semibold,
-    color: colors.foregroundMuted,
-    letterSpacing: 1,
-  },
-  inProgressCard: {
-    backgroundColor: colors.primary,
-    borderRadius: borderRadius.xl,
-    paddingVertical: spacing.base,
-    paddingHorizontal: spacing.md,
-    marginBottom: spacing.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  inProgressLeft: {
-    flex: 1,
-  },
-  inProgressId: {
-    fontSize: typography.xl,
-    fontWeight: typography.bold,
-    color: colors.primaryForeground,
-  },
-  inProgressSub: {
-    fontSize: typography.xs,
-    fontWeight: typography.medium,
-    color: 'rgba(26, 29, 33, 0.7)',
+  headerTitle: {
+    ...typeScale.headingSm,
+    color: palette.textPrimary,
     marginTop: 2,
   },
-  inProgressRight: {
-    alignItems: 'flex-end',
-    marginRight: spacing.base,
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
-  inProgressEtaTime: {
-    fontSize: typography.xl,
-    fontWeight: typography.bold,
-    color: colors.primaryForeground,
-  },
-  inProgressEtaLabel: {
-    fontSize: typography.xs,
-    fontWeight: typography.medium,
-    color: 'rgba(26, 29, 33, 0.7)',
-  },
-  inProgressArrow: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(26, 29, 33, 0.2)',
+  headerIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: radii.full,
     alignItems: 'center',
     justifyContent: 'center',
   },
-
-  // Load Card - iOS Glass Effect
-  loadCard: {
-    backgroundColor: isIOS ? 'rgba(34, 38, 43, 0.65)' : colors.card,
-    borderRadius: borderRadius.xl,
-    padding: spacing.base,
-    marginBottom: spacing.base,
-    borderWidth: 1,
-    borderColor: isIOS ? 'rgba(255, 255, 255, 0.1)' : 'rgba(63, 69, 82, 0.5)',
-    ...shadows.md,
-  },
-  loadCardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  loadCardHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  badgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 8,
-  },
-  loadCardTitle: {
-    fontSize: typography.base,
-    fontWeight: typography.semibold,
-    color: colors.foreground,
-  },
-  truckBadge: {
-    backgroundColor: 'rgba(255, 107, 0, 0.3)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: borderRadius.md,
-  },
-  truckBadgeText: {
-    fontSize: typography.xs,
-    fontWeight: typography.semibold,
-    color: colors.primary,
-  },
-  tripBadge: {
-    backgroundColor: 'rgba(59, 130, 246, 0.3)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: borderRadius.md,
-  },
-  tripBadgeText: {
-    fontSize: typography.xs,
-    fontWeight: typography.semibold,
-    color: colors.chart3,
-  },
-  statusBadge: {
-    backgroundColor: isIOS ? 'rgba(234, 179, 8, 0.4)' : 'rgba(234, 179, 8, 0.3)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: borderRadius.full,
-    borderWidth: isIOS ? 1 : 0,
-    borderColor: isIOS ? 'rgba(234, 179, 8, 0.6)' : 'transparent',
-  },
-  statusBadgeText: {
-    fontSize: typography.xs,
-    fontWeight: typography.semibold,
-    color: colors.secondary,
-  },
-
-  // Multi-Day Banner
-  multiDayBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.3)',
+  headerWeatherChip: {
+    height: 44,
     paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: borderRadius.lg,
-    marginBottom: 8,
+    borderRadius: radii.full,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
-  multiDayTitle: {
-    fontSize: typography.xs,
-    fontWeight: typography.semibold,
-    color: colors.chart3,
+  headerWeatherTemp: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: palette.textPrimary,
   },
-  multiDayText: {
-    fontSize: typography.xs,
-    color: colors.foregroundMuted,
+  endShiftPill: {
+    height: 36,
+    paddingHorizontal: 14,
+    borderRadius: radii.full,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: palette.danger,
+  },
+  endShiftPillText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#fff',
   },
 
-  // Stats
-  loadCardStats: {
+  // Tabs
+  tabs: {
     flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: sp.screenPx,
+    paddingTop: 4,
+    paddingBottom: sp.headerPy,
+  },
+  tab: {
+    flex: 1,
+    minHeight: 44,
+    paddingVertical: sp.tabPy,
+    paddingHorizontal: 8,
+    borderRadius: radii.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  tabActive: {
+    backgroundColor: palette.accentTint,
+  },
+  tabLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: palette.textSecondary,
+  },
+  tabLabelActive: {
+    color: palette.accent,
+    fontWeight: '600',
+  },
+  tabSub: {
+    fontSize: 11,
+    color: palette.textTertiary,
+  },
+  tabSubActive: {
+    color: palette.accent,
+    opacity: 0.8,
+  },
+
+  // Active card
+  activeCard: {
+    backgroundColor: palette.bgSurface,
+    borderRadius: radii.lg,
+    padding: sp.cardPadding,
+    paddingLeft: sp.cardPadding + 2,
+    borderWidth: 1,
+    borderColor: palette.borderSubtle,
+    gap: sp.cardGap,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  activeCardStripe: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 3,
+    backgroundColor: palette.accent,
+  },
+  activeCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
+    gap: 10,
   },
-  statLabel: {
-    fontSize: typography.sm,
-    color: colors.foregroundMuted,
-    marginBottom: 2,
-  },
-  statValue: {
-    fontSize: typography.lg,
-    fontWeight: typography.semibold,
-    color: colors.foreground,
-  },
-  statLeft: {
-    flex: 1,
-  },
-  statRight: {
-    alignItems: 'flex-end',
-  },
-  statValueMono: {
-    fontSize: typography.lg,
-    fontWeight: typography.bold,
-    color: colors.foreground,
-    fontFamily: 'Courier',
-  },
-
-  // Address Section
-  addressSection: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(63, 69, 82, 0.5)',
-    paddingTop: 8,
-    gap: 8,
-  },
-  addressRow: {
+  activeCardBody: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
+    gap: 12,
   },
-  addressContent: {
-    flex: 1,
+  railLine: {
+    position: 'absolute',
+    left: 8,
+    top: 10,
+    bottom: 10,
+    width: 2,
+    backgroundColor: palette.borderDefault,
   },
-  addressLabel: {
-    fontSize: typography.sm,
-    color: colors.foregroundMuted,
-    marginBottom: 2,
-  },
-  addressText: {
-    fontSize: typography.base,
-    fontWeight: typography.medium,
-    color: colors.foreground,
-  },
-  expectedText: {
-    fontSize: typography.xs,
-    fontWeight: typography.medium,
-    color: colors.chart3,
-    marginTop: 4,
+  railDot: {
+    position: 'absolute',
+    left: 3,
+    width: 12,
+    height: 12,
+    borderRadius: 99,
   },
 
-  // Empty State Card
-  emptyStateCard: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.xl,
-    padding: spacing.xl,
-    paddingVertical: spacing.xl * 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...shadows.md,
+  // Stop row
+  stopLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 14,
+    color: palette.textTertiary,
+    letterSpacing: 1,
   },
-  emptyStateIconContainer: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: colors.muted,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.lg,
-  },
-  emptyStateTitle: {
-    fontSize: typography.lg,
-    fontWeight: typography.semibold,
-    color: colors.foreground,
-    marginBottom: spacing.sm,
-    textAlign: 'center',
-  },
-  emptyStateSubtitle: {
-    fontSize: typography.sm,
-    color: colors.foregroundMuted,
-    textAlign: 'center',
+  stopName: {
+    fontSize: 14,
+    fontWeight: '600',
     lineHeight: 20,
-    paddingHorizontal: spacing.lg,
+    color: palette.textPrimary,
+  },
+  stopAddr: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: palette.textTertiary,
   },
 
-  // Completed Section
-  completedHeader: {
-    marginTop: spacing.lg,
-    marginBottom: spacing.base,
+  // Status + tags
+  statusChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radii.full,
   },
-  completedHeaderText: {
-    fontSize: typography.base,
-    fontWeight: typography.semibold,
-    color: colors.foregroundMuted,
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
-  completedCard: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.lg,
-    padding: spacing.base,
-    marginBottom: 8,
-    opacity: 0.7,
+  statusChipText: {
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.3,
   },
-  completedContent: {
+  tagRow: {
+    flexDirection: 'row',
+    gap: 4,
+    flexWrap: 'wrap',
+  },
+  tag: {
+    height: 20,
+    paddingHorizontal: 7,
+    borderRadius: radii.xs,
+    justifyContent: 'center',
+  },
+  tagText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+  },
+
+  // Sections
+  sectionHead: {
+    paddingHorizontal: 4,
+    paddingBottom: 4,
+  },
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.8,
+    color: palette.textTertiary,
+  },
+
+  // Upcoming row
+  upcomingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-  },
-  completedTitle: {
-    fontSize: typography.sm,
-    fontWeight: typography.semibold,
-    color: colors.foreground,
-  },
-  completedSubtitle: {
-    fontSize: typography.xs,
-    color: colors.foregroundMuted,
-  },
-  completedDate: {
-    fontSize: typography.xs,
-    color: colors.foregroundMuted,
-    fontWeight: typography.medium,
-  },
-
-  // Skeleton
-  skeletonContainer: {
-    paddingTop: spacing.md,
-  },
-  skeletonBox: {
-    backgroundColor: colors.muted,
-    borderRadius: borderRadius.xl,
-  },
-});
-
-// Driver Session System (Phase 3) — session header + soft-cap banners.
-// Kept as a separate StyleSheet so the legacy styles object stays intact.
-const sessionStyles = StyleSheet.create({
-  sessionHeader: {
-    marginHorizontal: spacing.md,
-    marginTop: spacing.sm,
-    marginBottom: spacing.md,
-    padding: spacing.md,
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.xl,
+    padding: sp.listPx,
+    borderRadius: radii.lg,
+    backgroundColor: palette.bgSurface,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: palette.borderSubtle,
   },
-  sessionHeaderRow: {
+  upcomingRoute: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  upcomingCity: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '600',
+    color: palette.textPrimary,
+    flexShrink: 1,
+  },
+  upcomingMeta: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: palette.textTertiary,
+  },
+
+  // Completed footer
+  completedFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    padding: sp.listPx,
+    borderRadius: radii.lg,
+    backgroundColor: palette.bgMuted,
   },
-  sessionHeaderTextWrap: {
-    flex: 1,
-  },
-  sessionHeaderTitle: {
-    ...typography.h3,
-    color: colors.foreground,
-  },
-  sessionHeaderSub: {
-    ...typography.caption,
-    color: colors.foregroundMuted,
-    marginTop: 2,
-  },
-  endShiftButton: {
+  completedLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.destructive,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.full,
-    gap: spacing.xs,
+    gap: 10,
   },
-  endShiftButtonText: {
-    ...typography.body,
-    color: colors.background,
+  completedCheck: {
+    width: 24,
+    height: 24,
+    borderRadius: 99,
+    backgroundColor: palette.success,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  completedLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: palette.textSecondary,
+  },
+  completedRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  completedCount: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: palette.textTertiary,
+  },
+
+  // Empty state
+  emptyWrap: {
+    alignItems: 'center',
+    paddingVertical: 48,
+    paddingHorizontal: 24,
+    gap: 12,
+  },
+  emptyIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: radii.xl,
+    backgroundColor: palette.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyTitle: {
+    ...typeScale.headingSm,
+    color: palette.textPrimary,
+    textAlign: 'center',
+  },
+  emptyBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: palette.textSecondary,
+    textAlign: 'center',
+    maxWidth: 280,
+  },
+  emptyCta: {
+    marginTop: 12,
+    height: comp.btnMd.height,
+    paddingHorizontal: comp.btnMd.paddingHorizontal,
+    borderRadius: comp.btnMd.radius,
+    backgroundColor: palette.accent,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  emptyCtaText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+
+  // Banners
+  connBanner: {
+    paddingHorizontal: sp.screenPx,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  connBannerText: {
+    fontSize: 12,
     fontWeight: '600',
   },
   softCapBanner: {
-    marginTop: spacing.sm,
-    paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.sm,
-    borderRadius: borderRadius.md,
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: 12,
+    borderRadius: radii.lg,
   },
-  softCapBanner10h: {
-    backgroundColor: '#D97706', // amber-600
+  softCapTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
   },
-  softCapBanner14h: {
-    backgroundColor: '#DC2626', // red-600
+  softCapBody: {
+    fontSize: 12,
+    lineHeight: 16,
+    color: palette.textSecondary,
+    marginTop: 2,
   },
-  softCapBannerText: {
-    ...typography.caption,
-    color: '#fff',
-    fontWeight: '500',
-    flex: 1,
+
+  // Skeleton
+  skeleton: {
+    backgroundColor: palette.bgMuted,
+    borderRadius: radii.lg,
   },
 });

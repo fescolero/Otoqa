@@ -45,6 +45,17 @@ import { getTotalCountForLoad, getUnsyncedCountForLoad } from '../../../lib/loca
 import { useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import { AppState } from 'react-native';
+// Design system — used for the redesigned top chrome (header, summary card,
+// quick actions). The stops list + modals below keep the legacy palette
+// for now; they'll migrate in a later pass.
+import { Icon } from '../../../lib/design-icons';
+import { useTheme } from '../../../lib/ThemeContext';
+import {
+  typeScale,
+  radii as designRadii,
+  tagStyles,
+  tagFallback,
+} from '../../../lib/design-tokens';
 
 // ============================================
 // DESIGN SYSTEM
@@ -90,6 +101,7 @@ export default function TripDetailScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { driverId, organizationId } = useDriver();
+  const { palette } = useTheme();
   const { connectionQuality } = useNetworkStatus();
   const { isWarming: isGPSWarming, getFreshLocation } = useGPSLocation();
   const { checkIn, checkOut } = useCheckIn(getFreshLocation);
@@ -501,14 +513,39 @@ export default function TripDetailScreen() {
     <>
       <Stack.Screen options={{ headerShown: false }} />
 
-      <View style={[styles.container, { paddingTop: insets.top }]}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Pressable style={styles.headerBackButton} onPress={() => router.back()}>
-            <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+      <View style={[styles.container, { paddingTop: insets.top, backgroundColor: palette.bgCanvas }]}>
+        {/* Header — edge-to-edge on canvas per design-principles: no border,
+            no surface fill. Back, centered title, kebab for quick actions. */}
+        <View style={[styles.header, { backgroundColor: palette.bgCanvas, borderBottomWidth: 0 }]}>
+          <Pressable
+            onPress={() => router.back()}
+            accessibilityLabel="Back"
+            style={({ pressed }) => [
+              { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: designRadii.full },
+              pressed && { opacity: 0.7 },
+            ]}
+          >
+            <Icon name="arrow-left" size={24} color={palette.textPrimary} />
           </Pressable>
-          <Text style={styles.headerTitle}>Load Details</Text>
-          <View style={styles.headerSpacer} />
+          <Text
+            style={{
+              ...typeScale.labelLg,
+              color: palette.textPrimary,
+              fontWeight: '600',
+            }}
+          >
+            Load details
+          </Text>
+          <Pressable
+            onPress={() => setShowQuickActions(true)}
+            accessibilityLabel="More actions"
+            style={({ pressed }) => [
+              { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: designRadii.full },
+              pressed && { opacity: 0.7 },
+            ]}
+          >
+            <Icon name="more-h" size={22} color={palette.textPrimary} />
+          </Pressable>
         </View>
 
         <ScrollView
@@ -564,7 +601,20 @@ export default function TripDetailScreen() {
             </View>
           )}
 
-          {/* Load ID Card */}
+          {/* Load Summary — design-aligned. Gives the driver the load's
+              identity, classification (tags), current status, and a glance-
+              able progress bar. Sits above the Route Details card since
+              drivers glance at it more often than they tap a stop. */}
+          <LoadSummary
+            palette={palette}
+            load={load}
+            displayStops={displayStops}
+            activeCheckedInStop={activeCheckedInStop}
+            statusDisplay={statusDisplay}
+          />
+
+          {/* Legacy Load ID Card — kept for continuity; the summary card
+              above is primary. Remove in the next design pass. */}
           <View style={styles.card}>
             <View style={styles.loadIdRow}>
               <View style={styles.loadIdLeft}>
@@ -580,152 +630,454 @@ export default function TripDetailScreen() {
             </View>
           </View>
 
-          {/* Route Details */}
-          <View style={styles.card}>
-            <View style={styles.sectionHeader}>
-              <Ionicons name="location" size={20} color={colors.primary} />
-              <Text style={styles.sectionTitle}>Route Details</Text>
-            </View>
+          {/* Route Timeline — design-aligned. Numbered dots per stop, dashed
+              ring for detours, single inline action per current stop (check-
+              in → check-out → disappears). Address/target time hidden for
+              detours per design-principles. */}
+          <View
+            style={{
+              backgroundColor: palette.bgSurface,
+              borderWidth: 1,
+              borderColor: palette.borderSubtle,
+              borderRadius: designRadii.lg,
+              paddingVertical: 4,
+              marginBottom: 16,
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 12,
+                fontWeight: '700',
+                letterSpacing: 0.72,
+                color: palette.textTertiary,
+                paddingHorizontal: 12,
+                paddingTop: 14,
+                paddingBottom: 4,
+              }}
+            >
+              ROUTE
+            </Text>
+            {displayStops.map((stop: any, index: number) => {
+              const isDetour = stop.stopType === 'DETOUR';
+              const isPickup = stop.stopType === 'PICKUP';
+              const isCompleted =
+                stop.status === 'Completed' || !!stop.checkedOutAt;
+              const isCheckedIn = !!stop.checkedInAt && !stop.checkedOutAt;
+              const isCurrent = index === currentStopIndex;
+              const isLast = index === displayStops.length - 1;
+              const isPendingSync = !!(stop as any).pendingSync;
 
-            <View style={styles.stopsContainer}>
-              {displayStops.map((stop: any, index: number) => {
-                const isPickup = stop.stopType === 'PICKUP';
-                const isCompleted = stop.status === 'Completed' || !!stop.checkedOutAt;
-                const isCheckedIn = !!stop.checkedInAt && !stop.checkedOutAt;
-                const isCurrent = index === currentStopIndex;
-                const isFuture = index > currentStopIndex && currentStopIndex !== -1;
-                const isLast = index === displayStops.length - 1;
-                const isPendingSync = !!(stop as any).pendingSync;
+              // Stable detour numbering: which # detour is this in order.
+              const detourNumber = isDetour
+                ? displayStops
+                    .slice(0, index + 1)
+                    .filter((s: any) => s.stopType === 'DETOUR').length
+                : null;
 
-                return (
-                  <View key={stop._id} style={styles.stopRow}>
-                    {/* Timeline indicator */}
-                    <View style={styles.timelineContainer}>
-                      <View
-                        style={[
-                          styles.timelineDot,
-                          isCompleted && styles.timelineDotCompleted,
-                          isCurrent && styles.timelineDotActive,
-                          isFuture && styles.timelineDotFuture,
-                        ]}
-                      >
-                        {isCurrent && <View style={styles.timelineDotRing} />}
-                      </View>
-                      {!isLast && <View style={[styles.timelineLine, isFuture && styles.timelineLineFuture]} />}
-                    </View>
+              const kindLabel = isDetour
+                ? `↔ Detour ${detourNumber ?? ''}`.trim()
+                : isPickup
+                  ? '↑ Pickup'
+                  : '↓ Dropoff';
 
-                    {/* Stop content */}
-                    <View style={[styles.stopContent, isFuture && styles.stopContentFuture]}>
-                      <View style={styles.stopHeader}>
+              const dotBorderColor = isCompleted
+                ? palette.success
+                : isCurrent
+                  ? palette.accent
+                  : palette.textTertiary;
+              const dotBgColor = isCompleted
+                ? palette.success
+                : isCurrent
+                  ? palette.accent
+                  : palette.bgSurface;
+
+              const compactTime = (ts?: number | string | null) => {
+                if (!ts) return '';
+                const raw = formatCheckedTime(
+                  typeof ts === 'string' ? new Date(ts).getTime() : ts,
+                );
+                if (!raw) return '';
+                // "09:38 AM" → "9:38a"
+                const m = /^(\d{1,2}):(\d{2})\s*([AP])M?/i.exec(raw);
+                if (!m) return raw;
+                const [, h, mm, ap] = m;
+                return `${parseInt(h, 10)}:${mm}${ap.toLowerCase()}`;
+              };
+
+              const windowText = formatDateTime(
+                stop.windowBeginDate,
+                stop.windowBeginTime,
+              );
+
+              return (
+                <View
+                  key={stop._id}
+                  style={{
+                    flexDirection: 'row',
+                    gap: 14,
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                  }}
+                >
+                  {/* Timeline rail: numbered dot + connecting line */}
+                  <View
+                    style={{
+                      alignItems: 'center',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: 11,
+                        borderWidth: 2,
+                        borderColor: dotBorderColor,
+                        borderStyle: isDetour ? 'dashed' : 'solid',
+                        backgroundColor: dotBgColor,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      {isCompleted ? (
+                        <Icon
+                          name="check"
+                          size={12}
+                          color="#fff"
+                          strokeWidth={3}
+                        />
+                      ) : (
                         <Text
-                          style={[
-                            styles.stopLabel,
-                            isCurrent && styles.stopLabelActive,
-                            isFuture && styles.stopLabelFuture,
-                          ]}
-                        >
-                          Stop {stop.sequenceNumber} -{' '}
-                          {isPickup ? 'Pickup' : index === stops.length - 1 ? 'Final Delivery' : 'Delivery'}
-                        </Text>
-                      </View>
-
-                      <Text style={[styles.stopName, isFuture && styles.stopNameFuture]}>
-                        {stop.locationName || `${stop.city}, ${stop.state}`}
-                      </Text>
-
-                      <Text style={[styles.stopAddress, isFuture && styles.stopAddressFuture]}>
-                        {stop.address}
-                        {stop.city ? `, ${stop.city}` : ''}
-                        {stop.state ? `, ${stop.state}` : ''} {stop.postalCode || ''}
-                      </Text>
-
-                      {/* Checked In/Out badges for completed stops */}
-                      {(stop.checkedInAt || stop.checkedOutAt) && (
-                        <View style={styles.checkedBadgesRow}>
-                          {stop.checkedInAt && (
-                            <View style={styles.checkedBadge}>
-                              <Text style={styles.checkedBadgeText} maxFontSizeMultiplier={1.2}>
-                                Checked In: {formatCheckedTime(stop.checkedInAt)}
-                              </Text>
-                            </View>
-                          )}
-                          {stop.checkedOutAt && (
-                            <View style={styles.checkedBadge}>
-                              <Text style={styles.checkedBadgeText} maxFontSizeMultiplier={1.2}>
-                                Checked Out: {formatCheckedTime(stop.checkedOutAt)}
-                              </Text>
-                            </View>
-                          )}
-                          {isPendingSync && (
-                            <View style={styles.pendingSyncBadge}>
-                              <Ionicons name="sync" size={10} color={colors.secondary} />
-                              <Text style={styles.pendingSyncBadgeText} maxFontSizeMultiplier={1.2}>
-                                Pending sync
-                              </Text>
-                            </View>
-                          )}
-                          {stop.isRedirected && (
-                            <View style={styles.redirectedBadge}>
-                              <Ionicons name="swap-horizontal" size={10} color={colors.secondary} />
-                              <Text style={styles.redirectedBadgeText} maxFontSizeMultiplier={1.2}>
-                                Redirected
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                      )}
-
-                      {/* Target time for current/future stops */}
-                      {!isCompleted && (
-                        <View style={[styles.targetTimeBadge, isCurrent && styles.targetTimeBadgeActive]}>
-                          <Ionicons
-                            name="time"
-                            size={14}
-                            color={isCurrent ? colors.secondary : colors.foregroundMuted}
-                          />
-                          <Text style={[styles.targetTimeText, isCurrent && styles.targetTimeTextActive]}>
-                            Target: {formatDateTime(stop.windowBeginDate, stop.windowBeginTime) || 'TBD'}
-                          </Text>
-                        </View>
-                      )}
-
-                      {/* GPS warming indicator */}
-                      {isCurrent && !isCheckedIn && isGPSWarming && (
-                        <View style={styles.gpsWarmingBadge}>
-                          <ActivityIndicator size="small" color={colors.secondary} />
-                          <Text style={styles.gpsWarmingText}>Acquiring GPS...</Text>
-                        </View>
-                      )}
-
-                      {/* Check In button for current stop */}
-                      {isCurrent && !isCheckedIn && (
-                        <Pressable
-                          style={({ pressed }) => [styles.checkInButton, pressed && { opacity: 0.8 }]}
-                          onPress={() => handleCheckIn(stop._id)}
-                        >
-                          <Ionicons name="log-in" size={20} color={colors.primaryForeground} />
-                          <Text style={styles.checkInButtonText}>Check In</Text>
-                        </Pressable>
-                      )}
-
-                      {/* Check Out button only for the active checked-in stop */}
-                      {isCurrent && isCheckedIn && (
-                        <Pressable
-                          style={({ pressed }) => [styles.checkOutButton, pressed && { opacity: 0.8 }]}
-                          onPress={() => {
-                            handleCheckOut(stop._id);
+                          style={{
+                            fontSize: 11,
+                            fontWeight: '700',
+                            color: isCurrent ? '#fff' : palette.textTertiary,
+                            fontVariant: ['tabular-nums'],
                           }}
                         >
-                          <Ionicons name="log-out" size={20} color={colors.foreground} />
-                          <Text style={styles.checkOutButtonText}>Check Out</Text>
-                        </Pressable>
+                          {stop.sequenceNumber}
+                        </Text>
                       )}
                     </View>
+                    {!isLast && (
+                      <View
+                        style={{
+                          flex: 1,
+                          width: 2,
+                          marginTop: 2,
+                          backgroundColor: isCompleted
+                            ? palette.success
+                            : palette.borderDefault,
+                          borderRadius: 1,
+                        }}
+                      />
+                    )}
                   </View>
-                );
-              })}
-            </View>
+
+                  {/* Body */}
+                  <View style={{ flex: 1, paddingBottom: isLast ? 0 : 6 }}>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '700',
+                        letterSpacing: 0.66,
+                        color: isDetour
+                          ? palette.warning
+                          : palette.textTertiary,
+                        marginBottom: 6,
+                      }}
+                    >
+                      {kindLabel.toUpperCase()}
+                      {isCompleted && !isDetour ? ' · DONE' : ''}
+                    </Text>
+
+                    <Text
+                      style={{
+                        fontSize: 15,
+                        lineHeight: 20,
+                        fontWeight: '600',
+                        color: palette.textPrimary,
+                      }}
+                      numberOfLines={1}
+                    >
+                      {isDetour
+                        ? 'Off-plan stop'
+                        : stop.locationName || `${stop.city}, ${stop.state}`}
+                    </Text>
+
+                    {!isDetour && (
+                      <Text
+                        style={{
+                          fontSize: 13,
+                          color: palette.textSecondary,
+                          marginTop: 2,
+                        }}
+                        numberOfLines={1}
+                      >
+                        {stop.address}
+                        {stop.city ? `, ${stop.city}` : ''}
+                        {stop.state ? `, ${stop.state}` : ''}{' '}
+                        {stop.postalCode || ''}
+                      </Text>
+                    )}
+
+                    {/* Compact time line: window · checkedIn → checkedOut */}
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 6,
+                        flexWrap: 'wrap',
+                        marginTop: 6,
+                      }}
+                    >
+                      <Icon
+                        name="clock"
+                        size={13}
+                        color={palette.textTertiary}
+                      />
+                      {!isDetour && windowText && (
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            color: palette.textTertiary,
+                            fontVariant: ['tabular-nums'],
+                          }}
+                        >
+                          {windowText}
+                        </Text>
+                      )}
+                      {(stop.checkedInAt || stop.checkedOutAt) && (
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            color: palette.textTertiary,
+                            fontVariant: ['tabular-nums'],
+                          }}
+                        >
+                          {!isDetour && windowText ? '· ' : ''}
+                          {compactTime(stop.checkedInAt)}
+                          {stop.checkedOutAt
+                            ? ` → ${compactTime(stop.checkedOutAt)}`
+                            : ''}
+                        </Text>
+                      )}
+                      {!windowText && !stop.checkedInAt && !isDetour && (
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            color: palette.textTertiary,
+                          }}
+                        >
+                          Not checked in
+                        </Text>
+                      )}
+                    </View>
+
+                    {/* Inline badges — pending sync + redirected */}
+                    {(isPendingSync || stop.isRedirected) && (
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          gap: 6,
+                          flexWrap: 'wrap',
+                          marginTop: 6,
+                        }}
+                      >
+                        {isPendingSync && (
+                          <View
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 4,
+                              paddingHorizontal: 8,
+                              paddingVertical: 2,
+                              borderRadius: designRadii.sm,
+                              backgroundColor: 'rgba(245,158,11,0.12)',
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 10,
+                                fontWeight: '600',
+                                color: palette.warning,
+                                letterSpacing: 0.3,
+                              }}
+                            >
+                              PENDING SYNC
+                            </Text>
+                          </View>
+                        )}
+                        {stop.isRedirected && (
+                          <View
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 4,
+                              paddingHorizontal: 8,
+                              paddingVertical: 2,
+                              borderRadius: designRadii.sm,
+                              backgroundColor: 'rgba(124,58,237,0.14)',
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 10,
+                                fontWeight: '600',
+                                color: '#A78BFA',
+                                letterSpacing: 0.3,
+                              }}
+                            >
+                              REDIRECTED
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    )}
+
+                    {/* GPS warming indicator */}
+                    {isCurrent && !isCheckedIn && isGPSWarming && (
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 6,
+                          marginTop: 10,
+                        }}
+                      >
+                        <ActivityIndicator
+                          size="small"
+                          color={palette.accent}
+                        />
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            color: palette.textSecondary,
+                          }}
+                        >
+                          Acquiring GPS…
+                        </Text>
+                      </View>
+                    )}
+
+                    {/* Single action per current stop — design rule:
+                        never show both Check In and Check Out at once. */}
+                    {isCurrent && !isCheckedIn && (
+                      <Pressable
+                        onPress={() => handleCheckIn(stop._id)}
+                        style={({ pressed }) => [
+                          {
+                            marginTop: 12,
+                            height: 40,
+                            borderRadius: designRadii.md,
+                            backgroundColor: palette.accent,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 8,
+                          },
+                          pressed && { opacity: 0.88 },
+                        ]}
+                      >
+                        <Icon name="map-pin" size={16} color="#fff" />
+                        <Text
+                          style={{
+                            color: '#fff',
+                            fontSize: 14,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {isDetour
+                            ? 'Check in at detour'
+                            : isPickup
+                              ? 'Check in at pickup'
+                              : 'Check in at dropoff'}
+                        </Text>
+                      </Pressable>
+                    )}
+                    {isCurrent && isCheckedIn && (
+                      <Pressable
+                        onPress={() => handleCheckOut(stop._id)}
+                        style={({ pressed }) => [
+                          {
+                            marginTop: 12,
+                            height: 40,
+                            borderRadius: designRadii.md,
+                            backgroundColor: palette.success,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 8,
+                          },
+                          pressed && { opacity: 0.88 },
+                        ]}
+                      >
+                        <Icon
+                          name="check"
+                          size={16}
+                          color="#fff"
+                          strokeWidth={2}
+                        />
+                        <Text
+                          style={{
+                            color: '#fff',
+                            fontSize: 14,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {isDetour ? 'Check out of detour' : 'Check out'}
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+                </View>
+              );
+            })}
           </View>
+
+          {/* Quick Actions — design 2×2 grid. Handlers reuse existing flows
+              so this is pure UI addition; no new business logic. */}
+          <QuickActionsGrid
+            palette={palette}
+            onNavigate={() => {
+              // Navigate the next stop that isn't completed yet. Falls back
+              // to the first stop if everything's done (edge case).
+              const target =
+                displayStops.find((s) => !s.checkedOutAt) ?? displayStops[0];
+              if (target?.address) {
+                openMaps(target.address, target.city, target.state);
+              }
+            }}
+            onDocuments={() => {
+              // Route to the existing check-in modal in "out" mode targeting
+              // the current active stop — that's where photo + notes capture
+              // lives today. A dedicated Documents sheet is the next pass.
+              const target = activeCheckedInStop ?? displayStops[currentStopIndex];
+              if (target) {
+                setCheckInModal({ visible: true, stopId: target._id, type: activeCheckedInStop ? 'out' : 'in' });
+              }
+            }}
+            onDetour={() => setShowDetourModal(true)}
+            onAccident={() => {
+              // Placeholder until the Accident sheet lands. For now, route
+              // through the existing Alert pattern so ops calls still happen.
+              Alert.alert(
+                'Report an issue',
+                'Tap OK to call dispatch. Ops will pick up immediately.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Call dispatch',
+                    onPress: () => {
+                      if (load.contactPersonPhone) {
+                        Linking.openURL(`tel:${load.contactPersonPhone}`);
+                      }
+                    },
+                  },
+                ],
+              );
+            }}
+          />
 
           {/* Contact Information */}
           {load.contactPersonName && (
@@ -1264,6 +1616,387 @@ export default function TripDetailScreen() {
         </Modal>
       </View>
     </>
+  );
+}
+
+// ============================================================================
+// DESIGN-ALIGNED SUB-COMPONENTS
+//
+// These live below the main TripDetailScreen render and are rendered by it
+// via direct invocation (<LoadSummary palette={palette} ... />). They're
+// scoped to this file so the main screen's state + handlers stay local.
+//
+// They use the design-tokens palette (passed in as a prop) so they flip
+// cleanly with the app-wide theme preference.
+// ============================================================================
+
+type Palette = ReturnType<typeof useTheme>['palette'];
+
+/**
+ * Load Summary card — top of screen, above the legacy Route Details block.
+ * Shows: internalId · tags · status chip · progress bar. Status progresses
+ * against non-detour stops so detours don't dilute the "X of Y complete"
+ * reading.
+ */
+function LoadSummary({
+  palette,
+  load,
+  displayStops,
+  activeCheckedInStop,
+  statusDisplay,
+}: {
+  palette: Palette;
+  load: any;
+  displayStops: any[];
+  activeCheckedInStop: any | null;
+  statusDisplay: { text: string; color: string };
+}) {
+  const plannedStops = displayStops.filter((s) => s.stopType !== 'DETOUR');
+  const total = plannedStops.length || 1;
+  const done = plannedStops.filter((s) => !!s.checkedOutAt).length;
+  const onDetour =
+    activeCheckedInStop && activeCheckedInStop.stopType === 'DETOUR';
+  const hasDetour = displayStops.some(
+    (s) => s.stopType === 'DETOUR' && !s.checkedOutAt,
+  );
+  const progressPct = Math.min((done / total) * 100, 100);
+
+  const tagValues: string[] = [
+    load.parsedHcr,
+    load.parsedTripNumber && `Trip ${load.parsedTripNumber}`,
+  ].filter(Boolean);
+
+  return (
+    <View
+      style={{
+        paddingHorizontal: 4,
+        paddingBottom: 12,
+        gap: 10,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: 11,
+          fontWeight: '700',
+          letterSpacing: 0.88,
+          color: palette.textTertiary,
+        }}
+      >
+        LOAD
+      </Text>
+
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+        }}
+      >
+        <Text
+          style={{
+            fontSize: 24,
+            lineHeight: 30,
+            fontWeight: '700',
+            letterSpacing: -0.24,
+            color: palette.textPrimary,
+            flexShrink: 1,
+            fontVariant: ['tabular-nums'],
+          }}
+          numberOfLines={1}
+        >
+          #{load.internalId}
+        </Text>
+        <View
+          style={{
+            backgroundColor: `${statusDisplay.color}20`,
+            paddingHorizontal: 10,
+            paddingVertical: 4,
+            borderRadius: designRadii.full,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: 11,
+              fontWeight: '600',
+              letterSpacing: 0.3,
+              color: statusDisplay.color,
+            }}
+          >
+            {statusDisplay.text}
+          </Text>
+        </View>
+      </View>
+
+      {(tagValues.length > 0 || hasDetour) && (
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+          {tagValues.map((v) => {
+            const s = tagStyles[v] ?? tagFallback;
+            return (
+              <View
+                key={v}
+                style={{
+                  height: 22,
+                  paddingHorizontal: 8,
+                  borderRadius: designRadii.sm,
+                  backgroundColor: s.bg,
+                  justifyContent: 'center',
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 11,
+                    fontWeight: '700',
+                    letterSpacing: 0.55,
+                    color: s.fg,
+                  }}
+                >
+                  {v}
+                </Text>
+              </View>
+            );
+          })}
+          {typeof load.stopCount === 'number' && load.effectiveMiles && (
+            <View
+              style={{
+                height: 22,
+                paddingHorizontal: 8,
+                borderRadius: designRadii.sm,
+                backgroundColor: palette.bgMuted,
+                justifyContent: 'center',
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.55,
+                  color: palette.textSecondary,
+                }}
+              >
+                {load.stopCount} stops · {Math.round(load.effectiveMiles)} mi
+              </Text>
+            </View>
+          )}
+          {hasDetour && (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 4,
+                height: 22,
+                paddingHorizontal: 8,
+                borderRadius: designRadii.sm,
+                backgroundColor: 'rgba(245,158,11,0.14)',
+              }}
+            >
+              <Icon name="warning" size={11} color={palette.warning} strokeWidth={2} />
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  letterSpacing: 0.55,
+                  color: palette.warning,
+                }}
+              >
+                DETOUR
+              </Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      <View style={{ marginTop: 4 }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 6,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: 12,
+              color: palette.textTertiary,
+              letterSpacing: 0.24,
+            }}
+          >
+            {onDetour
+              ? 'On detour'
+              : `Stop ${Math.min(done + 1, total)} of ${total}`}
+          </Text>
+          <Text
+            style={{
+              fontSize: 12,
+              color: palette.textTertiary,
+              fontVariant: ['tabular-nums'],
+            }}
+          >
+            {done}/{total} complete
+          </Text>
+        </View>
+        <View
+          style={{
+            height: 6,
+            borderRadius: designRadii.full,
+            backgroundColor: palette.bgMuted,
+            overflow: 'hidden',
+          }}
+        >
+          <View
+            style={{
+              width: `${progressPct}%`,
+              height: '100%',
+              backgroundColor: onDetour ? palette.warning : palette.accent,
+            }}
+          />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * Quick Actions grid — 2×2 tiles under the Route Details card. Keeps the
+ * existing business wiring: Navigate opens Apple Maps against the next
+ * unchecked stop; Documents reuses the check-in modal's photo path via a
+ * quick-actions trigger; Detour opens the existing detour modal;
+ * Report accident is a placeholder until the sheet lands.
+ */
+function QuickActionsGrid({
+  palette,
+  onNavigate,
+  onDocuments,
+  onDetour,
+  onAccident,
+}: {
+  palette: Palette;
+  onNavigate: () => void;
+  onDocuments: () => void;
+  onDetour: () => void;
+  onAccident: () => void;
+}) {
+  return (
+    <View style={{ paddingHorizontal: 0, paddingTop: 16 }}>
+      <Text
+        style={{
+          fontSize: 12,
+          fontWeight: '700',
+          letterSpacing: 0.72,
+          color: palette.textTertiary,
+          marginBottom: 8,
+          paddingHorizontal: 4,
+        }}
+      >
+        QUICK ACTIONS
+      </Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        <QuickActionTile
+          palette={palette}
+          icon="map-pin"
+          label="Navigate"
+          sub="Open in Maps"
+          onPress={onNavigate}
+        />
+        <QuickActionTile
+          palette={palette}
+          icon="clipboard"
+          label="Documents"
+          sub="Photos & notes"
+          onPress={onDocuments}
+        />
+        <QuickActionTile
+          palette={palette}
+          icon="plus"
+          label="Add detour"
+          sub="Extra stop"
+          onPress={onDetour}
+        />
+        <QuickActionTile
+          palette={palette}
+          icon="warning"
+          label="Report issue"
+          sub="Escalate to ops"
+          onPress={onAccident}
+          danger
+        />
+      </View>
+    </View>
+  );
+}
+
+function QuickActionTile({
+  palette,
+  icon,
+  label,
+  sub,
+  onPress,
+  danger,
+}: {
+  palette: Palette;
+  icon: React.ComponentProps<typeof Icon>['name'];
+  label: string;
+  sub: string;
+  onPress: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        {
+          flexBasis: '48%',
+          flexGrow: 1,
+          padding: 12,
+          borderRadius: designRadii.lg,
+          backgroundColor: palette.bgSurface,
+          borderWidth: 1,
+          borderColor: palette.borderSubtle,
+          minHeight: 76,
+          gap: 8,
+        },
+        pressed && { opacity: 0.85 },
+      ]}
+    >
+      <View
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: designRadii.md,
+          backgroundColor: danger ? 'rgba(245,158,11,0.14)' : palette.accentTint,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <Icon
+          name={icon}
+          size={18}
+          color={danger ? palette.warning : palette.accent}
+        />
+      </View>
+      <View>
+        <Text
+          style={{
+            fontSize: 14,
+            lineHeight: 18,
+            fontWeight: '600',
+            color: palette.textPrimary,
+          }}
+        >
+          {label}
+        </Text>
+        <Text
+          style={{
+            fontSize: 12,
+            color: palette.textTertiary,
+            marginTop: 2,
+          }}
+        >
+          {sub}
+        </Text>
+      </View>
+    </Pressable>
   );
 }
 
