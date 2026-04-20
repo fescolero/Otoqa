@@ -299,14 +299,17 @@ export default function HomeScreen() {
     const inProgress = loads.find(isInProgress) ?? null;
 
     const sortByStart = (a: any, b: any) => {
+      // plannedStartAt is already an epoch-ms number. Fallback is the
+      // pickup's ISO timestamp (windowBeginTime) — NOT windowBeginDate,
+      // which is date-only and parses as UTC midnight for every row.
       const aKey =
         typeof a.legPlannedStartAt === 'number'
           ? a.legPlannedStartAt
-          : Date.parse(a.firstPickup?.windowBeginDate ?? '') || Number.POSITIVE_INFINITY;
+          : Date.parse(a.firstPickup?.windowBeginTime ?? '') || Number.POSITIVE_INFINITY;
       const bKey =
         typeof b.legPlannedStartAt === 'number'
           ? b.legPlannedStartAt
-          : Date.parse(b.firstPickup?.windowBeginDate ?? '') || Number.POSITIVE_INFINITY;
+          : Date.parse(b.firstPickup?.windowBeginTime ?? '') || Number.POSITIVE_INFINITY;
       return aKey - bKey;
     };
 
@@ -522,8 +525,11 @@ const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
   const dropoffAddr = [load.lastDelivery?.city, load.lastDelivery?.state]
     .filter(Boolean)
     .join(', ');
-  const pickupTime = formatTime(load.firstPickup?.windowBeginDate);
-  const dropoffTime = formatTime(load.lastDelivery?.windowBeginDate);
+  // windowBeginDate / windowEndDate are calendar dates only ("2026-04-20")
+  // — parsing them yields UTC midnight which lands at 5pm Pacific. Use the
+  // full ISO timestamps instead so local time renders correctly.
+  const pickupTime = formatTime(load.firstPickup?.windowBeginTime);
+  const dropoffTime = formatTime(load.lastDelivery?.windowEndTime);
 
   const tags = loadFacetTags(load);
 
@@ -735,9 +741,11 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
   const { palette, styles } = useDesignStyles();
   const pickup = load.firstPickup?.city ?? 'Pickup';
   const dropoff = load.lastDelivery?.city ?? 'Dropoff';
+  // Use the full ISO timestamps — windowBeginDate/windowEndDate are date-only
+  // strings that parse to UTC midnight and always render as 5pm in Pacific.
   const window = [
-    formatTime(load.firstPickup?.windowBeginDate),
-    formatTime(load.lastDelivery?.windowBeginDate),
+    formatTime(load.firstPickup?.windowBeginTime),
+    formatTime(load.lastDelivery?.windowEndTime),
   ]
     .filter(Boolean)
     .join(' – ');
