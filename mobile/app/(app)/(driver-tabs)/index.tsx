@@ -6,21 +6,16 @@ import {
   StyleSheet,
   RefreshControl,
   Pressable,
-  ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
-import { useMutation } from 'convex/react';
-import { api } from '../../../../convex/_generated/api';
 import { useMyLoads } from '../../../lib/hooks/useMyLoads';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
 import { useDriver } from '../_layout';
 import { useLanguage } from '../../../lib/LanguageContext';
 import { trackWeatherFetchFailed, trackScreen } from '../../../lib/analytics';
-import { stopSessionTracking } from '../../../lib/location-tracking';
 import { Icon, type IconName } from '../../../lib/design-icons';
 import {
   typeScale,
@@ -36,15 +31,15 @@ import { useTheme } from '../../../lib/ThemeContext';
 // ============================================================================
 // DRIVER DASHBOARD — Otoqa Driver design
 //
-// Two modes:
-//   - Session mode:  driver started a shift. No day tabs; header shows shift
-//     status + End Shift. Loads derive from sessionLoads buckets.
-//   - Calendar mode: no active session. Yesterday/Today/Tomorrow tabs drive
-//     the load list.
+// Always calendar mode (Yesterday / Today / Tomorrow tabs). Shift start/end
+// lives on the More tab.
 //
-// Locked to the dark palette for now — drivers use the app in-vehicle where
-// dark mode reduces glare. Flip to `palettes[useColorScheme()]` later if we
-// surface a theme preference.
+// Today tab pins the active load at the top regardless of its own planned
+// date — covers multi-day trips that started yesterday but are still in
+// progress. Below the active load: today's Completed, then today's
+// Scheduled sorted by dispatchLeg.plannedStartAt (or windowBeginDate as
+// a fallback). Yesterday and Tomorrow tabs ignore the active-load pin
+// and just show that day's planned + completed list.
 // ============================================================================
 
 const density = 'dense'; // Drivers see more rows with dense; keeps 44pt hit targets.
@@ -195,10 +190,6 @@ function equipmentShortCode(raw?: string): string | null {
   return up.slice(0, 6);
 }
 
-// Soft caps for shift duration — banners only, never forced actions.
-const SOFT_CAP_10H_MS = 10 * 60 * 60 * 1000;
-const SOFT_CAP_14H_MS = 14 * 60 * 60 * 1000;
-
 // Time-of-day greeting per design
 const greet = (): string => {
   const h = new Date().getHours();
@@ -216,24 +207,14 @@ export default function HomeScreen() {
   const { palette, styles } = useDesignStyles();
   const { driverId, driverName } = useDriver();
   const firstName = driverName.trim().split(/\s+/)[0] || 'Driver';
-  const {
-    loads,
-    isLoading,
-    refetch,
-    isRefetching,
-    mode,
-    activeSession,
-    sessionLoads,
-  } = useMyLoads(driverId);
+  // Home is always calendar mode. Shift start/end lives on the More tab,
+  // so this screen never needs to branch on session status. An active
+  // load is detected from the load's own status fields below.
+  const { loads, isLoading, refetch, isRefetching } = useMyLoads(driverId);
   const { connectionQuality } = useNetworkStatus();
   const { pendingCount } = useOfflineQueue();
-  const { t, locale } = useLanguage();
+  const { locale } = useLanguage();
 
-  const endSessionMutation = useMutation(api.driverSessions.endSession);
-  const markSoftCapHit = useMutation(api.driverSessions.markSoftCapHit);
-  const [isEndingShift, setIsEndingShift] = useState(false);
-
-  const isSessionMode = mode === 'session';
   const [selectedDay, setSelectedDay] = useState<DayTab>('today');
 
   // Weather state
@@ -288,133 +269,62 @@ export default function HomeScreen() {
 
   const selectedDateStr = useMemo(() => getDateStringForDay(selectedDay), [selectedDay]);
 
+  // Bucket loads for the currently-selected day tab.
+  //
+  //   Today: active load pinned at the top regardless of its own planned
+  //     date (covers multi-day trips that started yesterday but are still
+  //     in progress), then today's Completed, then today's Scheduled
+  //     sorted by plannedStartAt (with firstPickup.windowBeginDate as a
+  //     secondary key for loads that don't have a dispatchLeg assigned
+  //     yet).
+  //
+  //   Yesterday / Tomorrow: no active pin. Just the day's Scheduled +
+  //     Completed, same sort rules. The active load, if any, stays on
+  //     Today until it's completed — then it falls into its own day's
+  //     Completed section.
   const { activeLoad, scheduledLoads, completedLoads } = useMemo(() => {
-    if (isSessionMode) {
-      if (!sessionLoads) return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
-      return {
-        activeLoad: sessionLoads.inProgress[0] ?? null,
-        scheduledLoads: sessionLoads.upNext,
-        completedLoads: sessionLoads.completedThisSession,
-      };
-    }
-
     if (!loads || loads.length === 0) {
       return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
     }
 
-    const completed = loads.filter(
-      (l) => l.status === 'Completed' || l.trackingStatus === 'Completed'
-    );
-    const active = loads.filter(
-      (l) => l.status !== 'Completed' && l.trackingStatus !== 'Completed'
-    );
-
-    const inProgress = active.find(
-      (l) =>
-        l.trackingStatus === 'In Transit' ||
+    const isCompleted = (l: any) =>
+      l.status === 'Completed' || l.trackingStatus === 'Completed';
+    const isInProgress = (l: any) =>
+      !isCompleted(l) &&
+      (l.trackingStatus === 'In Transit' ||
         l.trackingStatus === 'At Pickup' ||
         l.trackingStatus === 'At Delivery' ||
-        l.status === 'In Progress'
-    );
+        l.status === 'In Progress');
 
-    const scheduled = active
-      .filter((l) => l._id !== inProgress?._id)
-      .filter((l) => getLoadPickupDate(l) === selectedDateStr)
-      .sort((a, b) => {
-        const timeA = a.firstPickup?.windowBeginDate || '';
-        const timeB = b.firstPickup?.windowBeginDate || '';
-        return timeA.localeCompare(timeB);
-      });
+    const inProgress = loads.find(isInProgress) ?? null;
 
-    const filteredCompleted = completed.filter(
-      (l) => getLoadPickupDate(l) === selectedDateStr
-    );
+    const sortByStart = (a: any, b: any) => {
+      const aKey =
+        typeof a.legPlannedStartAt === 'number'
+          ? a.legPlannedStartAt
+          : Date.parse(a.firstPickup?.windowBeginDate ?? '') || Number.POSITIVE_INFINITY;
+      const bKey =
+        typeof b.legPlannedStartAt === 'number'
+          ? b.legPlannedStartAt
+          : Date.parse(b.firstPickup?.windowBeginDate ?? '') || Number.POSITIVE_INFINITY;
+      return aKey - bKey;
+    };
+
+    const forDay = loads.filter((l) => getLoadPickupDate(l) === selectedDateStr);
+
+    const scheduled = forDay
+      .filter((l) => !isCompleted(l) && l._id !== inProgress?._id)
+      .sort(sortByStart);
+    const completed = forDay.filter(isCompleted).sort(sortByStart);
+
+    const activeForTab = selectedDay === 'today' ? inProgress : null;
 
     return {
-      activeLoad: inProgress,
+      activeLoad: activeForTab,
       scheduledLoads: scheduled,
-      completedLoads: filteredCompleted,
+      completedLoads: completed,
     };
-  }, [isSessionMode, sessionLoads, loads, selectedDateStr]);
-
-  // Session elapsed time tick (every minute). Banners are render-time, not
-  // stored on the session doc — softCap*At fields on the session are
-  // stamped by the markSoftCapHit mutation side-effect below.
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  useEffect(() => {
-    if (!isSessionMode) return;
-    const id = setInterval(() => setNowTick(Date.now()), 60_000);
-    return () => clearInterval(id);
-  }, [isSessionMode]);
-  const elapsedMs = activeSession ? nowTick - activeSession.startedAt : 0;
-  const elapsedHours = Math.floor(elapsedMs / (60 * 60 * 1000));
-  const elapsedMinutes = Math.floor((elapsedMs % (60 * 60 * 1000)) / 60_000);
-  const overSoftCap10h = elapsedMs >= SOFT_CAP_10H_MS;
-  const overSoftCap14h = elapsedMs >= SOFT_CAP_14H_MS;
-
-  useEffect(() => {
-    if (!activeSession || !isSessionMode) return;
-    if (overSoftCap10h && !activeSession.softCap10hAt) {
-      markSoftCapHit({ sessionId: activeSession._id, cap: '10h' }).catch((e) =>
-        console.warn('[HomeScreen] markSoftCapHit(10h) failed:', e)
-      );
-    }
-    if (overSoftCap14h && !activeSession.softCap14hAt) {
-      markSoftCapHit({ sessionId: activeSession._id, cap: '14h' }).catch((e) =>
-        console.warn('[HomeScreen] markSoftCapHit(14h) failed:', e)
-      );
-    }
-  }, [
-    isSessionMode,
-    activeSession?._id,
-    activeSession?.softCap10hAt,
-    activeSession?.softCap14hAt,
-    overSoftCap10h,
-    overSoftCap14h,
-    markSoftCapHit,
-  ]);
-
-  const handleEndShift = useCallback(async () => {
-    if (!activeSession || isEndingShift) return;
-    const inProgressCount = sessionLoads?.inProgress.length ?? 0;
-
-    const proceed = async () => {
-      setIsEndingShift(true);
-      try {
-        await endSessionMutation({
-          sessionId: activeSession._id,
-          endReason: 'driver_manual',
-        });
-        await stopSessionTracking();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Failed to end shift';
-        Alert.alert('Could Not End Shift', msg);
-      } finally {
-        setIsEndingShift(false);
-      }
-    };
-
-    if (inProgressCount > 0) {
-      Alert.alert(
-        'Load In Progress',
-        'You have a load in progress. Contact dispatch to reassign before ending your shift, or end anyway and the load will be flagged for dispatcher review.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'End Anyway', style: 'destructive', onPress: proceed },
-        ]
-      );
-      return;
-    }
-
-    Alert.alert(
-      'End Shift?',
-      'GPS tracking will stop. You can start a new shift any time.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'End Shift', onPress: proceed },
-      ]
-    );
-  }, [activeSession, sessionLoads, isEndingShift, endSessionMutation]);
+  }, [loads, selectedDateStr, selectedDay]);
 
   // ============================================================================
   // RENDER
@@ -450,17 +360,10 @@ export default function HomeScreen() {
       <TopHeader
         greeting={greet()}
         driverFirstName={firstName}
-        isSessionMode={isSessionMode}
-        elapsedHours={elapsedHours}
-        elapsedMinutes={elapsedMinutes}
-        onEndShift={handleEndShift}
-        isEndingShift={isEndingShift}
         weather={weather}
       />
 
-      {!isSessionMode && (
-        <DayTabs tab={selectedDay} setTab={setSelectedDay} />
-      )}
+      <DayTabs tab={selectedDay} setTab={setSelectedDay} />
 
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -474,13 +377,6 @@ export default function HomeScreen() {
           />
         }
       >
-        {isSessionMode && overSoftCap14h && (
-          <SoftCapBanner level="14h" locale={locale} />
-        )}
-        {isSessionMode && !overSoftCap14h && overSoftCap10h && (
-          <SoftCapBanner level="10h" locale={locale} />
-        )}
-
         {isLoading && <LoadingSkeleton />}
 
         {!isLoading && activeLoad && (
@@ -490,18 +386,14 @@ export default function HomeScreen() {
           />
         )}
 
+        {!isLoading && completedLoads.length > 0 && (
+          <CompletedSection loads={completedLoads} />
+        )}
+
         {!isLoading && scheduledLoads.length > 0 && (
           <UpcomingSection
             loads={scheduledLoads}
-            isSessionMode={isSessionMode}
             onPress={(id) => router.push(`/trip/${id}`)}
-          />
-        )}
-
-        {!isLoading && completedLoads.length > 0 && (
-          <CompletedSection
-            loads={completedLoads}
-            isSessionMode={isSessionMode}
           />
         )}
 
@@ -510,7 +402,7 @@ export default function HomeScreen() {
           scheduledLoads.length === 0 &&
           completedLoads.length === 0 && (
             <EmptyState
-              variant={isSessionMode ? 'session' : selectedDay}
+              variant={selectedDay}
               locale={locale}
               onRefresh={handleRefresh}
               isRefreshing={isRefetching}
@@ -528,74 +420,42 @@ export default function HomeScreen() {
 interface TopHeaderProps {
   greeting: string;
   driverFirstName: string;
-  isSessionMode: boolean;
-  elapsedHours: number;
-  elapsedMinutes: number;
-  onEndShift: () => void;
-  isEndingShift: boolean;
   weather: WeatherData | null;
 }
 
 const TopHeader: React.FC<TopHeaderProps> = ({
   greeting,
   driverFirstName,
-  isSessionMode,
-  elapsedHours,
-  elapsedMinutes,
-  onEndShift,
-  isEndingShift,
   weather,
 }) => {
   const { palette, styles } = useDesignStyles();
   return (
-  <View style={styles.header}>
-    <View style={{ flex: 1, minWidth: 0 }}>
-      <Text style={styles.headerGreeting}>
-        {isSessionMode ? 'Shift active' : greeting}
-      </Text>
-      <Text style={styles.headerTitle} numberOfLines={1}>
-        {isSessionMode ? `${elapsedHours}h ${elapsedMinutes}m on duty` : driverFirstName}
-      </Text>
-    </View>
+    <View style={styles.header}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.headerGreeting}>{greeting}</Text>
+        <Text style={styles.headerTitle} numberOfLines={1}>
+          {driverFirstName}
+        </Text>
+      </View>
 
-    <View style={styles.headerActions}>
-      {isSessionMode ? (
+      <View style={styles.headerActions}>
+        {weather && (
+          <View style={styles.headerWeatherChip}>
+            <Icon name="cloud" size={18} color={palette.textPrimary} />
+            <Text style={styles.headerWeatherTemp}>{weather.temperature}°</Text>
+          </View>
+        )}
         <Pressable
-          onPress={onEndShift}
-          disabled={isEndingShift}
-          accessibilityLabel="End shift"
+          accessibilityLabel="Search"
           style={({ pressed }) => [
-            styles.endShiftPill,
-            pressed && { opacity: 0.85 },
-            isEndingShift && { opacity: 0.6 },
+            styles.headerIconBtn,
+            pressed && { opacity: 0.7 },
           ]}
         >
-          <Icon name="stop" size={14} color="#fff" strokeWidth={2} />
-          <Text style={styles.endShiftPillText}>
-            {isEndingShift ? 'Ending…' : 'End'}
-          </Text>
+          <Icon name="search" size={22} color={palette.textPrimary} />
         </Pressable>
-      ) : (
-        <>
-          {weather && (
-            <View style={styles.headerWeatherChip}>
-              <Icon name="cloud" size={18} color={palette.textPrimary} />
-              <Text style={styles.headerWeatherTemp}>{weather.temperature}°</Text>
-            </View>
-          )}
-          <Pressable
-            accessibilityLabel="Search"
-            style={({ pressed }) => [
-              styles.headerIconBtn,
-              pressed && { opacity: 0.7 },
-            ]}
-          >
-            <Icon name="search" size={22} color={palette.textPrimary} />
-          </Pressable>
-        </>
-      )}
+      </View>
     </View>
-  </View>
   );
 };
 
@@ -853,22 +713,15 @@ const Tag: React.FC<{ tag: FacetTag }> = ({ tag }) => {
 
 const UpcomingSection: React.FC<{
   loads: any[];
-  isSessionMode: boolean;
   onPress: (loadId: string) => void;
-}> = ({ loads, isSessionMode, onPress }) => {
+}> = ({ loads, onPress }) => {
   const { locale } = useLanguage();
   const { styles } = useDesignStyles();
   return (
     <View style={{ gap: sp.listGap }}>
       <View style={styles.sectionHead}>
         <Text style={styles.sectionLabel}>
-          {isSessionMode
-            ? locale === 'es'
-              ? `PRÓXIMAS · ${loads.length} CARGAS`
-              : `UP NEXT · ${loads.length} LOADS`
-            : locale === 'es'
-              ? `PROGRAMADAS · ${loads.length}`
-              : `SCHEDULED · ${loads.length}`}
+          {locale === 'es' ? `PROGRAMADAS · ${loads.length}` : `SCHEDULED · ${loads.length}`}
         </Text>
       </View>
       {loads.map((load) => (
@@ -930,10 +783,7 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
   );
 };
 
-const CompletedSection: React.FC<{ loads: any[]; isSessionMode: boolean }> = ({
-  loads,
-  isSessionMode,
-}) => {
+const CompletedSection: React.FC<{ loads: any[] }> = ({ loads }) => {
   const { locale } = useLanguage();
   const { palette, styles } = useDesignStyles();
   const [expanded, setExpanded] = useState(false);
@@ -948,13 +798,7 @@ const CompletedSection: React.FC<{ loads: any[]; isSessionMode: boolean }> = ({
             <Icon name="check" size={14} color="#fff" strokeWidth={2.5} />
           </View>
           <Text style={styles.completedLabel}>
-            {isSessionMode
-              ? locale === 'es'
-                ? 'Completadas en este turno'
-                : 'Completed this shift'
-              : locale === 'es'
-                ? 'Completadas'
-                : 'Completed'}
+            {locale === 'es' ? 'Completadas' : 'Completed'}
           </Text>
         </View>
         <View style={styles.completedRight}>
@@ -976,7 +820,7 @@ const CompletedSection: React.FC<{ loads: any[]; isSessionMode: boolean }> = ({
 // EMPTY STATE + BANNERS
 // ============================================================================
 
-type EmptyVariant = 'session' | 'today' | 'yesterday' | 'tomorrow';
+type EmptyVariant = 'today' | 'yesterday' | 'tomorrow';
 
 interface EmptyCopy {
   icon: IconName;
@@ -989,14 +833,6 @@ interface EmptyCopy {
 const getEmptyCopy = (variant: EmptyVariant, locale: string): EmptyCopy => {
   const isEs = locale === 'es';
   switch (variant) {
-    case 'session':
-      return {
-        icon: 'package',
-        title: isEs ? 'Nada en tu turno aún' : 'Nothing on your shift yet',
-        body: isEs
-          ? 'Los despachadores te asignarán cargas — aparecerán aquí.'
-          : "Dispatch will assign loads here — you'll get a notification.",
-      };
     case 'today':
       return {
         icon: 'truck',
@@ -1063,41 +899,6 @@ const EmptyState: React.FC<{
           <Text style={styles.emptyCtaText}>{copy.action}</Text>
         </Pressable>
       )}
-    </View>
-  );
-};
-
-const SoftCapBanner: React.FC<{ level: '10h' | '14h'; locale: string }> = ({
-  level,
-  locale,
-}) => {
-  const { palette, styles } = useDesignStyles();
-  const isCritical = level === '14h';
-  const bg = isCritical ? 'rgba(239,68,68,0.14)' : 'rgba(245,158,11,0.14)';
-  const fg = isCritical ? palette.danger : palette.warning;
-  const title =
-    level === '14h'
-      ? locale === 'es'
-        ? 'Más de 14 horas en turno'
-        : '14+ hours on shift'
-      : locale === 'es'
-        ? 'Más de 10 horas en turno'
-        : '10+ hours on shift';
-  const body =
-    level === '14h'
-      ? locale === 'es'
-        ? 'Considera terminar tu turno y descansar.'
-        : 'Consider ending your shift and resting.'
-      : locale === 'es'
-        ? 'Has estado trabajando 10 horas.'
-        : "You've been on shift 10 hours.";
-  return (
-    <View style={[styles.softCapBanner, { backgroundColor: bg }]}>
-      <Icon name={isCritical ? 'warning' : 'info'} size={18} color={fg} />
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.softCapTitle, { color: fg }]}>{title}</Text>
-        <Text style={styles.softCapBody}>{body}</Text>
-      </View>
     </View>
   );
 };
