@@ -242,15 +242,98 @@ export default function TripDetailScreen() {
     Linking.openURL(url);
   };
 
-  // Handle check-in
-  const handleCheckIn = async (stopId: Id<'loadStops'>) => {
-    setCheckInModal({ visible: true, stopId, type: 'in' });
+  // Run a check-in or check-out directly — no modal. The mutation only
+  // needs (stopId, driverId, loadId); notes / photo / isRedirected are all
+  // optional and captured via Documents flow when needed, not inline.
+  const runCheckAction = async (
+    stopId: Id<'loadStops'>,
+    type: 'in' | 'out',
+  ) => {
+    if (!driverId) return;
+    if (isSubmitting) return;
+
+    setIsSubmitting(true);
+    const actionType = type === 'in' ? 'check_in' : 'check_out';
+    const resolvedStopId =
+      type === 'out' ? (activeCheckedInStop?._id ?? stopId) : stopId;
+    const currentStop = displayStops.find((s: any) => s._id === resolvedStopId);
+    const totalStops = displayStops.filter((s: any) => s.stopType !== 'DETOUR').length;
+
+    posthog?.capture(`${actionType}_started`, {
+      loadId: id,
+      stopId: resolvedStopId,
+      inline: true,
+    });
+
+    try {
+      const result =
+        type === 'in'
+          ? await checkIn({
+              stopId: resolvedStopId,
+              driverId,
+              loadId: id as Id<'loadInformation'>,
+              stopSequence: currentStop?.sequenceNumber,
+              totalStops,
+              organizationId: organizationId || undefined,
+            })
+          : await checkOut({
+              stopId: resolvedStopId,
+              driverId,
+              loadId: id as Id<'loadInformation'>,
+              stopSequence: currentStop?.sequenceNumber,
+              totalStops,
+              organizationId: organizationId || undefined,
+            });
+
+      posthog?.capture(`${actionType}_result`, {
+        loadId: id,
+        stopId: resolvedStopId || null,
+        success: result.success,
+        queued: result.queued ?? false,
+      });
+
+      if (result.success) {
+        await recordPendingAction(resolvedStopId as string, type);
+
+        if (result.trackingFailed) {
+          setTimeout(() => {
+            Alert.alert(
+              'Location Permission Required',
+              'Route tracking could not start. Please enable "Always" location access in Settings so we can record your delivery route.',
+              [
+                { text: 'Not Now', style: 'cancel' },
+                {
+                  text: 'Open Settings',
+                  onPress: () => {
+                    pendingTrackingRetry.current = true;
+                    Linking.openSettings();
+                  },
+                },
+              ],
+            );
+          }, 400);
+        } else if (result.queued) {
+          // Surface offline-queue feedback only; success is silent.
+          Alert.alert('Queued', result.message);
+        }
+      } else {
+        Alert.alert('Error', result.message);
+      }
+    } catch (error: any) {
+      posthog?.capture(`${actionType}_exception`, {
+        loadId: id,
+        stopId: resolvedStopId || null,
+        error: error?.message || 'Unknown error',
+      });
+      Alert.alert('Error', 'Failed to submit. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+      posthog?.flush();
+    }
   };
 
-  // Handle check-out
-  const handleCheckOut = async (stopId: Id<'loadStops'>) => {
-    setCheckInModal({ visible: true, stopId, type: 'out' });
-  };
+  const handleCheckIn = (stopId: Id<'loadStops'>) => runCheckAction(stopId, 'in');
+  const handleCheckOut = (stopId: Id<'loadStops'>) => runCheckAction(stopId, 'out');
 
   // Launch native system camera — no custom screen, no touch issues
   const launchCamera = async () => {
@@ -1657,7 +1740,7 @@ function LoadSummary({
           }}
           numberOfLines={1}
         >
-          #{load.internalId}
+          #{load.orderNumber ?? load.internalId}
         </Text>
         <View
           style={{
