@@ -1,472 +1,673 @@
-import { View, Text, Pressable, StyleSheet, Alert, ScrollView } from 'react-native';
+/**
+ * Profile tab — Otoqa Driver design system.
+ *
+ * Ports lib/profile-screen.jsx: CDL-style identity hero, license detail
+ * rows, and three tiles (Payroll / Compliance / Documents). Payroll,
+ * Compliance and Documents tiles are placeholders until their backends
+ * land; they drill into screens that don't exist yet and show "Coming
+ * soon" state.
+ *
+ * App preferences that used to live here (language, appearance, role
+ * switch, version info) are kept as a secondary "App settings" block
+ * below the tiles so they still have a home — the standalone App
+ * Settings drill-in from the More tab is part of the next batch.
+ */
+import React, { useMemo } from 'react';
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useClerk } from '@clerk/clerk-expo';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useDriver, useAppMode } from '../_layout';
-import { useState } from 'react';
-import { useLanguage } from '../../../lib/LanguageContext';
-import { useTheme, type ThemePreference } from '../../../lib/ThemeContext';
+import { useQuery } from 'convex/react';
 import * as Application from 'expo-application';
 import * as Updates from 'expo-updates';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
+import { useDriver, useAppMode } from '../_layout';
+import { useLanguage } from '../../../lib/LanguageContext';
+import { useTheme, type ThemePreference } from '../../../lib/ThemeContext';
+import { Icon, type IconName } from '../../../lib/design-icons';
+import { radii, typeScale, type Palette } from '../../../lib/design-tokens';
 
-// ============================================
-// DESIGN SYSTEM
-// ============================================
-const colors = {
-  background: '#1a1d21',
-  foreground: '#f3f4f6',
-  foregroundMuted: '#9ca3af',
-  primary: '#ff6b00',
-  primaryForeground: '#1a1d21',
-  secondary: '#eab308',
-  muted: '#2d323b',
-  card: '#22262b',
-  cardForeground: '#f3f4f6',
-  border: '#3f4552',
-  destructive: '#ef4444',
-  success: '#10b981',
-};
-
-const spacing = {
-  'xs': 4,
-  'sm': 8,
-  'md': 12,
-  'lg': 16,
-  'xl': 20,
-  '2xl': 24,
-};
-
-const borderRadius = {
-  'md': 8,
-  'lg': 12,
-  'xl': 16,
-  '2xl': 20,
-  'full': 9999,
-};
-
-// ============================================
-// PROFILE / SETTINGS SCREEN
-// Driver Profile, Settings & Support
-// ============================================
-
-export default function SettingsScreen() {
-  const { signOut } = useClerk();
+export default function ProfileScreen() {
   const router = useRouter();
-  const { driverName, driverId } = useDriver();
+  const { palette } = useTheme();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
+
+  const { driverId } = useDriver();
+  const profile = useQuery(
+    api.driverMobile.getMyProfile,
+    driverId ? { driverId: driverId as Id<'drivers'> } : 'skip',
+  );
+
   const { canSwitchModes, setMode } = useAppMode();
   const { currentLanguage, t } = useLanguage();
   const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
-  const [lastSynced] = useState<string>('2 minutes ago');
-
-  // Dynamic version: native version + OTA update indicator
   const appVersion = Application.nativeApplicationVersion ?? '1.0.0';
   const buildNumber = Application.nativeBuildVersion ?? '?';
   const otaUpdateId = Updates.updateId;
   const isEmbeddedLaunch = Updates.isEmbeddedLaunch;
   const otaShortId = otaUpdateId ? otaUpdateId.slice(0, 8) : null;
 
-  // Get display name for current language
-  const getLanguageDisplayName = () => {
-    switch (currentLanguage) {
-      case 'system':
-        return 'System Default';
-      case 'en':
-        return 'English';
-      case 'es':
-        return 'Español';
-      default:
-        return 'English';
-    }
-  };
+  const getLanguageDisplayName = () =>
+    currentLanguage === 'system' ? 'System' : currentLanguage === 'es' ? 'Español' : 'English';
 
-  const getThemeDisplayName = () => {
-    switch (themePreference) {
-      case 'system':
-        return 'System';
-      case 'light':
-        return 'Light';
-      case 'dark':
-        return 'Dark';
-    }
-  };
+  const getThemeDisplayName = () =>
+    themePreference === 'system' ? 'System' : themePreference === 'light' ? 'Light' : 'Dark';
 
   const handleThemePress = () => {
-    Alert.alert(
-      'Appearance',
-      'Choose how the driver app looks.',
-      [
-        {
-          text: 'System',
-          onPress: () => setThemePreference('system' as ThemePreference),
-        },
-        {
-          text: 'Light',
-          onPress: () => setThemePreference('light' as ThemePreference),
-        },
-        {
-          text: 'Dark',
-          onPress: () => setThemePreference('dark' as ThemePreference),
-        },
-        { text: 'Cancel', style: 'cancel' },
-      ],
-      { cancelable: true },
-    );
-  };
-
-  // Handle sign out
-  const handleSignOut = () => {
-    Alert.alert(t('profile.signOut'), t('profile.signOutConfirm'), [
-      { text: t('common.cancel'), style: 'cancel' },
-      {
-        text: t('profile.signOut'),
-        style: 'destructive',
-        onPress: async () => {
-          await signOut();
-          router.replace('/(auth)/sign-in');
-        },
-      },
+    Alert.alert('Appearance', 'Choose how the driver app looks.', [
+      { text: 'System', onPress: () => setThemePreference('system' as ThemePreference) },
+      { text: 'Light', onPress: () => setThemePreference('light' as ThemePreference) },
+      { text: 'Dark', onPress: () => setThemePreference('dark' as ThemePreference) },
+      { text: 'Cancel', style: 'cancel' },
     ]);
   };
 
-  // Generate driver ID from actual ID or fallback
-  const getDriverDisplayId = () => {
-    if (driverId) {
-      // Use last 6 characters of actual ID
-      const shortId = driverId.slice(-6).toUpperCase();
-      return `TRK-${shortId}-CA`;
-    }
-    return 'TRK-000000-CA';
-  };
-
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Header - Sticky */}
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>{t('profile.title')}</Text>
-      </View>
-
+    <SafeAreaView style={styles.screen} edges={['top']}>
       <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
       >
-        {/* Profile Card */}
-        <View style={styles.profileCard}>
-          <View style={styles.profileRow}>
-            <View style={styles.onlineIndicator} />
-            <View style={styles.profileInfo}>
-              <Text style={styles.profileName}>{driverName || 'Driver'}</Text>
-              <Text style={styles.profileId}>Driver ID: {getDriverDisplayId()}</Text>
-            </View>
-          </View>
+        <LicenseHero palette={palette} profile={profile} />
+
+        <LicenseDetails palette={palette} profile={profile} />
+
+        <ProfileTiles
+          palette={palette}
+          onOpenPayroll={() =>
+            Alert.alert('Payroll', 'Payroll is coming soon.')
+          }
+          onOpenCompliance={() =>
+            Alert.alert('Compliance', 'Compliance is coming soon.')
+          }
+          onOpenDocs={() =>
+            Alert.alert('Documents', 'Documents are coming soon.')
+          }
+        />
+
+        {/* App preferences */}
+        <View style={styles.sectionHead}>
+          <Text style={styles.sectionLabel}>APP SETTINGS</Text>
+        </View>
+        <View style={styles.rowCard}>
+          <ProfileRow
+            palette={palette}
+            icon="message"
+            label="Language"
+            value={getLanguageDisplayName()}
+            onPress={() => router.push('/language')}
+          />
+          <RowDivider palette={palette} />
+          <ProfileRow
+            palette={palette}
+            icon="moon"
+            label="Appearance"
+            value={getThemeDisplayName()}
+            onPress={handleThemePress}
+          />
+          {canSwitchModes && (
+            <>
+              <RowDivider palette={palette} />
+              <ProfileRow
+                palette={palette}
+                icon="truck"
+                label={t('profile.switchToDispatcher')}
+                value=""
+                onPress={() => setMode('owner')}
+              />
+            </>
+          )}
         </View>
 
-        {/* Role Switch Section - Only shown for owner-operators */}
-        {canSwitchModes && (
-          <>
-            <Text style={styles.sectionTitle}>{t('profile.role')}</Text>
-            <View style={styles.menuSection}>
-              <Pressable style={[styles.menuRow, styles.menuRowLast]} onPress={() => setMode('owner')}>
-                <View style={[styles.menuIconContainer, styles.menuIconOrange]}>
-                  <MaterialCommunityIcons name="monitor-dashboard" size={20} color={colors.primary} />
-                </View>
-                <View style={styles.menuTextContainer}>
-                  <Text style={styles.menuLabel}>{t('profile.switchToDispatcher')}</Text>
-                  <Text style={styles.menuSubtitle}>{t('profile.manageLoadsDriversFleet')}</Text>
-                </View>
-                <Ionicons name="swap-horizontal" size={20} color={colors.primary} />
-              </Pressable>
-            </View>
-          </>
-        )}
-
-        {/* Settings Section */}
-        <Text style={styles.sectionTitle}>{t('profile.settings')}</Text>
-        <View style={styles.menuSection}>
-          <Pressable style={styles.menuRow} onPress={() => router.push('/notifications')}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="notifications" size={20} color={colors.foregroundMuted} />
-            </View>
-            <Text style={styles.menuLabel}>{t('profile.notifications')}</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </Pressable>
-
-          <Pressable style={styles.menuRow} onPress={() => router.push('/language')}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="globe" size={20} color={colors.foregroundMuted} />
-            </View>
-            <Text style={styles.menuLabel}>{t('profile.language')}</Text>
-            <Text style={styles.menuValue}>{getLanguageDisplayName()}</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </Pressable>
-
-          <Pressable style={styles.menuRow} onPress={handleThemePress}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="contrast" size={20} color={colors.foregroundMuted} />
-            </View>
-            <Text style={styles.menuLabel}>Appearance</Text>
-            <Text style={styles.menuValue}>{getThemeDisplayName()}</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </Pressable>
-
-          <Pressable style={[styles.menuRow, styles.menuRowLast]} onPress={() => router.push('/permissions')}>
-            <View style={[styles.menuIconContainer, styles.menuIconBlue]}>
-              <Ionicons name="shield-checkmark" size={20} color="#3b82f6" />
-            </View>
-            <Text style={styles.menuLabel}>{t('profile.permissions')}</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </Pressable>
+        {/* App info (read-only) */}
+        <View style={styles.sectionHead}>
+          <Text style={styles.sectionLabel}>APP INFO</Text>
         </View>
-
-        {/* App Information Section */}
-        <Text style={styles.sectionTitle}>{t('profile.appInfo')}</Text>
-        <View style={styles.menuSection}>
-          <View style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="phone-portrait" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>{t('profile.appVersion')}</Text>
-              <Text style={styles.menuSubtitle}>
-                {isEmbeddedLaunch ? t('profile.currentVersion') : `OTA: ${otaShortId ?? 'unknown'}`}
-              </Text>
-            </View>
-            <Text style={styles.menuValueBold}>
+        <View style={styles.rowCard}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoKey}>Version</Text>
+            <Text style={styles.infoValue}>
               v{appVersion} ({buildNumber})
             </Text>
           </View>
-
-          <View style={[styles.menuRow, styles.menuRowLast]}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="sync" size={20} color={colors.foregroundMuted} />
-            </View>
-            <View style={styles.menuTextContainer}>
-              <Text style={styles.menuLabel}>{t('profile.backgroundSync')}</Text>
-              <Text style={styles.menuSubtitle}>{t('profile.lastSynced', { time: lastSynced })}</Text>
-            </View>
-            <View style={styles.activeBadge}>
-              <View style={styles.activeDot} />
-              <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>
-                ACTIVE
-              </Text>
-            </View>
-          </View>
+          {!isEmbeddedLaunch && otaShortId && (
+            <>
+              <RowDivider palette={palette} />
+              <View style={styles.infoRow}>
+                <Text style={styles.infoKey}>OTA</Text>
+                <Text style={styles.infoValue}>{otaShortId}</Text>
+              </View>
+            </>
+          )}
         </View>
-
-        {/* Support Section */}
-        <Text style={styles.sectionTitle}>{t('profile.support')}</Text>
-        <View style={styles.menuSection}>
-          <Pressable style={styles.menuRow}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="chatbubble-ellipses" size={20} color={colors.foregroundMuted} />
-            </View>
-            <Text style={styles.menuLabel}>{t('profile.helpCenter')}</Text>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </Pressable>
-
-          <Pressable style={[styles.menuRow, styles.menuRowLast]}>
-            <View style={[styles.menuIconContainer, styles.menuIconMuted]}>
-              <Ionicons name="call" size={20} color={colors.foregroundMuted} />
-            </View>
-            <Text style={styles.menuLabel}>{t('profile.contactDispatch')}</Text>
-            <View style={styles.availableBadge}>
-              <Text style={styles.availableBadgeText} maxFontSizeMultiplier={1.2}>
-                {t('profile.available')}
-              </Text>
-            </View>
-          </Pressable>
-        </View>
-
-        {/* Sign Out Button */}
-        <Pressable style={styles.signOutButton} onPress={handleSignOut}>
-          <Ionicons name="log-out-outline" size={20} color={colors.destructive} />
-          <Text style={styles.signOutText}>{t('profile.signOut')}</Text>
-        </Pressable>
-
-        {/* Bottom spacing for nav */}
-        <View style={{ height: 120 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: spacing.lg,
-  },
+// ============================================================================
+// IDENTITY HERO — CDL-style gradient card
+// ============================================================================
 
-  // Header
-  header: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: colors.foreground,
-  },
+function LicenseHero({ palette, profile }: { palette: Palette; profile: any }) {
+  const styles = makeStyles(palette);
+  const firstName = (profile?.firstName ?? 'Driver').toString();
+  const lastName = (profile?.lastName ?? '').toString();
+  const initials = `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase();
+  const licenseNumber = profile?.licenseNumber ?? '—';
+  const licenseClass = profile?.licenseClass ?? 'CDL';
+  const licenseState = profile?.licenseState ?? '—';
+  const expiration = formatDateShort(profile?.licenseExpiration);
+  const medicalExpiration = profile?.medicalExpiration;
+  const medicalState = classifyExpiration(medicalExpiration);
 
-  // Profile Card
-  profileCard: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius['2xl'],
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
-    borderWidth: 1,
-    borderColor: `${colors.border}50`,
-  },
-  profileRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  onlineIndicator: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: colors.success,
-    marginRight: spacing.md,
-  },
-  profileInfo: {
-    flex: 1,
-  },
-  profileName: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: colors.foreground,
-    marginBottom: 2,
-  },
-  profileId: {
-    fontSize: 14,
-    color: colors.foregroundMuted,
-  },
+  return (
+    <View style={{ paddingHorizontal: 16, paddingTop: 20 }}>
+      <LinearGradient
+        colors={['#1D355C', '#2E5CFF', '#5C82FF']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.licenseCard}
+      >
+        <View style={styles.licenseTopRow}>
+          <View>
+            <Text style={styles.licenseStateLabel}>
+              {(licenseState || '—').toUpperCase()} · USA
+            </Text>
+            <Text style={styles.licenseTypeLabel}>COMMERCIAL DRIVER LICENSE</Text>
+          </View>
+          <View style={styles.licenseStatusPill}>
+            <View
+              style={[
+                styles.licenseStatusDot,
+                {
+                  backgroundColor:
+                    medicalState === 'bad'
+                      ? '#FECACA'
+                      : medicalState === 'warn'
+                        ? '#FEF3C7'
+                        : '#6EE7B7',
+                },
+              ]}
+            />
+            <Text style={styles.licenseStatusLabel}>
+              {medicalState === 'bad'
+                ? 'Expired'
+                : medicalState === 'warn'
+                  ? 'Medical due'
+                  : 'Active'}
+            </Text>
+          </View>
+        </View>
 
-  // Section Title
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: colors.foreground,
-    marginBottom: spacing.md,
-    marginTop: spacing.md,
-  },
+        <View style={styles.licenseMidRow}>
+          <View style={styles.licensePhotoTile}>
+            <Text style={styles.licensePhotoInitials}>{initials || 'DR'}</Text>
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.licenseFieldLabel}>LN</Text>
+            <Text style={styles.licenseLastName} numberOfLines={1}>
+              {lastName.toUpperCase()}
+            </Text>
+            <Text style={[styles.licenseFieldLabel, { marginTop: 6 }]}>FN</Text>
+            <Text style={styles.licenseFirstName} numberOfLines={1}>
+              {firstName.toUpperCase()}
+            </Text>
+          </View>
+        </View>
 
-  // Menu Section
-  menuSection: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius['2xl'],
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: `${colors.border}50`,
-  },
-  menuRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: `${colors.border}30`,
-    gap: spacing.md,
-  },
-  menuRowLast: {
-    borderBottomWidth: 0,
-  },
-  menuIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: borderRadius.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  menuIconMuted: {
-    backgroundColor: `${colors.muted}80`,
-  },
-  menuIconBlue: {
-    backgroundColor: '#3b82f620',
-  },
-  menuIconOrange: {
-    backgroundColor: `${colors.primary}20`,
-  },
-  menuTextContainer: {
-    flex: 1,
-  },
-  menuLabel: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: colors.foreground,
-    flex: 1,
-  },
-  menuSubtitle: {
-    fontSize: 13,
-    color: colors.foregroundMuted,
-    marginTop: 2,
-  },
-  menuValue: {
-    fontSize: 14,
-    color: colors.foregroundMuted,
-    marginRight: spacing.sm,
-  },
-  menuValueBold: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
+        <View style={styles.licenseBottomRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.licenseFieldLabel}>DL</Text>
+            <Text style={styles.licenseFieldValue}>{licenseNumber}</Text>
+          </View>
+          <View>
+            <Text style={styles.licenseFieldLabel}>CLASS</Text>
+            <Text style={styles.licenseFieldValue}>{licenseClass}</Text>
+          </View>
+          <View>
+            <Text style={[styles.licenseFieldLabel, { textAlign: 'right' }]}>EXP</Text>
+            <Text style={[styles.licenseFieldValue, { textAlign: 'right' }]}>
+              {expiration}
+            </Text>
+          </View>
+        </View>
+      </LinearGradient>
+    </View>
+  );
+}
 
-  // Badges
-  activeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    backgroundColor: `${colors.success}15`,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: borderRadius.md,
-  },
-  activeDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.success,
-  },
-  activeBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.success,
-  },
-  availableBadge: {
-    backgroundColor: `${colors.success}15`,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: borderRadius.md,
-  },
-  availableBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.success,
-  },
+// ============================================================================
+// LICENSE DETAILS
+// ============================================================================
 
-  // Sign Out
-  signOutButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: `${colors.destructive}15`,
-    borderWidth: 1,
-    borderColor: `${colors.destructive}40`,
-    height: 56,
-    borderRadius: borderRadius['2xl'],
-    marginTop: spacing.xl,
-    gap: spacing.sm,
-  },
-  signOutText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.destructive,
-  },
-});
+function LicenseDetails({ palette, profile }: { palette: Palette; profile: any }) {
+  const styles = makeStyles(palette);
+  const medicalState = classifyExpiration(profile?.medicalExpiration);
+  const medicalColor =
+    medicalState === 'bad' ? palette.danger : medicalState === 'warn' ? palette.warning : palette.textPrimary;
+  const medicalText =
+    medicalState === 'bad'
+      ? `Expired ${formatDateShort(profile?.medicalExpiration)}`
+      : medicalState === 'warn'
+        ? `Expires ${formatDateShort(profile?.medicalExpiration)}`
+        : formatDateShort(profile?.medicalExpiration) || '—';
+
+  const rows: Array<{ k: string; v: string; color?: string }> = [
+    { k: 'Issued by', v: profile?.licenseState ? `${profile.licenseState} DMV` : '—' },
+    { k: 'License expires', v: formatDateShort(profile?.licenseExpiration) || '—' },
+    { k: 'Medical card', v: medicalText, color: medicalColor },
+  ];
+
+  return (
+    <View style={{ paddingHorizontal: 16, paddingTop: 20 }}>
+      <View style={styles.detailsCard}>
+        {rows.map((row, i) => (
+          <View key={row.k}>
+            {i > 0 && <RowDivider palette={palette} />}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailKey}>{row.k}</Text>
+              <Text
+                style={[styles.detailValue, row.color && { color: row.color }]}
+                numberOfLines={1}
+              >
+                {row.v}
+              </Text>
+            </View>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+// ============================================================================
+// TILES
+// ============================================================================
+
+function ProfileTiles({
+  palette,
+  onOpenPayroll,
+  onOpenCompliance,
+  onOpenDocs,
+}: {
+  palette: Palette;
+  onOpenPayroll: () => void;
+  onOpenCompliance: () => void;
+  onOpenDocs: () => void;
+}) {
+  const styles = makeStyles(palette);
+  return (
+    <View style={{ paddingHorizontal: 16, paddingTop: 20, gap: 8 }}>
+      <Pressable
+        onPress={onOpenPayroll}
+        style={({ pressed }) => [styles.wideTile, pressed && { opacity: 0.9 }]}
+      >
+        <View style={{ flex: 1 }}>
+          <View style={styles.tileHeader}>
+            <Icon name="dollar" size={14} color={palette.accent} />
+            <Text style={styles.tileEyebrow}>PAYROLL · THIS WEEK</Text>
+          </View>
+          <Text style={styles.tileValueLg}>—</Text>
+          <Text style={styles.tileSub}>Coming soon</Text>
+        </View>
+        <Icon name="chevron-right" size={20} color={palette.textTertiary} />
+      </Pressable>
+
+      <View style={{ flexDirection: 'row', gap: 8 }}>
+        <Pressable
+          onPress={onOpenCompliance}
+          style={({ pressed }) => [styles.splitTile, pressed && { opacity: 0.9 }]}
+        >
+          <View style={styles.tileHeader}>
+            <Icon name="check-circle" size={14} color={palette.accent} />
+            <Text style={styles.tileEyebrow}>COMPLIANCE</Text>
+          </View>
+          <Text style={styles.tileValueMd}>—</Text>
+          <Text style={styles.tileSub}>Coming soon</Text>
+        </Pressable>
+        <Pressable
+          onPress={onOpenDocs}
+          style={({ pressed }) => [styles.splitTile, pressed && { opacity: 0.9 }]}
+        >
+          <View style={styles.tileHeader}>
+            <Icon name="clipboard" size={14} color={palette.accent} />
+            <Text style={styles.tileEyebrow}>DOCUMENTS</Text>
+          </View>
+          <Text style={styles.tileValueMd}>—</Text>
+          <Text style={styles.tileSub}>Coming soon</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+// ============================================================================
+// ROW PRIMITIVES (used by App settings + App info)
+// ============================================================================
+
+function ProfileRow({
+  palette,
+  icon,
+  label,
+  value,
+  onPress,
+}: {
+  palette: Palette;
+  icon: IconName;
+  label: string;
+  value: string;
+  onPress: () => void;
+}) {
+  const styles = makeStyles(palette);
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.row, pressed && { opacity: 0.85 }]}
+    >
+      <View style={styles.rowIcon}>
+        <Icon name={icon} size={18} color={palette.textSecondary} />
+      </View>
+      <Text style={styles.rowLabel}>{label}</Text>
+      {value ? <Text style={styles.rowValue}>{value}</Text> : null}
+      <Icon name="chevron-right" size={16} color={palette.textTertiary} />
+    </Pressable>
+  );
+}
+
+function RowDivider({ palette }: { palette: Palette }) {
+  return (
+    <View
+      style={{
+        height: StyleSheet.hairlineWidth,
+        backgroundColor: palette.borderSubtle,
+        marginLeft: 54,
+      }}
+    />
+  );
+}
+
+// ============================================================================
+// UTILS
+// ============================================================================
+
+function formatDateShort(iso?: string): string {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  } catch {
+    return iso;
+  }
+}
+
+function classifyExpiration(iso?: string): 'ok' | 'warn' | 'bad' {
+  if (!iso) return 'ok';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'ok';
+  const now = Date.now();
+  const diffDays = (d.getTime() - now) / (1000 * 60 * 60 * 24);
+  if (diffDays < 0) return 'bad';
+  if (diffDays < 30) return 'warn';
+  return 'ok';
+}
+
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: palette.bgCanvas,
+    },
+
+    // License hero
+    licenseCard: {
+      aspectRatio: 1.586 / 1,
+      borderRadius: 20,
+      padding: 18,
+      overflow: 'hidden',
+    },
+    licenseTopRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      marginBottom: 10,
+    },
+    licenseStateLabel: {
+      fontSize: 9,
+      fontWeight: '700',
+      letterSpacing: 1.1,
+      color: 'rgba(255,255,255,0.85)',
+    },
+    licenseTypeLabel: {
+      fontSize: 10,
+      fontWeight: '600',
+      letterSpacing: 0.8,
+      color: 'rgba(255,255,255,0.7)',
+      marginTop: 2,
+    },
+    licenseStatusPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: 999,
+      backgroundColor: 'rgba(16,185,129,0.9)',
+    },
+    licenseStatusDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 999,
+    },
+    licenseStatusLabel: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.3,
+      color: '#fff',
+    },
+    licenseMidRow: {
+      flexDirection: 'row',
+      gap: 12,
+      alignItems: 'flex-start',
+      flex: 1,
+    },
+    licensePhotoTile: {
+      width: 58,
+      height: 74,
+      borderRadius: 6,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.28)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    licensePhotoInitials: {
+      fontSize: 22,
+      fontWeight: '700',
+      color: '#fff',
+      letterSpacing: -0.01,
+    },
+    licenseFieldLabel: {
+      fontSize: 9,
+      fontWeight: '700',
+      letterSpacing: 1,
+      color: 'rgba(255,255,255,0.7)',
+    },
+    licenseLastName: {
+      fontSize: 17,
+      fontWeight: '700',
+      color: '#fff',
+      letterSpacing: -0.01,
+    },
+    licenseFirstName: {
+      fontSize: 15,
+      fontWeight: '600',
+      color: '#fff',
+    },
+    licenseBottomRow: {
+      flexDirection: 'row',
+      gap: 10,
+      paddingTop: 8,
+      borderTopWidth: 1,
+      borderTopColor: 'rgba(255,255,255,0.2)',
+    },
+    licenseFieldValue: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: '#fff',
+      fontVariant: ['tabular-nums'],
+    },
+
+    // License details
+    detailsCard: {
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      borderRadius: radii.lg,
+    },
+    detailRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    detailKey: {
+      fontSize: 13,
+      color: palette.textTertiary,
+    },
+    detailValue: {
+      fontSize: 13,
+      fontWeight: '500',
+      color: palette.textPrimary,
+      flex: 1,
+      textAlign: 'right',
+    },
+
+    // Tiles
+    tileHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    tileEyebrow: {
+      fontSize: 10,
+      fontWeight: '700',
+      letterSpacing: 0.8,
+      color: palette.textTertiary,
+    },
+    tileValueLg: {
+      fontSize: 24,
+      fontWeight: '700',
+      letterSpacing: -0.24,
+      color: palette.textPrimary,
+      marginTop: 4,
+      fontVariant: ['tabular-nums'],
+    },
+    tileValueMd: {
+      fontSize: 22,
+      fontWeight: '700',
+      color: palette.textPrimary,
+      marginTop: 6,
+      fontVariant: ['tabular-nums'],
+    },
+    tileSub: {
+      fontSize: 12,
+      color: palette.textTertiary,
+      marginTop: 2,
+    },
+    wideTile: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      padding: 16,
+      borderRadius: radii.lg,
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+    },
+    splitTile: {
+      flex: 1,
+      padding: 14,
+      borderRadius: radii.lg,
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      minHeight: 108,
+    },
+
+    // Section heads + rows
+    sectionHead: {
+      paddingHorizontal: 16,
+      paddingTop: 28,
+      paddingBottom: 8,
+    },
+    sectionLabel: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.8,
+      color: palette.textTertiary,
+    },
+    rowCard: {
+      marginHorizontal: 16,
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      borderRadius: radii.lg,
+      overflow: 'hidden',
+    },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    rowIcon: {
+      width: 28,
+      height: 28,
+      borderRadius: radii.md,
+      backgroundColor: palette.bgMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    rowLabel: {
+      flex: 1,
+      fontSize: 14,
+      color: palette.textPrimary,
+      fontWeight: '500',
+    },
+    rowValue: {
+      fontSize: 13,
+      color: palette.textTertiary,
+    },
+    infoRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    infoKey: {
+      fontSize: 13,
+      color: palette.textTertiary,
+    },
+    infoValue: {
+      fontSize: 13,
+      fontWeight: '500',
+      color: palette.textPrimary,
+      fontVariant: ['tabular-nums'],
+    },
+  });

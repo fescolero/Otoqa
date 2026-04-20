@@ -116,6 +116,14 @@ export const getMyProfile = query({
       employmentStatus: v.string(),
       organizationId: v.string(),
       currentTruckId: v.optional(v.id('trucks')),
+      // License (non-sensitive). Used by the Profile screen's CDL-style
+      // hero and detail rows. Number is optional on the driver schema so
+      // it's optional here too; class / state / expiration are required.
+      licenseNumber: v.optional(v.string()),
+      licenseClass: v.string(),
+      licenseState: v.string(),
+      licenseExpiration: v.string(),
+      medicalExpiration: v.optional(v.string()),
       // Truck info if assigned
       truck: v.optional(
         v.object({
@@ -160,6 +168,11 @@ export const getMyProfile = query({
       employmentStatus: driver.employmentStatus,
       organizationId: driver.organizationId,
       currentTruckId: driver.currentTruckId,
+      licenseNumber: driver.licenseNumber,
+      licenseClass: driver.licenseClass,
+      licenseState: driver.licenseState,
+      licenseExpiration: driver.licenseExpiration,
+      medicalExpiration: driver.medicalExpiration,
       truck,
     };
   },
