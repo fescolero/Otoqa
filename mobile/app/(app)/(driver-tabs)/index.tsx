@@ -140,7 +140,8 @@ const greet = (): string => {
 export default function HomeScreen() {
   const router = useRouter();
   const { palette, styles } = useDesignStyles();
-  const { driverId } = useDriver();
+  const { driverId, driverName } = useDriver();
+  const firstName = driverName.trim().split(/\s+/)[0] || 'Driver';
   const {
     loads,
     isLoading,
@@ -374,13 +375,13 @@ export default function HomeScreen() {
 
       <TopHeader
         greeting={greet()}
+        driverFirstName={firstName}
         isSessionMode={isSessionMode}
         elapsedHours={elapsedHours}
         elapsedMinutes={elapsedMinutes}
         onEndShift={handleEndShift}
         isEndingShift={isEndingShift}
         weather={weather}
-        onScanTruck={() => router.push('/switch-truck')}
       />
 
       {!isSessionMode && (
@@ -451,24 +452,24 @@ export default function HomeScreen() {
 
 interface TopHeaderProps {
   greeting: string;
+  driverFirstName: string;
   isSessionMode: boolean;
   elapsedHours: number;
   elapsedMinutes: number;
   onEndShift: () => void;
   isEndingShift: boolean;
   weather: WeatherData | null;
-  onScanTruck: () => void;
 }
 
 const TopHeader: React.FC<TopHeaderProps> = ({
   greeting,
+  driverFirstName,
   isSessionMode,
   elapsedHours,
   elapsedMinutes,
   onEndShift,
   isEndingShift,
   weather,
-  onScanTruck,
 }) => {
   const { palette, styles } = useDesignStyles();
   return (
@@ -478,7 +479,7 @@ const TopHeader: React.FC<TopHeaderProps> = ({
         {isSessionMode ? 'Shift active' : greeting}
       </Text>
       <Text style={styles.headerTitle} numberOfLines={1}>
-        {isSessionMode ? `${elapsedHours}h ${elapsedMinutes}m on duty` : 'Driver'}
+        {isSessionMode ? `${elapsedHours}h ${elapsedMinutes}m on duty` : driverFirstName}
       </Text>
     </View>
 
@@ -515,16 +516,6 @@ const TopHeader: React.FC<TopHeaderProps> = ({
             ]}
           >
             <Icon name="search" size={22} color={palette.textPrimary} />
-          </Pressable>
-          <Pressable
-            onPress={onScanTruck}
-            accessibilityLabel="Scan truck QR"
-            style={({ pressed }) => [
-              styles.headerIconBtn,
-              pressed && { opacity: 0.7 },
-            ]}
-          >
-            <Icon name="truck" size={22} color={palette.textPrimary} />
           </Pressable>
         </>
       )}
