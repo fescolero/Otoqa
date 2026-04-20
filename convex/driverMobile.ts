@@ -206,6 +206,11 @@ export const getMyAssignedLoads = query({
       isHazmat: v.optional(v.boolean()),
       requiresTarp: v.optional(v.boolean()),
       commodityDescription: v.optional(v.string()),
+      // Dispatcher's scheduled start (from dispatchLegs.plannedStartAt).
+      // Used by the dashboard to sort Today's scheduled list. Missing when
+      // no dispatchLeg exists for this driver on this load yet.
+      legPlannedStartAt: v.optional(v.float64()),
+      legStatus: v.optional(v.string()),
       // First pickup info
       firstPickup: v.optional(
         v.object({
@@ -316,6 +321,26 @@ export const getMyAssignedLoads = query({
       driverLoads.push(load);
     }
 
+    // Safety net: any dispatchLeg currently ACTIVE for this driver must
+    // flow through regardless of date window. Handles multi-day shifts
+    // where the load's firstStopDate is older than the rolling window
+    // but the driver is still mid-trip (e.g. started at 10pm yesterday,
+    // checking in at dropoff 36h later). The dashboard pins this to
+    // Today regardless of the load's planned date.
+    const activeLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) =>
+        q.eq('driverId', args.driverId).eq('status', 'ACTIVE'),
+      )
+      .collect();
+    for (const leg of activeLegs) {
+      if (loadIdsSet.has(leg.loadId)) continue;
+      const load = await ctx.db.get(leg.loadId);
+      if (!load) continue;
+      loadIdsSet.add(load._id);
+      driverLoads.push(load);
+    }
+
     // Get stops for each load
     const resultWithNulls = await Promise.all(
       driverLoads.map(async (load) => {
@@ -337,6 +362,15 @@ export const getMyAssignedLoads = query({
 
         const facets = await getLoadFacets(ctx, load._id);
 
+        // Find the driver's dispatchLeg for this load so the dashboard can
+        // sort by plannedStartAt. A leg is driver-specific — fetch via
+        // by_load and filter by driverId.
+        const legs = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_load', (q) => q.eq('loadId', load._id))
+          .collect();
+        const leg = legs.find((l) => l.driverId === driver._id);
+
         return {
           _id: load._id,
           internalId: load.internalId,
@@ -354,6 +388,8 @@ export const getMyAssignedLoads = query({
           isHazmat: load.isHazmat,
           requiresTarp: load.requiresTarp,
           commodityDescription: load.commodityDescription,
+          legPlannedStartAt: leg?.plannedStartAt,
+          legStatus: leg?.status,
           firstPickup: firstPickup
             ? {
                 city: firstPickup.city,

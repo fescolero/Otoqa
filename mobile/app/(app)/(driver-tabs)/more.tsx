@@ -30,12 +30,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import * as Application from 'expo-application';
 import * as Updates from 'expo-updates';
 import { api } from '../../../../convex/_generated/api';
 import { useDriver, useAppMode } from '../_layout';
-import { useMyLoads } from '../../../lib/hooks/useMyLoads';
 import { stopSessionTracking } from '../../../lib/location-tracking';
 import { useLanguage } from '../../../lib/LanguageContext';
 import { Icon, type IconName } from '../../../lib/design-icons';
@@ -49,7 +48,10 @@ export default function MoreScreen() {
 
   const { signOut } = useClerk();
   const { driverId, truck } = useDriver();
-  const { activeSession } = useMyLoads(driverId);
+  const activeSession = useQuery(
+    api.driverSessions.getActiveSession,
+    driverId ? { driverId } : 'skip',
+  );
   const endSessionMutation = useMutation(api.driverSessions.endSession);
   const { canSwitchModes, setMode } = useAppMode();
   const { currentLanguage } = useLanguage();
