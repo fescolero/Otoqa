@@ -49,6 +49,7 @@ import {
   WhatsappIcon,
   FileDownloadIcon,
   DollarSquareIcon,
+  RefreshIcon,
 } from '@hugeicons/core-free-icons';
 
 // Design uses dashed kebab-case names; map to HugeIcons exports. The
@@ -105,6 +106,7 @@ const ICON_MAP = {
   whatsapp: WhatsappIcon,
   download: FileDownloadIcon,
   dollar: DollarSquareIcon,
+  refresh: RefreshIcon,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;
