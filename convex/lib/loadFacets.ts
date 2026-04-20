@@ -216,6 +216,9 @@ export async function getLoadFacets(
   trip?: string;
   hcrCanonical?: string;
   tripCanonical?: string;
+  /** Every facet tag on this load, in insertion order. Used by UIs that
+   *  want to show all facets instead of just HCR + TRIP. */
+  all: Array<{ key: string; value: string }>;
 }> {
   const tags = await ctx.db
     .query('loadTags')
@@ -228,6 +231,7 @@ export async function getLoadFacets(
     trip: tripTag?.value,
     hcrCanonical: hcrTag?.canonicalValue,
     tripCanonical: tripTag?.canonicalValue,
+    all: tags.map((t) => ({ key: t.facetKey, value: t.value })),
   };
 }
 
