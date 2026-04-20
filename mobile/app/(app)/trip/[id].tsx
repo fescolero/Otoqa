@@ -507,11 +507,30 @@ export default function TripDetailScreen() {
     setIsRedirected(false);
   };
 
-  // Format date and time together
+  // Format date and time together.
+  //
+  // dateStr is a date-only string like "2026-04-20". If we feed that straight
+  // into new Date() it parses as UTC midnight — which in negative-offset
+  // zones (Pacific is UTC-7/-8) renders as the PRIOR day when passed through
+  // toLocaleDateString. Anchor it to local midnight instead so the label
+  // reads the day a driver actually thinks of it as.
+  //
+  // timeStr is a full ISO 8601 timestamp with TZ offset (schema comment
+  // confirms this), so new Date() already produces the correct instant.
+  const parseDateOnlyLocal = (ds: string): Date | null => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ds);
+    if (!m) {
+      const fallback = new Date(ds);
+      return isNaN(fallback.getTime()) ? null : fallback;
+    }
+    const [, y, mo, d] = m;
+    return new Date(Number(y), Number(mo) - 1, Number(d));
+  };
+
   const formatDateTime = (dateStr?: string, timeStr?: string) => {
     if (!dateStr && !timeStr) return null;
     try {
-      const dateObj = dateStr ? new Date(dateStr) : null;
+      const dateObj = dateStr ? parseDateOnlyLocal(dateStr) : null;
       const timeObj = timeStr ? new Date(timeStr) : null;
 
       // Format date part (e.g., "Jan 15")
@@ -524,9 +543,7 @@ export default function TripDetailScreen() {
       const timePart =
         timeObj && !isNaN(timeObj.getTime())
           ? timeObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-          : dateObj && !isNaN(dateObj.getTime())
-            ? dateObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-            : null;
+          : null;
 
       if (datePart && timePart) {
         return `${datePart}, ${timePart}`;
