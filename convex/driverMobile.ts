@@ -189,6 +189,8 @@ export const getMyAssignedLoads = query({
       effectiveMiles: v.optional(v.number()),
       stopCount: v.optional(v.number()),
       equipmentType: v.optional(v.string()),
+      isHazmat: v.optional(v.boolean()),
+      requiresTarp: v.optional(v.boolean()),
       commodityDescription: v.optional(v.string()),
       // First pickup info
       firstPickup: v.optional(
@@ -335,6 +337,8 @@ export const getMyAssignedLoads = query({
           effectiveMiles: load.effectiveMiles,
           stopCount: load.stopCount || stops.length,
           equipmentType: load.equipmentType,
+          isHazmat: load.isHazmat,
+          requiresTarp: load.requiresTarp,
           commodityDescription: load.commodityDescription,
           firstPickup: firstPickup
             ? {
@@ -487,6 +491,8 @@ export const getSessionLoads = query({
         effectiveMiles: load.effectiveMiles,
         stopCount: load.stopCount || stops.length,
         equipmentType: load.equipmentType,
+        isHazmat: load.isHazmat,
+        requiresTarp: load.requiresTarp,
         commodityDescription: load.commodityDescription,
         firstPickup: firstPickup
           ? {
@@ -639,6 +645,8 @@ export const getLoadWithStops = query({
         customerName: load.customerName,
         effectiveMiles: load.effectiveMiles,
         equipmentType: load.equipmentType,
+        isHazmat: load.isHazmat,
+        requiresTarp: load.requiresTarp,
         commodityDescription: load.commodityDescription,
         weight: load.weight,
         temperature: load.temperature,
