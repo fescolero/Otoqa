@@ -53,9 +53,11 @@ import { useTheme } from '../../../lib/ThemeContext';
 import {
   typeScale,
   radii as designRadii,
-  tagStyles,
-  tagFallback,
 } from '../../../lib/design-tokens';
+import {
+  loadFacetTags,
+  tagKindStyles,
+} from '../../../lib/facet-tags';
 
 // ============================================
 // DESIGN SYSTEM
@@ -1589,26 +1591,10 @@ function LoadSummary({
   );
   const progressPct = Math.min((done / total) * 100, 100);
 
-  // Prefer the server's `facets` array (all tagged facets, not just
-  // HCR + TRIP) so per-org custom facets show up. Fall back to the
-  // legacy parsedHcr / parsedTripNumber pair for responses that
-  // pre-date the facet migration.
-  // TRIP values get a "Trip " prefix so badges read "Trip 12345"
-  // instead of a bare number — mirrors the driver tab's loadFacetTags
-  // helper at (driver-tabs)/index.tsx:139.
-  const tagValues: string[] = (() => {
-    if (Array.isArray(load.facets) && load.facets.length > 0) {
-      return load.facets
-        .filter((f: { value?: string }) => f.value && f.value.trim())
-        .map((f: { key: string; value: string }) =>
-          f.key === 'TRIP' ? `Trip ${f.value}` : f.value,
-        );
-    }
-    return [
-      load.parsedHcr,
-      load.parsedTripNumber && `Trip ${load.parsedTripNumber}`,
-    ].filter(Boolean);
-  })();
+  // Shared facet-tag helper — same source as the driver dashboard so
+  // HCR / TRIP / equipment / HAZ / TARP badges stay consistent across
+  // surfaces. See mobile/lib/facet-tags.ts.
+  const tags = loadFacetTags(load);
 
   return (
     <View
@@ -1672,13 +1658,13 @@ function LoadSummary({
         </View>
       </View>
 
-      {(tagValues.length > 0 || hasDetour) && (
+      {(tags.length > 0 || hasDetour) && (
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-          {tagValues.map((v) => {
-            const s = tagStyles[v] ?? tagFallback;
+          {tags.map((t) => {
+            const s = tagKindStyles(t.kind, t.label, palette);
             return (
               <View
-                key={v}
+                key={t.label}
                 style={{
                   height: 22,
                   paddingHorizontal: 8,
@@ -1695,7 +1681,7 @@ function LoadSummary({
                     color: s.fg,
                   }}
                 >
-                  {v}
+                  {t.label}
                 </Text>
               </View>
             );
