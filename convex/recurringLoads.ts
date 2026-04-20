@@ -554,9 +554,13 @@ export const processRecurringTemplates = internalAction({
         if (template.excludeFederalHolidays) {
           let isFederalHoliday = holidayCache.get(pickupDate);
           if (isFederalHoliday === undefined) {
-            isFederalHoliday = await ctx.runQuery(internal.holidays.isFederalHoliday, {
-              date: pickupDate,
-            });
+            // `??= false` defends against the query returning undefined,
+            // which TypeScript infers even though the handler always
+            // resolves to a boolean.
+            isFederalHoliday =
+              (await ctx.runQuery(internal.holidays.isFederalHoliday, {
+                date: pickupDate,
+              })) ?? false;
             holidayCache.set(pickupDate, isFederalHoliday);
           }
 
