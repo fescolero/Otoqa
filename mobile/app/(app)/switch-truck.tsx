@@ -18,6 +18,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import { Id } from '../../../convex/_generated/dataModel';
 import { useAppMode } from './_layout';
+import { startSessionTracking } from '../../lib/location-tracking';
 
 // ============================================
 // DESIGN SYSTEM
@@ -120,6 +121,8 @@ export default function SwitchTruckScreen() {
   
   // Switch truck mutation
   const switchTruck = useMutation(api.driverMobile.switchTruck);
+  // Driver Session System (Phase 3): start a work-shift after truck QR scan.
+  const startSession = useMutation(api.driverSessions.startSession);
 
   useEffect(() => {
     if (!permission?.granted) {
@@ -167,15 +170,57 @@ export default function SwitchTruckScreen() {
       });
 
       if (result.success) {
+        // Truck assigned. Now offer to start the shift — this is the
+        // canonical entry point for the Driver Session System. Driver can
+        // dismiss and start later from settings if they're not ready.
+        const truckId = scannedData.data.truckId as Id<'trucks'>;
+        const driverId = profile._id;
         Alert.alert(
-          'Truck Switched',
-          result.message,
+          'Truck Assigned',
+          'Start your shift now? GPS tracking will begin and your loads for this shift will appear on the home screen.',
           [
             {
-              text: 'OK',
+              text: 'Not Now',
+              style: 'cancel',
               onPress: () => router.back(),
             },
-          ]
+            {
+              text: 'Start Shift',
+              onPress: async () => {
+                try {
+                  const sessionId = await startSession({ driverId, truckId });
+                  const trackingResult = await startSessionTracking({
+                    driverId,
+                    sessionId,
+                    organizationId: profile.organizationId,
+                  });
+                  if (!trackingResult.success) {
+                    // Session created on the server but GPS didn't initialize.
+                    // Surface the failure so the driver knows to fix it (usually
+                    // a permissions issue) instead of silently shipping with no
+                    // tracking. The session is still valid — bootstrap grace at
+                    // check-in will adopt it.
+                    Alert.alert(
+                      'Shift Started — GPS Issue',
+                      `Your shift is active but location tracking didn't start: ${trackingResult.message}`,
+                      [{ text: 'OK', onPress: () => router.back() }],
+                    );
+                    return;
+                  }
+                  router.back();
+                } catch (sessionError) {
+                  const msg =
+                    sessionError instanceof Error
+                      ? sessionError.message
+                      : 'Failed to start shift';
+                  Alert.alert('Could Not Start Shift', msg, [
+                    { text: 'OK', onPress: () => router.back() },
+                  ]);
+                }
+              },
+            },
+          ],
+          { cancelable: false },
         );
       } else {
         Alert.alert('Unable to Switch', result.message);

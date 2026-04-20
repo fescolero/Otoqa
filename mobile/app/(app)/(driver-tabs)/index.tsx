@@ -7,11 +7,14 @@ import {
   RefreshControl,
   Pressable,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons, Feather } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import { useMutation } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
 import { useMyLoads } from '../../../lib/hooks/useMyLoads';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
@@ -20,6 +23,11 @@ import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../..
 import { useLanguage } from '../../../lib/LanguageContext';
 import { LinearGradient } from 'expo-linear-gradient';
 import { trackWeatherFetchFailed, trackScreen } from '../../../lib/analytics';
+import { stopSessionTracking } from '../../../lib/location-tracking';
+
+// Soft caps for shift tracking — banner thresholds, never enforced.
+const SOFT_CAP_10H_MS = 10 * 60 * 60 * 1000;
+const SOFT_CAP_14H_MS = 14 * 60 * 60 * 1000;
 
 // ============================================
 // HOME SCREEN - Dark Logistics Design
@@ -78,10 +86,29 @@ const DAY_TABS: { key: DayTab; labelEn: string; labelEs: string }[] = [
 export default function HomeScreen() {
   const router = useRouter();
   const { driverId } = useDriver();
-  const { loads, isLoading, refetch, isRefetching } = useMyLoads(driverId);
+  const {
+    loads,
+    isLoading,
+    refetch,
+    isRefetching,
+    mode,
+    activeSession,
+    sessionLoads,
+  } = useMyLoads(driverId);
   const { connectionQuality } = useNetworkStatus();
   const { pendingCount } = useOfflineQueue();
   const { t, locale } = useLanguage();
+
+  // Driver Session System (Phase 3): End Shift mutation. Wrapped here so we
+  // can also tear down GPS tracking after the server-side session closes.
+  const endSessionMutation = useMutation(api.driverSessions.endSession);
+  // Phase 4: stamp soft-cap timestamps when banners cross threshold so the
+  // dispatcher dashboard (Phase 6) can surface drivers who've been on shift
+  // too long. Mutation is idempotent server-side.
+  const markSoftCapHit = useMutation(api.driverSessions.markSoftCapHit);
+  const [isEndingShift, setIsEndingShift] = useState(false);
+
+  const isSessionMode = mode === 'session';
 
   const [selectedDay, setSelectedDay] = useState<DayTab>('today');
 
@@ -154,22 +181,37 @@ export default function HomeScreen() {
 
   const selectedDateStr = useMemo(() => getDateStringForDay(selectedDay), [selectedDay]);
 
-  // Separate active, upcoming, and completed loads -- then filter by selected day
+  // Bucket loads for rendering. Session mode uses server-bucketed data
+  // directly (In Progress / Up Next / Completed-this-session). Calendar
+  // mode (legacy, no active session) keeps the existing day-tab logic.
   const { activeLoad, scheduledLoads, completedLoads } = useMemo(() => {
+    if (isSessionMode) {
+      if (!sessionLoads) {
+        return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
+      }
+      // Backend already sorted upNext by plannedStartAt and limited
+      // inProgress to the ACTIVE leg(s). No calendar filter applies.
+      return {
+        activeLoad: sessionLoads.inProgress[0] ?? null,
+        scheduledLoads: sessionLoads.upNext,
+        completedLoads: sessionLoads.completedThisSession,
+      };
+    }
+
     if (!loads || loads.length === 0) {
       return { activeLoad: null, scheduledLoads: [], completedLoads: [] };
     }
 
     const completed = loads.filter((l) => l.status === 'Completed' || l.trackingStatus === 'Completed');
     const active = loads.filter((l) => l.status !== 'Completed' && l.trackingStatus !== 'Completed');
-    
+
     const inProgress = active.find(
-      (l) => l.trackingStatus === 'In Transit' || 
-             l.trackingStatus === 'At Pickup' || 
+      (l) => l.trackingStatus === 'In Transit' ||
+             l.trackingStatus === 'At Pickup' ||
              l.trackingStatus === 'At Delivery' ||
              l.status === 'In Progress'
     );
-    
+
     const scheduled = active
       .filter((l) => l._id !== inProgress?._id)
       .filter((l) => getLoadPickupDate(l) === selectedDateStr)
@@ -181,12 +223,93 @@ export default function HomeScreen() {
 
     const filteredCompleted = completed.filter((l) => getLoadPickupDate(l) === selectedDateStr);
 
-    return { 
-      activeLoad: inProgress, 
+    return {
+      activeLoad: inProgress,
       scheduledLoads: scheduled,
-      completedLoads: filteredCompleted 
+      completedLoads: filteredCompleted,
     };
-  }, [loads, selectedDateStr]);
+  }, [isSessionMode, sessionLoads, loads, selectedDateStr]);
+
+  // Session elapsed time + soft-cap state (drives the chrome/banner). Tick
+  // every minute; banners are render-time, not stored on the session doc.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isSessionMode) return;
+    const id = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, [isSessionMode]);
+  const elapsedMs = activeSession ? nowTick - activeSession.startedAt : 0;
+  const elapsedHours = Math.floor(elapsedMs / (60 * 60 * 1000));
+  const elapsedMinutes = Math.floor((elapsedMs % (60 * 60 * 1000)) / 60_000);
+  const overSoftCap10h = elapsedMs >= SOFT_CAP_10H_MS;
+  const overSoftCap14h = elapsedMs >= SOFT_CAP_14H_MS;
+
+  // Stamp soft-cap timestamps server-side once per session per cap. Server
+  // is idempotent (only stamps if the field is null), so re-firing on every
+  // tick is safe — but we also gate via activeSession's existing softCap*At
+  // fields to avoid pointless mutations.
+  useEffect(() => {
+    if (!activeSession || !isSessionMode) return;
+    if (overSoftCap10h && !activeSession.softCap10hAt) {
+      markSoftCapHit({ sessionId: activeSession._id, cap: '10h' }).catch((e) =>
+        console.warn('[HomeScreen] markSoftCapHit(10h) failed:', e),
+      );
+    }
+    if (overSoftCap14h && !activeSession.softCap14hAt) {
+      markSoftCapHit({ sessionId: activeSession._id, cap: '14h' }).catch((e) =>
+        console.warn('[HomeScreen] markSoftCapHit(14h) failed:', e),
+      );
+    }
+  }, [
+    isSessionMode,
+    activeSession?._id,
+    activeSession?.softCap10hAt,
+    activeSession?.softCap14hAt,
+    overSoftCap10h,
+    overSoftCap14h,
+    markSoftCapHit,
+  ]);
+
+  // End Shift handler. Blocks via dialog if any leg is in progress (the
+  // backend will end them anyway, but we want the driver to confirm or
+  // contact dispatch for a handoff first).
+  const handleEndShift = useCallback(async () => {
+    if (!activeSession || isEndingShift) return;
+    const inProgressCount = sessionLoads?.inProgress.length ?? 0;
+
+    const proceed = async () => {
+      setIsEndingShift(true);
+      try {
+        await endSessionMutation({
+          sessionId: activeSession._id,
+          endReason: 'driver_manual',
+        });
+        await stopSessionTracking();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to end shift';
+        Alert.alert('Could Not End Shift', msg);
+      } finally {
+        setIsEndingShift(false);
+      }
+    };
+
+    if (inProgressCount > 0) {
+      Alert.alert(
+        'Load In Progress',
+        'You have a load in progress. Contact dispatch to reassign before ending your shift, or end anyway and the load will be flagged for dispatcher review.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'End Anyway', style: 'destructive', onPress: proceed },
+        ],
+      );
+      return;
+    }
+
+    Alert.alert('End Shift?', 'GPS tracking will stop. You can start a new shift any time.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'End Shift', onPress: proceed },
+    ]);
+  }, [activeSession, sessionLoads, isEndingShift, endSessionMutation]);
 
   // Format date for header
   const formatHeaderDate = () => {
@@ -385,27 +508,89 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Day Switcher */}
-        <View style={styles.daySwitcher}>
-          {DAY_TABS.map(({ key, labelEn, labelEs }) => (
-            <Pressable
-              key={key}
-              style={[styles.dayTab, selectedDay === key && styles.dayTabActive]}
-              onPress={() => setSelectedDay(key)}
-            >
-              <Text style={[styles.dayTabText, selectedDay === key && styles.dayTabTextActive]}>
-                {locale === 'es' ? labelEs : labelEn}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
+        {/* Session-mode header chrome — shown only when a shift is active */}
+        {isSessionMode && activeSession && (
+          <View style={sessionStyles.sessionHeader}>
+            <View style={sessionStyles.sessionHeaderRow}>
+              <View style={sessionStyles.sessionHeaderTextWrap}>
+                <Text style={sessionStyles.sessionHeaderTitle}>
+                  {locale === 'es' ? 'Turno Activo' : 'Shift Active'}
+                </Text>
+                <Text style={sessionStyles.sessionHeaderSub}>
+                  {`${elapsedHours}h ${elapsedMinutes}m`}
+                </Text>
+              </View>
+              <Pressable
+                style={({ pressed }) => [
+                  sessionStyles.endShiftButton,
+                  pressed && { opacity: 0.85 },
+                  isEndingShift && { opacity: 0.6 },
+                ]}
+                disabled={isEndingShift}
+                onPress={handleEndShift}
+              >
+                <Ionicons name="stop-circle-outline" size={18} color={colors.background} />
+                <Text style={sessionStyles.endShiftButtonText}>
+                  {isEndingShift
+                    ? locale === 'es'
+                      ? 'Terminando...'
+                      : 'Ending...'
+                    : locale === 'es'
+                      ? 'Terminar Turno'
+                      : 'End Shift'}
+                </Text>
+              </Pressable>
+            </View>
+            {overSoftCap14h && (
+              <View style={[sessionStyles.softCapBanner, sessionStyles.softCapBanner14h]}>
+                <Ionicons name="warning" size={14} color="#fff" />
+                <Text style={sessionStyles.softCapBannerText}>
+                  {locale === 'es'
+                    ? 'Has trabajado más de 14 horas. Considera terminar tu turno.'
+                    : "You've been on shift over 14 hours. Consider ending your shift."}
+                </Text>
+              </View>
+            )}
+            {!overSoftCap14h && overSoftCap10h && (
+              <View style={[sessionStyles.softCapBanner, sessionStyles.softCapBanner10h]}>
+                <Ionicons name="time-outline" size={14} color="#fff" />
+                <Text style={sessionStyles.softCapBannerText}>
+                  {locale === 'es'
+                    ? 'Llevas 10 horas en tu turno.'
+                    : "You've been on shift 10 hours."}
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* Day Switcher — calendar mode only. Session mode is shift-bounded. */}
+        {!isSessionMode && (
+          <View style={styles.daySwitcher}>
+            {DAY_TABS.map(({ key, labelEn, labelEs }) => (
+              <Pressable
+                key={key}
+                style={[styles.dayTab, selectedDay === key && styles.dayTabActive]}
+                onPress={() => setSelectedDay(key)}
+              >
+                <Text style={[styles.dayTabText, selectedDay === key && styles.dayTabTextActive]}>
+                  {locale === 'es' ? labelEs : labelEn}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
 
         {/* Section Header */}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>
-            {locale === 'es'
-              ? selectedDay === 'today' ? 'Próximas Hoy' : selectedDay === 'yesterday' ? 'Ayer' : 'Mañana'
-              : selectedDay === 'today' ? 'Upcoming Today' : selectedDay === 'yesterday' ? 'Yesterday' : 'Tomorrow'}
+            {isSessionMode
+              ? locale === 'es'
+                ? 'Cargas de Este Turno'
+                : 'Loads This Shift'
+              : locale === 'es'
+                ? selectedDay === 'today' ? 'Próximas Hoy' : selectedDay === 'yesterday' ? 'Ayer' : 'Mañana'
+                : selectedDay === 'today' ? 'Upcoming Today' : selectedDay === 'yesterday' ? 'Yesterday' : 'Tomorrow'}
           </Text>
         </View>
 
@@ -1039,5 +1224,72 @@ const styles = StyleSheet.create({
   skeletonBox: {
     backgroundColor: colors.muted,
     borderRadius: borderRadius.xl,
+  },
+});
+
+// Driver Session System (Phase 3) — session header + soft-cap banners.
+// Kept as a separate StyleSheet so the legacy styles object stays intact.
+const sessionStyles = StyleSheet.create({
+  sessionHeader: {
+    marginHorizontal: spacing.md,
+    marginTop: spacing.sm,
+    marginBottom: spacing.md,
+    padding: spacing.md,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  sessionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  sessionHeaderTextWrap: {
+    flex: 1,
+  },
+  sessionHeaderTitle: {
+    ...typography.h3,
+    color: colors.foreground,
+  },
+  sessionHeaderSub: {
+    ...typography.caption,
+    color: colors.foregroundMuted,
+    marginTop: 2,
+  },
+  endShiftButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.destructive,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+    gap: spacing.xs,
+  },
+  endShiftButtonText: {
+    ...typography.body,
+    color: colors.background,
+    fontWeight: '600',
+  },
+  softCapBanner: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: borderRadius.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  softCapBanner10h: {
+    backgroundColor: '#D97706', // amber-600
+  },
+  softCapBanner14h: {
+    backgroundColor: '#DC2626', // red-600
+  },
+  softCapBannerText: {
+    ...typography.caption,
+    color: '#fff',
+    fontWeight: '500',
+    flex: 1,
   },
 });

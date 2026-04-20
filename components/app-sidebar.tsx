@@ -91,6 +91,10 @@ const getNavData = (pathname: string) => ({
           title: 'Dispatch Planner',
           url: '/dispatch/planner',
         },
+        {
+          title: 'Active Driver Sessions',
+          url: '/dispatch/sessions',
+        },
       ],
     },
     {

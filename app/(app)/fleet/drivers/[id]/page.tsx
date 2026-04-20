@@ -52,7 +52,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Calendar, Loader2, Truck } from 'lucide-react';
+import { Calendar, Loader2, Truck, Activity } from 'lucide-react';
+import { DriverSessionsHistory } from '@/components/sessions/driver-sessions-history';
 import { toast } from 'sonner';
 
 const formatDate = (dateString?: string) => {
@@ -366,10 +367,18 @@ export default function DriverViewPage() {
               <Truck className="h-4 w-4 mr-1" />
               Loads
             </TabsTriggerLine>
+            <TabsTriggerLine value="sessions">
+              <Activity className="h-4 w-4 mr-1" />
+              Sessions
+            </TabsTriggerLine>
           </TabsListLine>
 
-          {/* Master-Detail Layout: 70/30 split (hidden on Loads tab) */}
-          <div className={`flex gap-6 ${activeTab === 'loads' ? 'hidden' : ''}`}>
+          {/* Master-Detail Layout: 70/30 split (hidden on Loads + Sessions tabs) */}
+          <div
+            className={`flex gap-6 ${
+              activeTab === 'loads' || activeTab === 'sessions' ? 'hidden' : ''
+            }`}
+          >
             {/* Main Content Area (70%) */}
             <div className="flex-1 min-w-0">
               {/* Overview Tab */}
@@ -724,6 +733,13 @@ export default function DriverViewPage() {
               statusFilter={loadStatusFilter}
               onStatusFilterChange={setLoadStatusFilter}
             />
+          </TabsContent>
+
+          {/* Sessions Tab — full width, outside the 70/30 split. Driver Session
+              System (Phase 6): per-driver shift history with end-reason +
+              soft-cap visibility for ops. */}
+          <TabsContent value="sessions" className="mt-0">
+            <DriverSessionsHistory driverId={driverId as Id<'drivers'>} />
           </TabsContent>
         </Tabs>
       </div>

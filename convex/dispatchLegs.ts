@@ -2,7 +2,13 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
-import { getLegTimeRange, doTimeRangesOverlap, calculateOverlapMinutes, detectDriverOverlaps } from './_helpers/timeUtils';
+import {
+  getLegTimeRange,
+  doTimeRangesOverlap,
+  calculateOverlapMinutes,
+  detectDriverOverlaps,
+  parseStopDateTime,
+} from './_helpers/timeUtils';
 import type { OverlapInfo } from './_helpers/timeUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
@@ -1391,5 +1397,347 @@ export const getAllActiveDrivers = query({
     );
 
     return driversWithTrucks;
+  },
+});
+
+// ============================================================================
+// DRIVER SESSION SYSTEM — Phase 1
+// Leg lifecycle hooks driven by check-in / checkout / handoff flows.
+// ============================================================================
+
+/**
+ * Transition a leg from PENDING to ACTIVE. Called from checkInAtStop when
+ * a driver arrives at stop 1 of a leg they own. Idempotent: a leg already
+ * ACTIVE is untouched (common on retry).
+ *
+ * Internal — auth happens in the caller (driverMobile.checkInAtStop).
+ */
+export const startLeg = internalMutation({
+  args: {
+    legId: v.id('dispatchLegs'),
+    sessionId: v.id('driverSessions'),
+    startedAt: v.number(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const leg = await ctx.db.get(args.legId);
+    if (!leg) throw new Error('Leg not found');
+    if (leg.status === 'ACTIVE') return null; // idempotent
+    if (leg.status !== 'PENDING') {
+      throw new Error(`Cannot start leg in status ${leg.status}`);
+    }
+
+    await ctx.db.patch(args.legId, {
+      status: 'ACTIVE',
+      sessionId: args.sessionId,
+      startedAt: args.startedAt,
+      updatedAt: args.startedAt,
+    });
+    return null;
+  },
+});
+
+/**
+ * Transition an ACTIVE leg to COMPLETED with a reason. Called from
+ * checkOutFromStop on the last stop (endReason='completed'), from the
+ * handoff flow (endReason='handoff'), and from session teardown paths
+ * (endReason='session_ended').
+ *
+ * Internal — auth happens in the caller.
+ */
+export const completeLeg = internalMutation({
+  args: {
+    legId: v.id('dispatchLegs'),
+    endReason: v.union(
+      v.literal('completed'),
+      v.literal('handoff'),
+      v.literal('unassigned'),
+      v.literal('session_ended')
+    ),
+    endedAt: v.number(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const leg = await ctx.db.get(args.legId);
+    if (!leg) throw new Error('Leg not found');
+    if (leg.status === 'COMPLETED') return null; // idempotent
+
+    await ctx.db.patch(args.legId, {
+      status: 'COMPLETED',
+      endedAt: args.endedAt,
+      endReason: args.endReason,
+      updatedAt: args.endedAt,
+    });
+    return null;
+  },
+});
+
+/**
+ * Dispatcher-initiated handoff: the driver currently on a load cannot
+ * finish it (out of hours, emergency, unreachable, etc.) so a new driver
+ * takes over from the current position.
+ *
+ * Atomic in one mutation:
+ *   1. Find from-driver's ACTIVE leg for this load; complete it with
+ *      endReason='handoff'.
+ *   2. Determine where the new leg starts. Prefer the current tracking
+ *      frontier (next unarrived stop); fall back to the old leg's startStop
+ *      if no tracking state exists (driver never checked in).
+ *   3. Create the new leg for the to-driver (sequence = max + 1, status
+ *      PENDING, plannedStartAt = now, carrier partnership preserved).
+ *   4. Transfer loadTrackingState to the new driver/session if it exists.
+ *   5. Update loadInformation.primaryDriverId if this handoff is on leg 1.
+ *   6. If from-driver has no other ACTIVE legs, end their session with
+ *      endReason='handoff_complete'.
+ *
+ * Only dispatchers can initiate.
+ */
+export const handoffLoad = mutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    fromDriverId: v.id('drivers'),
+    toDriverId: v.id('drivers'),
+  },
+  returns: v.object({
+    newLegId: v.id('dispatchLegs'),
+    fromSessionEnded: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const caller = await requireCallerIdentity(ctx);
+
+    const load = await ctx.db.get(args.loadId);
+    if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== caller.orgId) {
+      throw new Error('Not authorized for this load');
+    }
+
+    const [fromDriver, toDriver] = await Promise.all([
+      ctx.db.get(args.fromDriverId),
+      ctx.db.get(args.toDriverId),
+    ]);
+    if (!fromDriver || !toDriver) throw new Error('Driver not found');
+    if (toDriver.isDeleted || toDriver.employmentStatus !== 'Active') {
+      throw new Error('Destination driver is inactive');
+    }
+    if (toDriver.organizationId !== caller.orgId) {
+      throw new Error('Destination driver not in your organization');
+    }
+
+    const now = Date.now();
+
+    // Find the from-driver's ACTIVE leg on this load.
+    const activeLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', args.fromDriverId).eq('status', 'ACTIVE'))
+      .collect();
+    const oldLeg = activeLegs.find((l) => l.loadId === args.loadId);
+    if (!oldLeg) throw new Error('From-driver has no active leg on this load');
+
+    // Figure out where the new leg starts. Prefer the tracking frontier
+    // (where the from-driver was heading); fall back to the old leg's start.
+    const trackingState = await ctx.db
+      .query('loadTrackingState')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .first();
+
+    let newLegStartStopId: Id<'loadStops'> = oldLeg.startStopId;
+    if (trackingState) {
+      const frontierStop = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect()
+        .then((stops) =>
+          stops.find((s) => s.sequenceNumber === trackingState.currentStopSequenceNumber)
+        );
+      if (frontierStop) newLegStartStopId = frontierStop._id;
+    }
+
+    // Complete the old leg.
+    await ctx.db.patch(oldLeg._id, {
+      status: 'COMPLETED',
+      endedAt: now,
+      endReason: 'handoff',
+      updatedAt: now,
+    });
+
+    // Determine new leg sequence.
+    const allLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    const maxSequence = Math.max(...allLegs.map((l) => l.sequence));
+
+    // Create the new relay leg. Miles start at 0; pay calc can backfill.
+    const newLegId = await ctx.db.insert('dispatchLegs', {
+      loadId: args.loadId,
+      driverId: args.toDriverId,
+      truckId: toDriver.currentTruckId,
+      carrierPartnershipId: oldLeg.carrierPartnershipId,
+      sequence: maxSequence + 1,
+      startStopId: newLegStartStopId,
+      endStopId: oldLeg.endStopId,
+      legLoadedMiles: 0,
+      legEmptyMiles: 0,
+      status: 'PENDING',
+      plannedStartAt: now,
+      workosOrgId: load.workosOrgId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Transfer tracking state, if present. The new driver's session will
+    // be stamped on the tracking state when they check in at the new leg's
+    // first stop. For now, clear the tracking state's sessionId binding
+    // to the old session by setting driverId — sessionId stays as the old
+    // value until the relay driver's session activates on check-in.
+    if (trackingState) {
+      await ctx.db.patch(trackingState._id, {
+        driverId: args.toDriverId,
+        updatedAt: now,
+      });
+    }
+
+    // Maintain the primaryDriverId denorm cache if we just handed off leg 1.
+    if (oldLeg.sequence === 1 && load.primaryDriverId === args.fromDriverId) {
+      await ctx.db.patch(args.loadId, {
+        primaryDriverId: args.toDriverId,
+        updatedAt: now,
+      });
+    }
+
+    // If the from-driver has no other ACTIVE legs, end their session.
+    const remainingActive = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', args.fromDriverId).eq('status', 'ACTIVE'))
+      .collect();
+    let fromSessionEnded = false;
+    if (remainingActive.length === 0 && oldLeg.sessionId) {
+      await ctx.runMutation(internal.driverSessions.endSessionForHandoff, {
+        sessionId: oldLeg.sessionId,
+      });
+      fromSessionEnded = true;
+    }
+
+    return { newLegId, fromSessionEnded };
+  },
+});
+
+/**
+ * Mobile "what's on my plate" query. Returns PENDING + ACTIVE legs for the
+ * driver (the union can't be expressed in a single index scan on
+ * by_driver because the compound key is [driverId, status] — so we do two
+ * scans and merge).
+ *
+ * Used by the session-mode home screen's IN PROGRESS + UP NEXT sections.
+ */
+export const listPlannedAndActiveForDriver = query({
+  args: {
+    driverId: v.id('drivers'),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) return [];
+
+    const [pendingLegs, activeLegs] = await Promise.all([
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) => q.eq('driverId', args.driverId).eq('status', 'PENDING'))
+        .collect(),
+      ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) => q.eq('driverId', args.driverId).eq('status', 'ACTIVE'))
+        .collect(),
+    ]);
+    const legs = [...activeLegs, ...pendingLegs];
+
+    // Sort: ACTIVE first, then PENDING by plannedStartAt ascending (nulls last).
+    legs.sort((a, b) => {
+      if (a.status !== b.status) return a.status === 'ACTIVE' ? -1 : 1;
+      const aPlan = a.plannedStartAt ?? Number.POSITIVE_INFINITY;
+      const bPlan = b.plannedStartAt ?? Number.POSITIVE_INFINITY;
+      return aPlan - bPlan;
+    });
+
+    return legs;
+  },
+});
+
+/**
+ * Returns drivers in the caller's org who are eligible to take a handoff
+ * of the given load — i.e., drivers with no PENDING/ACTIVE legs that
+ * overlap the handoff load's remaining scheduled window.
+ *
+ * "Remaining window" is defined as [now, last-stop scheduled end). Off-
+ * shift drivers scheduled later are eligible; drivers on a conflicting
+ * load are not.
+ *
+ * Query-wise this is O(drivers × their legs). Paginate on the client if
+ * an org has more than ~500 drivers.
+ */
+export const getEligibleDriversForHandoff = query({
+  args: {
+    loadId: v.id('loadInformation'),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    if (stops.length === 0) return [];
+    const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    const lastStop = sortedStops[sortedStops.length - 1];
+    // Prefer the end of the delivery window; fall back to the begin time; then
+    // to "24 hours from now" as a last-ditch bound so we still return a list.
+    const handoffEnd =
+      parseStopDateTime(lastStop.windowEndDate, lastStop.windowEndTime) ??
+      parseStopDateTime(lastStop.windowBeginDate, lastStop.windowBeginTime) ??
+      Date.now() + 24 * 60 * 60 * 1000;
+    const handoffStart = Date.now();
+
+    const drivers = await ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
+      .collect();
+    const activeDrivers = drivers.filter(
+      (d) => !d.isDeleted && d.employmentStatus === 'Active'
+    );
+
+    const eligible: Doc<'drivers'>[] = [];
+    for (const driver of activeDrivers) {
+      const conflictLegs = await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_driver', (q) => q.eq('driverId', driver._id))
+        .filter((q) =>
+          q.or(q.eq(q.field('status'), 'PENDING'), q.eq(q.field('status'), 'ACTIVE'))
+        )
+        .collect();
+
+      const hasOverlap = await Promise.all(
+        conflictLegs.map(async (leg) => {
+          if (leg.loadId === args.loadId) return false; // handoff target itself
+          const range = await getLegTimeRange(ctx, leg);
+          if (!range) return false;
+          return doTimeRangesOverlap(
+            { start: handoffStart, end: handoffEnd },
+            { start: range.start, end: range.end }
+          );
+        })
+      ).then((flags) => flags.some(Boolean));
+
+      if (!hasOverlap) eligible.push(driver);
+    }
+
+    return eligible.map((d) => ({
+      _id: d._id,
+      firstName: d.firstName,
+      lastName: d.lastName,
+      phone: d.phone,
+      currentTruckId: d.currentTruckId,
+    }));
   },
 });

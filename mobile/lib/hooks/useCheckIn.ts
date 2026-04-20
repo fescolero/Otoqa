@@ -3,11 +3,79 @@ import { api } from '../../../convex/_generated/api';
 import { Id } from '../../../convex/_generated/dataModel';
 import { enqueueMutation } from '../offline-queue';
 import { uploadPODPhoto } from '../s3-upload';
-import { ensureTrackingForLoad, stopLocationTracking } from '../location-tracking';
+import {
+  ensureTrackingForLoad,
+  stopLocationTracking,
+  getTrackingState,
+  attachLoadToSession,
+  detachLoadFromSession,
+} from '../location-tracking';
 import * as Location from 'expo-location';
 import { useNetworkStatus } from './useNetworkStatus';
 import { usePostHog } from 'posthog-react-native';
 import { trackCheckinOfflineQueued, trackCheckinMutationTimeout } from '../analytics';
+
+/**
+ * Two tracking modes coexist on mobile during the rollout:
+ *
+ *   Session mode (Phase 3): the driver started a shift via the QR scan +
+ *     Start Shift flow. tracking-state.sessionId is set. Check-in attaches
+ *     the loadId to the existing ping stream; check-out detaches it but
+ *     keeps the session running. End Shift is the only way to fully stop.
+ *
+ *   Legacy load mode: no session exists. Check-in starts load-bound
+ *     tracking; last-stop checkout fully stops it. Same as today.
+ *
+ * Helpers below detect the mode by reading the persisted tracking state
+ * and route accordingly. Session mode is preferred when both could apply.
+ */
+async function attachLoadToTrackingForCheckIn(params: {
+  driverId: Id<'drivers'>;
+  loadId: Id<'loadInformation'>;
+  organizationId: string;
+}): Promise<{
+  success: boolean;
+  message: string;
+  mode: 'session' | 'legacy_load';
+  action?: 'attached' | 'started' | 'continued' | 'handoff';
+  previousLoadId?: string;
+}> {
+  const state = await getTrackingState();
+  if (state?.isActive && state.sessionId) {
+    const result = await attachLoadToSession(params.loadId);
+    return {
+      success: result.success,
+      message: result.message,
+      mode: 'session',
+      action: 'attached',
+    };
+  }
+  const legacy = await ensureTrackingForLoad(params);
+  return {
+    success: legacy.success,
+    message: legacy.message,
+    mode: 'legacy_load',
+    action: legacy.action,
+    previousLoadId: legacy.previousLoadId,
+  };
+}
+
+async function releaseLoadFromTrackingOnLastStop(): Promise<{
+  success: boolean;
+  message: string;
+  mode: 'session' | 'legacy_load';
+}> {
+  const state = await getTrackingState();
+  if (state?.isActive && state.sessionId) {
+    // Session mode: keep tracking running. Just dissociate the load from
+    // the ping stream. Driver ends the shift explicitly later.
+    const result = await detachLoadFromSession();
+    return { success: result.success, message: result.message, mode: 'session' };
+  }
+  // Legacy mode: last-stop checkout fully stops tracking.
+  const result = await stopLocationTracking();
+  return { success: result.success, message: result.message, mode: 'legacy_load' };
+}
 
 // ============================================
 // HOOK: CHECK-IN/OUT AT STOPS
@@ -98,29 +166,30 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           action: 'check_in',
         });
 
-        // Start tracking even when offline -- GPS points go to SQLite
+        // Attach load to tracking even when offline -- GPS points go to SQLite.
+        // Session mode: just attaches loadId to the existing ping stream.
+        // Legacy mode: starts load-bound tracking from scratch.
         if (options.loadId && options.organizationId) {
-          {
-            console.log(`[CheckIn] Stop ${options.stopSequence} (offline) - starting location tracking`);
-            try {
-              const trackingResult = await ensureTrackingForLoad({
-                driverId: options.driverId,
-                loadId: options.loadId,
-                organizationId: options.organizationId,
+          console.log(`[CheckIn] Stop ${options.stopSequence} (offline) - attaching load to tracking`);
+          try {
+            const trackingResult = await attachLoadToTrackingForCheckIn({
+              driverId: options.driverId,
+              loadId: options.loadId,
+              organizationId: options.organizationId,
+            });
+            if (trackingResult.action === 'handoff') {
+              posthog.capture('location_tracking_handed_off', {
+                fromLoadId: trackingResult.previousLoadId ?? null,
+                toLoadId: options.loadId,
+                stopId: options.stopId,
+                trigger: 'check_in_offline',
+                mode: trackingResult.mode,
+                success: trackingResult.success,
+                message: trackingResult.message,
               });
-              if (trackingResult.action === 'handoff') {
-                posthog.capture('location_tracking_handed_off', {
-                  fromLoadId: trackingResult.previousLoadId ?? null,
-                  toLoadId: options.loadId,
-                  stopId: options.stopId,
-                  trigger: 'check_in_offline',
-                  success: trackingResult.success,
-                  message: trackingResult.message,
-                });
-              }
-            } catch (trackErr) {
-              console.warn('[CheckIn] Tracking start failed while offline:', trackErr);
             }
+          } catch (trackErr) {
+            console.warn('[CheckIn] Tracking attach failed while offline:', trackErr);
           }
         }
 
@@ -147,38 +216,42 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           `[CheckIn] Tracking check: success=${result.success}, seq=${options.stopSequence}, total=${options.totalStops}, loadId=${options.loadId ? 'yes' : 'no'}, orgId=${options.organizationId ? 'yes' : 'no'}`,
         );
         if (result.success && options.loadId && options.organizationId) {
-          {
-            console.log(`[CheckIn] Stop ${options.stopSequence} check-in - tracking not running, starting now`);
-            const trackingResult = await ensureTrackingForLoad({
-              driverId: options.driverId,
-              loadId: options.loadId,
-              organizationId: options.organizationId,
+          console.log(
+            `[CheckIn] Stop ${options.stopSequence} check-in - attaching load to tracking`,
+          );
+          const trackingResult = await attachLoadToTrackingForCheckIn({
+            driverId: options.driverId,
+            loadId: options.loadId,
+            organizationId: options.organizationId,
+          });
+
+          const trigger = options.stopSequence === 1 ? 'check_in' : 'check_in_late_start';
+          if (trackingResult.action === 'handoff') {
+            posthog.capture('location_tracking_handed_off', {
+              fromLoadId: trackingResult.previousLoadId ?? null,
+              toLoadId: options.loadId,
+              stopId: options.stopId,
+              trigger,
+              mode: trackingResult.mode,
+              success: trackingResult.success,
+              message: trackingResult.message,
             });
+          } else if (trackingResult.action === 'started' || trackingResult.action === 'attached') {
+            posthog.capture('location_tracking_started', {
+              loadId: options.loadId ?? null,
+              stopId: options.stopId,
+              trigger,
+              mode: trackingResult.mode,
+              action: trackingResult.action,
+              success: trackingResult.success,
+              message: trackingResult.message,
+            });
+          }
 
-            if (trackingResult.action === 'handoff') {
-              posthog.capture('location_tracking_handed_off', {
-                fromLoadId: trackingResult.previousLoadId ?? null,
-                toLoadId: options.loadId,
-                stopId: options.stopId,
-                trigger: options.stopSequence === 1 ? 'check_in' : 'check_in_late_start',
-                success: trackingResult.success,
-                message: trackingResult.message,
-              });
-            } else if (trackingResult.action === 'started') {
-              posthog.capture('location_tracking_started', {
-                loadId: options.loadId ?? null,
-                stopId: options.stopId,
-                trigger: options.stopSequence === 1 ? 'check_in' : 'check_in_late_start',
-                success: trackingResult.success,
-                message: trackingResult.message,
-              });
-            }
-
-            if (!trackingResult.success) {
-              console.warn('[CheckIn] Location tracking failed to start:', trackingResult.message);
-              trackingFailed = true;
-              trackingMessage = trackingResult.message;
-            }
+          if (!trackingResult.success) {
+            console.warn('[CheckIn] Tracking attach failed:', trackingResult.message);
+            trackingFailed = true;
+            trackingMessage = trackingResult.message;
           }
         }
 
@@ -196,29 +269,28 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           error: onlineError instanceof Error ? onlineError.message : 'timeout',
         });
 
-        // Still try to start tracking even if the mutation was queued
+        // Still attach load to tracking even if the mutation was queued
         if (options.loadId && options.organizationId) {
-          {
-            console.log(`[CheckIn] Stop ${options.stopSequence} (queued) - starting location tracking`);
-            try {
-              const trackingResult = await ensureTrackingForLoad({
-                driverId: options.driverId,
-                loadId: options.loadId,
-                organizationId: options.organizationId,
+          console.log(`[CheckIn] Stop ${options.stopSequence} (queued) - attaching load to tracking`);
+          try {
+            const trackingResult = await attachLoadToTrackingForCheckIn({
+              driverId: options.driverId,
+              loadId: options.loadId,
+              organizationId: options.organizationId,
+            });
+            if (trackingResult.action === 'handoff') {
+              posthog.capture('location_tracking_handed_off', {
+                fromLoadId: trackingResult.previousLoadId ?? null,
+                toLoadId: options.loadId,
+                stopId: options.stopId,
+                trigger: 'check_in_queued',
+                mode: trackingResult.mode,
+                success: trackingResult.success,
+                message: trackingResult.message,
               });
-              if (trackingResult.action === 'handoff') {
-                posthog.capture('location_tracking_handed_off', {
-                  fromLoadId: trackingResult.previousLoadId ?? null,
-                  toLoadId: options.loadId,
-                  stopId: options.stopId,
-                  trigger: 'check_in_queued',
-                  success: trackingResult.success,
-                  message: trackingResult.message,
-                });
-              }
-            } catch (trackErr) {
-              console.warn('[CheckIn] Tracking start failed after queue:', trackErr);
             }
+          } catch (trackErr) {
+            console.warn('[CheckIn] Tracking attach failed after queue:', trackErr);
           }
         }
 
@@ -345,47 +417,56 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           const isLastStop = options.stopSequence === options.totalStops;
 
           if (isLastStop) {
-            console.log('[CheckOut] Last stop - stopping location tracking');
-            const trackingResult = await stopLocationTracking();
+            // Session mode: detach load (keep tracking running for the rest
+            // of the shift). Legacy mode: stop tracking entirely.
+            console.log('[CheckOut] Last stop - releasing load from tracking');
+            const trackingResult = await releaseLoadFromTrackingOnLastStop();
 
             posthog.capture('location_tracking_stopped', {
               loadId: options.loadId ?? null,
               stopId: options.stopId,
+              mode: trackingResult.mode,
               success: trackingResult.success,
             });
           } else {
-            {
-              console.log(`[CheckOut] Stop ${options.stopSequence} checkout - tracking not running, starting now`);
-              const trackingResult = await ensureTrackingForLoad({
-                driverId: options.driverId,
-                loadId: options.loadId,
-                organizationId: options.organizationId,
+            console.log(
+              `[CheckOut] Stop ${options.stopSequence} checkout - re-attaching load to tracking`,
+            );
+            const trackingResult = await attachLoadToTrackingForCheckIn({
+              driverId: options.driverId,
+              loadId: options.loadId,
+              organizationId: options.organizationId,
+            });
+
+            if (trackingResult.action === 'handoff') {
+              posthog.capture('location_tracking_handed_off', {
+                fromLoadId: trackingResult.previousLoadId ?? null,
+                toLoadId: options.loadId,
+                stopId: options.stopId,
+                trigger: 'check_out_late_start',
+                mode: trackingResult.mode,
+                success: trackingResult.success,
+                message: trackingResult.message,
               });
+            } else if (
+              trackingResult.action === 'started' ||
+              trackingResult.action === 'attached'
+            ) {
+              posthog.capture('location_tracking_started', {
+                loadId: options.loadId ?? null,
+                stopId: options.stopId,
+                trigger: 'check_out_late_start',
+                mode: trackingResult.mode,
+                action: trackingResult.action,
+                success: trackingResult.success,
+                message: trackingResult.message,
+              });
+            }
 
-              if (trackingResult.action === 'handoff') {
-                posthog.capture('location_tracking_handed_off', {
-                  fromLoadId: trackingResult.previousLoadId ?? null,
-                  toLoadId: options.loadId,
-                  stopId: options.stopId,
-                  trigger: 'check_out_late_start',
-                  success: trackingResult.success,
-                  message: trackingResult.message,
-                });
-              } else if (trackingResult.action === 'started') {
-                posthog.capture('location_tracking_started', {
-                  loadId: options.loadId ?? null,
-                  stopId: options.stopId,
-                  trigger: 'check_out_late_start',
-                  success: trackingResult.success,
-                  message: trackingResult.message,
-                });
-              }
-
-              if (!trackingResult.success) {
-                console.warn('[CheckOut] Location tracking failed to start:', trackingResult.message);
-                trackingFailed = true;
-                trackingMessage = trackingResult.message;
-              }
+            if (!trackingResult.success) {
+              console.warn('[CheckOut] Tracking attach failed:', trackingResult.message);
+              trackingFailed = true;
+              trackingMessage = trackingResult.message;
             }
           }
         }
