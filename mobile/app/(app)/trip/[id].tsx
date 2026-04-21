@@ -160,9 +160,12 @@ export default function TripDetailScreen() {
   >([]);
 
   // Accident sheet: optional photo that becomes an Accident-typed
-  // document alongside the tel: dial. Kept separate from the legacy
-  // POD `photoUri` state so they don't collide.
+  // document. Kept separate from the legacy POD `photoUri` state so
+  // they don't collide.
   const [accidentPhotoUri, setAccidentPhotoUri] = useState<string | null>(null);
+  // Gates the Report button + disables re-submit while the upload is in
+  // flight. Reset in both the success path and every failure branch.
+  const [isReportingAccident, setIsReportingAccident] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -1657,18 +1660,20 @@ export default function TripDetailScreen() {
         <AccidentSheet
           visible={showAccidentSheet}
           palette={palette}
-          contactPhone={load.contactPersonPhone}
           kind={accidentKind}
           setKind={setAccidentKind}
           note={accidentNote}
           setNote={setAccidentNote}
           hasPhoto={!!accidentPhotoUri}
           onCapturePhoto={captureAccidentPhoto}
+          isReporting={isReportingAccident}
           onClose={() => {
             setShowAccidentSheet(false);
             setAccidentPhotoUri(null);
           }}
-          onPageOps={async () => {
+          onReport={async () => {
+            if (!driverId || !id) return;
+            setIsReportingAccident(true);
             posthog?.capture('accident_reported', {
               loadId: id,
               kind: accidentKind,
@@ -1676,40 +1681,63 @@ export default function TripDetailScreen() {
               hasPhoto: !!accidentPhotoUri,
             });
 
-            // Write an Accident-typed document to loadDocuments so ops
-            // has a record with GPS + timestamp. The kind chip + driver
-            // note are concatenated into the `note` field (ACCIDENT rows
-            // don't have dedicated subtype columns by design).
-            if (driverId && id) {
-              try {
-                const payloadNote = accidentNote
-                  ? `${accidentKind} — ${accidentNote}`
-                  : accidentKind;
-                if (accidentPhotoUri) {
-                  await uploadDocument({
-                    loadId: id as Id<'loadInformation'>,
-                    driverId,
-                    type: 'Accident',
-                    photoUri: accidentPhotoUri,
-                    note: payloadNote,
-                  });
-                }
-              } catch (uploadErr) {
-                // Don't block the tel: handoff on an upload failure;
-                // driver's call to ops is the priority. The queue will
-                // retry the document in the background.
-                console.warn('[Accident] Document upload failed, continuing tel dial', uploadErr);
+            // Write an Accident-typed document. The "what happened" chip
+            // is sent as `accidentKind` — lands on the R2 object as the
+            // `accident-kind` metadata field, searchable from the bucket
+            // without hitting Convex. The free-text description stays in
+            // `note` (per-row on Convex, not in metadata; S3 per-object
+            // metadata is capped at 2KB and better suited to short
+            // structured values).
+            //
+            // Photo is optional — if the driver skipped it we still
+            // want the record; we just upload a minimal placeholder
+            // photo... actually, the backend requires externalUrl OR
+            // storageId, so without a photo the driver gets an inline
+            // warning (below). We enforce here rather than silently
+            // no-op'ing.
+            if (!accidentPhotoUri) {
+              Alert.alert(
+                'Photo required',
+                'Accident reports need a photo. Tap "Attach photo" to capture one before reporting.',
+              );
+              setIsReportingAccident(false);
+              return;
+            }
+
+            try {
+              const result = await uploadDocument({
+                loadId: id as Id<'loadInformation'>,
+                driverId,
+                type: 'Accident',
+                photoUri: accidentPhotoUri,
+                note: accidentNote || undefined,
+                accidentKind,
+              });
+
+              if (!result.success) {
+                Alert.alert('Report failed', result.message);
+                setIsReportingAccident(false);
+                return;
               }
+
+              Alert.alert(
+                result.queued ? 'Queued' : 'Reported',
+                result.queued
+                  ? 'No signal — the report will upload when connected.'
+                  : 'Dispatch will see this incident.',
+              );
+            } catch (uploadErr) {
+              const msg = uploadErr instanceof Error ? uploadErr.message : 'Report failed';
+              Alert.alert('Report failed', msg);
+              setIsReportingAccident(false);
+              return;
             }
 
             setShowAccidentSheet(false);
             setAccidentKind('Collision');
             setAccidentNote('');
             setAccidentPhotoUri(null);
-
-            if (load.contactPersonPhone) {
-              Linking.openURL(`tel:${load.contactPersonPhone}`);
-            }
+            setIsReportingAccident(false);
           }}
         />
 
@@ -2501,7 +2529,6 @@ const ACCIDENT_KINDS = [
 function AccidentSheet({
   visible,
   palette,
-  contactPhone,
   kind,
   setKind,
   note,
@@ -2509,24 +2536,26 @@ function AccidentSheet({
   hasPhoto,
   onCapturePhoto,
   onClose,
-  onPageOps,
+  onReport,
+  isReporting,
 }: {
   visible: boolean;
   palette: Palette;
-  contactPhone?: string;
   kind: string;
   setKind: (k: string) => void;
   note: string;
   setNote: (n: string) => void;
-  // Optional photo attachment — driver can capture before paging ops so
-  // the Accident record lands with visual evidence. The sheet hosts the
-  // affordance but the photoUri lives on the parent (same pattern as
-  // the legacy POD modal) so the upload mutation can fire alongside the
-  // tel: handoff.
+  // Optional photo attachment — driver captures visual evidence that
+  // lands as an Accident-typed document alongside the structured kind
+  // chip and the free-text description. The parent owns photoUri so the
+  // upload fires from the same place as the mutation.
   hasPhoto: boolean;
   onCapturePhoto: () => void;
   onClose: () => void;
-  onPageOps: () => void;
+  // Creates the Accident-typed loadDocuments row (+ R2 object with the
+  // kind stamped as metadata). Parent clears sheet state after success.
+  onReport: () => void;
+  isReporting: boolean;
 }) {
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -2536,7 +2565,7 @@ function AccidentSheet({
             palette={palette}
             onClose={onClose}
             title="Report an accident"
-            subtitle="Ops is paged immediately and will call you back."
+            subtitle="Logs an incident record with your GPS, time, and photo (if attached)."
           >
             <View
               style={{
@@ -2676,11 +2705,11 @@ function AccidentSheet({
               <SheetButton palette={palette} label="Cancel" variant="secondary" onPress={onClose} />
               <SheetButton
                 palette={palette}
-                label={contactPhone ? 'Page ops now' : 'No number on file'}
+                label={isReporting ? 'Reporting…' : 'Report'}
                 variant="danger"
-                icon="phone"
-                disabled={!contactPhone}
-                onPress={onPageOps}
+                icon="check"
+                disabled={isReporting}
+                onPress={onReport}
               />
             </View>
           </SheetFrame>

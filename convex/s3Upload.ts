@@ -147,6 +147,13 @@ export const getLoadDocumentUploadUrl = action({
     capturedLat: v.optional(v.number()),
     capturedLng: v.optional(v.number()),
     gpsAccuracyM: v.optional(v.number()),
+    // Accident-type only: the structured "what happened" chip (Collision
+    // / Trailer damage / ...). Lands on the R2 object as `accident-kind`
+    // metadata so ops can filter the bucket for a specific incident
+    // type without hitting Convex. Free-text description continues to
+    // live in the loadDocuments row's `note` column — metadata is only
+    // for short structured values.
+    accidentKind: v.optional(v.string()),
   },
   returns: v.object({
     uploadUrl: v.string(),
@@ -185,6 +192,13 @@ export const getLoadDocumentUploadUrl = action({
       metadata['captured-lng'] = args.capturedLng.toFixed(6);
     if (typeof args.gpsAccuracyM === 'number')
       metadata['gps-accuracy-m'] = args.gpsAccuracyM.toFixed(1);
+    // accident-kind is only meaningful on Accident-typed objects; the
+    // client guards that at the call site. Values are short, whitespace
+    // is trimmed, and we don't enforce an enum here in case a future
+    // AccidentSheet adds chips without a corresponding server deploy.
+    if (args.accidentKind) {
+      metadata['accident-kind'] = args.accidentKind.trim();
+    }
 
     const command = new PutObjectCommand({
       Bucket: bucket,
