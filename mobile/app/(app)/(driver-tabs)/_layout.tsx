@@ -11,6 +11,7 @@
 import React from 'react';
 import { Tabs } from 'expo-router';
 import { View, StyleSheet, Text, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLanguage } from '../../../lib/LanguageContext';
 import { useTheme } from '../../../lib/ThemeContext';
 import { Icon, type IconName } from '../../../lib/design-icons';
@@ -55,6 +56,14 @@ const TabLabel: React.FC<{ label: string; focused: boolean; palette: Palette }> 
 export default function DriverTabs() {
   const { palette } = useTheme();
   const { t } = useLanguage();
+  const insets = useSafeAreaInsets();
+
+  // iOS bakes the 34pt home-indicator inset into paddingBottom: 24;
+  // on Android we have to read the real nav-bar inset (0 on gesture
+  // phones, ~48 on three-button). Add it to both height and padding
+  // so the icons don't sit under the system bar.
+  const bottomInset = Platform.OS === 'ios' ? 24 : Math.max(insets.bottom, 10);
+  const tabHeight = (Platform.OS === 'ios' ? 60 : 58) + bottomInset;
 
   return (
     <Tabs
@@ -64,9 +73,9 @@ export default function DriverTabs() {
           backgroundColor: palette.bgSurface,
           borderTopWidth: StyleSheet.hairlineWidth,
           borderTopColor: palette.borderSubtle,
-          height: Platform.OS === 'ios' ? 84 : 68,
+          height: tabHeight,
           paddingTop: 8,
-          paddingBottom: Platform.OS === 'ios' ? 24 : 10,
+          paddingBottom: bottomInset,
           elevation: 0,
         },
         tabBarItemStyle: {
