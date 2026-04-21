@@ -1,435 +1,592 @@
-import React, { useState, useEffect, useCallback } from 'react';
+/**
+ * Permissions — Otoqa Driver design system.
+ *
+ * Ports lib/permissions-screen.jsx: hero status summary, Required +
+ * Optional grouped lists with expandable rows that reveal the "why"
+ * copy, and a sticky bottom "Open device settings" button (the only
+ * place permission state can actually change on iOS for most toggles).
+ *
+ * Uses live status from expo-location, expo-camera, expo-image-picker,
+ * and expo-notifications so the summary reflects reality.
+ */
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  Pressable,
-  ScrollView,
   Linking,
   Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { Camera } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import { Camera } from 'expo-camera';
+import * as Notifications from 'expo-notifications';
+import { Icon, type IconName } from '../../lib/design-icons';
+import { useTheme } from '../../lib/ThemeContext';
+import { radii, typeScale, type Palette } from '../../lib/design-tokens';
 
-// ============================================
-// DESIGN SYSTEM
-// ============================================
-const colors = {
-  background: '#1a1d21',
-  foreground: '#f3f4f6',
-  foregroundMuted: '#9ca3af',
-  primary: '#ff6b00',
-  primaryForeground: '#1a1d21',
-  secondary: '#eab308',
-  muted: '#2d323b',
-  card: '#22262b',
-  cardForeground: '#f3f4f6',
-  border: '#3f4552',
-  destructive: '#ef4444',
-  success: '#10b981',
-};
+type PermKey = 'location' | 'camera' | 'notifications' | 'photos';
 
-const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 20,
-  '2xl': 24,
-};
+// For location we track three buckets matching the design spec so the
+// "While using" warning can light up. Other permissions are binary.
+type PermState = 'always' | 'while-using' | 'granted' | 'denied' | 'unknown';
 
-const borderRadius = {
-  md: 8,
-  lg: 12,
-  xl: 16,
-  '2xl': 20,
-  full: 9999,
-};
-
-// ============================================
-// PERMISSIONS SCREEN
-// App Permissions Management
-// ============================================
-
-interface PermissionItem {
-  id: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  title: string;
-  subtitle: string;
-  description: string;
-  enabled: boolean;
+interface PermItem {
+  key: PermKey;
+  icon: IconName;
+  label: string;
+  why: string;
   required: boolean;
+  state: PermState;
 }
+
+const INITIAL_ITEMS: PermItem[] = [
+  {
+    key: 'location',
+    icon: 'location',
+    label: 'Location',
+    why:
+      'Tracks deliveries and route progress. Set to Always so we can log drop-offs while the app is in the background.',
+    required: true,
+    state: 'unknown',
+  },
+  {
+    key: 'camera',
+    icon: 'search',
+    label: 'Camera',
+    why: 'Scan truck QR codes and capture proof-of-delivery photos.',
+    required: true,
+    state: 'unknown',
+  },
+  {
+    key: 'notifications',
+    icon: 'bell',
+    label: 'Notifications',
+    why:
+      'New loads, detours, and dispatcher messages. Silenced during rest hours.',
+    required: true,
+    state: 'unknown',
+  },
+  {
+    key: 'photos',
+    icon: 'clipboard',
+    label: 'Photo library',
+    why: 'Upload previously taken photos of receipts and documentation.',
+    required: false,
+    state: 'unknown',
+  },
+];
 
 export default function PermissionsScreen() {
   const router = useRouter();
-  const insets = useSafeAreaInsets();
+  const { palette } = useTheme();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
 
-  const [permissions, setPermissions] = useState<PermissionItem[]>([
-    {
-      id: 'location',
-      icon: 'location',
-      title: 'Location Services',
-      subtitle: 'Required for route tracking',
-      description: 'Allows the app to provide turn-by-turn navigation and estimated arrival times for dispatchers.',
-      enabled: false,
-      required: true,
-    },
-    {
-      id: 'camera',
-      icon: 'camera',
-      title: 'Camera',
-      subtitle: 'Used for document scanning',
-      description: 'Needed to take photos of bills of lading (BOL) and proof of delivery documents.',
-      enabled: false,
-      required: true,
-    },
-    {
-      id: 'notifications',
-      icon: 'notifications',
-      title: 'Notifications',
-      subtitle: 'Load updates and alerts',
-      description: 'Receive real-time alerts for new assignments, schedule changes, and weather warnings.',
-      enabled: false,
-      required: true,
-    },
-    {
-      id: 'microphone',
-      icon: 'mic',
-      title: 'Microphone',
-      subtitle: 'Voice-to-text messaging',
-      description: 'Enable this to use voice commands or record audio notes for load summaries.',
-      enabled: false,
-      required: false,
-    },
-    {
-      id: 'photos',
-      icon: 'images',
-      title: 'Photo Library',
-      subtitle: 'Access saved photos',
-      description: 'Allows you to upload previously taken photos of receipts and documentation.',
-      enabled: false,
-      required: false,
-    },
-  ]);
+  const [items, setItems] = useState<PermItem[]>(INITIAL_ITEMS);
+  const [openKey, setOpenKey] = useState<PermKey | null>(null);
 
-  const checkPermissions = useCallback(async () => {
-    const locationStatus = await Location.getForegroundPermissionsAsync();
-    const cameraStatus = await Camera.getCameraPermissionsAsync();
-    const micStatus = await Camera.getMicrophonePermissionsAsync();
-    const photoStatus = await ImagePicker.getMediaLibraryPermissionsAsync();
+  const refresh = useCallback(async () => {
+    const [fg, bg, cam, photos, notifs] = await Promise.all([
+      Location.getForegroundPermissionsAsync(),
+      Location.getBackgroundPermissionsAsync().catch(() => null),
+      Camera.getCameraPermissionsAsync(),
+      ImagePicker.getMediaLibraryPermissionsAsync(),
+      Notifications.getPermissionsAsync().catch(() => null),
+    ]);
 
-    const statusById: Record<string, boolean> = {
-      location: locationStatus.granted,
-      camera: cameraStatus.granted,
-      notifications: true,
-      microphone: micStatus.granted,
-      photos: photoStatus.granted,
-    };
+    const locationState: PermState = !fg.granted
+      ? 'denied'
+      : bg?.granted
+        ? 'always'
+        : 'while-using';
+    const cameraState: PermState = cam.granted ? 'granted' : 'denied';
+    const photoState: PermState = photos.granted ? 'granted' : 'denied';
+    const notifState: PermState = notifs
+      ? notifs.status === 'granted' ||
+        (Platform.OS === 'ios' &&
+          (notifs.ios?.status === Notifications.IosAuthorizationStatus.AUTHORIZED ||
+            notifs.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL))
+        ? 'granted'
+        : 'denied'
+      : 'unknown';
 
-    setPermissions((current) =>
-      current.map((permission) => {
-        const enabled = statusById[permission.id];
-        return typeof enabled === 'boolean' ? { ...permission, enabled } : permission;
-      })
+    setItems((prev) =>
+      prev.map((it) => {
+        if (it.key === 'location') return { ...it, state: locationState };
+        if (it.key === 'camera') return { ...it, state: cameraState };
+        if (it.key === 'notifications') return { ...it, state: notifState };
+        if (it.key === 'photos') return { ...it, state: photoState };
+        return it;
+      }),
     );
   }, []);
 
-  // Check permission statuses on mount
   useEffect(() => {
-    void checkPermissions();
-  }, [checkPermissions]);
-
-  const requestPermission = async (id: string) => {
-    switch (id) {
-      case 'location':
-        await Location.requestForegroundPermissionsAsync();
-        break;
-      case 'camera':
-        await Camera.requestCameraPermissionsAsync();
-        break;
-      case 'notifications':
-        // Open device settings for notifications
-        openSettings();
-        return;
-      case 'microphone':
-        await Camera.requestMicrophonePermissionsAsync();
-        break;
-      case 'photos':
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
-        break;
-    }
-    // Refresh permissions after request
-    await checkPermissions();
-  };
+    void refresh();
+  }, [refresh]);
 
   const openSettings = () => {
-    if (Platform.OS === 'ios') {
-      Linking.openURL('app-settings:');
-    } else {
-      Linking.openSettings();
-    }
+    if (Platform.OS === 'ios') void Linking.openURL('app-settings:');
+    else void Linking.openSettings();
   };
 
-  const requiredPermissions = permissions.filter(p => p.required);
-  const optionalPermissions = permissions.filter(p => !p.required);
+  const requestFor = async (key: PermKey) => {
+    if (key === 'location') {
+      // Request foreground first; then escalate to background if granted.
+      const fg = await Location.requestForegroundPermissionsAsync();
+      if (fg.granted) {
+        await Location.requestBackgroundPermissionsAsync().catch(() => null);
+      }
+    } else if (key === 'camera') {
+      await Camera.requestCameraPermissionsAsync();
+    } else if (key === 'photos') {
+      await ImagePicker.requestMediaLibraryPermissionsAsync();
+    } else if (key === 'notifications') {
+      await Notifications.requestPermissionsAsync({
+        ios: { allowAlert: true, allowBadge: true, allowSound: true },
+      }).catch(() => null);
+    }
+    await refresh();
+  };
 
-  const renderPermissionCard = (permission: PermissionItem) => (
-    <View key={permission.id} style={styles.permissionCard}>
-      <View style={styles.permissionHeader}>
-        <View style={styles.permissionIconContainer}>
-          <Ionicons name={permission.icon} size={20} color={colors.foregroundMuted} />
-        </View>
-        <View style={styles.permissionTitleContainer}>
-          <Text style={styles.permissionTitle}>{permission.title}</Text>
-          <Text style={styles.permissionSubtitle}>{permission.subtitle}</Text>
-        </View>
-        <View style={[
-          styles.statusBadge,
-          permission.enabled ? styles.statusBadgeEnabled : styles.statusBadgeDisabled
-        ]}>
-          <View style={[
-            styles.statusDot,
-            permission.enabled ? styles.statusDotEnabled : styles.statusDotDisabled
-          ]} />
-          <Text style={[
-            styles.statusText,
-            permission.enabled ? styles.statusTextEnabled : styles.statusTextDisabled
-          ]}>
-            {permission.enabled ? 'ENABLED' : 'DISABLED'}
-          </Text>
-        </View>
-      </View>
-      <Text style={styles.permissionDescription}>{permission.description}</Text>
-      {!permission.enabled && (
-        <Pressable 
-          style={styles.grantButton}
-          onPress={() => requestPermission(permission.id)}
-        >
-          <Text style={styles.grantButtonText}>Grant Permission</Text>
-          <Ionicons name="arrow-forward" size={16} color={colors.primary} />
-        </Pressable>
-      )}
-    </View>
-  );
+  // ---- Summary ------------------------------------------------------------
+  const counts = useMemo(() => {
+    const c = { ok: 0, warn: 0, bad: 0, opt: 0 };
+    for (const it of items) {
+      const bucket = stateBucket(it);
+      if (bucket === 'bad' && !it.required) c.opt++;
+      else c[bucket as 'ok' | 'warn' | 'bad']++;
+    }
+    return c;
+  }, [items]);
+
+  const summary = summarize(counts, palette);
+  const required = items.filter((i) => i.required);
+  const optional = items.filter((i) => !i.required);
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Pressable style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+    <SafeAreaView style={styles.screen} edges={['top']}>
+      <View style={styles.topBar}>
+        <Pressable
+          onPress={() => router.back()}
+          accessibilityLabel="Back"
+          style={({ pressed }) => [styles.topBarBtn, pressed && { opacity: 0.7 }]}
+        >
+          <Icon name="arrow-left" size={22} color={palette.textPrimary} />
         </Pressable>
-        <Text style={styles.headerTitle}>App Permissions</Text>
-        <View style={styles.headerSpacer} />
+        <Text style={styles.topBarTitle}>Permissions</Text>
+        <View style={{ width: 44 }} />
       </View>
 
-      <ScrollView 
-        style={styles.scrollView}
-        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 40 }]}
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
       >
-        {/* Description */}
-        <Text style={styles.description}>
-          To get the best experience and ensure all safety features work correctly, the app requires the following
-        </Text>
+        {/* Hero summary */}
+        <View style={styles.heroWrap}>
+          <Text style={styles.heroEyebrow}>Overall</Text>
+          <Text style={[styles.heroHeadline, { color: summary.color }]}>
+            {summary.headline}
+          </Text>
 
-        {/* Required Permissions */}
-        <Text style={styles.sectionTitle}>Required Permissions</Text>
-        <View style={styles.permissionsSection}>
-          {requiredPermissions.map(renderPermissionCard)}
+          <View style={styles.bar}>
+            {counts.ok > 0 && (
+              <View style={{ flex: counts.ok, backgroundColor: palette.success }} />
+            )}
+            {counts.warn > 0 && (
+              <View style={{ flex: counts.warn, backgroundColor: palette.warning }} />
+            )}
+            {counts.bad > 0 && (
+              <View style={{ flex: counts.bad, backgroundColor: palette.danger }} />
+            )}
+            {counts.opt > 0 && (
+              <View
+                style={{
+                  flex: counts.opt,
+                  backgroundColor: palette.textTertiary,
+                  opacity: 0.4,
+                }}
+              />
+            )}
+          </View>
+
+          <View style={styles.legend}>
+            {counts.ok > 0 && <Legend palette={palette} swatch={palette.success} label={`${counts.ok} on`} />}
+            {counts.warn > 0 && (
+              <Legend palette={palette} swatch={palette.warning} label={`${counts.warn} attention`} />
+            )}
+            {counts.bad > 0 && (
+              <Legend palette={palette} swatch={palette.danger} label={`${counts.bad} off`} />
+            )}
+            {counts.opt > 0 && (
+              <Legend
+                palette={palette}
+                swatch={palette.textTertiary}
+                label={`${counts.opt} optional off`}
+                dim
+              />
+            )}
+          </View>
         </View>
 
-        {/* Optional Permissions */}
-        <Text style={styles.sectionTitle}>Optional Permissions</Text>
-        <View style={styles.permissionsSection}>
-          {optionalPermissions.map(renderPermissionCard)}
-        </View>
-
-        {/* Open Settings Button */}
-        <Pressable style={styles.settingsButton} onPress={openSettings}>
-          <Ionicons name="settings-outline" size={20} color={colors.foreground} />
-          <Text style={styles.settingsButtonText}>Open Device Settings</Text>
-        </Pressable>
+        <PermGroup
+          palette={palette}
+          title="Required"
+          items={required}
+          openKey={openKey}
+          setOpenKey={setOpenKey}
+          onRequest={requestFor}
+        />
+        {optional.length > 0 && (
+          <PermGroup
+            palette={palette}
+            title="Optional"
+            items={optional}
+            openKey={openKey}
+            setOpenKey={setOpenKey}
+            onRequest={requestFor}
+          />
+        )}
       </ScrollView>
-    </View>
+
+      <View style={styles.stickyWrap}>
+        <Pressable
+          onPress={openSettings}
+          style={({ pressed }) => [styles.settingsBtn, pressed && { opacity: 0.9 }]}
+        >
+          <Icon name="settings" size={16} color={palette.textPrimary} />
+          <Text style={styles.settingsBtnText}>Open device settings</Text>
+          <Icon name="arrow-right" size={14} color={palette.textTertiary} />
+        </Pressable>
+      </View>
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
+// ============================================================================
+// PIECES
+// ============================================================================
 
-  // Header
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md,
-  },
-  backButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: `${colors.muted}80`,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-  headerSpacer: {
-    width: 44,
-  },
+const Legend: React.FC<{
+  palette: Palette;
+  swatch: string;
+  label: string;
+  dim?: boolean;
+}> = ({ palette, swatch, label, dim }) => (
+  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, opacity: dim ? 0.7 : 1 }}>
+    <View style={{ width: 6, height: 6, borderRadius: 999, backgroundColor: swatch }} />
+    <Text style={{ fontSize: 11, color: palette.textTertiary }}>{label}</Text>
+  </View>
+);
 
-  // Scroll
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: spacing.lg,
-  },
+const PermGroup: React.FC<{
+  palette: Palette;
+  title: string;
+  items: PermItem[];
+  openKey: PermKey | null;
+  setOpenKey: (k: PermKey | null) => void;
+  onRequest: (k: PermKey) => void;
+}> = ({ palette, title, items, openKey, setOpenKey, onRequest }) => {
+  const styles = makeStyles(palette);
+  return (
+    <View style={styles.groupWrap}>
+      <Text style={styles.groupLabel}>{title.toUpperCase()}</Text>
+      <View style={styles.groupCard}>
+        {items.map((p, i) => (
+          <View
+            key={p.key}
+            style={[
+              i < items.length - 1 && {
+                borderBottomWidth: StyleSheet.hairlineWidth,
+                borderBottomColor: palette.borderSubtle,
+              },
+            ]}
+          >
+            <PermRow
+              palette={palette}
+              perm={p}
+              open={openKey === p.key}
+              onToggle={() => setOpenKey(openKey === p.key ? null : p.key)}
+              onRequest={() => onRequest(p.key)}
+            />
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+};
 
-  // Description
-  description: {
-    fontSize: 15,
-    color: colors.foregroundMuted,
-    lineHeight: 22,
-    marginBottom: spacing.xl,
-  },
+const PermRow: React.FC<{
+  palette: Palette;
+  perm: PermItem;
+  open: boolean;
+  onToggle: () => void;
+  onRequest: () => void;
+}> = ({ palette, perm, open, onToggle, onRequest }) => {
+  const styles = makeStyles(palette);
+  const bucket = stateBucket(perm);
+  const showWarn =
+    bucket === 'warn' || (bucket === 'bad' && perm.required);
+  const warnTone =
+    bucket === 'warn'
+      ? { bg: 'rgba(245,158,11,0.14)', fg: palette.warning }
+      : { bg: 'rgba(239,68,68,0.14)', fg: palette.danger };
 
-  // Section
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: colors.foreground,
-    marginBottom: spacing.md,
-    marginTop: spacing.md,
-  },
+  const stateLabel = (() => {
+    if (perm.key === 'location') {
+      if (perm.state === 'always') return 'Always';
+      if (perm.state === 'while-using') return 'While using';
+      return 'Off';
+    }
+    return perm.state === 'granted' ? 'On' : 'Off';
+  })();
 
-  // Permissions Section
-  permissionsSection: {
-    backgroundColor: colors.card,
-    borderRadius: borderRadius['2xl'],
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: `${colors.border}50`,
-  },
+  const ctaLabel =
+    perm.key === 'location' && perm.state === 'while-using'
+      ? 'Change to Always'
+      : 'Turn on';
 
-  // Permission Card
-  permissionCard: {
-    padding: spacing.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: `${colors.border}30`,
-  },
-  permissionHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: spacing.md,
-  },
-  permissionIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: borderRadius.lg,
-    backgroundColor: `${colors.muted}80`,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: spacing.md,
-  },
-  permissionTitleContainer: {
-    flex: 1,
-  },
-  permissionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.foreground,
-    marginBottom: 2,
-  },
-  permissionSubtitle: {
-    fontSize: 13,
-    color: colors.foregroundMuted,
-  },
-  permissionDescription: {
-    fontSize: 14,
-    color: colors.foregroundMuted,
-    lineHeight: 20,
-    fontStyle: 'italic',
-  },
+  return (
+    <View>
+      <Pressable
+        onPress={onToggle}
+        style={({ pressed }) => [styles.row, pressed && { opacity: 0.85 }]}
+      >
+        <View
+          style={[
+            styles.rowIcon,
+            showWarn && { backgroundColor: warnTone.bg },
+          ]}
+        >
+          <Icon
+            name={perm.icon}
+            size={16}
+            color={showWarn ? warnTone.fg : palette.textSecondary}
+          />
+        </View>
+        <Text style={styles.rowLabel}>{perm.label}</Text>
+        <Text
+          style={[
+            styles.rowState,
+            showWarn && { color: warnTone.fg },
+          ]}
+        >
+          {stateLabel}
+        </Text>
+        <Icon
+          name={open ? 'chevron-down' : 'chevron-down'}
+          size={14}
+          color={palette.textTertiary}
+        />
+      </Pressable>
+      {open && (
+        <View style={styles.rowExpand}>
+          <Text style={styles.rowWhy}>{perm.why}</Text>
+          {showWarn && (
+            <Pressable
+              onPress={onRequest}
+              style={({ pressed }) => [styles.rowAction, pressed && { opacity: 0.85 }]}
+            >
+              <Icon name="settings" size={12} color="#fff" />
+              <Text style={styles.rowActionText}>{ctaLabel}</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+    </View>
+  );
+};
 
-  // Status Badge
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: borderRadius.md,
-  },
-  statusBadgeEnabled: {
-    backgroundColor: `${colors.success}15`,
-  },
-  statusBadgeDisabled: {
-    backgroundColor: `${colors.destructive}15`,
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  statusDotEnabled: {
-    backgroundColor: colors.success,
-  },
-  statusDotDisabled: {
-    backgroundColor: colors.destructive,
-  },
-  statusText: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  statusTextEnabled: {
-    color: colors.success,
-  },
-  statusTextDisabled: {
-    color: colors.destructive,
-  },
+// ============================================================================
+// HELPERS
+// ============================================================================
 
-  // Grant Button
-  grantButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    marginTop: spacing.md,
-  },
-  grantButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: colors.primary,
-  },
+function stateBucket(p: PermItem): 'ok' | 'warn' | 'bad' {
+  if (p.key === 'location') {
+    if (p.state === 'always') return 'ok';
+    if (p.state === 'while-using') return 'warn';
+    return 'bad';
+  }
+  return p.state === 'granted' ? 'ok' : 'bad';
+}
 
-  // Settings Button
-  settingsButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.muted,
-    paddingVertical: spacing.lg,
-    borderRadius: borderRadius['2xl'],
-    marginTop: spacing.xl,
-  },
-  settingsButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-});
+function summarize(
+  counts: { ok: number; warn: number; bad: number; opt: number },
+  palette: Palette,
+): { headline: string; color: string } {
+  if (counts.bad > 0) {
+    return {
+      headline: `${counts.bad} required ${counts.bad === 1 ? 'permission' : 'permissions'} off`,
+      color: palette.danger,
+    };
+  }
+  if (counts.warn > 0) {
+    return {
+      headline: `${counts.warn} ${counts.warn === 1 ? 'needs' : 'need'} attention`,
+      color: palette.warning,
+    };
+  }
+  return { headline: 'All set for driving', color: palette.success };
+}
+
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: palette.bgCanvas,
+    },
+    topBar: {
+      height: 52,
+      paddingHorizontal: 4,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    topBarBtn: {
+      width: 44,
+      height: 44,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: radii.full,
+    },
+    topBarTitle: {
+      fontSize: 15,
+      fontWeight: '600',
+      letterSpacing: -0.15,
+      color: palette.textPrimary,
+    },
+
+    heroWrap: {
+      paddingHorizontal: 16,
+      paddingTop: 4,
+    },
+    heroEyebrow: {
+      fontSize: 13,
+      color: palette.textTertiary,
+    },
+    heroHeadline: {
+      fontSize: 22,
+      fontWeight: '700',
+      letterSpacing: -0.22,
+      marginTop: 4,
+    },
+    bar: {
+      flexDirection: 'row',
+      gap: 3,
+      height: 6,
+      borderRadius: 999,
+      marginTop: 12,
+      overflow: 'hidden',
+      backgroundColor: palette.bgMuted,
+    },
+    legend: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 12,
+      marginTop: 10,
+    },
+
+    groupWrap: {
+      paddingHorizontal: 16,
+      paddingTop: 20,
+    },
+    groupLabel: {
+      fontSize: 11,
+      fontWeight: '600',
+      letterSpacing: 0.8,
+      color: palette.textTertiary,
+      paddingHorizontal: 4,
+      paddingBottom: 8,
+    },
+    groupCard: {
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      borderRadius: radii.lg,
+      overflow: 'hidden',
+    },
+
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+    },
+    rowIcon: {
+      width: 28,
+      height: 28,
+      borderRadius: radii.md,
+      backgroundColor: palette.bgMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    rowLabel: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: '500',
+      color: palette.textPrimary,
+    },
+    rowState: {
+      fontSize: 12,
+      fontWeight: '600',
+      color: palette.textTertiary,
+    },
+    rowExpand: {
+      paddingHorizontal: 14,
+      paddingBottom: 14,
+      paddingLeft: 54,
+      gap: 10,
+    },
+    rowWhy: {
+      fontSize: 12,
+      lineHeight: 17,
+      color: palette.textSecondary,
+    },
+    rowAction: {
+      alignSelf: 'flex-start',
+      height: 30,
+      paddingHorizontal: 12,
+      borderRadius: radii.sm,
+      backgroundColor: palette.accent,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    rowActionText: {
+      color: '#fff',
+      fontSize: 12,
+      fontWeight: '600',
+    },
+
+    stickyWrap: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 0,
+      padding: 16,
+      paddingBottom: 28,
+      backgroundColor: palette.bgCanvas,
+    },
+    settingsBtn: {
+      height: 48,
+      borderRadius: radii.md,
+      borderWidth: 1,
+      borderColor: palette.borderDefault,
+      backgroundColor: palette.bgSurface,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+    },
+    settingsBtnText: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: palette.textPrimary,
+    },
+  });
