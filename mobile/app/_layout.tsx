@@ -128,7 +128,9 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
   const checkOutMutation = useMutation(api.driverMobile.checkOutFromStop);
   const updateStatusMutation = useMutation(api.driverMobile.updateStopStatus);
   const recordPODMutation = useMutation(api.driverMobile.recordPOD);
+  const uploadLoadDocumentMutation = useMutation(api.driverMobile.uploadLoadDocument);
   const getUploadUrl = useAction(api.s3Upload.getPODUploadUrl);
+  const getLoadDocumentUploadUrl = useAction(api.s3Upload.getLoadDocumentUploadUrl);
 
   useEffect(() => {
     // Set up the mutation processor for the offline queue
@@ -187,6 +189,34 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
           break;
         }
 
+        case 'uploadLoadDocument': {
+          // Replays the useUploadDocument online path: presigned URL →
+          // S3 PUT → uploadLoadDocument mutation. payload already holds
+          // type / capturedAt / capturedLat/Lng / note captured at queue
+          // time (accurate GPS at the moment the photo was taken, not at
+          // sync time, which may be hours later in a dead zone).
+          if (!photoPath) {
+            throw new Error('uploadLoadDocument queued without photoPath');
+          }
+          const docType = String(payload.type || 'Other');
+          const { uploadUrl, fileUrl } = await getLoadDocumentUploadUrl({
+            loadId: String(payload.loadId || ''),
+            type: docType as 'POD' | 'Receipt' | 'Cargo' | 'Damage' | 'Accident' | 'Other',
+            filename: `${docType.toLowerCase()}_${Date.now()}.jpg`,
+          });
+
+          const uploadResult = await uploadPODPhoto(uploadUrl, photoPath);
+          if (!uploadResult.success) {
+            throw new Error(uploadResult.error ?? 'Upload failed');
+          }
+
+          await uploadLoadDocumentMutation({
+            ...(payload as any),
+            externalUrl: fileUrl,
+          });
+          break;
+        }
+
         default:
           console.warn('Unknown mutation type:', type);
       }
@@ -194,7 +224,15 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
 
     // Process any queued mutations on startup
     processQueue().catch(console.error);
-  }, [checkInMutation, checkOutMutation, updateStatusMutation, recordPODMutation, getUploadUrl]);
+  }, [
+    checkInMutation,
+    checkOutMutation,
+    updateStatusMutation,
+    recordPODMutation,
+    uploadLoadDocumentMutation,
+    getUploadUrl,
+    getLoadDocumentUploadUrl,
+  ]);
 
   return <>{children}</>;
 }
