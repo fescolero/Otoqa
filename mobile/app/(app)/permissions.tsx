@@ -20,7 +20,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
@@ -103,6 +103,7 @@ export default function PermissionsScreen() {
   const router = useRouter();
   const { palette } = useTheme();
   const { sp } = useDensityTokens();
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
 
   const [items, setItems] = useState<PermItem[]>(INITIAL_ITEMS);
@@ -259,7 +260,7 @@ export default function PermissionsScreen() {
 
       <ScrollView
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingBottom: 120 }}
+        contentContainerStyle={{ paddingBottom: 160 + insets.bottom }}
         showsVerticalScrollIndicator={false}
       >
         {/* Hero summary */}
@@ -329,7 +330,16 @@ export default function PermissionsScreen() {
         )}
       </ScrollView>
 
-      <View style={styles.stickyWrap}>
+      <View
+        style={[
+          styles.stickyWrap,
+          // Sit the CTA in the thumb-reach band — mirrors how the driver
+          // tab bar occupies the bottom. Safe-area inset covers the home
+          // indicator; the extra 24 gives the button breathing room above
+          // the device chrome so it doesn't feel pinned to the edge.
+          { paddingBottom: insets.bottom + 24 },
+        ]}
+      >
         <Pressable
           onPress={openSettings}
           style={({ pressed }) => [styles.settingsBtn, pressed && { opacity: 0.9 }]}
@@ -650,9 +660,11 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       left: 0,
       right: 0,
       bottom: 0,
-      padding: sp.screenPx,
-      paddingBottom: 28,
+      paddingHorizontal: sp.screenPx,
+      paddingTop: sp.screenPx,
       backgroundColor: palette.bgCanvas,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: palette.borderSubtle,
     },
     settingsBtn: {
       height: 48,
