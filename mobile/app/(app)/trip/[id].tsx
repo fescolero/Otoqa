@@ -2690,17 +2690,20 @@ function AccidentSheet({
   );
 }
 
-// DOC_KINDS mirrors the driver-facing enum from convex schema.ts
-// loadDocuments.type. Adding / removing here must also happen in the
-// schema, s3Upload.getLoadDocumentUploadUrl args, and
-// driverMobile.uploadLoadDocument.driverDocType.
+// DocKind mirrors the driver-facing enum from convex schema.ts
+// loadDocuments.type. Kept as the full 6-value union so other surfaces
+// (AccidentSheet → uploadDocument({type:'Accident'})) still compile.
 type DocKind = 'POD' | 'Receipt' | 'Cargo' | 'Damage' | 'Accident' | 'Other';
+// DOC_KINDS is only the *tiles* rendered in the Documents sheet —
+// Accident is intentionally absent because the Quick Action has its own
+// dedicated AccidentSheet flow (kind chips + attach photo + page ops).
+// Exposing it here too would give drivers two entry points for the same
+// record and risk inconsistent metadata.
 const DOC_KINDS: ReadonlyArray<{ key: DocKind; icon: string; sub: string }> = [
   { key: 'POD', icon: 'check', sub: 'Signed delivery slip' },
   { key: 'Receipt', icon: 'clipboard', sub: 'Lumper, fuel, tolls' },
   { key: 'Cargo', icon: 'package', sub: 'Load condition' },
   { key: 'Damage', icon: 'warning', sub: 'Damaged freight' },
-  { key: 'Accident', icon: 'warning', sub: 'Vehicle incident' },
   { key: 'Other', icon: 'more-h', sub: 'Anything else' },
 ] as const;
 
