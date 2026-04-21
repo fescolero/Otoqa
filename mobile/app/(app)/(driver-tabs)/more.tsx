@@ -392,7 +392,7 @@ function SignOutSheet({
         <Text style={styles.sheetBodyText}>
           You&apos;ll need to scan your truck QR again when you sign back in.
         </Text>
-        <View style={{ gap: 10, marginTop: 18 }}>
+        <View style={{ gap: 10, marginTop: 18, alignSelf: 'stretch' }}>
           <Pressable
             onPress={onConfirm}
             style={({ pressed }) => [
