@@ -2604,6 +2604,11 @@ function AccidentSheet({
               >
                 WHAT HAPPENED?
               </Text>
+              {/* Balanced 2×2 grid. With 4 fixed chips, intrinsic-width
+                  + flex-wrap stranded "Multi-vehicle" on its own row
+                  with dead space on the right. flexBasis: '48%' +
+                  flexGrow: 1 makes every chip half-width, filling both
+                  rows evenly regardless of label length. */}
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
                 {ACCIDENT_KINDS.map((opt) => {
                   const active = kind === opt;
@@ -2613,12 +2618,15 @@ function AccidentSheet({
                       onPress={() => setKind(opt)}
                       style={({ pressed }) => [
                         {
+                          flexBasis: '48%',
+                          flexGrow: 1,
                           paddingHorizontal: 12,
-                          paddingVertical: 8,
+                          paddingVertical: 10,
                           borderRadius: designRadii.full,
                           backgroundColor: active ? palette.accentTint : palette.bgMuted,
                           borderWidth: 1,
                           borderColor: active ? palette.accent : 'transparent',
+                          alignItems: 'center',
                         },
                         pressed && { opacity: 0.8 },
                       ]}
