@@ -108,8 +108,17 @@ export const getUploadUrl = action({
  * can slice by kind:
  *   load-documents/{loadId}/{type}/{ts}-{filename}
  *
+ * Custom metadata is baked into the presigned PUT so every R2 object
+ * carries loadId, driverId, docType, capturedAt, and (when available)
+ * GPS + accuracy. This lets ops search the bucket directly — `aws s3api
+ * list-objects-v2` + the R2 dashboard filter by these without needing
+ * to hit Convex. Keys use kebab-case because S3 lowercases all user
+ * metadata keys and strips leading `x-amz-meta-` on read.
+ *
  * Returns the same shape as getPODUploadUrl so mobile's S3 uploader
- * (lib/s3-upload.ts) can reuse the existing PUT flow unchanged.
+ * (lib/s3-upload.ts) can reuse the PUT flow — the client must echo
+ * the exact same metadata headers on PUT or the presigned signature
+ * fails. Callers receive `metadataHeaders` to forward verbatim.
  *
  * The driver app should call this instead of getPODUploadUrl for any
  * document the driver is capturing — POD included. getPODUploadUrl is
@@ -129,11 +138,30 @@ export const getLoadDocumentUploadUrl = action({
     ),
     filename: v.string(),
     contentType: v.optional(v.string()),
+    // Optional metadata embedded in the R2 object. Drivers in a dead
+    // zone can omit GPS and the object still uploads — just without
+    // location stamped on the binary (the Convex row still carries
+    // whatever was known at queue time).
+    driverId: v.optional(v.string()),
+    capturedAt: v.optional(v.number()),
+    capturedLat: v.optional(v.number()),
+    capturedLng: v.optional(v.number()),
+    gpsAccuracyM: v.optional(v.number()),
+    // Accident-type only: the structured "what happened" chip (Collision
+    // / Trailer damage / ...). Lands on the R2 object as `accident-kind`
+    // metadata so ops can filter the bucket for a specific incident
+    // type without hitting Convex. Free-text description continues to
+    // live in the loadDocuments row's `note` column — metadata is only
+    // for short structured values.
+    accidentKind: v.optional(v.string()),
   },
   returns: v.object({
     uploadUrl: v.string(),
     fileUrl: v.string(),
     key: v.string(),
+    // Metadata the client MUST send as request headers on PUT so the
+    // presigned signature matches. Object: header name → value.
+    metadataHeaders: v.record(v.string(), v.string()),
   }),
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -148,15 +176,48 @@ export const getLoadDocumentUploadUrl = action({
     const sanitizedFilename = args.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
     const key = `load-documents/${args.loadId}/${args.type}/${timestamp}-${sanitizedFilename}`;
 
+    // Build the metadata map — all values must be strings; skip empties
+    // so S3 doesn't store "undefined" literals. Stick to kebab-case
+    // keys to avoid server-side normalization surprises.
+    const metadata: Record<string, string> = {
+      'load-id': args.loadId,
+      'doc-type': args.type,
+      'uploaded-via': 'driver-mobile',
+    };
+    if (args.driverId) metadata['driver-id'] = args.driverId;
+    if (args.capturedAt) metadata['captured-at'] = String(args.capturedAt);
+    if (typeof args.capturedLat === 'number')
+      metadata['captured-lat'] = args.capturedLat.toFixed(6);
+    if (typeof args.capturedLng === 'number')
+      metadata['captured-lng'] = args.capturedLng.toFixed(6);
+    if (typeof args.gpsAccuracyM === 'number')
+      metadata['gps-accuracy-m'] = args.gpsAccuracyM.toFixed(1);
+    // accident-kind is only meaningful on Accident-typed objects; the
+    // client guards that at the call site. Values are short, whitespace
+    // is trimmed, and we don't enforce an enum here in case a future
+    // AccidentSheet adds chips without a corresponding server deploy.
+    if (args.accidentKind) {
+      metadata['accident-kind'] = args.accidentKind.trim();
+    }
+
     const command = new PutObjectCommand({
       Bucket: bucket,
       Key: key,
       ContentType: args.contentType ?? 'image/jpeg',
+      Metadata: metadata,
     });
 
     const uploadUrl = await getSignedUrl(client, command, {
       expiresIn: 300,
     });
+
+    // Translate the metadata map into the header names the client must
+    // send back on PUT. S3 requires each key to be prefixed with
+    // `x-amz-meta-` when transmitted.
+    const metadataHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(metadata)) {
+      metadataHeaders[`x-amz-meta-${k}`] = v;
+    }
 
     let fileUrl: string;
     if (cloudflareDomain) {
@@ -167,23 +228,34 @@ export const getLoadDocumentUploadUrl = action({
       fileUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
     }
 
-    return { uploadUrl, fileUrl, key };
+    return { uploadUrl, fileUrl, key, metadataHeaders };
   },
 });
 
 /**
- * Get a presigned URL specifically for POD (Proof of Delivery) photos
+ * Get a presigned URL specifically for POD (Proof of Delivery) photos.
+ *
+ * Same metadata pattern as getLoadDocumentUploadUrl — loadId, stopId,
+ * driverId, capturedAt, GPS are baked into the PUT so POD-on-checkout
+ * objects in the pod-photos/ prefix are searchable from R2 directly.
+ * GPS is trusted here (check-out already captured it in
+ * checkOutFromStop args); caller forwards from useCheckIn.
  */
 export const getPODUploadUrl = action({
   args: {
     loadId: v.string(),
     stopId: v.string(),
     filename: v.string(),
+    driverId: v.optional(v.string()),
+    capturedAt: v.optional(v.number()),
+    capturedLat: v.optional(v.number()),
+    capturedLng: v.optional(v.number()),
   },
   returns: v.object({
     uploadUrl: v.string(),
     fileUrl: v.string(),
     key: v.string(),
+    metadataHeaders: v.record(v.string(), v.string()),
   }),
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -203,15 +275,34 @@ export const getPODUploadUrl = action({
     console.log('[DEBUG-ec49a3] getPODUploadUrl called:', JSON.stringify({ loadId: args.loadId, stopId: args.stopId, filename: args.filename }));
     // #endregion
 
+    const metadata: Record<string, string> = {
+      'load-id': args.loadId,
+      'stop-id': args.stopId,
+      'doc-type': 'POD',
+      'uploaded-via': 'driver-mobile',
+    };
+    if (args.driverId) metadata['driver-id'] = args.driverId;
+    if (args.capturedAt) metadata['captured-at'] = String(args.capturedAt);
+    if (typeof args.capturedLat === 'number')
+      metadata['captured-lat'] = args.capturedLat.toFixed(6);
+    if (typeof args.capturedLng === 'number')
+      metadata['captured-lng'] = args.capturedLng.toFixed(6);
+
     const command = new PutObjectCommand({
       Bucket: bucket,
       Key: key,
       ContentType: 'image/jpeg',
+      Metadata: metadata,
     });
 
     const uploadUrl = await getSignedUrl(client, command, {
       expiresIn: 300,
     });
+
+    const metadataHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(metadata)) {
+      metadataHeaders[`x-amz-meta-${k}`] = v;
+    }
 
     // Presigned URL generated — not logging to avoid credential exposure
 
@@ -225,6 +316,6 @@ export const getPODUploadUrl = action({
       fileUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
     }
 
-    return { uploadUrl, fileUrl, key };
+    return { uploadUrl, fileUrl, key, metadataHeaders };
   },
 });

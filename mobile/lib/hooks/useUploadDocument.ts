@@ -48,6 +48,12 @@ interface UploadOptions {
   type: DriverDocumentType;
   photoUri: string;
   note?: string;
+  // Only meaningful when type === 'Accident'. The "what happened" chip
+  // is passed through to R2 as the `accident-kind` metadata field so
+  // ops can filter the bucket on incident type. Free-text description
+  // still goes in `note` (which lives on the Convex row, not in
+  // metadata — S3 per-object metadata is capped at 2KB total).
+  accidentKind?: string;
 }
 
 interface UploadResult {
@@ -126,6 +132,7 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
           capturedLat: location?.latitude,
           capturedLng: location?.longitude,
           note: opts.note,
+          accidentKind: opts.accidentKind,
         },
         { photoUri: opts.photoUri },
       );
@@ -147,13 +154,21 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
     try {
       const location = await safelyReadLocation();
 
-      const { uploadUrl, fileUrl } = await getUploadUrl({
+      const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
         loadId: String(opts.loadId),
         type: opts.type,
         filename: `${opts.type.toLowerCase()}_${capturedAt}.jpg`,
+        // Pass everything we know to the action so it gets baked into
+        // the R2 object as x-amz-meta-* — ops can search the bucket
+        // without needing Convex for any of this.
+        driverId: String(opts.driverId),
+        capturedAt,
+        capturedLat: location?.latitude,
+        capturedLng: location?.longitude,
+        accidentKind: opts.accidentKind,
       });
 
-      const putResult = await uploadPODPhoto(uploadUrl, opts.photoUri);
+      const putResult = await uploadPODPhoto(uploadUrl, opts.photoUri, 3, metadataHeaders);
       if (!putResult.success) {
         throw new Error(putResult.error ?? 'Upload failed');
       }
