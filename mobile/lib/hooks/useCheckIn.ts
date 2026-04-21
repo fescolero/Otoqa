@@ -354,16 +354,24 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           console.log('[CheckOut] Photo URI:', options.photoUri);
           console.log('[CheckOut] Getting presigned URL from Convex...');
 
-          const { uploadUrl, fileUrl } = await getUploadUrl({
+          const nowMs = Date.now();
+          const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
             loadId: options.loadId ? String(options.loadId) : 'unknown',
             stopId: String(options.stopId),
-            filename: `pod_${Date.now()}.jpg`,
+            filename: `pod_${nowMs}.jpg`,
+            // Stamp the R2 object with the same GPS + driverId we're
+            // about to hand to the check-out mutation. This makes the
+            // bucket searchable / auditable without Convex.
+            driverId: String(options.driverId),
+            capturedAt: nowMs,
+            capturedLat: location.latitude,
+            capturedLng: location.longitude,
           });
 
           console.log('[CheckOut] Got presigned URL, uploading to R2...');
           console.log('[CheckOut] Upload URL (first 100 chars):', uploadUrl.substring(0, 100));
 
-          const uploadResult = await uploadPODPhoto(uploadUrl, options.photoUri);
+          const uploadResult = await uploadPODPhoto(uploadUrl, options.photoUri, 3, metadataHeaders);
 
           if (uploadResult.success) {
             podPhotoUrl = fileUrl;
