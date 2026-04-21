@@ -24,7 +24,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSignIn, useAuth } from '@clerk/clerk-expo';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../../../convex/_generated/api';
+import { FIRST_RUN_STORAGE_KEY } from '../(app)/first-run';
 import { Icon } from '../../lib/design-icons';
 import { useTheme } from '../../lib/ThemeContext';
 import { radii, typeScale, type Palette } from '../../lib/design-tokens';
@@ -56,13 +58,14 @@ export default function VerifyScreen() {
     trackScreen('Verify');
   }, []);
 
-  // Post-auth gating: once the driver is signed in, look at their profile
-  // and decide where to send them.
-  //   - No truck paired  → QR scanner (switch-truck) so they can pair
-  //     before they hit the dashboard. The scanner routes to /start-shift
-  //     on success, which in turn routes to /(driver-tabs).
-  //   - Truck already paired → straight to the dashboard. Returning
-  //     drivers don't get re-pinged through the scanner every sign-in.
+  // Post-auth gating: once the driver is signed in, decide where to send
+  // them based on their profile state.
+  //   1. No first-run completion recorded      → /first-run
+  //   2. No truck paired (post-first-run)      → /switch-truck
+  //   3. Both truck paired AND has dual roles  → /role-switch (future;
+  //      only relevant when we teach the app about multi-role users)
+  //   4. Truck paired                          → /(app) dashboard
+  //
   // profile is 'skip'-guarded until isSignedIn so the JWT is ready before
   // we fetch.
   const profile = useQuery(
@@ -72,11 +75,27 @@ export default function VerifyScreen() {
 
   useEffect(() => {
     if (!isSignedIn || !isLoaded) return;
-    // Wait for the profile to resolve. `undefined` = still loading.
     if (profile === undefined) return;
-    const dest =
-      profile && profile.currentTruckId ? '/(app)' : '/switch-truck';
-    router.replace(dest);
+
+    let cancelled = false;
+    (async () => {
+      const firstRun = await AsyncStorage.getItem(FIRST_RUN_STORAGE_KEY).catch(
+        () => null,
+      );
+      if (cancelled) return;
+      if (!firstRun) {
+        router.replace('/first-run');
+        return;
+      }
+      if (profile && profile.currentTruckId) {
+        router.replace('/(app)');
+      } else {
+        router.replace('/switch-truck');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [isSignedIn, isLoaded, profile, verificationComplete]);
 
   useEffect(() => {

@@ -1,21 +1,21 @@
 /**
- * Messages — Otoqa Driver design system.
+ * Messages — Otoqa Driver design system (port of lib/messages-screen.jsx).
  *
- * Two surfaces:
- *   - List: ordered by most-recent activity. Each row is avatar + name
- *     + preview + timestamp, with a dot when unread. Tapping routes to
- *     the thread.
- *   - Empty state: same circular-illustration + title + body pattern
- *     the dashboard uses, so drivers see one consistent "nothing here"
- *     vocabulary.
+ * This is a notifications inbox, not a chat. Every row is informational
+ * — compliance flags, route delays, payroll posts, system updates — and
+ * tapping a row with a deeplink opens the relevant screen later (stub
+ * for now).
  *
- * No backend yet — the list reads from a local `threads` array, which
- * is [] until we plumb in a real query. The toggle is a one-liner once
- * that ships.
+ * Grouped by day bucket (Today / Yesterday / Earlier this week). Filter
+ * chips across the top (All / Unread / Alerts / Updates). Unread rows
+ * get a subtle accent tint and a dot next to the title. A "Mark all
+ * read" action sits top-right when unread > 0.
+ *
+ * No real backend yet — `threads` is [] until we wire a query. The
+ * Empty state has four filter-specific variants mirroring the design.
  */
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -23,10 +23,10 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Icon } from '../../../lib/design-icons';
+import { useRouter } from 'expo-router';
+import { Icon, type IconName } from '../../../lib/design-icons';
 import { useTheme } from '../../../lib/ThemeContext';
 import { useDensityTokens } from '../../../lib/density';
-import { useLanguage } from '../../../lib/LanguageContext';
 import {
   densitySpacing,
   radii,
@@ -36,136 +36,374 @@ import {
 
 type Sp = (typeof densitySpacing)['dense'];
 
-// Thread shape — loosely matches what a future `api.messages.getThreads`
-// would surface. Kept thin until backend defines the real wire format.
-interface Thread {
+type MessageKind = 'route' | 'compliance' | 'payroll' | 'system';
+type DayKey = 'today' | 'yest' | 'earlier';
+type Filter = 'all' | 'unread' | 'alerts' | 'updates';
+
+interface Message {
   id: string;
-  name: string;
-  preview: string;
-  timestamp: string;
-  initials: string;
+  kind: MessageKind;
+  day: DayKey;
+  time: string;
+  title: string;
+  body: string;
+  deeplink?: string;
   unread: boolean;
 }
 
-// TEMP: empty until we wire a threads query. Swap to `useQuery(...)`
-// once the backend ships.
-const threads: Thread[] = [];
+// No real backend — empty array surfaces the empty state. When a
+// `getMessages` query lands, swap to `useQuery(...)` and keep the local
+// `readIds` state for optimistic mark-as-read.
+const INITIAL: Message[] = [];
+
+const DAY_ORDER: DayKey[] = ['today', 'yest', 'earlier'];
+const DAY_LABEL: Record<DayKey, string> = {
+  today: 'Today',
+  yest: 'Yesterday',
+  earlier: 'Earlier this week',
+};
+
+const KIND_META: Record<
+  MessageKind,
+  { icon: IconName; tint: string; color: (p: Palette) => string }
+> = {
+  route: {
+    icon: 'navigate',
+    tint: 'rgba(245, 158, 11, 0.14)',
+    color: (p) => p.warning,
+  },
+  compliance: {
+    icon: 'shield',
+    tint: 'rgba(245, 158, 11, 0.14)',
+    color: (p) => p.warning,
+  },
+  payroll: {
+    icon: 'dollar',
+    tint: 'rgba(16, 185, 129, 0.14)',
+    color: (p) => p.success,
+  },
+  system: {
+    icon: 'info',
+    tint: 'rgba(107, 115, 133, 0.18)',
+    color: (p) => p.textSecondary,
+  },
+};
 
 export default function MessagesScreen() {
+  const router = useRouter();
   const { palette } = useTheme();
   const { sp } = useDensityTokens();
-  const { locale } = useLanguage();
   const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
+
+  const [messages] = useState<Message[]>(INITIAL);
+  const [readIds, setReadIds] = useState<Set<string>>(
+    () => new Set(INITIAL.filter((m) => !m.unread).map((m) => m.id)),
+  );
+  const [filter, setFilter] = useState<Filter>('all');
+
+  const unreadCount = useMemo(
+    () => messages.filter((m) => !readIds.has(m.id)).length,
+    [messages, readIds],
+  );
+
+  const markRead = (id: string) =>
+    setReadIds((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+
+  const markAllRead = () =>
+    setReadIds(new Set(messages.map((m) => m.id)));
+
+  const visible = useMemo(() => {
+    if (filter === 'unread') return messages.filter((m) => !readIds.has(m.id));
+    if (filter === 'alerts')
+      return messages.filter((m) => m.kind === 'compliance' || m.kind === 'route');
+    if (filter === 'updates')
+      return messages.filter((m) => m.kind === 'system' || m.kind === 'payroll');
+    return messages;
+  }, [messages, readIds, filter]);
+
+  const grouped = useMemo(
+    () =>
+      DAY_ORDER.map((key) => ({
+        key,
+        items: visible.filter((m) => m.day === key),
+      })).filter((g) => g.items.length > 0),
+    [visible],
+  );
+
+  const openRow = (m: Message) => {
+    markRead(m.id);
+    // Deeplink routing — these screens exist today and can absorb the tap.
+    // Unknown deeplinks fall through to the dashboard.
+    if (m.deeplink === 'permissions') router.push('/permissions');
+    else if (m.deeplink === 'compliance')
+      router.push('/(driver-tabs)/settings');
+    else if (m.deeplink === 'payroll')
+      router.push('/(driver-tabs)/settings');
+  };
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.topBar}>
-        <Text style={styles.topBarTitle}>Messages</Text>
+        <View style={styles.topTitleRow}>
+          <Text style={styles.topTitle}>Messages</Text>
+          {unreadCount > 0 && (
+            <Text style={styles.unreadCountText}>{unreadCount}</Text>
+          )}
+        </View>
         <Pressable
-          accessibilityLabel="Search messages"
-          style={({ pressed }) => [styles.topBarBtn, pressed && { opacity: 0.7 }]}
+          onPress={markAllRead}
+          disabled={unreadCount === 0}
+          accessibilityLabel="Mark all as read"
+          style={({ pressed }) => [
+            styles.markAllBtn,
+            pressed && unreadCount > 0 && { opacity: 0.7 },
+            unreadCount === 0 && { opacity: 0.4 },
+          ]}
         >
-          <Icon name="search" size={22} color={palette.textPrimary} />
+          <Text
+            style={[
+              styles.markAllText,
+              unreadCount === 0
+                ? { color: palette.textTertiary }
+                : { color: palette.accent },
+            ]}
+          >
+            Mark all read
+          </Text>
         </Pressable>
       </View>
 
-      {threads.length === 0 ? (
-        <EmptyState palette={palette} locale={locale} />
-      ) : (
-        <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: 40 }}
-          showsVerticalScrollIndicator={false}
-        >
-          {threads.map((t) => (
-            <ThreadRow
-              key={t.id}
-              palette={palette}
-              thread={t}
-              onPress={() =>
-                Alert.alert(t.name, 'Thread view is coming soon.')
-              }
-            />
-          ))}
-        </ScrollView>
-      )}
+      <FilterChips
+        palette={palette}
+        filter={filter}
+        setFilter={setFilter}
+        unreadCount={unreadCount}
+      />
+
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ paddingBottom: 48 }}
+        showsVerticalScrollIndicator={false}
+      >
+        {grouped.length === 0 ? (
+          <EmptyState palette={palette} filter={filter} />
+        ) : (
+          grouped.map((g, gi) => (
+            <View key={g.key} style={{ marginTop: gi === 0 ? 6 : 20 }}>
+              <Text style={styles.dayHeader}>{DAY_LABEL[g.key]}</Text>
+              <View style={styles.groupCard}>
+                {g.items.map((m, i) => (
+                  <MessageRow
+                    key={m.id}
+                    palette={palette}
+                    msg={m}
+                    isRead={readIds.has(m.id)}
+                    isFirst={i === 0}
+                    onPress={() => openRow(m)}
+                  />
+                ))}
+              </View>
+            </View>
+          ))
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
-const ThreadRow: React.FC<{
+// ============================================================================
+// FILTER CHIPS
+// ============================================================================
+
+const FilterChips: React.FC<{
   palette: Palette;
-  thread: Thread;
-  onPress: () => void;
-}> = ({ palette, thread, onPress }) => {
+  filter: Filter;
+  setFilter: (f: Filter) => void;
+  unreadCount: number;
+}> = ({ palette, filter, setFilter, unreadCount }) => {
   const { sp } = useDensityTokens();
   const styles = makeStyles(palette, sp);
+  const chips: Array<{ k: Filter; label: string }> = [
+    { k: 'all', label: 'All' },
+    {
+      k: 'unread',
+      label: unreadCount > 0 ? `Unread · ${unreadCount}` : 'Unread',
+    },
+    { k: 'alerts', label: 'Alerts' },
+    { k: 'updates', label: 'Updates' },
+  ];
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={styles.chipRow}
+    >
+      {chips.map((c) => {
+        const active = filter === c.k;
+        return (
+          <Pressable
+            key={c.k}
+            onPress={() => setFilter(c.k)}
+            style={({ pressed }) => [
+              styles.chip,
+              active && styles.chipActive,
+              pressed && { opacity: 0.85 },
+            ]}
+          >
+            <Text
+              style={[
+                styles.chipText,
+                active && styles.chipTextActive,
+              ]}
+            >
+              {c.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+};
+
+// ============================================================================
+// MESSAGE ROW
+// ============================================================================
+
+const MessageRow: React.FC<{
+  palette: Palette;
+  msg: Message;
+  isRead: boolean;
+  isFirst: boolean;
+  onPress: () => void;
+}> = ({ palette, msg, isRead, isFirst, onPress }) => {
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
+  const meta = KIND_META[msg.kind];
+  const hasLink = !!msg.deeplink;
   return (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [styles.row, pressed && { opacity: 0.85 }]}
+      style={({ pressed }) => [
+        styles.msgRow,
+        !isFirst && {
+          borderTopWidth: StyleSheet.hairlineWidth,
+          borderTopColor: palette.borderSubtle,
+        },
+        !isRead && { backgroundColor: palette.accentTint },
+        pressed && { opacity: 0.85 },
+      ]}
     >
-      <View style={styles.avatar}>
-        <Text style={styles.avatarText}>{thread.initials}</Text>
+      <View style={[styles.msgIcon, { backgroundColor: meta.tint }]}>
+        <Icon name={meta.icon} size={20} color={meta.color(palette)} />
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
-        <View style={styles.rowHeader}>
-          <Text
-            style={[styles.name, thread.unread && { fontWeight: '700' }]}
-            numberOfLines={1}
-          >
-            {thread.name}
-          </Text>
-          <Text style={styles.timestamp}>{thread.timestamp}</Text>
-        </View>
-        <View style={styles.previewRow}>
+        <View style={styles.msgTitleRow}>
+          {!isRead && <View style={styles.unreadDot} />}
           <Text
             style={[
-              styles.preview,
-              thread.unread && { color: palette.textPrimary, fontWeight: '500' },
+              styles.msgTitle,
+              !isRead && { color: palette.textPrimary, fontWeight: '700' },
             ]}
             numberOfLines={1}
           >
-            {thread.preview}
+            {msg.title}
           </Text>
-          {thread.unread && <View style={styles.unreadDot} />}
         </View>
+        <Text style={styles.msgBody} numberOfLines={2}>
+          {msg.body}
+        </Text>
+      </View>
+      <View style={styles.msgTrailing}>
+        <Text style={styles.msgTime}>{msg.time}</Text>
+        {hasLink && (
+          <Icon name="chevron-right" size={16} color={palette.textTertiary} />
+        )}
       </View>
     </Pressable>
   );
 };
 
-const EmptyState: React.FC<{ palette: Palette; locale: string }> = ({
+// ============================================================================
+// EMPTY STATE — four filter-specific variants
+// ============================================================================
+
+const EMPTY_COPY: Record<
+  Filter,
+  { kind: EmptyKind; title: string; body: string; helper?: string }
+> = {
+  all: {
+    kind: 'inbox',
+    title: 'All caught up',
+    body:
+      "You haven't missed anything. New alerts and updates will land here.",
+    helper: "We'll ping you when something needs attention",
+  },
+  unread: {
+    kind: 'check',
+    title: 'Nothing unread',
+    body: "You've seen everything. Come back after your next stop.",
+  },
+  alerts: {
+    kind: 'shield',
+    title: 'No alerts right now',
+    body:
+      'Route changes, delays, and compliance reminders will show up here.',
+    helper: 'Everything looks good',
+  },
+  updates: {
+    kind: 'dollar',
+    title: 'No recent updates',
+    body:
+      'Payroll, direct deposits, and app updates will appear here.',
+  },
+};
+
+type EmptyKind = 'inbox' | 'check' | 'shield' | 'dollar';
+
+const EMPTY_ICON: Record<EmptyKind, IconName> = {
+  inbox: 'inbox',
+  check: 'check-circle',
+  shield: 'shield',
+  dollar: 'dollar',
+};
+
+const EmptyState: React.FC<{ palette: Palette; filter: Filter }> = ({
   palette,
-  locale,
+  filter,
 }) => {
   const { sp } = useDensityTokens();
   const styles = makeStyles(palette, sp);
-  const isEs = locale === 'es';
+  const copy = EMPTY_COPY[filter];
   return (
     <View style={styles.emptyWrap}>
       <View style={styles.emptyIllustration}>
-        <Icon name="message" size={40} color={palette.accent} strokeWidth={1.3} />
+        <Icon
+          name={EMPTY_ICON[copy.kind]}
+          size={40}
+          color={palette.accent}
+          strokeWidth={1.3}
+        />
       </View>
-      <Text style={styles.emptyTitle}>
-        {isEs ? 'Sin mensajes aún' : 'Nothing to read yet'}
-      </Text>
-      <Text style={styles.emptyBody}>
-        {isEs
-          ? 'Tu despachador te enviará mensajes aquí sobre rutas y actualizaciones.'
-          : 'Dispatcher updates, route changes, and messages will show here.'}
-      </Text>
-      <View style={styles.emptyHelper}>
-        <View style={[styles.emptyHelperDot, { backgroundColor: palette.success }]} />
-        <Text style={styles.emptyHelperText}>
-          {isEs
-            ? 'Te avisaremos cuando haya algo nuevo'
-            : "We'll notify you when something arrives"}
-        </Text>
-      </View>
+      <Text style={styles.emptyTitle}>{copy.title}</Text>
+      <Text style={styles.emptyBody}>{copy.body}</Text>
+      {copy.helper && (
+        <View style={styles.emptyHelper}>
+          <View style={[styles.emptyHelperDot, { backgroundColor: palette.success }]} />
+          <Text style={styles.emptyHelperText}>{copy.helper}</Text>
+        </View>
+      )}
     </View>
   );
 };
+
+// ============================================================================
+// STYLES
+// ============================================================================
 
 const makeStyles = (palette: Palette, sp: Sp) =>
   StyleSheet.create({
@@ -173,6 +411,7 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       flex: 1,
       backgroundColor: palette.bgCanvas,
     },
+
     topBar: {
       paddingHorizontal: sp.screenPx,
       paddingTop: 4,
@@ -181,85 +420,133 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       alignItems: 'center',
       justifyContent: 'space-between',
     },
-    topBarTitle: {
+    topTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      gap: 8,
+    },
+    topTitle: {
       ...typeScale.headingLg,
       color: palette.textPrimary,
     },
-    topBarBtn: {
-      width: 44,
-      height: 44,
-      borderRadius: radii.full,
+    unreadCountText: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: palette.textTertiary,
+      fontVariant: ['tabular-nums'],
+    },
+    markAllBtn: {
+      height: 32,
+      paddingHorizontal: 10,
+      borderRadius: radii.md,
       alignItems: 'center',
       justifyContent: 'center',
     },
+    markAllText: {
+      fontSize: 13,
+      fontWeight: '600',
+    },
 
-    // Thread row
-    row: {
+    chipRow: {
+      paddingHorizontal: sp.screenPx,
+      paddingBottom: 10,
+      gap: 6,
+    },
+    chip: {
+      height: 30,
+      paddingHorizontal: 12,
+      borderRadius: radii.full,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    chipActive: {
+      borderColor: palette.accent,
+      backgroundColor: palette.accentTint,
+    },
+    chipText: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: palette.textSecondary,
+    },
+    chipTextActive: {
+      color: palette.accent,
+    },
+
+    dayHeader: {
+      fontSize: 11,
+      fontWeight: '600',
+      letterSpacing: 0.6,
+      color: palette.textTertiary,
+      textTransform: 'uppercase',
+      paddingHorizontal: sp.screenPx,
+      paddingBottom: 6,
+    },
+    groupCard: {
+      marginHorizontal: sp.screenPx,
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1,
+      borderColor: palette.borderSubtle,
+      borderRadius: radii.lg,
+      overflow: 'hidden',
+    },
+
+    msgRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 12,
-      paddingHorizontal: sp.screenPx,
+      paddingHorizontal: sp.listPx,
       paddingVertical: sp.listPy,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      borderBottomColor: palette.borderSubtle,
     },
-    avatar: {
-      width: 44,
-      height: 44,
-      borderRadius: radii.full,
-      backgroundColor: palette.accentTint,
+    msgIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: radii.md,
       alignItems: 'center',
       justifyContent: 'center',
       flexShrink: 0,
     },
-    avatarText: {
-      fontSize: 15,
-      fontWeight: '700',
-      color: palette.accent,
-      letterSpacing: 0.2,
-    },
-    rowHeader: {
+    msgTitleRow: {
       flexDirection: 'row',
-      alignItems: 'baseline',
-      justifyContent: 'space-between',
-      gap: 8,
+      alignItems: 'center',
+      gap: 6,
     },
-    name: {
+    unreadDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 999,
+      backgroundColor: palette.accent,
+    },
+    msgTitle: {
       flex: 1,
       fontSize: 14,
       fontWeight: '600',
       color: palette.textPrimary,
     },
-    timestamp: {
+    msgBody: {
+      fontSize: 12,
+      color: palette.textTertiary,
+      marginTop: 2,
+      lineHeight: 16,
+    },
+    msgTrailing: {
+      alignItems: 'flex-end',
+      gap: 4,
+      flexShrink: 0,
+    },
+    msgTime: {
       fontSize: 11,
       color: palette.textTertiary,
       fontVariant: ['tabular-nums'],
     },
-    previewRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 8,
-      marginTop: 2,
-    },
-    preview: {
-      flex: 1,
-      fontSize: 12,
-      color: palette.textSecondary,
-    },
-    unreadDot: {
-      width: 8,
-      height: 8,
-      borderRadius: 999,
-      backgroundColor: palette.accent,
-    },
 
-    // Empty state — same vocabulary as dashboard's EmptyState
+    // Empty state
     emptyWrap: {
-      flex: 1,
       alignItems: 'center',
-      justifyContent: 'center',
       paddingHorizontal: sp.screenPx,
-      paddingBottom: 48,
+      paddingTop: 48,
+      paddingBottom: 32,
     },
     emptyIllustration: {
       width: 88,

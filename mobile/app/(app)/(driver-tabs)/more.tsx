@@ -34,7 +34,7 @@ import { useMutation, useQuery } from 'convex/react';
 import * as Application from 'expo-application';
 import * as Updates from 'expo-updates';
 import { api } from '../../../../convex/_generated/api';
-import { useDriver } from '../_layout';
+import { useDriver, useAppMode } from '../_layout';
 import { stopSessionTracking } from '../../../lib/location-tracking';
 import { Icon, type IconName } from '../../../lib/design-icons';
 import { useTheme } from '../../../lib/ThemeContext';
@@ -56,6 +56,7 @@ export default function MoreScreen() {
 
   const { signOut } = useClerk();
   const { driverId, truck } = useDriver();
+  const { canSwitchModes } = useAppMode();
   const activeSession = useQuery(
     api.driverSessions.getActiveSession,
     driverId ? { driverId } : 'skip',
@@ -247,6 +248,15 @@ export default function MoreScreen() {
 
         {/* Drill-ins */}
         <View style={{ marginTop: 14, gap: 10 }}>
+          {canSwitchModes && (
+            <DrillRow
+              palette={palette}
+              icon="truck-swap"
+              label="Switch role"
+              meta="Driver · Dispatcher"
+              onPress={() => router.push('/role-switch')}
+            />
+          )}
           <DrillRow
             palette={palette}
             icon="settings"
