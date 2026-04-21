@@ -16,6 +16,8 @@ import {
   Keyboard,
   TouchableWithoutFeedback,
   Switch,
+  Animated,
+  PanResponder,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -2257,6 +2259,11 @@ function QuickActionTile({
 
 const SHEET_RADIUS = 20;
 
+// Either crossing the distance threshold OR flicking past the velocity
+// threshold dismisses — matches iOS's presented-sheet gesture feel.
+const SHEET_DISMISS_DISTANCE = 120;
+const SHEET_DISMISS_VELOCITY = 0.8;
+
 function SheetFrame({
   palette,
   onClose,
@@ -2270,11 +2277,65 @@ function SheetFrame({
   subtitle?: string;
   children: React.ReactNode;
 }) {
+  // translateY drives the sheet's vertical offset as the user drags.
+  // Reset to 0 on every fresh pan start via the PanResponder callbacks.
+  const translateY = useRef(new Animated.Value(0)).current;
+  const isClosingRef = useRef(false);
+
+  const closeWithAnimation = useCallback(() => {
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
+    Animated.timing(translateY, {
+      toValue: 600,
+      duration: 180,
+      useNativeDriver: true,
+    }).start(() => {
+      onClose();
+      isClosingRef.current = false;
+      translateY.setValue(0);
+    });
+  }, [onClose, translateY]);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        // Only claim the gesture on a clearly downward drag. ≤ 4pt lets
+        // underlying Pressables (chips, buttons) keep their taps, and
+        // horizontal-dominant motion is ignored so lists inside the
+        // sheet can still scroll horizontally if they need to.
+        onMoveShouldSetPanResponder: (_, g) => g.dy > 4 && Math.abs(g.dy) > Math.abs(g.dx),
+        onPanResponderMove: (_, g) => {
+          // Clamp to 0 — you can pull down but not push up past the
+          // resting position.
+          translateY.setValue(Math.max(0, g.dy));
+        },
+        onPanResponderRelease: (_, g) => {
+          if (g.dy > SHEET_DISMISS_DISTANCE || g.vy > SHEET_DISMISS_VELOCITY) {
+            closeWithAnimation();
+          } else {
+            Animated.spring(translateY, {
+              toValue: 0,
+              useNativeDriver: true,
+              bounciness: 4,
+            }).start();
+          }
+        },
+        onPanResponderTerminate: () => {
+          Animated.spring(translateY, {
+            toValue: 0,
+            useNativeDriver: true,
+            bounciness: 4,
+          }).start();
+        },
+      }),
+    [translateY, closeWithAnimation],
+  );
+
   return (
     <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' }}>
       <Pressable style={{ flex: 1 }} onPress={onClose} />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View
+        <Animated.View
           style={{
             backgroundColor: palette.bgSurface,
             borderTopLeftRadius: SHEET_RADIUS,
@@ -2282,19 +2343,24 @@ function SheetFrame({
             padding: 20,
             paddingBottom: 32,
             gap: 14,
+            transform: [{ translateY }],
           }}
         >
-          <View
-            style={{
-              alignSelf: 'center',
-              width: 36,
-              height: 4,
-              borderRadius: 2,
-              backgroundColor: palette.borderDefault,
-              marginBottom: 6,
-            }}
-          />
-          <View>
+          {/* Drag-handle area (pill + title + subtitle) owns the pan
+              gesture. Scopes to the top so tap-heavy children below
+              (chip rows, submit buttons) aren't intercepted by a
+              down-drag starting inside them. */}
+          <View {...panResponder.panHandlers}>
+            <View
+              style={{
+                alignSelf: 'center',
+                width: 36,
+                height: 4,
+                borderRadius: 2,
+                backgroundColor: palette.borderDefault,
+                marginBottom: 6,
+              }}
+            />
             <Text
               style={{ fontSize: 18, fontWeight: '700', color: palette.textPrimary, letterSpacing: -0.2 }}
             >
@@ -2307,7 +2373,7 @@ function SheetFrame({
             ) : null}
           </View>
           {children}
-        </View>
+        </Animated.View>
       </KeyboardAvoidingView>
     </View>
   );
