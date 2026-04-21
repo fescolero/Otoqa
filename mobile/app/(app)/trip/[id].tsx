@@ -24,6 +24,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useLoadDetail } from '../../../lib/hooks/useLoadDetail';
 import { useCheckIn } from '../../../lib/hooks/useCheckIn';
 import { useGPSLocation } from '../../../lib/hooks/useGPSLocation';
+import { useUploadDocument } from '../../../lib/hooks/useUploadDocument';
 import { useDriver } from '../_layout';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
@@ -107,6 +108,7 @@ export default function TripDetailScreen() {
   const { connectionQuality } = useNetworkStatus();
   const { isWarming: isGPSWarming, getFreshLocation } = useGPSLocation();
   const { checkIn, checkOut } = useCheckIn(getFreshLocation);
+  const { uploadDocument } = useUploadDocument(getFreshLocation);
   const { pendingCount } = useOfflineQueue();
   const posthog = usePostHog();
 
@@ -149,6 +151,18 @@ export default function TripDetailScreen() {
   // Track whether we should retry starting tracking on foreground return
   // (e.g., after the driver grants "Always" permission in Settings)
   const pendingTrackingRetry = useRef(false);
+
+  // Recent doc uploads — drives the "JUST UPLOADED" list inside the
+  // Documents sheet so the driver has tactile feedback that the capture
+  // landed. Cleared when the sheet is dismissed.
+  const [recentUploads, setRecentUploads] = useState<
+    Array<{ type: DocKind; status: 'uploading' | 'uploaded' | 'queued' | 'failed' }>
+  >([]);
+
+  // Accident sheet: optional photo that becomes an Accident-typed
+  // document alongside the tel: dial. Kept separate from the legacy
+  // POD `photoUri` state so they don't collide.
+  const [accidentPhotoUri, setAccidentPhotoUri] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -376,6 +390,83 @@ export default function TripDetailScreen() {
     if (!result.canceled && result.assets?.[0]?.uri) {
       setPhotoUri(result.assets[0].uri);
       posthog?.capture('capture_photo_taken', { loadId: id, success: true });
+    }
+  };
+
+  // DocumentsSheet tile handler — one flow per kind:
+  //   1. Request camera permission.
+  //   2. Capture a single photo (cancel-safe).
+  //   3. Fire an optimistic "uploading" row in the sheet list.
+  //   4. uploadDocument() handles the presign → PUT → mutation chain
+  //      (or queues on poor signal). Update the row with the outcome.
+  // Unlike the legacy POD path, the upload does NOT wait for a checkout
+  // — the doc is written immediately with its own GPS + capturedAt.
+  const handlePickDocKind = async (kind: DocKind) => {
+    if (!driverId || !id) return;
+
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Camera access is needed to capture documents.');
+      return;
+    }
+
+    const cameraResult = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 0.8,
+      allowsEditing: false,
+    });
+    if (cameraResult.canceled || !cameraResult.assets?.[0]?.uri) return;
+
+    const capturedUri = cameraResult.assets[0].uri;
+    setRecentUploads((prev) => [{ type: kind, status: 'uploading' }, ...prev]);
+
+    try {
+      const result = await uploadDocument({
+        loadId: id as Id<'loadInformation'>,
+        driverId,
+        type: kind,
+        photoUri: capturedUri,
+      });
+      setRecentUploads((prev) => {
+        // Find the most recent `uploading` entry for this kind and
+        // update it — not a nice-to-have, this avoids ghost rows if the
+        // driver hammers the tile before a previous one resolves.
+        const idx = prev.findIndex((r) => r.type === kind && r.status === 'uploading');
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next[idx] = {
+          type: kind,
+          status: result.queued ? 'queued' : result.success ? 'uploaded' : 'failed',
+        };
+        return next;
+      });
+    } catch {
+      setRecentUploads((prev) => {
+        const idx = prev.findIndex((r) => r.type === kind && r.status === 'uploading');
+        if (idx < 0) return prev;
+        const next = [...prev];
+        next[idx] = { type: kind, status: 'failed' };
+        return next;
+      });
+    }
+  };
+
+  // AccidentSheet's optional photo affordance. We keep the uri in a
+  // separate slot (accidentPhotoUri) so it doesn't fight the legacy POD
+  // photoUri used by the check-out flow.
+  const captureAccidentPhoto = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Camera access is needed to attach a photo.');
+      return;
+    }
+    const cameraResult = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 0.8,
+      allowsEditing: false,
+    });
+    if (!cameraResult.canceled && cameraResult.assets?.[0]?.uri) {
+      setAccidentPhotoUri(cameraResult.assets[0].uri);
     }
   };
 
@@ -657,7 +748,44 @@ export default function TripDetailScreen() {
           >
             Load details
           </Text>
-          <View style={{ width: 44, height: 44 }} />
+          {/* Kebab menu — exposes the contact dial + maps fallback as an
+              explicit action so the dense action bar below doesn't swallow
+              them. When we wire Compliance/Payroll screens the shortcuts
+              live here too. Disabled until there's something to show. */}
+          <Pressable
+            onPress={() => {
+              const opts: Array<{ label: string; action: () => void }> = [];
+              if (load.contactPersonPhone) {
+                opts.push({
+                  label: `Call ${load.contactPersonName ?? 'contact'}`,
+                  action: () => Linking.openURL(`tel:${load.contactPersonPhone}`),
+                });
+              }
+              const nextStop =
+                displayStops.find((s) => !s.checkedOutAt) ?? displayStops[0];
+              if (nextStop?.address) {
+                opts.push({
+                  label: 'Open in Maps',
+                  action: () => openMaps(nextStop.address, nextStop.city, nextStop.state),
+                });
+              }
+              if (opts.length === 0) {
+                Alert.alert('Nothing to show', 'No contact or address on this load.');
+                return;
+              }
+              Alert.alert('Actions', undefined, [
+                ...opts.map((o) => ({ text: o.label, onPress: o.action })),
+                { text: 'Cancel', style: 'cancel' },
+              ]);
+            }}
+            accessibilityLabel="More actions"
+            style={({ pressed }) => [
+              { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: designRadii.full },
+              pressed && { opacity: 0.7 },
+            ]}
+          >
+            <Icon name="more-h" size={22} color={palette.textPrimary} />
+          </Pressable>
         </View>
 
         <ScrollView
@@ -1148,6 +1276,21 @@ export default function TripDetailScreen() {
             onAccident={() => setShowAccidentSheet(true)}
           />
 
+          {/* Load meta (Commodity / Weight + units / Broker / Trailer temp).
+              Reads the fields plumbed through getLoadWithStops — the card
+              hides itself entirely if none are set so spot loads without
+              full metadata don't show a blank shell. */}
+          <LoadMetaCard
+            palette={palette}
+            commodity={load.commodityDescription}
+            weight={load.weight}
+            units={load.units}
+            broker={load.customerName}
+            poNumber={load.poNumber}
+            temperature={load.temperature}
+            maxTemperature={load.maxTemperature}
+          />
+
           {/* Contact Information */}
           {load.contactPersonName && (
             <View
@@ -1519,16 +1662,51 @@ export default function TripDetailScreen() {
           setKind={setAccidentKind}
           note={accidentNote}
           setNote={setAccidentNote}
-          onClose={() => setShowAccidentSheet(false)}
-          onPageOps={() => {
+          hasPhoto={!!accidentPhotoUri}
+          onCapturePhoto={captureAccidentPhoto}
+          onClose={() => {
+            setShowAccidentSheet(false);
+            setAccidentPhotoUri(null);
+          }}
+          onPageOps={async () => {
             posthog?.capture('accident_reported', {
               loadId: id,
               kind: accidentKind,
               hasNote: !!accidentNote,
+              hasPhoto: !!accidentPhotoUri,
             });
+
+            // Write an Accident-typed document to loadDocuments so ops
+            // has a record with GPS + timestamp. The kind chip + driver
+            // note are concatenated into the `note` field (ACCIDENT rows
+            // don't have dedicated subtype columns by design).
+            if (driverId && id) {
+              try {
+                const payloadNote = accidentNote
+                  ? `${accidentKind} — ${accidentNote}`
+                  : accidentKind;
+                if (accidentPhotoUri) {
+                  await uploadDocument({
+                    loadId: id as Id<'loadInformation'>,
+                    driverId,
+                    type: 'Accident',
+                    photoUri: accidentPhotoUri,
+                    note: payloadNote,
+                  });
+                }
+              } catch (uploadErr) {
+                // Don't block the tel: handoff on an upload failure;
+                // driver's call to ops is the priority. The queue will
+                // retry the document in the background.
+                console.warn('[Accident] Document upload failed, continuing tel dial', uploadErr);
+              }
+            }
+
             setShowAccidentSheet(false);
             setAccidentKind('Collision');
             setAccidentNote('');
+            setAccidentPhotoUri(null);
+
             if (load.contactPersonPhone) {
               Linking.openURL(`tel:${load.contactPersonPhone}`);
             }
@@ -1538,11 +1716,15 @@ export default function TripDetailScreen() {
         <DocumentsSheet
           visible={showDocumentsSheet}
           palette={palette}
-          note={notes}
-          setNote={setNotes}
-          hasPhoto={!!photoUri}
-          onClose={() => setShowDocumentsSheet(false)}
-          onCapture={launchCamera}
+          recentUploads={recentUploads}
+          onClose={() => {
+            setShowDocumentsSheet(false);
+            // Clear the toast list on dismiss so re-opening the sheet
+            // starts fresh (the server-side loadDocuments query is the
+            // source of truth; this list is just ephemeral feedback).
+            setRecentUploads([]);
+          }}
+          onPickKind={handlePickDocKind}
         />
       </View>
     </>
@@ -1794,6 +1976,113 @@ function LoadSummary({
  * quick-actions trigger; Detour opens the existing detour modal;
  * Report accident is a placeholder until the sheet lands.
  */
+/**
+ * LoadMetaCard — the design's Load Meta section.
+ *
+ * Four optional k/v rows (Commodity / Weight+units / Broker / Trailer temp).
+ * Renders nothing at all if none of the fields are populated. Temp renders
+ * as a range when both `temperature` and `maxTemperature` are set:
+ *   "34°F – 38°F required"
+ * Weight picks up the new `units` field (PR #57) to avoid the hardcoded
+ * "lbs" the legacy surface assumed.
+ */
+function LoadMetaCard({
+  palette,
+  commodity,
+  weight,
+  units,
+  broker,
+  poNumber,
+  temperature,
+  maxTemperature,
+}: {
+  palette: Palette;
+  commodity?: string;
+  weight?: number;
+  units?: 'Pallets' | 'Boxes' | 'Pieces' | 'Lbs' | 'Kg';
+  broker?: string;
+  poNumber?: string;
+  temperature?: number;
+  maxTemperature?: number;
+}) {
+  const rows: Array<[string, string]> = [];
+  if (commodity) rows.push(['Commodity', commodity]);
+
+  if (typeof weight === 'number') {
+    const unitLabel = units ?? 'Lbs';
+    rows.push(['Weight', `${weight.toLocaleString()} ${unitLabel}`]);
+  }
+
+  if (broker) {
+    rows.push(['Broker', poNumber ? `${broker} · PO ${poNumber}` : broker]);
+  }
+
+  if (typeof temperature === 'number') {
+    const tempLabel =
+      typeof maxTemperature === 'number' && maxTemperature !== temperature
+        ? `${temperature}°F – ${maxTemperature}°F required`
+        : `${temperature}°F required`;
+    rows.push(['Trailer temp', tempLabel]);
+  }
+
+  if (rows.length === 0) return null;
+
+  return (
+    <View style={{ paddingTop: 20 }}>
+      <Text
+        style={{
+          fontSize: 12,
+          fontWeight: '700',
+          letterSpacing: 0.72,
+          color: palette.textTertiary,
+          marginBottom: 8,
+          paddingHorizontal: 4,
+        }}
+      >
+        LOAD INFO
+      </Text>
+      <View
+        style={{
+          backgroundColor: palette.bgSurface,
+          borderWidth: 1,
+          borderColor: palette.borderSubtle,
+          borderRadius: designRadii.lg,
+          overflow: 'hidden',
+        }}
+      >
+        {rows.map(([k, v], i) => (
+          <View
+            key={k}
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              paddingHorizontal: 14,
+              paddingVertical: 12,
+              borderTopWidth: i === 0 ? 0 : StyleSheet.hairlineWidth,
+              borderTopColor: palette.borderSubtle,
+            }}
+          >
+            <Text style={{ fontSize: 13, color: palette.textTertiary }}>{k}</Text>
+            <Text
+              style={{
+                fontSize: 13,
+                fontWeight: '500',
+                color: palette.textPrimary,
+                flexShrink: 1,
+                textAlign: 'right',
+                marginLeft: 12,
+              }}
+            >
+              {v}
+            </Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 function QuickActionsGrid({
   palette,
   onNavigate,
@@ -2217,6 +2506,8 @@ function AccidentSheet({
   setKind,
   note,
   setNote,
+  hasPhoto,
+  onCapturePhoto,
   onClose,
   onPageOps,
 }: {
@@ -2227,6 +2518,13 @@ function AccidentSheet({
   setKind: (k: string) => void;
   note: string;
   setNote: (n: string) => void;
+  // Optional photo attachment — driver can capture before paging ops so
+  // the Accident record lands with visual evidence. The sheet hosts the
+  // affordance but the photoUri lives on the parent (same pattern as
+  // the legacy POD modal) so the upload mutation can fire alongside the
+  // tel: handoff.
+  hasPhoto: boolean;
+  onCapturePhoto: () => void;
   onClose: () => void;
   onPageOps: () => void;
 }) {
@@ -2343,6 +2641,37 @@ function AccidentSheet({
               />
             </View>
 
+            {/* Optional photo attachment — builds an Accident-typed
+                document in loadDocuments with GPS + timestamp alongside
+                the tel: dial, so ops has evidence before the call. */}
+            <Pressable
+              onPress={onCapturePhoto}
+              style={({ pressed }) => [
+                {
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: 12,
+                  borderRadius: designRadii.md,
+                  borderWidth: 1,
+                  borderColor: hasPhoto ? palette.success : palette.borderSubtle,
+                  borderStyle: hasPhoto ? 'solid' : 'dashed',
+                  backgroundColor: hasPhoto ? 'rgba(16,185,129,0.08)' : palette.bgMuted,
+                },
+                pressed && { opacity: 0.85 },
+              ]}
+            >
+              <Icon
+                name={hasPhoto ? 'check' : 'camera'}
+                size={18}
+                color={hasPhoto ? palette.success : palette.textSecondary}
+                strokeWidth={hasPhoto ? 2.5 : 1.5}
+              />
+              <Text style={{ fontSize: 13, color: palette.textPrimary, flex: 1 }}>
+                {hasPhoto ? 'Photo attached — tap to retake' : 'Attach photo (optional)'}
+              </Text>
+            </Pressable>
+
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <SheetButton palette={palette} label="Cancel" variant="secondary" onPress={onClose} />
               <SheetButton
@@ -2361,24 +2690,45 @@ function AccidentSheet({
   );
 }
 
-const DOC_KINDS = ['BOL', 'Seal', 'Pallet count', 'Damage'] as const;
+// DOC_KINDS mirrors the driver-facing enum from convex schema.ts
+// loadDocuments.type. Adding / removing here must also happen in the
+// schema, s3Upload.getLoadDocumentUploadUrl args, and
+// driverMobile.uploadLoadDocument.driverDocType.
+type DocKind = 'POD' | 'Receipt' | 'Cargo' | 'Damage' | 'Accident' | 'Other';
+const DOC_KINDS: ReadonlyArray<{ key: DocKind; icon: string; sub: string }> = [
+  { key: 'POD', icon: 'check', sub: 'Signed delivery slip' },
+  { key: 'Receipt', icon: 'clipboard', sub: 'Lumper, fuel, tolls' },
+  { key: 'Cargo', icon: 'package', sub: 'Load condition' },
+  { key: 'Damage', icon: 'warning', sub: 'Damaged freight' },
+  { key: 'Accident', icon: 'warning', sub: 'Vehicle incident' },
+  { key: 'Other', icon: 'more-h', sub: 'Anything else' },
+] as const;
 
+/**
+ * DocumentsSheet — per-tile capture + upload.
+ *
+ * Each tile corresponds to one of the 6 backend DocKinds. Tapping a tile
+ * launches the camera, then on capture fires onUpload(type, photoUri).
+ * The parent screen routes that through useUploadDocument, which stamps
+ * GPS + capturedAt + type server-side (PR #58).
+ *
+ * No more "save with next check-out" — each upload is its own record,
+ * independently stamped with the driver's GPS and time at capture.
+ */
 function DocumentsSheet({
   visible,
   palette,
-  note,
-  setNote,
-  hasPhoto,
+  recentUploads,
   onClose,
-  onCapture,
+  onPickKind,
 }: {
   visible: boolean;
   palette: Palette;
-  note: string;
-  setNote: (n: string) => void;
-  hasPhoto: boolean;
+  // Shown as a subtle "Uploaded in this session" list below the tiles so
+  // the driver has feedback that the tap actually landed.
+  recentUploads: Array<{ type: DocKind; status: 'uploading' | 'uploaded' | 'queued' | 'failed' }>;
   onClose: () => void;
-  onCapture: () => void;
+  onPickKind: (kind: DocKind) => void;
 }) {
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -2388,13 +2738,13 @@ function DocumentsSheet({
             palette={palette}
             onClose={onClose}
             title="Documents"
-            subtitle="Attach a photo and note to this load. They'll be saved with your next check-out."
+            subtitle="Tap a kind to capture — we record your GPS and time automatically."
           >
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {DOC_KINDS.map((kind) => (
+              {DOC_KINDS.map(({ key, icon, sub }) => (
                 <Pressable
-                  key={kind}
-                  onPress={onCapture}
+                  key={key}
+                  onPress={() => onPickKind(key)}
                   style={({ pressed }) => [
                     {
                       flexBasis: '48%',
@@ -2413,57 +2763,75 @@ function DocumentsSheet({
                     pressed && { opacity: 0.85 },
                   ]}
                 >
-                  <Icon name="clipboard" size={22} color={palette.textSecondary} />
+                  <Icon name={icon} size={22} color={palette.textSecondary} />
                   <Text style={{ fontSize: 13, fontWeight: '500', color: palette.textPrimary }}>
-                    {kind}
+                    {key}
                   </Text>
-                  <Text style={{ fontSize: 11, color: palette.textTertiary }}>
-                    Tap to capture
+                  <Text style={{ fontSize: 11, color: palette.textTertiary, textAlign: 'center' }}>
+                    {sub}
                   </Text>
                 </Pressable>
               ))}
             </View>
 
-            {hasPhoto ? (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: 10,
-                  borderRadius: designRadii.md,
-                  backgroundColor: 'rgba(16,185,129,0.12)',
-                }}
-              >
-                <Icon name="check" size={16} color={palette.success} strokeWidth={2.5} />
-                <Text style={{ fontSize: 12, color: palette.textSecondary, flex: 1 }}>
-                  Photo ready — it will upload with your next check-out.
+            {recentUploads.length > 0 && (
+              <View style={{ gap: 6 }}>
+                <Text
+                  style={{
+                    fontSize: 11,
+                    fontWeight: '700',
+                    letterSpacing: 0.8,
+                    color: palette.textTertiary,
+                  }}
+                >
+                  JUST UPLOADED
                 </Text>
+                {recentUploads.map((u, i) => {
+                  const color =
+                    u.status === 'failed'
+                      ? palette.danger
+                      : u.status === 'uploading'
+                        ? palette.textSecondary
+                        : u.status === 'queued'
+                          ? palette.warning
+                          : palette.success;
+                  const label =
+                    u.status === 'uploading'
+                      ? 'Uploading…'
+                      : u.status === 'queued'
+                        ? 'Queued (no signal)'
+                        : u.status === 'failed'
+                          ? 'Failed'
+                          : 'Uploaded';
+                  return (
+                    <View
+                      key={i}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: 10,
+                        borderRadius: designRadii.md,
+                        backgroundColor: palette.bgMuted,
+                      }}
+                    >
+                      <Icon
+                        name={u.status === 'failed' ? 'warning' : 'check'}
+                        size={14}
+                        color={color}
+                        strokeWidth={2.5}
+                      />
+                      <Text style={{ fontSize: 13, color: palette.textPrimary, flex: 1 }}>
+                        {u.type}
+                      </Text>
+                      <Text style={{ fontSize: 12, color }}>{label}</Text>
+                    </View>
+                  );
+                })}
               </View>
-            ) : null}
+            )}
 
-            <TextInput
-              value={note}
-              onChangeText={setNote}
-              placeholder="Add a note (optional)"
-              placeholderTextColor={palette.textPlaceholder}
-              multiline
-              maxLength={500}
-              style={{
-                borderWidth: 1,
-                borderColor: palette.borderSubtle,
-                backgroundColor: palette.bgMuted,
-                borderRadius: designRadii.md,
-                paddingHorizontal: 12,
-                paddingVertical: 10,
-                minHeight: 80,
-                fontSize: 14,
-                color: palette.textPrimary,
-                textAlignVertical: 'top',
-              }}
-            />
-
-            <SheetButton palette={palette} label="Save to load" variant="primary" onPress={onClose} />
+            <SheetButton palette={palette} label="Done" variant="secondary" onPress={onClose} />
           </SheetFrame>
         </View>
       </TouchableWithoutFeedback>

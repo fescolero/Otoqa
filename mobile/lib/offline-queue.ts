@@ -21,7 +21,8 @@ export type MutationType =
   | 'checkOut'
   | 'statusUpdate'
   | 'recordPOD'
-  | 'updateLocation';
+  | 'updateLocation'
+  | 'uploadLoadDocument';
 
 export interface QueuedMutation {
   id: string;
