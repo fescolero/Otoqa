@@ -27,7 +27,7 @@ import {
   Modal,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
 import { useMutation, useQuery } from 'convex/react';
@@ -398,10 +398,16 @@ function SheetFrame({
 }) {
   const { sp } = useDensityTokens();
   const styles = makeStyles(palette, sp);
+  // The Modal sits above all SafeAreaView providers, so we have to pull
+  // insets here and pad the sheet body. iOS home-indicator is ~34px; on
+  // Android gesture phones inset.bottom is 0–16, on 3-button nav it's
+  // 48+. `Math.max` keeps iOS looking identical while pushing the CTA
+  // clear of the Android nav bar.
+  const insets = useSafeAreaInsets();
   return (
     <View style={styles.sheetOverlay}>
       <Pressable style={styles.sheetBackdrop} onPress={onCancel} />
-      <View style={styles.sheetBody}>
+      <View style={[styles.sheetBody, { paddingBottom: Math.max(insets.bottom + 12, 24) }]}>
         <View style={styles.sheetHandle} />
         {children}
       </View>
@@ -822,7 +828,7 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       borderTopLeftRadius: 22,
       borderTopRightRadius: 22,
       padding: 18,
-      paddingBottom: 34,
+      // paddingBottom is applied inline from useSafeAreaInsets in SheetFrame
       alignItems: 'center',
     },
     sheetHandle: {
