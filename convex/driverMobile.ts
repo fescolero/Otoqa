@@ -1113,12 +1113,35 @@ export const checkOutFromStop = mutation({
     );
     // #endregion
 
-    // If POD photo provided, store it
+    // If POD photo provided, store it in both places during the transition:
+    //   1. stop.deliveryPhotos (legacy — web UI still reads this)
+    //   2. loadDocuments (new unified table; mobile UI will read from here
+    //      once the Load Details port ships)
+    //
+    // The new loadDocuments row is classified AT_STOP because we're inside
+    // the checkout flow — the driver is, by definition, at the stop they
+    // just checked out of. We use the check-in → now window for capturedAt
+    // approximation (the photo was taken somewhere in that window).
     if (args.podPhotoUrl && stop.stopType === 'DELIVERY') {
-      // Store POD URL in delivery photos array
       const existingPhotos = stop.deliveryPhotos || [];
       await ctx.db.patch(args.stopId, {
         deliveryPhotos: [...existingPhotos, args.podPhotoUrl],
+      });
+
+      await ctx.db.insert('loadDocuments', {
+        loadId: stop.loadId,
+        workosOrgId: load.workosOrgId,
+        type: 'POD',
+        externalUrl: args.podPhotoUrl,
+        uploadedBy: `driver:${driver._id}`,
+        driverId: driver._id,
+        capturedAt: Date.now(),
+        uploadedAt: Date.now(),
+        capturedLat: args.latitude,
+        capturedLng: args.longitude,
+        inferredStopId: stop._id,
+        inferredStopSequence: stop.sequenceNumber,
+        inferredContext: 'AT_STOP',
       });
     }
 
@@ -1301,14 +1324,356 @@ export const recordPOD = mutation({
       return { success: false, message: 'Not authorized for this load' };
     }
 
-    // Add photo to delivery photos
+    // Dual-write during transition — stop.deliveryPhotos for the legacy
+    // web UI, loadDocuments for the new unified driver surface.
     const existingPhotos = stop.deliveryPhotos || [];
     await ctx.db.patch(args.stopId, {
       deliveryPhotos: [...existingPhotos, args.photoUrl],
       updatedAt: Date.now(),
     });
 
+    await ctx.db.insert('loadDocuments', {
+      loadId: stop.loadId,
+      workosOrgId: load.workosOrgId,
+      type: 'POD',
+      externalUrl: args.photoUrl,
+      uploadedBy: `driver:${driver._id}`,
+      driverId: driver._id,
+      capturedAt: Date.now(),
+      uploadedAt: Date.now(),
+      inferredStopId: stop._id,
+      inferredStopSequence: stop.sequenceNumber,
+      inferredContext: 'AT_STOP',
+    });
+
     return { success: true, message: 'POD photo recorded' };
+  },
+});
+
+// ============================================
+// LOAD DOCUMENTS — unified driver-upload surface
+// ============================================
+
+/**
+ * Document type enum shared between the mutation validator and the query
+ * response shape. Kept in sync with schema.ts loadDocuments.type.
+ * 'EXTRA_DOC' is intentionally NOT exposed to the driver API — drivers
+ * only produce the six user-facing kinds.
+ */
+const driverDocType = v.union(
+  v.literal('POD'),
+  v.literal('Receipt'),
+  v.literal('Cargo'),
+  v.literal('Damage'),
+  v.literal('Accident'),
+  v.literal('Other'),
+);
+
+const inferredContextLiteral = v.union(
+  v.literal('AT_STOP'),
+  v.literal('IN_TRANSIT'),
+  v.literal('BEFORE_FIRST'),
+  v.literal('AFTER_LAST'),
+  v.literal('UNKNOWN'),
+);
+
+/**
+ * Infer a document's relation to the route from capture timestamp + stops.
+ *
+ * Rules (in priority order):
+ *   1. If any stop has checkedInAt ≤ capturedAt AND (checkedOutAt is null
+ *      OR checkedOutAt ≥ capturedAt) → AT_STOP, link to that stop.
+ *   2. If capturedAt is before the earliest checkedInAt → BEFORE_FIRST.
+ *   3. If capturedAt is after the latest checkedOutAt and no later stop
+ *      is pending → AFTER_LAST, link to the final stop.
+ *   4. Otherwise the driver is between two stops → IN_TRANSIT, link to
+ *      the NEXT upcoming stop (the one they're heading toward) so ops
+ *      sees "photo taken on the way to stop 3".
+ *   5. Nothing resolvable (no timestamps, empty route) → UNKNOWN.
+ *
+ * GPS is intentionally ignored here — time-based inference is more
+ * reliable than radius matching (stops often have bad coordinates, yards
+ * are big, signal is spotty). GPS is stored raw alongside the inference
+ * so ops can cross-check visually on the web.
+ */
+function inferDocumentContext(
+  stops: Doc<'loadStops'>[],
+  capturedAtMs: number | undefined,
+): {
+  inferredStopId: Id<'loadStops'> | null;
+  inferredStopSequence: number | null;
+  inferredContext: 'AT_STOP' | 'IN_TRANSIT' | 'BEFORE_FIRST' | 'AFTER_LAST' | 'UNKNOWN';
+} {
+  if (!capturedAtMs || stops.length === 0) {
+    return { inferredStopId: null, inferredStopSequence: null, inferredContext: 'UNKNOWN' };
+  }
+
+  const sorted = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+
+  // checkedInAt / checkedOutAt are ISO strings — normalize to ms once.
+  const normalized = sorted.map((s) => ({
+    stop: s,
+    inMs: s.checkedInAt ? Date.parse(s.checkedInAt) : null,
+    outMs: s.checkedOutAt ? Date.parse(s.checkedOutAt) : null,
+  }));
+
+  // Rule 1 — AT_STOP: currently inside a check-in window.
+  for (const r of normalized) {
+    if (r.inMs !== null && r.inMs <= capturedAtMs) {
+      const stillIn = r.outMs === null || r.outMs >= capturedAtMs;
+      if (stillIn) {
+        return {
+          inferredStopId: r.stop._id,
+          inferredStopSequence: r.stop.sequenceNumber,
+          inferredContext: 'AT_STOP',
+        };
+      }
+    }
+  }
+
+  const earliestIn = normalized.find((r) => r.inMs !== null)?.inMs ?? null;
+  const latestOut = normalized
+    .slice()
+    .reverse()
+    .find((r) => r.outMs !== null)?.outMs ?? null;
+
+  // Rule 2 — BEFORE_FIRST: captured before any check-in happened.
+  if (earliestIn !== null && capturedAtMs < earliestIn) {
+    return { inferredStopId: null, inferredStopSequence: null, inferredContext: 'BEFORE_FIRST' };
+  }
+
+  // Rule 3 — AFTER_LAST: past the last check-out and nothing left pending.
+  const anyPending = normalized.some((r) => r.inMs === null);
+  if (latestOut !== null && capturedAtMs > latestOut && !anyPending) {
+    const last = normalized[normalized.length - 1]?.stop;
+    return {
+      inferredStopId: last?._id ?? null,
+      inferredStopSequence: last?.sequenceNumber ?? null,
+      inferredContext: 'AFTER_LAST',
+    };
+  }
+
+  // Rule 4 — IN_TRANSIT: between a completed stop and the next pending.
+  // Pick the next pending stop (smallest sequence number with no check-in).
+  const nextPending = normalized.find((r) => r.inMs === null);
+  if (nextPending) {
+    return {
+      inferredStopId: nextPending.stop._id,
+      inferredStopSequence: nextPending.stop.sequenceNumber,
+      inferredContext: 'IN_TRANSIT',
+    };
+  }
+
+  return { inferredStopId: null, inferredStopSequence: null, inferredContext: 'UNKNOWN' };
+}
+
+/**
+ * Upload a document (photo, receipt, accident report, etc.) against a
+ * load. The driver app has already uploaded the bytes to R2 via a
+ * presigned URL returned by s3Upload.getLoadDocumentUploadUrl — this
+ * mutation just records the metadata + infers the stop relation.
+ *
+ * GPS is optional: drivers in bad signal or with location denied can
+ * still upload, but the record lands with inferredContext: UNKNOWN
+ * (the time-based inference will often still resolve it anyway).
+ */
+export const uploadLoadDocument = mutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    driverId: v.id('drivers'),
+    type: driverDocType,
+    // Storage: the driver app goes through S3/R2 presigned URLs, so we
+    // store the fileUrl (externalUrl). storageId is present only for
+    // paths that use Convex file storage (ops uploads via the web app).
+    externalUrl: v.optional(v.string()),
+    storageId: v.optional(v.id('_storage')),
+    fileName: v.optional(v.string()),
+    contentType: v.optional(v.string()),
+    capturedAt: v.optional(v.float64()),
+    capturedLat: v.optional(v.number()),
+    capturedLng: v.optional(v.number()),
+    gpsAccuracyM: v.optional(v.number()),
+    note: v.optional(v.string()),
+  },
+  returns: v.object({
+    documentId: v.id('loadDocuments'),
+    inferredContext: inferredContextLiteral,
+    inferredStopId: v.union(v.id('loadStops'), v.null()),
+    inferredStopSequence: v.union(v.number(), v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+
+    const load = await ctx.db.get(args.loadId);
+    if (!load) {
+      throw new Error('Load not found');
+    }
+
+    // Verify driver assignment (same rules as getLoadWithStops).
+    let hasAccess = load.primaryDriverId === driver._id;
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .first();
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
+        hasAccess = true;
+      }
+    }
+    if (!hasAccess) {
+      throw new Error('Not authorized for this load');
+    }
+
+    // Must have either a storageId or an externalUrl — we reject empty
+    // records rather than creating a pointer to nothing.
+    if (!args.storageId && !args.externalUrl) {
+      throw new Error('Document must have either storageId or externalUrl');
+    }
+
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+
+    const { inferredStopId, inferredStopSequence, inferredContext } = inferDocumentContext(
+      stops,
+      args.capturedAt,
+    );
+
+    const now = Date.now();
+    const documentId = await ctx.db.insert('loadDocuments', {
+      loadId: args.loadId,
+      workosOrgId: load.workosOrgId,
+      type: args.type,
+      storageId: args.storageId,
+      externalUrl: args.externalUrl,
+      fileName: args.fileName,
+      contentType: args.contentType,
+      // uploadedBy is a synthetic string for driver uploads; the WorkOS
+      // user field isn't populated on driver JWTs. Prefix with `driver:`
+      // so ops can distinguish at a glance.
+      uploadedBy: `driver:${driver._id}`,
+      driverId: driver._id,
+      capturedAt: args.capturedAt,
+      uploadedAt: now,
+      capturedLat: args.capturedLat,
+      capturedLng: args.capturedLng,
+      gpsAccuracyM: args.gpsAccuracyM,
+      inferredStopId: inferredStopId ?? undefined,
+      inferredStopSequence: inferredStopSequence ?? undefined,
+      inferredContext,
+      note: args.note,
+    });
+
+    return {
+      documentId,
+      inferredContext,
+      inferredStopId,
+      inferredStopSequence,
+    };
+  },
+});
+
+/**
+ * List all documents for a load, ordered by capture time ASC so the UI
+ * reads as a chronological timeline ("first thing captured on top").
+ */
+export const getLoadDocuments = query({
+  args: {
+    loadId: v.id('loadInformation'),
+    driverId: v.id('drivers'),
+  },
+  returns: v.array(
+    v.object({
+      _id: v.id('loadDocuments'),
+      type: driverDocType,
+      externalUrl: v.optional(v.string()),
+      storageId: v.optional(v.id('_storage')),
+      fileName: v.optional(v.string()),
+      contentType: v.optional(v.string()),
+      capturedAt: v.optional(v.float64()),
+      uploadedAt: v.float64(),
+      capturedLat: v.optional(v.number()),
+      capturedLng: v.optional(v.number()),
+      gpsAccuracyM: v.optional(v.number()),
+      inferredStopId: v.optional(v.id('loadStops')),
+      inferredStopSequence: v.optional(v.number()),
+      inferredContext: v.optional(inferredContextLiteral),
+      note: v.optional(v.string()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
+      return [];
+    }
+
+    const load = await ctx.db.get(args.loadId);
+    if (!load) return [];
+
+    // Same access check as getLoadWithStops.
+    let hasAccess = load.primaryDriverId === driver._id;
+    if (!hasAccess) {
+      const carrierAssignment = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .first();
+      if (carrierAssignment && carrierAssignment.assignedDriverId === driver._id) {
+        hasAccess = true;
+      }
+    }
+    if (!hasAccess) return [];
+
+    const docs = await ctx.db
+      .query('loadDocuments')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+
+    // Filter out legacy EXTRA_DOC rows until migration maps them to 'Other'
+    // — don't surface the deprecated tag to drivers.
+    const visible = docs.filter((d) => d.type !== 'EXTRA_DOC');
+
+    // Sort by capturedAt, falling back to uploadedAt for legacy rows that
+    // predate the capturedAt field.
+    visible.sort((a, b) => {
+      const aT = a.capturedAt ?? a.uploadedAt;
+      const bT = b.capturedAt ?? b.uploadedAt;
+      return aT - bT;
+    });
+
+    return visible.map((doc) => ({
+      _id: doc._id,
+      // The filter above removes EXTRA_DOC rows, so the union narrowing is
+      // safe — cast for the type system.
+      type: doc.type as
+        | 'POD'
+        | 'Receipt'
+        | 'Cargo'
+        | 'Damage'
+        | 'Accident'
+        | 'Other',
+      externalUrl: doc.externalUrl,
+      storageId: doc.storageId,
+      fileName: doc.fileName,
+      contentType: doc.contentType,
+      capturedAt: doc.capturedAt,
+      uploadedAt: doc.uploadedAt,
+      capturedLat: doc.capturedLat,
+      capturedLng: doc.capturedLng,
+      gpsAccuracyM: doc.gpsAccuracyM,
+      inferredStopId: doc.inferredStopId,
+      inferredStopSequence: doc.inferredStopSequence,
+      inferredContext: doc.inferredContext as
+        | 'AT_STOP'
+        | 'IN_TRANSIT'
+        | 'BEFORE_FIRST'
+        | 'AFTER_LAST'
+        | 'UNKNOWN'
+        | undefined,
+      note: doc.note,
+    }));
   },
 });
 

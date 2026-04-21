@@ -1670,20 +1670,77 @@ export default defineSchema({
     .index('by_driver_created', ['driverId', 'createdAt']),
 
   /**
-   * Load Documents - Attachments for loads (e.g., extra documentation images)
+   * Load Documents — unified attachment surface for loads.
+   *
+   * Evolution (2026-04): previously this table held only dispatcher-uploaded
+   * "extra docs" (type: 'EXTRA_DOC'). It's now the single source of truth
+   * for every file attached to a load — driver POD photos, receipts, cargo
+   * condition photos, damage claims, accident reports, and ops uploads.
+   *
+   * Classification ≠ stop. A driver can upload a BOL photo while checked in
+   * at the pickup (AT_STOP) or while driving to the next one (IN_TRANSIT).
+   * The server infers the relation at upload time from the driver's active
+   * check-in window + GPS, so dispatchers don't have to ask "when was this
+   * taken?". See driverMobile.uploadLoadDocument for the inference rule.
+   *
+   * 'EXTRA_DOC' is retained in the type union as a deprecated alias so
+   * legacy rows still validate during the backfill. A follow-up migration
+   * will patch them to 'Other' and a future PR will drop it from the union.
    */
   loadDocuments: defineTable({
     loadId: v.id('loadInformation'),
-    type: v.union(v.literal('EXTRA_DOC')),
-    storageId: v.id('_storage'),
+    workosOrgId: v.string(),
+
+    // Classification — drives UI filter chips and any ops alerting rules.
+    type: v.union(
+      v.literal('POD'), // Proof of delivery (bill, signed receipt)
+      v.literal('Receipt'), // Lumper, fuel, toll, incidental
+      v.literal('Cargo'), // Pre/post cargo condition
+      v.literal('Damage'), // Damaged freight
+      v.literal('Accident'), // Vehicle accident documentation
+      v.literal('Other'), // Catch-all driver upload
+      v.literal('EXTRA_DOC'), // DEPRECATED — legacy rows; migration → 'Other'
+    ),
+
+    // Storage (Convex _storage for web uploads; S3 URL via `externalUrl`
+    // for driver POD photos that go through the R2 presigned-URL flow).
+    storageId: v.optional(v.id('_storage')),
+    externalUrl: v.optional(v.string()),
     fileName: v.optional(v.string()),
     contentType: v.optional(v.string()),
-    uploadedAt: v.float64(),
-    uploadedBy: v.string(), // WorkOS user ID
-    workosOrgId: v.string(),
+
+    // Who / when
+    uploadedBy: v.string(), // WorkOS user ID, or driver-prefixed synthetic ID
+    driverId: v.optional(v.id('drivers')), // Set when driver app is the source
+    capturedAt: v.optional(v.float64()), // Wall-clock ms when the shot was taken
+    uploadedAt: v.float64(), // Server receive ms
+
+    // Where — driver captures only. Ops uploads leave these null.
+    capturedLat: v.optional(v.number()),
+    capturedLng: v.optional(v.number()),
+    gpsAccuracyM: v.optional(v.number()),
+
+    // Inferred relation to the route. Set server-side so the UI + ops
+    // see the same computed linkage and drivers don't have to tag stops.
+    inferredStopId: v.optional(v.id('loadStops')),
+    inferredStopSequence: v.optional(v.number()), // Denormalized for queries
+    inferredContext: v.optional(
+      v.union(
+        v.literal('AT_STOP'), // Driver was checked in when captured
+        v.literal('IN_TRANSIT'), // Between a completed and an upcoming stop
+        v.literal('BEFORE_FIRST'), // Before any check-in
+        v.literal('AFTER_LAST'), // After the final check-out
+        v.literal('UNKNOWN'), // No GPS or unresolvable
+      ),
+    ),
+
+    // Optional freeform driver caption
+    note: v.optional(v.string()),
   })
     .index('by_load', ['loadId'])
     .index('by_load_type', ['loadId', 'type'])
+    .index('by_load_capturedAt', ['loadId', 'capturedAt'])
+    .index('by_driver_captured', ['driverId', 'capturedAt'])
     .index('by_org', ['workosOrgId']),
 
   /**
