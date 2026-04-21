@@ -53,6 +53,15 @@ import {
   Camera01Icon,
   RunningShoesIcon,
   QrCodeIcon,
+  Navigation01Icon,
+  Shield01Icon,
+  Building01Icon,
+  Exchange01Icon,
+  HelpCircleIcon,
+  ArrowUp01Icon,
+  ActivityIcon,
+  InboxIcon,
+  LayoutGridIcon,
 } from '@hugeicons/core-free-icons';
 
 // Design uses dashed kebab-case names; map to HugeIcons exports. The
@@ -113,6 +122,16 @@ const ICON_MAP = {
   camera: Camera01Icon,
   motion: RunningShoesIcon,
   qr: QrCodeIcon,
+  navigate: Navigation01Icon,
+  shield: Shield01Icon,
+  building: Building01Icon,
+  'truck-swap': Exchange01Icon,
+  help: HelpCircleIcon,
+  'chevron-up': ArrowUp01Icon,
+  activity: ActivityIcon,
+  inbox: InboxIcon,
+  layout: LayoutGridIcon,
+  pin: MapPinIcon,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;
