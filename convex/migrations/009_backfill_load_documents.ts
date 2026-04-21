@@ -17,9 +17,25 @@
  * via a (loadId, externalUrl, type=POD) lookup, so partial runs are safe
  * and the migration can be invoked again after backend deploys that land
  * new legacy data (unlikely but safe).
+ *
+ * Usage (preferred — auto-loops through every page):
+ *   npx convex run migrations/009_backfill_load_documents:runAll
+ *
+ * Usage (manual paging, for debugging a single batch):
+ *   npx convex run migrations/009_backfill_load_documents:remapExtraDocRows
+ *   npx convex run migrations/009_backfill_load_documents:backfillPodFromDeliveryPhotos
+ *   # then feed nextCursor back in:
+ *   npx convex run migrations/009_backfill_load_documents:backfillPodFromDeliveryPhotos '{"cursor":"<nextCursor>"}'
  */
-import { internalMutation } from '../_generated/server';
+import { internalAction, internalMutation } from '../_generated/server';
+import { internal } from '../_generated/api';
 import { v } from 'convex/values';
+
+// Typed alias for the circular self-reference. `internal` hasn't indexed
+// the new migration path yet at typecheck time, so we cast through any —
+// matches the pattern in migration 008.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const self: any = (internal as any)['migrations/009_backfill_load_documents'];
 
 export const remapExtraDocRows = internalMutation({
   args: {
@@ -117,6 +133,74 @@ export const backfillPodFromDeliveryPhotos = internalMutation({
       inserted,
       nextCursor: page.isDone ? null : page.continueCursor,
       done: page.isDone,
+    };
+  },
+});
+
+/**
+ * Loop wrapper — runs both passes to completion in a single command so the
+ * operator doesn't have to shuffle cursors. Prints per-pass totals and
+ * returns the grand summary.
+ *
+ * Actions can't access the DB directly but CAN invoke internalMutations
+ * in a loop via ctx.runMutation, which is exactly what we want here.
+ */
+export const runAll = internalAction({
+  args: {},
+  returns: v.object({
+    extraDocsPatched: v.number(),
+    stopsScanned: v.number(),
+    podsInserted: v.number(),
+    iterations: v.number(),
+  }),
+  handler: async (ctx) => {
+    const MAX_ITERATIONS = 20_000;
+
+    // Pass 1 — remap EXTRA_DOC → Other.
+    let cursor: string | null = null;
+    let extraDocsPatched = 0;
+    let iters1 = 0;
+    while (iters1 < MAX_ITERATIONS) {
+      iters1++;
+      const batch: { patched: number; nextCursor: string | null; done: boolean } =
+        await ctx.runMutation(self.remapExtraDocRows, {
+          cursor: cursor ?? undefined,
+        });
+      extraDocsPatched += batch.patched;
+      if (batch.done) break;
+      cursor = batch.nextCursor;
+    }
+    console.log(`[migration 009] remap done — patched=${extraDocsPatched}`);
+
+    // Pass 2 — backfill POD rows from stop.deliveryPhotos.
+    cursor = null;
+    let stopsScanned = 0;
+    let podsInserted = 0;
+    let iters2 = 0;
+    while (iters2 < MAX_ITERATIONS) {
+      iters2++;
+      const batch: {
+        scanned: number;
+        inserted: number;
+        nextCursor: string | null;
+        done: boolean;
+      } = await ctx.runMutation(self.backfillPodFromDeliveryPhotos, {
+        cursor: cursor ?? undefined,
+      });
+      stopsScanned += batch.scanned;
+      podsInserted += batch.inserted;
+      if (batch.done) break;
+      cursor = batch.nextCursor;
+    }
+    console.log(
+      `[migration 009] POD backfill done — scanned=${stopsScanned} inserted=${podsInserted}`,
+    );
+
+    return {
+      extraDocsPatched,
+      stopsScanned,
+      podsInserted,
+      iterations: iters1 + iters2,
     };
   },
 });
