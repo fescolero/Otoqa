@@ -2263,6 +2263,9 @@ const SHEET_RADIUS = 20;
 // threshold dismisses — matches iOS's presented-sheet gesture feel.
 const SHEET_DISMISS_DISTANCE = 120;
 const SHEET_DISMISS_VELOCITY = 0.8;
+// Max translation the backdrop fades across — beyond this we're past
+// the dismiss threshold anyway. Keeps the math simple.
+const SHEET_DRAG_FADE_RANGE = 240;
 
 function SheetFrame({
   palette,
@@ -2278,9 +2281,18 @@ function SheetFrame({
   children: React.ReactNode;
 }) {
   // translateY drives the sheet's vertical offset as the user drags.
-  // Reset to 0 on every fresh pan start via the PanResponder callbacks.
   const translateY = useRef(new Animated.Value(0)).current;
   const isClosingRef = useRef(false);
+
+  // Backdrop opacity fades from 0.5 → 0 as the sheet drags toward
+  // dismiss, matching iOS presented-sheet behavior. Interpolating off
+  // the same translateY keeps the two perfectly in sync and native-
+  // driver-friendly.
+  const backdropOpacity = translateY.interpolate({
+    inputRange: [0, SHEET_DRAG_FADE_RANGE],
+    outputRange: [0.5, 0],
+    extrapolate: 'clamp',
+  });
 
   const closeWithAnimation = useCallback(() => {
     if (isClosingRef.current) return;
@@ -2299,14 +2311,18 @@ function SheetFrame({
   const panResponder = useMemo(
     () =>
       PanResponder.create({
-        // Only claim the gesture on a clearly downward drag. ≤ 4pt lets
-        // underlying Pressables (chips, buttons) keep their taps, and
-        // horizontal-dominant motion is ignored so lists inside the
-        // sheet can still scroll horizontally if they need to.
-        onMoveShouldSetPanResponder: (_, g) => g.dy > 4 && Math.abs(g.dy) > Math.abs(g.dx),
+        // Don't claim the gesture on touch-start — let children take
+        // tap events first. Only steal on a clearly downward drag
+        // (dy > 6pt, vertical-dominant) so buttons/chips/text inputs
+        // inside the sheet keep working normally.
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
+        // Same policy for capture — children resolve first, we grab
+        // only once the motion pattern is clearly a pull-down.
+        onMoveShouldSetPanResponderCapture: (_, g) =>
+          g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx) * 1.5,
         onPanResponderMove: (_, g) => {
-          // Clamp to 0 — you can pull down but not push up past the
-          // resting position.
+          // Clamp to 0 — you can pull down but not push up past rest.
           translateY.setValue(Math.max(0, g.dy));
         },
         onPanResponderRelease: (_, g) => {
@@ -2332,10 +2348,29 @@ function SheetFrame({
   );
 
   return (
-    <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' }}>
-      <Pressable style={{ flex: 1 }} onPress={onClose} />
+    <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+      {/* Backdrop lives in its own absolute layer so it can fade
+          independently of the sheet's transform. Still captures taps
+          to close. */}
+      <Animated.View
+        pointerEvents="auto"
+        style={{
+          ...StyleSheet.absoluteFillObject,
+          backgroundColor: '#000',
+          opacity: backdropOpacity,
+        }}
+      >
+        <Pressable style={{ flex: 1 }} onPress={onClose} />
+      </Animated.View>
+
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {/* The entire sheet body is the drag target — pan handlers
+            are attached here so grabbing the pill, the title, OR even
+            the whitespace just inside the sheet all register. Children
+            (chips, buttons, inputs) still resolve taps first because
+            of the onStartShouldSetPanResponder: false policy. */}
         <Animated.View
+          {...panResponder.panHandlers}
           style={{
             backgroundColor: palette.bgSurface,
             borderTopLeftRadius: SHEET_RADIUS,
@@ -2346,21 +2381,28 @@ function SheetFrame({
             transform: [{ translateY }],
           }}
         >
-          {/* Drag-handle area (pill + title + subtitle) owns the pan
-              gesture. Scopes to the top so tap-heavy children below
-              (chip rows, submit buttons) aren't intercepted by a
-              down-drag starting inside them. */}
-          <View {...panResponder.panHandlers}>
+          {/* Enlarged tap target around the pill — 44pt tall band per
+              iOS HIG minimum so thumbs land reliably. Pill itself bumped
+              to 44×5 so it reads as clearly interactive. */}
+          <View
+            style={{
+              alignSelf: 'center',
+              paddingVertical: 10,
+              paddingHorizontal: 20,
+              marginTop: -8,
+              marginBottom: 2,
+            }}
+          >
             <View
               style={{
-                alignSelf: 'center',
-                width: 36,
-                height: 4,
-                borderRadius: 2,
+                width: 44,
+                height: 5,
+                borderRadius: 3,
                 backgroundColor: palette.borderDefault,
-                marginBottom: 6,
               }}
             />
+          </View>
+          <View>
             <Text
               style={{ fontSize: 18, fontWeight: '700', color: palette.textPrimary, letterSpacing: -0.2 }}
             >
