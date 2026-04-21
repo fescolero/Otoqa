@@ -38,12 +38,21 @@ import { useDriver } from '../_layout';
 import { stopSessionTracking } from '../../../lib/location-tracking';
 import { Icon, type IconName } from '../../../lib/design-icons';
 import { useTheme } from '../../../lib/ThemeContext';
-import { radii, typeScale, type Palette } from '../../../lib/design-tokens';
+import { useDensityTokens } from '../../../lib/density';
+import {
+  densitySpacing,
+  radii,
+  typeScale,
+  type Palette,
+} from '../../../lib/design-tokens';
+
+type Sp = (typeof densitySpacing)['dense'];
 
 export default function MoreScreen() {
   const router = useRouter();
   const { palette } = useTheme();
-  const styles = useMemo(() => makeStyles(palette), [palette]);
+  const { sp } = useDensityTokens();
+  const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
 
   const { signOut } = useClerk();
   const { driverId, truck } = useDriver();
@@ -292,7 +301,8 @@ function DrillRow({
   meta: string;
   onPress: () => void;
 }) {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <View style={{ marginTop: 10 }}>
       <Pressable
@@ -338,7 +348,8 @@ function SheetFrame({
   onCancel: () => void;
   children: React.ReactNode;
 }) {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <View style={styles.sheetOverlay}>
       <Pressable style={styles.sheetBackdrop} onPress={onCancel} />
@@ -361,7 +372,8 @@ function SignOutSheet({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
       <SheetFrame palette={palette} onCancel={onCancel}>
@@ -420,7 +432,8 @@ function EndShiftSheet({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
       <SheetFrame palette={palette} onCancel={onCancel}>
@@ -494,7 +507,7 @@ function formatElapsed(startedAtMs?: number): string {
   return `${hours}h ${mins.toString().padStart(2, '0')}m`;
 }
 
-const makeStyles = (palette: Palette) =>
+const makeStyles = (palette: Palette, sp: Sp) =>
   StyleSheet.create({
     screen: {
       flex: 1,
@@ -516,7 +529,7 @@ const makeStyles = (palette: Palette) =>
     },
     scroll: {
       flex: 1,
-      paddingHorizontal: 16,
+      paddingHorizontal: sp.screenPx,
     },
     eyebrow: {
       fontSize: 11,
@@ -529,7 +542,7 @@ const makeStyles = (palette: Palette) =>
       backgroundColor: palette.bgSurface,
       borderWidth: 1,
       borderColor: palette.borderSubtle,
-      padding: 14,
+      padding: sp.cardPadding,
       position: 'relative',
       overflow: 'hidden',
     },
@@ -632,7 +645,8 @@ const makeStyles = (palette: Palette) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: 12,
-      padding: 14,
+      paddingVertical: sp.listPy,
+      paddingHorizontal: sp.listPx,
       borderRadius: radii.lg,
       backgroundColor: palette.bgSurface,
       borderWidth: 1,

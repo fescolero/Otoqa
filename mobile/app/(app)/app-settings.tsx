@@ -35,7 +35,15 @@ import {
   type Density,
   type ThemePreference,
 } from '../../lib/ThemeContext';
-import { radii, typeScale, type Palette } from '../../lib/design-tokens';
+import { useDensityTokens } from '../../lib/density';
+import {
+  densitySpacing,
+  radii,
+  typeScale,
+  type Palette,
+} from '../../lib/design-tokens';
+
+type Sp = (typeof densitySpacing)['dense'];
 
 type UnitSystem = 'imperial' | 'metric';
 type TimeFormat = '12h' | '24h';
@@ -49,7 +57,8 @@ const LANGUAGES: Array<{ code: string; label: string; region: string; flag: stri
 export default function AppSettingsScreen() {
   const router = useRouter();
   const { palette } = useTheme();
-  const styles = useMemo(() => makeStyles(palette), [palette]);
+  const { sp } = useDensityTokens();
+  const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
 
   const { currentLanguage, changeLanguage } = useLanguage();
   const {
@@ -212,7 +221,8 @@ const Group: React.FC<{
   title: string;
   children: React.ReactNode;
 }> = ({ palette, title, children }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <View style={styles.groupWrap}>
       <Text style={styles.groupLabel}>{title.toUpperCase()}</Text>
@@ -222,7 +232,8 @@ const Group: React.FC<{
 };
 
 const FlagTile: React.FC<{ palette: Palette; label: string }> = ({ palette, label }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <View style={styles.flagTile}>
       <Text style={styles.flagText}>{label}</Text>
@@ -237,7 +248,8 @@ const RowButton: React.FC<{
   title: string;
   meta?: string;
 }> = ({ palette, onPress, leading, title, meta }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <Pressable
       onPress={onPress}
@@ -265,7 +277,8 @@ const ToggleRow: React.FC<{
   value: boolean;
   onChange: (v: boolean) => void;
 }> = ({ palette, icon, title, sub, value, onChange }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <View style={styles.row}>
       <View style={styles.leadingIcon}>
@@ -297,7 +310,8 @@ const SegRow: React.FC<{
   options: Array<{ v: string; l: string }>;
   onChange: (v: string) => void;
 }> = ({ palette, icon, label, value, options, onChange }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <View style={[styles.row, { alignItems: 'flex-start' }]}>
       <View style={styles.leadingIcon}>
@@ -341,7 +355,8 @@ const LanguageSheet: React.FC<{
   onClose: () => void;
   onPick: (code: string) => void;
 }> = ({ palette, visible, active, onClose, onPick }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <TouchableWithoutFeedback onPress={onClose}>
@@ -389,7 +404,7 @@ const LanguageSheet: React.FC<{
 // STYLES
 // ============================================================================
 
-const makeStyles = (palette: Palette) =>
+const makeStyles = (palette: Palette, sp: Sp) =>
   StyleSheet.create({
     screen: {
       flex: 1,
@@ -417,8 +432,8 @@ const makeStyles = (palette: Palette) =>
     },
 
     groupWrap: {
-      paddingHorizontal: 16,
-      paddingTop: 20,
+      paddingHorizontal: sp.screenPx,
+      paddingTop: sp.sectionGap,
     },
     groupLabel: {
       fontSize: 11,
@@ -440,8 +455,8 @@ const makeStyles = (palette: Palette) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: 12,
-      paddingHorizontal: 14,
-      paddingVertical: 12,
+      paddingHorizontal: sp.listPx,
+      paddingVertical: sp.listPy,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: palette.borderSubtle,
     },

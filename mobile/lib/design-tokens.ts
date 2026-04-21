@@ -206,34 +206,39 @@ export const spacing = {
   s16: 64,
 };
 
+// Comfortable is the roomier, less-cluttered variant — larger screen
+// margins, deeper card padding, wider row breathing room. Dense is the
+// in-vehicle default — tighter gaps, smaller paddings, more rows
+// visible before scrolling. Deltas are 4-12px on every token so a
+// flip is obviously visible, not subliminal.
 export const spacingComfortable = {
-  screenPx: 16,
-  screenPy: 20,
-  sectionGap: 20,
-  rowGap: 8,
-  rowPy: 14,
-  headerPy: 12,
-  tabPy: 10,
+  screenPx: 20,
+  screenPy: 24,
+  sectionGap: 24,
+  rowGap: 10,
+  rowPy: 16,
+  headerPy: 14,
+  tabPy: 12,
   cardPadding: 20,
-  cardGap: 16,
+  cardGap: 18,
   listPy: 14,
-  listPx: 16,
+  listPx: 18,
   listGap: 12,
 };
 
 export const spacingDense = {
-  screenPx: 12,
-  screenPy: 14,
-  sectionGap: 14,
-  rowGap: 6,
-  rowPy: 10,
-  headerPy: 8,
-  tabPy: 6,
-  cardPadding: 12,
-  cardGap: 10,
-  listPy: 10,
-  listPx: 12,
-  listGap: 6,
+  screenPx: 10,
+  screenPy: 10,
+  sectionGap: 10,
+  rowGap: 4,
+  rowPy: 8,
+  headerPy: 6,
+  tabPy: 4,
+  cardPadding: 10,
+  cardGap: 8,
+  listPy: 8,
+  listPx: 10,
+  listGap: 4,
 };
 
 export const densitySpacing = {
@@ -261,19 +266,19 @@ export const radii = {
 // ============================================================================
 
 export const componentsComfortable = {
-  btnMd: { height: 44, paddingHorizontal: 20, radius: 12 },
-  btnLg: { height: 56, radius: 14 },
-  inputMd: { height: 48, paddingHorizontal: 16, radius: 12 },
-  navBotHeight: 64,
-  navTopHeight: 56,
+  btnMd: { height: 48, paddingHorizontal: 20, radius: 12 },
+  btnLg: { height: 60, radius: 14 },
+  inputMd: { height: 52, paddingHorizontal: 16, radius: 12 },
+  navBotHeight: 68,
+  navTopHeight: 60,
 };
 
 export const componentsDense = {
-  btnMd: { height: 40, paddingHorizontal: 14, radius: 10 },
-  btnLg: { height: 48, radius: 12 },
-  inputMd: { height: 44, paddingHorizontal: 12, radius: 10 },
-  navBotHeight: 60,
-  navTopHeight: 52,
+  btnMd: { height: 36, paddingHorizontal: 12, radius: 10 },
+  btnLg: { height: 44, radius: 12 },
+  inputMd: { height: 40, paddingHorizontal: 12, radius: 10 },
+  navBotHeight: 56,
+  navTopHeight: 48,
 };
 
 export const densityComponents = {
