@@ -48,6 +48,12 @@ interface UploadOptions {
   type: DriverDocumentType;
   photoUri: string;
   note?: string;
+  // Only meaningful when type === 'Accident'. The "what happened" chip
+  // is passed through to R2 as the `accident-kind` metadata field so
+  // ops can filter the bucket on incident type. Free-text description
+  // still goes in `note` (which lives on the Convex row, not in
+  // metadata — S3 per-object metadata is capped at 2KB total).
+  accidentKind?: string;
 }
 
 interface UploadResult {
@@ -126,6 +132,7 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
           capturedLat: location?.latitude,
           capturedLng: location?.longitude,
           note: opts.note,
+          accidentKind: opts.accidentKind,
         },
         { photoUri: opts.photoUri },
       );
@@ -158,6 +165,7 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
         capturedAt,
         capturedLat: location?.latitude,
         capturedLng: location?.longitude,
+        accidentKind: opts.accidentKind,
       });
 
       const putResult = await uploadPODPhoto(uploadUrl, opts.photoUri, 3, metadataHeaders);
