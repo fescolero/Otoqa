@@ -317,11 +317,16 @@ const SegRow: React.FC<{
       <View style={styles.leadingIcon}>
         <Icon name={icon} size={16} color={palette.textSecondary} />
       </View>
-      <Text style={[styles.rowTitle, { marginRight: 8 }]}>{label}</Text>
-      {/* Segmented control sits on the same row as the label, pushed to
-          the right. Uses flexShrink + flexWrap so if the label runs long
-          the chips still wrap cleanly rather than clipping. */}
-      <View style={[styles.segRow, { flex: 1, justifyContent: 'flex-end' }]}>
+      {/* flexShrink lets long labels ellipsize; the chip group keeps its
+          natural width on the right so Imperial/Metric always fit on one
+          line even for the "Distance & weight" row. */}
+      <Text
+        numberOfLines={1}
+        style={[styles.rowTitle, { flexShrink: 1, marginRight: 8 }]}
+      >
+        {label}
+      </Text>
+      <View style={[styles.segRow, { marginLeft: 'auto' }]}>
         {options.map((o) => {
           const active = o.v === value;
           return (
@@ -495,12 +500,12 @@ const makeStyles = (palette: Palette, sp: Sp) =>
 
     segRow: {
       flexDirection: 'row',
-      gap: 6,
-      flexWrap: 'wrap',
+      gap: 4,
+      flexWrap: 'nowrap',
     },
     seg: {
-      paddingHorizontal: 12,
-      paddingVertical: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
       borderRadius: radii.full,
       borderWidth: 1,
       borderColor: palette.borderSubtle,
