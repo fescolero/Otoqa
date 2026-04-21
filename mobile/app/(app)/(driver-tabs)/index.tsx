@@ -46,18 +46,21 @@ import {
 // and just show that day's planned + completed list.
 // ============================================================================
 
-const density = 'dense'; // Drivers see more rows with dense; keeps 44pt hit targets.
-const sp = densitySpacing[density];
-const comp = densityComponents[density];
-
 /**
- * Tiny wrapper so sub-components inside this file get `palette` + memoized
- * `styles` without each duplicating the hook-plus-useMemo boilerplate.
+ * Tiny wrapper so sub-components inside this file get `palette`, density-
+ * resolved `sp` / `comp`, and memoized `styles` without each duplicating
+ * the hook-plus-useMemo boilerplate. Density defaults to `'dense'` but
+ * flips live the moment the driver changes it in App Settings.
  */
 function useDesignStyles() {
-  const { palette } = useTheme();
-  const styles = useMemo(() => makeStyles(palette), [palette]);
-  return { palette, styles };
+  const { palette, density } = useTheme();
+  const sp = densitySpacing[density];
+  const comp = densityComponents[density];
+  const styles = useMemo(
+    () => makeStyles(palette, sp, comp),
+    [palette, sp, comp],
+  );
+  return { palette, styles, sp, comp };
 }
 
 // Weather tooling
@@ -448,7 +451,7 @@ interface ActiveLoadCardProps {
 }
 
 const ActiveLoadCard: React.FC<ActiveLoadCardProps> = ({ load, onPress }) => {
-  const { palette, styles } = useDesignStyles();
+  const { palette, styles, sp } = useDesignStyles();
   const pickupCity = load.firstPickup?.city;
   const pickupAddr = [load.firstPickup?.city, load.firstPickup?.state]
     .filter(Boolean)
@@ -621,7 +624,7 @@ const UpcomingSection: React.FC<{
   onPress: (loadId: string) => void;
 }> = ({ loads, onPress }) => {
   const { locale } = useLanguage();
-  const { styles } = useDesignStyles();
+  const { styles, sp } = useDesignStyles();
   return (
     <View style={{ gap: sp.listGap }}>
       <View style={styles.sectionHead}>
@@ -637,7 +640,7 @@ const UpcomingSection: React.FC<{
 };
 
 const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPress }) => {
-  const { palette, styles } = useDesignStyles();
+  const { palette, styles, sp } = useDesignStyles();
   const pickup = load.firstPickup?.city ?? 'Pickup';
   const dropoff = load.lastDelivery?.city ?? 'Dropoff';
   // Use the full ISO timestamps — windowBeginDate/windowEndDate are date-only
@@ -692,7 +695,7 @@ const UpcomingRow: React.FC<{ load: any; onPress: () => void }> = ({ load, onPre
 
 const CompletedSection: React.FC<{ loads: any[] }> = ({ loads }) => {
   const { locale } = useLanguage();
-  const { palette, styles } = useDesignStyles();
+  const { palette, styles, sp } = useDesignStyles();
   const [expanded, setExpanded] = useState(false);
   return (
     <View style={{ gap: sp.listGap }}>
@@ -845,7 +848,7 @@ const ConnectionBanner: React.FC<{
 };
 
 const LoadingSkeleton: React.FC = () => {
-  const { styles } = useDesignStyles();
+  const { styles, sp } = useDesignStyles();
   return (
   <View style={{ gap: sp.sectionGap, paddingTop: spacing.s2 }}>
     <View style={[styles.skeleton, { height: 220 }]} />
@@ -859,7 +862,11 @@ const LoadingSkeleton: React.FC = () => {
 // STYLES
 // ============================================================================
 
-const makeStyles = (palette: Palette) =>
+const makeStyles = (
+  palette: Palette,
+  sp: (typeof densitySpacing)['dense'],
+  comp: (typeof densityComponents)['dense'],
+) =>
   StyleSheet.create({
   screen: {
     flex: 1,

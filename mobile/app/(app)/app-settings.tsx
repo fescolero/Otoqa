@@ -30,7 +30,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Icon, type IconName } from '../../lib/design-icons';
 import { useLanguage } from '../../lib/LanguageContext';
-import { useTheme, type ThemePreference } from '../../lib/ThemeContext';
+import {
+  useTheme,
+  type Density,
+  type ThemePreference,
+} from '../../lib/ThemeContext';
 import { radii, typeScale, type Palette } from '../../lib/design-tokens';
 
 type UnitSystem = 'imperial' | 'metric';
@@ -48,7 +52,12 @@ export default function AppSettingsScreen() {
   const styles = useMemo(() => makeStyles(palette), [palette]);
 
   const { currentLanguage, changeLanguage } = useLanguage();
-  const { preference: theme, setPreference: setTheme } = useTheme();
+  const {
+    preference: theme,
+    setPreference: setTheme,
+    density,
+    setDensity,
+  } = useTheme();
 
   const [langOpen, setLangOpen] = useState(false);
   const [notifOn, setNotifOn] = useState(true);
@@ -135,6 +144,17 @@ export default function AppSettingsScreen() {
               { v: 'dark', l: 'Dark' },
             ]}
             onChange={(v) => void setTheme(v as ThemePreference)}
+          />
+          <SegRow
+            palette={palette}
+            icon="menu"
+            label="Density"
+            value={density}
+            options={[
+              { v: 'comfortable', l: 'Comfortable' },
+              { v: 'dense', l: 'Dense' },
+            ]}
+            onChange={(v) => void setDensity(v as Density)}
           />
         </Group>
 
