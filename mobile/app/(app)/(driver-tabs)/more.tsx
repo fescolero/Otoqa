@@ -34,11 +34,10 @@ import { useMutation, useQuery } from 'convex/react';
 import * as Application from 'expo-application';
 import * as Updates from 'expo-updates';
 import { api } from '../../../../convex/_generated/api';
-import { useDriver, useAppMode } from '../_layout';
+import { useDriver } from '../_layout';
 import { stopSessionTracking } from '../../../lib/location-tracking';
-import { useLanguage } from '../../../lib/LanguageContext';
 import { Icon, type IconName } from '../../../lib/design-icons';
-import { useTheme, type ThemePreference } from '../../../lib/ThemeContext';
+import { useTheme } from '../../../lib/ThemeContext';
 import { radii, typeScale, type Palette } from '../../../lib/design-tokens';
 
 export default function MoreScreen() {
@@ -53,9 +52,6 @@ export default function MoreScreen() {
     driverId ? { driverId } : 'skip',
   );
   const endSessionMutation = useMutation(api.driverSessions.endSession);
-  const { canSwitchModes, setMode } = useAppMode();
-  const { currentLanguage } = useLanguage();
-  const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [endShiftOpen, setEndShiftOpen] = useState(false);
@@ -66,19 +62,6 @@ export default function MoreScreen() {
   const otaUpdateId = Updates.updateId;
   const isEmbeddedLaunch = Updates.isEmbeddedLaunch;
   const otaShortId = otaUpdateId ? otaUpdateId.slice(0, 8) : null;
-
-  const languageLabel =
-    currentLanguage === 'system' ? 'System' : currentLanguage === 'es' ? 'Español' : 'English';
-  const themeLabel =
-    themePreference === 'system' ? 'System' : themePreference === 'light' ? 'Light' : 'Dark';
-
-  const pickTheme = () =>
-    Alert.alert('Appearance', 'Choose how the driver app looks.', [
-      { text: 'System', onPress: () => setThemePreference('system' as ThemePreference) },
-      { text: 'Light', onPress: () => setThemePreference('light' as ThemePreference) },
-      { text: 'Dark', onPress: () => setThemePreference('dark' as ThemePreference) },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
 
   const onDuty = !!activeSession;
   const elapsedLabel = formatElapsed(activeSession?.startedAt);
@@ -218,42 +201,15 @@ export default function MoreScreen() {
           </Pressable>
         </View>
 
-        {/* App settings */}
-        <View style={styles.sectionHead}>
-          <Text style={styles.sectionLabel}>APP SETTINGS</Text>
-        </View>
-        <View style={styles.rowCard}>
-          <SettingsRow
-            palette={palette}
-            icon="message"
-            label="Language"
-            value={languageLabel}
-            onPress={() => router.push('/language')}
-          />
-          <RowDivider palette={palette} />
-          <SettingsRow
-            palette={palette}
-            icon="moon"
-            label="Appearance"
-            value={themeLabel}
-            onPress={pickTheme}
-          />
-          {canSwitchModes && (
-            <>
-              <RowDivider palette={palette} />
-              <SettingsRow
-                palette={palette}
-                icon="truck"
-                label="Switch to dispatcher"
-                value=""
-                onPress={() => setMode('owner')}
-              />
-            </>
-          )}
-        </View>
-
-        {/* Help + About */}
+        {/* Drill-ins */}
         <View style={{ marginTop: 14, gap: 10 }}>
+          <DrillRow
+            palette={palette}
+            icon="settings"
+            label="App settings"
+            meta="Language, notifications, permissions"
+            onPress={() => router.push('/app-settings')}
+          />
           <DrillRow
             palette={palette}
             icon="info"
@@ -358,35 +314,6 @@ function DrillRow({
         <Icon name="chevron-right" size={16} color={palette.textTertiary} />
       </Pressable>
     </View>
-  );
-}
-
-function SettingsRow({
-  palette,
-  icon,
-  label,
-  value,
-  onPress,
-}: {
-  palette: Palette;
-  icon: IconName;
-  label: string;
-  value: string;
-  onPress: () => void;
-}) {
-  const styles = makeStyles(palette);
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [styles.settingsRow, pressed && { opacity: 0.85 }]}
-    >
-      <View style={styles.settingsRowIcon}>
-        <Icon name={icon} size={18} color={palette.textSecondary} />
-      </View>
-      <Text style={styles.settingsRowLabel}>{label}</Text>
-      {value ? <Text style={styles.settingsRowValue}>{value}</Text> : null}
-      <Icon name="chevron-right" size={16} color={palette.textTertiary} />
-    </Pressable>
   );
 }
 

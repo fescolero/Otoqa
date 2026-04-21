@@ -1,65 +1,41 @@
-import React, { useState, useEffect, useCallback } from 'react';
+/**
+ * Truck QR scanner — Otoqa Driver design system.
+ *
+ * Ports lib/scanner-screen.jsx: full-bleed camera preview with glass
+ * controls, accent-cornered cutout, scanline animation, and a manual-code
+ * bottom sheet with its own numeric keypad.
+ *
+ * Convex wiring (switchTruck mutation, profile query, post-scan routing
+ * into /start-shift) is preserved verbatim from the previous version.
+ */
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  Pressable,
-  Modal,
-  TextInput,
   Alert,
+  Animated,
   Dimensions,
-  ActivityIndicator,
+  Easing,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableWithoutFeedback,
+  View,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
-import { Id } from '../../../convex/_generated/dataModel';
+import type { Id } from '../../../convex/_generated/dataModel';
 import { useAppMode } from './_layout';
+import { Icon } from '../../lib/design-icons';
+import { useTheme } from '../../lib/ThemeContext';
+import { radii, typeScale, type Palette } from '../../lib/design-tokens';
 
-// ============================================
-// DESIGN SYSTEM
-// ============================================
-const colors = {
-  background: '#1a1d21',
-  foreground: '#f3f4f6',
-  foregroundMuted: '#9ca3af',
-  primary: '#ff6b00',
-  primaryForeground: '#1a1d21',
-  secondary: '#eab308',
-  muted: '#2d323b',
-  card: '#22262b',
-  cardForeground: '#f3f4f6',
-  border: '#3f4552',
-  destructive: '#ef4444',
-  success: '#10b981',
-};
+const CUTOUT = 260;
+const { width: SCREEN_W } = Dimensions.get('window');
 
-const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 20,
-  '2xl': 24,
-};
-
-const borderRadius = {
-  md: 8,
-  lg: 12,
-  xl: 16,
-  '2xl': 20,
-  full: 9999,
-};
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const SCANNER_SIZE = Math.min(SCREEN_WIDTH * 0.65, SCREEN_HEIGHT * 0.32);
-
-// ============================================
-// QR CODE DATA TYPES
-// ============================================
 interface QRCodeData {
   type: 'otoqa-truck';
   truckId: string;
@@ -72,776 +48,759 @@ interface ParsedQR {
   error?: string;
 }
 
-/**
- * Parse and validate QR code data
- */
-function parseQRCode(rawData: string): ParsedQR {
+function parseQRCode(raw: string): ParsedQR {
   try {
-    const parsed = JSON.parse(rawData);
-    
-    // Validate QR code structure
-    if (parsed.type !== 'otoqa-truck') {
-      return { valid: false, error: 'Invalid QR code type' };
-    }
-    
-    if (!parsed.truckId || typeof parsed.truckId !== 'string') {
+    const parsed = JSON.parse(raw);
+    if (parsed.type !== 'otoqa-truck') return { valid: false, error: 'Invalid QR code type' };
+    if (!parsed.truckId || typeof parsed.truckId !== 'string')
       return { valid: false, error: 'Missing truck ID' };
-    }
-    
-    if (!parsed.unitId || typeof parsed.unitId !== 'string') {
+    if (!parsed.unitId || typeof parsed.unitId !== 'string')
       return { valid: false, error: 'Missing unit ID' };
-    }
-    
     return { valid: true, data: parsed as QRCodeData };
   } catch {
     return { valid: false, error: 'Invalid QR code format' };
   }
 }
 
-// ============================================
-// SWITCH TRUCK SCREEN
-// QR Code Scanner for Vehicle Assignment
-// ============================================
-
 export default function SwitchTruckScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { palette } = useTheme();
+  const styles = useMemo(() => makeStyles(palette), [palette]);
+
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
-  const [scannedData, setScannedData] = useState<ParsedQR | null>(null);
-  const [flashOn, setFlashOn] = useState(false);
-  const [showManualEntry, setShowManualEntry] = useState(false);
-  const [manualId, setManualId] = useState('');
+  const [torch, setTorch] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualCode, setManualCode] = useState('');
   const [isSwitching, setIsSwitching] = useState(false);
 
-  // Get driver profile from Convex
   const { roles } = useAppMode();
-  const profile = useQuery(api.driverMobile.getMyProfile, { driverId: (roles?.driverId ?? undefined) as Id<'drivers'> | undefined });
-  
-  // Switch truck mutation
+  const profile = useQuery(api.driverMobile.getMyProfile, {
+    driverId: (roles?.driverId ?? undefined) as Id<'drivers'> | undefined,
+  });
   const switchTruck = useMutation(api.driverMobile.switchTruck);
 
   useEffect(() => {
-    if (!permission?.granted) {
-      requestPermission();
-    }
+    if (!permission?.granted) requestPermission();
   }, [permission]);
 
-  // Current vehicle info from profile
-  const currentVehicle = profile?.truck
-    ? {
-        unitNumber: `Unit #${profile.truck.unitId}`,
-        model: [profile.truck.make, profile.truck.model].filter(Boolean).join(' ') || 'Unknown Model',
-        isActive: true,
-      }
-    : {
-        unitNumber: 'No truck assigned',
-        model: 'Scan a QR code to assign a truck',
-        isActive: false,
-      };
-
-  const handleBarCodeScanned = useCallback(({ data }: { type: string; data: string }) => {
-    if (!scanned) {
-      setScanned(true);
-      const parsed = parseQRCode(data);
-      setScannedData(parsed);
-      
-      if (!parsed.valid) {
-        Alert.alert('Invalid QR Code', parsed.error || 'Please scan a valid truck QR code.');
-      }
-    }
-  }, [scanned]);
-
-  const handleConfirmScan = async () => {
-    if (!scannedData?.valid || !scannedData.data || !profile) {
-      Alert.alert('Error', 'Please scan a valid QR code first.');
+  // Scanline animation — travels from the top of the cutout to the bottom
+  // and back. Drops to zero while a scan is being processed so it doesn't
+  // compete with the success / error moment.
+  const scanlineY = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (scanned) {
+      scanlineY.stopAnimation();
       return;
     }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scanlineY, {
+          toValue: CUTOUT - 4,
+          duration: 1400,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(scanlineY, {
+          toValue: 0,
+          duration: 1400,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [scanned, scanlineY]);
 
+  const handleBarcodeScanned = ({ data }: { data: string }) => {
+    if (scanned) return;
+    const parsed = parseQRCode(data);
+    setScanned(true);
+    if (!parsed.valid) {
+      Alert.alert('Invalid QR code', parsed.error || 'Please scan a valid truck QR.', [
+        { text: 'Try again', onPress: () => setScanned(false) },
+      ]);
+      return;
+    }
+    void confirmScan(parsed.data!);
+  };
+
+  const confirmScan = async (data: QRCodeData) => {
+    if (!profile) {
+      Alert.alert('Error', 'Driver profile not loaded. Please try again.');
+      setScanned(false);
+      return;
+    }
     setIsSwitching(true);
-
     try {
       const result = await switchTruck({
         driverId: profile._id,
-        truckId: scannedData.data.truckId as Id<'trucks'>,
+        truckId: data.truckId as Id<'trucks'>,
       });
-
-      if (result.success) {
-        // Truck assigned server-side. Hand off to the full-screen Start Shift
-        // flow (app/(app)/start-shift.tsx) — it owns session creation + GPS
-        // initialization. Passing truck display info via query params saves
-        // a round-trip re-fetch.
-        const truckId = scannedData.data.truckId as Id<'trucks'>;
-        router.replace({
-          pathname: '/start-shift',
-          params: {
-            truckId: truckId as unknown as string,
-            truckUnitId: scannedData.data.unitId ?? '',
-            truckMake: profile?.truck?.make ?? '',
-            truckModel: profile?.truck?.model ?? '',
-          },
-        });
-      } else {
-        Alert.alert('Unable to Switch', result.message);
-        resetScan();
+      if (!result.success) {
+        Alert.alert('Unable to switch', result.message, [
+          { text: 'Try again', onPress: () => setScanned(false) },
+        ]);
+        return;
       }
-    } catch (error) {
-      console.error('Switch truck error:', error);
-      Alert.alert('Error', 'Failed to switch truck. Please try again.');
-      resetScan();
+      router.replace({
+        pathname: '/start-shift',
+        params: {
+          truckId: data.truckId,
+          truckUnitId: data.unitId,
+          truckMake: profile.truck?.make ?? '',
+          truckModel: profile.truck?.model ?? '',
+        },
+      });
+    } catch (err) {
+      console.error('Switch truck error:', err);
+      Alert.alert('Error', 'Failed to switch truck. Please try again.', [
+        { text: 'OK', onPress: () => setScanned(false) },
+      ]);
     } finally {
       setIsSwitching(false);
     }
   };
 
-  const handleManualEntry = () => {
-    // Manual entry is not fully supported yet since we need the Convex ID
-    // For now, show a message to use QR scanning instead
+  const handleManualSubmit = () => {
+    // The manual code path would need a backend endpoint that resolves a
+    // 6-digit code to a truckId. Until that lands, tell the driver to use
+    // the scanner — same behaviour as before, but through the design's
+    // sheet UX.
     Alert.alert(
-      'Manual Entry Not Available',
-      'Please scan the QR code on the truck to switch vehicles. Manual entry will be available in a future update.',
-      [{ text: 'OK', onPress: () => setShowManualEntry(false) }]
+      'Manual entry coming soon',
+      'For now please scan the QR on your truck. Manual code entry will work once dispatch hands out printed codes.',
+      [{ text: 'OK', onPress: () => setManualOpen(false) }],
     );
   };
 
-  const resetScan = () => {
-    setScanned(false);
-    setScannedData(null);
-  };
-
-  // Loading state while fetching profile
-  if (profile === undefined) {
-    return (
-      <View style={[styles.container, styles.centerContent, { paddingTop: insets.top }]}>
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Loading...</Text>
-      </View>
-    );
-  }
-
-  // Not authenticated
-  if (profile === null) {
-    return (
-      <View style={[styles.container, styles.centerContent, { paddingTop: insets.top }]}>
-        <Ionicons name="alert-circle-outline" size={64} color={colors.destructive} />
-        <Text style={styles.errorTitle}>Not Authenticated</Text>
-        <Text style={styles.errorText}>Please sign in to switch trucks.</Text>
-        <Pressable style={styles.errorButton} onPress={() => router.back()}>
-          <Text style={styles.errorButtonText}>Go Back</Text>
-        </Pressable>
-      </View>
-    );
-  }
-
+  // ---- Permission gate ----------------------------------------------------
   if (!permission) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
-        <Text style={styles.permissionText}>Requesting camera permission...</Text>
+      <View style={[styles.screen, styles.center]}>
+        <Text style={styles.loadingText}>Requesting camera permission…</Text>
       </View>
     );
   }
 
   if (!permission.granted) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
-        <View style={styles.permissionContainer}>
-          <Ionicons name="camera-outline" size={64} color={colors.foregroundMuted} />
-          <Text style={styles.permissionTitle}>Camera Access Required</Text>
-          <Text style={styles.permissionText}>
-            We need camera access to scan the QR code on your vehicle.
-          </Text>
-          <Pressable style={styles.permissionButton} onPress={requestPermission}>
-            <Text style={styles.permissionButtonText}>Grant Permission</Text>
-          </Pressable>
-          <Pressable 
-            style={styles.manualEntryLink} 
-            onPress={() => setShowManualEntry(true)}
+      <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
+        <View style={styles.topBar}>
+          <Pressable
+            onPress={() => router.back()}
+            style={({ pressed }) => [styles.glassBtn, pressed && { opacity: 0.7 }]}
           >
-            <Text style={styles.manualEntryLinkText}>Or enter ID manually</Text>
+            <Icon name="arrow-left" size={20} color="#fff" />
           </Pressable>
         </View>
-      </View>
+        <View style={styles.center}>
+          <View style={styles.permIcon}>
+            <Icon name="search" size={28} color="#fff" />
+          </View>
+          <Text style={styles.permTitle}>Camera access needed</Text>
+          <Text style={styles.permBody}>
+            We need your camera to scan the QR code on your truck&apos;s dash.
+          </Text>
+          <Pressable
+            onPress={requestPermission}
+            style={({ pressed }) => [styles.permCta, pressed && { opacity: 0.9 }]}
+          >
+            <Text style={styles.permCtaText}>Allow camera</Text>
+          </Pressable>
+          <Pressable onPress={() => setManualOpen(true)}>
+            <Text style={styles.permLink}>Or enter code manually</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
     );
   }
 
+  // ---- Scanner ------------------------------------------------------------
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Pressable style={styles.backButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={colors.foreground} />
+    <View style={styles.screen}>
+      <CameraView
+        style={StyleSheet.absoluteFill}
+        facing="back"
+        enableTorch={torch}
+        barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+        onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
+      />
+
+      {/* Dim mask with a cutout window */}
+      <CutoutMask scanlineY={scanlineY} scanned={scanned} />
+
+      {/* Top glass nav */}
+      <View style={[styles.topBar, { paddingTop: insets.top + 6 }]}>
+        <Pressable
+          onPress={() => router.back()}
+          accessibilityLabel="Back"
+          style={({ pressed }) => [styles.glassBtn, pressed && { opacity: 0.7 }]}
+        >
+          <Icon name="arrow-left" size={20} color="#fff" />
         </Pressable>
-        <Text style={styles.headerTitle}>Switch Truck</Text>
-        <View style={styles.headerSpacer} />
+        <Text style={styles.topTitle}>Scan truck QR</Text>
+        <Pressable
+          onPress={() => router.back()}
+          accessibilityLabel="Skip"
+          style={({ pressed }) => [styles.glassPill, pressed && { opacity: 0.7 }]}
+        >
+          <Text style={styles.glassPillText}>Skip</Text>
+          <Icon name="chevron-right" size={16} color="#fff" />
+        </Pressable>
       </View>
 
-      {/* Scanner Area */}
-      <View style={styles.scannerContainer}>
-        <Text style={styles.scannerTitle}>Align QR Code</Text>
-        <Text style={styles.scannerSubtitle}>
-          Scan the QR code located on the dashboard or door frame of your new vehicle.
-        </Text>
-
-        <View style={styles.scannerFrame}>
-          <CameraView
-            style={styles.camera}
-            facing="back"
-            enableTorch={flashOn}
-            barcodeScannerSettings={{
-              barcodeTypes: ['qr'],
-            }}
-            onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
-          />
-          
-          {/* Corner brackets */}
-          <View style={styles.cornerTopLeft} />
-          <View style={styles.cornerTopRight} />
-          <View style={styles.cornerBottomLeft} />
-          <View style={styles.cornerBottomRight} />
-
-          {/* Scanning line */}
-          <View style={styles.scanLine} />
-
-          {/* QR Icon overlay when scanned */}
-          {scanned && scannedData?.valid && (
-            <View style={styles.scannedOverlay}>
-              <Ionicons name="checkmark-circle" size={80} color={colors.success} />
-              <Text style={styles.scannedText}>Truck Found!</Text>
-              <Text style={styles.scannedUnitId}>{scannedData.data?.unitId}</Text>
-            </View>
-          )}
-          
-          {/* Error overlay for invalid scan */}
-          {scanned && !scannedData?.valid && (
-            <View style={styles.scannedOverlay}>
-              <Ionicons name="close-circle" size={80} color={colors.destructive} />
-              <Text style={styles.scannedErrorText}>Invalid QR Code</Text>
-              <Pressable style={styles.rescanButton} onPress={resetScan}>
-                <Text style={styles.rescanButtonText}>Tap to Scan Again</Text>
-              </Pressable>
-            </View>
-          )}
-        </View>
-
-        {/* Flash toggle */}
-        <Pressable
-          style={[styles.flashButton, flashOn && styles.flashButtonActive]}
-          onPress={() => setFlashOn(!flashOn)}
-        >
-          <Ionicons
-            name={flashOn ? 'flashlight' : 'flashlight-outline'}
-            size={24}
-            color={flashOn ? colors.primaryForeground : colors.foregroundMuted}
-          />
-        </Pressable>
-        <Text style={styles.flashLabel}>
-          {flashOn ? 'Flashlight On' : 'Tap for Flashlight'}
+      {/* Helper text above cutout */}
+      <View style={styles.helperWrap} pointerEvents="none">
+        <Text style={styles.helperTitle}>Point at the QR on the dash</Text>
+        <Text style={styles.helperBody}>
+          Or tap <Text style={styles.helperStrong}>Enter code</Text> below to type it in
         </Text>
       </View>
 
-      {/* Bottom Section */}
-      <View style={[styles.bottomSection, { paddingBottom: insets.bottom + spacing.sm }]}>
-        {/* Current Vehicle */}
-        <Text style={styles.currentVehicleLabel}>CURRENT VEHICLE</Text>
-        <View style={styles.currentVehicleCard}>
-          <View style={styles.vehicleIcon}>
-            <MaterialCommunityIcons name="truck" size={20} color={colors.primary} />
-          </View>
-          <View style={styles.vehicleInfo}>
-            <Text style={styles.vehicleUnit}>{currentVehicle.unitNumber}</Text>
-            <Text style={styles.vehicleModel}>{currentVehicle.model}</Text>
-          </View>
-          {currentVehicle.isActive && (
-            <View style={styles.activeBadge}>
-              <Text style={styles.activeBadgeText} maxFontSizeMultiplier={1.2}>ACTIVE</Text>
-            </View>
-          )}
-        </View>
-
-        {/* Action Buttons */}
-        <Pressable
-          style={({ pressed }) => [
-            styles.confirmButton, 
-            (!scannedData?.valid || isSwitching) && styles.confirmButtonDisabled,
-            pressed && { opacity: 0.8 },
-          ]}
-          onPress={scannedData?.valid ? handleConfirmScan : resetScan}
-          disabled={isSwitching}
-        >
-          {isSwitching ? (
-            <ActivityIndicator size="small" color={colors.primaryForeground} />
-          ) : (
-            <MaterialCommunityIcons name="qrcode-scan" size={18} color={colors.primaryForeground} />
-          )}
-          <Text style={styles.confirmButtonText}>
-            {isSwitching 
-              ? 'Switching...' 
-              : scannedData?.valid 
-                ? `Switch to ${scannedData.data?.unitId}` 
-                : 'Scan QR Code'}
-          </Text>
-        </Pressable>
-
-        <Pressable
-          style={({ pressed }) => [styles.manualButton, pressed && { opacity: 0.8 }]}
-          onPress={() => setShowManualEntry(true)}
-        >
-          <Ionicons name="keypad" size={18} color={colors.foreground} />
-          <Text style={styles.manualButtonText}>Enter ID Manually</Text>
-        </Pressable>
-      </View>
-
-      {/* Manual Entry Modal */}
-      <Modal
-        visible={showManualEntry}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setShowManualEntry(false)}
-      >
-        <View style={styles.modalOverlay}>
+      {/* Bottom controls */}
+      <View style={[styles.bottomWrap, { paddingBottom: insets.bottom + 32 }]}>
+        <View style={styles.btnRow}>
           <Pressable
-            style={styles.modalBackdrop}
-            onPress={() => setShowManualEntry(false)}
-          />
-          <View style={styles.modalContent}>
-            <View style={styles.sheetHandle} />
-
-            <Text style={styles.modalTitle}>Enter Vehicle ID</Text>
-            <Text style={styles.modalSubtitle}>
-              Enter the vehicle ID found on the dashboard or registration documents.
-            </Text>
-
-            <TextInput
-              style={styles.modalInput}
-              value={manualId}
-              onChangeText={setManualId}
-              placeholder="e.g., 4402-TX"
-              placeholderTextColor={colors.foregroundMuted}
-              autoCapitalize="characters"
-              autoCorrect={false}
-            />
-
-            <Pressable
-              style={({ pressed }) => [styles.modalConfirmButton, pressed && { opacity: 0.8 }]}
-              onPress={handleManualEntry}
-            >
-              <Text style={styles.modalConfirmButtonText}>Assign Vehicle</Text>
-            </Pressable>
-
-            <Pressable
-              style={styles.modalCancelButton}
-              onPress={() => setShowManualEntry(false)}
-            >
-              <Text style={styles.modalCancelButtonText}>Cancel</Text>
-            </Pressable>
-          </View>
+            onPress={() => setTorch((t) => !t)}
+            accessibilityLabel="Torch"
+            style={({ pressed }) => [
+              styles.circleBtn,
+              torch && styles.circleBtnActive,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Icon name={torch ? 'sun' : 'moon'} size={22} color={torch ? '#000' : '#fff'} />
+          </Pressable>
+          <Pressable
+            onPress={() => setManualOpen(true)}
+            accessibilityLabel="Enter code"
+            style={({ pressed }) => [styles.wideBtn, pressed && { opacity: 0.8 }]}
+          >
+            <Icon name="menu" size={18} color="#fff" />
+            <Text style={styles.wideBtnText}>Enter code</Text>
+          </Pressable>
         </View>
-      </Modal>
+        <Text style={styles.skipHint}>
+          Not driving today?{' '}
+          <Text style={styles.skipLink} onPress={() => router.back()}>
+            Skip to dashboard
+          </Text>
+        </Text>
+      </View>
+
+      {isSwitching && (
+        <View style={styles.processing} pointerEvents="auto">
+          <Text style={styles.processingText}>Switching…</Text>
+        </View>
+      )}
+
+      <ManualCodeSheet
+        palette={palette}
+        visible={manualOpen}
+        code={manualCode}
+        setCode={setManualCode}
+        onClose={() => {
+          setManualOpen(false);
+          setManualCode('');
+        }}
+        onSubmit={handleManualSubmit}
+      />
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  centerContent: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+// ============================================================================
+// CUTOUT — four corner brackets + moving scanline, over a dimmed backdrop
+// ============================================================================
 
-  // Loading & Error states
-  loadingText: {
-    fontSize: 16,
-    color: colors.foregroundMuted,
-    marginTop: spacing.md,
-  },
-  errorTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: colors.foreground,
-    marginTop: spacing.xl,
-    marginBottom: spacing.sm,
-  },
-  errorText: {
-    fontSize: 15,
-    color: colors.foregroundMuted,
-    textAlign: 'center',
-    marginBottom: spacing.xl,
-  },
-  errorButton: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: spacing['2xl'],
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.xl,
-  },
-  errorButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.primaryForeground,
-  },
+const CutoutMask: React.FC<{
+  scanlineY: Animated.Value;
+  scanned: boolean;
+}> = ({ scanlineY, scanned }) => {
+  const padH = (SCREEN_W - CUTOUT) / 2;
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      {/* Four dim panes forming the mask */}
+      <View
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: `50%`,
+          backgroundColor: 'rgba(0,0,0,0.55)',
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: `50%`,
+          backgroundColor: 'rgba(0,0,0,0.55)',
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          top: `50%`,
+          left: 0,
+          width: padH,
+          height: CUTOUT,
+          marginTop: -CUTOUT / 2,
+          backgroundColor: 'rgba(0,0,0,0.55)',
+        }}
+      />
+      <View
+        style={{
+          position: 'absolute',
+          top: `50%`,
+          right: 0,
+          width: padH,
+          height: CUTOUT,
+          marginTop: -CUTOUT / 2,
+          backgroundColor: 'rgba(0,0,0,0.55)',
+        }}
+      />
 
-  // Header
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.sm,
-  },
-  backButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: `${colors.muted}80`,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-  headerSpacer: {
-    width: 44,
-  },
+      {/* Corner brackets + scanline sit inside the window */}
+      <View
+        style={{
+          position: 'absolute',
+          left: padH,
+          top: `50%`,
+          width: CUTOUT,
+          height: CUTOUT,
+          marginTop: -CUTOUT / 2,
+        }}
+      >
+        {/* top-left */}
+        <View style={[scannerStyles.bracket, { top: -2, left: -2, borderTopWidth: 3, borderLeftWidth: 3, borderTopLeftRadius: 16 }]} />
+        {/* top-right */}
+        <View style={[scannerStyles.bracket, { top: -2, right: -2, borderTopWidth: 3, borderRightWidth: 3, borderTopRightRadius: 16 }]} />
+        {/* bottom-left */}
+        <View style={[scannerStyles.bracket, { bottom: -2, left: -2, borderBottomWidth: 3, borderLeftWidth: 3, borderBottomLeftRadius: 16 }]} />
+        {/* bottom-right */}
+        <View style={[scannerStyles.bracket, { bottom: -2, right: -2, borderBottomWidth: 3, borderRightWidth: 3, borderBottomRightRadius: 16 }]} />
 
-  // Permission
-  permissionContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: spacing['2xl'],
-  },
-  permissionTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: colors.foreground,
-    marginTop: spacing.xl,
-    marginBottom: spacing.md,
-  },
-  permissionText: {
-    fontSize: 15,
-    color: colors.foregroundMuted,
-    textAlign: 'center',
-    marginBottom: spacing.xl,
-  },
-  permissionButton: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: spacing['2xl'],
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.xl,
-  },
-  permissionButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.primaryForeground,
-  },
-  manualEntryLink: {
-    marginTop: spacing.lg,
-  },
-  manualEntryLinkText: {
-    fontSize: 15,
-    color: colors.primary,
-    fontWeight: '500',
-  },
+        {!scanned && (
+          <Animated.View
+            style={[
+              scannerStyles.scanline,
+              { transform: [{ translateY: scanlineY }] },
+            ]}
+          />
+        )}
+      </View>
+    </View>
+  );
+};
 
-  // Scanner
-  scannerContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingTop: spacing.sm,
-  },
-  scannerTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: colors.foreground,
-    marginBottom: spacing.xs,
-  },
-  scannerSubtitle: {
-    fontSize: 13,
-    color: colors.foregroundMuted,
-    textAlign: 'center',
-    paddingHorizontal: spacing['2xl'],
-    marginBottom: spacing.md,
-    lineHeight: 18,
-  },
-  scannerFrame: {
-    width: SCANNER_SIZE,
-    height: SCANNER_SIZE,
-    borderRadius: borderRadius.lg,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  camera: {
-    width: '100%',
-    height: '100%',
-  },
-  cornerTopLeft: {
+const scannerStyles = StyleSheet.create({
+  bracket: {
     position: 'absolute',
+    width: 32,
+    height: 32,
+    borderColor: '#2E5CFF',
+  },
+  scanline: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
     top: 0,
-    left: 0,
-    width: 40,
-    height: 40,
-    borderTopWidth: 4,
-    borderLeftWidth: 4,
-    borderColor: colors.primary,
-    borderTopLeftRadius: borderRadius.lg,
-  },
-  cornerTopRight: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    width: 40,
-    height: 40,
-    borderTopWidth: 4,
-    borderRightWidth: 4,
-    borderColor: colors.primary,
-    borderTopRightRadius: borderRadius.lg,
-  },
-  cornerBottomLeft: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    width: 40,
-    height: 40,
-    borderBottomWidth: 4,
-    borderLeftWidth: 4,
-    borderColor: colors.primary,
-    borderBottomLeftRadius: borderRadius.lg,
-  },
-  cornerBottomRight: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    width: 40,
-    height: 40,
-    borderBottomWidth: 4,
-    borderRightWidth: 4,
-    borderColor: colors.primary,
-    borderBottomRightRadius: borderRadius.lg,
-  },
-  scanLine: {
-    position: 'absolute',
-    top: '15%',
-    left: spacing.lg,
-    right: spacing.lg,
     height: 2,
-    backgroundColor: colors.primary,
-  },
-  scannedOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: `${colors.background}E0`,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scannedText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.success,
-    marginTop: spacing.md,
-  },
-  scannedUnitId: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: colors.foreground,
-    marginTop: spacing.xs,
-  },
-  scannedErrorText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.destructive,
-    marginTop: spacing.md,
-  },
-  rescanButton: {
-    marginTop: spacing.lg,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    backgroundColor: colors.muted,
-    borderRadius: borderRadius.md,
-  },
-  rescanButtonText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: colors.foreground,
-  },
-  flashButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: colors.muted,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: spacing.md,
-  },
-  flashButtonActive: {
-    backgroundColor: colors.primary,
-  },
-  flashLabel: {
-    fontSize: 12,
-    color: colors.foregroundMuted,
-    marginTop: spacing.xs,
-  },
-
-  // Bottom Section
-  bottomSection: {
-    backgroundColor: colors.background,
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-  },
-  currentVehicleLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.foregroundMuted,
-    letterSpacing: 1,
-    marginBottom: spacing.sm,
-  },
-  currentVehicleCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.xl,
-    padding: spacing.md,
-    marginBottom: spacing.md,
-    borderWidth: 1,
-    borderColor: `${colors.border}50`,
-  },
-  vehicleIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: borderRadius.md,
-    backgroundColor: `${colors.primary}25`,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: spacing.sm,
-  },
-  vehicleInfo: {
-    flex: 1,
-  },
-  vehicleUnit: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-  vehicleModel: {
-    fontSize: 12,
-    color: colors.foregroundMuted,
-    marginTop: 1,
-  },
-  activeBadge: {
-    backgroundColor: `${colors.success}25`,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    borderRadius: borderRadius.md,
-  },
-  activeBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.success,
-    letterSpacing: 0.5,
-  },
-  confirmButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.primary,
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.xl,
-    marginBottom: spacing.sm,
-  },
-  confirmButtonDisabled: {
-    opacity: 0.6,
-  },
-  confirmButtonText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: colors.primaryForeground,
-  },
-  manualButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.muted,
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.xl,
-  },
-  manualButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.foreground,
-  },
-
-  // Modal
-  modalOverlay: {
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  modalBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: `${colors.background}E0`,
-  },
-  modalContent: {
-    backgroundColor: colors.card,
-    borderTopLeftRadius: borderRadius['2xl'],
-    borderTopRightRadius: borderRadius['2xl'],
-    padding: spacing['2xl'],
-    paddingBottom: spacing['2xl'] + 20,
-  },
-  sheetHandle: {
-    width: 40,
-    height: 4,
-    backgroundColor: colors.muted,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginBottom: spacing.xl,
-  },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: colors.foreground,
-    marginBottom: spacing.sm,
-  },
-  modalSubtitle: {
-    fontSize: 15,
-    color: colors.foregroundMuted,
-    marginBottom: spacing.xl,
-    lineHeight: 22,
-  },
-  modalInput: {
-    backgroundColor: colors.muted,
-    borderRadius: borderRadius.xl,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-    fontSize: 18,
-    fontWeight: '600',
-    color: colors.foreground,
-    textAlign: 'center',
-    marginBottom: spacing.xl,
-    letterSpacing: 2,
-  },
-  modalConfirmButton: {
-    backgroundColor: colors.primary,
-    paddingVertical: spacing.lg,
-    borderRadius: borderRadius['2xl'],
-    alignItems: 'center',
-    marginBottom: spacing.md,
-  },
-  modalConfirmButtonText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: colors.primaryForeground,
-  },
-  modalCancelButton: {
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-  },
-  modalCancelButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.foreground,
+    backgroundColor: '#A5B6FF',
+    shadowColor: '#2E5CFF',
+    shadowOpacity: 0.8,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
   },
 });
+
+// ============================================================================
+// MANUAL CODE SHEET
+// ============================================================================
+
+const ManualCodeSheet: React.FC<{
+  palette: Palette;
+  visible: boolean;
+  code: string;
+  setCode: (c: string) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}> = ({ palette, visible, code, setCode, onClose, onSubmit }) => {
+  const styles = useMemo(() => makeStyles(palette), [palette]);
+  const digits = code.padEnd(6, ' ').split('').slice(0, 6);
+
+  const press = (k: string) => {
+    if (k === '⌫') setCode(code.slice(0, -1));
+    else if (code.length < 6) setCode(code + k);
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={onClose}>
+        <View style={styles.sheetOverlay}>
+          <TouchableWithoutFeedback>
+            <View style={styles.sheetBody}>
+              <View style={styles.sheetHandle} />
+              <Text style={styles.sheetTitle}>Enter truck code</Text>
+              <Text style={styles.sheetSubtitle}>
+                6-digit code printed below the QR on the dash.
+              </Text>
+
+              <View style={styles.digitRow}>
+                {digits.map((d, i) => {
+                  const filled = d !== ' ';
+                  return (
+                    <View
+                      key={i}
+                      style={[styles.digitBox, filled && styles.digitBoxFilled]}
+                    >
+                      <Text style={styles.digitText}>{d.trim()}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+
+              <View style={styles.keypad}>
+                {['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map((k, i) => (
+                  <View key={i} style={styles.keyCell}>
+                    {k ? (
+                      <Pressable
+                        onPress={() => press(k)}
+                        style={({ pressed }) => [styles.key, pressed && { opacity: 0.8 }]}
+                      >
+                        <Text style={styles.keyText}>{k}</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                ))}
+              </View>
+
+              {/* Hidden input so paste / autocomplete can still push 6 digits in */}
+              <TextInput
+                value={code}
+                onChangeText={(t) => setCode(t.replace(/\D/g, '').slice(0, 6))}
+                keyboardType="number-pad"
+                maxLength={6}
+                style={{ position: 'absolute', opacity: 0, width: 1, height: 1 }}
+              />
+
+              <Pressable
+                onPress={onSubmit}
+                disabled={code.length < 6}
+                style={({ pressed }) => [
+                  styles.sheetCta,
+                  code.length < 6 && { opacity: 0.4 },
+                  pressed && code.length >= 6 && { opacity: 0.9 },
+                ]}
+              >
+                <Text style={styles.sheetCtaText}>Connect to truck</Text>
+              </Pressable>
+            </View>
+          </TouchableWithoutFeedback>
+        </View>
+      </TouchableWithoutFeedback>
+    </Modal>
+  );
+};
+
+const makeStyles = (palette: Palette) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: '#000',
+    },
+    center: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 24,
+    },
+
+    // Top nav
+    topBar: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      zIndex: 5,
+      paddingHorizontal: 12,
+      paddingTop: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    topTitle: {
+      color: '#fff',
+      fontSize: 17,
+      fontWeight: '600',
+      letterSpacing: -0.17,
+    },
+    glassBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 999,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(255,255,255,0.22)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    glassPill: {
+      height: 40,
+      paddingHorizontal: 14,
+      borderRadius: 999,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(255,255,255,0.22)',
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+    },
+    glassPillText: {
+      color: '#fff',
+      fontSize: 14,
+      fontWeight: '600',
+    },
+
+    // Helper text
+    helperWrap: {
+      position: 'absolute',
+      top: '22%',
+      left: 0,
+      right: 0,
+      alignItems: 'center',
+      paddingHorizontal: 32,
+      zIndex: 3,
+    },
+    helperTitle: {
+      color: '#fff',
+      fontSize: 17,
+      fontWeight: '600',
+      marginBottom: 6,
+    },
+    helperBody: {
+      color: 'rgba(255,255,255,0.7)',
+      fontSize: 14,
+      lineHeight: 20,
+      textAlign: 'center',
+    },
+    helperStrong: {
+      color: '#fff',
+      fontWeight: '600',
+    },
+
+    // Bottom controls
+    bottomWrap: {
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      zIndex: 5,
+      paddingHorizontal: 20,
+      gap: 14,
+      alignItems: 'center',
+    },
+    btnRow: {
+      flexDirection: 'row',
+      gap: 10,
+      alignItems: 'center',
+    },
+    circleBtn: {
+      width: 56,
+      height: 56,
+      borderRadius: 999,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(255,255,255,0.22)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    circleBtnActive: {
+      backgroundColor: '#fff',
+    },
+    wideBtn: {
+      height: 56,
+      paddingHorizontal: 22,
+      borderRadius: 999,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'rgba(255,255,255,0.22)',
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    wideBtnText: {
+      color: '#fff',
+      fontSize: 15,
+      fontWeight: '600',
+    },
+    skipHint: {
+      fontSize: 12,
+      color: 'rgba(255,255,255,0.55)',
+    },
+    skipLink: {
+      color: '#fff',
+      fontWeight: '600',
+      textDecorationLine: 'underline',
+    },
+
+    // Processing overlay
+    processing: {
+      position: 'absolute',
+      inset: 0,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 20,
+    },
+    processingText: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+
+    // Permission gate
+    loadingText: {
+      color: '#fff',
+      fontSize: 14,
+    },
+    permIcon: {
+      width: 72,
+      height: 72,
+      borderRadius: 999,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: 20,
+    },
+    permTitle: {
+      ...typeScale.headingMd,
+      color: '#fff',
+      textAlign: 'center',
+    },
+    permBody: {
+      fontSize: 14,
+      lineHeight: 20,
+      color: 'rgba(255,255,255,0.7)',
+      textAlign: 'center',
+      maxWidth: 300,
+      marginTop: 8,
+    },
+    permCta: {
+      marginTop: 28,
+      height: 52,
+      paddingHorizontal: 24,
+      borderRadius: radii.md,
+      backgroundColor: palette.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    permCtaText: {
+      color: '#fff',
+      fontSize: 15,
+      fontWeight: '600',
+    },
+    permLink: {
+      marginTop: 14,
+      color: '#fff',
+      fontSize: 13,
+      fontWeight: '500',
+      textDecorationLine: 'underline',
+    },
+
+    // Sheet
+    sheetOverlay: {
+      flex: 1,
+      justifyContent: 'flex-end',
+      backgroundColor: 'rgba(0,0,0,0.5)',
+    },
+    sheetBody: {
+      backgroundColor: palette.bgSurface,
+      borderTopLeftRadius: 24,
+      borderTopRightRadius: 24,
+      padding: 20,
+      paddingBottom: 32,
+      gap: 16,
+    },
+    sheetHandle: {
+      alignSelf: 'center',
+      width: 38,
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: palette.borderDefault,
+    },
+    sheetTitle: {
+      ...typeScale.headingMd,
+      color: palette.textPrimary,
+    },
+    sheetSubtitle: {
+      fontSize: 13,
+      lineHeight: 18,
+      color: palette.textSecondary,
+      marginTop: -6,
+    },
+    digitRow: {
+      flexDirection: 'row',
+      gap: 8,
+      justifyContent: 'space-between',
+    },
+    digitBox: {
+      flex: 1,
+      aspectRatio: 1 / 1.1,
+      maxWidth: 48,
+      borderRadius: radii.md,
+      borderWidth: 1.5,
+      borderColor: palette.borderDefault,
+      backgroundColor: palette.bgSurface,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    digitBoxFilled: {
+      borderColor: palette.accent,
+    },
+    digitText: {
+      fontSize: 22,
+      fontWeight: '600',
+      color: palette.textPrimary,
+      fontVariant: ['tabular-nums'],
+    },
+    keypad: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+    },
+    keyCell: {
+      width: '33.3333%',
+      padding: 4,
+    },
+    key: {
+      height: 48,
+      borderRadius: radii.lg,
+      backgroundColor: palette.bgMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    keyText: {
+      fontSize: 20,
+      fontWeight: '500',
+      color: palette.textPrimary,
+    },
+    sheetCta: {
+      height: 52,
+      borderRadius: radii.md,
+      backgroundColor: palette.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    sheetCtaText: {
+      color: '#fff',
+      fontSize: 15,
+      fontWeight: '600',
+    },
+  });
