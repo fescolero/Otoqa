@@ -226,6 +226,11 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
               typeof payload.capturedLng === 'number' ? payload.capturedLng : undefined,
             gpsAccuracyM:
               typeof payload.gpsAccuracyM === 'number' ? payload.gpsAccuracyM : undefined,
+            // Accident-kind chip — only set when type === 'Accident'
+            // (AccidentSheet is the sole caller). Forwarded so the R2
+            // metadata stamp survives offline queueing.
+            accidentKind:
+              typeof payload.accidentKind === 'string' ? payload.accidentKind : undefined,
           });
 
           const uploadResult = await uploadPODPhoto(uploadUrl, photoPath, 3, metadataHeaders);
