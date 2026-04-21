@@ -317,7 +317,11 @@ export default function SwitchTruckScreen() {
 // CUTOUT — four corner brackets + moving scanline, over a dimmed backdrop
 // ============================================================================
 
-const CUTOUT_RADIUS = 24;
+// Match the bracket's inner curve. Accent brackets draw a 3px stroke with
+// borderRadius 16 on their outside corner, so the inside of the curve sits
+// at roughly r = 16 - 3 = 13 and an exact match risks hairline bleed;
+// 14 lands snug against the blue without a visible gap.
+const CUTOUT_RADIUS = 14;
 
 const CutoutMask: React.FC<{
   scanlineY: Animated.Value;
