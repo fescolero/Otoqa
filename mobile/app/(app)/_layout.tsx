@@ -2,12 +2,12 @@ import { Redirect, Stack, useRouter } from 'expo-router';
 import { useAuth, useUser } from '@clerk/clerk-expo';
 import {
   View,
-  ActivityIndicator,
   StyleSheet,
   Text,
   Pressable,
   AppState,
 } from 'react-native';
+import { LoadingRingScreen } from '../../lib/otoqa-loader';
 import { useQuery } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
@@ -407,12 +407,7 @@ export default function AppLayout() {
 
   // Wait for Clerk to be ready and stored mode to load
   if (!clerkLoaded || isLoadingStoredMode) {
-    return (
-      <View style={styles.loading}>
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Loading...</Text>
-      </View>
-    );
+    return <LoadingRingScreen statusText="Loading…" subText="Hang tight" />;
   }
 
   if (!isSignedIn) {
@@ -421,56 +416,44 @@ export default function AppLayout() {
 
   // Wait for Convex auth setup
   if (convexAuth.isLoading) {
-    return (
-      <View style={styles.loading}>
-        {convexAuthGate.isTimedOut ? (
-          <>
-            <Ionicons name="cloud-offline-outline" size={48} color={colors.warning} />
-            <Text style={styles.loadingTitle}>Connection Slow</Text>
-            <Text style={styles.loadingSubtext}>Having trouble connecting to the server.</Text>
-            <Pressable style={styles.retryButton} onPress={() => { convexAuthGate.retry(); }}>
-              <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
-              <Text style={styles.retryButtonText}>Retry</Text>
-            </Pressable>
-            <Pressable style={styles.signOutLink} onPress={handleSignOut}>
-              <Text style={styles.signOutLinkText}>Sign out</Text>
-            </Pressable>
-          </>
-        ) : (
-          <>
-            <ActivityIndicator size="large" color={colors.primary} />
-            <Text style={styles.loadingText}>Connecting to server...</Text>
-          </>
-        )}
-      </View>
-    );
+    if (convexAuthGate.isTimedOut) {
+      return (
+        <View style={styles.loading}>
+          <Ionicons name="cloud-offline-outline" size={48} color={colors.warning} />
+          <Text style={styles.loadingTitle}>Connection Slow</Text>
+          <Text style={styles.loadingSubtext}>Having trouble connecting to the server.</Text>
+          <Pressable style={styles.retryButton} onPress={() => { convexAuthGate.retry(); }}>
+            <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </Pressable>
+          <Pressable style={styles.signOutLink} onPress={handleSignOut}>
+            <Text style={styles.signOutLinkText}>Sign out</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    return <LoadingRingScreen statusText="Connecting to server…" subText="Hang tight" />;
   }
 
   // Show loading while fetching roles
   if (isRolesLoading) {
-    return (
-      <View style={styles.loading}>
-        {rolesGate.isTimedOut ? (
-          <>
-            <Ionicons name="shield-outline" size={48} color={colors.warning} />
-            <Text style={styles.loadingTitle}>Taking Longer Than Expected</Text>
-            <Text style={styles.loadingSubtext}>Still checking your permissions. You can retry or sign out and try again.</Text>
-            <Pressable style={styles.retryButton} onPress={() => { rolesGate.retry(); }}>
-              <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
-              <Text style={styles.retryButtonText}>Retry</Text>
-            </Pressable>
-            <Pressable style={styles.signOutLink} onPress={handleSignOut}>
-              <Text style={styles.signOutLinkText}>Sign out</Text>
-            </Pressable>
-          </>
-        ) : (
-          <>
-            <ActivityIndicator size="large" color={colors.primary} />
-            <Text style={styles.loadingText}>Checking permissions...</Text>
-          </>
-        )}
-      </View>
-    );
+    if (rolesGate.isTimedOut) {
+      return (
+        <View style={styles.loading}>
+          <Ionicons name="shield-outline" size={48} color={colors.warning} />
+          <Text style={styles.loadingTitle}>Taking Longer Than Expected</Text>
+          <Text style={styles.loadingSubtext}>Still checking your permissions. You can retry or sign out and try again.</Text>
+          <Pressable style={styles.retryButton} onPress={() => { rolesGate.retry(); }}>
+            <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </Pressable>
+          <Pressable style={styles.signOutLink} onPress={handleSignOut}>
+            <Text style={styles.signOutLinkText}>Sign out</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    return <LoadingRingScreen statusText="Checking permissions…" subText="Hang tight" />;
   }
 
   // Show role selection if user has carrier access and hasn't selected yet
@@ -563,30 +546,23 @@ export default function AppLayout() {
   // Show loading while fetching profile/org
   if (isProfileLoading || isCarrierOrgLoading) {
     const activeGate = isProfileLoading ? profileGate : carrierOrgGate;
-    const isStuck = activeGate.isTimedOut;
-    return (
-      <View style={styles.loading}>
-        {isStuck ? (
-          <>
-            <Ionicons name="person-outline" size={48} color={colors.warning} />
-            <Text style={styles.loadingTitle}>Profile Load Slow</Text>
-            <Text style={styles.loadingSubtext}>Having trouble loading your profile data.</Text>
-            <Pressable style={styles.retryButton} onPress={() => { activeGate.retry(); }}>
-              <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
-              <Text style={styles.retryButtonText}>Retry</Text>
-            </Pressable>
-            <Pressable style={styles.signOutLink} onPress={handleSignOut}>
-              <Text style={styles.signOutLinkText}>Sign out</Text>
-            </Pressable>
-          </>
-        ) : (
-          <>
-            <ActivityIndicator size="large" color={colors.primary} />
-            <Text style={styles.loadingText}>Loading profile...</Text>
-          </>
-        )}
-      </View>
-    );
+    if (activeGate.isTimedOut) {
+      return (
+        <View style={styles.loading}>
+          <Ionicons name="person-outline" size={48} color={colors.warning} />
+          <Text style={styles.loadingTitle}>Profile Load Slow</Text>
+          <Text style={styles.loadingSubtext}>Having trouble loading your profile data.</Text>
+          <Pressable style={styles.retryButton} onPress={() => { activeGate.retry(); }}>
+            <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </Pressable>
+          <Pressable style={styles.signOutLink} onPress={handleSignOut}>
+            <Text style={styles.signOutLinkText}>Sign out</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    return <LoadingRingScreen statusText="Loading profile…" subText="Hang tight" />;
   }
 
   // Handle deleted organization (shows specific message with reason)
