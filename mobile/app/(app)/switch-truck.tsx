@@ -236,7 +236,7 @@ export default function SwitchTruckScreen() {
       {/* Top glass nav */}
       <View style={[styles.topBar, { paddingTop: insets.top + 6 }]}>
         <Pressable
-          onPress={() => router.back()}
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/(app)'))}
           accessibilityLabel="Back"
           style={({ pressed }) => [styles.glassBtn, pressed && { opacity: 0.7 }]}
         >
@@ -244,7 +244,7 @@ export default function SwitchTruckScreen() {
         </Pressable>
         <Text style={styles.topTitle}>Scan truck QR</Text>
         <Pressable
-          onPress={() => router.back()}
+          onPress={() => router.replace('/(app)')}
           accessibilityLabel="Skip"
           style={({ pressed }) => [styles.glassPill, pressed && { opacity: 0.7 }]}
         >
@@ -286,7 +286,7 @@ export default function SwitchTruckScreen() {
         </View>
         <Text style={styles.skipHint}>
           Not driving today?{' '}
-          <Text style={styles.skipLink} onPress={() => router.back()}>
+          <Text style={styles.skipLink} onPress={() => router.replace('/(app)')}>
             Skip to dashboard
           </Text>
         </Text>
