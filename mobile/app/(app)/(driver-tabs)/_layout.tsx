@@ -58,12 +58,23 @@ export default function DriverTabs() {
   const { t } = useLanguage();
   const insets = useSafeAreaInsets();
 
-  // iOS bakes the 34pt home-indicator inset into paddingBottom: 24;
-  // on Android we have to read the real nav-bar inset (0 on gesture
-  // phones, ~48 on three-button). Add it to both height and padding
-  // so the icons don't sit under the system bar.
+  // Layout math
+  // ─────────────────────────────────────────────────────────
+  // React-navigation's BottomTabItem uses `justifyContent: flex-start`
+  // on its column, so icon+label sit at the TOP of each item — *not*
+  // centered. With the previous 50pt content band the label's
+  // baseline landed below the item's centerline, which made the glyphs
+  // feel pinned to the top-edge of the bar (the background grew from
+  // our #55 inset fix, but the icons visually didn't move).
+  //
+  // Fix: enlarge the content band to 64pt so icon (28) + label (~16)
+  // + item's own 5pt padding breathe naturally, and explicitly center
+  // the item's column so icons + labels are vertically centered inside
+  // the band.
   const bottomInset = Platform.OS === 'ios' ? 24 : Math.max(insets.bottom, 10);
-  const tabHeight = (Platform.OS === 'ios' ? 60 : 58) + bottomInset;
+  const CONTENT_BAND = 64;
+  const TOP_PAD = 8;
+  const tabHeight = TOP_PAD + CONTENT_BAND + bottomInset;
 
   return (
     <Tabs
@@ -74,11 +85,15 @@ export default function DriverTabs() {
           borderTopWidth: StyleSheet.hairlineWidth,
           borderTopColor: palette.borderSubtle,
           height: tabHeight,
-          paddingTop: 8,
+          paddingTop: TOP_PAD,
           paddingBottom: bottomInset,
           elevation: 0,
         },
         tabBarItemStyle: {
+          // Override the stock `justifyContent: flex-start` so icon +
+          // label sit centered in the content band, not pinned to the
+          // item top.
+          justifyContent: 'center',
           paddingVertical: 2,
         },
       }}
