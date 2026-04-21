@@ -102,6 +102,76 @@ export const getUploadUrl = action({
 });
 
 /**
+ * Presigned upload URL for unified load documents (driver-captured).
+ *
+ * Keys are grouped by document type so R2 lifecycle rules + ops tooling
+ * can slice by kind:
+ *   load-documents/{loadId}/{type}/{ts}-{filename}
+ *
+ * Returns the same shape as getPODUploadUrl so mobile's S3 uploader
+ * (lib/s3-upload.ts) can reuse the existing PUT flow unchanged.
+ *
+ * The driver app should call this instead of getPODUploadUrl for any
+ * document the driver is capturing — POD included. getPODUploadUrl is
+ * kept alive for the dual-write transition and will be removed once the
+ * Load Details UI fully cuts over to uploadLoadDocument.
+ */
+export const getLoadDocumentUploadUrl = action({
+  args: {
+    loadId: v.string(),
+    type: v.union(
+      v.literal('POD'),
+      v.literal('Receipt'),
+      v.literal('Cargo'),
+      v.literal('Damage'),
+      v.literal('Accident'),
+      v.literal('Other'),
+    ),
+    filename: v.string(),
+    contentType: v.optional(v.string()),
+  },
+  returns: v.object({
+    uploadUrl: v.string(),
+    fileUrl: v.string(),
+    key: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Not authenticated');
+    }
+
+    const { client, bucket, r2AccountId } = createS3Client();
+    const cloudflareDomain = process.env.CLOUDFLARE_DOMAIN;
+
+    const timestamp = Date.now();
+    const sanitizedFilename = args.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const key = `load-documents/${args.loadId}/${args.type}/${timestamp}-${sanitizedFilename}`;
+
+    const command = new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ContentType: args.contentType ?? 'image/jpeg',
+    });
+
+    const uploadUrl = await getSignedUrl(client, command, {
+      expiresIn: 300,
+    });
+
+    let fileUrl: string;
+    if (cloudflareDomain) {
+      fileUrl = `https://${cloudflareDomain}/${key}`;
+    } else if (r2AccountId) {
+      fileUrl = `https://pub-${r2AccountId}.r2.dev/${key}`;
+    } else {
+      fileUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
+    }
+
+    return { uploadUrl, fileUrl, key };
+  },
+});
+
+/**
  * Get a presigned URL specifically for POD (Proof of Delivery) photos
  */
 export const getPODUploadUrl = action({

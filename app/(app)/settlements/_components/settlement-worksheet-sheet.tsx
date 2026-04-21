@@ -80,10 +80,14 @@ export function SettlementWorksheetSheet({
     selectedLoadId ? { loadId: selectedLoadId as Id<'loadInformation'> } : 'skip'
   );
 
-  // Fetch extra documentation for selected load
+  // Fetch extra documentation for selected load.
+  // Previously filtered on type: 'EXTRA_DOC'; that tag is being migrated
+  // to 'Other' (see migration 009). Dropping the filter returns all
+  // document kinds for the load — POD, receipts, accidents, etc. —
+  // which is what the settlements audit surface actually wants to see.
   const extraDocs = useQuery(
     api.loadDocuments.listForLoad,
-    selectedLoadId ? { loadId: selectedLoadId as Id<'loadInformation'>, type: 'EXTRA_DOC' } : 'skip'
+    selectedLoadId ? { loadId: selectedLoadId as Id<'loadInformation'> } : 'skip'
   );
   const extraDocsWithUrl = useMemo(() => {
     if (!extraDocs) return [];
@@ -184,7 +188,10 @@ export function SettlementWorksheetSheet({
         await createLoadDocument({
           loadId: selectedLoadId as Id<'loadInformation'>,
           storageId,
-          type: 'EXTRA_DOC',
+          // Web-uploaded misc docs now use 'Other' (the new catch-all).
+          // 'EXTRA_DOC' remains in the schema union only so pre-migration
+          // rows still validate; migration 009 rewrites them to 'Other'.
+          type: 'Other',
           fileName: file.name,
           contentType: file.type,
         });
