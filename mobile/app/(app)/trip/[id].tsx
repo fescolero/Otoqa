@@ -2518,12 +2518,13 @@ function DetourSheet({
   );
 }
 
+// Values land on the R2 object as `x-amz-meta-accident-kind`. Kept
+// short + distinct so ops can filter the bucket by incident category.
 const ACCIDENT_KINDS = [
   'Collision',
   'Trailer damage',
   'Cargo damage',
-  'Other driver at fault',
-  'Single-vehicle',
+  'Multi-vehicle',
 ] as const;
 
 function AccidentSheet({
