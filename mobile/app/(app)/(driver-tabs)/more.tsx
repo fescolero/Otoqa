@@ -434,6 +434,13 @@ function EndShiftSheet({
 }) {
   const { sp } = useDensityTokens();
   const styles = makeStyles(palette, sp);
+  // Loads / Miles / Stops aren't aggregated server-side yet — show them
+  // as placeholders so the 4-up stats grid from the design is present.
+  // Wire real numbers once a session-summary query lands.
+  const loadsLabel = '—';
+  const milesLabel = '—';
+  const stopsLabel = '—';
+  const endingLabel = formatClock(Date.now());
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
       <SheetFrame palette={palette} onCancel={onCancel}>
@@ -450,12 +457,18 @@ function EndShiftSheet({
           Tracking will pause and your timesheet will log out. You&apos;ll stay signed
           in and can start a new shift anytime.
         </Text>
-        <View style={styles.shiftStats}>
-          <Text style={styles.shiftStatsText}>
-            Started {startedLabel} · {elapsedLabel} elapsed
-          </Text>
+
+        <View style={styles.statsGrid}>
+          <ShiftStat palette={palette} label="Elapsed" value={elapsedLabel} />
+          <ShiftStat palette={palette} label="Loads" value={loadsLabel} />
+          <ShiftStat palette={palette} label="Miles" value={milesLabel} />
+          <ShiftStat palette={palette} label="Stops" value={stopsLabel} />
         </View>
-        <View style={{ gap: 10, marginTop: 18 }}>
+        <Text style={styles.statsFooter}>
+          Started {startedLabel} · Ending {endingLabel}
+        </Text>
+
+        <View style={{ gap: 10, marginTop: 18, alignSelf: 'stretch' }}>
           <Pressable
             onPress={onConfirm}
             disabled={isEnding}
@@ -483,6 +496,21 @@ function EndShiftSheet({
     </Modal>
   );
 }
+
+const ShiftStat: React.FC<{ palette: Palette; label: string; value: string }> = ({
+  palette,
+  label,
+  value,
+}) => {
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
+  return (
+    <View style={styles.statCell}>
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label.toUpperCase()}</Text>
+    </View>
+  );
+};
 
 // ============================================================================
 // UTILS
@@ -777,17 +805,39 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       marginTop: 8,
       paddingHorizontal: 8,
     },
-    shiftStats: {
-      marginTop: 14,
+    statsGrid: {
+      marginTop: 16,
       padding: 12,
       borderRadius: radii.md,
       backgroundColor: palette.bgMuted,
       alignSelf: 'stretch',
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      gap: 8,
+    },
+    statCell: {
+      flex: 1,
       alignItems: 'center',
     },
-    shiftStatsText: {
-      fontSize: 12,
-      color: palette.textSecondary,
+    statValue: {
+      fontSize: 16,
+      fontWeight: '700',
+      letterSpacing: -0.16,
+      color: palette.textPrimary,
+      fontVariant: ['tabular-nums'],
+    },
+    statLabel: {
+      fontSize: 10,
+      fontWeight: '600',
+      letterSpacing: 0.6,
+      color: palette.textTertiary,
+      marginTop: 2,
+    },
+    statsFooter: {
+      marginTop: 8,
+      fontSize: 11,
+      color: palette.textTertiary,
+      textAlign: 'center',
       fontVariant: ['tabular-nums'],
     },
     sheetCta: {
