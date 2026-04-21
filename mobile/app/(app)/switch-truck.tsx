@@ -25,6 +25,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import Svg, { Defs, Mask, Rect } from 'react-native-svg';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
@@ -316,6 +317,8 @@ export default function SwitchTruckScreen() {
 // CUTOUT — four corner brackets + moving scanline, over a dimmed backdrop
 // ============================================================================
 
+const CUTOUT_RADIUS = 24;
+
 const CutoutMask: React.FC<{
   scanlineY: Animated.Value;
   scanned: boolean;
@@ -324,52 +327,41 @@ const CutoutMask: React.FC<{
   const padV = (SCREEN_H - CUTOUT) / 2;
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      {/* Four non-overlapping dim panes that tile around the cutout. The
-          earlier implementation used 50%-height top + bottom panes which
-          overlapped with the left/right side panes at the cutout corners,
-          stacking two 55% layers and producing visible dark squares
-          either side of the window. Now each pane ends exactly where the
-          cutout begins, so the dim looks uniform. */}
-      <View
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          height: padV,
-          backgroundColor: 'rgba(0,0,0,0.55)',
-        }}
-      />
-      <View
-        style={{
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: padV,
-          backgroundColor: 'rgba(0,0,0,0.55)',
-        }}
-      />
-      <View
-        style={{
-          position: 'absolute',
-          top: padV,
-          left: 0,
-          width: padH,
-          height: CUTOUT,
-          backgroundColor: 'rgba(0,0,0,0.55)',
-        }}
-      />
-      <View
-        style={{
-          position: 'absolute',
-          top: padV,
-          right: 0,
-          width: padH,
-          height: CUTOUT,
-          backgroundColor: 'rgba(0,0,0,0.55)',
-        }}
-      />
+      {/* Full-screen dim with a rounded-rect hole cut out by an SVG mask.
+          Replaces the earlier 4-pane tiling — those had sharp 90° corners
+          that didn't meet the bracket radius, leaving visible gaps where
+          the camera feed poked through between the bracket curve and the
+          dim's corner. An SVG mask gives us exact matching radii. */}
+      <Svg
+        width={SCREEN_W}
+        height={SCREEN_H}
+        style={StyleSheet.absoluteFill}
+      >
+        <Defs>
+          <Mask id="cutoutMask">
+            {/* Everything white stays dim. The inner rect is black, which
+                the mask treats as transparent — that's the window. */}
+            <Rect x="0" y="0" width={SCREEN_W} height={SCREEN_H} fill="white" />
+            <Rect
+              x={padH}
+              y={padV}
+              width={CUTOUT}
+              height={CUTOUT}
+              rx={CUTOUT_RADIUS}
+              ry={CUTOUT_RADIUS}
+              fill="black"
+            />
+          </Mask>
+        </Defs>
+        <Rect
+          x="0"
+          y="0"
+          width={SCREEN_W}
+          height={SCREEN_H}
+          fill="rgba(0,0,0,0.55)"
+          mask="url(#cutoutMask)"
+        />
+      </Svg>
 
       {/* Corner brackets + scanline sit inside the window */}
       <View
