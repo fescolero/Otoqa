@@ -11,6 +11,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Linking,
   Platform,
   Pressable,
@@ -37,7 +38,7 @@ import {
 
 type Sp = (typeof densitySpacing)['dense'];
 
-type PermKey = 'location' | 'camera' | 'notifications' | 'photos';
+type PermKey = 'location' | 'camera' | 'notifications' | 'photos' | 'motion';
 
 // For location we track three buckets matching the design spec so the
 // "While using" warning can light up. Other permissions are binary.
@@ -64,7 +65,7 @@ const INITIAL_ITEMS: PermItem[] = [
   },
   {
     key: 'camera',
-    icon: 'search',
+    icon: 'camera',
     label: 'Camera',
     why: 'Scan truck QR codes and capture proof-of-delivery photos.',
     required: true,
@@ -77,6 +78,15 @@ const INITIAL_ITEMS: PermItem[] = [
     why:
       'New loads, detours, and dispatcher messages. Silenced during rest hours.',
     required: true,
+    state: 'unknown',
+  },
+  {
+    key: 'motion',
+    icon: 'motion',
+    label: 'Motion',
+    why:
+      'Improves arrival-detection accuracy at stops. Change this in the device Settings app.',
+    required: false,
     state: 'unknown',
   },
   {
@@ -143,21 +153,77 @@ export default function PermissionsScreen() {
     else void Linking.openSettings();
   };
 
+  const routeToSettings = (reason: string) => {
+    Alert.alert(
+      'Open device settings',
+      reason,
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Open settings', onPress: openSettings },
+      ],
+      { cancelable: true },
+    );
+  };
+
   const requestFor = async (key: PermKey) => {
     if (key === 'location') {
-      // Request foreground first; then escalate to background if granted.
-      const fg = await Location.requestForegroundPermissionsAsync();
-      if (fg.granted) {
-        await Location.requestBackgroundPermissionsAsync().catch(() => null);
+      // iOS only shows the foreground and background permission dialogs ONCE
+      // each. If the user has already chosen "While Using", asking for
+      // Always again returns the same value silently. Detect that and route
+      // them to Settings, which is the only remaining path.
+      const fgBefore = await Location.getForegroundPermissionsAsync();
+      const fg = fgBefore.granted
+        ? fgBefore
+        : await Location.requestForegroundPermissionsAsync();
+      if (!fg.granted) {
+        routeToSettings(
+          'Location is currently off. Turn it on in Settings to start tracking deliveries.',
+        );
+        await refresh();
+        return;
+      }
+      const bg = await Location.requestBackgroundPermissionsAsync().catch(
+        () => null,
+      );
+      if (!bg?.granted) {
+        routeToSettings(
+          Platform.OS === 'ios'
+            ? 'To upgrade to Always, open Settings → Otoqa → Location and pick "Always".'
+            : 'To upgrade to Always, open Settings → Apps → Otoqa → Permissions → Location and pick "Allow all the time".',
+        );
       }
     } else if (key === 'camera') {
-      await Camera.requestCameraPermissionsAsync();
+      const res = await Camera.requestCameraPermissionsAsync();
+      if (!res.granted) {
+        routeToSettings('Camera access is turned off. Enable it in Settings.');
+      }
     } else if (key === 'photos') {
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const res = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!res.granted) {
+        routeToSettings('Photo library access is turned off. Enable it in Settings.');
+      }
     } else if (key === 'notifications') {
-      await Notifications.requestPermissionsAsync({
+      // On iOS, the notifications prompt only shows once; after that we
+      // must send the driver to Settings to flip it.
+      const before = await Notifications.getPermissionsAsync().catch(() => null);
+      const res = await Notifications.requestPermissionsAsync({
         ios: { allowAlert: true, allowBadge: true, allowSound: true },
       }).catch(() => null);
+      const gotGranted =
+        res?.status === 'granted' ||
+        (Platform.OS === 'ios' &&
+          (res?.ios?.status === Notifications.IosAuthorizationStatus.AUTHORIZED ||
+            res?.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL));
+      if (!gotGranted && before?.status !== 'undetermined') {
+        routeToSettings('Notifications are off. Enable them in Settings.');
+      }
+    } else if (key === 'motion') {
+      // No runtime prompt is wired for Motion yet — that requires
+      // expo-sensors + NSMotionUsageDescription. Point the driver at
+      // Settings instead, which always works.
+      routeToSettings(
+        'Motion permission is controlled in device Settings. Enable it under Settings → Otoqa → Motion & Fitness.',
+      );
     }
     await refresh();
   };
@@ -343,6 +409,10 @@ const PermRow: React.FC<{
   const bucket = stateBucket(perm);
   const showWarn =
     bucket === 'warn' || (bucket === 'bad' && perm.required);
+  // The action button is useful whenever the permission isn't already at
+  // its optimal state — warn (while-using vs always) and bad (denied /
+  // unknown) both benefit from a one-tap re-request. 'ok' hides it.
+  const showCta = bucket !== 'ok';
   const warnTone =
     bucket === 'warn'
       ? { bg: 'rgba(245,158,11,0.14)', fg: palette.warning }
@@ -398,7 +468,7 @@ const PermRow: React.FC<{
       {open && (
         <View style={styles.rowExpand}>
           <Text style={styles.rowWhy}>{perm.why}</Text>
-          {showWarn && (
+          {showCta && (
             <Pressable
               onPress={onRequest}
               style={({ pressed }) => [styles.rowAction, pressed && { opacity: 0.85 }]}

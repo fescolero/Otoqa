@@ -50,6 +50,8 @@ import {
   FileDownloadIcon,
   DollarSquareIcon,
   RefreshIcon,
+  Camera01Icon,
+  RunningShoesIcon,
 } from '@hugeicons/core-free-icons';
 
 // Design uses dashed kebab-case names; map to HugeIcons exports. The
@@ -107,6 +109,8 @@ const ICON_MAP = {
   download: FileDownloadIcon,
   dollar: DollarSquareIcon,
   refresh: RefreshIcon,
+  camera: Camera01Icon,
+  motion: RunningShoesIcon,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;
