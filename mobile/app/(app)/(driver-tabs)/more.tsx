@@ -80,7 +80,10 @@ export default function MoreScreen() {
     if (!activeSession) return;
     setIsEnding(true);
     try {
-      await endSessionMutation({ sessionId: activeSession._id });
+      await endSessionMutation({
+        sessionId: activeSession._id,
+        endReason: 'driver_manual',
+      });
       await stopSessionTracking();
       setEndShiftOpen(false);
     } catch (err) {
