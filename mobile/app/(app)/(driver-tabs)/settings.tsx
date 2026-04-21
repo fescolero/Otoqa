@@ -28,12 +28,16 @@ import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 import { useDriver } from '../_layout';
 import { useTheme } from '../../../lib/ThemeContext';
+import { useDensityTokens } from '../../../lib/density';
 import { Icon } from '../../../lib/design-icons';
-import { radii, type Palette } from '../../../lib/design-tokens';
+import { densitySpacing, radii, type Palette } from '../../../lib/design-tokens';
+
+type Sp = (typeof densitySpacing)['dense'];
 
 export default function ProfileScreen() {
   const { palette } = useTheme();
-  const styles = useMemo(() => makeStyles(palette), [palette]);
+  const { sp } = useDensityTokens();
+  const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
 
   const { driverId } = useDriver();
   const profile = useQuery(
@@ -74,7 +78,8 @@ export default function ProfileScreen() {
 // ============================================================================
 
 function LicenseHero({ palette, profile }: { palette: Palette; profile: any }) {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   const firstName = (profile?.firstName ?? 'Driver').toString();
   const lastName = (profile?.lastName ?? '').toString();
   const initials = `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase();
@@ -86,7 +91,7 @@ function LicenseHero({ palette, profile }: { palette: Palette; profile: any }) {
   const medicalState = classifyExpiration(medicalExpiration);
 
   return (
-    <View style={{ paddingHorizontal: 16, paddingTop: 20 }}>
+    <View style={{ paddingHorizontal: sp.screenPx, paddingTop: sp.sectionGap }}>
       <LinearGradient
         colors={['#1D355C', '#2E5CFF', '#5C82FF']}
         start={{ x: 0, y: 0 }}
@@ -166,7 +171,8 @@ function LicenseHero({ palette, profile }: { palette: Palette; profile: any }) {
 // ============================================================================
 
 function LicenseDetails({ palette, profile }: { palette: Palette; profile: any }) {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   const medicalState = classifyExpiration(profile?.medicalExpiration);
   const medicalColor =
     medicalState === 'bad' ? palette.danger : medicalState === 'warn' ? palette.warning : palette.textPrimary;
@@ -184,7 +190,7 @@ function LicenseDetails({ palette, profile }: { palette: Palette; profile: any }
   ];
 
   return (
-    <View style={{ paddingHorizontal: 16, paddingTop: 20 }}>
+    <View style={{ paddingHorizontal: sp.screenPx, paddingTop: sp.sectionGap }}>
       <View style={styles.detailsCard}>
         {rows.map((row, i) => (
           <View key={row.k}>
@@ -220,9 +226,10 @@ function ProfileTiles({
   onOpenCompliance: () => void;
   onOpenDocs: () => void;
 }) {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
-    <View style={{ paddingHorizontal: 16, paddingTop: 20, gap: 8 }}>
+    <View style={{ paddingHorizontal: sp.screenPx, paddingTop: sp.sectionGap, gap: 8 }}>
       <Pressable
         onPress={onOpenPayroll}
         style={({ pressed }) => [styles.wideTile, pressed && { opacity: 0.9 }]}
@@ -308,7 +315,7 @@ function classifyExpiration(iso?: string): 'ok' | 'warn' | 'bad' {
   return 'ok';
 }
 
-const makeStyles = (palette: Palette) =>
+const makeStyles = (palette: Palette, sp: Sp) =>
   StyleSheet.create({
     screen: {
       flex: 1,

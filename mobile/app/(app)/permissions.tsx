@@ -27,7 +27,15 @@ import { Camera } from 'expo-camera';
 import * as Notifications from 'expo-notifications';
 import { Icon, type IconName } from '../../lib/design-icons';
 import { useTheme } from '../../lib/ThemeContext';
-import { radii, typeScale, type Palette } from '../../lib/design-tokens';
+import { useDensityTokens } from '../../lib/density';
+import {
+  densitySpacing,
+  radii,
+  typeScale,
+  type Palette,
+} from '../../lib/design-tokens';
+
+type Sp = (typeof densitySpacing)['dense'];
 
 type PermKey = 'location' | 'camera' | 'notifications' | 'photos';
 
@@ -84,7 +92,8 @@ const INITIAL_ITEMS: PermItem[] = [
 export default function PermissionsScreen() {
   const router = useRouter();
   const { palette } = useTheme();
-  const styles = useMemo(() => makeStyles(palette), [palette]);
+  const { sp } = useDensityTokens();
+  const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
 
   const [items, setItems] = useState<PermItem[]>(INITIAL_ITEMS);
   const [openKey, setOpenKey] = useState<PermKey | null>(null);
@@ -292,7 +301,8 @@ const PermGroup: React.FC<{
   setOpenKey: (k: PermKey | null) => void;
   onRequest: (k: PermKey) => void;
 }> = ({ palette, title, items, openKey, setOpenKey, onRequest }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   return (
     <View style={styles.groupWrap}>
       <Text style={styles.groupLabel}>{title.toUpperCase()}</Text>
@@ -328,7 +338,8 @@ const PermRow: React.FC<{
   onToggle: () => void;
   onRequest: () => void;
 }> = ({ palette, perm, open, onToggle, onRequest }) => {
-  const styles = makeStyles(palette);
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
   const bucket = stateBucket(perm);
   const showWarn =
     bucket === 'warn' || (bucket === 'bad' && perm.required);
@@ -434,7 +445,7 @@ function summarize(
   return { headline: 'All set for driving', color: palette.success };
 }
 
-const makeStyles = (palette: Palette) =>
+const makeStyles = (palette: Palette, sp: Sp) =>
   StyleSheet.create({
     screen: {
       flex: 1,
@@ -462,7 +473,7 @@ const makeStyles = (palette: Palette) =>
     },
 
     heroWrap: {
-      paddingHorizontal: 16,
+      paddingHorizontal: sp.screenPx,
       paddingTop: 4,
     },
     heroEyebrow: {
@@ -492,8 +503,8 @@ const makeStyles = (palette: Palette) =>
     },
 
     groupWrap: {
-      paddingHorizontal: 16,
-      paddingTop: 20,
+      paddingHorizontal: sp.screenPx,
+      paddingTop: sp.sectionGap,
     },
     groupLabel: {
       fontSize: 11,
@@ -515,8 +526,8 @@ const makeStyles = (palette: Palette) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: 12,
-      paddingHorizontal: 14,
-      paddingVertical: 12,
+      paddingHorizontal: sp.listPx,
+      paddingVertical: sp.listPy,
     },
     rowIcon: {
       width: 28,
@@ -569,7 +580,7 @@ const makeStyles = (palette: Palette) =>
       left: 0,
       right: 0,
       bottom: 0,
-      padding: 16,
+      padding: sp.screenPx,
       paddingBottom: 28,
       backgroundColor: palette.bgCanvas,
     },
