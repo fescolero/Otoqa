@@ -34,7 +34,7 @@ import { useTheme } from '../../lib/ThemeContext';
 import { radii, typeScale, type Palette } from '../../lib/design-tokens';
 
 const CUTOUT = 260;
-const { width: SCREEN_W } = Dimensions.get('window');
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 interface QRCodeData {
   type: 'otoqa-truck';
@@ -321,16 +321,22 @@ const CutoutMask: React.FC<{
   scanned: boolean;
 }> = ({ scanlineY, scanned }) => {
   const padH = (SCREEN_W - CUTOUT) / 2;
+  const padV = (SCREEN_H - CUTOUT) / 2;
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      {/* Four dim panes forming the mask */}
+      {/* Four non-overlapping dim panes that tile around the cutout. The
+          earlier implementation used 50%-height top + bottom panes which
+          overlapped with the left/right side panes at the cutout corners,
+          stacking two 55% layers and producing visible dark squares
+          either side of the window. Now each pane ends exactly where the
+          cutout begins, so the dim looks uniform. */}
       <View
         style={{
           position: 'absolute',
           top: 0,
           left: 0,
           right: 0,
-          height: `50%`,
+          height: padV,
           backgroundColor: 'rgba(0,0,0,0.55)',
         }}
       />
@@ -340,29 +346,27 @@ const CutoutMask: React.FC<{
           bottom: 0,
           left: 0,
           right: 0,
-          height: `50%`,
+          height: padV,
           backgroundColor: 'rgba(0,0,0,0.55)',
         }}
       />
       <View
         style={{
           position: 'absolute',
-          top: `50%`,
+          top: padV,
           left: 0,
           width: padH,
           height: CUTOUT,
-          marginTop: -CUTOUT / 2,
           backgroundColor: 'rgba(0,0,0,0.55)',
         }}
       />
       <View
         style={{
           position: 'absolute',
-          top: `50%`,
+          top: padV,
           right: 0,
           width: padH,
           height: CUTOUT,
-          marginTop: -CUTOUT / 2,
           backgroundColor: 'rgba(0,0,0,0.55)',
         }}
       />
@@ -372,10 +376,9 @@ const CutoutMask: React.FC<{
         style={{
           position: 'absolute',
           left: padH,
-          top: `50%`,
+          top: padV,
           width: CUTOUT,
           height: CUTOUT,
-          marginTop: -CUTOUT / 2,
         }}
       >
         {/* top-left */}
