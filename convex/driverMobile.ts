@@ -617,13 +617,22 @@ export const getLoadWithStops = query({
         trackingStatus: v.string(),
         customerName: v.optional(v.string()),
         effectiveMiles: v.optional(v.number()),
+        stopCount: v.optional(v.number()),
         equipmentType: v.optional(v.string()),
+        isHazmat: v.optional(v.boolean()),
+        requiresTarp: v.optional(v.boolean()),
         commodityDescription: v.optional(v.string()),
         weight: v.optional(v.number()),
         temperature: v.optional(v.number()),
         generalInstructions: v.optional(v.string()),
         contactPersonName: v.optional(v.string()),
         contactPersonPhone: v.optional(v.string()),
+        // Facet surface — same shape as getMyAssignedLoads so the trip
+        // detail renders the same HCR/TRIP/equipment badges as the
+        // dashboard cards via the shared lib/facet-tags helper.
+        parsedHcr: v.optional(v.string()),
+        parsedTripNumber: v.optional(v.string()),
+        facets: v.array(v.object({ key: v.string(), value: v.string() })),
       }),
       stops: v.array(
         v.object({
@@ -703,6 +712,10 @@ export const getLoadWithStops = query({
     // Sort by sequence number
     stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
+    // Pull tagged facets so the trip detail's LoadSummary can render
+    // the same HCR / TRIP / custom badges the dashboard shows.
+    const facets = await getLoadFacets(ctx, args.loadId);
+
     return {
       load: {
         _id: load._id,
@@ -713,6 +726,7 @@ export const getLoadWithStops = query({
         trackingStatus: load.trackingStatus,
         customerName: load.customerName,
         effectiveMiles: load.effectiveMiles,
+        stopCount: load.stopCount,
         equipmentType: load.equipmentType,
         isHazmat: load.isHazmat,
         requiresTarp: load.requiresTarp,
@@ -722,6 +736,9 @@ export const getLoadWithStops = query({
         generalInstructions: load.generalInstructions,
         contactPersonName: load.contactPersonName,
         contactPersonPhone: load.contactPersonPhone,
+        parsedHcr: facets.hcr,
+        parsedTripNumber: facets.trip,
+        facets: facets.all,
       },
       stops: stops.map((stop) => ({
         _id: stop._id,
