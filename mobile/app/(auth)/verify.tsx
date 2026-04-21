@@ -23,6 +23,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSignIn, useAuth } from '@clerk/clerk-expo';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQuery } from 'convex/react';
+import { api } from '../../../convex/_generated/api';
 import { Icon } from '../../lib/design-icons';
 import { useTheme } from '../../lib/ThemeContext';
 import { radii, typeScale, type Palette } from '../../lib/design-tokens';
@@ -54,17 +56,28 @@ export default function VerifyScreen() {
     trackScreen('Verify');
   }, []);
 
-  useEffect(() => {
-    if (verificationComplete && isSignedIn) {
-      router.replace('/(app)');
-    }
-  }, [verificationComplete, isSignedIn]);
+  // Post-auth gating: once the driver is signed in, look at their profile
+  // and decide where to send them.
+  //   - No truck paired  → QR scanner (switch-truck) so they can pair
+  //     before they hit the dashboard. The scanner routes to /start-shift
+  //     on success, which in turn routes to /(driver-tabs).
+  //   - Truck already paired → straight to the dashboard. Returning
+  //     drivers don't get re-pinged through the scanner every sign-in.
+  // profile is 'skip'-guarded until isSignedIn so the JWT is ready before
+  // we fetch.
+  const profile = useQuery(
+    api.driverMobile.getMyProfile,
+    isSignedIn ? {} : 'skip',
+  );
 
   useEffect(() => {
-    if (isSignedIn && isLoaded) {
-      router.replace('/(app)');
-    }
-  }, [isSignedIn, isLoaded]);
+    if (!isSignedIn || !isLoaded) return;
+    // Wait for the profile to resolve. `undefined` = still loading.
+    if (profile === undefined) return;
+    const dest =
+      profile && profile.currentTruckId ? '/(app)' : '/switch-truck';
+    router.replace(dest);
+  }, [isSignedIn, isLoaded, profile, verificationComplete]);
 
   useEffect(() => {
     if (resendTimer > 0) {
