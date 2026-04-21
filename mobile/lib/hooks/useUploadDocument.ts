@@ -147,13 +147,20 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
     try {
       const location = await safelyReadLocation();
 
-      const { uploadUrl, fileUrl } = await getUploadUrl({
+      const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
         loadId: String(opts.loadId),
         type: opts.type,
         filename: `${opts.type.toLowerCase()}_${capturedAt}.jpg`,
+        // Pass everything we know to the action so it gets baked into
+        // the R2 object as x-amz-meta-* — ops can search the bucket
+        // without needing Convex for any of this.
+        driverId: String(opts.driverId),
+        capturedAt,
+        capturedLat: location?.latitude,
+        capturedLng: location?.longitude,
       });
 
-      const putResult = await uploadPODPhoto(uploadUrl, opts.photoUri);
+      const putResult = await uploadPODPhoto(uploadUrl, opts.photoUri, 3, metadataHeaders);
       if (!putResult.success) {
         throw new Error(putResult.error ?? 'Upload failed');
       }

@@ -147,13 +147,23 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
 
           // If there's a photo, upload it first
           if (photoPath) {
-            const { uploadUrl, fileUrl } = await getUploadUrl({
+            const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
               loadId: String(payload.loadId || ''),
               stopId: String(payload.stopId || ''),
               filename: `pod_${Date.now()}.jpg`,
+              // Forward whatever the checkout mutation already has —
+              // payload.latitude/longitude were captured at queue time
+              // (accurate), driverId + the ISO driverTimestamp are
+              // present on every queued checkout.
+              driverId: payload.driverId ? String(payload.driverId) : undefined,
+              capturedAt: payload.driverTimestamp
+                ? Date.parse(String(payload.driverTimestamp))
+                : undefined,
+              capturedLat: typeof payload.latitude === 'number' ? payload.latitude : undefined,
+              capturedLng: typeof payload.longitude === 'number' ? payload.longitude : undefined,
             });
 
-            const uploadResult = await uploadPODPhoto(uploadUrl, photoPath);
+            const uploadResult = await uploadPODPhoto(uploadUrl, photoPath, 3, metadataHeaders);
             if (uploadResult.success) {
               podPhotoUrl = fileUrl;
             }
@@ -172,13 +182,14 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
 
         case 'recordPOD': {
           if (photoPath) {
-            const { uploadUrl, fileUrl } = await getUploadUrl({
+            const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
               loadId: String(payload.loadId || ''),
               stopId: String(payload.stopId || ''),
               filename: `pod_${Date.now()}.jpg`,
+              driverId: payload.driverId ? String(payload.driverId) : undefined,
             });
 
-            const uploadResult = await uploadPODPhoto(uploadUrl, photoPath);
+            const uploadResult = await uploadPODPhoto(uploadUrl, photoPath, 3, metadataHeaders);
             if (uploadResult.success) {
               await recordPODMutation({
                 ...(payload as any),
@@ -199,13 +210,25 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
             throw new Error('uploadLoadDocument queued without photoPath');
           }
           const docType = String(payload.type || 'Other');
-          const { uploadUrl, fileUrl } = await getLoadDocumentUploadUrl({
+          const { uploadUrl, fileUrl, metadataHeaders } = await getLoadDocumentUploadUrl({
             loadId: String(payload.loadId || ''),
             type: docType as 'POD' | 'Receipt' | 'Cargo' | 'Damage' | 'Accident' | 'Other',
             filename: `${docType.toLowerCase()}_${Date.now()}.jpg`,
+            // Replay the GPS + capturedAt captured when the driver
+            // originally took the photo — stamped on the queued entry
+            // back in useUploadDocument, accurate to the moment, not
+            // to sync time.
+            driverId: payload.driverId ? String(payload.driverId) : undefined,
+            capturedAt: typeof payload.capturedAt === 'number' ? payload.capturedAt : undefined,
+            capturedLat:
+              typeof payload.capturedLat === 'number' ? payload.capturedLat : undefined,
+            capturedLng:
+              typeof payload.capturedLng === 'number' ? payload.capturedLng : undefined,
+            gpsAccuracyM:
+              typeof payload.gpsAccuracyM === 'number' ? payload.gpsAccuracyM : undefined,
           });
 
-          const uploadResult = await uploadPODPhoto(uploadUrl, photoPath);
+          const uploadResult = await uploadPODPhoto(uploadUrl, photoPath, 3, metadataHeaders);
           if (!uploadResult.success) {
             throw new Error(uploadResult.error ?? 'Upload failed');
           }
