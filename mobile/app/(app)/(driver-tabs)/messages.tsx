@@ -23,6 +23,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Svg, { Circle, Path } from 'react-native-svg';
 import { useRouter } from 'expo-router';
 import { Icon, type IconName } from '../../../lib/design-icons';
 import { useTheme } from '../../../lib/ThemeContext';
@@ -185,15 +186,18 @@ export default function MessagesScreen() {
         unreadCount={unreadCount}
       />
 
-      <ScrollView
-        style={{ flex: 1 }}
-        contentContainerStyle={{ paddingBottom: 48 }}
-        showsVerticalScrollIndicator={false}
-      >
-        {grouped.length === 0 ? (
-          <EmptyState palette={palette} filter={filter} />
-        ) : (
-          grouped.map((g, gi) => (
+      {grouped.length === 0 ? (
+        // Empty state skips the ScrollView so its wrapper can flex-1
+        // and vertically center the illustration + copy in the remaining
+        // space below the filter chips.
+        <EmptyState palette={palette} filter={filter} />
+      ) : (
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ paddingBottom: 48 }}
+          showsVerticalScrollIndicator={false}
+        >
+          {grouped.map((g, gi) => (
             <View key={g.key} style={{ marginTop: gi === 0 ? 6 : 20 }}>
               <Text style={styles.dayHeader}>{DAY_LABEL[g.key]}</Text>
               <View style={styles.groupCard}>
@@ -209,9 +213,9 @@ export default function MessagesScreen() {
                 ))}
               </View>
             </View>
-          ))
-        )}
-      </ScrollView>
+          ))}
+        </ScrollView>
+      )}
     </SafeAreaView>
   );
 }
@@ -365,13 +369,6 @@ const EMPTY_COPY: Record<
 
 type EmptyKind = 'inbox' | 'check' | 'shield' | 'dollar';
 
-const EMPTY_ICON: Record<EmptyKind, IconName> = {
-  inbox: 'inbox',
-  check: 'check-circle',
-  shield: 'shield',
-  dollar: 'dollar',
-};
-
 const EmptyState: React.FC<{ palette: Palette; filter: Filter }> = ({
   palette,
   filter,
@@ -382,12 +379,7 @@ const EmptyState: React.FC<{ palette: Palette; filter: Filter }> = ({
   return (
     <View style={styles.emptyWrap}>
       <View style={styles.emptyIllustration}>
-        <Icon
-          name={EMPTY_ICON[copy.kind]}
-          size={40}
-          color={palette.accent}
-          strokeWidth={1.3}
-        />
+        <EmptyIllustration kind={copy.kind} color={palette.accent} />
       </View>
       <Text style={styles.emptyTitle}>{copy.title}</Text>
       <Text style={styles.emptyBody}>{copy.body}</Text>
@@ -398,6 +390,65 @@ const EmptyState: React.FC<{ palette: Palette; filter: Filter }> = ({
         </View>
       )}
     </View>
+  );
+};
+
+// Filter-specific line-art SVGs matching lib/messages-screen.jsx's
+// InboxIllustration. HugeIcons don't match these closely enough — the
+// inbox variant in particular has a custom notification-dot composition
+// that the stock icon can't represent.
+const EmptyIllustration: React.FC<{ kind: EmptyKind; color: string }> = ({
+  kind,
+  color,
+}) => {
+  const common = {
+    stroke: color,
+    strokeWidth: 1.3,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    fill: 'none' as const,
+  };
+  return (
+    <Svg width={44} height={44} viewBox="0 0 24 24">
+      {kind === 'inbox' && (
+        <>
+          <Path d="M4 13l2-7h12l2 7" {...common} />
+          <Path d="M4 13v5a1 1 0 001 1h14a1 1 0 001-1v-5" {...common} />
+          <Path d="M4 13h4l1.5 2h5L16 13h4" {...common} />
+          <Circle cx="18" cy="6" r="2.2" fill={color} opacity={0.25} />
+        </>
+      )}
+      {kind === 'check' && (
+        <>
+          <Circle cx="12" cy="12" r="8" {...common} />
+          <Path d="M8.5 12.3l2.4 2.4 4.6-5.4" {...common} />
+          <Path
+            d="M5 6l1.5 1.5M19 6l-1.5 1.5M5 18l1.5-1.5M19 18l-1.5-1.5"
+            {...common}
+            opacity={0.35}
+          />
+        </>
+      )}
+      {kind === 'shield' && (
+        <>
+          <Path
+            d="M12 4l7 2.5V12c0 3.9-2.9 7-7 8-4.1-1-7-4.1-7-8V6.5L12 4z"
+            {...common}
+          />
+          <Path d="M9 12.3l2.2 2.2L15 10.5" {...common} />
+        </>
+      )}
+      {kind === 'dollar' && (
+        <>
+          <Circle cx="12" cy="12" r="8" {...common} />
+          <Path d="M12 7v10" {...common} />
+          <Path
+            d="M15 9.3a2.7 2.7 0 00-2.7-1.8H11a2.3 2.3 0 000 4.6h2a2.3 2.3 0 010 4.6h-1.4a2.7 2.7 0 01-2.7-1.8"
+            {...common}
+          />
+        </>
+      )}
+    </Svg>
   );
 };
 
@@ -541,12 +592,16 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       fontVariant: ['tabular-nums'],
     },
 
-    // Empty state
+    // Empty state — fills the space below filter chips + vertically
+    // centers the illustration. Slight upward bias (paddingBottom more
+    // than paddingTop) so the composition doesn't feel bottom-heavy
+    // against the tall filter-chip row.
     emptyWrap: {
+      flex: 1,
       alignItems: 'center',
+      justifyContent: 'center',
       paddingHorizontal: sp.screenPx,
-      paddingTop: 48,
-      paddingBottom: 32,
+      paddingBottom: 56,
     },
     emptyIllustration: {
       width: 88,
