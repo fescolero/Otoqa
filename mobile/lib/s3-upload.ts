@@ -13,12 +13,18 @@ interface UploadResult {
 }
 
 /**
- * Upload a file to S3 using a presigned URL
+ * Upload a file to S3 using a presigned URL.
+ *
+ * `metadataHeaders` is a map of x-amz-meta-* headers that the presigned
+ * URL was signed with. These MUST be sent back verbatim or the signature
+ * fails with 403 SignatureDoesNotMatch. See convex/s3Upload.ts —
+ * getLoadDocumentUploadUrl + getPODUploadUrl both return this map.
  */
 export async function uploadToS3(
   presignedUrl: string,
   localFilePath: string,
-  contentType: string = 'image/jpeg'
+  contentType: string = 'image/jpeg',
+  metadataHeaders?: Record<string, string>,
 ): Promise<UploadResult> {
   try {
     // Upload using expo-file-system's uploadAsync
@@ -28,6 +34,7 @@ export async function uploadToS3(
       uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
       headers: {
         'Content-Type': contentType,
+        ...(metadataHeaders ?? {}),
       },
     });
 
@@ -52,12 +59,18 @@ export async function uploadToS3(
 }
 
 /**
- * Upload a POD photo with retry logic
+ * Upload a POD / document photo with retry logic.
+ *
+ * Name predates the unified loadDocuments backend — still used for all
+ * driver uploads (POD + Receipt + Cargo + Damage + Accident + Other).
+ * Pass metadataHeaders from the presign action so the x-amz-meta-*
+ * headers land on the R2 object.
  */
 export async function uploadPODPhoto(
   presignedUrl: string,
   photoPath: string,
-  maxRetries: number = 3
+  maxRetries: number = 3,
+  metadataHeaders?: Record<string, string>,
 ): Promise<UploadResult> {
   // Check if file exists first
   try {
@@ -75,8 +88,8 @@ export async function uploadPODPhoto(
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     console.log(`[S3Upload] Attempt ${attempt + 1}/${maxRetries} for ${photoPath}`);
-    const result = await uploadToS3(presignedUrl, photoPath, 'image/jpeg');
-    
+    const result = await uploadToS3(presignedUrl, photoPath, 'image/jpeg', metadataHeaders);
+
     if (result.success) {
       console.log('[S3Upload] Upload successful');
       return result;
