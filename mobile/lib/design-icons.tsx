@@ -52,6 +52,7 @@ import {
   RefreshIcon,
   Camera01Icon,
   RunningShoesIcon,
+  QrCodeIcon,
 } from '@hugeicons/core-free-icons';
 
 // Design uses dashed kebab-case names; map to HugeIcons exports. The
@@ -111,6 +112,7 @@ const ICON_MAP = {
   refresh: RefreshIcon,
   camera: Camera01Icon,
   motion: RunningShoesIcon,
+  qr: QrCodeIcon,
 } as const;
 
 export type IconName = keyof typeof ICON_MAP;

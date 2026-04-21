@@ -208,7 +208,7 @@ export default function MoreScreen() {
               pressed && { opacity: 0.8 },
             ]}
           >
-            <Icon name="search" size={14} color={palette.accent} />
+            <Icon name="qr" size={14} color={palette.accent} />
             <Text style={styles.changeBtnText}>{truck ? 'Change' : 'Pair'}</Text>
           </Pressable>
         </View>
