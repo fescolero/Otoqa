@@ -119,7 +119,7 @@ export default function AppSettingsScreen() {
           <SegRow
             palette={palette}
             icon="gauge"
-            label="Distance & weight"
+            label="Units"
             value={units}
             options={[
               { v: 'imperial', l: 'Imperial' },
