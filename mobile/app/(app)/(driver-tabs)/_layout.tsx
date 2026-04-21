@@ -58,12 +58,23 @@ export default function DriverTabs() {
   const { t } = useLanguage();
   const insets = useSafeAreaInsets();
 
-  // iOS bakes the 34pt home-indicator inset into paddingBottom: 24;
-  // on Android we have to read the real nav-bar inset (0 on gesture
-  // phones, ~48 on three-button). Add it to both height and padding
-  // so the icons don't sit under the system bar.
-  const bottomInset = Platform.OS === 'ios' ? 24 : Math.max(insets.bottom, 10);
-  const tabHeight = (Platform.OS === 'ios' ? 60 : 58) + bottomInset;
+  // Layout math
+  // ─────────────────────────────────────────────────────────
+  // Goal: icon + label sit in a 56pt "content band" with 8pt of
+  // breathing room above it, above whatever bottom chrome the OS
+  // shows (iOS home indicator ≈34, Android nav bar 0–48).
+  //
+  // We set `tabBarStyle.height = 8 + 56 + bottomInset` so the bar
+  // grows with the inset, AND also push each item's content up by
+  // the same inset via `tabBarItemStyle.paddingBottom`. Setting it
+  // on the item (not the bar) is what actually moves the glyphs,
+  // since react-navigation distributes item height evenly and
+  // centers icons + labels inside each item's content area.
+  const bottomInset =
+    Platform.OS === 'ios' ? Math.max(insets.bottom, 20) : Math.max(insets.bottom, 12);
+  const CONTENT_BAND = 56;
+  const TOP_PAD = 8;
+  const tabHeight = TOP_PAD + CONTENT_BAND + bottomInset;
 
   return (
     <Tabs
@@ -74,12 +85,15 @@ export default function DriverTabs() {
           borderTopWidth: StyleSheet.hairlineWidth,
           borderTopColor: palette.borderSubtle,
           height: tabHeight,
-          paddingTop: 8,
+          paddingTop: TOP_PAD,
           paddingBottom: bottomInset,
           elevation: 0,
         },
         tabBarItemStyle: {
-          paddingVertical: 2,
+          // Nudge the label/icon pair up into the content band —
+          // without this the item's default vertical centering leaves
+          // the label hugging the very bottom of the content area.
+          paddingBottom: 4,
         },
       }}
     >
