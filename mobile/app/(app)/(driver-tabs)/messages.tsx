@@ -245,6 +245,7 @@ const FilterChips: React.FC<{
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
+      style={styles.filterScroll}
       contentContainerStyle={styles.chipRow}
     >
       {chips.map((c) => {
@@ -498,10 +499,18 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       fontWeight: '600',
     },
 
+    // flexGrow: 0 so this horizontal scroll row only takes the height
+    // it actually needs (≈ chip height + bottom padding). Without it the
+    // ScrollView stretches to fill the column parent, which was shoving
+    // the empty state below the vertical center of the available area.
+    filterScroll: {
+      flexGrow: 0,
+    },
     chipRow: {
       paddingHorizontal: sp.screenPx,
       paddingBottom: 10,
       gap: 6,
+      alignItems: 'center',
     },
     chip: {
       height: 30,
@@ -592,16 +601,14 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       fontVariant: ['tabular-nums'],
     },
 
-    // Empty state — fills the space below filter chips + vertically
-    // centers the illustration. Slight upward bias (paddingBottom more
-    // than paddingTop) so the composition doesn't feel bottom-heavy
-    // against the tall filter-chip row.
+    // Fills the space below the filter chips + vertically centers its
+    // contents. Filter ScrollView is now flexGrow: 0 so the remaining
+    // vertical area is unambiguous, no bias padding needed.
     emptyWrap: {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
       paddingHorizontal: sp.screenPx,
-      paddingBottom: 56,
     },
     emptyIllustration: {
       width: 88,
