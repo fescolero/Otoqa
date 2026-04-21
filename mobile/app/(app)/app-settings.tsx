@@ -313,32 +313,33 @@ const SegRow: React.FC<{
   const { sp } = useDensityTokens();
   const styles = makeStyles(palette, sp);
   return (
-    <View style={[styles.row, { alignItems: 'flex-start' }]}>
+    <View style={styles.row}>
       <View style={styles.leadingIcon}>
         <Icon name={icon} size={16} color={palette.textSecondary} />
       </View>
-      <View style={{ flex: 1, minWidth: 0, gap: 8 }}>
-        <Text style={styles.rowTitle}>{label}</Text>
-        <View style={styles.segRow}>
-          {options.map((o) => {
-            const active = o.v === value;
-            return (
-              <Pressable
-                key={o.v}
-                onPress={() => onChange(o.v)}
-                style={({ pressed }) => [
-                  styles.seg,
-                  active && styles.segActive,
-                  pressed && { opacity: 0.85 },
-                ]}
-              >
-                <Text style={[styles.segText, active && styles.segTextActive]}>
-                  {o.l}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
+      <Text style={[styles.rowTitle, { marginRight: 8 }]}>{label}</Text>
+      {/* Segmented control sits on the same row as the label, pushed to
+          the right. Uses flexShrink + flexWrap so if the label runs long
+          the chips still wrap cleanly rather than clipping. */}
+      <View style={[styles.segRow, { flex: 1, justifyContent: 'flex-end' }]}>
+        {options.map((o) => {
+          const active = o.v === value;
+          return (
+            <Pressable
+              key={o.v}
+              onPress={() => onChange(o.v)}
+              style={({ pressed }) => [
+                styles.seg,
+                active && styles.segActive,
+                pressed && { opacity: 0.85 },
+              ]}
+            >
+              <Text style={[styles.segText, active && styles.segTextActive]}>
+                {o.l}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
     </View>
   );
