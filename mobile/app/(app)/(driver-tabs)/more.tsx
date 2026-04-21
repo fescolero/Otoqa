@@ -66,6 +66,38 @@ export default function MoreScreen() {
   const [endShiftOpen, setEndShiftOpen] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
 
+  // Only fetch the session load buckets once the driver has opened the
+  // End shift sheet — avoids a second subscription on every More-tab
+  // visit when the driver isn't about to end their shift.
+  const sessionLoads = useQuery(
+    api.driverMobile.getSessionLoads,
+    endShiftOpen && activeSession ? { sessionId: activeSession._id } : 'skip',
+  );
+
+  // All-session counts: completed this shift + still in progress.
+  // Drivers think "I worked 3 loads today", not "I finished 2 out of 3".
+  const shiftSummary = useMemo(() => {
+    if (!sessionLoads) return null;
+    const rows = [
+      ...sessionLoads.inProgress,
+      ...sessionLoads.completedThisSession,
+    ];
+    const loads = rows.length;
+    const miles = rows.reduce(
+      (acc: number, r: { effectiveMiles?: number }) => acc + (r.effectiveMiles ?? 0),
+      0,
+    );
+    const stops = rows.reduce(
+      (acc: number, r: { stopCount?: number }) => acc + (r.stopCount ?? 0),
+      0,
+    );
+    return {
+      loads: String(loads),
+      miles: miles > 0 ? Math.round(miles).toLocaleString() : '0',
+      stops: String(stops),
+    };
+  }, [sessionLoads]);
+
   const appVersion = Application.nativeApplicationVersion ?? '1.0.0';
   const buildNumber = Application.nativeBuildVersion ?? '?';
   const otaUpdateId = Updates.updateId;
@@ -279,6 +311,9 @@ export default function MoreScreen() {
         palette={palette}
         elapsedLabel={elapsedLabel}
         startedLabel={startedLabel}
+        loadsLabel={shiftSummary?.loads ?? '—'}
+        milesLabel={shiftSummary?.miles ?? '—'}
+        stopsLabel={shiftSummary?.stops ?? '—'}
         isEnding={isEnding}
         onConfirm={handleEndShift}
         onCancel={() => setEndShiftOpen(false)}
@@ -423,6 +458,9 @@ function EndShiftSheet({
   palette,
   elapsedLabel,
   startedLabel,
+  loadsLabel,
+  milesLabel,
+  stopsLabel,
   isEnding,
   onConfirm,
   onCancel,
@@ -431,18 +469,15 @@ function EndShiftSheet({
   palette: Palette;
   elapsedLabel: string;
   startedLabel: string;
+  loadsLabel: string;
+  milesLabel: string;
+  stopsLabel: string;
   isEnding: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const { sp } = useDensityTokens();
   const styles = makeStyles(palette, sp);
-  // Loads / Miles / Stops aren't aggregated server-side yet — show them
-  // as placeholders so the 4-up stats grid from the design is present.
-  // Wire real numbers once a session-summary query lands.
-  const loadsLabel = '—';
-  const milesLabel = '—';
-  const stopsLabel = '—';
   const endingLabel = formatClock(Date.now());
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
