@@ -623,7 +623,23 @@ export const getLoadWithStops = query({
         requiresTarp: v.optional(v.boolean()),
         commodityDescription: v.optional(v.string()),
         weight: v.optional(v.number()),
+        // Units enum from loadInformation: Pallets | Boxes | Pieces | Lbs | Kg.
+        // Schema marks this required at the table level, but we return it as
+        // optional so legacy rows (pre-migration) that somehow lack it don't
+        // break the driver surface.
+        units: v.optional(
+          v.union(
+            v.literal('Pallets'),
+            v.literal('Boxes'),
+            v.literal('Pieces'),
+            v.literal('Lbs'),
+            v.literal('Kg'),
+          ),
+        ),
         temperature: v.optional(v.number()),
+        // maxTemperature lets the UI render a reefer *range* (e.g.
+        // "34°F – 38°F") when both values are set, not a single setpoint.
+        maxTemperature: v.optional(v.number()),
         generalInstructions: v.optional(v.string()),
         contactPersonName: v.optional(v.string()),
         contactPersonPhone: v.optional(v.string()),
@@ -732,7 +748,9 @@ export const getLoadWithStops = query({
         requiresTarp: load.requiresTarp,
         commodityDescription: load.commodityDescription,
         weight: load.weight,
+        units: load.units,
         temperature: load.temperature,
+        maxTemperature: load.maxTemperature,
         generalInstructions: load.generalInstructions,
         contactPersonName: load.contactPersonName,
         contactPersonPhone: load.contactPersonPhone,
