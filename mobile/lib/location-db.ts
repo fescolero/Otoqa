@@ -1,4 +1,7 @@
 import * as SQLite from 'expo-sqlite';
+import { log } from './log';
+
+const lg = log('LocationDB');
 
 // ============================================
 // SQLITE-BACKED GPS LOCATION STORE
@@ -48,7 +51,7 @@ async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (error) {
     if (!isRecoverableDbError(error)) throw error;
-    console.warn('[LocationDB] Recoverable DB error, reopening and retrying once');
+    lg.warn('Recoverable DB error, reopening and retrying once');
     await resetDbHandle();
     return await fn();
   }
@@ -116,7 +119,7 @@ const SCHEMA_V3_SQL = `
  * will sync through the legacy loadId-based ingest path on next resume.
  */
 async function migrateV1ToV2(database: SQLite.SQLiteDatabase): Promise<void> {
-  console.log('[LocationDB] Migrating schema v1 → v2');
+  lg.debug('Migrating schema v1 → v2');
   await database.execAsync(`
     BEGIN TRANSACTION;
 
@@ -156,7 +159,7 @@ async function migrateV1ToV2(database: SQLite.SQLiteDatabase): Promise<void> {
 
     COMMIT;
   `);
-  console.log('[LocationDB] Schema migration v1 → v2 complete');
+  lg.debug('Schema migration v1 → v2 complete');
 }
 
 /**
@@ -171,7 +174,7 @@ async function migrateV1ToV2(database: SQLite.SQLiteDatabase): Promise<void> {
  * adds succeed.
  */
 async function migrateV2ToV3(database: SQLite.SQLiteDatabase): Promise<void> {
-  console.log('[LocationDB] Migrating schema v2 → v3');
+  lg.debug('Migrating schema v2 → v3');
   await database.execAsync(`
     BEGIN TRANSACTION;
 
@@ -182,7 +185,7 @@ async function migrateV2ToV3(database: SQLite.SQLiteDatabase): Promise<void> {
 
     COMMIT;
   `);
-  console.log('[LocationDB] Schema migration v2 → v3 complete');
+  lg.debug('Schema migration v2 → v3 complete');
 }
 
 async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
@@ -198,7 +201,7 @@ async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
     // Fresh install — create the latest schema directly.
     await newDb.execAsync(SCHEMA_V3_SQL);
     await newDb.execAsync(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);
-    console.log(`[LocationDB] Initialized fresh schema at v${CURRENT_SCHEMA_VERSION}`);
+    lg.debug(`Initialized fresh schema at v${CURRENT_SCHEMA_VERSION}`);
   } else if (currentVersion < CURRENT_SCHEMA_VERSION) {
     // Sequential migrations — apply each step that's needed. Each migration
     // bumps user_version, so a crash mid-chain leaves the DB at the last
@@ -208,8 +211,8 @@ async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   } else if (currentVersion > CURRENT_SCHEMA_VERSION) {
     // Downgrade (user re-installed older app over newer data). Log and proceed;
     // the schema is forward-compatible enough that inserts will still work.
-    console.warn(
-      `[LocationDB] DB at version ${currentVersion}, app expects ${CURRENT_SCHEMA_VERSION}. Proceeding.`
+    lg.warn(
+      `DB at version ${currentVersion}, app expects ${CURRENT_SCHEMA_VERSION}. Proceeding.`
     );
   }
 
@@ -229,7 +232,7 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
       if (dbInitPromise) return dbInitPromise;
       return db;
     } catch {
-      console.warn('[LocationDB] Stale DB handle detected, reopening...');
+      lg.warn('Stale DB handle detected, reopening...');
       // Fall through to claim the mutex below.
     }
   }
@@ -265,7 +268,7 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
 export async function reopenDb(): Promise<void> {
   await resetDbHandle();
   await getDb(); // uses mutex so concurrent callers share one openAndInit()
-  console.log('[LocationDB] Database connection refreshed');
+  lg.debug('Database connection refreshed');
 }
 
 // ============================================
