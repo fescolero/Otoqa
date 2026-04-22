@@ -8,14 +8,14 @@ import {
   AppState,
 } from 'react-native';
 import { LoadingRingScreen } from '../../lib/otoqa-loader';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { Id } from '../../../convex/_generated/dataModel';
 import { useConvexAuthState } from '../../lib/convex';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { colors, typography, borderRadius } from '../../lib/theme';
-import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush, restartForegroundServices } from '../../lib/location-tracking';
+import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush, restartForegroundServices, stopSessionTracking } from '../../lib/location-tracking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import RoleSwitchScreen from './role-switch';
@@ -273,6 +273,67 @@ export default function AppLayout() {
   // and React bailed out mid-commit with no visual change. The hook
   // no-ops when driverId is null so it's safe to call every render.
   useRegisterPushToken(profile?._id ?? null);
+
+  // Self-heal orphan GPS tracking.
+  //
+  // Problem: several codepaths flip `mode` without going through the
+  // graceful teardown in RoleSwitchSheet (which ends the session and
+  // stops tracking before calling setMode). Examples:
+  //   • The auto-switch useEffect below that flips driver→owner when
+  //     `profile === null` fires during a reactive query hiccup.
+  //   • The AsyncStorage mode-load on app start after a crash mid-
+  //     role-switch (state.isActive=true in SQLite but stored mode
+  //     flipped to 'owner' before the crash).
+  //   • Any future codepath that calls `setMode` directly.
+  //
+  // Wrapping setMode isn't enough — `setModeState` is also called
+  // directly (AsyncStorage load, line ~208) and would bypass a wrapper.
+  //
+  // This declarative effect is the backstop: whenever mode is NOT
+  // driver, tracking must not be running. If it is, end the session
+  // (best-effort) and stop tracking. endSession failure is non-fatal —
+  // stopping the client-side tracking is the critical half, because
+  // that's what orphans the GPS stream against a dead context.
+  //
+  // Same hoisting rule as useRegisterPushToken: must sit above any
+  // conditional return so React's hook count stays stable.
+  const endSessionMutation = useMutation(api.driverSessions.endSession);
+  useEffect(() => {
+    if (mode === 'driver') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const state = await getTrackingState();
+        if (cancelled || !state?.isActive) return;
+        console.warn(
+          '[AppLayout] Orphan tracking detected in non-driver mode; self-healing',
+        );
+        if (activeSession) {
+          await endSessionMutation({
+            sessionId: activeSession._id,
+            endReason: 'driver_manual',
+          }).catch((err) => {
+            // Non-fatal. Server may have already ended the session, or
+            // the driver's auth might be in a weird state. What matters
+            // is stopping the client-side tracking below.
+            console.warn(
+              '[AppLayout] endSession failed during self-heal:',
+              err instanceof Error ? err.message : String(err),
+            );
+          });
+        }
+        await stopSessionTracking();
+      } catch (err) {
+        console.warn(
+          '[AppLayout] Self-heal failed:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, activeSession, endSessionMutation]);
 
   // Carrier org info is now returned directly from userRoles
   // No need for separate query - use carrierOrgConvexId and carrierOrgName from userRoles
