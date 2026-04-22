@@ -17,14 +17,18 @@
  *   - Dispatcher quick-call card
  *   - Shift summary stats (loads/miles/stops for the elapsed shift)
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { trackScreen } from '../../../lib/analytics';
 import { usePostHog } from 'posthog-react-native';
 import {
+  Animated,
   View,
   Text,
   StyleSheet,
+  PanResponder,
+  Platform,
   Pressable,
+  KeyboardAvoidingView,
   ScrollView,
   Modal,
   Alert,
@@ -464,6 +468,12 @@ function RowDivider({ palette }: { palette: Palette }) {
   );
 }
 
+// Drag-to-dismiss thresholds — match the Load Details sheets so the
+// gesture feel is consistent everywhere.
+const SHEET_DISMISS_DISTANCE = 120;
+const SHEET_DISMISS_VELOCITY = 0.8;
+const SHEET_DRAG_FADE_RANGE = 240;
+
 function SheetFrame({
   palette,
   onCancel,
@@ -481,13 +491,108 @@ function SheetFrame({
   // 48+. `Math.max` keeps iOS looking identical while pushing the CTA
   // clear of the Android nav bar.
   const insets = useSafeAreaInsets();
+
+  // Drag-to-dismiss. translateY drives vertical offset as the user
+  // drags; the backdrop fades in lockstep via interpolation on the
+  // same value. Same implementation as trip/[id].tsx's SheetFrame so
+  // the gesture feel is consistent across the app.
+  const translateY = useRef(new Animated.Value(0)).current;
+  const isClosingRef = useRef(false);
+
+  const backdropOpacity = translateY.interpolate({
+    inputRange: [0, SHEET_DRAG_FADE_RANGE],
+    outputRange: [0.45, 0],
+    extrapolate: 'clamp',
+  });
+
+  const closeWithAnimation = useCallback(() => {
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
+    Animated.timing(translateY, {
+      toValue: 600,
+      duration: 180,
+      useNativeDriver: true,
+    }).start(() => {
+      onCancel();
+      // Defer the reset until AFTER RN's Modal has fully hidden.
+      // Without this delay, setValue(0) teleports the sheet back to
+      // rest mid-Modal-close — visible as a flash.
+      setTimeout(() => {
+        translateY.setValue(0);
+        isClosingRef.current = false;
+      }, 400);
+    });
+  }, [onCancel, translateY]);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        // Capture phase: let children (Pressables, buttons) take tap
+        // events first. Only steal if the motion is clearly a
+        // vertical-dominant pull-down.
+        onStartShouldSetPanResponderCapture: () => false,
+        // Bubble phase: the sheet body claims any touch that no child
+        // handled. Makes title/subtitle/whitespace draggable — without
+        // this, plain Views have nothing registered for moves so the
+        // drag is dead.
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponderCapture: (_, g) =>
+          g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx) * 1.5,
+        onPanResponderMove: (_, g) => {
+          translateY.setValue(Math.max(0, g.dy));
+        },
+        onPanResponderRelease: (_, g) => {
+          if (g.dy > SHEET_DISMISS_DISTANCE || g.vy > SHEET_DISMISS_VELOCITY) {
+            closeWithAnimation();
+          } else {
+            Animated.spring(translateY, {
+              toValue: 0,
+              useNativeDriver: true,
+              bounciness: 4,
+            }).start();
+          }
+        },
+        onPanResponderTerminate: () => {
+          Animated.spring(translateY, {
+            toValue: 0,
+            useNativeDriver: true,
+            bounciness: 4,
+          }).start();
+        },
+      }),
+    [translateY, closeWithAnimation],
+  );
+
   return (
-    <View style={styles.sheetOverlay}>
-      <Pressable style={styles.sheetBackdrop} onPress={onCancel} />
-      <View style={[styles.sheetBody, { paddingBottom: Math.max(insets.bottom + 12, 24) }]}>
-        <View style={styles.sheetHandle} />
-        {children}
-      </View>
+    <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+      {/* Backdrop in its own layer so it can fade independently of the
+          sheet's transform. Still captures taps to close. */}
+      <Animated.View
+        pointerEvents="auto"
+        style={{
+          ...StyleSheet.absoluteFillObject,
+          backgroundColor: '#000',
+          opacity: backdropOpacity,
+        }}
+      >
+        <Pressable style={{ flex: 1 }} onPress={onCancel} />
+      </Animated.View>
+
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <Animated.View
+          {...panResponder.panHandlers}
+          style={[
+            styles.sheetBody,
+            {
+              paddingBottom: Math.max(insets.bottom + 12, 24),
+              transform: [{ translateY }],
+            },
+          ]}
+        >
+          <View style={styles.sheetHandle} />
+          {children}
+        </Animated.View>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -730,19 +835,24 @@ function RoleSwitchSheet({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
       <SheetFrame palette={palette} onCancel={onCancel}>
-        <View style={[styles.roleSwitchHeader]}>
-          <View style={[styles.roleSwitchHeaderIcon, { backgroundColor: palette.accentTint }]}>
-            <Icon name="truck-swap" size={18} color={palette.accent} />
-          </View>
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={styles.sheetTitle}>Switch role</Text>
-            <Text style={styles.roleSwitchSubtitle}>
-              {onDuty
-                ? "You'll end this shift before switching."
-                : 'Pick the role you want to work in.'}
-            </Text>
-          </View>
+        {/* Centered-icon-above-title header — matches SignOutSheet /
+            EndShiftSheet in this file. Title + subtitle are both
+            text-center so they read as a symmetric block, with the
+            tinted icon as the focal point above them. */}
+        <View
+          style={[
+            styles.sheetIcon,
+            { backgroundColor: palette.accentTint },
+          ]}
+        >
+          <Icon name="truck-swap" size={22} color={palette.accent} />
         </View>
+        <Text style={styles.sheetTitle}>Switch role</Text>
+        <Text style={styles.sheetBodyText}>
+          {onDuty
+            ? "You'll end this shift before switching."
+            : 'Pick the role you want to work in.'}
+        </Text>
 
         {/* alignSelf: 'stretch' is mandatory because SheetFrame's body
             has alignItems: 'center' — without it the row column width
@@ -1201,24 +1311,8 @@ const makeStyles = (palette: Palette, sp: Sp) =>
     },
 
     // Role switch sheet ────────────────────────────────────────
-    roleSwitchHeader: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-      alignSelf: 'stretch',
-    },
-    roleSwitchHeaderIcon: {
-      width: 34,
-      height: 34,
-      borderRadius: radii.md,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    roleSwitchSubtitle: {
-      fontSize: 12,
-      color: palette.textTertiary,
-      marginTop: 2,
-    },
+    // (Header reuses shared sheetIcon / sheetTitle / sheetBodyText
+    // styles above — the pattern matches SignOutSheet + EndShiftSheet.)
     roleRow: {
       // Explicit stretch so the row pulls its column middle (label +
       // meta) across the available width. Without this some RN versions
