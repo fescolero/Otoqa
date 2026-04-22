@@ -26,6 +26,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../../../convex/_generated/api';
+import type { Id } from '../../../convex/_generated/dataModel';
 import { FIRST_RUN_STORAGE_KEY } from '../(app)/first-run';
 import { Icon } from '../../lib/design-icons';
 import { useTheme } from '../../lib/ThemeContext';
@@ -59,23 +60,38 @@ export default function VerifyScreen() {
   }, []);
 
   // Post-auth gating: once the driver is signed in, decide where to send
-  // them based on their profile state.
-  //   1. No first-run completion recorded      → /first-run
-  //   2. No truck paired (post-first-run)      → /switch-truck
-  //   3. Both truck paired AND has dual roles  → /role-switch (future;
-  //      only relevant when we teach the app about multi-role users)
-  //   4. Truck paired                          → /(app) dashboard
+  // them based on whether a live shift exists.
+  //   1. No first-run completion recorded         → /first-run
+  //   2. Driver with no ACTIVE SESSION             → /switch-truck
+  //   3. Driver with an active session OR owner    → /(app) (the (app)
+  //      layout handles role-picker / owner routing from there)
   //
-  // profile is 'skip'-guarded until isSignedIn so the JWT is ready before
-  // we fetch.
+  // The previous version routed off `profile.currentTruckId`. That field
+  // is sticky — it survives session end, sign-out, and reinstall — so a
+  // driver who'd ever paired a truck would always skip the scanner even
+  // if their session had ended hours ago and they were starting a new
+  // shift on a different unit. Active session is the right signal: if
+  // there's no live shift, force a fresh scan.
+  //
+  // profile / activeSession are 'skip'-guarded until isSignedIn so the
+  // JWT is ready before we fetch.
   const profile = useQuery(
     api.driverMobile.getMyProfile,
     isSignedIn ? {} : 'skip',
+  );
+  const activeSession = useQuery(
+    api.driverSessions.getActiveSession,
+    isSignedIn && profile?._id
+      ? { driverId: profile._id as Id<'drivers'> }
+      : 'skip',
   );
 
   useEffect(() => {
     if (!isSignedIn || !isLoaded) return;
     if (profile === undefined) return;
+    // For drivers (profile exists), wait for the activeSession query too —
+    // we can't make the scan-vs-dashboard call without it.
+    if (profile && activeSession === undefined) return;
 
     let cancelled = false;
     (async () => {
@@ -87,16 +103,19 @@ export default function VerifyScreen() {
         router.replace('/first-run');
         return;
       }
-      if (profile && profile.currentTruckId) {
-        router.replace('/(app)');
-      } else {
+      // Drivers without a live session must scan a truck. Owner-only users
+      // (no driver profile) skip the scanner — the (app) layout's
+      // auto-role-resolve will land them on the owner dashboard.
+      if (profile && !activeSession) {
         router.replace('/switch-truck');
+      } else {
+        router.replace('/(app)');
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [isSignedIn, isLoaded, profile, verificationComplete]);
+  }, [isSignedIn, isLoaded, profile, activeSession, verificationComplete]);
 
   useEffect(() => {
     if (resendTimer > 0) {

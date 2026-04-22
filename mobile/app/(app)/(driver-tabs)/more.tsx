@@ -258,16 +258,24 @@ export default function MoreScreen() {
               {truck ? `Unit ${truck.unitId}` : 'Scan your truck QR to pair'}
             </Text>
           </View>
-          <Pressable
-            onPress={() => router.push('/switch-truck')}
-            style={({ pressed }) => [
-              styles.changeBtn,
-              pressed && { opacity: 0.8 },
-            ]}
-          >
-            <Icon name="qr" size={14} color={palette.accent} />
-            <Text style={styles.changeBtnText}>{truck ? 'Change' : 'Pair'}</Text>
-          </Pressable>
+          {/* Hide the Change/Pair affordance while a session is active —
+              swapping trucks mid-shift would silently close the active
+              session server-side (startSession idempotently ends any
+              prior session) and bind the new truck to a fresh shift,
+              losing the elapsed timer / load history. The driver must
+              End shift first to switch units. */}
+          {!onDuty && (
+            <Pressable
+              onPress={() => router.push('/switch-truck')}
+              style={({ pressed }) => [
+                styles.changeBtn,
+                pressed && { opacity: 0.8 },
+              ]}
+            >
+              <Icon name="qr" size={14} color={palette.accent} />
+              <Text style={styles.changeBtnText}>{truck ? 'Change' : 'Pair'}</Text>
+            </Pressable>
+          )}
         </View>
 
         {/* Drill-ins */}
