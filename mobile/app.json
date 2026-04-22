@@ -15,11 +15,6 @@
       "fallbackToCacheTimeout": 3000,
       "checkAutomatically": "ON_LOAD"
     },
-    "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#1a1a2e"
-    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -42,7 +37,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#1a1a2e"
+        "backgroundColor": "#2E5CFF"
       },
       "package": "com.otoqa.driver",
       "permissions": [
@@ -60,6 +55,20 @@
       "expo-router",
       "expo-secure-store",
       "expo-task-manager",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F7F8FC",
+          "image": "./assets/splash.png",
+          "imageWidth": 320,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#0B0D14",
+            "image": "./assets/splash-dark.png",
+            "resizeMode": "contain"
+          }
+        }
+      ],
       [
         "expo-camera",
         {
