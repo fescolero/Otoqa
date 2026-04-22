@@ -27,6 +27,7 @@ import { useLoadDetail } from '../../../lib/hooks/useLoadDetail';
 import { useCheckIn } from '../../../lib/hooks/useCheckIn';
 import { useGPSLocation } from '../../../lib/hooks/useGPSLocation';
 import { useUploadDocument } from '../../../lib/hooks/useUploadDocument';
+import { enqueueMutation } from '../../../lib/offline-queue';
 import { useDriver } from '../_layout';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
 import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
@@ -1625,7 +1626,7 @@ export default function TripDetailScreen() {
                 return;
               }
 
-              const result = await addDetourStopsMutation({
+              const mutationArgs = {
                 loadId: id as Id<'loadInformation'>,
                 driverId,
                 numberOfStops: 1,
@@ -1634,7 +1635,32 @@ export default function TripDetailScreen() {
                 latitude: loc.latitude,
                 longitude: loc.longitude,
                 driverTimestamp: new Date().toISOString(),
-              });
+              };
+
+              // Offline / poor signal — queue the detour so the driver
+              // isn't blocked in a yard with bad coverage. The mutation
+              // replays verbatim when signal returns; dispatch sees it a
+              // minute late rather than not at all.
+              if (connectionQuality !== 'good') {
+                await enqueueMutation('addDetourStops', mutationArgs);
+                posthog?.capture('detour_queued_offline', {
+                  loadId: id,
+                  reason: detourReason,
+                  connectionQuality,
+                });
+                setShowDetourModal(false);
+                setDetourReason('FUEL');
+                setDetourNotes('');
+                Alert.alert(
+                  connectionQuality === 'offline' ? 'Saved offline' : 'Weak signal',
+                  connectionQuality === 'offline'
+                    ? 'Detour saved — will sync when you reconnect.'
+                    : 'Detour queued — will sync as signal improves.',
+                );
+                return;
+              }
+
+              const result = await addDetourStopsMutation(mutationArgs);
 
               posthog?.capture('detour_confirmed', {
                 loadId: id,
@@ -1648,11 +1674,45 @@ export default function TripDetailScreen() {
               setDetourNotes('');
 
               if (!result.success) {
-                Alert.alert('Error', result.message);
+                Alert.alert(
+                  "Couldn't add detour",
+                  result.message ||
+                    'The server rejected the detour. Try again, or reach out to dispatch if this keeps happening.',
+                );
               }
             } catch (err) {
+              // Any runtime error — fall back to queueing rather than
+              // dead-ending the driver. The queue processor will retry
+              // with exponential backoff.
               const msg = err instanceof Error ? err.message : 'Something went wrong';
-              Alert.alert('Error', msg);
+              try {
+                const loc = await getFreshLocation();
+                if (driverId && loc) {
+                  await enqueueMutation('addDetourStops', {
+                    loadId: id as Id<'loadInformation'>,
+                    driverId,
+                    numberOfStops: 1,
+                    reason: detourReason,
+                    notes: detourNotes || undefined,
+                    latitude: loc.latitude,
+                    longitude: loc.longitude,
+                    driverTimestamp: new Date().toISOString(),
+                  });
+                  posthog?.capture('detour_queued_after_error', {
+                    loadId: id,
+                    reason: detourReason,
+                    error: msg,
+                  });
+                  setShowDetourModal(false);
+                  setDetourReason('FUEL');
+                  setDetourNotes('');
+                  Alert.alert('Connection slow', 'Detour queued — will sync shortly.');
+                  return;
+                }
+              } catch {
+                /* fall through to the raw error alert below */
+              }
+              Alert.alert("Couldn't add detour", msg);
             } finally {
               setIsAddingDetour(false);
             }

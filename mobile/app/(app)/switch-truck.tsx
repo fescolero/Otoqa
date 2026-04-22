@@ -27,6 +27,8 @@ import { useRouter } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import Svg, { Defs, Mask, Rect } from 'react-native-svg';
 import { useMutation, useQuery } from 'convex/react';
+import { enqueueMutation } from '../../lib/offline-queue';
+import { useNetworkStatus } from '../../lib/hooks/useNetworkStatus';
 import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
 import { useAppMode } from './_layout';
@@ -81,6 +83,7 @@ export default function SwitchTruckScreen() {
     driverId: (roles?.driverId ?? undefined) as Id<'drivers'> | undefined,
   });
   const switchTruck = useMutation(api.driverMobile.switchTruck);
+  const { connectionQuality } = useNetworkStatus();
 
   useEffect(() => {
     if (!permission?.granted) requestPermission();
@@ -135,17 +138,19 @@ export default function SwitchTruckScreen() {
       return;
     }
     setIsSwitching(true);
-    try {
-      const result = await switchTruck({
-        driverId: profile._id,
-        truckId: data.truckId as Id<'trucks'>,
-      });
-      if (!result.success) {
-        Alert.alert('Unable to switch', result.message, [
-          { text: 'Try again', onPress: () => setScanned(false) },
-        ]);
-        return;
-      }
+
+    const mutationArgs = {
+      driverId: profile._id,
+      truckId: data.truckId as Id<'trucks'>,
+    };
+
+    // Advance the driver to start-shift after either (a) a confirmed
+    // server pairing, or (b) successfully queueing the mutation. In the
+    // queued case the truck shows as paired locally and the server
+    // catches up on reconnect; if the server ultimately rejects (truck
+    // decommissioned, wrong org) the UI will surface that on next
+    // reactive refresh.
+    const proceedToStartShift = () => {
       router.replace({
         pathname: '/start-shift',
         params: {
@@ -155,11 +160,57 @@ export default function SwitchTruckScreen() {
           truckModel: profile.truck?.model ?? '',
         },
       });
+    };
+
+    // Offline / poor signal path — yard loading docks are a known dead
+    // zone. Queue + proceed optimistically. Expected far more often than
+    // not-this-driver / truck-decommissioned cases, which have their
+    // own "try again" branch below for the online path.
+    if (connectionQuality !== 'good') {
+      try {
+        await enqueueMutation('switchTruck', mutationArgs);
+        proceedToStartShift();
+        Alert.alert(
+          connectionQuality === 'offline' ? 'Saved offline' : 'Weak signal',
+          connectionQuality === 'offline'
+            ? 'Truck pairing saved — will sync when you reconnect.'
+            : 'Truck pairing queued — will sync shortly.',
+        );
+      } catch (err) {
+        Alert.alert(
+          "Couldn't save offline",
+          "Storage error. Please try again once you have signal.",
+          [{ text: 'OK', onPress: () => setScanned(false) }],
+        );
+      } finally {
+        setIsSwitching(false);
+      }
+      return;
+    }
+
+    try {
+      const result = await switchTruck(mutationArgs);
+      if (!result.success) {
+        Alert.alert('Unable to switch', result.message, [
+          { text: 'Try again', onPress: () => setScanned(false) },
+        ]);
+        return;
+      }
+      proceedToStartShift();
     } catch (err) {
-      console.error('Switch truck error:', err);
-      Alert.alert('Error', 'Failed to switch truck. Please try again.', [
-        { text: 'OK', onPress: () => setScanned(false) },
-      ]);
+      // Network timeout mid-request on an otherwise-good connection.
+      // Queue and proceed — same optimistic path as the poor-signal
+      // branch above.
+      try {
+        await enqueueMutation('switchTruck', mutationArgs);
+        proceedToStartShift();
+        Alert.alert('Connection slow', 'Truck pairing queued — will sync shortly.');
+      } catch {
+        console.error('Switch truck error:', err);
+        Alert.alert('Error', 'Failed to switch truck. Please try again.', [
+          { text: 'OK', onPress: () => setScanned(false) },
+        ]);
+      }
     } finally {
       setIsSwitching(false);
     }

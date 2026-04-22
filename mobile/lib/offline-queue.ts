@@ -22,7 +22,9 @@ export type MutationType =
   | 'statusUpdate'
   | 'recordPOD'
   | 'updateLocation'
-  | 'uploadLoadDocument';
+  | 'uploadLoadDocument'
+  | 'addDetourStops'
+  | 'switchTruck';
 
 export interface QueuedMutation {
   id: string;

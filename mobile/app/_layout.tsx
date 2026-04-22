@@ -129,6 +129,8 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
   const updateStatusMutation = useMutation(api.driverMobile.updateStopStatus);
   const recordPODMutation = useMutation(api.driverMobile.recordPOD);
   const uploadLoadDocumentMutation = useMutation(api.driverMobile.uploadLoadDocument);
+  const addDetourStopsMutation = useMutation(api.driverMobile.addDetourStops);
+  const switchTruckMutation = useMutation(api.driverMobile.switchTruck);
   const getUploadUrl = useAction(api.s3Upload.getPODUploadUrl);
   const getLoadDocumentUploadUrl = useAction(api.s3Upload.getLoadDocumentUploadUrl);
 
@@ -245,6 +247,25 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
           break;
         }
 
+        case 'addDetourStops': {
+          // Drivers in weak-signal yards would otherwise hit a hard GPS /
+          // network error. The mutation itself is idempotent-enough for
+          // our purposes: inserting a duplicate detour on retry is a
+          // visible regression but not a data-loss one, so failing
+          // gracefully after the queue gives up is acceptable.
+          await addDetourStopsMutation(payload as any);
+          break;
+        }
+
+        case 'switchTruck': {
+          // Scanning a yard QR at a loading dock often means borderline
+          // signal. Replays the same args verbatim — server resolves the
+          // truck by code and handles the pairing; safe on retry because
+          // re-pairing to an already-paired truck is a no-op.
+          await switchTruckMutation(payload as any);
+          break;
+        }
+
         default:
           console.warn('Unknown mutation type:', type);
       }
@@ -258,6 +279,8 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
     updateStatusMutation,
     recordPODMutation,
     uploadLoadDocumentMutation,
+    addDetourStopsMutation,
+    switchTruckMutation,
     getUploadUrl,
     getLoadDocumentUploadUrl,
   ]);
