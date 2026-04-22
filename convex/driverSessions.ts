@@ -22,8 +22,16 @@ const endReasonValidator = v.union(
   v.literal('dispatch_override'),
   v.literal('auto_timeout'),
   v.literal('next_session_opened'),
-  v.literal('handoff_complete')
+  v.literal('handoff_complete'),
+  v.literal('role_switch')
 );
+
+// End reasons that represent an intentional driver action, as opposed to
+// a system/dispatch event. These skip the "session-ended-with-active-load"
+// dispatcher-alert audit row because the driver knew what they were doing.
+const INTENTIONAL_DRIVER_END_REASONS: ReadonlyArray<
+  Doc<'driverSessions'>['endReason']
+> = ['driver_manual', 'role_switch'];
 
 const adminEndReasonValidator = v.union(
   v.literal('emergency'),
@@ -110,7 +118,10 @@ async function endSessionInternal(
     updatedAt: endedAt,
   });
 
-  if (affectedLegIds.length > 0 && args.endReason !== 'driver_manual') {
+  if (
+    affectedLegIds.length > 0 &&
+    !INTENTIONAL_DRIVER_END_REASONS.includes(args.endReason)
+  ) {
     await ctx.db.insert('sessionEndedWithActiveLoad', {
       sessionId: session._id,
       driverId: session.driverId,
@@ -188,7 +199,15 @@ export const startSession = mutation({
 export const endSession = mutation({
   args: {
     sessionId: v.id('driverSessions'),
-    endReason: v.union(v.literal('driver_manual')),
+    // Driver-initiated end reasons only. Dispatch-initiated
+    // (dispatch_override, handoff_complete) and system-initiated
+    // (auto_timeout, next_session_opened) reasons go through their
+    // own internal mutations — this public mutation is the shift's
+    // owner ending their own session.
+    endReason: v.union(
+      v.literal('driver_manual'),
+      v.literal('role_switch')
+    ),
   },
   returns: v.null(),
   handler: async (ctx, args) => {

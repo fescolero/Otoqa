@@ -2048,7 +2048,13 @@ export default defineSchema({
         v.literal('dispatch_override'),
         v.literal('auto_timeout'),
         v.literal('next_session_opened'),
-        v.literal('handoff_complete')
+        v.literal('handoff_complete'),
+        // role_switch: driver on shift switched role (driver → dispatcher).
+        // The RoleSwitchSheet ends the active session before flipping mode
+        // so GPS tracking doesn't orphan against a defunct context. Treated
+        // like driver_manual for the "still-had-active-load" audit
+        // (intentional user action, no dispatcher alert needed).
+        v.literal('role_switch')
       )
     ),
     endedByUserId: v.optional(v.string()), // WorkOS user ID for dispatch_override
