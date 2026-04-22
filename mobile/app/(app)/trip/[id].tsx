@@ -2311,14 +2311,20 @@ function SheetFrame({
   const panResponder = useMemo(
     () =>
       PanResponder.create({
-        // Don't claim the gesture on touch-start — let children take
-        // tap events first. Only steal on a clearly downward drag
-        // (dy > 6pt, vertical-dominant) so buttons/chips/text inputs
-        // inside the sheet keep working normally.
-        onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
-        // Same policy for capture — children resolve first, we grab
-        // only once the motion pattern is clearly a pull-down.
+        // Capture phase: let children take first shot. Buttons / chips /
+        // text inputs claim the touch here.
+        onStartShouldSetPanResponderCapture: () => false,
+        // Bubble phase: if no child claimed, the Animated.View takes
+        // the touch. This is what makes title/subtitle/pill draggable —
+        // they're inside plain Views with no own touch handlers, so the
+        // touch bubbles up and we claim it. Without this, RN's responder
+        // system has no one registered for moves over those areas, so
+        // no drag events fire at all.
+        onStartShouldSetPanResponder: () => true,
+        // When a child (Pressable) already owns the touch, this steals
+        // it on clearly-vertical movement so drivers can still start a
+        // drag from a chip. The velocity-biased check (|dy| > |dx|*1.5)
+        // avoids hijacking a horizontal scroll accidentally.
         onMoveShouldSetPanResponderCapture: (_, g) =>
           g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx) * 1.5,
         onPanResponderMove: (_, g) => {
