@@ -97,8 +97,10 @@ export default function CapturePhotoScreen() {
           onPress={() => {
             if (loadId) {
               router.replace(`/trip/${loadId}`);
-            } else {
+            } else if (router.canGoBack()) {
               router.back();
+            } else {
+              router.replace('/(app)');
             }
           }}
         >
@@ -136,13 +138,19 @@ export default function CapturePhotoScreen() {
         trackPhotoCapture(true, loadId);
       } else {
         trackPhotoCapture(false, loadId, 'No image data received');
-        Alert.alert('Error', 'Failed to capture photo. No image data received.');
+        Alert.alert(
+          "Couldn't capture photo",
+          'The camera returned no image. Tap the shutter again.',
+        );
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       trackPhotoCapture(false, loadId, msg);
       console.error('[CapturePhoto] Error capturing photo:', error);
-      Alert.alert('Error', 'Failed to capture photo. Please try again.');
+      Alert.alert(
+        "Couldn't capture photo",
+        `${msg}\n\nTry again, or restart the app if this keeps happening.`,
+      );
     } finally {
       setIsCapturing(false);
     }
@@ -163,14 +171,19 @@ export default function CapturePhotoScreen() {
       
       if (loadId) {
         router.replace(`/trip/${loadId}`);
-      } else {
+      } else if (router.canGoBack()) {
         router.back();
+      } else {
+        router.replace('/(app)');
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       trackPhotoSaveFailed(loadId, msg);
       console.error('[CapturePhoto] Failed to save photo:', error);
-      Alert.alert('Error', 'Failed to save photo. Please try again.');
+      Alert.alert(
+        "Couldn't save photo",
+        `${msg}\n\nTry tapping Use again.`,
+      );
     }
   };
 
@@ -246,8 +259,10 @@ export default function CapturePhotoScreen() {
               onPress={() => {
                 if (loadId) {
                   router.replace(`/trip/${loadId}`);
-                } else {
+                } else if (router.canGoBack()) {
                   router.back();
+                } else {
+                  router.replace('/(app)');
                 }
               }}
             >

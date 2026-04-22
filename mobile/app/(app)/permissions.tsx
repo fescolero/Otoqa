@@ -248,7 +248,9 @@ export default function PermissionsScreen() {
     <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.topBar}>
         <Pressable
-          onPress={() => router.back()}
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace('/(app)')
+          }
           accessibilityLabel="Back"
           style={({ pressed }) => [styles.topBarBtn, pressed && { opacity: 0.7 }]}
         >

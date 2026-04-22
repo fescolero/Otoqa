@@ -358,15 +358,22 @@ export default function TripDetailScreen() {
           Alert.alert('Queued', result.message);
         }
       } else {
-        Alert.alert('Error', result.message);
+        Alert.alert(
+          type === 'in' ? "Couldn't check in" : "Couldn't check out",
+          result.message || 'Try again, or reach dispatch if this keeps happening.',
+        );
       }
     } catch (error: any) {
+      const msg = error?.message || 'Unexpected error';
       posthog?.capture(`${actionType}_exception`, {
         loadId: id,
         stopId: resolvedStopId || null,
-        error: error?.message || 'Unknown error',
+        error: msg,
       });
-      Alert.alert('Error', 'Failed to submit. Please try again.');
+      Alert.alert(
+        type === 'in' ? "Couldn't check in" : "Couldn't check out",
+        `${msg}\n\nIf this keeps happening, reach out to dispatch.`,
+      );
     } finally {
       setIsSubmitting(false);
       posthog?.flush();
@@ -580,17 +587,23 @@ export default function TripDetailScreen() {
           closeModal();
         }
       } else {
-        Alert.alert('Error', result.message);
+        Alert.alert(
+          checkInModal.type === 'in' ? "Couldn't check in" : "Couldn't check out",
+          result.message || 'Try again, or reach dispatch if this keeps happening.',
+        );
       }
     } catch (error: any) {
-      const errorMessage = error?.message || 'Unknown error';
+      const errorMessage = error?.message || 'Unexpected error';
       posthog?.capture(`${actionType}_exception`, {
         loadId: id,
         stopId: checkInModal.type === 'out' ? (activeCheckedInStop?._id ?? checkInModal.stopId) : checkInModal.stopId,
         error: errorMessage,
         stack: error?.stack,
       });
-      Alert.alert('Error', 'Failed to submit. Please try again.');
+      Alert.alert(
+        checkInModal.type === 'in' ? "Couldn't check in" : "Couldn't check out",
+        `${errorMessage}\n\nIf this keeps happening, reach out to dispatch.`,
+      );
     } finally {
       setIsSubmitting(false);
       posthog?.flush();
@@ -703,7 +716,12 @@ export default function TripDetailScreen() {
         <Text style={[styles.errorText, { fontSize: 14, fontWeight: '400', marginTop: 0 }]}>
           Please try again when you have a stronger signal
         </Text>
-        <Pressable style={styles.backButton} onPress={() => router.back()}>
+        <Pressable
+          style={styles.backButton}
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace('/(app)')
+          }
+        >
           <Text style={styles.backButtonText}>Go Back</Text>
         </Pressable>
       </View>
@@ -715,7 +733,12 @@ export default function TripDetailScreen() {
       <View style={[styles.error, { paddingTop: insets.top }]}>
         <Ionicons name="alert-circle" size={64} color={colors.destructive} />
         <Text style={styles.errorText}>Load not found</Text>
-        <Pressable style={styles.backButton} onPress={() => router.back()}>
+        <Pressable
+          style={styles.backButton}
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace('/(app)')
+          }
+        >
           <Text style={styles.backButtonText}>Go Back</Text>
         </Pressable>
       </View>
@@ -735,7 +758,9 @@ export default function TripDetailScreen() {
             no surface fill. Back, centered title, kebab for quick actions. */}
         <View style={[styles.header, { backgroundColor: palette.bgCanvas, borderBottomWidth: 0 }]}>
           <Pressable
-            onPress={() => router.back()}
+            onPress={() =>
+              router.canGoBack() ? router.back() : router.replace('/(app)')
+            }
             accessibilityLabel="Back"
             style={({ pressed }) => [
               { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: designRadii.full },

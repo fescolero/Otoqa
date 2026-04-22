@@ -86,7 +86,9 @@ export default function LanguageScreen() {
       <View style={styles.header}>
         <Pressable
           style={styles.backButton}
-          onPress={() => router.back()}
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace('/(app)')
+          }
         >
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
         </Pressable>

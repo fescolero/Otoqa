@@ -14,7 +14,8 @@
  * No real backend yet — `threads` is [] until we wire a query. The
  * Empty state has four filter-specific variants mirroring the design.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { trackScreen } from '../../../lib/analytics';
 import {
   Pressable,
   ScrollView,
@@ -95,6 +96,10 @@ export default function MessagesScreen() {
   const { palette } = useTheme();
   const { sp } = useDensityTokens();
   const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
+
+  useEffect(() => {
+    trackScreen('Messages');
+  }, []);
 
   const [messages] = useState<Message[]>(INITIAL);
   const [readIds, setReadIds] = useState<Set<string>>(

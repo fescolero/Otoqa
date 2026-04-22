@@ -17,7 +17,9 @@
  *   - Dispatcher quick-call card
  *   - Shift summary stats (loads/miles/stops for the elapsed shift)
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { trackScreen } from '../../../lib/analytics';
+import { usePostHog } from 'posthog-react-native';
 import {
   View,
   Text,
@@ -55,7 +57,12 @@ export default function MoreScreen() {
   const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
 
   const { signOut } = useClerk();
+  const posthog = usePostHog();
   const { driverId, truck } = useDriver();
+
+  useEffect(() => {
+    trackScreen('More');
+  }, []);
   const { canSwitchModes } = useAppMode();
   const activeSession = useQuery(
     api.driverSessions.getActiveSession,
@@ -118,16 +125,27 @@ export default function MoreScreen() {
         endReason: 'driver_manual',
       });
       await stopSessionTracking();
+      posthog?.capture('shift_ended', {
+        sessionId: activeSession._id,
+        elapsedMs: activeSession.startedAt
+          ? Date.now() - new Date(activeSession.startedAt).getTime()
+          : null,
+      });
       setEndShiftOpen(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to end shift';
-      Alert.alert('Error', msg);
+      posthog?.capture('shift_end_failed', { error: msg });
+      Alert.alert(
+        "Couldn't end shift",
+        `${msg}\n\nTry again, or contact dispatch if this keeps happening.`,
+      );
     } finally {
       setIsEnding(false);
     }
   };
 
   const handleSignOut = async () => {
+    posthog?.capture('sign_out');
     setSignOutOpen(false);
     try {
       await signOut();

@@ -30,20 +30,6 @@ export default function DriverDetailScreen() {
     id ? { driverId: id as Id<'drivers'> } : 'skip'
   );
 
-  // #region agent log
-  if (driver) {
-    console.log('[DEBUG] Driver data received:', {
-      driverId: id,
-      dateOfBirth: driver.dateOfBirth,
-      licenseNumber: driver.licenseNumber,
-      licenseExpiration: driver.licenseExpiration,
-      licenseState: driver.licenseState,
-      licenseClass: driver.licenseClass,
-    });
-    fetch('http://127.0.0.1:7242/ingest/700633f7-32af-4e1f-a83a-d6bc6a4b555b',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'[id].tsx:driver-data',message:'Driver data received',data:{driverId:id,dateOfBirth:driver.dateOfBirth,licenseNumber:driver.licenseNumber,licenseExpiration:driver.licenseExpiration,licenseState:driver.licenseState,licenseClass:driver.licenseClass},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
-  }
-  // #endregion
-
   const handleCall = (phone: string) => {
     Linking.openURL(`tel:${phone}`);
   };

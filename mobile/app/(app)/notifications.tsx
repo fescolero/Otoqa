@@ -157,7 +157,12 @@ export default function NotificationsScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.backButton}>
+        <Pressable
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace('/(app)')
+          }
+          style={styles.backButton}
+        >
           <Ionicons name="arrow-back" size={24} color={colors.foreground} />
         </Pressable>
         <Text style={styles.headerTitle}>{t('notifications.title')}</Text>
