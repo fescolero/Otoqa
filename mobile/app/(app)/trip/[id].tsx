@@ -46,7 +46,7 @@ import {
   startLocationTracking,
 } from '../../../lib/location-tracking';
 import { getTotalCountForLoad, getUnsyncedCountForLoad } from '../../../lib/location-db';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import { AppState } from 'react-native';
 // Design system — used for the redesigned top chrome (header, summary card,
@@ -169,6 +169,19 @@ export default function TripDetailScreen() {
   // Gates the Report button + disables re-submit while the upload is in
   // flight. Reset in both the success path and every failure branch.
   const [isReportingAccident, setIsReportingAccident] = useState(false);
+
+  // Persistent load-documents list. Only fetched while the Documents
+  // sheet is open — avoids a second reactive subscription on every trip
+  // mount when the driver hasn't opened it yet. The sheet renders a
+  // chronological "On this load" section from this data; the ephemeral
+  // `recentUploads` state above is just for sub-second tap feedback
+  // until the server query catches up.
+  const loadDocuments = useQuery(
+    api.driverMobile.getLoadDocuments,
+    showDocumentsSheet && driverId && id
+      ? { loadId: id as Id<'loadInformation'>, driverId }
+      : 'skip',
+  );
 
   useEffect(() => {
     if (!id) return;
@@ -1832,11 +1845,12 @@ export default function TripDetailScreen() {
           visible={showDocumentsSheet}
           palette={palette}
           recentUploads={recentUploads}
+          existingDocs={loadDocuments ?? []}
           onClose={() => {
             setShowDocumentsSheet(false);
             // Clear the toast list on dismiss so re-opening the sheet
-            // starts fresh (the server-side loadDocuments query is the
-            // source of truth; this list is just ephemeral feedback).
+            // starts fresh — the server-side loadDocuments query is the
+            // source of truth; this list is just ephemeral feedback.
             setRecentUploads([]);
           }}
           onPickKind={handlePickDocKind}
@@ -2963,21 +2977,51 @@ const DOC_KINDS: ReadonlyArray<{ key: DocKind; icon: string; sub: string }> = [
  * No more "save with next check-out" — each upload is its own record,
  * independently stamped with the driver's GPS and time at capture.
  */
+// Shape that comes back from api.driverMobile.getLoadDocuments. Kept
+// inline rather than importing from _generated because the generated
+// type union would pull in all 6 string literals + UNKNOWN for context,
+// which we'd just re-narrow anyway.
+type LoadDocumentRow = {
+  _id: string;
+  type: DocKind;
+  externalUrl?: string;
+  capturedAt?: number;
+  uploadedAt: number;
+  inferredStopSequence?: number;
+  inferredContext?: string;
+};
+
 function DocumentsSheet({
   visible,
   palette,
   recentUploads,
+  existingDocs,
   onClose,
   onPickKind,
 }: {
   visible: boolean;
   palette: Palette;
-  // Shown as a subtle "Uploaded in this session" list below the tiles so
-  // the driver has feedback that the tap actually landed.
+  // Sub-second tap feedback for captures made in the current session.
+  // Fades into the `existingDocs` list once the server query catches up.
   recentUploads: Array<{ type: DocKind; status: 'uploading' | 'uploaded' | 'queued' | 'failed' }>;
+  // Persistent list from getLoadDocuments — every document for this
+  // load, ordered chronologically. Source of truth.
+  existingDocs: ReadonlyArray<LoadDocumentRow>;
   onClose: () => void;
   onPickKind: (kind: DocKind) => void;
 }) {
+  // Newest first for visual priority — the driver cares about what
+  // they just uploaded, not what ops uploaded last Tuesday.
+  const sortedDocs = useMemo(
+    () =>
+      [...existingDocs].sort((a, b) => {
+        const aT = a.capturedAt ?? a.uploadedAt;
+        const bT = b.capturedAt ?? b.uploadedAt;
+        return bT - aT;
+      }),
+    [existingDocs],
+  );
+
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
@@ -3079,12 +3123,141 @@ function DocumentsSheet({
               </View>
             )}
 
+            {sortedDocs.length > 0 && (
+              <View style={{ gap: 6 }}>
+                <Text
+                  style={{
+                    fontSize: 11,
+                    fontWeight: '700',
+                    letterSpacing: 0.8,
+                    color: palette.textTertiary,
+                  }}
+                >
+                  ON THIS LOAD · {sortedDocs.length}
+                </Text>
+                {/* Cap at 6 rows to keep the sheet height sane. The full
+                    history lives on ops tooling / future driver-wide
+                    Documents hub; this is just for "did my last few
+                    uploads land?" verification. */}
+                {sortedDocs.slice(0, 6).map((doc) => (
+                  <LoadDocumentRowView key={doc._id} palette={palette} doc={doc} />
+                ))}
+                {sortedDocs.length > 6 && (
+                  <Text style={{ fontSize: 12, color: palette.textTertiary, paddingHorizontal: 4 }}>
+                    +{sortedDocs.length - 6} more
+                  </Text>
+                )}
+              </View>
+            )}
+
             <SheetButton palette={palette} label="Done" variant="secondary" onPress={onClose} />
           </SheetFrame>
         </View>
       </TouchableWithoutFeedback>
     </Modal>
   );
+}
+
+// One row of the persistent list. Shows the doc kind, captured time,
+// and the inferred context chip ("Stop 2 · At stop" / "In transit to
+// stop 3" / etc.) so drivers + ops can see how the row was linked to
+// the route without opening the image.
+function LoadDocumentRowView({ palette, doc }: { palette: Palette; doc: LoadDocumentRow }) {
+  const capturedAt = doc.capturedAt ?? doc.uploadedAt;
+  const time = formatDocTime(capturedAt);
+  const ctx = formatContextLabel(doc.inferredContext, doc.inferredStopSequence);
+
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        padding: 10,
+        borderRadius: designRadii.md,
+        borderWidth: 1,
+        borderColor: palette.borderSubtle,
+      }}
+    >
+      <View
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: designRadii.md,
+          backgroundColor: palette.bgMuted,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <Icon
+          name={DOC_TYPE_ICON[doc.type] ?? 'clipboard'}
+          size={16}
+          color={palette.textSecondary}
+        />
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={{ fontSize: 13, fontWeight: '600', color: palette.textPrimary }}>
+          {doc.type}
+          {ctx && (
+            <Text style={{ fontWeight: '400', color: palette.textTertiary }}>
+              {` · ${ctx}`}
+            </Text>
+          )}
+        </Text>
+        <Text style={{ fontSize: 11, color: palette.textTertiary, marginTop: 2 }}>{time}</Text>
+      </View>
+    </View>
+  );
+}
+
+// Shared with DOC_KINDS above — keeps the icon mapping authoritative
+// even when the list grows.
+const DOC_TYPE_ICON: Record<DocKind, string> = {
+  POD: 'check',
+  Receipt: 'clipboard',
+  Cargo: 'package',
+  Damage: 'warning',
+  Accident: 'warning',
+  Other: 'more-h',
+};
+
+function formatDocTime(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const timeStr = d.toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  if (sameDay) return `Today · ${timeStr}`;
+  const dateStr = d.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  });
+  return `${dateStr} · ${timeStr}`;
+}
+
+function formatContextLabel(
+  ctx: string | undefined,
+  stopSeq: number | undefined,
+): string | null {
+  if (!ctx) return null;
+  switch (ctx) {
+    case 'AT_STOP':
+      return stopSeq ? `At stop ${stopSeq}` : 'At stop';
+    case 'IN_TRANSIT':
+      return stopSeq ? `In transit to stop ${stopSeq}` : 'In transit';
+    case 'BEFORE_FIRST':
+      return 'Before first stop';
+    case 'AFTER_LAST':
+      return 'After last stop';
+    case 'UNKNOWN':
+    default:
+      return null;
+  }
 }
 
 const styles = StyleSheet.create({
