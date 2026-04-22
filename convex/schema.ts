@@ -1670,6 +1670,35 @@ export default defineSchema({
     .index('by_driver_created', ['driverId', 'createdAt']),
 
   /**
+   * Driver push-notification tokens.
+   *
+   * One row per (driver, device) — a driver can have multiple entries
+   * if they sign in on a phone + tablet, or swap phones. Tokens expire
+   * / rotate over time (Expo periodically reissues), so we upsert by
+   * the token string rather than by (driver, device). Stale tokens get
+   * pruned when send-notification actions hit a "DeviceNotRegistered"
+   * error from Expo's push service.
+   */
+  driverPushTokens: defineTable({
+    driverId: v.id('drivers'),
+    token: v.string(), // Expo push token (ExponentPushToken[...])
+    platform: v.union(v.literal('ios'), v.literal('android')),
+    // Install-stable identifier from expo-application. Helpful when we
+    // need to replace a token on the same device (e.g., reinstall) vs.
+    // register a brand new device. Optional — older clients may omit.
+    deviceId: v.optional(v.string()),
+    appVersion: v.optional(v.string()),
+    registeredAt: v.float64(),
+    // Bumped on every register call. When a token goes idle for a long
+    // time (no re-registration from a booted app), we can deprioritize
+    // it on send or prune it during maintenance.
+    lastSeenAt: v.float64(),
+  })
+    .index('by_driver', ['driverId'])
+    .index('by_token', ['token'])
+    .index('by_driver_lastSeen', ['driverId', 'lastSeenAt']),
+
+  /**
    * Load Documents — unified attachment surface for loads.
    *
    * Evolution (2026-04): previously this table held only dispatcher-uploaded

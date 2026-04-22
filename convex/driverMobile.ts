@@ -1680,6 +1680,74 @@ export const getLoadDocuments = query({
 /**
  * Update driver's current GPS location (for live tracking)
  */
+/**
+ * Register (or refresh) an Expo push notification token for the driver.
+ *
+ * Called on every app launch + whenever expo-notifications rotates the
+ * token. Upserts by token string so reinstalls don't accumulate dupes.
+ * Also bumps `lastSeenAt` so maintenance jobs can prune dormant entries.
+ *
+ * Sending actual pushes isn't in scope for this mutation — once the
+ * token is in the table, an internal action (future) reads them and
+ * fires via expo-server-sdk. That action is where DeviceNotRegistered
+ * responses cause rows to be deleted.
+ */
+export const registerDriverPushToken = mutation({
+  args: {
+    driverId: v.id('drivers'),
+    token: v.string(),
+    platform: v.union(v.literal('ios'), v.literal('android')),
+    deviceId: v.optional(v.string()),
+    appVersion: v.optional(v.string()),
+  },
+  returns: v.object({
+    success: v.boolean(),
+    created: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    let driver: Doc<'drivers'>;
+    try {
+      driver = await resolveAuthenticatedDriver(ctx, args.driverId);
+    } catch {
+      return { success: false, created: false };
+    }
+
+    // Upsert: check for an existing row with this exact token first.
+    // Tokens are globally unique per Expo install, so a match means the
+    // same device + install re-registered (app relaunch / reboot).
+    const existing = await ctx.db
+      .query('driverPushTokens')
+      .withIndex('by_token', (q) => q.eq('token', args.token))
+      .first();
+
+    const now = Date.now();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        // Re-associate in case a device changed hands between drivers
+        // (org lends out a tablet, driver reassigned). Cheap and correct.
+        driverId: driver._id,
+        platform: args.platform,
+        deviceId: args.deviceId,
+        appVersion: args.appVersion,
+        lastSeenAt: now,
+      });
+      return { success: true, created: false };
+    }
+
+    await ctx.db.insert('driverPushTokens', {
+      driverId: driver._id,
+      token: args.token,
+      platform: args.platform,
+      deviceId: args.deviceId,
+      appVersion: args.appVersion,
+      registeredAt: now,
+      lastSeenAt: now,
+    });
+    return { success: true, created: true };
+  },
+});
+
 export const updateDriverLocation = mutation({
   args: {
     driverId: v.id('drivers'),
