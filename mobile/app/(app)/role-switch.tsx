@@ -15,6 +15,7 @@
  */
 import React, { useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -87,14 +88,32 @@ export default function RoleSwitchScreen() {
     availableRoles.push('driver', 'owner'); // fallback: show both
   }
 
-  const handleContinue = () => {
-    // Don't navigate here — the parent AppLayout has a useEffect gated
-    // on `hasSelectedRole + mode` that routes to /(driver-tabs) or
-    // /(app)/owner once setMode settles. Calling router.replace here
-    // racees with that effect and, in the post-sign-in gate, no-ops
-    // because the Stack isn't mounted yet (the role-switch screen is
-    // returned BEFORE the Stack in (app)/_layout.tsx). Trust setMode.
-    void setMode(picked);
+  const [isContinuing, setIsContinuing] = useState(false);
+
+  const handleContinue = async () => {
+    if (isContinuing) return;
+    setIsContinuing(true);
+    try {
+      // Fully await setMode so any async state writes (AsyncStorage +
+      // the wrapped hasSelectedRole flip in the post-sign-in gate) are
+      // committed BEFORE we navigate. Without this, router.replace
+      // could fire while we're still in the gate render tree — no Stack
+      // mounted yet, navigation no-ops.
+      await setMode(picked);
+      // Defer navigation to the next frame — gives React time to commit
+      // the gate-flip render (Stack mounts on that render). router.replace
+      // then has a live navigator to work with.
+      requestAnimationFrame(() => {
+        router.replace(
+          picked === 'driver' ? '/(app)/(driver-tabs)' : '/(app)/owner',
+        );
+      });
+    } finally {
+      // Leave the guard on briefly; the screen unmounts a moment later
+      // as the Stack takes over. If something goes wrong and we're still
+      // here, re-enable after a beat.
+      setTimeout(() => setIsContinuing(false), 800);
+    }
   };
 
   const pickedDef = ROLE_DEFS[picked];
@@ -184,14 +203,22 @@ export default function RoleSwitchScreen() {
       <View style={styles.footer}>
         <Pressable
           onPress={handleContinue}
+          disabled={isContinuing}
           style={({ pressed }) => [
             styles.cta,
             { backgroundColor: pickedDef.accent },
             pressed && { opacity: 0.9 },
+            isContinuing && { opacity: 0.7 },
           ]}
         >
-          <Text style={styles.ctaText}>Continue as {pickedDef.label}</Text>
-          <Icon name="arrow-right" size={17} color="#fff" />
+          {isContinuing ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <>
+              <Text style={styles.ctaText}>Continue as {pickedDef.label}</Text>
+              <Icon name="arrow-right" size={17} color="#fff" />
+            </>
+          )}
         </Pressable>
       </View>
     </SafeAreaView>
