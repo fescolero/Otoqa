@@ -744,7 +744,10 @@ function RoleSwitchSheet({
           </View>
         </View>
 
-        <View style={{ gap: 8, marginTop: 14 }}>
+        {/* alignSelf: 'stretch' is mandatory because SheetFrame's body
+            has alignItems: 'center' — without it the row column width
+            collapses to the icon+radio combined, hiding label + meta. */}
+        <View style={{ gap: 8, marginTop: 14, alignSelf: 'stretch' }}>
           {choices.map((id) => {
             const def = ROLE_OPTIONS[id];
             const selected = picked === id;
@@ -1217,6 +1220,11 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       marginTop: 2,
     },
     roleRow: {
+      // Explicit stretch so the row pulls its column middle (label +
+      // meta) across the available width. Without this some RN versions
+      // leave the row at content-width, collapsing the flex:1 middle
+      // column and hiding the label entirely.
+      alignSelf: 'stretch',
       flexDirection: 'row',
       alignItems: 'center',
       gap: 12,
