@@ -16,6 +16,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -90,30 +91,38 @@ export default function RoleSwitchScreen() {
 
   const [isContinuing, setIsContinuing] = useState(false);
 
-  const handleContinue = async () => {
-    if (isContinuing) return;
+  // Synchronous handler — no async/await, no requestAnimationFrame, no
+  // timers. Previous iterations chained too many async steps and one
+  // of them was silently no-op'ing. Call setMode straight through; the
+  // parent AppLayout's useEffect on [mode, hasSelectedRole] handles
+  // the actual navigation after state commits.
+  const handleContinue = () => {
+    console.log('[RoleSwitch] Continue pressed — picked:', picked);
+    if (isContinuing) {
+      console.log('[RoleSwitch] Already continuing, skip');
+      return;
+    }
     setIsContinuing(true);
     try {
-      // Fully await setMode so any async state writes (AsyncStorage +
-      // the wrapped hasSelectedRole flip in the post-sign-in gate) are
-      // committed BEFORE we navigate. Without this, router.replace
-      // could fire while we're still in the gate render tree — no Stack
-      // mounted yet, navigation no-ops.
-      await setMode(picked);
-      // Defer navigation to the next frame — gives React time to commit
-      // the gate-flip render (Stack mounts on that render). router.replace
-      // then has a live navigator to work with.
-      requestAnimationFrame(() => {
-        router.replace(
-          picked === 'driver' ? '/(app)/(driver-tabs)' : '/(app)/owner',
-        );
-      });
-    } finally {
-      // Leave the guard on briefly; the screen unmounts a moment later
-      // as the Stack takes over. If something goes wrong and we're still
-      // here, re-enable after a beat.
-      setTimeout(() => setIsContinuing(false), 800);
+      const result = setMode(picked);
+      console.log('[RoleSwitch] setMode returned:', typeof result);
+      // Fire a router.replace as a redundant path. If we're in the
+      // post-sign-in gate, the state flip + parent nav-effect will
+      // carry us. If we're mounted as a real route (More-tab drill-in),
+      // this replace is what actually unmounts this screen.
+      router.replace(
+        picked === 'driver' ? '/(app)/(driver-tabs)' : '/(app)/owner',
+      );
+    } catch (err) {
+      console.warn('[RoleSwitch] handleContinue failed:', err);
+      Alert.alert(
+        "Couldn't continue",
+        err instanceof Error ? err.message : String(err),
+      );
     }
+    // Release the lock after a beat so a retry is possible if the state
+    // flip didn't unmount us.
+    setTimeout(() => setIsContinuing(false), 1000);
   };
 
   const pickedDef = ROLE_DEFS[picked];
@@ -188,6 +197,7 @@ export default function RoleSwitchScreen() {
       </View>
 
       <ScrollView
+        style={{ flex: 1 }}
         contentContainerStyle={styles.cards}
         showsVerticalScrollIndicator={false}
       >
