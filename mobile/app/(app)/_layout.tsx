@@ -20,6 +20,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import RoleSwitchScreen from './role-switch';
 import { useRequestPermissionsOnce } from '../../lib/request-permissions';
+import { useRegisterPushToken } from '../../lib/hooks/useRegisterPushToken';
 import {
   identifyUser,
   resetUser,
@@ -633,6 +634,11 @@ export default function AppLayout() {
     isLoading: false,
   };
 
+
+  // Register the Expo push token as soon as the driver is hydrated.
+  // Runs once per mount-with-driver; the hook guards itself against
+  // duplicate fires and silently skips on Expo Go.
+  useRegisterPushToken(profile?._id ?? null);
 
   const driverContextValue = profile ? {
     driverId: profile._id,
