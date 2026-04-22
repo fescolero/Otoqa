@@ -1149,10 +1149,33 @@ export const getUserRoles = query({
       }
     }
 
+    // Resolve a human-readable name for the driver's org so screens
+    // like Role Switch don't have to render the raw Convex doc ID.
+    // Most commonly, driverOrgId === carrierOrgConvexId (same org) and
+    // we just reuse the name; otherwise try a fresh lookup.
+    let driverOrgName: string | null = null;
+    if (driverOrgId) {
+      if (driverOrgId === carrierOrgConvexId) {
+        driverOrgName = carrierOrgName;
+      } else {
+        try {
+          const driverOrg = await ctx.db.get(
+            driverOrgId as unknown as Id<'organizations'>,
+          );
+          if (driverOrg && 'name' in driverOrg) {
+            driverOrgName = driverOrg.name;
+          }
+        } catch {
+          // driverOrgId isn't a valid Convex org doc id — leave null.
+        }
+      }
+    }
+
     return {
       isDriver,
       driverId,
       driverOrgId,
+      driverOrgName,
       isCarrierOwner,
       carrierOrgId,
       carrierOrgConvexId, // Convex document ID for direct queries

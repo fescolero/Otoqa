@@ -97,8 +97,10 @@ interface UserRoles {
   isDriver: boolean;
   driverId: string | null;
   driverOrgId: string | null;
+  driverOrgName: string | null;
   isCarrierOwner: boolean;
   carrierOrgId: string | null;
+  carrierOrgName: string | null;
   orgType: string | null;
   isBroker: boolean;
 }
