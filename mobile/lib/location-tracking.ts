@@ -12,6 +12,8 @@ import {
   getUnsyncedLocations,
   getUnsyncedCount,
   markAsSynced,
+  markSyncAttemptFailed,
+  purgeStaleUnsynced,
   getLastLocationForLoad,
   getLastLocationForSession,
   deleteOldSyncedLocations,
@@ -90,13 +92,157 @@ type SyncPing = {
 };
 
 /**
+ * Server's structured outcome for a batch insert. See
+ * convex/driverLocations.ts::IngestOutcome for full semantics.
+ *
+ * Pre-PR-1 servers only return `inserted`; the other fields are normalized
+ * to 0 in normalizeIngestResponse below so the client can use a single
+ * code path either way.
+ */
+type IngestResponse = {
+  inserted: number;
+  duplicates: number;
+  permanentlyRejected: number;
+  transientlyRejected: number;
+};
+
+function normalizeIngestResponse(raw: unknown): IngestResponse {
+  const r = (raw ?? {}) as Partial<IngestResponse>;
+  return {
+    inserted: typeof r.inserted === 'number' ? r.inserted : 0,
+    duplicates: typeof r.duplicates === 'number' ? r.duplicates : 0,
+    permanentlyRejected:
+      typeof r.permanentlyRejected === 'number' ? r.permanentlyRejected : 0,
+    transientlyRejected:
+      typeof r.transientlyRejected === 'number' ? r.transientlyRejected : 0,
+  };
+}
+
+// Escape-hatch thresholds for the sync-rejection infinite loop.
+//   • MAX_SYNC_ATTEMPTS: at the 2-min sync interval this is ~40 min of
+//     retries before we give up on a row. Long enough to ride out
+//     transient outages; short enough that genuine bad data doesn't
+//     block the queue forever.
+//   • MAX_PING_AGE_MS: 48h. The user confirmed this is the realistic
+//     max offline window for a driver — 12h is rare already, 48h
+//     covers edge cases (weekend offline, dead phone in the cab).
+//     Anything older is almost certainly never going to land — purge
+//     it so the queue stays bounded.
+const MAX_SYNC_ATTEMPTS = 20;
+const MAX_PING_AGE_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Apply the server's structured outcome to a batch of attempted-to-sync
+ * rows, then run the escape-hatch purge.
+ *
+ * Returns true if any rows were marked synced (i.e. the batch made
+ * progress). The caller uses this to decide whether to continue
+ * recursive batching — false means the same rows would be re-selected
+ * next iteration, so stop.
+ *
+ * Outcome handling:
+ *   • If server accounts for the whole batch with NO transient
+ *     rejections: mark all rows synced. inserted = stored, duplicates
+ *     = already there, permanentlyRejected = won't retry — all "done".
+ *   • If server flags any row as transientlyRejected (today: never;
+ *     reserved for future): we can't tell which row is which, so bump
+ *     the attempt counter on all rows in the batch and let the next
+ *     cycle retry the same set.
+ *   • If server didn't account for every row (old server, accounting
+ *     drift): fall back to legacy behavior — mark synced if inserted>0,
+ *     else bump attempts.
+ */
+async function applyIngestOutcome(
+  batchIds: number[],
+  result: IngestResponse,
+  source: 'FG' | 'BG',
+): Promise<boolean> {
+  if (batchIds.length === 0) return false;
+
+  const completed = result.inserted + result.duplicates + result.permanentlyRejected;
+  const totalProcessed = completed + result.transientlyRejected;
+  const fullyAccounted = totalProcessed === batchIds.length;
+
+  let advanced = false;
+
+  if (fullyAccounted && result.transientlyRejected === 0) {
+    await markAsSynced(batchIds);
+    advanced = true;
+    console.log(
+      `[LocationTracking] ${source} sync: ${batchIds.length} done (` +
+        `inserted=${result.inserted}, dup=${result.duplicates}, ` +
+        `permRejected=${result.permanentlyRejected})`,
+    );
+    if (result.permanentlyRejected > 0) {
+      // Bad data being uploaded — surface so we can investigate upstream.
+      // Not a sync failure (we've stopped retrying), but worth knowing.
+      trackBGTaskError({
+        step: 'permanently_rejected',
+        error: `${source}_${result.permanentlyRejected}_of_${batchIds.length}`,
+      });
+    }
+  } else if (fullyAccounted && result.transientlyRejected > 0) {
+    // Server says retry. We don't know which rows specifically, so bump
+    // attempts on all and try the same set again next cycle.
+    await markSyncAttemptFailed(batchIds);
+    console.warn(
+      `[LocationTracking] ${source} sync: ${result.transientlyRejected}/${batchIds.length} transiently rejected, bumping attempts`,
+    );
+  } else {
+    // Old server (returned only `inserted`) or accounting drift. Fall
+    // back to legacy "any progress = success" rule, plus attempt bump
+    // when nothing landed so the escape hatch can eventually kick in.
+    if (result.inserted > 0) {
+      await markAsSynced(batchIds);
+      advanced = true;
+      console.log(
+        `[LocationTracking] ${source} sync (legacy path): ${result.inserted} inserted, marking ${batchIds.length} rows synced`,
+      );
+    } else {
+      await markSyncAttemptFailed(batchIds);
+      console.warn(
+        `[LocationTracking] ${source} sync: server returned inserted=0 for ${batchIds.length} rows, bumping attempts (escape hatch active)`,
+      );
+      trackBGTaskError({
+        step: 'sync_rejected',
+        error: `${source}_inserted_0_of_${batchIds.length}`,
+      });
+    }
+  }
+
+  // Escape hatch: anything that's been retried >MAX_SYNC_ATTEMPTS times,
+  // or has been queued >MAX_PING_AGE_MS, gets hard-deleted with telemetry.
+  // Cheap query, runs at most once per sync cycle.
+  try {
+    const purge = await purgeStaleUnsynced(MAX_SYNC_ATTEMPTS, MAX_PING_AGE_MS);
+    if (purge.deleted > 0) {
+      console.warn(
+        `[LocationTracking] Purged ${purge.deleted} stale unsynced rows ` +
+          `(maxAttempts=${MAX_SYNC_ATTEMPTS}, maxAge=${MAX_PING_AGE_MS}ms). ` +
+          `Sample: ${JSON.stringify(purge.sample)}`,
+      );
+      trackBGTaskError({
+        step: 'purged_stale_unsynced',
+        error: `${source}_${purge.deleted}_rows`,
+      });
+    }
+  } catch (purgeErr) {
+    // Purge failure is non-fatal — DB might be busy. Try again next cycle.
+    const msg = purgeErr instanceof Error ? purgeErr.message : String(purgeErr);
+    console.warn(`[LocationTracking] Stale-purge failed (will retry): ${msg}`);
+  }
+
+  return advanced;
+}
+
+/**
  * Sync locations directly via the Convex HTTP endpoint using a static API key.
  * Works in background tasks without Clerk auth.
  */
 async function syncViaHttpEndpoint(
   locations: SyncPing[],
   organizationId: string,
-): Promise<{ inserted: number }> {
+): Promise<IngestResponse> {
   if (!MOBILE_LOCATION_API_KEY) {
     throw new Error('MOBILE_LOCATION_API_KEY not configured');
   }
@@ -115,7 +261,7 @@ async function syncViaHttpEndpoint(
     throw new Error(`HTTP ${response.status}: ${text}`);
   }
 
-  return await response.json();
+  return normalizeIngestResponse(await response.json());
 }
 
 /**
@@ -583,19 +729,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         syncSuccess = true;
         syncCount = result.inserted;
 
-        if (result.inserted > 0) {
-          // Only mark synced if the server actually accepted points.
-          // If inserted === 0, the server rejected everything (org mismatch,
-          // driver deleted, etc.) — retaining as unsynced lets us retry later
-          // or investigate why points are rejected.
-          await markAsSynced(unsynced.map((r) => r.id));
-          console.log(`[LocationTracking] BG HTTP sync: ${result.inserted} inserted, ${unsynced.length} marked synced`);
-        } else {
-          console.warn(
-            `[LocationTracking] BG HTTP sync: server returned inserted=0 for ${unsynced.length} points — NOT marking synced (will retry)`,
-          );
-          trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${unsynced.length}` });
-        }
+        await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
       }
     } catch (flushError) {
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
@@ -1596,39 +1730,27 @@ async function syncUnsyncedToConvex(
       recordedAt: loc.recordedAt,
     }));
 
-    const result = await authedMutation<{ inserted: number }>(api.driverLocations.batchInsertLocations, {
+    const rawResult = await authedMutation<unknown>(api.driverLocations.batchInsertLocations, {
       locations,
       organizationId,
     });
-
+    const result = normalizeIngestResponse(rawResult);
     const syncedIds = unsynced.map((r) => r.id);
 
-    if (result.inserted > 0) {
-      // Only mark synced if the server actually accepted some/all points.
-      // This prevents permanent data loss when the server rejects everything
-      // (e.g. org mismatch, deleted driver, missing load).
-      await markAsSynced(syncedIds);
-      console.log(`[LocationTracking] Synced ${result.inserted} locations, marked ${syncedIds.length} rows`);
+    const advanced = await applyIngestOutcome(syncedIds, result, 'FG');
 
-      if (result.inserted < syncedIds.length) {
-        console.warn(
-          `[LocationTracking] Server accepted ${result.inserted}/${syncedIds.length} — some points may have been rejected (org mismatch or invalid driver/load)`,
-        );
-      }
-
-      // Only continue batching when the server accepted points; if inserted===0
-      // the same records would be selected again causing infinite recursion.
+    // Continue batching only when this batch made progress. If `advanced`
+    // is false the same rows would be reselected next iteration, causing
+    // unbounded recursion. The escape-hatch purge inside applyIngestOutcome
+    // handles rows that have failed too many times — anything still
+    // unsynced after the purge is genuinely worth retrying later.
+    if (advanced) {
       const remaining = await getUnsyncedCount();
       if (remaining > 0) {
         console.log(`[LocationTracking] ${remaining} more unsynced points, continuing...`);
         const nextResult = await syncUnsyncedToConvex(organizationId);
         return { success: true, synced: result.inserted + nextResult.synced };
       }
-    } else {
-      console.warn(
-        `[LocationTracking] Server rejected all ${syncedIds.length} points (inserted=0) — NOT marking synced, will retry`,
-      );
-      trackBGTaskError({ step: 'sync_rejected', error: `server_inserted_0_of_${syncedIds.length}` });
     }
 
     return { success: true, synced: result.inserted };

@@ -68,14 +68,19 @@ export interface LocationRow {
   recordedAt: number;
   createdAt: number;
   synced: number; // 0 = unsynced, 1 = synced
+  syncAttempts: number; // v3+: incremented each time a sync cycle fails to mark this row synced
+  firstAttemptAt: number | null; // v3+: ms epoch of the first sync attempt for this row
 }
 
 // Schema version tracked via SQLite's user_version pragma.
 // v1: initial schema (loadId NOT NULL, no sessionId).
 // v2: loadId made nullable, sessionId column + index added.
-const CURRENT_SCHEMA_VERSION = 2;
+// v3: syncAttempts + firstAttemptAt columns added — escape hatch for the
+//     sync-rejection infinite loop. Rows that fail enough times or sit
+//     unsynced too long get purged (see purgeStaleUnsynced below).
+const CURRENT_SCHEMA_VERSION = 3;
 
-const SCHEMA_V2_SQL = `
+const SCHEMA_V3_SQL = `
   CREATE TABLE IF NOT EXISTS locations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     driverId TEXT NOT NULL,
@@ -89,7 +94,9 @@ const SCHEMA_V2_SQL = `
     heading REAL,
     recordedAt REAL NOT NULL,
     createdAt REAL NOT NULL,
-    synced INTEGER NOT NULL DEFAULT 0
+    synced INTEGER NOT NULL DEFAULT 0,
+    syncAttempts INTEGER NOT NULL DEFAULT 0,
+    firstAttemptAt INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_locations_load_synced ON locations (loadId, synced);
   CREATE INDEX IF NOT EXISTS idx_locations_session_synced ON locations (sessionId, synced);
@@ -152,6 +159,32 @@ async function migrateV1ToV2(database: SQLite.SQLiteDatabase): Promise<void> {
   console.log('[LocationDB] Schema migration v1 → v2 complete');
 }
 
+/**
+ * v2 → v3 migration: add syncAttempts + firstAttemptAt columns.
+ *
+ * Pure ALTER TABLE — no rebuild required because we're only ADDING
+ * columns with defaults. Both new columns are nullable (firstAttemptAt)
+ * or have defaults (syncAttempts), so existing rows are valid as-is.
+ *
+ * SQLite's ALTER TABLE ADD COLUMN is atomic-per-statement; we still
+ * wrap in a transaction so the user_version bump only commits if both
+ * adds succeed.
+ */
+async function migrateV2ToV3(database: SQLite.SQLiteDatabase): Promise<void> {
+  console.log('[LocationDB] Migrating schema v2 → v3');
+  await database.execAsync(`
+    BEGIN TRANSACTION;
+
+    ALTER TABLE locations ADD COLUMN syncAttempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE locations ADD COLUMN firstAttemptAt INTEGER;
+
+    PRAGMA user_version = 3;
+
+    COMMIT;
+  `);
+  console.log('[LocationDB] Schema migration v2 → v3 complete');
+}
+
 async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   const newDb = await SQLite.openDatabaseAsync(DB_NAME);
   await newDb.execAsync('PRAGMA journal_mode = WAL;');
@@ -162,14 +195,16 @@ async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   const currentVersion = versionRow?.user_version ?? 0;
 
   if (currentVersion === 0) {
-    // Fresh install — create v2 schema directly.
-    await newDb.execAsync(SCHEMA_V2_SQL);
+    // Fresh install — create the latest schema directly.
+    await newDb.execAsync(SCHEMA_V3_SQL);
     await newDb.execAsync(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);
-    console.log('[LocationDB] Initialized fresh schema at v2');
-  } else if (currentVersion === 1) {
-    await migrateV1ToV2(newDb);
-  } else if (currentVersion === CURRENT_SCHEMA_VERSION) {
-    // Already current. No-op.
+    console.log(`[LocationDB] Initialized fresh schema at v${CURRENT_SCHEMA_VERSION}`);
+  } else if (currentVersion < CURRENT_SCHEMA_VERSION) {
+    // Sequential migrations — apply each step that's needed. Each migration
+    // bumps user_version, so a crash mid-chain leaves the DB at the last
+    // successful step and the next launch picks up where we left off.
+    if (currentVersion < 2) await migrateV1ToV2(newDb);
+    if (currentVersion < 3) await migrateV2ToV3(newDb);
   } else if (currentVersion > CURRENT_SCHEMA_VERSION) {
     // Downgrade (user re-installed older app over newer data). Log and proceed;
     // the schema is forward-compatible enough that inserts will still work.
@@ -390,6 +425,120 @@ export async function markAsSynced(ids: number[]): Promise<void> {
     const database = await getDb();
     const placeholders = ids.map(() => '?').join(',');
     await database.runAsync(`UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
+  });
+}
+
+/**
+ * Record that a sync cycle failed to mark these rows synced.
+ *
+ * Increments syncAttempts for each row (so the escape hatch in
+ * purgeStaleUnsynced can give up after enough tries) and stamps
+ * firstAttemptAt on rows that haven't been tried before (so the age
+ * cutoff has a stable reference even if recordedAt is far in the past
+ * from offline accumulation).
+ *
+ * Called from syncUnsyncedToConvex for any row that wasn't covered by
+ * the server's inserted/duplicates/permanentlyRejected counts.
+ */
+export async function markSyncAttemptFailed(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
+  await withDbRetry(async () => {
+    const database = await getDb();
+    const placeholders = ids.map(() => '?').join(',');
+    const now = Date.now();
+    await database.runAsync(
+      `UPDATE locations
+         SET syncAttempts = syncAttempts + 1,
+             firstAttemptAt = COALESCE(firstAttemptAt, ?)
+         WHERE id IN (${placeholders})`,
+      now,
+      ...ids,
+    );
+  });
+}
+
+export interface PurgeResult {
+  deleted: number;
+  // Sample of purged rows for telemetry — we intentionally only keep a few
+  // so the event payload stays small. Bug-hunting upstream uses these.
+  sample: Array<{
+    id: number;
+    driverId: string;
+    sessionId: string | null;
+    loadId: string | null;
+    syncAttempts: number;
+    ageMs: number;
+  }>;
+}
+
+/**
+ * Hard-delete unsynced rows that have exhausted retry budget.
+ *
+ * Two cutoffs (logical OR — either triggers purge):
+ *   • syncAttempts >= maxAttempts (default 20 ≈ 40 min at 2-min sync interval)
+ *   • now - createdAt > maxAgeMs   (default 48h — the user-confirmed
+ *                                    realistic max offline window; 12h is
+ *                                    rare already, 48h covers edge cases)
+ *
+ * Returns the count + a small sample (max 5 rows) for telemetry. The
+ * caller is expected to fire a tracking event so we can spot persistent
+ * upstream issues (a specific driver/org systematically losing pings).
+ */
+export async function purgeStaleUnsynced(
+  maxAttempts: number = 20,
+  maxAgeMs: number = 48 * 60 * 60 * 1000,
+): Promise<PurgeResult> {
+  return withDbRetry(async () => {
+    const database = await getDb();
+    const now = Date.now();
+    const ageCutoff = now - maxAgeMs;
+
+    // Read sample BEFORE delete so we can include row details in telemetry.
+    const sample = await database.getAllAsync<{
+      id: number;
+      driverId: string;
+      sessionId: string | null;
+      loadId: string | null;
+      syncAttempts: number;
+      createdAt: number;
+    }>(
+      `SELECT id, driverId, sessionId, loadId, syncAttempts, createdAt
+         FROM locations
+         WHERE synced = 0
+           AND (syncAttempts >= ? OR createdAt < ?)
+         ORDER BY createdAt ASC
+         LIMIT 5`,
+      maxAttempts,
+      ageCutoff,
+    );
+
+    const result = await database.runAsync(
+      `DELETE FROM locations
+         WHERE synced = 0
+           AND (syncAttempts >= ? OR createdAt < ?)`,
+      maxAttempts,
+      ageCutoff,
+    );
+
+    type SampleRow = {
+      id: number;
+      driverId: string;
+      sessionId: string | null;
+      loadId: string | null;
+      syncAttempts: number;
+      createdAt: number;
+    };
+    return {
+      deleted: result.changes,
+      sample: (sample as SampleRow[]).map((r) => ({
+        id: r.id,
+        driverId: r.driverId,
+        sessionId: r.sessionId,
+        loadId: r.loadId,
+        syncAttempts: r.syncAttempts,
+        ageMs: now - r.createdAt,
+      })),
+    };
   });
 }
 
