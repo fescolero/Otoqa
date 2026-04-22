@@ -302,13 +302,18 @@ export default function AppLayout() {
   const canSwitchModes = canBeDriver && canBeOwner;
 
 
-  // Auto-select role ONLY if user has just one role
+  // Auto-select role ONLY if user has just one role.
+  // Single-role users should never see the picker — they go straight
+  // to home. The picker is only meaningful when both roles are
+  // available and the user genuinely has a choice to make.
   useEffect(() => {
-    if (userRoles && !isRolesLoading && !hasSelectedRole) {
-      if (userRoles.isDriver && !userRoles.isCarrierOwner) {
-        setMode('driver');
-        setHasSelectedRole(true);
-      }
+    if (!userRoles || isRolesLoading || hasSelectedRole) return;
+    if (userRoles.isDriver && !userRoles.isCarrierOwner) {
+      setMode('driver');
+      setHasSelectedRole(true);
+    } else if (!userRoles.isDriver && userRoles.isCarrierOwner) {
+      setMode('owner');
+      setHasSelectedRole(true);
     }
   }, [userRoles, isRolesLoading, hasSelectedRole]);
 
@@ -464,7 +469,7 @@ export default function AppLayout() {
     return <LoadingRingScreen statusText="Checking permissions…" subText="Hang tight" />;
   }
 
-  // Post-sign-in role chooser for dual-role users.
+  // Post-sign-in role chooser — DUAL-ROLE USERS ONLY.
   //
   // Renders the v4-design `RoleSwitchScreen` inline, wrapped in the
   // AppModeContext + DriverContext providers it expects. `setMode` is
@@ -474,10 +479,11 @@ export default function AppLayout() {
   // call is a no-op in this code path (we're already at /(app) and
   // the mode flip drives what the Stack renders) — safe to leave as-is.
   //
-  // Guarded on `canBeOwner` to match the previous legacy behavior:
-  // driver-only users auto-select driver (see the useEffect above) and
-  // skip this screen entirely.
-  if (!hasSelectedRole && canBeOwner) {
+  // Guarded on `canSwitchModes` (= isDriver && isCarrierOwner). Single-
+  // role users (driver-only OR owner-only) get auto-resolved by the
+  // useEffect above and skip this screen entirely — they go straight
+  // home because they have no choice to make.
+  if (!hasSelectedRole && canSwitchModes) {
     const displayName =
       user?.fullName ||
       (user?.firstName && user?.lastName
