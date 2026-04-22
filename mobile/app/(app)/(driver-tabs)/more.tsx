@@ -63,7 +63,7 @@ export default function MoreScreen() {
   useEffect(() => {
     trackScreen('More');
   }, []);
-  const { canSwitchModes } = useAppMode();
+  const { canSwitchModes, mode, setMode, roles } = useAppMode();
   const activeSession = useQuery(
     api.driverSessions.getActiveSession,
     driverId ? { driverId } : 'skip',
@@ -73,6 +73,8 @@ export default function MoreScreen() {
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [endShiftOpen, setEndShiftOpen] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
+  const [roleSwitchOpen, setRoleSwitchOpen] = useState(false);
+  const [isSwitchingRole, setIsSwitchingRole] = useState(false);
 
   // Only fetch the session load buckets once the driver has opened the
   // End shift sheet — avoids a second subscription on every More-tab
@@ -271,8 +273,15 @@ export default function MoreScreen() {
               palette={palette}
               icon="truck-swap"
               label="Switch role"
-              meta="Driver · Dispatcher"
-              onPress={() => router.push('/role-switch')}
+              // Dynamic meta reflecting the active role + its org so the
+              // row communicates state without a tap. Mirrors the design
+              // (DrillRow.meta = currentRoleLabel(currentRoleId)).
+              meta={
+                mode === 'driver'
+                  ? `Driver · ${roles?.driverOrgName ?? 'Your organization'}`
+                  : `Dispatcher · ${roles?.carrierOrgName ?? 'Your organization'}`
+              }
+              onPress={() => setRoleSwitchOpen(true)}
             />
           )}
           <DrillRow
@@ -345,6 +354,56 @@ export default function MoreScreen() {
         isEnding={isEnding}
         onConfirm={handleEndShift}
         onCancel={() => setEndShiftOpen(false)}
+      />
+      <RoleSwitchSheet
+        visible={roleSwitchOpen}
+        palette={palette}
+        currentMode={mode}
+        availableDriver={roles?.isDriver ?? false}
+        availableOwner={roles?.isCarrierOwner ?? false}
+        driverOrgName={roles?.driverOrgName ?? null}
+        carrierOrgName={roles?.carrierOrgName ?? null}
+        onDuty={onDuty}
+        isSwitching={isSwitchingRole}
+        onConfirm={async (picked) => {
+          if (picked === mode) {
+            // Defensive — the sheet button is disabled in this case
+            // but guard in case anything slips through.
+            setRoleSwitchOpen(false);
+            return;
+          }
+          setIsSwitchingRole(true);
+          try {
+            // End the active shift before flipping role. The design
+            // subtitle ("You'll end this shift before switching.")
+            // promises this, and session state is tied to the driver
+            // mode — carrying it across a role change would leave the
+            // shift tracking against the wrong context.
+            if (onDuty && activeSession) {
+              await endSessionMutation({
+                sessionId: activeSession._id,
+                endReason: 'role_switch',
+              });
+              await stopSessionTracking();
+              posthog?.capture('shift_ended', {
+                sessionId: activeSession._id,
+                reason: 'role_switch',
+              });
+            }
+            await setMode(picked);
+            posthog?.capture('role_switched', { from: mode, to: picked });
+            setRoleSwitchOpen(false);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Switch failed';
+            Alert.alert(
+              "Couldn't switch role",
+              `${msg}\n\nTry again, or contact dispatch if this keeps happening.`,
+            );
+          } finally {
+            setIsSwitchingRole(false);
+          }
+        }}
+        onCancel={() => setRoleSwitchOpen(false)}
       />
     </SafeAreaView>
   );
@@ -583,6 +642,205 @@ const ShiftStat: React.FC<{ palette: Palette; label: string; value: string }> = 
     </View>
   );
 };
+
+// ============================================================================
+// ROLE SWITCH SHEET — compact in-session switcher
+// ============================================================================
+//
+// Ported from lib/role-switch-screen.jsx's `RoleSwitchSheet` variant.
+// Tighter than the full-screen `/role-switch` chooser: compact rows,
+// current role gets an "Active" pill, CTA is disabled when the picked
+// role IS the current one. Subtitle warns that switching ends the shift
+// (the parent's onConfirm handles that end-session + setMode sequence).
+
+type RoleChoice = 'driver' | 'owner';
+
+interface RoleOption {
+  id: RoleChoice;
+  label: string;
+  tagline: string;
+  icon: IconName;
+  accent: string;
+  tint: string;
+}
+
+const ROLE_OPTIONS: Record<RoleChoice, RoleOption> = {
+  driver: {
+    id: 'driver',
+    label: 'Driver',
+    tagline: 'Drive loads · Log your shift',
+    icon: 'truck',
+    accent: '#2E5CFF',
+    tint: 'rgba(46, 92, 255, 0.12)',
+  },
+  owner: {
+    id: 'owner',
+    label: 'Dispatcher',
+    tagline: 'Manage fleet · Assign loads',
+    icon: 'layout',
+    accent: '#7C3AED',
+    tint: 'rgba(124, 58, 237, 0.12)',
+  },
+};
+
+function RoleSwitchSheet({
+  visible,
+  palette,
+  currentMode,
+  availableDriver,
+  availableOwner,
+  driverOrgName,
+  carrierOrgName,
+  onDuty,
+  isSwitching,
+  onConfirm,
+  onCancel,
+}: {
+  visible: boolean;
+  palette: Palette;
+  currentMode: RoleChoice;
+  availableDriver: boolean;
+  availableOwner: boolean;
+  driverOrgName: string | null;
+  carrierOrgName: string | null;
+  onDuty: boolean;
+  isSwitching: boolean;
+  onConfirm: (picked: RoleChoice) => void;
+  onCancel: () => void;
+}) {
+  const { sp } = useDensityTokens();
+  const styles = makeStyles(palette, sp);
+  // Default the selection to the CURRENT role so accidental opens don't
+  // pre-select a role swap. Reset each time the sheet re-opens.
+  const [picked, setPicked] = useState<RoleChoice>(currentMode);
+  useEffect(() => {
+    if (visible) setPicked(currentMode);
+  }, [visible, currentMode]);
+
+  const choices: RoleChoice[] = [];
+  if (availableDriver) choices.push('driver');
+  if (availableOwner) choices.push('owner');
+
+  const pickedDef = ROLE_OPTIONS[picked];
+  const isSame = picked === currentMode;
+
+  const orgNameFor = (id: RoleChoice) =>
+    id === 'driver' ? driverOrgName : carrierOrgName;
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <SheetFrame palette={palette} onCancel={onCancel}>
+        <View style={[styles.roleSwitchHeader]}>
+          <View style={[styles.roleSwitchHeaderIcon, { backgroundColor: palette.accentTint }]}>
+            <Icon name="truck-swap" size={18} color={palette.accent} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.sheetTitle}>Switch role</Text>
+            <Text style={styles.roleSwitchSubtitle}>
+              {onDuty
+                ? "You'll end this shift before switching."
+                : 'Pick the role you want to work in.'}
+            </Text>
+          </View>
+        </View>
+
+        <View style={{ gap: 8, marginTop: 14 }}>
+          {choices.map((id) => {
+            const def = ROLE_OPTIONS[id];
+            const selected = picked === id;
+            const isCurrent = currentMode === id;
+            return (
+              <Pressable
+                key={id}
+                onPress={() => setPicked(id)}
+                style={({ pressed }) => [
+                  styles.roleRow,
+                  selected && {
+                    borderColor: def.accent,
+                    shadowColor: def.accent,
+                    shadowOpacity: 0.2,
+                    shadowRadius: 6,
+                    shadowOffset: { width: 0, height: 2 },
+                    elevation: 2,
+                  },
+                  pressed && { opacity: 0.9 },
+                ]}
+              >
+                <View style={[styles.roleRowIcon, { backgroundColor: def.tint }]}>
+                  <Icon name={def.icon} size={19} color={def.accent} />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <View style={styles.roleRowTitleRow}>
+                    <Text style={styles.roleRowLabel}>{def.label}</Text>
+                    {isCurrent && (
+                      <View style={styles.roleRowActivePill}>
+                        <Text style={styles.roleRowActiveText}>ACTIVE</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.roleRowMeta} numberOfLines={1}>
+                    {orgNameFor(id) ?? def.tagline}
+                  </Text>
+                </View>
+                <View
+                  style={[
+                    styles.roleRowRadio,
+                    selected && {
+                      borderColor: def.accent,
+                      backgroundColor: def.accent,
+                    },
+                  ]}
+                >
+                  {selected && (
+                    <Icon name="check" size={12} color="#fff" strokeWidth={2.5} />
+                  )}
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <View style={{ gap: 10, marginTop: 16, alignSelf: 'stretch' }}>
+          <Pressable
+            onPress={() => onConfirm(picked)}
+            disabled={isSame || isSwitching}
+            style={({ pressed }) => [
+              styles.sheetCta,
+              {
+                backgroundColor: isSame ? palette.bgMuted : pickedDef.accent,
+              },
+              pressed && !isSame && !isSwitching && { opacity: 0.9 },
+              isSwitching && { opacity: 0.7 },
+            ]}
+          >
+            <Text
+              style={[
+                styles.sheetCtaText,
+                isSame && { color: palette.textTertiary },
+              ]}
+            >
+              {isSame
+                ? `Already in ${pickedDef.label}`
+                : isSwitching
+                  ? 'Switching…'
+                  : `Switch to ${pickedDef.label}`}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={onCancel}
+            disabled={isSwitching}
+            style={({ pressed }) => [
+              styles.sheetCtaSecondary,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Text style={styles.sheetCtaSecondaryText}>Cancel</Text>
+          </Pressable>
+        </View>
+      </SheetFrame>
+    </Modal>
+  );
+}
 
 // ============================================================================
 // UTILS
@@ -937,5 +1195,79 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       fontSize: 15,
       fontWeight: '500',
       color: palette.textPrimary,
+    },
+
+    // Role switch sheet ────────────────────────────────────────
+    roleSwitchHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      alignSelf: 'stretch',
+    },
+    roleSwitchHeaderIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: radii.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    roleSwitchSubtitle: {
+      fontSize: 12,
+      color: palette.textTertiary,
+      marginTop: 2,
+    },
+    roleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      padding: 12,
+      borderRadius: radii.lg,
+      backgroundColor: palette.bgSurface,
+      borderWidth: 1.5,
+      borderColor: palette.borderSubtle,
+    },
+    roleRowIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: radii.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    roleRowTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    roleRowLabel: {
+      fontSize: 14,
+      fontWeight: '700',
+      letterSpacing: -0.1,
+      color: palette.textPrimary,
+    },
+    roleRowActivePill: {
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: radii.full,
+      backgroundColor: palette.success,
+    },
+    roleRowActiveText: {
+      fontSize: 9,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+      color: '#fff',
+    },
+    roleRowMeta: {
+      fontSize: 11,
+      color: palette.textTertiary,
+      marginTop: 1,
+    },
+    roleRowRadio: {
+      width: 22,
+      height: 22,
+      borderRadius: 999,
+      borderWidth: 1.5,
+      borderColor: palette.borderDefault,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
   });
