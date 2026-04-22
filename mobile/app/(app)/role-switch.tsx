@@ -21,6 +21,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -221,29 +222,37 @@ export default function RoleSwitchScreen() {
             onPick={() => setPicked(id)}
           />
         ))}
-      </ScrollView>
 
-      <View style={styles.footer}>
-        <Pressable
+        {/* Continue CTA placed INSIDE the ScrollView's content. Card
+            Pressables here register taps fine (user confirmed), but the
+            same button rendered in a sibling footer View below the
+            ScrollView was not receiving onPress at all. Keeping it in
+            the same touch zone dodges whatever z-order / gesture
+            handler issue was eating the footer taps. */}
+        <TouchableOpacity
           onPress={handleContinue}
+          onPressIn={() => console.log('[RoleSwitch] pressIn')}
           disabled={isContinuing}
-          style={({ pressed }) => [
+          activeOpacity={0.85}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={[
             styles.cta,
-            { backgroundColor: pickedDef.accent },
-            pressed && { opacity: 0.9 },
+            { backgroundColor: pickedDef.accent, marginTop: 8 },
             isContinuing && { opacity: 0.7 },
           ]}
         >
           {isContinuing ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <>
-              <Text style={styles.ctaText}>Continue as {pickedDef.label}</Text>
+            <View style={styles.ctaInner}>
+              <Text style={styles.ctaText}>
+                Continue as {pickedDef.label}
+              </Text>
               <Icon name="arrow-right" size={17} color="#fff" />
-            </>
+            </View>
           )}
-        </Pressable>
-      </View>
+        </TouchableOpacity>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -567,22 +576,13 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       marginTop: 1,
     },
 
-    footer: {
-      paddingHorizontal: sp.screenPx,
-      paddingTop: 14,
-      paddingBottom: 16,
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: palette.borderSubtle,
-      backgroundColor: palette.bgCanvas,
-      // Guarantee the Continue CTA sits above any sibling that might
-      // absorb taps (the SVG ambient wash and its host view). zIndex is
-      // a no-op without elevation on Android, hence both.
-      zIndex: 10,
-      elevation: 10,
-    },
     cta: {
       height: 52,
       borderRadius: radii.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    ctaInner: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
