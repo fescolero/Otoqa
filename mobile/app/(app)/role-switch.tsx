@@ -122,9 +122,22 @@ export default function RoleSwitchScreen() {
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       {/* Two soft radial gradients — one per role, placed diagonally in
           opposite corners. Evokes "two doors" without the hard-edged
-          circles the previous View-based implementation produced. */}
-      <View pointerEvents="none" style={styles.ambientWash}>
-        <Svg width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+          circles the previous View-based implementation produced.
+          pointerEvents is set on BOTH the wrapper View AND the SVG —
+          react-native-svg's internal host views don't always honor a
+          parent pointerEvents: 'none', so the SVG would absorb taps
+          meant for the footer CTA below. Locking both layers ensures
+          touches pass straight through to the Pressable. */}
+      <View
+        pointerEvents="none"
+        style={[styles.ambientWash, { pointerEvents: 'none' }]}
+      >
+        <Svg
+          width="100%"
+          height="100%"
+          preserveAspectRatio="xMidYMid slice"
+          pointerEvents="none"
+        >
           <Defs>
             <RadialGradient
               id="roleWashDriver"
@@ -551,6 +564,11 @@ const makeStyles = (palette: Palette, sp: Sp) =>
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: palette.borderSubtle,
       backgroundColor: palette.bgCanvas,
+      // Guarantee the Continue CTA sits above any sibling that might
+      // absorb taps (the SVG ambient wash and its host view). zIndex is
+      // a no-op without elevation on Android, hence both.
+      zIndex: 10,
+      elevation: 10,
     },
     cta: {
       height: 52,
