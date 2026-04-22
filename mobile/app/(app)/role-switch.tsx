@@ -22,7 +22,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { Path, Rect, Circle, G } from 'react-native-svg';
+import Svg, { Path, Rect, Circle, G, Defs, RadialGradient, Stop } from 'react-native-svg';
 import { useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
 import { useAppMode } from './_layout';
@@ -88,18 +88,51 @@ export default function RoleSwitchScreen() {
   }
 
   const handleContinue = () => {
-    setMode(picked);
-    router.replace(picked === 'driver' ? '/(app)' : '/(app)/owner');
+    // Don't navigate here — the parent AppLayout has a useEffect gated
+    // on `hasSelectedRole + mode` that routes to /(driver-tabs) or
+    // /(app)/owner once setMode settles. Calling router.replace here
+    // racees with that effect and, in the post-sign-in gate, no-ops
+    // because the Stack isn't mounted yet (the role-switch screen is
+    // returned BEFORE the Stack in (app)/_layout.tsx). Trust setMode.
+    void setMode(picked);
   };
 
   const pickedDef = ROLE_DEFS[picked];
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
-      {/* Two soft color washes — one per role. Evokes "two doors." */}
+      {/* Two soft radial gradients — one per role, placed diagonally in
+          opposite corners. Evokes "two doors" without the hard-edged
+          circles the previous View-based implementation produced. */}
       <View pointerEvents="none" style={styles.ambientWash}>
-        <View style={[styles.washBlob, styles.washBlobDriver]} />
-        <View style={[styles.washBlob, styles.washBlobOwner]} />
+        <Svg width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+          <Defs>
+            <RadialGradient
+              id="roleWashDriver"
+              cx="18%"
+              cy="12%"
+              r="55%"
+              fx="18%"
+              fy="12%"
+            >
+              <Stop offset="0%" stopColor="#2E5CFF" stopOpacity={0.22} />
+              <Stop offset="100%" stopColor="#2E5CFF" stopOpacity={0} />
+            </RadialGradient>
+            <RadialGradient
+              id="roleWashOwner"
+              cx="86%"
+              cy="88%"
+              r="55%"
+              fx="86%"
+              fy="88%"
+            >
+              <Stop offset="0%" stopColor="#7C3AED" stopOpacity={0.18} />
+              <Stop offset="100%" stopColor="#7C3AED" stopOpacity={0} />
+            </RadialGradient>
+          </Defs>
+          <Rect x={0} y={0} width="100%" height="100%" fill="url(#roleWashDriver)" />
+          <Rect x={0} y={0} width="100%" height="100%" fill="url(#roleWashOwner)" />
+        </Svg>
       </View>
 
       <View style={styles.header}>
@@ -131,12 +164,16 @@ export default function RoleSwitchScreen() {
             key={id}
             palette={palette}
             role={ROLE_DEFS[id]}
+            // Prefer the human-readable org name resolved on the server
+            // (getUserRoles.driverOrgName / carrierOrgName). Fall back to
+            // "Your organization" if the lookup didn't resolve — don't
+            // show the raw Convex doc id in the UI.
             org={
-              id === 'driver' ? roles?.driverOrgId ?? null : roles?.carrierOrgId ?? null
+              id === 'driver'
+                ? roles?.driverOrgName ?? null
+                : roles?.carrierOrgName ?? null
             }
-            orgRole={
-              id === 'driver' ? 'CDL-A Driver' : 'Dispatcher'
-            }
+            orgRole={id === 'driver' ? 'CDL-A Driver' : 'Dispatcher'}
             selected={picked === id}
             lastUsed={mode === id}
             onPick={() => setPicked(id)}
@@ -322,23 +359,6 @@ const makeStyles = (palette: Palette, sp: Sp) =>
     },
     ambientWash: {
       ...StyleSheet.absoluteFillObject,
-    },
-    washBlob: {
-      position: 'absolute',
-      width: 360,
-      height: 360,
-      borderRadius: 999,
-      opacity: 0.35,
-    },
-    washBlobDriver: {
-      top: -80,
-      left: -80,
-      backgroundColor: 'rgba(46, 92, 255, 0.16)',
-    },
-    washBlobOwner: {
-      bottom: -100,
-      right: -100,
-      backgroundColor: 'rgba(124, 58, 237, 0.12)',
     },
 
     header: {
