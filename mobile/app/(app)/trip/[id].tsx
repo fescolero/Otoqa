@@ -2303,8 +2303,16 @@ function SheetFrame({
       useNativeDriver: true,
     }).start(() => {
       onClose();
-      isClosingRef.current = false;
-      translateY.setValue(0);
+      // Defer the reset until AFTER RN's Modal has finished its own
+      // slide-out animation. Without this delay, setValue(0) teleports
+      // the sheet back to rest position mid-Modal-close — visible as
+      // a split-second re-open flash before the Modal finishes hiding.
+      // 400ms covers both iOS (~300ms slide) and Android (~250ms) with
+      // headroom. The next open then starts from a clean y=0.
+      setTimeout(() => {
+        translateY.setValue(0);
+        isClosingRef.current = false;
+      }, 400);
     });
   }, [onClose, translateY]);
 
