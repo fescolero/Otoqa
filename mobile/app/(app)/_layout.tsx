@@ -18,6 +18,7 @@ import { colors, typography, borderRadius } from '../../lib/theme';
 import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush, restartForegroundServices } from '../../lib/location-tracking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
+import RoleSwitchScreen from './role-switch';
 import { useRequestPermissionsOnce } from '../../lib/request-permissions';
 import {
   identifyUser,
@@ -316,13 +317,6 @@ export default function AppLayout() {
     });
   }, [userId, userRoles, hasSelectedRole, user, clerkOrgId]);
 
-  // Handle role selection
-  const handleSelectRole = async (selectedRole: 'driver' | 'owner') => {
-    trackRoleSelected(selectedRole);
-    setHasSelectedRole(true);
-    await setMode(selectedRole);
-  };
-
   // Handle sign out - clear stored mode
   const handleSignOut = async () => {
     try {
@@ -456,90 +450,56 @@ export default function AppLayout() {
     return <LoadingRingScreen statusText="Checking permissions…" subText="Hang tight" />;
   }
 
-  // Show role selection if user has carrier access and hasn't selected yet
+  // Post-sign-in role chooser for dual-role users.
+  //
+  // Renders the v4-design `RoleSwitchScreen` inline, wrapped in the
+  // AppModeContext + DriverContext providers it expects. `setMode` is
+  // shadowed with a wrapper that also flips `hasSelectedRole` so the
+  // next render falls through to the Stack rather than looping back
+  // here. The screen's own `router.replace('/(app)'|'/(app)/owner')`
+  // call is a no-op in this code path (we're already at /(app) and
+  // the mode flip drives what the Stack renders) — safe to leave as-is.
+  //
+  // Guarded on `canBeOwner` to match the previous legacy behavior:
+  // driver-only users auto-select driver (see the useEffect above) and
+  // skip this screen entirely.
   if (!hasSelectedRole && canBeOwner) {
-    const firstName = user?.firstName || userRoles?.carrierOrgName?.split(' ')[0] || 'there';
-    
+    const displayName =
+      user?.fullName ||
+      (user?.firstName && user?.lastName
+        ? `${user.firstName} ${user.lastName}`
+        : user?.firstName) ||
+      userRoles?.carrierOrgName ||
+      'Driver';
+
     return (
-      <View style={styles.roleSelectionContainer}>
-        {/* Header Badge */}
-        <View style={styles.verifiedBadge}>
-          <Ionicons name="shield-checkmark" size={16} color={colors.primary} />
-          <Text style={styles.verifiedText}>Carrier Identity Verified</Text>
-        </View>
-
-        {/* Welcome Message */}
-        <Text style={styles.welcomeTitle}>Welcome back, {firstName}</Text>
-        <Text style={styles.welcomeSubtitle}>
-          Your account is associated with multiple carrier roles. Please select your workspace for today.
-        </Text>
-
-        {/* Role Options */}
-        <View style={styles.roleOptionsContainer}>
-          {/* Driver Option */}
-          {canBeDriver && (
-            <Pressable
-              style={({ pressed }) => [styles.roleCard, pressed && { opacity: 0.7 }]}
-              onPress={() => handleSelectRole('driver')}
-            >
-              <View style={[styles.roleIconBox, { backgroundColor: colors.primary + '20' }]}>
-                <Ionicons name="person" size={24} color={colors.primary} />
-              </View>
-              <View style={styles.roleCardContent}>
-                <Text style={styles.roleTitle}>Enter as Driver</Text>
-                <Text style={styles.roleDescription}>
-                  Access routes, update statuses, and manage your logs.
-                </Text>
-              </View>
-              <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-            </Pressable>
-          )}
-
-          {/* Dispatcher/Owner Option */}
-          <Pressable
-            style={({ pressed }) => [styles.roleCard, pressed && { opacity: 0.7 }]}
-            onPress={() => handleSelectRole('owner')}
-          >
-            <View style={[styles.roleIconBox, { backgroundColor: colors.warning + '20' }]}>
-              <MaterialCommunityIcons name="monitor-dashboard" size={24} color={colors.warning} />
-            </View>
-            <View style={styles.roleCardContent}>
-              <Text style={styles.roleTitle}>Enter as Dispatcher</Text>
-              <Text style={styles.roleDescription}>
-                Assign loads, monitor the fleet, and manage operations.
-              </Text>
-            </View>
-            <Ionicons name="arrow-forward" size={20} color={colors.foregroundMuted} />
-          </Pressable>
-        </View>
-
-        {/* Active Account Display */}
-        <View style={styles.activeAccountCard}>
-          <View style={styles.accountAvatar}>
-            <Text style={styles.avatarText}>
-              {firstName.charAt(0).toUpperCase()}
-            </Text>
-          </View>
-          <View style={styles.accountInfo}>
-            <Text style={styles.accountLabel}>ACTIVE ACCOUNT</Text>
-            <Text style={styles.accountName}>
-              {user?.fullName || userRoles?.carrierOrgName || 'User'}
-            </Text>
-          </View>
-          <Pressable 
-            style={styles.switchButton}
-            onPress={handleSignOut}
-          >
-            <Text style={styles.switchButtonText}>Switch</Text>
-          </Pressable>
-        </View>
-
-        {/* Help Link */}
-        <Text style={styles.helpText}>
-          Need help with your roles? Contact your administrator or our{' '}
-          <Text style={styles.helpLink}>Support Team</Text>.
-        </Text>
-      </View>
+      <AppModeContext.Provider
+        value={{
+          mode,
+          setMode: async (selectedRole) => {
+            trackRoleSelected(selectedRole);
+            setHasSelectedRole(true);
+            await setMode(selectedRole);
+          },
+          roles: userRoles,
+          canSwitchModes,
+        }}
+      >
+        <DriverContext.Provider
+          value={{
+            // Profile isn't loaded yet here (this gate fires before the
+            // profile query settles), but RoleSwitchScreen only reads
+            // driverName for the header — pass the Clerk-derived name.
+            driverId: null,
+            driverName: displayName,
+            organizationId: null,
+            truck: null,
+            isLoading: false,
+          }}
+        >
+          <RoleSwitchScreen />
+        </DriverContext.Provider>
+      </AppModeContext.Provider>
     );
   }
 
