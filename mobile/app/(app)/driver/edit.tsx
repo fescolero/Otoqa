@@ -147,14 +147,6 @@ export default function EditDriverScreen() {
     setIsUpdating(true);
 
     try {
-      // #region agent log
-      console.log('[DEBUG] Updating driver with:', {
-        driverId: id,
-        dateOfBirth: formData.dateOfBirth,
-        licenseNumber: formData.licenseNumber,
-        middleName: formData.middleName,
-      });
-      // #endregion
       const result = await updateDriverMutation({
         driverId: id as Id<'drivers'>,
         carrierOrgId: driver.organizationId,
@@ -225,7 +217,11 @@ export default function EditDriverScreen() {
       >
         {/* Header */}
         <View style={[styles.header, { paddingTop: insets.top + spacing.md }]}>
-          <Pressable onPress={() => router.back()}>
+          <Pressable
+            onPress={() =>
+              router.canGoBack() ? router.back() : router.replace('/(app)')
+            }
+          >
             <Ionicons name="arrow-back" size={24} color={colors.foreground} />
           </Pressable>
           <Text style={styles.headerTitle}>Edit Driver</Text>
@@ -456,7 +452,9 @@ export default function EditDriverScreen() {
 
           <Pressable
             style={styles.cancelButton}
-            onPress={() => router.back()}
+            onPress={() =>
+              router.canGoBack() ? router.back() : router.replace('/(app)')
+            }
             disabled={isUpdating}
           >
             <Text style={styles.cancelButtonText}>Cancel</Text>

@@ -157,7 +157,10 @@ export default function VerifyScreen() {
         setVerificationComplete(true);
       } else {
         trackVerificationFailed('incomplete', 'Verification incomplete');
-        Alert.alert('Error', 'Verification incomplete. Please try again.');
+        Alert.alert(
+          'Verification incomplete',
+          "The code was valid but the sign-in didn't complete. Try resending the code.",
+        );
       }
     } catch (error: any) {
       console.error('Verification error:', error);
@@ -171,7 +174,11 @@ export default function VerifyScreen() {
         setFocusedIndex(0);
         hiddenInputRef.current?.focus();
       } else {
-        Alert.alert('Error', errorMessage || 'Verification failed');
+        Alert.alert(
+          'Verification failed',
+          errorMessage ||
+            'Something went wrong on our end. Try resending the code.',
+        );
       }
     } finally {
       setIsLoading(false);
@@ -194,7 +201,10 @@ export default function VerifyScreen() {
       Alert.alert('Code Sent', 'A new verification code has been sent.');
     } catch {
       trackResendCode(false);
-      Alert.alert('Error', 'Failed to resend code. Please try again.');
+      Alert.alert(
+        "Couldn't resend code",
+        'Check your signal and try again in a moment.',
+      );
     }
   };
 

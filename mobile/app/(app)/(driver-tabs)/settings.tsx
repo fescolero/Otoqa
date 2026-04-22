@@ -12,7 +12,8 @@
  * below the tiles so they still have a home — the standalone App
  * Settings drill-in from the More tab is part of the next batch.
  */
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
+import { trackScreen } from '../../../lib/analytics';
 import {
   Alert,
   Pressable,
@@ -38,6 +39,10 @@ export default function ProfileScreen() {
   const { palette } = useTheme();
   const { sp } = useDensityTokens();
   const styles = useMemo(() => makeStyles(palette, sp), [palette, sp]);
+
+  useEffect(() => {
+    trackScreen('Profile');
+  }, []);
 
   const { driverId } = useDriver();
   const profile = useQuery(

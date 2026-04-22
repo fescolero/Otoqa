@@ -32,6 +32,7 @@ import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
 import { useAppMode } from './_layout';
 import { startSessionTracking } from '../../lib/location-tracking';
+import { usePostHog } from 'posthog-react-native';
 import { Icon, type IconName } from '../../lib/design-icons';
 import {
   typeScale,
@@ -60,6 +61,7 @@ export default function StartShiftScreen() {
   const driverId = roles?.driverId as Id<'drivers'> | undefined;
 
   const startSession = useMutation(api.driverSessions.startSession);
+  const posthog = usePostHog();
   const [isStarting, setIsStarting] = useState(false);
 
   const truckIdStr = params.truckId ?? '';
@@ -78,6 +80,10 @@ export default function StartShiftScreen() {
     try {
       const truckId = truckIdStr as Id<'trucks'>;
       const sessionId = await startSession({ driverId, truckId });
+      posthog?.capture('shift_started', {
+        sessionId,
+        truckUnitId: params.truckUnitId ?? null,
+      });
       // Session exists server-side. Now kick off GPS.
       // organizationId comes from the driver profile; we can fetch lazily, but
       // tracking accepts it as required — pulled from the driver profile.
@@ -104,7 +110,8 @@ export default function StartShiftScreen() {
       router.replace('/(driver-tabs)');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to start shift';
-      Alert.alert('Could not start shift', msg);
+      posthog?.capture('shift_start_failed', { error: msg });
+      Alert.alert('Could not start shift', `${msg}\n\nTry again — if this keeps happening, contact dispatch.`);
     } finally {
       setIsStarting(false);
     }
@@ -120,7 +127,9 @@ export default function StartShiftScreen() {
     <SafeAreaView style={styles.screen} edges={['top']}>
       <View style={styles.topBar}>
         <Pressable
-          onPress={() => router.back()}
+          onPress={() =>
+            router.canGoBack() ? router.back() : router.replace('/(app)')
+          }
           accessibilityLabel="Back"
           style={({ pressed }) => [
             styles.iconBtn,
