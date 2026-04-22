@@ -473,10 +473,23 @@ http.route({
         organizationId,
       });
 
-      return new Response(JSON.stringify({ inserted: result.inserted }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      // Echo the full structured outcome so the mobile client can mark
+      // duplicates + permanent rejections as synced (and stop retrying
+      // them). See driverLocations.ts::IngestOutcome for the contract.
+      // Older mobile clients only read `inserted` — extra fields are
+      // ignored, so this is backward compatible.
+      return new Response(
+        JSON.stringify({
+          inserted: result.inserted,
+          duplicates: result.duplicates,
+          permanentlyRejected: result.permanentlyRejected,
+          transientlyRejected: result.transientlyRejected,
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
     } catch (err: any) {
       console.error('[MobileLocations] Insert failed:', err.message || err);
       return new Response(JSON.stringify({ error: 'Insert failed', message: err.message || 'Unknown error' }), {
