@@ -835,29 +835,37 @@ function RoleSwitchSheet({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
       <SheetFrame palette={palette} onCancel={onCancel}>
-        {/* Centered-icon-above-title header — matches SignOutSheet /
-            EndShiftSheet in this file. Title + subtitle are both
-            text-center so they read as a symmetric block, with the
-            tinted icon as the focal point above them. */}
-        <View
-          style={[
-            styles.sheetIcon,
-            { backgroundColor: palette.accentTint },
-          ]}
-        >
-          <Icon name="truck-swap" size={22} color={palette.accent} />
+        {/* Horizontal icon + text header — per design spec in
+            lib/role-switch-screen.jsx::RoleSwitchSheet. Small 34×34
+            accent-tint icon on the left, title + one-line subtitle
+            stacked to the right, both left-aligned. Deliberately
+            different from SignOut/EndShift (which are centered-stacked
+            for a destructive confirm) — this is a compact picker header. */}
+        <View style={styles.roleSwitchHeader}>
+          <View
+            style={[
+              styles.roleSwitchHeaderIcon,
+              { backgroundColor: palette.accentTint },
+            ]}
+          >
+            <Icon name="truck-swap" size={18} color={palette.accent} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.roleSwitchHeaderTitle}>Switch role</Text>
+            <Text style={styles.roleSwitchHeaderSubtitle} numberOfLines={2}>
+              {onDuty
+                ? "You'll end this shift before switching."
+                : 'Pick the role you want to work in.'}
+            </Text>
+          </View>
         </View>
-        <Text style={styles.sheetTitle}>Switch role</Text>
-        <Text style={styles.sheetBodyText}>
-          {onDuty
-            ? "You'll end this shift before switching."
-            : 'Pick the role you want to work in.'}
-        </Text>
 
         {/* alignSelf: 'stretch' is mandatory because SheetFrame's body
             has alignItems: 'center' — without it the row column width
-            collapses to the icon+radio combined, hiding label + meta. */}
-        <View style={{ gap: 8, marginTop: 14, alignSelf: 'stretch' }}>
+            collapses to the icon+radio combined, hiding label + meta.
+            marginTop: 4 because the horizontal header already has
+            paddingBottom: 12. */}
+        <View style={{ gap: 8, marginTop: 4, alignSelf: 'stretch' }}>
           {choices.map((id) => {
             const def = ROLE_OPTIONS[id];
             const selected = picked === id;
@@ -1311,8 +1319,35 @@ const makeStyles = (palette: Palette, sp: Sp) =>
     },
 
     // Role switch sheet ────────────────────────────────────────
-    // (Header reuses shared sheetIcon / sheetTitle / sheetBodyText
-    // styles above — the pattern matches SignOutSheet + EndShiftSheet.)
+    // Horizontal icon+text header variant — distinct from the
+    // centered-stacked SignOutSheet / EndShiftSheet header because
+    // this is a compact picker, not a destructive confirm.
+    roleSwitchHeader: {
+      alignSelf: 'stretch',
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingHorizontal: 4,
+      paddingBottom: 12,
+    },
+    roleSwitchHeaderIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: radii.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    roleSwitchHeaderTitle: {
+      fontSize: 16,
+      fontWeight: '700',
+      letterSpacing: -0.16,
+      color: palette.textPrimary,
+    },
+    roleSwitchHeaderSubtitle: {
+      fontSize: 12,
+      color: palette.textTertiary,
+      marginTop: 1,
+    },
     roleRow: {
       // Explicit stretch so the row pulls its column middle (label +
       // meta) across the available width. Without this some RN versions
