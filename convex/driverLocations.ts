@@ -66,11 +66,35 @@ type PingInput = {
  * once, and only fall back to per-ping dedup if the new batch overlaps
  * the stored window (the "genuine retry" scenario, which is rare).
  */
+/**
+ * Structured outcome of a batch insert. The mobile client uses these to
+ * decide which queued rows to mark synced (and stop retrying).
+ *
+ *   • inserted              — newly stored. Mark synced.
+ *   • duplicates            — server already had this exact (sessionId,
+ *                             recordedAt) or (loadId, recordedAt). Data is
+ *                             on the server already. Mark synced.
+ *   • permanentlyRejected   — driver/org/load/session not found, shape
+ *                             invariant violated. Will NEVER succeed on
+ *                             retry. Mark synced + telemetry.
+ *   • transientlyRejected   — reserved for future use (none today). Do
+ *                             NOT mark synced; let the client retry.
+ *
+ * Invariant: inserted + duplicates + permanentlyRejected + transientlyRejected
+ *            === pings.length (modulo bugs — telemetry surfaces drift).
+ */
+type IngestOutcome = {
+  inserted: number;
+  duplicates: number;
+  permanentlyRejected: number;
+  transientlyRejected: number;
+};
+
 async function ingestBatch(
   ctx: MutationCtx,
   pings: PingInput[],
   orgId: string
-): Promise<{ inserted: number }> {
+): Promise<IngestOutcome> {
   const now = Date.now();
   let inserted = 0;
   let skippedDriver = 0;
@@ -305,7 +329,25 @@ async function ingestBatch(
     );
   }
 
-  return { inserted };
+  // Categorize skips for the client. Everything except duplicates is
+  // permanent — these conditions don't heal on retry. Reserved
+  // transientlyRejected bucket stays at 0 for now; if we later add a
+  // transient failure mode (e.g. rate-limit / temporary server error
+  // surfaced via this path), we can route it here without changing the
+  // contract.
+  const permanentlyRejected =
+    skippedDriver +
+    skippedOrgMismatch +
+    skippedLoad +
+    skippedSession +
+    skippedShape;
+
+  return {
+    inserted,
+    duplicates: skippedDuplicate,
+    permanentlyRejected,
+    transientlyRejected: 0,
+  };
 }
 
 // ============================================
@@ -321,7 +363,12 @@ export const batchInsertLocations = mutation({
     locations: v.array(pingValidator),
     organizationId: v.string(),
   },
-  returns: v.object({ inserted: v.number() }),
+  returns: v.object({
+    inserted: v.number(),
+    duplicates: v.number(),
+    permanentlyRejected: v.number(),
+    transientlyRejected: v.number(),
+  }),
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error('Not authenticated');
@@ -339,7 +386,12 @@ export const internalBatchInsertLocations = internalMutation({
     locations: v.array(pingValidator),
     organizationId: v.string(),
   },
-  returns: v.object({ inserted: v.number() }),
+  returns: v.object({
+    inserted: v.number(),
+    duplicates: v.number(),
+    permanentlyRejected: v.number(),
+    transientlyRejected: v.number(),
+  }),
   handler: async (ctx, args) => {
     return ingestBatch(ctx, args.locations, args.organizationId);
   },
