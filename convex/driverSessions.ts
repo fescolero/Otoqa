@@ -93,6 +93,23 @@ async function endSessionInternal(
     totalActiveMinutes,
   });
 
+  // Clear the driver's current truck pairing on session end. This forces
+  // a fresh QR scan to start the next shift — the driver might be on a
+  // different unit tomorrow, and we never want to silently bind a stale
+  // truck to a new session. Pair this with the verify.tsx routing rule
+  // that sends drivers to /switch-truck when there's no active session,
+  // and the loop is closed: end shift → currentTruckId cleared → next
+  // sign-in (or "Start shift" tap) routes to scanner → fresh binding.
+  //
+  // Note: this also disables the bootstrap-grace path in
+  // getOrCreateActiveSession (it requires currentTruckId), which is the
+  // correct behavior — that path is for "checked in without tapping
+  // Start", not for "session ended hours ago, do it again automatically".
+  await ctx.db.patch(session.driverId, {
+    currentTruckId: undefined,
+    updatedAt: endedAt,
+  });
+
   if (affectedLegIds.length > 0 && args.endReason !== 'driver_manual') {
     await ctx.db.insert('sessionEndedWithActiveLoad', {
       sessionId: session._id,
