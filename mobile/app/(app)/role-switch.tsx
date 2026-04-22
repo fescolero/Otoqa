@@ -26,7 +26,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Rect, Circle, G, Defs, RadialGradient, Stop } from 'react-native-svg';
-import { useRouter, router as globalRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
 import { useAppMode } from './_layout';
 import { useDriver } from './_layout';
@@ -92,66 +92,24 @@ export default function RoleSwitchScreen() {
 
   const [isContinuing, setIsContinuing] = useState(false);
 
-  // Fully instrumented async handler so every step is visible in Metro
-  // if navigation fails. Each log is prefixed [RoleSwitch:] so the
-  // sequence can be grep'd out of the verbose RN log stream.
   const handleContinue = async () => {
-    console.log('[RoleSwitch:1] Continue pressed — picked:', picked);
-    if (isContinuing) {
-      console.log('[RoleSwitch:1a] Already continuing, skip');
-      return;
-    }
+    if (isContinuing) return;
     setIsContinuing(true);
-
-    const target =
-      picked === 'driver' ? '/(app)/(driver-tabs)' : '/(app)/owner';
-
     try {
-      console.log('[RoleSwitch:2] About to call setMode');
-      const result = setMode(picked);
-      console.log('[RoleSwitch:3] setMode returned, type:', typeof result, 'isPromise:', result instanceof Promise);
-
-      if (result instanceof Promise) {
-        console.log('[RoleSwitch:4] Awaiting setMode promise…');
-        await result;
-        console.log('[RoleSwitch:5] setMode promise resolved');
-      }
-
-      // Let React commit all pending state updates and run the parent's
-      // navigation effect. A 50ms delay is plenty for React 18 to flush.
-      console.log('[RoleSwitch:6] Waiting 50ms for state commit');
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      // Try both routers — local hook router and the global router
-      // singleton. If one is stale or unbound in this render context,
-      // the other should catch it.
-      console.log('[RoleSwitch:7] Calling router.replace →', target);
-      try {
-        router.replace(target);
-        console.log('[RoleSwitch:8] router.replace call returned');
-      } catch (navErr) {
-        console.warn('[RoleSwitch:8!] router.replace threw:', navErr);
-      }
-
-      // Belt-and-suspenders: fire the global router singleton after one
-      // more frame, in case the hook router was scoped to an unmounted
-      // tree by that point.
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      try {
-        console.log('[RoleSwitch:9] Calling globalRouter.replace →', target);
-        globalRouter.replace(target);
-        console.log('[RoleSwitch:10] globalRouter.replace call returned');
-      } catch (navErr) {
-        console.warn('[RoleSwitch:10!] globalRouter threw:', navErr);
-      }
+      // Wait for setMode's wrapped version to commit both state writes
+      // (mode + hasSelectedRole in the post-sign-in gate) before we
+      // navigate. Without awaiting, router.replace fires while we're
+      // still in the gate render tree with no Stack mounted, no-op'ing.
+      await setMode(picked);
+      router.replace(
+        picked === 'driver' ? '/(app)/(driver-tabs)' : '/(app)/owner',
+      );
     } catch (err) {
-      console.warn('[RoleSwitch:!] handleContinue failed:', err);
       Alert.alert(
         "Couldn't continue",
         err instanceof Error ? err.message : String(err),
       );
-    } finally {
-      setTimeout(() => setIsContinuing(false), 1500);
+      setIsContinuing(false);
     }
   };
 

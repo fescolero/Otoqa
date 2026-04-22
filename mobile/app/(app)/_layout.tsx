@@ -255,6 +255,17 @@ export default function AppLayout() {
   }
   const profile = profileLive ?? cachedProfileRef.current;
 
+  // Register the Expo push token once the driver is hydrated. CRITICAL:
+  // this call must sit ABOVE every conditional `return` below — if it's
+  // called in a branch that's skipped on one render (e.g. the role-
+  // switch gate) and reached on another (after hasSelectedRole flips),
+  // React's hook-counter changes and throws "Rendered more hooks than
+  // during the previous render." That's exactly what broke the Continue
+  // button: state flipped, the next render took the non-gate branch,
+  // and React bailed out mid-commit with no visual change. The hook
+  // no-ops when driverId is null so it's safe to call every render.
+  useRegisterPushToken(profile?._id ?? null);
+
   // Carrier org info is now returned directly from userRoles
   // No need for separate query - use carrierOrgConvexId and carrierOrgName from userRoles
   const carrierOrg = userRoles?.isCarrierOwner ? {
@@ -636,11 +647,6 @@ export default function AppLayout() {
     isLoading: false,
   };
 
-
-  // Register the Expo push token as soon as the driver is hydrated.
-  // Runs once per mount-with-driver; the hook guards itself against
-  // duplicate fires and silently skips on Expo Go.
-  useRegisterPushToken(profile?._id ?? null);
 
   const driverContextValue = profile ? {
     driverId: profile._id,
