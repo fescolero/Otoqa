@@ -255,6 +255,14 @@ export default function AppLayout() {
   }
   const profile = profileLive ?? cachedProfileRef.current;
 
+  // Active driver session — drives the "must scan a truck before any
+  // driver work" gate below. Skip-guarded on profile._id so we don't
+  // fire pre-auth or for owner-only users.
+  const activeSession = useQuery(
+    api.driverSessions.getActiveSession,
+    profile?._id ? { driverId: profile._id as Id<'drivers'> } : 'skip',
+  );
+
   // Register the Expo push token once the driver is hydrated. CRITICAL:
   // this call must sit ABOVE every conditional `return` below — if it's
   // called in a branch that's skipped on one render (e.g. the role-
@@ -289,6 +297,17 @@ export default function AppLayout() {
   const isProfileLoading = mode === 'driver' && hasSelectedRole && userRoles?.isDriver && profile === undefined;
   const isCarrierOrgLoading = mode === 'owner' && hasSelectedRole && userRoles === undefined;
   const isRolesLoading = userRoles === undefined;
+  // For drivers, also wait for the active-session query before rendering
+  // any (app) screen — otherwise the default Stack child (driver-tabs)
+  // flashes for a frame before our navigation effect can route the user
+  // to /switch-truck. Profile-with-id is required because activeSession
+  // is skip-guarded on profile?._id; if profile resolves to null (rare)
+  // we don't block.
+  const isActiveSessionLoading =
+    mode === 'driver' &&
+    hasSelectedRole &&
+    !!profile?._id &&
+    activeSession === undefined;
 
   // Loading gate monitors — track how long each gate takes and fire PostHog events on timeout
   const convexAuthGate = useLoadingGate('convex_auth', convexAuth.isLoading && !!isSignedIn);
@@ -347,22 +366,47 @@ export default function AppLayout() {
     await signOut();
   };
 
-  // Get router for navigation - only needed for owner mode
+  // Get router for initial-screen navigation
   const router = useRouter();
-  const lastNavigatedModeRef = useRef<'driver' | 'owner' | null>(null);
+  // Tracks which mode we've already done the one-shot landing nav for.
+  // Re-fires only when the mode itself changes (driver↔owner). Within a
+  // mode, we never override the user's own navigation — e.g. ending a
+  // shift in /(driver-tabs)/more must NOT bounce them to /switch-truck;
+  // they may want to browse loads first, and Start shift will route to
+  // the scanner when they're ready.
+  const initialNavFiredForModeRef = useRef<'driver' | 'owner' | null>(null);
 
-  // Navigate to the correct initial screen based on mode
-  useEffect(() => {
-    if (!hasSelectedRole) return;
-    
-    if (mode === 'owner' && carrierOrg?._id && lastNavigatedModeRef.current !== 'owner') {
-      lastNavigatedModeRef.current = 'owner';
-      router.navigate('/(app)/owner');
-    } else if (mode === 'driver' && lastNavigatedModeRef.current !== 'driver') {
-      lastNavigatedModeRef.current = 'driver';
-      router.navigate('/(app)/(driver-tabs)');
+  // Compute the initial landing destination per mode.
+  //   • owner mode → /(app)/owner (need carrierOrg loaded)
+  //   • driver mode + active session → /(app)/(driver-tabs)
+  //   • driver mode + no active session → /switch-truck (force a fresh
+  //     scan — verify.tsx defers to us so the decision lives here)
+  //   • driver mode + activeSession still loading → wait (the
+  //     isActiveSessionLoading gate above shows the spinner)
+  let desiredRoute: string | null = null;
+  if (hasSelectedRole) {
+    if (mode === 'owner' && carrierOrg?._id) {
+      desiredRoute = '/(app)/owner';
+    } else if (mode === 'driver') {
+      if (activeSession === undefined) {
+        desiredRoute = null;
+      } else if (activeSession) {
+        desiredRoute = '/(app)/(driver-tabs)';
+      } else {
+        desiredRoute = '/switch-truck';
+      }
     }
-  }, [mode, hasSelectedRole, carrierOrg?._id]);
+  }
+
+  useEffect(() => {
+    if (!desiredRoute) return;
+    // One-shot per mode. Subsequent activeSession flips inside a mode
+    // (e.g. End shift) don't reroute the user — they continue navigating
+    // the app under their own steam.
+    if (initialNavFiredForModeRef.current === mode) return;
+    initialNavFiredForModeRef.current = mode;
+    router.navigate(desiredRoute as never);
+  }, [desiredRoute, mode]);
 
   // Resume location tracking on app start if it was active
   useEffect(() => {
@@ -523,8 +567,11 @@ export default function AppLayout() {
     );
   }
 
-  // Show loading while fetching profile/org
-  if (isProfileLoading || isCarrierOrgLoading) {
+  // Show loading while fetching profile/org/session. Active-session
+  // loading is critical for the /switch-truck-vs-/(driver-tabs) routing
+  // decision — without this gate the default Stack child renders for
+  // a frame before the navigation effect fires.
+  if (isProfileLoading || isCarrierOrgLoading || isActiveSessionLoading) {
     const activeGate = isProfileLoading ? profileGate : carrierOrgGate;
     if (activeGate.isTimedOut) {
       return (
