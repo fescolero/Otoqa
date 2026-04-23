@@ -400,6 +400,10 @@ export function trackPendingActionReconciled(context: { stopId: string; loadId: 
   capture('pending_action_reconciled', context);
 }
 
+export function trackTrackingStorageReset(context: { success: boolean; error?: string }) {
+  capture('tracking_storage_reset', context);
+}
+
 function maskPhone(phone: string): string {
   if (phone.length <= 4) return '****';
   return phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);
