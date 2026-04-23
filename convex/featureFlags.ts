@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation, internalMutation } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
+import { resolveAuthenticatedDriver } from './driverMobile';
 
 // ============================================================================
 // FEATURE FLAGS — per-org runtime toggles
@@ -19,20 +20,46 @@ import { requireCallerOrgId } from './lib/auth';
 /**
  * Returns every flag set for the caller's org as a flat map.
  *
- * Callers cache this in AsyncStorage for offline boot — a device with no
- * cached value and no network at launch falls back to the in-code default
- * (sqlite for gps_queue_backend). That's the right behavior: first-launch
- * offline on a canary org stays on the legacy backend until the device
- * gets a chance to read the flag.
+ * Auth resolution: Mobile (Clerk) drivers authenticate with a PHONE claim,
+ * not an org claim, so we can't use requireCallerOrgId here. Instead we
+ * resolve the driver via phone and read driver.organizationId. Web (WorkOS)
+ * callers are served by checking the org_id claim directly. Falling through
+ * both paths returns {} so callers gracefully default to in-code values.
+ *
+ * Callers cache the result in AsyncStorage for offline boot — a device
+ * with no cached value and no network at launch falls back to the in-code
+ * default (sqlite for gps_queue_backend). That's the right behavior:
+ * first-launch offline on a canary org stays on the legacy backend until
+ * the device gets a chance to read the flag.
  */
 export const getForOrg = query({
   args: {},
   returns: v.record(v.string(), v.string()),
   handler: async (ctx) => {
-    const orgId = await requireCallerOrgId(ctx);
+    let orgId: string | null = null;
+
+    // Web / WorkOS path: identity carries org_id directly.
+    try {
+      orgId = await requireCallerOrgId(ctx);
+    } catch {
+      // Fall through to mobile resolution below.
+    }
+
+    // Mobile / Clerk path: resolve driver via phone claim → driver.organizationId.
+    if (!orgId) {
+      try {
+        const driver = await resolveAuthenticatedDriver(ctx);
+        orgId = driver.organizationId;
+      } catch {
+        // Unauthenticated or unrecognized phone — return empty flags so the
+        // client defaults to in-code fallback.
+        return {};
+      }
+    }
+
     const rows = await ctx.db
       .query('featureFlags')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId))
+      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId!))
       .collect();
     const flags: Record<string, string> = {};
     for (const row of rows) {
