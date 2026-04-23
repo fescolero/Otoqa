@@ -1372,6 +1372,79 @@ export const getDriverSchedule = query({
   },
 });
 
+// DIAGNOSTIC: reports leg/stop counts for an org so we can size the read budget
+// of getAvailableDrivers. Safe to call — no writes, returns counts only.
+// Delete after investigation.
+export const diagnoseReadCount = query({
+  args: { workosOrgId: v.string() },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const allOrgLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+
+    const byStatus: Record<string, number> = {
+      PENDING: 0,
+      ACTIVE: 0,
+      COMPLETED: 0,
+      CANCELED: 0,
+    };
+    let withDriver = 0;
+    let pendingOrActiveWithDriver = 0;
+    const stopIdsForPendingOrActive = new Set<string>();
+
+    for (const leg of allOrgLegs) {
+      byStatus[leg.status] = (byStatus[leg.status] ?? 0) + 1;
+      if (leg.driverId) withDriver++;
+      if ((leg.status === 'PENDING' || leg.status === 'ACTIVE') && leg.driverId) {
+        pendingOrActiveWithDriver++;
+        stopIdsForPendingOrActive.add(leg.startStopId);
+        stopIdsForPendingOrActive.add(leg.endStopId);
+      }
+    }
+
+    const activeDrivers = await ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('employmentStatus'), 'Active'),
+          q.neq(q.field('isDeleted'), true)
+        )
+      )
+      .collect();
+
+    const totalLegs = allOrgLegs.length;
+    const pendingActiveLegs = pendingOrActiveWithDriver;
+    const uniqueStops = stopIdsForPendingOrActive.size;
+
+    // Estimated read budget under current (pre-denormalization) implementation:
+    // 1 leg doc + 1.5 stop docs per active leg + driver/truck overhead.
+    const estimatedReadsOld =
+      totalLegs + pendingActiveLegs * 2 + activeDrivers.length * 2;
+    const estimatedReadsInverted =
+      pendingActiveLegs + uniqueStops + activeDrivers.length * 2;
+    const estimatedReadsDenormalized =
+      pendingActiveLegs + activeDrivers.length * 2;
+
+    return {
+      totalLegsInOrg: totalLegs,
+      legsByStatus: byStatus,
+      legsWithDriver: withDriver,
+      pendingOrActiveLegsWithDriver: pendingActiveLegs,
+      uniqueStopsReferenced: uniqueStops,
+      activeDrivers: activeDrivers.length,
+      estimatedReads: {
+        oldByOrgScan: estimatedReadsOld,
+        invertedPerDriver: estimatedReadsInverted,
+        withDenormalizedLegTimes: estimatedReadsDenormalized,
+      },
+    };
+  },
+});
+
 // Get ALL active drivers with truck data (for dispatch planner default view)
 // Unlike getAvailableDrivers, this returns all drivers regardless of time window
 export const getAllActiveDrivers = query({
