@@ -1595,7 +1595,12 @@ export default defineSchema({
         v.literal('completed'),
         v.literal('handoff'),
         v.literal('unassigned'),
-        v.literal('session_ended')
+        v.literal('session_ended'),
+        // Closed out by the data-hygiene cleanup path (e.g. parent load
+        // expired/deleted and its legs were never cascaded). Used so we can
+        // distinguish these from legs closed through normal flow when
+        // auditing or running cohort queries.
+        v.literal('data_hygiene')
       )
     ),
     plannedStartAt: v.optional(v.float64()), // Dispatcher's scheduled start
