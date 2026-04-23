@@ -1618,6 +1618,7 @@ export default defineSchema({
   })
     .index('by_load', ['loadId'])
     .index('by_driver', ['driverId', 'status'])
+    .index('by_driver_status_scheduled_start', ['driverId', 'status', 'scheduledStartMs'])
     .index('by_carrier_partnership', ['carrierPartnershipId', 'status'])
     .index('by_org', ['workosOrgId'])
     .index('by_truck', ['truckId']),

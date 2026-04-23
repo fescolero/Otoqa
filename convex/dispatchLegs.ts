@@ -1154,23 +1154,38 @@ export const getAvailableDrivers = query({
 
     if (allDrivers.length === 0) return [];
 
-    // 2. For each active driver, read ONLY their PENDING and ACTIVE legs via the
-    //    compound index [driverId, status]. Selective indexed range — avoids the
-    //    full by_org scan (which read every historical leg, including COMPLETED /
-    //    CANCELED) that triggered the "too many reads" warning.
+    // 2. For each active driver, fetch only the legs that could plausibly
+    //    overlap the requested time window, using a selective range over the
+    //    compound index [driverId, status, scheduledStartMs].
+    //
+    //    Two time ranges overlap iff legStart < requestedEnd AND legEnd >
+    //    requestedStart. The indexed range filters on scheduledStartMs <
+    //    requestedEnd — the tail comparison (scheduledEndMs > requestedStart)
+    //    is applied in memory on the small candidate set.
+    //
+    //    Legs with scheduledStartMs still undefined (the ~handful that the
+    //    backfill couldn't resolve) land at the low end of the index and
+    //    pass the lt() filter; they're excluded by the scheduledEndMs check,
+    //    matching the pre-denorm "unparsable times → no overlap" behavior.
     const driverLegPairs = await Promise.all(
       allDrivers.map(async (driver) => {
         const [pendingLegs, activeLegs] = await Promise.all([
           ctx.db
             .query('dispatchLegs')
-            .withIndex('by_driver', (q) =>
-              q.eq('driverId', driver._id).eq('status', 'PENDING')
+            .withIndex('by_driver_status_scheduled_start', (q) =>
+              q
+                .eq('driverId', driver._id)
+                .eq('status', 'PENDING')
+                .lt('scheduledStartMs', args.endTime)
             )
             .collect(),
           ctx.db
             .query('dispatchLegs')
-            .withIndex('by_driver', (q) =>
-              q.eq('driverId', driver._id).eq('status', 'ACTIVE')
+            .withIndex('by_driver_status_scheduled_start', (q) =>
+              q
+                .eq('driverId', driver._id)
+                .eq('status', 'ACTIVE')
+                .lt('scheduledStartMs', args.endTime)
             )
             .collect(),
         ]);
@@ -1178,57 +1193,19 @@ export const getAvailableDrivers = query({
       })
     );
 
-    // 3. Fast path: most legs carry cached scheduledStartMs / scheduledEndMs
-    //    populated at insert time + backfilled on historical rows. Only legs
-    //    whose cache is undefined need a live stop read — dedup those and
-    //    batch-read. This drops ~2/3 of reads vs. always fetching stops.
-    const legsNeedingFallback: typeof driverLegPairs[number]['legs'] = [];
-    for (const { legs } of driverLegPairs) {
-      for (const leg of legs) {
-        if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
-        if (leg.scheduledStartMs === undefined || leg.scheduledEndMs === undefined) {
-          legsNeedingFallback.push(leg);
-        }
-      }
-    }
-
-    const stopIdSet = new Set<Id<'loadStops'>>();
-    for (const leg of legsNeedingFallback) {
-      stopIdSet.add(leg.startStopId);
-      stopIdSet.add(leg.endStopId);
-    }
-    const stopIds = Array.from(stopIdSet);
-    const stopDocs = await Promise.all(stopIds.map((id) => ctx.db.get(id)));
-    const stopsById = new Map<Id<'loadStops'>, Doc<'loadStops'>>();
-    stopIds.forEach((id, i) => {
-      const doc = stopDocs[i];
-      if (doc) stopsById.set(id, doc);
-    });
-
-    const resolveLegRange = (
-      leg: typeof driverLegPairs[number]['legs'][number]
-    ): { start: number; end: number } | null => {
-      if (leg.scheduledStartMs !== undefined && leg.scheduledEndMs !== undefined) {
-        return { start: leg.scheduledStartMs, end: leg.scheduledEndMs };
-      }
-      const startStop = stopsById.get(leg.startStopId);
-      const endStop = stopsById.get(leg.endStopId);
-      if (!startStop || !endStop) return null;
-      const start = parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime);
-      const end = parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime);
-      if (start === null || end === null) return null;
-      return { start, end };
-    };
-
-    // 4. Compute max-overlap-per-driver in memory.
+    // 3. Compute max-overlap-per-driver in memory. No more stop reads — the
+    //    cached scheduledStartMs/EndMs on each leg are source-of-truth as of
+    //    their last sync. A leg with either cache undefined can't produce a
+    //    valid range and is skipped, same as the pre-denorm behavior.
     const requestedRange = { start: args.startTime, end: args.endTime };
     const winningLegByDriver = new Map<string, { overlapMinutes: number; loadId: Id<'loadInformation'> }>();
 
     for (const { driver, legs } of driverLegPairs) {
       for (const leg of legs) {
         if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
-        const legRange = resolveLegRange(leg);
-        if (!legRange) continue;
+        if (leg.scheduledStartMs === undefined || leg.scheduledEndMs === undefined) continue;
+        if (leg.scheduledEndMs <= requestedRange.start) continue;
+        const legRange = { start: leg.scheduledStartMs, end: leg.scheduledEndMs };
         if (!doTimeRangesOverlap(requestedRange, legRange)) continue;
 
         const minutes = calculateOverlapMinutes(requestedRange, legRange);
