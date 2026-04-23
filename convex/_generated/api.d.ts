@@ -98,6 +98,10 @@ import type * as migrations_005_backfill_load_tags from "../migrations/005_backf
 import type * as migrations_006_cleanup_junk_facets from "../migrations/006_cleanup_junk_facets.js";
 import type * as migrations_007_strip_parsed_columns from "../migrations/007_strip_parsed_columns.js";
 import type * as migrations_008_backfill_stop_denorm from "../migrations/008_backfill_stop_denorm.js";
+import type * as migrations_009_backfill_load_documents from "../migrations/009_backfill_load_documents.js";
+import type * as migrations_010_backfill_leg_scheduled_times from "../migrations/010_backfill_leg_scheduled_times.js";
+import type * as migrations_011_diagnose_pending_legs from "../migrations/011_diagnose_pending_legs.js";
+import type * as migrations_012_cleanup_orphaned_pending_legs from "../migrations/012_cleanup_orphaned_pending_legs.js";
 import type * as migrations_backfillDispatchLegs from "../migrations/backfillDispatchLegs.js";
 import type * as migrations_backfillFirstStopDate from "../migrations/backfillFirstStopDate.js";
 import type * as migrations_backfillOrgType from "../migrations/backfillOrgType.js";
@@ -216,6 +220,10 @@ declare const fullApi: ApiFromModules<{
   "migrations/006_cleanup_junk_facets": typeof migrations_006_cleanup_junk_facets;
   "migrations/007_strip_parsed_columns": typeof migrations_007_strip_parsed_columns;
   "migrations/008_backfill_stop_denorm": typeof migrations_008_backfill_stop_denorm;
+  "migrations/009_backfill_load_documents": typeof migrations_009_backfill_load_documents;
+  "migrations/010_backfill_leg_scheduled_times": typeof migrations_010_backfill_leg_scheduled_times;
+  "migrations/011_diagnose_pending_legs": typeof migrations_011_diagnose_pending_legs;
+  "migrations/012_cleanup_orphaned_pending_legs": typeof migrations_012_cleanup_orphaned_pending_legs;
   "migrations/backfillDispatchLegs": typeof migrations_backfillDispatchLegs;
   "migrations/backfillFirstStopDate": typeof migrations_backfillFirstStopDate;
   "migrations/backfillOrgType": typeof migrations_backfillOrgType;

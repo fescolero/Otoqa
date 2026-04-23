@@ -42,6 +42,8 @@ import {
   typeScale,
   type Palette,
 } from '../../lib/design-tokens';
+import { resetTrackingStorage } from '../../lib/location-tracking';
+import { trackTrackingStorageReset } from '../../lib/analytics';
 
 type Sp = (typeof densitySpacing)['dense'];
 
@@ -72,6 +74,41 @@ export default function AppSettingsScreen() {
   const [notifOn, setNotifOn] = useState(true);
   const [units, setUnits] = useState<UnitSystem>('imperial');
   const [timeFmt, setTimeFmt] = useState<TimeFormat>('12h');
+  const [isResetting, setIsResetting] = useState(false);
+
+  const handleResetTrackingStorage = () => {
+    Alert.alert(
+      'Reset tracking storage?',
+      "This clears the app's on-device GPS cache and starts fresh. Any points not yet uploaded will be lost. Use this only if dispatch asks you to.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: async () => {
+            setIsResetting(true);
+            try {
+              await resetTrackingStorage();
+              trackTrackingStorageReset({ success: true });
+              Alert.alert(
+                'Tracking storage reset',
+                'The on-device cache has been cleared. Tracking will resume on your next trip.',
+              );
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              trackTrackingStorageReset({ success: false, error: msg });
+              Alert.alert(
+                "Couldn't reset",
+                `${msg}\n\nTry again, or contact dispatch.`,
+              );
+            } finally {
+              setIsResetting(false);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   const activeLang =
     LANGUAGES.find((l) => l.code === currentLanguage) ?? LANGUAGES[0];
@@ -194,6 +231,23 @@ export default function AppSettingsScreen() {
             }
             title="Download my data"
             meta="Trips, hours, and documents · ZIP"
+          />
+        </Group>
+
+        {/* Troubleshooting */}
+        <Group palette={palette} title="Troubleshooting">
+          <RowButton
+            palette={palette}
+            onPress={isResetting ? () => {} : handleResetTrackingStorage}
+            leading={
+              <View style={styles.leadingIcon}>
+                <Icon name="refresh" size={16} color={palette.textSecondary} />
+              </View>
+            }
+            title={
+              isResetting ? 'Resetting…' : 'Reset tracking storage'
+            }
+            meta="Clears the on-device GPS cache if tracking is stuck"
           />
         </Group>
 

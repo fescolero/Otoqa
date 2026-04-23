@@ -18,6 +18,7 @@ import {
   getLastLocationForSession,
   deleteOldSyncedLocations,
   reopenDb,
+  resetLocationDb,
 } from './location-db';
 import { log } from './log';
 import {
@@ -767,6 +768,27 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 // ============================================
 // PUBLIC API
 // ============================================
+
+/**
+ * Drop the SQLite DB file and the AsyncStorage fallback buffer, then
+ * reinitialize at the current schema. Exposed to App settings as a
+ * last-resort recovery for drivers whose DB got into a state the
+ * schema-drift guard in openAndInit can't auto-correct.
+ *
+ * Any unsynced pings sitting locally are discarded — acceptable because
+ * the states this recovers from (corrupt DB, wrong-schema DB) can't flush
+ * those pings anyway.
+ */
+export async function resetTrackingStorage(): Promise<void> {
+  await resetLocationDb();
+  try {
+    await storage.delete(BG_FALLBACK_LOCATIONS_KEY);
+  } catch (err) {
+    lg.warn(
+      `Failed to clear fallback buffer: ${err instanceof Error ? err.message : err}`
+    );
+  }
+}
 
 /**
  * Start location tracking for a load

@@ -195,10 +195,38 @@ async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   const versionRow = await newDb.getFirstAsync<{ user_version: number }>(
     'PRAGMA user_version'
   );
-  const currentVersion = versionRow?.user_version ?? 0;
+  const reportedVersion = versionRow?.user_version ?? 0;
+
+  // Schema-drift guard. Pre-Phase-1 builds created the `locations` table but
+  // never stamped user_version, so those DBs report 0 while physically at v1.
+  // Without this guard, the fresh-install branch below would run
+  // CREATE TABLE IF NOT EXISTS (a no-op against the existing v1 table) and
+  // then stamp user_version = CURRENT_SCHEMA_VERSION, leaving the DB claiming
+  // v3 with v1 columns — every sessionId query then throws "no such column".
+  // Infer the real version from the live column set and override.
+  const cols = await newDb.getAllAsync<{ name: string }>(
+    'PRAGMA table_info(locations)'
+  );
+  const tableExists = cols.length > 0;
+
+  let currentVersion: number;
+  if (!tableExists) {
+    currentVersion = 0; // genuinely fresh
+  } else {
+    const hasSessionId = cols.some((c) => c.name === 'sessionId');
+    const hasSyncAttempts = cols.some((c) => c.name === 'syncAttempts');
+    const inferredVersion = !hasSessionId ? 1 : !hasSyncAttempts ? 2 : 3;
+    if (inferredVersion !== reportedVersion) {
+      lg.warn(
+        `Schema drift: user_version=${reportedVersion} but columns imply v${inferredVersion}. Trusting columns and re-stamping.`
+      );
+      await newDb.execAsync(`PRAGMA user_version = ${inferredVersion};`);
+    }
+    currentVersion = inferredVersion;
+  }
 
   if (currentVersion === 0) {
-    // Fresh install — create the latest schema directly.
+    // Fresh install — table doesn't exist. Create the latest schema directly.
     await newDb.execAsync(SCHEMA_V3_SQL);
     await newDb.execAsync(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);
     lg.debug(`Initialized fresh schema at v${CURRENT_SCHEMA_VERSION}`);
@@ -217,6 +245,30 @@ async function openAndInit(): Promise<SQLite.SQLiteDatabase> {
   }
 
   return newDb;
+}
+
+/**
+ * Nuke the SQLite location database entirely and recreate it at the current
+ * schema. Used by the "Reset tracking storage" affordance in App settings —
+ * the last-resort recovery for drivers whose DB got into a state the
+ * schema-drift guard above can't auto-correct (corrupt file, partial
+ * migration, etc.). Safe to call while tracking is running; the next ping
+ * just writes into the fresh DB.
+ */
+export async function resetLocationDb(): Promise<void> {
+  lg.warn('Resetting location DB — all unsynced pings will be discarded');
+  await resetDbHandle();
+  try {
+    await SQLite.deleteDatabaseAsync(DB_NAME);
+  } catch (err) {
+    // deleteDatabaseAsync throws if the file doesn't exist. That's fine —
+    // the next getDb() call will create a fresh one.
+    lg.debug(
+      `deleteDatabaseAsync: ${err instanceof Error ? err.message : err}`
+    );
+  }
+  await getDb(); // forces openAndInit() against an empty file
+  lg.debug('Location DB reset complete');
 }
 
 async function getDb(): Promise<SQLite.SQLiteDatabase> {
