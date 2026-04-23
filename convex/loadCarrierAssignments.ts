@@ -5,6 +5,7 @@ import { internal } from './_generated/api';
 import { updateLoadCount } from './stats_helpers';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { getLoadFacets } from './lib/loadFacets';
+import { computeLegScheduledTimes } from './_helpers/timeUtils';
 
 /**
  * Load Carrier Assignments API
@@ -684,6 +685,7 @@ export const directAssign = mutation({
         const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
         const firstStop = sortedStops[0];
         const lastStop = sortedStops[sortedStops.length - 1];
+        const scheduledTimes = await computeLegScheduledTimes(ctx, firstStop._id, lastStop._id);
 
         const legId = await ctx.db.insert('dispatchLegs', {
           loadId: args.loadId,
@@ -694,6 +696,7 @@ export const directAssign = mutation({
           legLoadedMiles: load.effectiveMiles ?? 0,
           legEmptyMiles: 0,
           status: 'PENDING',
+          ...scheduledTimes,
           workosOrgId: args.brokerOrgId,
           createdAt: now,
           updatedAt: now,

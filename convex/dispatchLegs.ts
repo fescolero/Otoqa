@@ -8,6 +8,8 @@ import {
   calculateOverlapMinutes,
   detectDriverOverlaps,
   parseStopDateTime,
+  computeLegScheduledTimes,
+  syncLegScheduledTimes,
 } from './_helpers/timeUtils';
 import type { OverlapInfo } from './_helpers/timeUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -176,6 +178,7 @@ export const create = mutation({
 
     const maxSequence = existingLegs.reduce((max, l) => Math.max(max, l.sequence), 0);
     const now = Date.now();
+    const scheduledTimes = await computeLegScheduledTimes(ctx, args.startStopId, args.endStopId);
 
     const legId = await ctx.db.insert('dispatchLegs', {
       loadId: args.loadId,
@@ -188,6 +191,7 @@ export const create = mutation({
       legLoadedMiles: args.legLoadedMiles,
       legEmptyMiles: args.legEmptyMiles ?? 0,
       status: 'PENDING',
+      ...scheduledTimes,
       workosOrgId: load.workosOrgId,
       createdAt: now,
       updatedAt: now,
@@ -337,6 +341,7 @@ export const assignDriver = mutation({
       const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
+      const scheduledTimes = await computeLegScheduledTimes(ctx, firstStop._id, lastStop._id);
 
       const legId = await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
@@ -349,6 +354,7 @@ export const assignDriver = mutation({
         legLoadedMiles: load.effectiveMiles ?? 0,
         legEmptyMiles: 0,
         status: 'PENDING',
+        ...scheduledTimes,
         workosOrgId: args.workosOrgId,
         createdAt: now,
         updatedAt: now,
@@ -493,6 +499,7 @@ export const assignDriverInternal = internalMutation({
       const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
+      const scheduledTimes = await computeLegScheduledTimes(ctx, firstStop._id, lastStop._id);
 
       const legId = await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
@@ -504,6 +511,7 @@ export const assignDriverInternal = internalMutation({
         legLoadedMiles: load.effectiveMiles ?? 0,
         legEmptyMiles: 0,
         status: 'PENDING',
+        ...scheduledTimes,
         workosOrgId: load.workosOrgId,
         createdAt: now,
         updatedAt: now,
@@ -622,6 +630,7 @@ export const assignCarrierInternal = internalMutation({
       const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
+      const scheduledTimes = await computeLegScheduledTimes(ctx, firstStop._id, lastStop._id);
 
       await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
@@ -632,6 +641,7 @@ export const assignCarrierInternal = internalMutation({
         legLoadedMiles: load.effectiveMiles ?? 0,
         legEmptyMiles: 0,
         status: 'PENDING',
+        ...scheduledTimes,
         workosOrgId: load.workosOrgId,
         createdAt: now,
         updatedAt: now,
@@ -765,6 +775,7 @@ export const assignCarrier = mutation({
       const sortedStops = [...stops].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
       const firstStop = sortedStops[0];
       const lastStop = sortedStops[sortedStops.length - 1];
+      const scheduledTimes = await computeLegScheduledTimes(ctx, firstStop._id, lastStop._id);
 
       await ctx.db.insert('dispatchLegs', {
         loadId: args.loadId,
@@ -776,6 +787,7 @@ export const assignCarrier = mutation({
         legLoadedMiles: load.effectiveMiles ?? 0,
         legEmptyMiles: 0,
         status: 'PENDING',
+        ...scheduledTimes,
         workosOrgId: args.workosOrgId,
         createdAt: now,
         updatedAt: now,
@@ -986,8 +998,11 @@ export const splitAtStop = mutation({
       legLoadedMiles: legAMiles,
       updatedAt: now,
     });
+    // Leg A's endStopId changed — refresh its cached scheduled times.
+    await syncLegScheduledTimes(ctx, existingLeg._id);
 
     // Create Leg B: starts at split stop, ends at final destination
+    const legBScheduledTimes = await computeLegScheduledTimes(ctx, args.splitStopId, lastStop._id);
     const legBId = await ctx.db.insert('dispatchLegs', {
       loadId: args.loadId,
       driverId: args.newDriverId,
@@ -999,6 +1014,7 @@ export const splitAtStop = mutation({
       legLoadedMiles: legBMiles,
       legEmptyMiles: 0,
       status: 'PENDING',
+      ...legBScheduledTimes,
       workosOrgId: load.workosOrgId,
       createdAt: now,
       updatedAt: now,
@@ -1162,16 +1178,24 @@ export const getAvailableDrivers = query({
       })
     );
 
-    // 3. Dedup stop IDs across all candidate legs and batch-read once. Legs in
-    //    the same load share stops (end of leg N = start of leg N+1), so this
-    //    typically cuts stop reads ~25-40%.
-    const stopIdSet = new Set<Id<'loadStops'>>();
+    // 3. Fast path: most legs carry cached scheduledStartMs / scheduledEndMs
+    //    populated at insert time + backfilled on historical rows. Only legs
+    //    whose cache is undefined need a live stop read — dedup those and
+    //    batch-read. This drops ~2/3 of reads vs. always fetching stops.
+    const legsNeedingFallback: typeof driverLegPairs[number]['legs'] = [];
     for (const { legs } of driverLegPairs) {
       for (const leg of legs) {
         if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
-        stopIdSet.add(leg.startStopId);
-        stopIdSet.add(leg.endStopId);
+        if (leg.scheduledStartMs === undefined || leg.scheduledEndMs === undefined) {
+          legsNeedingFallback.push(leg);
+        }
       }
+    }
+
+    const stopIdSet = new Set<Id<'loadStops'>>();
+    for (const leg of legsNeedingFallback) {
+      stopIdSet.add(leg.startStopId);
+      stopIdSet.add(leg.endStopId);
     }
     const stopIds = Array.from(stopIdSet);
     const stopDocs = await Promise.all(stopIds.map((id) => ctx.db.get(id)));
@@ -1181,20 +1205,30 @@ export const getAvailableDrivers = query({
       if (doc) stopsById.set(id, doc);
     });
 
-    // 4. Compute max-overlap-per-driver in memory from the dedup'd stop map.
+    const resolveLegRange = (
+      leg: typeof driverLegPairs[number]['legs'][number]
+    ): { start: number; end: number } | null => {
+      if (leg.scheduledStartMs !== undefined && leg.scheduledEndMs !== undefined) {
+        return { start: leg.scheduledStartMs, end: leg.scheduledEndMs };
+      }
+      const startStop = stopsById.get(leg.startStopId);
+      const endStop = stopsById.get(leg.endStopId);
+      if (!startStop || !endStop) return null;
+      const start = parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime);
+      const end = parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime);
+      if (start === null || end === null) return null;
+      return { start, end };
+    };
+
+    // 4. Compute max-overlap-per-driver in memory.
     const requestedRange = { start: args.startTime, end: args.endTime };
     const winningLegByDriver = new Map<string, { overlapMinutes: number; loadId: Id<'loadInformation'> }>();
 
     for (const { driver, legs } of driverLegPairs) {
       for (const leg of legs) {
         if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
-        const startStop = stopsById.get(leg.startStopId);
-        const endStop = stopsById.get(leg.endStopId);
-        if (!startStop || !endStop) continue;
-        const start = parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime);
-        const end = parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime);
-        if (start === null || end === null) continue;
-        const legRange = { start, end };
+        const legRange = resolveLegRange(leg);
+        if (!legRange) continue;
         if (!doTimeRangesOverlap(requestedRange, legRange)) continue;
 
         const minutes = calculateOverlapMinutes(requestedRange, legRange);
@@ -1680,6 +1714,11 @@ export const handoffLoad = mutation({
     const maxSequence = Math.max(...allLegs.map((l) => l.sequence));
 
     // Create the new relay leg. Miles start at 0; pay calc can backfill.
+    const handoffScheduledTimes = await computeLegScheduledTimes(
+      ctx,
+      newLegStartStopId,
+      oldLeg.endStopId
+    );
     const newLegId = await ctx.db.insert('dispatchLegs', {
       loadId: args.loadId,
       driverId: args.toDriverId,
@@ -1691,6 +1730,7 @@ export const handoffLoad = mutation({
       legLoadedMiles: 0,
       legEmptyMiles: 0,
       status: 'PENDING',
+      ...handoffScheduledTimes,
       plannedStartAt: now,
       workosOrgId: load.workosOrgId,
       createdAt: now,
