@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { query, mutation } from './_generated/server';
+import { query, mutation, internalMutation } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
 
 // ============================================================================
@@ -77,6 +77,54 @@ export const setFlag = mutation({
         value,
         updatedAt: now,
         updatedBy,
+      });
+    }
+    return null;
+  },
+});
+
+/**
+ * Set a flag for an explicit org, bypassing auth. `internalMutation` means
+ * this is only reachable from other Convex functions, schedulers, or the
+ * `npx convex run` CLI — never from an authenticated client. Used during
+ * the MMKV rollout for flipping flags from the terminal without going
+ * through the dashboard.
+ *
+ * Example:
+ *   npx convex run featureFlags:setFlagInternal \
+ *     '{"workosOrgId":"org_01KA…","key":"gps_queue_backend","value":"mmkv"}'
+ *
+ * Deleted in Phase 5 along with the rest of the featureFlags scaffolding.
+ */
+export const setFlagInternal = internalMutation({
+  args: {
+    workosOrgId: v.string(),
+    key: v.string(),
+    value: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, { workosOrgId, key, value }) => {
+    const existing = await ctx.db
+      .query('featureFlags')
+      .withIndex('by_org_key', (q) =>
+        q.eq('workosOrgId', workosOrgId).eq('key', key),
+      )
+      .first();
+
+    const now = Date.now();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        value,
+        updatedAt: now,
+        updatedBy: 'cli',
+      });
+    } else {
+      await ctx.db.insert('featureFlags', {
+        workosOrgId,
+        key,
+        value,
+        updatedAt: now,
+        updatedBy: 'cli',
       });
     }
     return null;
