@@ -130,6 +130,36 @@ async function applyLoadStatusUpdate(
     }
   } else if (args.status === 'Expired') {
     updates.trackingStatus = 'Canceled';
+
+    // Cascade: a load can't expire while still holding open legs. Mirrors
+    // the Canceled branch above. Prior to this cascade, expiring loads
+    // accumulated orphan PENDING legs (closed out in migration 012).
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
+      .collect();
+
+    for (const leg of legs) {
+      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+        await ctx.db.patch(leg._id, {
+          status: 'CANCELED',
+          endReason: 'data_hygiene',
+          endedAt: now,
+          updatedAt: now,
+        });
+
+        const payables = await ctx.db
+          .query('loadPayables')
+          .withIndex('by_leg', (q: any) => q.eq('legId', leg._id))
+          .collect();
+
+        for (const payable of payables) {
+          if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
+            await ctx.db.delete(payable._id);
+          }
+        }
+      }
+    }
   } else if (args.status === 'Open') {
     updates.primaryDriverId = undefined;
     updates.primaryCarrierPartnershipId = undefined;
@@ -1551,6 +1581,28 @@ export const deleteLoad = mutation({
     const loadToDelete = await ctx.db.get(args.loadId);
     if (!loadToDelete) throw new Error('Load not found');
     if (loadToDelete.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+
+    // Cascade: cancel any open legs before removing the load. Legs are
+    // retained (not deleted) so downstream ledger data — loadPayables,
+    // audit trails — keeps its referential anchor. Prior to this cascade,
+    // deleted loads left orphan PENDING legs that diagnoseReadCount
+    // surfaced via the "parent load missing" bucket.
+    const now = Date.now();
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    for (const leg of legs) {
+      if (leg.status === 'PENDING' || leg.status === 'ACTIVE') {
+        await ctx.db.patch(leg._id, {
+          status: 'CANCELED',
+          endReason: 'data_hygiene',
+          endedAt: now,
+          updatedAt: now,
+        });
+      }
+    }
+
     const stops = await ctx.db
       .query('loadStops')
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -2259,13 +2311,14 @@ export const autoExpireStaleLoads = internalMutation({
         if (!load.firstStopDate || load.firstStopDate >= todayStr) continue;
         if (load.trackingStatus !== 'Pending') continue;
 
-        await ctx.db.patch(load._id, {
+        // Route through applyLoadStatusUpdate so the Expired branch's leg
+        // cascade fires. Direct ctx.db.patch here previously bypassed the
+        // cascade and accumulated orphan PENDING legs.
+        const result = await applyLoadStatusUpdate(ctx, {
+          loadId: load._id,
           status: 'Expired',
-          trackingStatus: 'Canceled',
-          updatedAt: now,
         });
-
-        await updateLoadCount(ctx, load.workosOrgId, status, 'Expired');
+        await updateLoadCount(ctx, load.workosOrgId, result.previousStatus, result.nextStatus);
         expired++;
 
         if (expired >= BATCH_SIZE) break;
@@ -2305,14 +2358,13 @@ export const autoExpireStaleLoads = internalMutation({
       for (const load of loads) {
         if (!load.updatedAt || load.updatedAt >= cutoff) continue;
 
-        const previousStatus = load.status;
-        await ctx.db.patch(load._id, {
+        // Route through applyLoadStatusUpdate so the Expired branch's leg
+        // cascade fires. Same reasoning as the pending-phase loop above.
+        const result = await applyLoadStatusUpdate(ctx, {
+          loadId: load._id,
           status: 'Expired',
-          trackingStatus: 'Canceled',
-          updatedAt: now,
         });
-
-        await updateLoadCount(ctx, load.workosOrgId, previousStatus, 'Expired');
+        await updateLoadCount(ctx, load.workosOrgId, result.previousStatus, result.nextStatus);
         expired++;
 
         if (expired >= BATCH_SIZE) break;
