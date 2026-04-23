@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { mutation, query, internalMutation } from './_generated/server';
+import { mutation, query, internalMutation, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import {
@@ -1375,11 +1375,9 @@ export const getDriverSchedule = query({
 // DIAGNOSTIC: reports leg/stop counts for an org so we can size the read budget
 // of getAvailableDrivers. Safe to call — no writes, returns counts only.
 // Delete after investigation.
-export const diagnoseReadCount = query({
+export const diagnoseReadCount = internalQuery({
   args: { workosOrgId: v.string() },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
-
     const allOrgLegs = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
