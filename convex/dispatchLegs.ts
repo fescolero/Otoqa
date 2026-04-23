@@ -1123,48 +1123,8 @@ export const getAvailableDrivers = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // 1. Get all legs with drivers in PENDING/ACTIVE status for this org
-    const allOrgLegs = await ctx.db
-      .query('dispatchLegs')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
-      .filter((q) =>
-        q.and(
-          q.or(
-            q.eq(q.field('status'), 'PENDING'),
-            q.eq(q.field('status'), 'ACTIVE')
-          ),
-          q.neq(q.field('driverId'), undefined)
-        )
-      )
-      .collect();
 
-    // 2. Build overlap map: driverId -> worst overlap info
-    const driverOverlaps = new Map<string, { overlapMinutes: number; orderNumber?: string; loadId: string }>();
-    const requestedRange = { start: args.startTime, end: args.endTime };
-
-    for (const leg of allOrgLegs) {
-      if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
-      if (!leg.driverId) continue;
-
-      const legRange = await getLegTimeRange(ctx, leg);
-      if (!legRange) continue;
-
-      if (doTimeRangesOverlap(requestedRange, legRange)) {
-        const minutes = calculateOverlapMinutes(requestedRange, legRange);
-        const existing = driverOverlaps.get(leg.driverId);
-
-        if (!existing || minutes > existing.overlapMinutes) {
-          const conflictLoad = await ctx.db.get(leg.loadId);
-          driverOverlaps.set(leg.driverId, {
-            overlapMinutes: minutes,
-            orderNumber: conflictLoad?.orderNumber,
-            loadId: leg.loadId as string,
-          });
-        }
-      }
-    }
-
-    // 3. Get all active drivers for the org
+    // 1. Get all active drivers for the org (bounded by org headcount).
     const allDrivers = await ctx.db
       .query('drivers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
@@ -1178,46 +1138,127 @@ export const getAvailableDrivers = query({
 
     if (allDrivers.length === 0) return [];
 
-    // 4. Enrich all drivers with truck data and overlap insight
-    const drivers = [];
-    for (const driver of allDrivers) {
-      let truck = null;
-      if (driver.currentTruckId) {
-        truck = await ctx.db.get(driver.currentTruckId);
-      }
-      if (!truck) {
-        const lastLeg = await ctx.db
-          .query('dispatchLegs')
-          .withIndex('by_driver', (q) => q.eq('driverId', driver._id))
-          .order('desc')
-          .first();
-        truck = lastLeg?.truckId ? await ctx.db.get(lastLeg.truckId) : null;
-      }
+    // 2. For each active driver, read ONLY their PENDING and ACTIVE legs via the
+    //    compound index [driverId, status]. Selective indexed range — avoids the
+    //    full by_org scan (which read every historical leg, including COMPLETED /
+    //    CANCELED) that triggered the "too many reads" warning.
+    const driverLegPairs = await Promise.all(
+      allDrivers.map(async (driver) => {
+        const [pendingLegs, activeLegs] = await Promise.all([
+          ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_driver', (q) =>
+              q.eq('driverId', driver._id).eq('status', 'PENDING')
+            )
+            .collect(),
+          ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_driver', (q) =>
+              q.eq('driverId', driver._id).eq('status', 'ACTIVE')
+            )
+            .collect(),
+        ]);
+        return { driver, legs: [...pendingLegs, ...activeLegs] };
+      })
+    );
 
-      const overlap = driverOverlaps.get(driver._id) ?? null;
-
-      drivers.push({
-        _id: driver._id,
-        firstName: driver.firstName,
-        lastName: driver.lastName,
-        email: driver.email,
-        phone: driver.phone,
-        licenseState: driver.licenseState,
-        city: driver.city,
-        state: driver.state,
-        assignedTruck: truck
-          ? {
-              _id: truck._id,
-              unitId: truck.unitId,
-              bodyType: truck.bodyType,
-              lastLocationLat: truck.lastLocationLat,
-              lastLocationLng: truck.lastLocationLng,
-              lastLocationUpdatedAt: truck.lastLocationUpdatedAt,
-            }
-          : null,
-        overlap,
-      });
+    // 3. Dedup stop IDs across all candidate legs and batch-read once. Legs in
+    //    the same load share stops (end of leg N = start of leg N+1), so this
+    //    typically cuts stop reads ~25-40%.
+    const stopIdSet = new Set<Id<'loadStops'>>();
+    for (const { legs } of driverLegPairs) {
+      for (const leg of legs) {
+        if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
+        stopIdSet.add(leg.startStopId);
+        stopIdSet.add(leg.endStopId);
+      }
     }
+    const stopIds = Array.from(stopIdSet);
+    const stopDocs = await Promise.all(stopIds.map((id) => ctx.db.get(id)));
+    const stopsById = new Map<Id<'loadStops'>, Doc<'loadStops'>>();
+    stopIds.forEach((id, i) => {
+      const doc = stopDocs[i];
+      if (doc) stopsById.set(id, doc);
+    });
+
+    // 4. Compute max-overlap-per-driver in memory from the dedup'd stop map.
+    const requestedRange = { start: args.startTime, end: args.endTime };
+    const winningLegByDriver = new Map<string, { overlapMinutes: number; loadId: Id<'loadInformation'> }>();
+
+    for (const { driver, legs } of driverLegPairs) {
+      for (const leg of legs) {
+        if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
+        const startStop = stopsById.get(leg.startStopId);
+        const endStop = stopsById.get(leg.endStopId);
+        if (!startStop || !endStop) continue;
+        const start = parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime);
+        const end = parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime);
+        if (start === null || end === null) continue;
+        const legRange = { start, end };
+        if (!doTimeRangesOverlap(requestedRange, legRange)) continue;
+
+        const minutes = calculateOverlapMinutes(requestedRange, legRange);
+        const existing = winningLegByDriver.get(driver._id);
+        if (!existing || minutes > existing.overlapMinutes) {
+          winningLegByDriver.set(driver._id, { overlapMinutes: minutes, loadId: leg.loadId });
+        }
+      }
+    }
+
+    // 5. Fetch conflict load docs (one per driver with an overlap) in parallel.
+    const driverOverlaps = new Map<string, { overlapMinutes: number; orderNumber?: string; loadId: string }>();
+    await Promise.all(
+      Array.from(winningLegByDriver.entries()).map(async ([driverId, winner]) => {
+        const conflictLoad = await ctx.db.get(winner.loadId);
+        driverOverlaps.set(driverId, {
+          overlapMinutes: winner.overlapMinutes,
+          orderNumber: conflictLoad?.orderNumber,
+          loadId: winner.loadId as string,
+        });
+      })
+    );
+
+    // 6. Enrich drivers with truck data and overlap insight (parallel).
+    const drivers = await Promise.all(
+      allDrivers.map(async (driver) => {
+        let truck = null;
+        if (driver.currentTruckId) {
+          truck = await ctx.db.get(driver.currentTruckId);
+        }
+        if (!truck) {
+          const lastLeg = await ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_driver', (q) => q.eq('driverId', driver._id))
+            .order('desc')
+            .first();
+          truck = lastLeg?.truckId ? await ctx.db.get(lastLeg.truckId) : null;
+        }
+
+        const overlap = driverOverlaps.get(driver._id) ?? null;
+
+        return {
+          _id: driver._id,
+          firstName: driver.firstName,
+          lastName: driver.lastName,
+          email: driver.email,
+          phone: driver.phone,
+          licenseState: driver.licenseState,
+          city: driver.city,
+          state: driver.state,
+          assignedTruck: truck
+            ? {
+                _id: truck._id,
+                unitId: truck.unitId,
+                bodyType: truck.bodyType,
+                lastLocationLat: truck.lastLocationLat,
+                lastLocationLng: truck.lastLocationLng,
+                lastLocationUpdatedAt: truck.lastLocationUpdatedAt,
+              }
+            : null,
+          overlap,
+        };
+      })
+    );
 
     // Sort: available drivers first, then by overlap minutes ascending
     drivers.sort((a, b) => {
@@ -1328,6 +1369,79 @@ export const getDriverSchedule = query({
       if (!b.startTime) return -1;
       return a.startTime - b.startTime;
     });
+  },
+});
+
+// DIAGNOSTIC: reports leg/stop counts for an org so we can size the read budget
+// of getAvailableDrivers. Safe to call — no writes, returns counts only.
+// Delete after investigation.
+export const diagnoseReadCount = query({
+  args: { workosOrgId: v.string() },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const allOrgLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+
+    const byStatus: Record<string, number> = {
+      PENDING: 0,
+      ACTIVE: 0,
+      COMPLETED: 0,
+      CANCELED: 0,
+    };
+    let withDriver = 0;
+    let pendingOrActiveWithDriver = 0;
+    const stopIdsForPendingOrActive = new Set<string>();
+
+    for (const leg of allOrgLegs) {
+      byStatus[leg.status] = (byStatus[leg.status] ?? 0) + 1;
+      if (leg.driverId) withDriver++;
+      if ((leg.status === 'PENDING' || leg.status === 'ACTIVE') && leg.driverId) {
+        pendingOrActiveWithDriver++;
+        stopIdsForPendingOrActive.add(leg.startStopId);
+        stopIdsForPendingOrActive.add(leg.endStopId);
+      }
+    }
+
+    const activeDrivers = await ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('employmentStatus'), 'Active'),
+          q.neq(q.field('isDeleted'), true)
+        )
+      )
+      .collect();
+
+    const totalLegs = allOrgLegs.length;
+    const pendingActiveLegs = pendingOrActiveWithDriver;
+    const uniqueStops = stopIdsForPendingOrActive.size;
+
+    // Estimated read budget under current (pre-denormalization) implementation:
+    // 1 leg doc + 1.5 stop docs per active leg + driver/truck overhead.
+    const estimatedReadsOld =
+      totalLegs + pendingActiveLegs * 2 + activeDrivers.length * 2;
+    const estimatedReadsInverted =
+      pendingActiveLegs + uniqueStops + activeDrivers.length * 2;
+    const estimatedReadsDenormalized =
+      pendingActiveLegs + activeDrivers.length * 2;
+
+    return {
+      totalLegsInOrg: totalLegs,
+      legsByStatus: byStatus,
+      legsWithDriver: withDriver,
+      pendingOrActiveLegsWithDriver: pendingActiveLegs,
+      uniqueStopsReferenced: uniqueStops,
+      activeDrivers: activeDrivers.length,
+      estimatedReads: {
+        oldByOrgScan: estimatedReadsOld,
+        invertedPerDriver: estimatedReadsInverted,
+        withDenormalizedLegTimes: estimatedReadsDenormalized,
+      },
+    };
   },
 });
 
