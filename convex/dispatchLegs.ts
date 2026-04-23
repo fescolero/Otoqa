@@ -1123,69 +1123,8 @@ export const getAvailableDrivers = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // 1. Get all legs with drivers in PENDING/ACTIVE status for this org
-    const allOrgLegs = await ctx.db
-      .query('dispatchLegs')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
-      .filter((q) =>
-        q.and(
-          q.or(
-            q.eq(q.field('status'), 'PENDING'),
-            q.eq(q.field('status'), 'ACTIVE')
-          ),
-          q.neq(q.field('driverId'), undefined)
-        )
-      )
-      .collect();
 
-    // 2. Build overlap map: driverId -> worst overlap info
-    // Two-phase to preserve "max overlap per driver" semantics while
-    // parallelizing the per-leg time-range reads.
-    const requestedRange = { start: args.startTime, end: args.endTime };
-
-    const perLegOverlaps = await Promise.all(
-      allOrgLegs.map(async (leg) => {
-        if (args.excludeLoadId && leg.loadId === args.excludeLoadId) return null;
-        if (!leg.driverId) return null;
-
-        const legRange = await getLegTimeRange(ctx, leg);
-        if (!legRange) return null;
-        if (!doTimeRangesOverlap(requestedRange, legRange)) return null;
-
-        return {
-          driverId: leg.driverId,
-          overlapMinutes: calculateOverlapMinutes(requestedRange, legRange),
-          loadId: leg.loadId,
-        };
-      })
-    );
-
-    const winningLegByDriver = new Map<string, { overlapMinutes: number; loadId: Id<'loadInformation'> }>();
-    for (const entry of perLegOverlaps) {
-      if (!entry) continue;
-      const existing = winningLegByDriver.get(entry.driverId);
-      if (!existing || entry.overlapMinutes > existing.overlapMinutes) {
-        winningLegByDriver.set(entry.driverId, {
-          overlapMinutes: entry.overlapMinutes,
-          loadId: entry.loadId,
-        });
-      }
-    }
-
-    // Fetch conflictLoad only for the winning leg per driver (parallel).
-    const driverOverlaps = new Map<string, { overlapMinutes: number; orderNumber?: string; loadId: string }>();
-    await Promise.all(
-      Array.from(winningLegByDriver.entries()).map(async ([driverId, winner]) => {
-        const conflictLoad = await ctx.db.get(winner.loadId);
-        driverOverlaps.set(driverId, {
-          overlapMinutes: winner.overlapMinutes,
-          orderNumber: conflictLoad?.orderNumber,
-          loadId: winner.loadId as string,
-        });
-      })
-    );
-
-    // 3. Get all active drivers for the org
+    // 1. Get all active drivers for the org (bounded by org headcount).
     const allDrivers = await ctx.db
       .query('drivers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
@@ -1199,7 +1138,87 @@ export const getAvailableDrivers = query({
 
     if (allDrivers.length === 0) return [];
 
-    // 4. Enrich all drivers with truck data and overlap insight (parallel).
+    // 2. For each active driver, read ONLY their PENDING and ACTIVE legs via the
+    //    compound index [driverId, status]. Selective indexed range — avoids the
+    //    full by_org scan (which read every historical leg, including COMPLETED /
+    //    CANCELED) that triggered the "too many reads" warning.
+    const driverLegPairs = await Promise.all(
+      allDrivers.map(async (driver) => {
+        const [pendingLegs, activeLegs] = await Promise.all([
+          ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_driver', (q) =>
+              q.eq('driverId', driver._id).eq('status', 'PENDING')
+            )
+            .collect(),
+          ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_driver', (q) =>
+              q.eq('driverId', driver._id).eq('status', 'ACTIVE')
+            )
+            .collect(),
+        ]);
+        return { driver, legs: [...pendingLegs, ...activeLegs] };
+      })
+    );
+
+    // 3. Dedup stop IDs across all candidate legs and batch-read once. Legs in
+    //    the same load share stops (end of leg N = start of leg N+1), so this
+    //    typically cuts stop reads ~25-40%.
+    const stopIdSet = new Set<Id<'loadStops'>>();
+    for (const { legs } of driverLegPairs) {
+      for (const leg of legs) {
+        if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
+        stopIdSet.add(leg.startStopId);
+        stopIdSet.add(leg.endStopId);
+      }
+    }
+    const stopIds = Array.from(stopIdSet);
+    const stopDocs = await Promise.all(stopIds.map((id) => ctx.db.get(id)));
+    const stopsById = new Map<Id<'loadStops'>, Doc<'loadStops'>>();
+    stopIds.forEach((id, i) => {
+      const doc = stopDocs[i];
+      if (doc) stopsById.set(id, doc);
+    });
+
+    // 4. Compute max-overlap-per-driver in memory from the dedup'd stop map.
+    const requestedRange = { start: args.startTime, end: args.endTime };
+    const winningLegByDriver = new Map<string, { overlapMinutes: number; loadId: Id<'loadInformation'> }>();
+
+    for (const { driver, legs } of driverLegPairs) {
+      for (const leg of legs) {
+        if (args.excludeLoadId && leg.loadId === args.excludeLoadId) continue;
+        const startStop = stopsById.get(leg.startStopId);
+        const endStop = stopsById.get(leg.endStopId);
+        if (!startStop || !endStop) continue;
+        const start = parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime);
+        const end = parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime);
+        if (start === null || end === null) continue;
+        const legRange = { start, end };
+        if (!doTimeRangesOverlap(requestedRange, legRange)) continue;
+
+        const minutes = calculateOverlapMinutes(requestedRange, legRange);
+        const existing = winningLegByDriver.get(driver._id);
+        if (!existing || minutes > existing.overlapMinutes) {
+          winningLegByDriver.set(driver._id, { overlapMinutes: minutes, loadId: leg.loadId });
+        }
+      }
+    }
+
+    // 5. Fetch conflict load docs (one per driver with an overlap) in parallel.
+    const driverOverlaps = new Map<string, { overlapMinutes: number; orderNumber?: string; loadId: string }>();
+    await Promise.all(
+      Array.from(winningLegByDriver.entries()).map(async ([driverId, winner]) => {
+        const conflictLoad = await ctx.db.get(winner.loadId);
+        driverOverlaps.set(driverId, {
+          overlapMinutes: winner.overlapMinutes,
+          orderNumber: conflictLoad?.orderNumber,
+          loadId: winner.loadId as string,
+        });
+      })
+    );
+
+    // 6. Enrich drivers with truck data and overlap insight (parallel).
     const drivers = await Promise.all(
       allDrivers.map(async (driver) => {
         let truck = null;
