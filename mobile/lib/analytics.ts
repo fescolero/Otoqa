@@ -400,6 +400,55 @@ export function trackPendingActionReconciled(context: { stopId: string; loadId: 
   capture('pending_action_reconciled', context);
 }
 
+// ============================================
+// LOCATION QUEUE TELEMETRY
+// Fires from mobile/lib/location-queue.ts (MMKV backend). Combined with
+// the queue_backend super-property registered on setPostHogClient, every
+// tracking event carries backend context for side-by-side MMKV-vs-SQLite
+// comparison during canary.
+// ============================================
+
+export function trackLocationQueueOpFailed(context: {
+  op: string;
+  error: string;
+  consecutiveFailures: number;
+}) {
+  capture('location_queue_op_failed', context);
+}
+
+export function trackLocationQueueAutoReset(context: {
+  trigger: 'consecutive_failures' | 'interrupted_migration' | 'manual';
+  op?: string;
+}) {
+  capture('location_queue_auto_reset', context);
+}
+
+export function trackLocationQueueEvicted(context: {
+  reason: 'queue_full';
+  queueSize: number;
+}) {
+  capture('location_queue_evicted', context);
+}
+
+export function trackLocationQueueMigrated(context: {
+  sqliteRows: number;
+  fallbackRows: number;
+  sqliteReadable: boolean;
+  fallbackReadable: boolean;
+}) {
+  capture('location_queue_migrated', context);
+}
+
+/**
+ * Register the queue backend as a super-property so every subsequent event
+ * (watch_location_saved, bg_task_result, etc.) carries `queue_backend` in
+ * its properties. Filter by this in PostHog to compare MMKV-vs-SQLite
+ * failure rates side-by-side during the canary.
+ */
+export function registerQueueBackend(backend: 'mmkv' | 'sqlite') {
+  posthogClient?.register({ queue_backend: backend });
+}
+
 function maskPhone(phone: string): string {
   if (phone.length <= 4) return '****';
   return phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);

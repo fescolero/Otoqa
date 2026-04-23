@@ -17,6 +17,11 @@ import { convex, ConvexAuthProvider } from '../lib/convex';
 import { queryClient, setupQueryPersistence } from '../lib/query-client';
 import { setupNetworkListener, processQueue, setMutationProcessor } from '../lib/offline-queue';
 import { registerBackgroundSync } from '../lib/background-sync';
+import {
+  resolveBackend,
+  migrateIfNeeded,
+  purgeStaleUnsynced,
+} from '../lib/location-storage';
 import { useMutation, useAction } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
@@ -298,6 +303,21 @@ export default function RootLayout() {
 
     // Register background sync task
     registerBackgroundSync();
+
+    // Resolve the GPS queue backend for this app session (flag-gated rollout
+    // of MMKV over the legacy SQLite store). Locks once per boot; all
+    // subsequent calls to location-storage.* route to whichever backend won
+    // the flag. Drains legacy stores into MMKV if this is the first launch
+    // on the MMKV backend, then runs a best-effort purge of stale pings.
+    (async () => {
+      try {
+        await resolveBackend();
+        await migrateIfNeeded();
+        await purgeStaleUnsynced();
+      } catch (err) {
+        console.warn('[RootLayout] queue backend init failed:', err);
+      }
+    })();
 
     return () => {
       unsubscribe();
