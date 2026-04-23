@@ -5,7 +5,7 @@ import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from '
 import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
-import { parseStopDateTime } from './_helpers/timeUtils';
+import { parseStopDateTime, syncLegsAffectedByStop } from './_helpers/timeUtils';
 import { updateLoadCount } from './stats_helpers';
 import {
   setLoadTag,
@@ -1602,6 +1602,12 @@ export const updateStopTimes = mutation({
     // If updating the first stop's date, sync firstStopDate on the load
     if (stop.sequenceNumber === 1 && updates.windowBeginDate !== undefined) {
       await syncFirstStopDate(ctx, stop.loadId);
+    }
+
+    // If the window's begin date/time changed, refresh cached scheduled times
+    // on every leg that references this stop as start or end.
+    if (updates.windowBeginDate !== undefined || updates.windowBeginTime !== undefined) {
+      await syncLegsAffectedByStop(ctx, stopId);
     }
 
     // Trigger pay recalculation for affected legs

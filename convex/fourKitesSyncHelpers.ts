@@ -10,6 +10,7 @@ import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
 import { setLoadTag, getLoadFacets } from "./lib/loadFacets";
+import { syncLegsAffectedByStop } from "./_helpers/timeUtils";
 
 // Read-only lane lookup using the compound index (reads ~1 doc instead of full table scan)
 export const findContractLane = internalQuery({
@@ -192,6 +193,16 @@ export const updateStop = internalMutation({
   },
   handler: async (ctx, args) => {
     await ctx.db.patch(args.stopId, args.data);
+    // If the patch touched the window's begin date/time, refresh cached
+    // scheduled times on every leg that references this stop.
+    const data = args.data as Record<string, unknown> | null | undefined;
+    if (
+      data &&
+      (Object.prototype.hasOwnProperty.call(data, "windowBeginDate") ||
+        Object.prototype.hasOwnProperty.call(data, "windowBeginTime"))
+    ) {
+      await syncLegsAffectedByStop(ctx, args.stopId);
+    }
   },
 });
 

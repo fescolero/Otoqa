@@ -1600,6 +1600,18 @@ export default defineSchema({
     ),
     plannedStartAt: v.optional(v.float64()), // Dispatcher's scheduled start
 
+    // Denormalized scheduled times — cached from start/end stops so overlap
+    // queries (e.g. getAvailableDrivers) don't N+1 into loadStops.
+    // Source of truth: startStop.windowBeginDate+Time → scheduledStartMs,
+    // endStop.windowBeginDate+Time → scheduledEndMs. Maintained by the
+    // helpers in convex/_helpers/timeUtils.ts — any mutation that inserts a
+    // leg, changes its startStopId/endStopId, or patches a stop's
+    // windowBeginDate/Time must keep these in sync.
+    // Optional because backfill hasn't touched historical rows yet; reads
+    // fall back to live stop reads while either field is undefined.
+    scheduledStartMs: v.optional(v.float64()),
+    scheduledEndMs: v.optional(v.float64()),
+
     workosOrgId: v.string(),
     createdAt: v.float64(),
     updatedAt: v.float64(),

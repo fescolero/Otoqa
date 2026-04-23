@@ -1,5 +1,5 @@
 import { QueryCtx, MutationCtx } from '../_generated/server';
-import { Doc } from '../_generated/dataModel';
+import { Doc, Id } from '../_generated/dataModel';
 
 /**
  * Parses stop date and time strings into a Unix timestamp.
@@ -97,6 +97,70 @@ export type OverlapInfo = {
   orderNumber?: string;
   overlapMinutes: number;
 };
+
+/**
+ * Compute scheduledStartMs / scheduledEndMs for a new leg before insert.
+ * Returns the cached values the caller should include in the leg document.
+ * If either stop is missing or has unparsable window times, the corresponding
+ * field is returned as undefined so the read-side fallback can recover later.
+ */
+export async function computeLegScheduledTimes(
+  ctx: QueryCtx | MutationCtx,
+  startStopId: Id<'loadStops'>,
+  endStopId: Id<'loadStops'>
+): Promise<{ scheduledStartMs: number | undefined; scheduledEndMs: number | undefined }> {
+  const [startStop, endStop] = await Promise.all([
+    ctx.db.get(startStopId),
+    ctx.db.get(endStopId),
+  ]);
+  return {
+    scheduledStartMs: startStop
+      ? parseStopDateTime(startStop.windowBeginDate, startStop.windowBeginTime) ?? undefined
+      : undefined,
+    scheduledEndMs: endStop
+      ? parseStopDateTime(endStop.windowBeginDate, endStop.windowBeginTime) ?? undefined
+      : undefined,
+  };
+}
+
+/**
+ * Re-compute and patch a single leg's cached scheduled times. Call when the
+ * leg's startStopId or endStopId changes (e.g. splitAtStop repower).
+ */
+export async function syncLegScheduledTimes(
+  ctx: MutationCtx,
+  legId: Id<'dispatchLegs'>
+): Promise<void> {
+  const leg = await ctx.db.get(legId);
+  if (!leg) return;
+  const times = await computeLegScheduledTimes(ctx, leg.startStopId, leg.endStopId);
+  await ctx.db.patch(legId, times);
+}
+
+/**
+ * Fan-out: find every leg that uses `stopId` as its start or end, and re-sync
+ * their cached scheduled times. Call after patching a stop's windowBeginDate
+ * or windowBeginTime.
+ *
+ * Uses the by_load index + in-memory filter rather than a dedicated by_stop
+ * index — legs-per-load is small (splits are rare), so the added index cost
+ * outweighs the gain. Revisit if a "bulk re-stop" workflow emerges.
+ */
+export async function syncLegsAffectedByStop(
+  ctx: MutationCtx,
+  stopId: Id<'loadStops'>
+): Promise<void> {
+  const stop = await ctx.db.get(stopId);
+  if (!stop) return;
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+    .collect();
+  const affected = legs.filter(
+    (leg) => leg.startStopId === stopId || leg.endStopId === stopId
+  );
+  await Promise.all(affected.map((leg) => syncLegScheduledTimes(ctx, leg._id)));
+}
 
 /**
  * Detects all time overlaps between a set of new leg ranges and a driver's
