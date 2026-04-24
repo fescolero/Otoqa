@@ -641,7 +641,8 @@ Future contributors may be tempted to implement these. This section documents wh
 - [`mobile/docs/gps-ping-attribution.md`](./gps-ping-attribution.md) — if created during Phase 1
 - PR [#104](https://github.com/fescolero/Otoqa/pull/104) — schema-drift guard
 - PR [#105](https://github.com/fescolero/Otoqa/pull/105) — MMKV migration + battery-opt + heartbeat
-- PR #106 (future) — Phase 1 activity recognition + FCM wake-up
+- PR [#106](https://github.com/fescolero/Otoqa/pull/106) — Phase 0 storage hardening (encryption + boot-state + clock-skew guard + typed flag accessors)
+- PR [#107](https://github.com/fescolero/Otoqa/pull/107) — Phase 1a GPS wake-up server foundation (schema + ingest debounce + pushTokens API)
 
 ---
 
@@ -740,27 +741,37 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
 
 ### Phase 1 — Activity Recognition + FCM wake-up
 
+**Sub-phase slicing** (shipping as 5 sequential PRs instead of one bundle — keeps each reviewable, isolates the first runtime-version bump to PR 1d, and lets server changes bake before native touches the client):
+
+- **1a — Server foundation** (PR [#107](https://github.com/fescolero/Otoqa/pull/107), merged / in review): schema + indexes, `batchInsertLocations` lastPingAt debounce + sampled `ping_ingested` emit, Phase 1 feature-flag keys, `pushTokens.ts` register/clear mutations. Dark (no callers yet).
+- **1b — FCM server send path**: `fcmWake.sweep` cron + `sendWake` action with atomic cooldown mutation, FCM HTTP v1 POST + error-code handling (backoff, token clear), cron registration, `FCM_SERVICE_ACCOUNT_JSON` env wiring. Still dark until 1c arrives.
+- **1c — Mobile push-token + FCM receive**: `mobile/lib/push-token.ts` + `mobile/lib/fcm-handler.ts` (Path B: `expo-notifications` only), `mobile/lib/logout.ts` centralization refactor, session-active guard, real-time flag subscription, Android `POST_NOTIFICATIONS` permission, Proguard rules. Flip `fcm_wake_enabled` on canary → end-to-end FCM wake works without AR.
+- **1d — `otoqa-motion` native module**: first Expo local module, Kotlin AR wrapper, broadcast receiver, JS bridge, runtime `ACTIVITY_RECOGNITION` permission, dev-mock `fakeTransition`, `motion-service.ts` with debounce + rate-limit. Ships behind `ar_shadow_mode=true` only. **First native module → bumps `expo.runtimeVersion`.**
+- **1e — Shadow→live flip**: after ≥7 days shadow-mode on canary with § Phase-1 thresholds met (1–20 transitions/hr, debounce-hit < 30%, phantoms < 5/driver/day), flip `ar_shadow_mode=false` + `ar_wake_enabled=true`. PR contents: exit-criteria evidence doc + flag flips.
+
+**Pre-work done as of PR 1a**: `FCM_SERVICE_ACCOUNT_JSON` Convex env var set (dev); `google-services.json` Firebase config downloaded (package `com.otoqa.driver`, project `otoqa-95106`) — awaiting placement + `app.json` wire-up in PR 1c. APNs key upload deferred to Phase 4 prep (requires Option A-vs-B decision — see PR 1a review thread for the spec inconsistency noted there).
+
 **Server (Convex)**:
 
-- [ ] Verify prerequisites exist in the current codebase before starting (should already be true — confirm by grep):
-  - [ ] `resolveAuthenticatedDriver` exported from [`convex/driverMobile.ts`](../../../convex/driverMobile.ts) — auth helper for Clerk mobile JWTs (phone claim → driver row)
-  - [ ] `api.driverSessions.getActiveSession` query exists (already consumed by [`mobile/app/(app)/_layout.tsx`](../app/(app)/_layout.tsx))
-- [ ] Schema: add `driverSessions.lastPingAt: v.optional(v.number())`
-- [ ] Schema: add `driverSessions.fcmLastPushAt: v.optional(v.number())`
-- [ ] Schema: add `driverSessions.fcmBackoffUntil: v.optional(v.number())` — unix ms; `sendWake` skips while `now < fcmBackoffUntil`. Reset to undefined on first successful send
-- [ ] Schema: add `driverSessions.fcmConsecutiveFailures: v.optional(v.number())` — counter, used to compute backoff (e.g. `1min << min(failures, 6)` caps at ~64 min)
-- [ ] Schema: add `driverSessions.pushToken: v.optional(v.string())` + `pushTokenPlatform: v.optional(v.union(v.literal('ios'), v.literal('android')))` + `pushTokenUpdatedAt: v.optional(v.number())`
-- [ ] Schema: add index `by_active_lastping` on `['status', 'lastPingAt']`. **Verified**: `driverSessions.status` is `v.union(v.literal('active'), v.literal('completed'))` at [`convex/schema.ts:2087`](../../../convex/schema.ts). Sweep filter selects `status === 'active'`. The existing `by_status_started` index does not collide with the new one
-- [ ] Patch `batchInsertLocations` in `convex/driverLocations.ts`:
-  - [ ] Compute max `recordedAt` per session group after inserts
-  - [ ] Debounce — only patch session if `maxRecordedAt > session.lastPingAt + 15000`
-  - [ ] When patching, emit `session_last_ping_patched({ sessionId, newLastPingAt })` for observability
-  - [ ] Write the patch in the same mutation
-  - [ ] Per-ping **sampled** emit `ping_ingested({ recordedToCreatedLagMs })` = `Date.now() - recordedAt`. Gate on `Math.random() < ping_ingested_sample_rate` (default 0.01 from Phase 0 flag). Sole source of the `recordedToCreatedLagMs` KPI in § 10.4 / § 12
-- [ ] Per-capability feature flags in `convex/featureFlags.ts` — add keys: `ar_wake_enabled`, `fcm_wake_enabled`, `ar_shadow_mode` (fire telemetry without starting FGS)
-- [ ] Create `convex/pushTokens.ts`:
-  - [ ] `registerPushToken({ token, platform })` mutation — auth-gated via `resolveAuthenticatedDriver`; stores on active session (or driver row if no active session)
-  - [ ] `clearPushToken({ token })` internal mutation — called on FCM `UNREGISTERED` / `INVALID_ARGUMENT` response
+- [x] Verify prerequisites exist in the current codebase before starting (should already be true — confirm by grep):
+  - [x] `resolveAuthenticatedDriver` exported from [`convex/driverMobile.ts`](../../../convex/driverMobile.ts) — auth helper for Clerk mobile JWTs (phone claim → driver row)
+  - [x] `api.driverSessions.getActiveSession` query exists (already consumed by [`mobile/app/(app)/_layout.tsx`](../app/(app)/_layout.tsx))
+- [x] Schema: add `driverSessions.lastPingAt: v.optional(v.number())` *(PR 1a)*
+- [x] Schema: add `driverSessions.fcmLastPushAt: v.optional(v.number())` *(PR 1a)*
+- [x] Schema: add `driverSessions.fcmBackoffUntil: v.optional(v.number())` — unix ms; `sendWake` skips while `now < fcmBackoffUntil`. Reset to undefined on first successful send *(PR 1a)*
+- [x] Schema: add `driverSessions.fcmConsecutiveFailures: v.optional(v.number())` — counter, used to compute backoff (e.g. `1min << min(failures, 6)` caps at ~64 min) *(PR 1a)*
+- [x] Schema: add `driverSessions.pushToken: v.optional(v.string())` + `pushTokenPlatform: v.optional(v.union(v.literal('ios'), v.literal('android')))` + `pushTokenUpdatedAt: v.optional(v.number())` *(PR 1a)*
+- [x] Schema: add index `by_active_lastping` on `['status', 'lastPingAt']`. **Verified**: `driverSessions.status` is `v.union(v.literal('active'), v.literal('completed'))` at [`convex/schema.ts:2087`](../../../convex/schema.ts). Sweep filter selects `status === 'active'`. The existing `by_status_started` index does not collide with the new one *(PR 1a)*. Also added `by_push_token` on `['pushToken']` to make `clearPushToken` O(1) instead of scanning active sessions
+- [x] Patch `batchInsertLocations` in `convex/driverLocations.ts`: *(PR 1a)*
+  - [x] Compute max `recordedAt` per session group after inserts
+  - [x] Debounce — only patch session if `maxRecordedAt > session.lastPingAt + 15000`
+  - [x] When patching, emit `session_last_ping_patched({ sessionId, newLastPingAt })` for observability
+  - [x] Write the patch in the same mutation
+  - [x] Per-ping **sampled** emit `ping_ingested({ recordedToCreatedLagMs })` = `Date.now() - recordedAt`. Gate on `Math.random() < ping_ingested_sample_rate` (default 0.01 from Phase 0 flag). Sole source of the `recordedToCreatedLagMs` KPI in § 10.4 / § 12
+- [x] Per-capability feature flags in `convex/featureFlags.ts` — add keys: `ar_wake_enabled`, `fcm_wake_enabled`, `ar_shadow_mode` (fire telemetry without starting FGS) *(PR 1a — mobile constants in `mobile/lib/feature-flags.ts`; Convex-side the "registration" is just inserting flag rows, no schema change required)*
+- [x] Create `convex/pushTokens.ts`: *(PR 1a)*
+  - [x] `registerPushToken({ token, platform })` mutation — auth-gated via `resolveAuthenticatedDriver`; stores on active session. **Spec clarification**: the original text said "or driver row if no active session", but the schema additions only added push-token fields to `driverSessions`. PR 1a takes the simpler interpretation — no-op + telemetry (`no_active_session` reason) when no active session, and the mobile client re-registers on the next tracking-start. A driver-row fallback would require a schema addition not otherwise motivated
+  - [x] `clearPushToken({ token })` internal mutation — called on FCM `UNREGISTERED` / `INVALID_ARGUMENT` response *(caller not wired until PR 1b)*
 - [ ] Create `convex/fcmWake.ts`:
   - [ ] `internal.fcmWake.sweep` cron handler — scan `by_active_lastping`, take(500), schedule sends; gate on `fcm_wake_enabled` flag per org. **Do NOT check the 5-min cooldown in sweep** — defer to the mutation inside `sendWake` to avoid read-then-write races across concurrent sweeps
   - [ ] `internal.fcmWake.sendWake({ sessionId, driverId })` action — wraps an internal mutation that atomically re-reads `fcmLastPushAt` AND `fcmBackoffUntil`, aborts if either blocks, and patches `fcmLastPushAt=now` before the action fires the HTTP POST. This is the only writer to `fcmLastPushAt`
@@ -771,7 +782,7 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
     - On `QUOTA_EXCEEDED` / `UNAVAILABLE` / `INTERNAL`: increment `fcmConsecutiveFailures`, set `fcmBackoffUntil = now + (60_000 << Math.min(fcmConsecutiveFailures, 6))` (1min → 64min ceiling)
     - On success: reset `fcmConsecutiveFailures=0`, clear `fcmBackoffUntil`
 - [ ] Register cron in [`convex/crons.ts`](../../../convex/crons.ts) — use `crons.interval('fcm-wake-sweep', { minutes: 1 }, internal.fcmWake.sweep, {})` (matches the shipped pattern at `crons.ts:7,11,41`). Either `crons.interval` or `crons.cron` with a crontab string works; `interval` is more idiomatic for fixed cadence
-- [ ] Store `FCM_SERVICE_ACCOUNT_JSON` as Convex env var (one-time, see Pre-work)
+- [x] Store `FCM_SERVICE_ACCOUNT_JSON` as Convex env var (one-time, see Pre-work) *(dev deployment, 2026-04-24; prod still pending until the live flip)*
 
 **Checkpoint — server standalone** (do not proceed to native until green):
 
