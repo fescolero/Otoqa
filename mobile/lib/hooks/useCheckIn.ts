@@ -9,6 +9,7 @@ import {
   getTrackingState,
   attachLoadToSession,
   detachLoadFromSession,
+  reconcileTrackingStateWithActiveSession,
 } from '../location-tracking';
 import * as Location from 'expo-location';
 import { useNetworkStatus } from './useNetworkStatus';
@@ -40,7 +41,13 @@ async function attachLoadToTrackingForCheckIn(params: {
   action?: 'attached' | 'started' | 'continued' | 'handoff';
   previousLoadId?: string;
 }> {
-  const state = await getTrackingState();
+  // Reconcile with the server's active-session source of truth BEFORE
+  // deciding mode. Drivers whose TrackingState lost / never had
+  // sessionId (e.g., from the pre-fix start-shift.tsx typo) get their
+  // state patched here, so this check-in and every subsequent ping
+  // flows in session mode and lastPingAt populates on the server.
+  // See reconcileTrackingStateWithActiveSession in location-tracking.ts.
+  const state = await reconcileTrackingStateWithActiveSession('check_in');
   if (state?.isActive && state.sessionId) {
     const result = await attachLoadToSession(params.loadId);
     return {

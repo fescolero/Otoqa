@@ -274,17 +274,24 @@ export const findStaleSessionsForWake = internalQuery({
   ),
   handler: async (ctx) => {
     const threshold = Date.now() - STALE_THRESHOLD_MS;
-    // by_active_lastping is [status, lastPingAt]. lastPingAt=undefined on
-    // brand-new sessions sorts before any number, so the .lt(threshold)
-    // filter excludes them — a session that has never pinged isn't
-    // meaningfully "overdue" yet (it may have just started). Once the
-    // first batch of pings lands, the 15s-debounced patch in
-    // batchInsertLocations populates lastPingAt, and the session becomes
-    // wake-eligible after 2 min of silence.
+    // by_active_lastping is [status, lastPingAt]. We want sessions that
+    // have actually pinged AT LEAST ONCE and then gone quiet — a session
+    // that has never pinged isn't "stale," it just hasn't started yet
+    // (or it has a broken client that never attributes sessionId to
+    // pings, which would wake-flood every minute if we included it).
+    //
+    // Empirical finding: in Convex indexes, `lastPingAt = undefined`
+    // sorts before all numbers, and `.lt(threshold)` INCLUDES those
+    // undefined entries (verified via a live sweep that returned an
+    // undefined-lastPingAt session). An earlier version of this query
+    // assumed the opposite and would have wake-flooded every active
+    // session system-wide. The explicit `.gt('lastPingAt', 0)` bound
+    // here guarantees we skip undefined/zero values regardless of
+    // Convex's undefined-sort semantics.
     const rows = await ctx.db
       .query('driverSessions')
       .withIndex('by_active_lastping', (q) =>
-        q.eq('status', 'active').lt('lastPingAt', threshold),
+        q.eq('status', 'active').gt('lastPingAt', 0).lt('lastPingAt', threshold),
       )
       .take(MAX_SWEEP_BATCH);
 

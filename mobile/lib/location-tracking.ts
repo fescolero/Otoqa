@@ -30,6 +30,7 @@ import {
   trackWatchLocationFiltered,
   trackWatchLocationSaved,
   trackWatchLocationError,
+  trackTrackingStateSelfHealed,
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
 import { setBootState, clearBootState } from './boot-state';
@@ -352,6 +353,129 @@ async function authedMutation<T>(mutationRef: any, args: any): Promise<T> {
     lg.error(`HTTP client also failed: ${msg}`);
     throw httpErr;
   }
+}
+
+/**
+ * Query variant of authedMutation — for read-only Convex calls that
+ * might fire from foreground, background, or mid-recovery contexts
+ * where React client auth may or may not be live. Returns null on any
+ * failure (caller should treat as "no data available" rather than
+ * throwing). Used by reconcileTrackingStateWithActiveSession below.
+ */
+async function authedQueryOrNull<T>(queryRef: any, args: any): Promise<T | null> {
+  try {
+    const REACT_CLIENT_TIMEOUT = 5_000;
+    const result = await Promise.race([
+      convex.query(queryRef, args),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT),
+      ),
+    ]);
+    return result as T;
+  } catch (reactErr) {
+    // Fall through to HTTP client with fresh Clerk token.
+  }
+  try {
+    const { getFreshToken } = require('./auth-token-store');
+    const token = await getFreshToken();
+    if (!token) return null;
+    const httpClient = new ConvexHttpClient(CONVEX_URL);
+    httpClient.setAuth(token);
+    return (await httpClient.query(queryRef, args)) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reconcile the local TrackingState with the server's active-session
+ * source of truth. Self-heals the state when a server-side active
+ * session exists but the local state is missing its `sessionId`.
+ *
+ * Called at every TrackingState entry point that either reads or
+ * writes the state (check-in, resume on foreground, legacy-load start
+ * retry). Safe to call anywhere — idempotent if state already matches,
+ * no-op if no server session exists, and swallows all errors so a
+ * transient Convex outage never blocks tracking continuity.
+ *
+ * Returns the (possibly patched) current TrackingState, or the
+ * original state if no change was needed.
+ *
+ * Why this exists: from Phase-1a ship date through the commit that
+ * introduced this helper, `start-shift.tsx` had a typo in the
+ * organizationId lookup (`roles.organizationId`, which doesn't exist
+ * on UserRoles) that silently prevented `startSessionTracking` from
+ * ever running. Every driver in every org was stuck in legacy_load
+ * mode, pings flowed without `sessionId`, and Phase 1's entire
+ * `lastPingAt` / FCM-wake foundation was dormant. The Start Shift
+ * typo fix (same PR) prevents the bug for NEW shifts; this helper
+ * self-heals for drivers mid-shift when the fix ships.
+ */
+export async function reconcileTrackingStateWithActiveSession(
+  reason: 'check_in' | 'resume' | 'legacy_start',
+): Promise<TrackingState | null> {
+  const state = await getTrackingState();
+
+  // If local state already has a sessionId OR no local state exists
+  // at all, there's nothing to reconcile:
+  //   - state.sessionId set → already session-mode, correct
+  //   - state == null → driver hasn't started tracking at all; the
+  //     caller will handle state creation via its normal path
+  if (!state || state.sessionId) return state;
+
+  // Local state is active in legacy mode. Query server for an active
+  // session. If the driver actually tapped Start Shift, a driverSessions
+  // row exists and we can patch it into the local state in place.
+  //
+  // getActiveSession is auth-gated via Clerk (resolveAuthenticatedDriver
+  // in convex/driverSessions.ts), so without a valid JWT it returns
+  // null. That's treated as "no reconciliation available" — falling
+  // through to the caller's legacy path, which is no worse than today's
+  // behavior.
+  const active = await authedQueryOrNull<{
+    _id: string;
+    driverId: string;
+    organizationId: string;
+  } | null>(api.driverSessions.getActiveSession, {});
+
+  if (!active) return state; // No server session; legacy state is correct.
+
+  // Sanity: the server session must match the local driverId. If it
+  // doesn't, something deeper is wrong (mixed accounts? device swap?)
+  // — log and bail rather than corrupt state.
+  if (active.driverId !== state.driverId) {
+    lg.warn(
+      `reconcileTrackingState: server session driverId=${active.driverId.substring(0, 8)} ` +
+        `does not match local state driverId=${state.driverId.substring(0, 8)} — skipping patch`,
+    );
+    return state;
+  }
+
+  const patched: TrackingState = {
+    ...state,
+    sessionId: active._id,
+  };
+  try {
+    await storage.set(TRACKING_STATE_KEY, JSON.stringify(patched));
+    // Mirror the sessionId into boot-state so Phase 3 reboot recovery
+    // finds the correct session if the OS kills the process after
+    // reconciliation.
+    setBootState({
+      isActive: true,
+      sessionId: active._id,
+      driverId: state.driverId,
+    });
+  } catch (err) {
+    lg.warn(
+      `reconcileTrackingState: failed to persist patched state: ${err instanceof Error ? err.message : err}`,
+    );
+    return state;
+  }
+  trackTrackingStateSelfHealed({ reason, sessionId: active._id });
+  lg.debug(
+    `Self-healed tracking state (reason=${reason}): attached session ${active._id.substring(0, 12)}`,
+  );
+  return patched;
 }
 
 // Detect Expo Go: background tasks only work in development/production builds.
@@ -789,8 +913,45 @@ export async function startLocationTracking(params: {
       lg.warn('Running on simulator - background location may not work');
     }
 
-    // Check if already tracking
-    const existingState = await getTrackingState();
+    // Reconcile first: if a server-side active session exists, we must
+    // NOT drop it by running in legacy-load mode. Trip-screen's
+    // permission-retry path calls this function directly and would
+    // otherwise wipe the session state of an on-shift driver.
+    //
+    // Three cases:
+    //   (a) Reconciled state has sessionId AND FGS already running → the
+    //       state is correct; attach the load (no FGS restart).
+    //   (b) Reconciled state has sessionId BUT FGS is NOT running → need
+    //       to start FGS in session mode. startSessionTracking does that
+    //       using the existing sessionId, then attach the load.
+    //   (c) No sessionId (legacy state or no state) → fall through to
+    //       the legacy code below, same as before this fix.
+    const reconciled = await reconcileTrackingStateWithActiveSession('legacy_start');
+    if (reconciled?.sessionId) {
+      const fgsLive = await isTracking();
+      if (fgsLive) {
+        lg.debug(
+          `Session active (${reconciled.sessionId.substring(0, 12)}), FGS live; attaching load`,
+        );
+        const attach = await attachLoadToSession(params.loadId);
+        return { success: attach.success, message: attach.message };
+      }
+      lg.debug(
+        `Session active (${reconciled.sessionId.substring(0, 12)}), FGS dead; restarting in session mode`,
+      );
+      const sessionResult = await startSessionTracking({
+        driverId: params.driverId,
+        sessionId: reconciled.sessionId as Id<'driverSessions'>,
+        organizationId: params.organizationId,
+      });
+      if (!sessionResult.success) return sessionResult;
+      const attach = await attachLoadToSession(params.loadId);
+      return { success: attach.success, message: attach.message };
+    }
+
+    // Check if already tracking (legacy path only — any legacy state
+    // gets replaced by this call's fresh state)
+    const existingState = reconciled;
     if (existingState?.isActive) {
       lg.debug('Already tracking, stopping previous session');
       await stopLocationTracking();
@@ -1326,7 +1487,12 @@ export async function resumeTracking(): Promise<{
   state?: TrackingState;
 }> {
   try {
-    const state = await getTrackingState();
+    // Self-heal BEFORE the isActive check — if a driver is mid-shift
+    // with legacy state (no sessionId), this patches sessionId into
+    // state so post-resume pings attribute correctly and lastPingAt
+    // starts populating on the server. No-op if state already has
+    // sessionId or no server session exists.
+    let state = await reconcileTrackingStateWithActiveSession('resume');
 
     if (!state?.isActive) {
       lg.debug('No active tracking to resume');
