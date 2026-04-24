@@ -30,6 +30,7 @@ import {
   trackWatchLocationSaved,
   trackWatchLocationError,
 } from './analytics';
+import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
 
 // Module-scoped namespaced logger. Debug/info calls are stripped in
 // production by Metro; warn/error pass through so Sentry / native
@@ -773,6 +774,17 @@ export async function startLocationTracking(params: {
       };
     }
 
+    // One-shot: ask the user to exempt us from Android's battery optimization.
+    // Without this, Doze + App Standby will aggressively kill the foreground
+    // service on long shifts (esp. screen-locked driving), silently stopping
+    // GPS capture. The prompt is a single system dialog; deferred here so the
+    // driver only ever sees it alongside the location-permission flow (not as
+    // a surprise mid-use). Non-blocking: we don't fail tracking start if the
+    // user declines — the battery killer just becomes more likely.
+    requestIgnoreBatteryOptimizationOnce().catch(() => {
+      /* best-effort; don't block tracking start on this */
+    });
+
     // Save tracking state
     const state: TrackingState = {
       isActive: true,
@@ -1107,6 +1119,10 @@ async function applyOSLevelTrackingResources(state: TrackingState): Promise<{
     };
   }
 
+  // One-shot battery-optimization exemption prompt. See startLocationTracking
+  // for rationale; same best-effort, non-blocking call.
+  requestIgnoreBatteryOptimizationOnce().catch(() => {});
+
   try {
     await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
       accuracy: Location.Accuracy.High,
@@ -1375,6 +1391,77 @@ function stopSyncInterval() {
 let foregroundWatchSubscription: Location.LocationSubscription | null = null;
 let lastForegroundLocation: { latitude: number; longitude: number; time: number } | null = null;
 let isSyncing = false;
+// Heartbeat gate: verify BG task is still registered every ~5 minutes during
+// active foreground tracking. Cheap TaskManager.isTaskRegisteredAsync call,
+// but no need to run it on every single GPS fix.
+let lastBgTaskHeartbeatCheck = 0;
+const BG_TASK_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Throttled heartbeat: if the BG task has been silently unregistered (OEM
+ * kill, Doze sweep, Samsung Sleeping Apps, etc.), re-register it now so
+ * the driver doesn't silently stop capturing when they next lock the
+ * phone. The foreground watch itself keeps running even when the BG task
+ * is dead — which is why this check is necessary in the first place; the
+ * data from the foreground side looks healthy while the background side
+ * has quietly died.
+ *
+ * No-op on Expo Go (no TaskManager). No-op if called within
+ * BG_TASK_HEARTBEAT_INTERVAL_MS of the previous check.
+ */
+async function maybeReregisterBgTaskHeartbeat(
+  now: number,
+  organizationId: string,
+): Promise<void> {
+  if (isExpoGo) return;
+  if (now - lastBgTaskHeartbeatCheck < BG_TASK_HEARTBEAT_INTERVAL_MS) return;
+  lastBgTaskHeartbeatCheck = now;
+
+  try {
+    const isRegistered = await TaskManager.isTaskRegisteredAsync(
+      LOCATION_TASK_NAME,
+    );
+    if (isRegistered) return; // healthy — nothing to do
+
+    // BG task is gone but foreground watch is still firing. That means the
+    // OS killed the headless JS context (zombie recycle). Re-register
+    // immediately so the next screen-off / app-background event doesn't
+    // drop into a silent capture gap.
+    lg.warn('Heartbeat: BG task is NOT registered during active tracking — re-registering');
+    let success = false;
+    let error: string | undefined;
+    try {
+      await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+        accuracy: Location.Accuracy.High,
+        timeInterval: TRACKING_INTERVAL_MS,
+        distanceInterval: BG_DISTANCE_INTERVAL,
+        showsBackgroundLocationIndicator: true,
+        foregroundService: {
+          notificationTitle: 'Route Tracking Active',
+          notificationBody: 'Recording your delivery route',
+          notificationColor: '#22c55e',
+        },
+        activityType: Location.ActivityType.OtherNavigation,
+        pausesUpdatesAutomatically: false,
+      });
+      success = true;
+    } catch (restartErr) {
+      error = restartErr instanceof Error ? restartErr.message : String(restartErr);
+      lg.warn(`Heartbeat: BG task re-registration failed: ${error}`);
+    }
+    trackBGTaskReregistered({
+      source: 'heartbeat',
+      wasRegistered: false,
+      success,
+      error,
+    });
+  } catch (err) {
+    // isTaskRegisteredAsync itself failed — unusual but non-fatal.
+    lg.warn(
+      `Heartbeat: isTaskRegisteredAsync failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
 
 /**
  * Start foreground location watching with continuous real-time updates
@@ -1407,6 +1494,10 @@ async function startForegroundPolling(organizationId: string) {
             speed_mps: location.coords.speed ?? null,
             heading_deg: location.coords.heading ?? null,
           });
+
+          // Throttled heartbeat — catches silently-killed BG tasks before
+          // the driver locks the phone and drops into a capture gap.
+          void maybeReregisterBgTaskHeartbeat(now, organizationId);
 
           const state = await getTrackingState();
           if (!state?.isActive) {
@@ -1836,6 +1927,18 @@ export async function restartForegroundServices(): Promise<void> {
 
   startSyncInterval(state.organizationId);
   startForegroundPolling(state.organizationId);
+
+  // Immediate one-shot flush: if any pings were buffered during the silent
+  // window (zombie BG task, screen-off gap, etc.), push them now instead of
+  // waiting for the sync interval's next tick. Cheap when queue is empty.
+  if (unsyncedCount > 0) {
+    lg.debug(`Foreground resume: flushing ${unsyncedCount} buffered pings`);
+    syncUnsyncedToConvex(state.organizationId).catch((err) => {
+      lg.warn(
+        `Foreground-resume flush failed (retry on next interval): ${err instanceof Error ? err.message : err}`,
+      );
+    });
+  }
 }
 
 // ============================================

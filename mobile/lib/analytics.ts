@@ -351,7 +351,7 @@ export function trackBGTaskError(context: { step: string; error: string }) {
 }
 
 export function trackBGTaskReregistered(context: {
-  source: 'foreground_return' | 'app_resume';
+  source: 'foreground_return' | 'app_resume' | 'heartbeat';
   wasRegistered: boolean;
   success: boolean;
   error?: string;
