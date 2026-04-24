@@ -63,20 +63,15 @@ async function requestAllPermissions() {
   // 6. Photo library
   await ImagePicker.requestMediaLibraryPermissionsAsync();
 
-  // 7. Activity recognition (Android 10+, runtime). Required by the
-  //    Phase 1d `otoqa-motion` native module. Pre-Q the permission is
-  //    install-time (com.google.android.gms.permission.ACTIVITY_RECOGNITION
-  //    in app.json) and always granted. On denial we leave motion-service
-  //    inert — the FCM wake path (PR 1b) still covers dead-FGS recovery.
-  if (Platform.OS === 'android' && Platform.Version >= 29) {
-    try {
-      await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.ACTIVITY_RECOGNITION,
-      );
-    } catch (err) {
-      console.log('ACTIVITY_RECOGNITION request error:', err);
-    }
-  }
+  // NOTE: ACTIVITY_RECOGNITION is NOT requested here. It has its own
+  // hook (useRequestActivityRecognitionOnce below) because users who
+  // signed in before Phase 1d shipped already have the
+  // PERMISSIONS_REQUESTED_KEY set, which would short-circuit this
+  // whole function before the AR request could fire. Bumping the key
+  // to _v2 would re-prompt camera/mic/location for every existing
+  // user — overkill for adding one permission. A dedicated hook
+  // with its own gate (or better: a runtime `check()` call) handles
+  // the upgrade path cleanly.
 
   await AsyncStorage.setItem(PERMISSIONS_REQUESTED_KEY, Date.now().toString());
 }
@@ -113,5 +108,46 @@ export function useRequestPermissionsOnce() {
     requestAllPermissions().catch((e) =>
       console.log('Permission request error:', e)
     );
+  }, []);
+}
+
+/**
+ * Phase 1d — request Google Play Services `ACTIVITY_RECOGNITION` runtime
+ * permission on Android 10+. Separate hook (not folded into
+ * `requestAllPermissions`) because the upgrade path matters: existing
+ * drivers already have `@permissions_requested_v1` set, which would
+ * short-circuit the broader permission loop and skip this. Using
+ * `PermissionsAndroid.check()` as the gate — no storage key — because
+ * the OS is already the source of truth for "did the user answer
+ * yes/no." If they denied with "don't ask again," `request()` returns
+ * `never_ask_again` without re-prompting.
+ *
+ * On denial: `motion-service.ts` stays inert (registerTransitions
+ * throws at the native layer) and FCM wake (PR 1b) remains the
+ * primary dead-FGS recovery path. No in-app UI consequence; we'd
+ * surface a rationale banner in a follow-up PR if canary data shows
+ * denial rates matter.
+ */
+export function useRequestActivityRecognitionOnce() {
+  const requested = useRef(false);
+
+  useEffect(() => {
+    if (requested.current) return;
+    requested.current = true;
+    (async () => {
+      if (Platform.OS !== 'android') return;
+      if (Platform.Version < 29) return; // pre-Q: install-time permission
+      try {
+        const already = await PermissionsAndroid.check(
+          PermissionsAndroid.PERMISSIONS.ACTIVITY_RECOGNITION,
+        );
+        if (already) return;
+        await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACTIVITY_RECOGNITION,
+        );
+      } catch (err) {
+        console.log('ACTIVITY_RECOGNITION request error:', err);
+      }
+    })();
   }, []);
 }
