@@ -204,6 +204,45 @@ export function registerForegroundWakeListener(): () => void {
 }
 
 // ---------------------------------------------------------------------------
+// FOREGROUND NOTIFICATION HANDLER (module-level — no React needed)
+// ---------------------------------------------------------------------------
+//
+// Wake pushes should NEVER render as visible banners — they're silent
+// data messages. Default expo-notifications behavior is to show a
+// banner + play sound when a notification arrives in the foreground;
+// without this handler the driver would see a random "wake_tracking"
+// banner every 2 minutes during an FCM wake test.
+//
+// Returns the full set of `shouldShow*` booleans the SDK supports so
+// we're forward-compatible: older versions use `shouldShowAlert`,
+// 0.30+ renamed it to `shouldShowBanner` + `shouldShowList`. We set
+// all of them for the wake case (suppress everything) and default-
+// allow for driver-facing messages.
+
+Notifications.setNotificationHandler({
+  handleNotification: async (notification) => {
+    const data = notification.request?.content?.data;
+    if ((data as { type?: string } | null)?.type === WAKE_PAYLOAD_TYPE) {
+      return {
+        shouldShowAlert: false,
+        shouldShowBanner: false,
+        shouldShowList: false,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
+      };
+    }
+    // Driver-facing pushes (dispatch messages, etc.) — default visible.
+    return {
+      shouldShowAlert: true,
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: true,
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
 // TASK DEFINITION (module-level side effect — required by TaskManager)
 // ---------------------------------------------------------------------------
 //
