@@ -28,6 +28,7 @@ import {
   registerForegroundWakeListener,
 } from '../../lib/fcm-handler';
 import { applyFlagSnapshot } from '../../lib/feature-flags';
+import { startMotionService, stopMotionService } from '../../lib/motion-service';
 import {
   identifyUser,
   resetUser,
@@ -319,6 +320,21 @@ export default function AppLayout() {
   useEffect(() => {
     if (liveFlags) applyFlagSnapshot(liveFlags);
   }, [liveFlags]);
+
+  // 4. Activity Recognition (Phase 1d). Native module registers
+  //    STILL↔IN_VEHICLE transitions via Google Play Services and
+  //    forwards them to motion-service, which gates on ar_wake_enabled
+  //    + ar_shadow_mode flags. Telemetry fires in shadow mode; FGS
+  //    restart fires only in live mode. No-op on iOS (Phase 4 decision
+  //    for the iOS motion path is separate). The subscription is
+  //    torn down on unmount — the stopLocationTracking flow separately
+  //    tears it down when the driver ends their shift.
+  useEffect(() => {
+    startMotionService().catch(() => {});
+    return () => {
+      stopMotionService().catch(() => {});
+    };
+  }, []);
 
   // Self-heal orphan GPS tracking.
   //

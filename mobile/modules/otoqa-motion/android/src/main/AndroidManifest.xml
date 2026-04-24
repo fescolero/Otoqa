@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    Permissions are declared in the host app's app.json (see § Phase 1d
+    in mobile/docs/gps-tracking-architecture.md). This manifest
+    intentionally empty so the module adds no permissions on its own —
+    the app author remains in control.
+
+    The BroadcastReceiver for ActivityTransition events is registered
+    dynamically from OtoqaMotionModule (lifecycle-bound to the JS
+    registerTransitions call) rather than statically here. Rationale:
+    a static receiver would survive app death and would need to route
+    the event through a HeadlessJS task to restart the FGS. That
+    dead-app wake path is a planned follow-up (see PR description); at
+    Phase 1d scope AR fires only while the JS runtime is alive, and
+    the FCM wake path (PR 1b) covers the dead-app case.
+  -->
+</manifest>

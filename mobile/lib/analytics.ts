@@ -510,6 +510,29 @@ export function trackFcmWakeResumeSuccess(context: {
   capture('fcm_wake_resume_success', context);
 }
 
+// ============================================
+// PHASE 1D — ACTIVITY RECOGNITION EVENTS
+// ============================================
+
+export function trackActivityRecognitionTransition(context: {
+  from?: string;
+  to: string;
+  shadow: boolean;
+  debounced?: boolean;
+  rateLimited?: boolean;
+  mock?: boolean;
+}) {
+  capture('activity_recognition_transition', context);
+}
+
+export function trackActivityRecognitionFgsRestart(context: {
+  success: boolean;
+  error?: string;
+  mock?: boolean;
+}) {
+  capture('activity_recognition_fgs_restart', context);
+}
+
 function maskPhone(phone: string): string {
   if (phone.length <= 4) return '****';
   return phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);
