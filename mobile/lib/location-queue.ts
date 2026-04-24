@@ -1,12 +1,15 @@
-import { createMMKV } from 'react-native-mmkv';
+import { createMMKV, deleteMMKV, type MMKV } from 'react-native-mmkv';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SQLite from 'expo-sqlite';
+import * as SecureStore from 'expo-secure-store';
+import * as Crypto from 'expo-crypto';
 import { log } from './log';
 import {
   trackLocationQueueOpFailed,
   trackLocationQueueAutoReset,
   trackLocationQueueEvicted,
   trackLocationQueueMigrated,
+  trackLocationQueueEncryptionMigrated,
 } from './analytics';
 
 // ============================================================================
@@ -37,9 +40,39 @@ import {
 
 const lg = log('LocationQueue');
 
-// MMKV instance. Thread-safe via internal file lock; safely shared across
-// the foreground JS context and the headless TaskManager context.
-const mmkv = createMMKV({ id: 'otoqa-location-queue' });
+// ============================================================================
+// INSTANCE IDS & ENCRYPTION STATE KEYS
+// ============================================================================
+// The ping queue lives in one of two MMKV instances on disk:
+//
+//   • PLAINTEXT_MMKV_ID — no encryption. The default mode. Every device
+//     boots here; the encryption migration only runs if the caller flips
+//     `queue_encryption_enabled` to true AND we successfully generate a
+//     key and drain. Disk file lives at $(Documents)/mmkv/otoqa-location-queue.
+//
+//   • ENCRYPTED_MMKV_ID — AES-256, key stored in SecureStore (iOS Keychain
+//     / Android Keystore). Once migrated, a device stays here permanently
+//     (no un-migration path by design — see resolveQueueEncryption below).
+//
+// Mode resolution happens once per app launch, inside
+// resolveQueueEncryption(). Until that resolves, `mmkv` points at the
+// plaintext instance — safe fallback, writes land somewhere durable.
+//
+// The META_ENCRYPTION_STATE marker is the on-disk state machine:
+//   • absent        → never migrated, plaintext mode
+//   • 'migrating'   → migration started, did not finish (resume on boot)
+//   • 'encrypted'   → migration complete, encrypted instance is canonical
+// ============================================================================
+
+const PLAINTEXT_MMKV_ID = 'otoqa-location-queue';
+const ENCRYPTED_MMKV_ID = 'otoqa-location-queue-enc';
+const SECURE_STORE_ENCRYPTION_KEY = 'otoqa.locationQueue.encryptionKey';
+const META_ENCRYPTION_STATE = 'meta:encryption_state';
+
+// Mutable module binding. Top-level function declarations below resolve
+// `mmkv` by name at call time, so swapping this after migration flips every
+// op onto the encrypted instance atomically.
+let mmkv: MMKV = createMMKV({ id: PLAINTEXT_MMKV_ID });
 
 const KEY_SCHEMA = 'meta:schema_v';
 const PING_PREFIX = 'ping:';
@@ -84,6 +117,18 @@ export interface QueuedPing {
   createdAt: number;
   syncAttempts: number; // escape-hatch: purged after 20 fails
   firstAttemptAt: number | null; // or when createdAt is > maxAgeMs old
+  // Set when the server permanently rejects a ping via the clock-skew
+  // guard (see convex/driverLocations.ts::SKEW_FUTURE_MS/SKEW_PAST_MS).
+  // A permanently-failed ping is:
+  //   • excluded from getUnsyncedLocations — the sync loop never sees it
+  //   • excluded from getUnsyncedCount — so sync doesn't spin re-checking it
+  //   • still counted by allPingKeys (queue-size / eviction) — we want
+  //     queue pressure to eventually push these out even if no new writes
+  //     trigger the purge
+  //   • eventually purged by purgeStaleUnsynced via the 48h age cap
+  // Optional for forward-compat: rows written by older bundles have no
+  // such field; undefined reads as falsy.
+  permanentlyFailed?: boolean;
 }
 
 export interface LocationInput {
@@ -256,21 +301,38 @@ export function insertLocationBatch(locs: LocationInput[]): number {
 
 export function getUnsyncedLocations(limit = 100): QueuedPing[] {
   return withRecovery('getUnsyncedLocations', () => {
-    // Every queued ping is unsynced — on successful sync we delete, so there's
-    // no synced=1 state. FIFO by key order (which is time order via timestamp
-    // prefix).
-    const keys = allPingKeys().sort().slice(0, limit);
+    // Every queued ping is unsynced unless flagged permanentlyFailed —
+    // on successful sync we delete, so there's no synced=1 state. FIFO
+    // by key order (which is time order via timestamp prefix).
+    //
+    // permanentlyFailed rows are walked past, not stopped on — a batch
+    // of, say, 80 permfailed rows at the head would otherwise starve
+    // the sync loop. We oversample keys and only take up to `limit`
+    // syncable pings.
+    const keys = allPingKeys().sort();
     const out: QueuedPing[] = [];
     for (const key of keys) {
+      if (out.length >= limit) break;
       const ping = readPing(key);
-      if (ping) out.push(ping);
+      if (!ping) continue;
+      if (ping.permanentlyFailed) continue;
+      out.push(ping);
     }
     return out;
   });
 }
 
 export function getUnsyncedCount(): number {
-  return withRecovery('getUnsyncedCount', () => allPingKeys().length);
+  return withRecovery('getUnsyncedCount', () => {
+    // Caller is the sync loop / diagnostics — it wants "how many rows
+    // are still *sync-eligible*," not raw disk occupancy. Eviction uses
+    // allPingKeys() directly in insertLocation.
+    let n = 0;
+    for (const ping of iterateAll()) {
+      if (!ping.permanentlyFailed) n++;
+    }
+    return n;
+  });
 }
 
 export function getUnsyncedForLoad(loadId: string, limit = 500): QueuedPing[] {
@@ -368,6 +430,26 @@ export function markSyncAttemptFailed(ids: string[]): void {
       if (!ping) continue;
       ping.syncAttempts += 1;
       if (ping.firstAttemptAt === null) ping.firstAttemptAt = now;
+      writePing(ping);
+    }
+  });
+}
+
+/**
+ * Flag the given pings as permanently failed — the server clock-skew guard
+ * rejected them and they will never succeed on retry. The rows stay on
+ * disk (they're useful forensic evidence: a 6-hour past skew points at a
+ * broken device clock we might want to investigate) but are invisible to
+ * the sync loop. purgeStaleUnsynced's 48h age cap reaps them naturally.
+ */
+export function markPermanentlyFailed(ids: string[]): void {
+  withRecovery('markPermanentlyFailed', () => {
+    for (const id of ids) {
+      const key = keyFor(id);
+      const ping = readPing(key);
+      if (!ping) continue;
+      if (ping.permanentlyFailed) continue; // idempotent
+      ping.permanentlyFailed = true;
       writePing(ping);
     }
   });
@@ -537,4 +619,185 @@ export async function migrateFromLegacyStoresOnce(): Promise<void> {
   // complete. Any crash above leaves schema_v = 'migrating', which next
   // launch interprets as "roll back and retry."
   mmkv.set(KEY_SCHEMA, '1');
+}
+
+// ============================================================================
+// ENCRYPTION-AT-REST RESOLUTION
+// ============================================================================
+//
+// Ordering guarantee: `SecureStore.setItemAsync` resolves only after the
+// platform (Keychain / Keystore) has durably persisted the key. This is
+// what makes the two-instance approach safer than MMKV's in-place
+// `encrypt()` — the plaintext file is still intact and readable if we
+// crash anywhere before step 5 below. With in-place encrypt, a crash
+// between "encrypt()" and "SecureStore.setItemAsync" would leave the data
+// encrypted on disk with no key — unrecoverable.
+//
+// Crash-resume scenarios (steps numbered to match body below):
+//
+//   1. Crash during step 2 (stamp `migrating`): plaintext has the marker,
+//      no SecureStore key, no encrypted instance. Next boot: SecureStore
+//      key absent → treated as fresh. If flag on, run migration from
+//      scratch (the stray `migrating` marker will be overwritten).
+//
+//   2. Crash between step 3 (key saved) and step 6 (encrypted marker):
+//      SecureStore has key, encrypted instance either absent or
+//      partially populated (no `encrypted` marker). Next boot: SecureStore
+//      key present → open encrypted, marker != 'encrypted' → re-drain
+//      from plaintext (idempotent via importAllFrom), stamp marker,
+//      delete plaintext.
+//
+//   3. Crash after step 6 but before step 7 (deleteMMKV plaintext):
+//      encrypted instance has `encrypted` marker, plaintext files linger.
+//      Next boot: use encrypted instance, best-effort delete plaintext.
+//      No data loss possible — the encrypted instance is canonical.
+//
+// Un-migration: not supported. Flipping `queue_encryption_enabled` back
+// to false after migration is interpreted as "don't start new migrations,"
+// not "revert." Decrypting in-place would require writing plaintext to
+// disk — a silent security downgrade. A user who wants to revert must
+// clear app data.
+// ============================================================================
+
+/**
+ * Generate a 32-char ASCII key (~190 bits of entropy) suitable for MMKV
+ * AES-256. MMKV treats the string as raw bytes; sticking to printable
+ * ASCII keeps char count == byte count, which matches the library's
+ * "32 bytes for AES-256" requirement unambiguously.
+ */
+async function generateAes256Key(): Promise<string> {
+  const ALPHABET =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = await Crypto.getRandomBytesAsync(32);
+  let out = '';
+  for (let i = 0; i < 32; i++) {
+    out += ALPHABET[bytes[i] % ALPHABET.length];
+  }
+  return out;
+}
+
+/**
+ * Resolve the active MMKV instance for this app launch.
+ *
+ * Called once during root init, after the feature-flag cache is warm.
+ * Idempotent: safe to call multiple times (re-resolves the same instance).
+ *
+ * @param enabled  Current value of the `queue_encryption_enabled` flag.
+ *                 A false value does NOT revert an already-migrated device.
+ */
+export async function resolveQueueEncryption(
+  enabled: boolean,
+): Promise<'plaintext' | 'encrypted'> {
+  const storedKey = await SecureStore.getItemAsync(
+    SECURE_STORE_ENCRYPTION_KEY,
+  );
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Path A: a key exists in SecureStore. Device has previously migrated,
+  // OR a prior migration crashed mid-flight. Either way, the encrypted
+  // instance is the canonical one.
+  // ──────────────────────────────────────────────────────────────────────
+  if (storedKey) {
+    const enc = createMMKV({
+      id: ENCRYPTED_MMKV_ID,
+      encryptionKey: storedKey,
+      encryptionType: 'AES-256',
+    });
+    const state = enc.getString(META_ENCRYPTION_STATE);
+
+    if (state !== 'encrypted') {
+      // Previous migration didn't finish — resume.
+      const start = Date.now();
+      const plain = createMMKV({ id: PLAINTEXT_MMKV_ID });
+      const pingsDrained = enc.importAllFrom(plain);
+      enc.set(META_ENCRYPTION_STATE, 'encrypted');
+      try {
+        deleteMMKV(PLAINTEXT_MMKV_ID);
+      } catch (err) {
+        // Plaintext file cleanup is best-effort — the encrypted instance
+        // is canonical; a lingering plaintext file is a hygiene issue,
+        // not correctness.
+        lg.warn(`resolveQueueEncryption: deleteMMKV plaintext failed: ${err}`);
+      }
+      trackLocationQueueEncryptionMigrated({
+        pingsDrained,
+        durationMs: Date.now() - start,
+        resumed: true,
+      });
+      lg.warn(
+        `Resumed interrupted encryption migration: ${pingsDrained} pings drained`,
+      );
+    } else {
+      // Clean encrypted state. Still worth a best-effort sweep in case
+      // deleteMMKV failed on a prior boot.
+      try {
+        deleteMMKV(PLAINTEXT_MMKV_ID);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    mmkv = enc;
+    return 'encrypted';
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Path B: no SecureStore key. Device has never migrated. If the flag is
+  // off, stay on plaintext. If on, run the migration now.
+  // ──────────────────────────────────────────────────────────────────────
+  if (!enabled) {
+    return 'plaintext';
+  }
+
+  const start = Date.now();
+  try {
+    // Step 1: the plaintext instance already exists (created at module
+    // load). Step 2: stamp the in-flight marker BEFORE generating the
+    // key, so a crash here leaves no orphaned key in SecureStore.
+    mmkv.set(META_ENCRYPTION_STATE, 'migrating');
+
+    // Step 3: generate + persist key atomically via SecureStore (Keychain
+    // / Keystore). After this resolves, the key is durable across app
+    // launches.
+    const newKey = await generateAes256Key();
+    await SecureStore.setItemAsync(SECURE_STORE_ENCRYPTION_KEY, newKey);
+
+    // Step 4: create the encrypted instance.
+    const enc = createMMKV({
+      id: ENCRYPTED_MMKV_ID,
+      encryptionKey: newKey,
+      encryptionType: 'AES-256',
+    });
+
+    // Step 5: drain plaintext → encrypted. importAllFrom overwrites keys,
+    // so running this twice (resume path) is safe.
+    const pingsDrained = enc.importAllFrom(mmkv);
+
+    // Step 6: stamp `encrypted` in the NEW instance. From here on the
+    // encrypted instance is canonical even if deleteMMKV below fails.
+    enc.set(META_ENCRYPTION_STATE, 'encrypted');
+
+    // Step 7: delete plaintext files from disk. Best-effort — if it
+    // fails, next boot sees SecureStore key + encrypted marker and
+    // retries the delete (no data risk).
+    try {
+      deleteMMKV(PLAINTEXT_MMKV_ID);
+    } catch (err) {
+      lg.warn(`resolveQueueEncryption: deleteMMKV plaintext failed: ${err}`);
+    }
+
+    mmkv = enc;
+    trackLocationQueueEncryptionMigrated({
+      pingsDrained,
+      durationMs: Date.now() - start,
+      resumed: false,
+    });
+    lg.warn(`Encryption migration complete: ${pingsDrained} pings drained`);
+    return 'encrypted';
+  } catch (err) {
+    // Any failure above leaves the plaintext instance intact. We stay on
+    // plaintext for this session and retry on next boot.
+    lg.error(`Encryption migration failed, staying on plaintext: ${err}`);
+    return 'plaintext';
+  }
 }

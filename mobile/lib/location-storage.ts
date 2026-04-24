@@ -1,6 +1,10 @@
 import * as mmkvQueue from './location-queue';
 import * as sqliteQueue from './location-db';
-import { getQueueBackend } from './feature-flags';
+import {
+  getQueueBackend,
+  getFlagBool,
+  FLAG_QUEUE_ENCRYPTION_ENABLED,
+} from './feature-flags';
 import { registerQueueBackend } from './analytics';
 import { log } from './log';
 
@@ -58,6 +62,29 @@ export async function resolveBackend(): Promise<Backend> {
 
   inflightResolve = (async () => {
     const backend = await getQueueBackend();
+
+    // Encryption-at-rest resolution is only meaningful on the MMKV path —
+    // the legacy SQLite backend is scheduled for deletion in Phase 5 and
+    // won't receive encryption work. If the flag is absent (cold cache,
+    // first launch) we default to false; a device that's going to be
+    // encryption-enabled will pick it up on the next launch when the
+    // refresh has landed.
+    if (backend === 'mmkv') {
+      const encryptionEnabled = await getFlagBool(
+        FLAG_QUEUE_ENCRYPTION_ENABLED,
+        false,
+      );
+      try {
+        const mode = await mmkvQueue.resolveQueueEncryption(encryptionEnabled);
+        lg.debug(`Queue encryption resolved: ${mode}`);
+      } catch (err) {
+        // Non-fatal: resolveQueueEncryption already falls back to plaintext
+        // internally. Log and continue so we don't block tracking startup
+        // on a Keychain/Keystore hiccup.
+        lg.warn(`Queue encryption resolve failed (plaintext fallback): ${err}`);
+      }
+    }
+
     resolved = { backend };
     registerQueueBackend(backend);
     lg.debug(`Queue backend resolved: ${backend}`);
@@ -256,6 +283,28 @@ export async function markSyncAttemptFailed(ids: string[]): Promise<void> {
   }
   const numericIds = ids.map((s) => Number(s)).filter((n) => !Number.isNaN(n));
   return sqliteQueue.markSyncAttemptFailed(numericIds);
+}
+
+/**
+ * Mark the given pings as permanently failed (server clock-skew rejection).
+ *
+ * MMKV: sets a flag on each row so getUnsyncedLocations excludes it; the
+ * row sticks around for forensic inspection until the 48h age purge.
+ *
+ * SQLite: no-op (with warning). The legacy backend has no permanentlyFailed
+ * column and Phase 5 deletes this dispatcher along with it. Skew-rejected
+ * rows on SQLite will retry until the 20-attempt escape hatch inside
+ * purgeStaleUnsynced kicks in — worse than MMKV but bounded and acceptable
+ * for the shrinking SQLite cohort.
+ */
+export async function markPermanentlyFailed(ids: string[]): Promise<void> {
+  if (ensureResolved() === 'mmkv') {
+    return mmkvQueue.markPermanentlyFailed(ids);
+  }
+  lg.warn(
+    `markPermanentlyFailed on SQLite backend is a no-op (${ids.length} ids). ` +
+      `Pings will retry until the 20-attempt escape hatch. See Phase 5 cleanup.`,
+  );
 }
 
 export async function purgeStaleUnsynced(

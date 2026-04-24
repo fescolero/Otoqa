@@ -75,10 +75,25 @@ type PingInput = {
  *                             recordedAt) or (loadId, recordedAt). Data is
  *                             on the server already. Mark synced.
  *   • permanentlyRejected   — driver/org/load/session not found, shape
- *                             invariant violated. Will NEVER succeed on
- *                             retry. Mark synced + telemetry.
+ *                             invariant violated, or clock-skew guard
+ *                             tripped. Will NEVER succeed on retry. Mark
+ *                             synced + telemetry. Includes skew
+ *                             rejections — see rejectedIndices below.
  *   • transientlyRejected   — reserved for future use (none today). Do
  *                             NOT mark synced; let the client retry.
+ *   • rejectedIndices       — zero-based indices into the incoming
+ *                             `locations` array for pings that were
+ *                             rejected specifically by the clock-skew
+ *                             guard. The client flags these as
+ *                             `permanentlyFailed` on the local queue
+ *                             (retained for forensic inspection until
+ *                             the 48h age purge), rather than removing
+ *                             them as it does for other permanent
+ *                             rejections. Other permanent rejections
+ *                             (driver/org/session/shape) do NOT appear
+ *                             here — they flow through the scalar
+ *                             `permanentlyRejected` count and are
+ *                             removed from the local queue as before.
  *
  * Invariant: inserted + duplicates + permanentlyRejected + transientlyRejected
  *            === pings.length (modulo bugs — telemetry surfaces drift).
@@ -88,7 +103,21 @@ type IngestOutcome = {
   duplicates: number;
   permanentlyRejected: number;
   transientlyRejected: number;
+  rejectedIndices: number[];
 };
+
+// Clock-skew guard thresholds. Tuned so:
+//   • Future > 5min:  covers RTC / NTP drift on consumer hardware. A real
+//                     driver's phone shouldn't ever record a timestamp
+//                     more than a few seconds ahead of the server; 5 min
+//                     is comfortably above that noise floor.
+//   • Past > 48h:     matches MAX_PING_AGE_MS in mobile/location-tracking.ts.
+//                     A ping older than 48h was already going to be purged
+//                     client-side; rejecting it here prevents storing a
+//                     stale ping whose ordering would confuse geofence
+//                     evaluation and the dispatcher freshness heuristic.
+const SKEW_FUTURE_MS = 5 * 60 * 1000;
+const SKEW_PAST_MS = 48 * 60 * 60 * 1000;
 
 async function ingestBatch(
   ctx: MutationCtx,
@@ -103,6 +132,13 @@ async function ingestBatch(
   let skippedSession = 0;
   let skippedShape = 0;
   let skippedDuplicate = 0;
+  let skippedSkew = 0;
+  // Indices (in the original `pings` array) of pings rejected by the
+  // clock-skew guard. Returned so the client can mark those specific
+  // local rows `permanentlyFailed` instead of removing them outright —
+  // retained for forensic inspection until the 48h age purge sweeps
+  // them up.
+  const rejectedIndices: number[] = [];
 
   // Cache per-batch to avoid re-reads when multiple pings share a driver.
   const driverCache = new Map<Id<'drivers'>, Doc<'drivers'> | null>();
@@ -124,7 +160,35 @@ async function ingestBatch(
 
   // First pass: per-ping validation. Build the "valid" list for dedup + insert.
   const valid: PingInput[] = [];
-  for (const loc of pings) {
+  for (let idx = 0; idx < pings.length; idx++) {
+    const loc = pings[idx];
+
+    // Clock-skew guard — runs first. A ping with a garbage timestamp
+    // would poison downstream logic (dedup on recordedAt, geofence
+    // evaluation on the "latest" ping, dispatcher freshness checks
+    // that compare `recordedAt` against wall-clock "now"), so reject
+    // before anything else touches it.
+    const futureSkewMs = loc.recordedAt - now;
+    const pastSkewMs = now - loc.recordedAt;
+    if (futureSkewMs > SKEW_FUTURE_MS) {
+      skippedSkew++;
+      rejectedIndices.push(idx);
+      console.warn(
+        `[driverLocations.ingestBatch] tracking_skewed_ping_rejected ` +
+          `driverId=${loc.driverId} skewMs=${futureSkewMs} direction=future`,
+      );
+      continue;
+    }
+    if (pastSkewMs > SKEW_PAST_MS) {
+      skippedSkew++;
+      rejectedIndices.push(idx);
+      console.warn(
+        `[driverLocations.ingestBatch] tracking_skewed_ping_rejected ` +
+          `driverId=${loc.driverId} skewMs=${pastSkewMs} direction=past`,
+      );
+      continue;
+    }
+
     // Shape invariants
     if (!loc.loadId && !loc.sessionId) {
       skippedShape++;
@@ -180,6 +244,17 @@ async function ingestBatch(
   // For each group, read the latest stored ping once; if the batch starts
   // after that timestamp there's no possible overlap, so skip the per-ping
   // dedup reads entirely.
+  //
+  // Dedup caveat (documented, intentionally permissive): the batch-boundary
+  // shortcut assumes one active device per (sessionId|loadId) at a time.
+  // With a single device, the ping queue's timestamp-based ids (see
+  // mobile/lib/location-queue.ts:43) all but guarantee monotonic
+  // recordedAt within a batch; collisions there would indicate a client
+  // bug. With two devices reporting against the same sessionId, both can
+  // independently sample a GPS fix at the same millisecond — a genuine
+  // cross-device dup. We observe here (below) but do not reject, so we
+  // don't surprise any unintentional multi-device users while the rate
+  // is measured.
   const sessionGroups = new Map<Id<'driverSessions'>, PingInput[]>();
   const legacyLoadGroups = new Map<Id<'loadInformation'>, PingInput[]>();
 
@@ -192,6 +267,43 @@ async function ingestBatch(
       const list = legacyLoadGroups.get(loc.loadId) ?? [];
       list.push(loc);
       legacyLoadGroups.set(loc.loadId, list);
+    }
+  }
+
+  // Observe intra-batch duplicates BEFORE dedup — the "clean boundary"
+  // shortcut (below) will happily insert them all, so the telemetry here
+  // is the only way to measure how often this happens. If the rate
+  // exceeds 0.1% of inserts over a 7-day window, the § 6.4 plan note
+  // says to revisit and add per-ping dedup. Until then: observe only.
+  let internalDupCount = 0;
+  for (const [sessionId, group] of sessionGroups) {
+    const seen = new Set<number>();
+    let groupDups = 0;
+    for (const p of group) {
+      if (seen.has(p.recordedAt)) groupDups++;
+      else seen.add(p.recordedAt);
+    }
+    if (groupDups > 0) {
+      internalDupCount += groupDups;
+      console.warn(
+        `[driverLocations.ingestBatch] location_queue_internal_dup_observed ` +
+          `count=${groupDups} sessionId=${sessionId}`,
+      );
+    }
+  }
+  for (const [loadId, group] of legacyLoadGroups) {
+    const seen = new Set<number>();
+    let groupDups = 0;
+    for (const p of group) {
+      if (seen.has(p.recordedAt)) groupDups++;
+      else seen.add(p.recordedAt);
+    }
+    if (groupDups > 0) {
+      internalDupCount += groupDups;
+      console.warn(
+        `[driverLocations.ingestBatch] location_queue_internal_dup_observed ` +
+          `count=${groupDups} loadId=${loadId}`,
+      );
     }
   }
 
@@ -320,12 +432,14 @@ async function ingestBatch(
     skippedLoad +
     skippedSession +
     skippedShape +
-    skippedDuplicate;
+    skippedDuplicate +
+    skippedSkew;
   if (skippedTotal > 0) {
     console.warn(
       `[driverLocations.ingestBatch] Skipped ${skippedTotal}/${pings.length}:`,
       `driver=${skippedDriver}, orgMismatch=${skippedOrgMismatch} (passed="${orgId}"),`,
-      `load=${skippedLoad}, session=${skippedSession}, shape=${skippedShape}, dup=${skippedDuplicate}`
+      `load=${skippedLoad}, session=${skippedSession}, shape=${skippedShape},`,
+      `dup=${skippedDuplicate}, skew=${skippedSkew}, internalDup=${internalDupCount}`
     );
   }
 
@@ -340,13 +454,15 @@ async function ingestBatch(
     skippedOrgMismatch +
     skippedLoad +
     skippedSession +
-    skippedShape;
+    skippedShape +
+    skippedSkew;
 
   return {
     inserted,
     duplicates: skippedDuplicate,
     permanentlyRejected,
     transientlyRejected: 0,
+    rejectedIndices,
   };
 }
 
@@ -368,6 +484,7 @@ export const batchInsertLocations = mutation({
     duplicates: v.number(),
     permanentlyRejected: v.number(),
     transientlyRejected: v.number(),
+    rejectedIndices: v.array(v.number()),
   }),
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -391,6 +508,7 @@ export const internalBatchInsertLocations = internalMutation({
     duplicates: v.number(),
     permanentlyRejected: v.number(),
     transientlyRejected: v.number(),
+    rejectedIndices: v.array(v.number()),
   }),
   handler: async (ctx, args) => {
     return ingestBatch(ctx, args.locations, args.organizationId);

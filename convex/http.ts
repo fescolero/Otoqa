@@ -484,6 +484,7 @@ http.route({
           duplicates: result.duplicates,
           permanentlyRejected: result.permanentlyRejected,
           transientlyRejected: result.transientlyRejected,
+          rejectedIndices: result.rejectedIndices,
         }),
         {
           status: 200,
