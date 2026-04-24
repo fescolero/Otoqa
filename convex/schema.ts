@@ -2089,6 +2089,36 @@ export default defineSchema({
     totalActiveMinutes: v.optional(v.float64()), // computed on end
     softCap10hAt: v.optional(v.float64()), // stamped when 10h banner shown
     softCap14hAt: v.optional(v.float64()), // stamped when 14h banner shown
+
+    // ====== Phase 1: GPS wake-up freshness + FCM push coordination ======
+    // Debounced write (15s threshold) from batchInsertLocations; used by the
+    // fcmWake.sweep cron to find stale active sessions. Not the
+    // source-of-truth for "when was the last ping" — that's
+    // driverLocations.recordedAt. This is a denormalized freshness probe
+    // only, tolerating staleness up to the debounce window.
+    lastPingAt: v.optional(v.float64()),
+
+    // Raw FCM (Android) / APNs (iOS) device token for the wake-push path.
+    // Distinct from the Expo push token on `driverPushTokens` — that one
+    // routes through Expo's service for driver-facing notifications; this
+    // one is consumed by FCM HTTP v1 direct sends from the sweep cron.
+    // Scoped per-session: on session end, stays put until overwritten by
+    // the next session's register call. `clearPushToken` wipes it when
+    // FCM returns UNREGISTERED / INVALID_ARGUMENT.
+    pushToken: v.optional(v.string()),
+    pushTokenPlatform: v.optional(v.union(v.literal('ios'), v.literal('android'))),
+    pushTokenUpdatedAt: v.optional(v.float64()),
+
+    // Wake-push dispatch coordination. Written only by the sendWake
+    // mutation (atomic cooldown check against concurrent sweep races):
+    //   fcmLastPushAt          — timestamp of last dispatch attempt;
+    //                            enforces the 5-min per-session cooldown
+    //   fcmBackoffUntil        — FCM QUOTA_EXCEEDED / UNAVAILABLE backoff
+    //                            ceiling (1min → 64min exponential)
+    //   fcmConsecutiveFailures — backoff counter; reset to 0 on success
+    fcmLastPushAt: v.optional(v.float64()),
+    fcmBackoffUntil: v.optional(v.float64()),
+    fcmConsecutiveFailures: v.optional(v.float64()),
   })
     .index('by_driver_status', ['driverId', 'status'])
     .index('by_org_active', ['organizationId', 'status'])
@@ -2096,7 +2126,20 @@ export default defineSchema({
     // Powers the daily auto-timeout cron. Scans only active sessions sorted
     // by startedAt so we can short-circuit the moment we hit one inside the
     // 18-hour window (status='active' first → tightest selectivity).
-    .index('by_status_started', ['status', 'startedAt']),
+    .index('by_status_started', ['status', 'startedAt'])
+    // Powers the Phase 1 fcmWake.sweep cron. Scans only active sessions
+    // sorted by lastPingAt so we can short-circuit on the first session
+    // inside the freshness window (status='active' first → tightest
+    // selectivity). Orthogonal to by_status_started above (sorts by
+    // different field).
+    .index('by_active_lastping', ['status', 'lastPingAt'])
+    // Phase 1: supports clearPushToken({ token }) — called on FCM
+    // UNREGISTERED / INVALID_ARGUMENT so invalid tokens don't keep getting
+    // retried. Token strings are globally unique per FCM install, so the
+    // index is highly selective; callers still filter status='active' to
+    // avoid blanking ended sessions that legitimately retain the last
+    // known token.
+    .index('by_push_token', ['pushToken']),
 
   /**
    * loadTrackingState — per-load geofence frontier. High-write, narrow-read.

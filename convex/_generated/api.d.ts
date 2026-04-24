@@ -109,6 +109,7 @@ import type * as migrations_backfillOrgType from "../migrations/backfillOrgType.
 import type * as migrations_initializeOrgStats from "../migrations/initializeOrgStats.js";
 import type * as migrations_unlinkFalselyLinkedCarriers from "../migrations/unlinkFalselyLinkedCarriers.js";
 import type * as payPlans from "../payPlans.js";
+import type * as pushTokens from "../pushTokens.js";
 import type * as rateProfiles from "../rateProfiles.js";
 import type * as rateRules from "../rateRules.js";
 import type * as recurringLoads from "../recurringLoads.js";
@@ -232,6 +233,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/initializeOrgStats": typeof migrations_initializeOrgStats;
   "migrations/unlinkFalselyLinkedCarriers": typeof migrations_unlinkFalselyLinkedCarriers;
   payPlans: typeof payPlans;
+  pushTokens: typeof pushTokens;
   rateProfiles: typeof rateProfiles;
   rateRules: typeof rateRules;
   recurringLoads: typeof recurringLoads;

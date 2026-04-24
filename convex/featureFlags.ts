@@ -7,14 +7,19 @@ import { resolveAuthenticatedDriver } from './driverMobile';
 // FEATURE FLAGS — per-org runtime toggles
 // ============================================================================
 //
-// Scaffolding for the MMKV GPS-queue rollout (see
-// mobile/docs/location-queue-mmkv.md). Deleted in Phase 5 cleanup after
-// the global flip to MMKV lands and `expo-sqlite` is removed.
+// Values are always serialized as v.string(); the mobile client parses them
+// to the right shape via typed accessors in mobile/lib/feature-flags.ts.
 //
 // Keys currently in use:
-//   gps_queue_backend → 'mmkv' | 'sqlite'  (default: 'sqlite')
+//   gps_queue_backend           → 'mmkv' | 'sqlite'  (default: 'sqlite')
+//   queue_encryption_enabled    → 'true' | 'false'   (default: 'false')
+//   ping_ingested_sample_rate   → '0.01'             (default: 0.01)
+//   ar_wake_enabled             → 'true' | 'false'   (default: 'false')
+//   ar_shadow_mode              → 'true' | 'false'   (default: 'false')
+//   fcm_wake_enabled            → 'true' | 'false'   (default: 'false')
 //
-// Admins flip flags via the setFlag mutation from the Convex dashboard.
+// Admins flip flags via the setFlag mutation from the Convex dashboard, or
+// via setFlagInternal from the terminal during canary rollouts.
 // ============================================================================
 
 /**

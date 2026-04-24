@@ -35,6 +35,17 @@ const CACHE_KEY = 'feature_flags_cache';
 export const FLAG_GPS_QUEUE_BACKEND = 'gps_queue_backend';
 export const FLAG_QUEUE_ENCRYPTION_ENABLED = 'queue_encryption_enabled';
 export const FLAG_PING_INGESTED_SAMPLE_RATE = 'ping_ingested_sample_rate';
+// Phase 1 — Activity Recognition + FCM wake-up capability gates.
+//   ar_wake_enabled   : motion-service subscribes to AR transitions +
+//                       starts FGS on STILL→IN_VEHICLE
+//   ar_shadow_mode    : AR fires telemetry only; FGS start is suppressed
+//                       (required ≥7-day observation step before the
+//                        ar_wake_enabled flip — see architecture doc)
+//   fcm_wake_enabled  : both server sweep (dispatch) and mobile handler
+//                       (receive) gate on this flag
+export const FLAG_AR_WAKE_ENABLED = 'ar_wake_enabled';
+export const FLAG_AR_SHADOW_MODE = 'ar_shadow_mode';
+export const FLAG_FCM_WAKE_ENABLED = 'fcm_wake_enabled';
 
 // How long getQueueBackend is willing to wait on a fresh refresh when the
 // cache is empty, before falling back to the in-code default (sqlite).

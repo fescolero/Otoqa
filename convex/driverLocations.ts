@@ -119,6 +119,20 @@ type IngestOutcome = {
 const SKEW_FUTURE_MS = 5 * 60 * 1000;
 const SKEW_PAST_MS = 48 * 60 * 60 * 1000;
 
+// Phase 1: debounce threshold for driverSessions.lastPingAt writes. A
+// session patched on every batch would churn reactive query subscriptions
+// for dispatchers watching the session row; 15s cuts write rate by ~15×
+// for a driver reporting every second while keeping the freshness probe
+// accurate enough for the fcmWake.sweep cron (which trips at 2 min of
+// silence).
+const LAST_PING_DEBOUNCE_MS = 15_000;
+
+// Phase 1: fallback sample rate for the ping_ingested server-side emit
+// when the `ping_ingested_sample_rate` flag is missing or malformed. 1%
+// matches the default documented in mobile/docs/gps-tracking-architecture.md
+// and keeps PostHog event volume bounded at scale.
+const PING_INGESTED_SAMPLE_RATE_FALLBACK = 0.01;
+
 async function ingestBatch(
   ctx: MutationCtx,
   pings: PingInput[],
@@ -307,6 +321,26 @@ async function ingestBatch(
     }
   }
 
+  // Phase 1: read the ping_ingested sample-rate flag once per batch.
+  // Cheap indexed lookup, amortized across every ping in the mutation.
+  // Malformed / missing rows fall back to 1% to match the in-code default.
+  const sampleRateRow = await ctx.db
+    .query('featureFlags')
+    .withIndex('by_org_key', (q) =>
+      q.eq('workosOrgId', orgId).eq('key', 'ping_ingested_sample_rate'),
+    )
+    .first();
+  const parsedRate = sampleRateRow ? Number(sampleRateRow.value) : NaN;
+  const pingIngestedSampleRate =
+    Number.isFinite(parsedRate) && parsedRate >= 0 && parsedRate <= 1
+      ? parsedRate
+      : PING_INGESTED_SAMPLE_RATE_FALLBACK;
+
+  // Phase 1: per-session max recordedAt among SUCCESSFULLY inserted pings.
+  // Used by the debounced lastPingAt patch below. Legacy loadId-only pings
+  // (no sessionId) are excluded — the FCM wake path only targets sessions.
+  const insertedMaxRecordedAtBySession = new Map<Id<'driverSessions'>, number>();
+
   const insertPing = async (loc: PingInput) => {
     await ctx.db.insert('driverLocations', {
       driverId: loc.driverId,
@@ -323,6 +357,25 @@ async function ingestBatch(
       createdAt: now,
     });
     inserted++;
+
+    if (loc.sessionId) {
+      const prev = insertedMaxRecordedAtBySession.get(loc.sessionId) ?? 0;
+      if (loc.recordedAt > prev) {
+        insertedMaxRecordedAtBySession.set(loc.sessionId, loc.recordedAt);
+      }
+    }
+
+    // Sampled ping_ingested emit. Sole server-side source of the
+    // recordedToCreatedLagMs KPI documented in § 6.5 / § 10.4 / § 12. Log
+    // format matches the tracking_skewed_ping_rejected line above so both
+    // surface through the same downstream parser.
+    if (Math.random() < pingIngestedSampleRate) {
+      const lagMs = now - loc.recordedAt;
+      console.warn(
+        `[driverLocations.ingestBatch] ping_ingested ` +
+          `recordedToCreatedLagMs=${lagMs}`,
+      );
+    }
   };
 
   // Session-keyed groups
@@ -424,6 +477,26 @@ async function ingestBatch(
         recordedAt: loc.recordedAt,
       },
     });
+  }
+
+  // Phase 1: debounced driverSessions.lastPingAt patch. Reuses the
+  // session doc already loaded into sessionCache during validation — no
+  // extra reads. Only advances the timestamp; the comparison uses >
+  // (not ≥) so concurrent batches can't oscillate the value. Per-session
+  // OCC on the patch is Convex's guarantee — retries re-read and see the
+  // newer lastPingAt, so they correctly no-op if the debounce is still
+  // within window.
+  for (const [sessionId, maxRecordedAt] of insertedMaxRecordedAtBySession) {
+    const session = sessionCache.get(sessionId);
+    if (!session) continue;
+    const prev = session.lastPingAt ?? 0;
+    if (maxRecordedAt > prev + LAST_PING_DEBOUNCE_MS) {
+      await ctx.db.patch(sessionId, { lastPingAt: maxRecordedAt });
+      console.warn(
+        `[driverLocations.ingestBatch] session_last_ping_patched ` +
+          `sessionId=${sessionId} newLastPingAt=${maxRecordedAt}`,
+      );
+    }
   }
 
   const skippedTotal =
