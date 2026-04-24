@@ -22,6 +22,7 @@ import {
   migrateIfNeeded,
   purgeStaleUnsynced,
 } from '../lib/location-storage';
+import { refreshFlagsFromServer } from '../lib/feature-flags';
 import { useMutation, useAction } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
@@ -359,6 +360,12 @@ export default function RootLayout() {
     const sub = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         checkForOTAUpdate('foreground');
+        // Also re-fetch feature flags: Clerk is guaranteed loaded by now
+        // (any foreground_return happens after auth is wired). This is the
+        // belt-and-suspenders for the Clerk-race in feature-flags.ts —
+        // populates the cache so the NEXT cold start picks up flag changes
+        // even if root-init's refresh raced auth setup.
+        refreshFlagsFromServer().catch(() => {});
       }
     });
 

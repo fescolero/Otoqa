@@ -8,10 +8,16 @@ import { api } from '../../convex/_generated/api';
 // FEATURE FLAGS — client wrapper around the Convex featureFlags table
 // ============================================================================
 //
-// Read path is offline-first: we check the cached AsyncStorage blob before
-// attempting any network call, so first-open after a cold start boots on
-// the flag values we saw last session. A background refresh then pulls the
-// current values for next launch.
+// Read path is offline-first but with a bounded wait on the very first call
+// per app-launch (empty cache): we give a fresh server fetch ~1.5 seconds
+// to land before falling back to the in-code default. Later launches always
+// hit the cache instantly and refresh in the background.
+//
+// Clerk-race defense: the refresh needs a Clerk token, and Clerk's auth
+// singleton isn't always loaded at root-init. refreshFromServer() retries
+// with backoff when getFreshToken() returns null, and is also re-triggered
+// explicitly on app foreground-resume (by the root layout) — at which
+// point Clerk is guaranteed to be loaded.
 //
 // Deleted as part of Phase 5 cleanup along with the Convex table and the
 // location-storage.ts dispatcher.
@@ -20,15 +26,33 @@ import { api } from '../../convex/_generated/api';
 const lg = log('FeatureFlags');
 const CACHE_KEY = 'feature_flags_cache';
 
+// How long getQueueBackend is willing to wait on a fresh refresh when the
+// cache is empty, before falling back to the in-code default (sqlite).
+// Keeps first-launch cold-start delay bounded while still giving an online
+// device a real chance to get the right backend without needing two cold
+// starts.
+const FIRST_LAUNCH_REFRESH_TIMEOUT_MS = 1500;
+
+// Retry backoff for the Clerk-not-loaded case. Root-init fires well before
+// Clerk's singleton is populated; we retry at these offsets until either a
+// token becomes available or we give up. Offsets sum to ~10 seconds across
+// the first cold start.
+const REFRESH_RETRY_DELAYS_MS = [500, 1500, 3000, 5000];
+
 type FlagMap = Record<string, string>;
 type Backend = 'mmkv' | 'sqlite';
 
 let inMemory: FlagMap | null = null;
 
+// One in-flight refresh at a time. getQueueBackend needs to observe its
+// completion to unblock the first-launch wait, and multiple triggers (boot
+// + foreground resume + retry) shouldn't stampede Convex.
+let inflightRefresh: Promise<void> | null = null;
+
 const CONVEX_URL = process.env.EXPO_PUBLIC_CONVEX_URL;
-// We intentionally create a fresh HTTP client here instead of reusing the
-// ConvexReactClient — feature-flag fetches can happen before React mounts,
-// during root-init, when the ReactClient's auth isn't yet wired.
+// Fresh HTTP client, not the ConvexReactClient — feature-flag fetches can
+// happen before React mounts, during root-init, when the ReactClient's auth
+// isn't yet wired.
 const httpClient: ConvexHttpClient | null = CONVEX_URL
   ? new ConvexHttpClient(CONVEX_URL)
   : null;
@@ -49,37 +73,107 @@ async function loadCacheIntoMemory(): Promise<FlagMap> {
   return inMemory;
 }
 
-async function refreshFromServer(): Promise<void> {
-  if (!httpClient) return;
+/**
+ * Single refresh attempt: fetch from Convex, update in-memory + AsyncStorage
+ * cache. Returns true on successful fetch (cache is fresh), false on any
+ * failure (no token / offline / Convex error) — the caller decides whether
+ * to retry.
+ */
+async function attemptRefresh(): Promise<boolean> {
+  if (!httpClient) return false;
   try {
     const token = await getFreshToken();
-    if (!token) return; // not signed in yet — keep cached values
+    if (!token) return false; // Clerk not loaded yet — caller will retry.
     httpClient.setAuth(token);
     const flags = await httpClient.query(api.featureFlags.getForOrg, {});
     inMemory = flags;
     await storage.set(CACHE_KEY, JSON.stringify(flags));
     lg.debug(`Refreshed ${Object.keys(flags).length} flag(s) from Convex`);
+    return true;
   } catch (err) {
-    // Offline, unauthenticated, or Convex unreachable — keep cached values.
-    lg.debug(`Flag refresh failed (using cached): ${err}`);
+    lg.debug(
+      `Flag refresh attempt failed (using cached): ${err instanceof Error ? err.message : err}`,
+    );
+    return false;
   }
 }
 
 /**
- * Resolve the GPS queue backend for this app session. Cached-first: returns
- * immediately from AsyncStorage without waiting on the network, then fires
- * a background refresh so the next launch reads the current value.
+ * Retry-aware refresh. Single in-flight call across the whole app; if a
+ * refresh is already running, returns the same promise so callers chain on
+ * the existing cycle rather than starting another. On each attempt that
+ * comes back "no token yet," we wait a backoff and try again — works around
+ * the Clerk-singleton race at root-init.
+ */
+function refreshFromServer(): Promise<void> {
+  if (inflightRefresh) return inflightRefresh;
+
+  inflightRefresh = (async () => {
+    for (let i = 0; i <= REFRESH_RETRY_DELAYS_MS.length; i++) {
+      const ok = await attemptRefresh();
+      if (ok) return;
+      if (i === REFRESH_RETRY_DELAYS_MS.length) return; // out of retries
+      await new Promise((resolve) =>
+        setTimeout(resolve, REFRESH_RETRY_DELAYS_MS[i]),
+      );
+    }
+  })().finally(() => {
+    inflightRefresh = null;
+  });
+
+  return inflightRefresh;
+}
+
+/**
+ * Public: trigger a refresh cycle. Intended for use on events where Clerk
+ * is known to be loaded (e.g., foreground resume, auth_setup_complete).
+ * Idempotent — joins any in-flight refresh rather than stacking.
+ */
+export function refreshFlagsFromServer(): Promise<void> {
+  return refreshFromServer();
+}
+
+/**
+ * Resolve the GPS queue backend for this app session.
  *
- * Default is 'sqlite' — a device with no cache and no network boots on the
- * legacy backend. The MMKV canary org has to have gps_queue_backend=mmkv
- * explicitly set in Convex before drivers on that org will pick it up.
+ * First call per launch with an empty cache: give the server refresh up to
+ * FIRST_LAUNCH_REFRESH_TIMEOUT_MS to land before falling back to the
+ * in-code default. This is the critical path that determines whether a
+ * fresh install on a canary org boots on MMKV or on legacy SQLite — we
+ * want online devices to get the right backend on the very first launch,
+ * not need a second cold start.
+ *
+ * Later calls per launch hit the populated cache immediately and fire the
+ * refresh in the background for the next launch.
+ *
+ * Default is 'sqlite' — a device with no cache, no network, and no token
+ * boots on the legacy backend. That's the right behavior: first-launch
+ * offline on a canary org stays on the legacy backend until the device
+ * gets a chance to read the flag.
  */
 export async function getQueueBackend(): Promise<Backend> {
   const flags = await loadCacheIntoMemory();
-
-  // Kick off a background refresh — don't await; next launch benefits.
-  refreshFromServer().catch(() => {});
-
   const cached = flags.gps_queue_backend;
-  return cached === 'mmkv' || cached === 'sqlite' ? cached : 'sqlite';
+
+  if (cached === 'mmkv' || cached === 'sqlite') {
+    // Warm cache — use it, refresh for next launch.
+    refreshFromServer().catch(() => {});
+    return cached;
+  }
+
+  // Cold cache. Give the refresh a bounded chance to land before we
+  // fall back to the default.
+  try {
+    await Promise.race([
+      refreshFromServer(),
+      new Promise<void>((resolve) =>
+        setTimeout(resolve, FIRST_LAUNCH_REFRESH_TIMEOUT_MS),
+      ),
+    ]);
+  } catch {
+    /* ignore — fall through to whatever inMemory holds now */
+  }
+
+  const refreshed = inMemory?.gps_queue_backend;
+  return refreshed === 'mmkv' || refreshed === 'sqlite' ? refreshed : 'sqlite';
 }
