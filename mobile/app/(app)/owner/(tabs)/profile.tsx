@@ -13,6 +13,7 @@ import { colors, typography, borderRadius, spacing, shadows } from '../../../../
 import { useAppMode, useCarrierOwner } from '../../_layout';
 import { useClerk } from '@clerk/clerk-expo';
 import { useLanguage } from '../../../../lib/LanguageContext';
+import { performSignOut } from '../../../../lib/logout';
 
 // ============================================
 // DISPATCHER PROFILE PAGE
@@ -28,7 +29,7 @@ export default function ProfileScreen() {
   const { currentLanguage, t } = useLanguage();
 
   const handleSignOut = async () => {
-    await signOut();
+    await performSignOut(signOut, 'owner_profile');
   };
 
   const handleSwitchToDriver = () => {

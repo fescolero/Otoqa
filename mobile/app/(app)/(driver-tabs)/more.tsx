@@ -36,6 +36,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
+import { performSignOut } from '../../../lib/logout';
 import { useMutation, useQuery } from 'convex/react';
 import * as Application from 'expo-application';
 import * as Updates from 'expo-updates';
@@ -154,7 +155,7 @@ export default function MoreScreen() {
     posthog?.capture('sign_out');
     setSignOutOpen(false);
     try {
-      await signOut();
+      await performSignOut(signOut, 'more_tab');
     } catch (err) {
       console.error('[More] signOut failed:', err);
     }

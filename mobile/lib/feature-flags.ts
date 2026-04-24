@@ -155,6 +155,29 @@ export function refreshFlagsFromServer(): Promise<void> {
 }
 
 /**
+ * Phase 1c — reactive subscription entry point.
+ *
+ * Write a fresh flag snapshot into the in-memory + AsyncStorage cache.
+ * Called from the root layout's `useQuery(api.featureFlags.getForOrg)`
+ * effect whenever Convex pushes a new value. This is the kill-switch
+ * path: flipping `ar_wake_enabled=false` or `fcm_wake_enabled=false`
+ * takes effect within seconds on every active tracking client,
+ * without requiring a cold start.
+ *
+ * Accepts a snapshot directly (not a mutation to `inMemory`) so the
+ * React effect can pass whatever Convex returned without deep-diffing
+ * first — the write here is small (a stringify + MMKV set).
+ */
+export function applyFlagSnapshot(flags: FlagMap): void {
+  inMemory = flags;
+  storage.set(CACHE_KEY, JSON.stringify(flags)).catch((err) => {
+    lg.warn(
+      `Failed to persist reactive flag snapshot: ${err instanceof Error ? err.message : err}`,
+    );
+  });
+}
+
+/**
  * Resolve the GPS queue backend for this app session.
  *
  * First call per launch with an empty cache: give the server refresh up to
