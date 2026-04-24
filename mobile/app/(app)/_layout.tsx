@@ -309,6 +309,20 @@ export default function AppLayout() {
     return () => sub.remove();
   }, []);
 
+  // 2b. Re-register the device push token whenever the active session
+  //     _id transitions. Without this, the "sign in → Start Shift
+  //     without backgrounding" flow never populates pushToken on the
+  //     session: the mount effect fires before a session exists (server
+  //     returns { registered: false, reason: 'no_active_session' }),
+  //     the token isn't cached locally, and nothing else triggers
+  //     another attempt. Reactive session query → re-run registration
+  //     closes the gap with no user-visible seams.
+  useEffect(() => {
+    if (activeSession?._id) {
+      refreshPushTokenIfChanged().catch(() => {});
+    }
+  }, [activeSession?._id]);
+
   // 3. Reactive feature-flag subscription. Convex pushes new snapshots
   //    on every write to featureFlags for the caller's org, which means
   //    flipping `fcm_wake_enabled=false` (or any other capability flag)

@@ -66,8 +66,16 @@ class OtoqaMotionModule : Module() {
     // Cleanly tear down when the JS context goes away (hot reload,
     // full JS shutdown). Leaves us in a known state so a subsequent
     // register can reuse the slot.
+    //
+    // OnDestroy's signature is `(() -> Unit)` — non-suspend — so we
+    // call the sync-cleanup variant here. `removeActivityTransitionUpdates`
+    // returns a Task which we fire-and-forget: the OS will reap the
+    // subscription even if the Task hasn't finished by the time the
+    // process exits, and BroadcastReceivers auto-unregister on process
+    // death. JS callers that need to await completion use the
+    // `unregisterTransitions` AsyncFunction (Coroutine variant) instead.
     OnDestroy {
-      tryUnregister()
+      cleanupSync()
     }
 
     AsyncFunction("registerTransitions") Coroutine { ->
@@ -195,6 +203,34 @@ class OtoqaMotionModule : Module() {
       } catch (_: IllegalArgumentException) {
         // Receiver was never registered (unregisterTransitions called
         // without a prior registerTransitions). Quietly ignore.
+      }
+    }
+    receiver = null
+  }
+
+  /**
+   * Non-suspend sibling of [tryUnregister] for use in non-suspend
+   * lifecycle hooks (OnDestroy). Fires the Play Services removal
+   * without awaiting the Task — the OS reaps the subscription on
+   * process death regardless.
+   */
+  private fun cleanupSync() {
+    val ctx = appContext.reactContext ?: return
+    pendingIntent?.let { pi ->
+      try {
+        // Non-awaited Task — the subscription is cleaned up best-effort.
+        ActivityRecognition.getClient(ctx).removeActivityTransitionUpdates(pi)
+      } catch (_: Throwable) {
+        // Client may be in an error state; receiver cleanup below still runs.
+      }
+      pi.cancel()
+    }
+    pendingIntent = null
+    receiver?.let { rcv ->
+      try {
+        ctx.unregisterReceiver(rcv)
+      } catch (_: IllegalArgumentException) {
+        // Never registered — no-op.
       }
     }
     receiver = null
