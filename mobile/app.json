@@ -8,7 +8,7 @@
     "scheme": "otoqa-driver",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "runtimeVersion": "1.1.0",
+    "runtimeVersion": "1.3.1",
     "updates": {
       "url": "https://u.expo.dev/6449e793-4e00-49e3-be2f-586c9ffc4dd2",
       "enabled": true,
@@ -48,7 +48,8 @@
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_LOCATION",
         "android.permission.RECEIVE_BOOT_COMPLETED",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
       ]
     },
     "plugins": [

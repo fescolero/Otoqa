@@ -45,7 +45,7 @@ import {
   isTracking,
   startLocationTracking,
 } from '../../../lib/location-tracking';
-import { getTotalCountForLoad, getUnsyncedCountForLoad } from '../../../lib/location-db';
+import { getUnsyncedCountForLoad } from '../../../lib/location-storage';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import { AppState } from 'react-native';
@@ -146,8 +146,7 @@ export default function TripDetailScreen() {
   // GPS tracking debug info
   const [trackingDebug, setTrackingDebug] = useState<{
     isActive: boolean;
-    totalPoints: number;
-    unsyncedPoints: number;
+    pendingPoints: number;
     loadId: string | null;
   } | null>(null);
 
@@ -189,13 +188,11 @@ export default function TripDetailScreen() {
     const refresh = async () => {
       try {
         const state = await getTrackingState();
-        const total = await getTotalCountForLoad(id);
-        const unsynced = await getUnsyncedCountForLoad(id);
+        const pending = await getUnsyncedCountForLoad(id);
         if (!cancelled) {
           setTrackingDebug({
             isActive: state?.isActive ?? false,
-            totalPoints: total,
-            unsyncedPoints: unsynced,
+            pendingPoints: pending,
             loadId: state?.loadId ?? null,
           });
         }
@@ -879,8 +876,7 @@ export default function TripDetailScreen() {
               <Text
                 style={{ color: '#d1d5db', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}
               >
-                GPS {trackingDebug.isActive ? 'ON' : 'OFF'} · {trackingDebug.totalPoints} pts ·{' '}
-                {trackingDebug.unsyncedPoints} pending
+                GPS {trackingDebug.isActive ? 'ON' : 'OFF'} · {trackingDebug.pendingPoints} pending
               </Text>
             </View>
           )}

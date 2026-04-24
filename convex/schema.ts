@@ -2833,4 +2833,28 @@ export default defineSchema({
     .index('by_org_key', ['workosOrgId', 'facetKey'])
     // Idempotent upsert lookup during tag writes.
     .index('by_org_key_canonical', ['workosOrgId', 'facetKey', 'canonicalValue']),
+
+  // ============================================================================
+  // FEATURE FLAGS — per-org runtime toggles
+  // ============================================================================
+  //
+  // Scaffolding for the MMKV GPS-queue rollout. After Phase 5 cleanup (when
+  // only the MMKV backend remains), this table and its query/mutation are
+  // deleted. Do not add long-term product flags here without consciously
+  // accepting that this table survives past Phase 5.
+  //
+  // Keys currently in use:
+  //   gps_queue_backend → 'mmkv' | 'sqlite'  (default: 'sqlite')
+  //
+  // Read path: mobile/lib/feature-flags.ts caches the whole row per org in
+  // AsyncStorage on fetch; startup reads cached-first for offline boot.
+  featureFlags: defineTable({
+    workosOrgId: v.string(),
+    key: v.string(),
+    value: v.string(),
+    updatedAt: v.number(),
+    updatedBy: v.optional(v.string()), // Clerk/WorkOS user id that flipped it
+  })
+    .index('by_org', ['workosOrgId'])
+    .index('by_org_key', ['workosOrgId', 'key']),
 });

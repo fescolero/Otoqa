@@ -1,7 +1,7 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import Constants from 'expo-constants';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import { storage } from './storage';
 import { convex } from './convex';
 import { ConvexHttpClient } from 'convex/browser';
@@ -16,9 +16,8 @@ import {
   purgeStaleUnsynced,
   getLastLocationForLoad,
   getLastLocationForSession,
-  deleteOldSyncedLocations,
-  reopenDb,
-} from './location-db';
+  type LocationInput,
+} from './location-storage';
 import { log } from './log';
 import {
   trackBGTaskFired,
@@ -31,6 +30,7 @@ import {
   trackWatchLocationSaved,
   trackWatchLocationError,
 } from './analytics';
+import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
 
 // Module-scoped namespaced logger. Debug/info calls are stripped in
 // production by Metro; warn/error pass through so Sentry / native
@@ -159,7 +159,7 @@ const MAX_PING_AGE_MS = 48 * 60 * 60 * 1000;
  *     else bump attempts.
  */
 async function applyIngestOutcome(
-  batchIds: number[],
+  batchIds: string[],
   result: IngestResponse,
   source: 'FG' | 'BG',
 ): Promise<boolean> {
@@ -402,81 +402,13 @@ const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const TRACKING_SESSION_MAX_AGE_MS = 18 * 60 * 60 * 1000; // 18 hours
 const LAST_HEARTBEAT_KEY = 'location_last_heartbeat';
 const BG_TASK_ALIVE_KEY = 'bg_task_last_alive';
-const BG_FALLBACK_LOCATIONS_KEY = 'bg_fallback_locations';
 
-/**
- * Save locations to AsyncStorage as a fallback when SQLite is unavailable.
- * These get recovered and inserted into SQLite on the next foreground return.
- */
-type FallbackLocation = {
-  driverId: string;
-  loadId?: string | null;
-  sessionId?: string | null;
-  organizationId: string;
-  latitude: number;
-  longitude: number;
-  accuracy: number | null;
-  speed: number | null;
-  heading: number | null;
-  recordedAt: number;
-};
-
-async function saveFallbackLocations(locations: FallbackLocation[]): Promise<void> {
-  try {
-    const existingJson = await storage.getString(BG_FALLBACK_LOCATIONS_KEY);
-    const existing = existingJson ? JSON.parse(existingJson) : [];
-    const combined = [...existing, ...locations];
-    // Cap at 500 to prevent unbounded growth
-    const capped = combined.slice(-500);
-    await storage.set(BG_FALLBACK_LOCATIONS_KEY, JSON.stringify(capped));
-    lg.debug(
-      `BG fallback: saved ${locations.length} locations to AsyncStorage (total: ${capped.length})`,
-    );
-  } catch (err) {
-    lg.error('BG fallback save failed:', err);
-  }
-}
-
-/**
- * Recover fallback locations from AsyncStorage into SQLite.
- * Called on foreground return.
- */
-export async function recoverFallbackLocations(): Promise<number> {
-  try {
-    const json = await storage.getString(BG_FALLBACK_LOCATIONS_KEY);
-    if (!json) return 0;
-    const locations = JSON.parse(json);
-    if (!Array.isArray(locations) || locations.length === 0) return 0;
-
-    let inserted = 0;
-    for (const loc of locations) {
-      try {
-        await insertLocation(loc);
-        inserted++;
-      } catch {
-        // Skip duplicates or invalid entries
-      }
-    }
-
-    // Only clear the fallback once we've confirmed at least one record made it
-    // into SQLite. If inserted===0, SQLite may be broken (NullPointerException
-    // surviving withDbRetry) and clearing here would silently discard GPS data.
-    if (inserted > 0 || locations.length === 0) {
-      await storage.delete(BG_FALLBACK_LOCATIONS_KEY);
-    } else {
-      lg.warn(
-        'Fallback recovery: 0 records inserted (SQLite may be broken), keeping fallback for retry',
-      );
-    }
-    lg.debug(
-      `Recovered ${inserted}/${locations.length} fallback locations from AsyncStorage to SQLite`,
-    );
-    return inserted;
-  } catch (err) {
-    lg.error('Fallback recovery failed:', err);
-    return 0;
-  }
-}
+// Note: the legacy `bg_fallback_locations` AsyncStorage buffer and its
+// save/recover helpers have been deleted. They existed to catch writes
+// when SQLite was unavailable (the Android-16 NPE failure mode). On the
+// MMKV backend that failure class doesn't exist; on the legacy SQLite
+// backend the new withRecovery layer in location-queue.ts handles it.
+// See mobile/docs/location-queue-mmkv.md § "Can we kill the bg_fallback_locations buffer?"
 
 /**
  * Check when the background task last fired (for diagnostics).
@@ -599,7 +531,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   let prevTimestamp = lastPoint?.recordedAt ?? 0;
   let savedHeartbeat = false;
 
-  const locationsToSave: FallbackLocation[] = [];
+  const locationsToSave: LocationInput[] = [];
 
   for (const loc of locations) {
     if (loc.coords.accuracy && loc.coords.accuracy > MAX_ACCURACY_METERS) {
@@ -645,7 +577,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       continue;
     }
 
-    const locationData: FallbackLocation = {
+    const locationData: LocationInput = {
       driverId: state.driverId,
       // Both anchors written when present. State.loadId may be undefined in
       // session-only mode; that's fine — server validates trackingType matches.
@@ -680,30 +612,29 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     `BG task: filtered ${addedCount}/${locations.length} to save (rejected: ${rejectedAccuracy} accuracy, ${rejectedDistance} distance, ${rejectedStale} stale${savedHeartbeat ? ', +heartbeat' : ''})`,
   );
 
-  // Step 5: Save to SQLite (primary) or AsyncStorage (fallback)
-  let usedFallback = false;
+  // Step 5: Persist to the queue.
+  //
+  // The `usedFallback` signal + its `bg_fallback_locations` AsyncStorage
+  // buffer existed for the Android-16 SQLite NPE incident (4/22). On MMKV
+  // the failure class doesn't exist, and the dispatcher's auto-reset layer
+  // handles the rare storage errors that remain. Flag is kept (always
+  // false) for telemetry-shape backwards compatibility during the canary.
+  const usedFallback = false;
   if (locationsToSave.length > 0) {
-    if (sqliteAvailable) {
-      try {
-        for (const loc of locationsToSave) {
-          await insertLocation(loc);
-        }
-        lg.debug(`BG task: saved ${locationsToSave.length} to SQLite`);
-      } catch (sqliteErr) {
-        lg.error(
-          'BG task: SQLite insert failed, falling back to AsyncStorage:',
-          sqliteErr instanceof Error ? sqliteErr.message : sqliteErr,
-        );
-        trackBGTaskError({
-          step: 'sqlite_insert',
-          error: sqliteErr instanceof Error ? sqliteErr.message : String(sqliteErr),
-        });
-        usedFallback = true;
-        await saveFallbackLocations(locationsToSave);
+    try {
+      for (const loc of locationsToSave) {
+        await insertLocation(loc);
       }
-    } else {
-      usedFallback = true;
-      await saveFallbackLocations(locationsToSave);
+      lg.debug(`BG task: persisted ${locationsToSave.length} pings to local queue`);
+    } catch (queueErr) {
+      lg.error(
+        'BG task: queue insert failed (pings lost this cycle):',
+        queueErr instanceof Error ? queueErr.message : queueErr,
+      );
+      trackBGTaskError({
+        step: 'queue_insert',
+        error: queueErr instanceof Error ? queueErr.message : String(queueErr),
+      });
     }
   }
 
@@ -843,6 +774,17 @@ export async function startLocationTracking(params: {
       };
     }
 
+    // One-shot: ask the user to exempt us from Android's battery optimization.
+    // Without this, Doze + App Standby will aggressively kill the foreground
+    // service on long shifts (esp. screen-locked driving), silently stopping
+    // GPS capture. The prompt is a single system dialog; deferred here so the
+    // driver only ever sees it alongside the location-permission flow (not as
+    // a surprise mid-use). Non-blocking: we don't fail tracking start if the
+    // user declines — the battery killer just becomes more likely.
+    requestIgnoreBatteryOptimizationOnce().catch(() => {
+      /* best-effort; don't block tracking start on this */
+    });
+
     // Save tracking state
     const state: TrackingState = {
       isActive: true,
@@ -923,12 +865,6 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
   try {
     lg.debug('Stopping tracking...');
 
-    try {
-      await reopenDb();
-    } catch (err) {
-      lg.warn('stop: DB reopen failed, continuing best-effort:', err);
-    }
-
     // Stop sync interval and foreground polling
     stopSyncInterval();
     await stopForegroundPolling();
@@ -963,16 +899,6 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
       if (isRegistered) {
         await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
       }
-    }
-
-    // Clean up old synced data (keep 7 days for debugging)
-    try {
-      const cleaned = await deleteOldSyncedLocations();
-      if (cleaned > 0) {
-        lg.debug(`Cleaned ${cleaned} old synced records from SQLite`);
-      }
-    } catch {
-      // Non-critical
     }
 
     lg.debug('Stopped successfully');
@@ -1053,12 +979,6 @@ export async function ensureTrackingForLoad(params: {
     `Handing off tracking from load=${fromLoadDisplay}... ` +
       `to load=${params.loadId.slice(0, 12)}... (age=${Math.round(ageMs / 60000)}m, stale=${isStale})`,
   );
-
-  try {
-    await reopenDb();
-  } catch (err) {
-    lg.warn('Handoff DB reopen failed, continuing best-effort:', err);
-  }
 
   try {
     await forceFlush();
@@ -1198,6 +1118,10 @@ async function applyOSLevelTrackingResources(state: TrackingState): Promise<{
         'Background location permission required. Please enable "Always" location access in Settings.',
     };
   }
+
+  // One-shot battery-optimization exemption prompt. See startLocationTracking
+  // for rationale; same best-effort, non-blocking call.
+  requestIgnoreBatteryOptimizationOnce().catch(() => {});
 
   try {
     await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
@@ -1467,6 +1391,107 @@ function stopSyncInterval() {
 let foregroundWatchSubscription: Location.LocationSubscription | null = null;
 let lastForegroundLocation: { latitude: number; longitude: number; time: number } | null = null;
 let isSyncing = false;
+// Heartbeat gate: verify BG task is still registered every ~5 minutes during
+// active foreground tracking. Cheap TaskManager.isTaskRegisteredAsync call,
+// but no need to run it on every single GPS fix.
+let lastBgTaskHeartbeatCheck = 0;
+const BG_TASK_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Throttled heartbeat: if the BG task has been silently unregistered (OEM
+ * kill, Doze sweep, Samsung Sleeping Apps, etc.), re-register it now so
+ * the driver doesn't silently stop capturing when they next lock the
+ * phone. The foreground watch itself keeps running even when the BG task
+ * is dead — which is why this check is necessary in the first place; the
+ * data from the foreground side looks healthy while the background side
+ * has quietly died.
+ *
+ * No-op on Expo Go (no TaskManager). No-op if called within
+ * BG_TASK_HEARTBEAT_INTERVAL_MS of the previous check.
+ */
+async function maybeReregisterBgTaskHeartbeat(
+  now: number,
+  organizationId: string,
+): Promise<void> {
+  if (isExpoGo) return;
+  if (now - lastBgTaskHeartbeatCheck < BG_TASK_HEARTBEAT_INTERVAL_MS) return;
+  lastBgTaskHeartbeatCheck = now;
+
+  try {
+    const isRegistered = await TaskManager.isTaskRegisteredAsync(
+      LOCATION_TASK_NAME,
+    );
+    if (isRegistered) return; // healthy — nothing to do
+
+    // BG task is gone. We'd like to re-register immediately, BUT Android 12+
+    // (API 31+) forbids starting a foreground service from the background —
+    // Location.startLocationUpdatesAsync throws ForegroundServiceStartNotAllowedException
+    // with message "Foreground service cannot be started when the application
+    // is in the background." This callback fires from watchPositionAsync, which
+    // can briefly outlive the FGS during a background kill, so hitting this
+    // path WITH AppState != 'active' is the common case, not an edge case.
+    //
+    // Two consequences:
+    //   • Heartbeat can only self-heal background-kills that happen WHILE the
+    //     app is foreground — a narrow window (mostly OS-wake-word churn on
+    //     Samsung + similar OEMs while screen is on).
+    //   • The "app was backgrounded, FGS got killed, driver is driving with
+    //     screen off" case — the common one — cannot be recovered in-process.
+    //     It needs FCM high-priority push to wake the app into foreground
+    //     first, which our server-push wake-up PR addresses.
+    //
+    // So: in background, emit a "skipped_backgrounded" signal and return.
+    // We DON'T even attempt the register call; avoids log noise + uncaught
+    // SecurityException in telemetry.
+    const appState = AppState.currentState;
+    if (appState !== 'active') {
+      trackBGTaskReregistered({
+        source: 'heartbeat',
+        wasRegistered: false,
+        success: false,
+        error: `skipped_backgrounded:${appState}`,
+      });
+      lg.debug(
+        `Heartbeat: BG task dead but app is ${appState} — can't restart FGS from background, deferring to foreground_return or FCM wake`,
+      );
+      return;
+    }
+
+    lg.warn('Heartbeat: BG task is NOT registered during active tracking — re-registering');
+    let success = false;
+    let error: string | undefined;
+    try {
+      await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
+        accuracy: Location.Accuracy.High,
+        timeInterval: TRACKING_INTERVAL_MS,
+        distanceInterval: BG_DISTANCE_INTERVAL,
+        showsBackgroundLocationIndicator: true,
+        foregroundService: {
+          notificationTitle: 'Route Tracking Active',
+          notificationBody: 'Recording your delivery route',
+          notificationColor: '#22c55e',
+        },
+        activityType: Location.ActivityType.OtherNavigation,
+        pausesUpdatesAutomatically: false,
+      });
+      success = true;
+    } catch (restartErr) {
+      error = restartErr instanceof Error ? restartErr.message : String(restartErr);
+      lg.warn(`Heartbeat: BG task re-registration failed: ${error}`);
+    }
+    trackBGTaskReregistered({
+      source: 'heartbeat',
+      wasRegistered: false,
+      success,
+      error,
+    });
+  } catch (err) {
+    // isTaskRegisteredAsync itself failed — unusual but non-fatal.
+    lg.warn(
+      `Heartbeat: isTaskRegisteredAsync failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
 
 /**
  * Start foreground location watching with continuous real-time updates
@@ -1499,6 +1524,10 @@ async function startForegroundPolling(organizationId: string) {
             speed_mps: location.coords.speed ?? null,
             heading_deg: location.coords.heading ?? null,
           });
+
+          // Throttled heartbeat — catches silently-killed BG tasks before
+          // the driver locks the phone and drops into a capture gap.
+          void maybeReregisterBgTaskHeartbeat(now, organizationId);
 
           const state = await getTrackingState();
           if (!state?.isActive) {
@@ -1574,20 +1603,22 @@ async function startForegroundPolling(organizationId: string) {
             recordedAt: location.timestamp,
           };
 
-          let usedFallback = false;
+          // No fallback buffer — on MMKV the failure class is gone, and on
+          // the legacy SQLite backend the dispatcher's withRecovery handles
+          // retry + auto-reset. If insert still throws here, the ping is
+          // dropped and telemetry flags the error.
+          const usedFallback = false;
           try {
             await insertLocation(locationRecord);
           } catch (insertError) {
             lg.warn(
-              'Watch: SQLite insert failed after retry, buffering fallback location:',
+              'Watch: insert failed (ping dropped):',
               insertError instanceof Error ? insertError.message : insertError,
             );
             trackWatchLocationError({
               step: 'insert',
               error: insertError instanceof Error ? insertError.message : String(insertError),
             });
-            await saveFallbackLocations([locationRecord]);
-            usedFallback = true;
           }
 
           lastForegroundLocation = {
@@ -1801,25 +1832,10 @@ export async function restartForegroundServices(): Promise<void> {
 
   lg.debug('Restarting foreground services after app resume');
 
-  // Proactively refresh the SQLite connection. Android can destroy the native
-  // database handle after long background periods while the JS-side reference
-  // remains cached, causing NullPointerException on the next prepareAsync/runAsync.
-  try {
-    await reopenDb();
-  } catch (err) {
-    lg.warn('DB reopen failed, getDb() will retry on demand:', err);
-  }
-
-  // Recover any locations saved to AsyncStorage fallback during background
-  let fallbackRecovered = 0;
-  try {
-    fallbackRecovered = await recoverFallbackLocations();
-    if (fallbackRecovered > 0) {
-      lg.debug(`Recovered ${fallbackRecovered} fallback locations from background`);
-    }
-  } catch (err) {
-    lg.warn('Fallback recovery error:', err);
-  }
+  // (Legacy AsyncStorage fallback recovery removed — the buffer no longer
+  // exists. The one-shot migrateFromLegacyStoresOnce in root init handles
+  // draining pre-upgrade buffers into the queue.)
+  const fallbackRecovered = 0;
 
   // Check when the background task last fired (diagnostic)
   let bgTaskLastAliveAgoSec: number | null = null;
@@ -1941,6 +1957,18 @@ export async function restartForegroundServices(): Promise<void> {
 
   startSyncInterval(state.organizationId);
   startForegroundPolling(state.organizationId);
+
+  // Immediate one-shot flush: if any pings were buffered during the silent
+  // window (zombie BG task, screen-off gap, etc.), push them now instead of
+  // waiting for the sync interval's next tick. Cheap when queue is empty.
+  if (unsyncedCount > 0) {
+    lg.debug(`Foreground resume: flushing ${unsyncedCount} buffered pings`);
+    syncUnsyncedToConvex(state.organizationId).catch((err) => {
+      lg.warn(
+        `Foreground-resume flush failed (retry on next interval): ${err instanceof Error ? err.message : err}`,
+      );
+    });
+  }
 }
 
 // ============================================
