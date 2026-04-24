@@ -115,6 +115,20 @@ crons.interval(
   {},
 );
 
+// ✅ FCM wake-up sweep (every 1 minute) — Phase 1b
+// Scans active driverSessions whose lastPingAt is older than 2 minutes
+// and fans out sendWake actions to revive killed FGS. Gated per-org on
+// the fcm_wake_enabled feature flag (default off). Cooldown + backoff
+// are enforced atomically inside sendWake, not here — concurrent sweeps
+// are expected to be rare but the atomic check makes them safe.
+// See convex/fcmWake.ts and mobile/docs/gps-tracking-architecture.md § Phase 1.
+crons.interval(
+  'fcm-wake-sweep',
+  { minutes: 1 },
+  internal.fcmWake.sweep,
+  {},
+);
+
 // ==========================================
 // FACET SYSTEM MAINTENANCE
 // ==========================================

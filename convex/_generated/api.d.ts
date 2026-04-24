@@ -47,6 +47,7 @@ import type * as externalTrackingAuthCrypto from "../externalTrackingAuthCrypto.
 import type * as externalTrackingPartnerKeys from "../externalTrackingPartnerKeys.js";
 import type * as externalTrackingWebhooks from "../externalTrackingWebhooks.js";
 import type * as facetMaintenance from "../facetMaintenance.js";
+import type * as fcmWake from "../fcmWake.js";
 import type * as featureFlags from "../featureFlags.js";
 import type * as forceResync from "../forceResync.js";
 import type * as fourKitesApiClient from "../fourKitesApiClient.js";
@@ -171,6 +172,7 @@ declare const fullApi: ApiFromModules<{
   externalTrackingPartnerKeys: typeof externalTrackingPartnerKeys;
   externalTrackingWebhooks: typeof externalTrackingWebhooks;
   facetMaintenance: typeof facetMaintenance;
+  fcmWake: typeof fcmWake;
   featureFlags: typeof featureFlags;
   forceResync: typeof forceResync;
   fourKitesApiClient: typeof fourKitesApiClient;
