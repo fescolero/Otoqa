@@ -30,7 +30,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useMutation } from 'convex/react';
 import { api } from '../../../convex/_generated/api';
 import type { Id } from '../../../convex/_generated/dataModel';
-import { useAppMode } from './_layout';
+import { useAppMode, useDriver } from './_layout';
 import { startSessionTracking } from '../../lib/location-tracking';
 import { usePostHog } from 'posthog-react-native';
 import { Icon, type IconName } from '../../lib/design-icons';
@@ -59,6 +59,18 @@ export default function StartShiftScreen() {
 
   const { roles } = useAppMode();
   const driverId = roles?.driverId as Id<'drivers'> | undefined;
+  // Driver organizationId comes from the profile context (DriverContext in
+  // _layout.tsx), sourced from `profile.organizationId`. It's the same
+  // value the rest of the driver tracking stack reads. The `roles` object
+  // does NOT expose `organizationId` — a prior version of this screen
+  // tried to read `roles.organizationId` via an `as unknown as` cast, and
+  // since no such field exists on UserRoles at runtime, the guard that
+  // followed ALWAYS fell through and startSessionTracking NEVER ran for
+  // any driver in any shift. That bug left every driver in legacy_load
+  // mode with pings carrying no sessionId, which silently broke Phase 1's
+  // FCM wake path. Read from useDriver() — the source that's type-
+  // checked and actually populated.
+  const { organizationId: driverOrgId } = useDriver();
 
   const startSession = useMutation(api.driverSessions.startSession);
   const posthog = usePostHog();
@@ -84,28 +96,40 @@ export default function StartShiftScreen() {
         sessionId,
         truckUnitId: params.truckUnitId ?? null,
       });
+
       // Session exists server-side. Now kick off GPS.
-      // organizationId comes from the driver profile; we can fetch lazily, but
-      // tracking accepts it as required — pulled from the driver profile.
-      // The caller (start-shift) doesn't have it; we rely on the driver profile
-      // being hydrated in memory already. If missing we fail-forward and let
-      // the home screen take it from there.
-      const orgId =
-        (roles as unknown as { organizationId?: string })?.organizationId ?? '';
-      if (orgId) {
-        const result = await startSessionTracking({
-          driverId,
+      //
+      // driverOrgId is sourced from the profile context (above) which the
+      // upstream profileGate guarantees is hydrated before this screen
+      // renders. If somehow it's still null, fail LOUDLY — silently
+      // skipping tracking was the pre-existing bug that left every
+      // driver in legacy_load mode. The driver would see a "shift
+      // started" toast but no GPS would actually flow.
+      if (!driverOrgId) {
+        posthog?.capture('start_shift_session_tracking_skipped', {
+          reason: 'no_org_id',
           sessionId,
-          organizationId: orgId,
         });
-        if (!result.success) {
-          Alert.alert(
-            'Shift started — GPS issue',
-            `Shift is active but tracking didn't start: ${result.message}`,
-            [{ text: 'OK', onPress: () => router.replace('/(driver-tabs)') }]
-          );
-          return;
-        }
+        Alert.alert(
+          'Tracking not started',
+          'Your driver profile is still loading. Please wait a moment and tap Start Shift again.',
+        );
+        setIsStarting(false);
+        return;
+      }
+
+      const result = await startSessionTracking({
+        driverId,
+        sessionId,
+        organizationId: driverOrgId,
+      });
+      if (!result.success) {
+        Alert.alert(
+          'Shift started — GPS issue',
+          `Shift is active but tracking didn't start: ${result.message}`,
+          [{ text: 'OK', onPress: () => router.replace('/(driver-tabs)') }]
+        );
+        return;
       }
       router.replace('/(driver-tabs)');
     } catch (err) {

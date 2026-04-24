@@ -533,6 +533,25 @@ export function trackActivityRecognitionFgsRestart(context: {
   capture('activity_recognition_fgs_restart', context);
 }
 
+// ============================================
+// PHASE 1 — SESSIONID ATTRIBUTION SELF-HEAL
+// ============================================
+//
+// Fires whenever reconcileTrackingStateWithActiveSession patches a
+// missing sessionId into the local TrackingState. Used to measure how
+// often drivers are arriving at check-in / resume / legacy-start with
+// a local state that doesn't match the server's active session —
+// diagnostic for Phase 1's sessionId-attribution rollout. Should
+// trend toward zero as the Start Shift typo fix (in the same PR)
+// covers all new shifts.
+
+export function trackTrackingStateSelfHealed(context: {
+  reason: 'check_in' | 'resume' | 'legacy_start';
+  sessionId: string;
+}) {
+  capture('tracking_state_self_healed', context);
+}
+
 function maskPhone(phone: string): string {
   if (phone.length <= 4) return '****';
   return phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);
