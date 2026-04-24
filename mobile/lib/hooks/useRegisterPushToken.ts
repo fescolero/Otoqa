@@ -95,11 +95,25 @@ export function useRegisterPushToken(driverId: Id<'drivers'> | null | undefined)
           return;
         }
 
+        // `Application.getAndroidId` is defined on iOS as a function that
+        // *throws* when called, rather than being absent. `?.()` only
+        // guards against the property being undefined, so it doesn't
+        // help here — iOS drivers hit this path and blow up with
+        // "expo-application.androidId is not available on ios". Platform-
+        // gate the call explicitly. `deviceId` is Android-only anyway
+        // (it's the ANDROID_ID used for cross-install tracking); iOS has
+        // no stable equivalent Expo exposes, so leaving it undefined on
+        // iOS is correct.
+        const deviceId =
+          Platform.OS === 'android'
+            ? (Application.getAndroidId?.() ?? undefined)
+            : undefined;
+
         const result = await registerToken({
           driverId,
           token,
           platform: Platform.OS === 'ios' ? 'ios' : 'android',
-          deviceId: Application.getAndroidId?.() ?? undefined,
+          deviceId,
           appVersion: Application.nativeApplicationVersion ?? undefined,
         });
         if (cancelled) return;
