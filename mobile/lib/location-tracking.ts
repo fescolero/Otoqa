@@ -13,6 +13,7 @@ import {
   getUnsyncedCount,
   markAsSynced,
   markSyncAttemptFailed,
+  markPermanentlyFailed,
   purgeStaleUnsynced,
   getLastLocationForLoad,
   getLastLocationForSession,
@@ -31,6 +32,7 @@ import {
   trackWatchLocationError,
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
+import { setBootState, clearBootState } from './boot-state';
 
 // Module-scoped namespaced logger. Debug/info calls are stripped in
 // production by Metro; warn/error pass through so Sentry / native
@@ -41,7 +43,7 @@ const lg = log('LocationTracking');
 // LOCATION TRACKING
 // Background location tracking for route recording
 // Tracks driver from first stop check-in to last stop checkout
-// GPS points are stored durably in SQLite and only marked synced
+// GPS points are stored durably in the on-device queue and only marked synced
 // after confirmed upload to Convex. No data loss on auth failures,
 // app kills, or network issues.
 // NOTE: Background location requires a development build (not Expo Go)
@@ -102,14 +104,20 @@ type SyncPing = {
  * convex/driverLocations.ts::IngestOutcome for full semantics.
  *
  * Pre-PR-1 servers only return `inserted`; the other fields are normalized
- * to 0 in normalizeIngestResponse below so the client can use a single
- * code path either way.
+ * to 0 / [] in normalizeIngestResponse below so the client can use a
+ * single code path either way.
+ *
+ * rejectedIndices is specifically the clock-skew-guard rejections — a
+ * subset of permanentlyRejected. The indices reference positions in the
+ * outgoing batch (NOT the full queue), so map them back to batchIds[i]
+ * at the call site.
  */
 type IngestResponse = {
   inserted: number;
   duplicates: number;
   permanentlyRejected: number;
   transientlyRejected: number;
+  rejectedIndices: number[];
 };
 
 function normalizeIngestResponse(raw: unknown): IngestResponse {
@@ -121,6 +129,11 @@ function normalizeIngestResponse(raw: unknown): IngestResponse {
       typeof r.permanentlyRejected === 'number' ? r.permanentlyRejected : 0,
     transientlyRejected:
       typeof r.transientlyRejected === 'number' ? r.transientlyRejected : 0,
+    rejectedIndices: Array.isArray(r.rejectedIndices)
+      ? r.rejectedIndices.filter(
+          (n): n is number => typeof n === 'number' && Number.isInteger(n),
+        )
+      : [],
   };
 }
 
@@ -172,12 +185,33 @@ async function applyIngestOutcome(
   let advanced = false;
 
   if (fullyAccounted && result.transientlyRejected === 0) {
-    await markAsSynced(batchIds);
+    // Split the batch into skew-rejected (clock-skew guard) and everyone
+    // else. Skew-rejected rows are RETAINED on disk with a permanentlyFailed
+    // flag so they don't get re-synced; other permanent rejections still
+    // get removed (the existing "mark synced" behavior) because they were
+    // never valid data in the first place (bad shape, missing driver, etc.).
+    const skewedIdSet = new Set<string>();
+    for (const idx of result.rejectedIndices) {
+      const id = batchIds[idx];
+      if (id !== undefined) skewedIdSet.add(id);
+    }
+    const cleanIds: string[] = [];
+    for (const id of batchIds) {
+      if (!skewedIdSet.has(id)) cleanIds.push(id);
+    }
+
+    if (skewedIdSet.size > 0) {
+      await markPermanentlyFailed(Array.from(skewedIdSet));
+    }
+    if (cleanIds.length > 0) {
+      await markAsSynced(cleanIds);
+    }
     advanced = true;
     lg.debug(
       `${source} sync: ${batchIds.length} done (` +
         `inserted=${result.inserted}, dup=${result.duplicates}, ` +
-        `permRejected=${result.permanentlyRejected})`,
+        `permRejected=${result.permanentlyRejected}, ` +
+        `skewQuarantined=${skewedIdSet.size})`,
     );
     if (result.permanentlyRejected > 0) {
       // Bad data being uploaded — surface so we can investigate upstream.
@@ -382,18 +416,18 @@ interface TrackingState {
   startedAt: number;
 }
 
-// BufferedLocation type removed — GPS points are now stored in SQLite
+// BufferedLocation type removed — GPS points are now stored in the on-device queue
 // via location-db.ts instead of AsyncStorage JSON arrays.
 
 // ============================================
 // BACKGROUND TASK DEFINITION
 // Must be at module scope for background execution
-// Points are written to SQLite immediately (durable).
+// Points are written to the on-device queue immediately (durable).
 // Sync to Convex is best-effort — failures are safe because
-// SQLite retains unsynced rows for later retry.
+// The queue retains unsynced rows for later retry.
 //
 // RESILIENCE: Every step is individually try/caught so a failure
-// in one part (e.g. SQLite init) doesn't prevent the rest from
+// in one part (e.g. queue init) doesn't prevent the rest from
 // running. AsyncStorage is used as a fallback buffer if SQLite
 // is unavailable in the headless background context.
 // ============================================
@@ -481,7 +515,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     `BG task: ${locations.length} location(s) received, accuracy=[${accuracies}], ages=[${ages}]`,
   );
 
-  // Step 3: Try to get last point from SQLite (may fail in headless context).
+  // Step 3: Try to get last point from the queue (may fail in headless context).
   // Prefer sessionId-keyed lookup when present — that's the new source of
   // truth and works even before any check-in. Fall back to loadId for the
   // legacy load-only path.
@@ -493,11 +527,11 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     } else if (state.loadId) {
       lastPoint = await getLastLocationForLoad(state.loadId);
     }
-    lg.debug(`BG task: SQLite available, lastPoint=${lastPoint ? 'yes' : 'none'}`);
+    lg.debug(`BG task: queue available, lastPoint=${lastPoint ? 'yes' : 'none'}`);
   } catch (dbErr) {
     sqliteAvailable = false;
     lg.warn(
-      'BG task: SQLite NOT available in background:',
+      'BG task: queue NOT available in background:',
       dbErr instanceof Error ? dbErr.message : dbErr,
     );
     trackBGTaskError({ step: 'sqlite_init', error: dbErr instanceof Error ? dbErr.message : String(dbErr) });
@@ -670,7 +704,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       }
     } catch (flushError) {
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
-      lg.warn(`BG HTTP sync failed (points safe in SQLite): ${errMsg}`);
+      lg.warn(`BG HTTP sync failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
       trackBGTaskError({ step: 'sync', error: errMsg });
     }
@@ -732,6 +766,11 @@ export async function startLocationTracking(params: {
         startedAt: Date.now(),
       };
       await storage.set(TRACKING_STATE_KEY, JSON.stringify(state));
+      setBootState({
+        isActive: true,
+        sessionId: null,
+        driverId: state.driverId,
+      });
 
       // Capture initial location
       await captureCurrentLocation(state);
@@ -795,6 +834,11 @@ export async function startLocationTracking(params: {
       startedAt: Date.now(),
     };
     await storage.set(TRACKING_STATE_KEY, JSON.stringify(state));
+    setBootState({
+      isActive: true,
+      sessionId: null,
+      driverId: state.driverId,
+    });
 
     // Check if task is already registered
     const isTaskDefined = await TaskManager.isTaskRegisteredAsync(LOCATION_TASK_NAME);
@@ -829,7 +873,7 @@ export async function startLocationTracking(params: {
       // Also start foreground watch as a dual safety net.
       // Background task handles updates when the app is suspended,
       // but foreground watch gives us immediate points while the app is open.
-      // SQLite distance filtering prevents duplicates.
+      // Queue-level distance filtering prevents duplicates.
       startForegroundPolling(params.organizationId);
 
       lg.debug('Background + foreground tracking started successfully');
@@ -869,7 +913,7 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
     stopSyncInterval();
     await stopForegroundPolling();
 
-    // Final sync attempt — any failures are safe, SQLite retains unsynced rows
+    // Final sync attempt — any failures are safe, the queue retains unsynced rows
     const state = await getTrackingState();
     if (state?.isActive) {
       try {
@@ -883,15 +927,16 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
         }
         lg.warn(
           unsyncedRemaining >= 0
-            ? `Final sync incomplete, ${unsyncedRemaining} points retained in SQLite for later upload`
-            : 'Final sync incomplete, unsynced points retained in SQLite for later upload',
+            ? `Final sync incomplete, ${unsyncedRemaining} points retained in local queue for later upload`
+            : 'Final sync incomplete, unsynced points retained in local queue for later upload',
         );
       }
     }
 
-    // Clear tracking state and heartbeat (but NOT the SQLite data — it persists for re-upload)
+    // Clear tracking state and heartbeat (the queued pings persist for re-upload)
     await storage.set(TRACKING_STATE_KEY, JSON.stringify({ isActive: false }));
     await storage.delete(LAST_HEARTBEAT_KEY);
+    clearBootState();
 
     // Stop background updates if registered (only in non-Expo Go)
     if (!isExpoGo) {
@@ -1023,7 +1068,7 @@ export async function ensureTrackingForLoad(params: {
 }
 
 /**
- * Get count of unsynced locations in SQLite
+ * Get count of unsynced locations in the on-device queue
  */
 export async function getBufferedLocationCount(): Promise<number> {
   try {
@@ -1071,7 +1116,7 @@ export async function forceFlush(): Promise<{ success: boolean; synced: number }
   }
 
   const remaining = await getUnsyncedCount();
-  lg.warn(`forceFlush: all retries exhausted, ${remaining} points still in SQLite`);
+  lg.warn(`forceFlush: all retries exhausted, ${remaining} points still in local queue`);
   return { success: false, synced: 0 };
 }
 
@@ -1094,6 +1139,11 @@ async function applyOSLevelTrackingResources(state: TrackingState): Promise<{
 }> {
   // Persist state first so the BG task can read it on next OS callback.
   await storage.set(TRACKING_STATE_KEY, JSON.stringify(state));
+  setBootState({
+    isActive: true,
+    sessionId: state.sessionId ?? null,
+    driverId: state.driverId,
+  });
 
   if (isExpoGo) {
     lg.warn('Running in Expo Go — background location not supported');
@@ -1337,10 +1387,10 @@ export async function resumeTracking(): Promise<{
     // the background task is throttled by the OS and fires infrequently.
     startForegroundPolling(state.organizationId);
 
-    // Sync any unsynced locations from SQLite (survived app restart)
+    // Sync any unsynced locations from the queue (survived app restart)
     const unsyncedCount = await getUnsyncedCount();
     if (unsyncedCount > 0) {
-      lg.debug(`Found ${unsyncedCount} unsynced locations in SQLite, syncing...`);
+      lg.debug(`Found ${unsyncedCount} unsynced locations in local queue, syncing...`);
       await syncUnsyncedToConvex(state.organizationId);
     }
 
@@ -1683,7 +1733,7 @@ async function stopForegroundPolling() {
 }
 
 /**
- * Capture current location immediately, write to SQLite, and attempt immediate sync.
+ * Capture current location immediately, write to the local queue, and attempt immediate sync.
  * Called at tracking start when the user is in the foreground with valid auth.
  */
 async function captureCurrentLocation(state: TrackingState) {
@@ -1706,7 +1756,7 @@ async function captureCurrentLocation(state: TrackingState) {
     });
 
     lg.debug(
-      `Captured initial location to SQLite (rowId=${rowId}, accuracy=${location.coords.accuracy?.toFixed(0)}m, lat=${location.coords.latitude.toFixed(5)}, lng=${location.coords.longitude.toFixed(5)})`,
+      `Captured initial location to local queue (rowId=${rowId}, accuracy=${location.coords.accuracy?.toFixed(0)}m, lat=${location.coords.latitude.toFixed(5)}, lng=${location.coords.longitude.toFixed(5)})`,
     );
 
     // Seed the foreground watch state so it doesn't immediately save a duplicate
@@ -1731,10 +1781,10 @@ async function captureCurrentLocation(state: TrackingState) {
 }
 
 /**
- * Sync unsynced GPS points from SQLite to Convex.
+ * Sync unsynced GPS points from the local queue to Convex.
  * Reads unsynced rows, uploads in batches, marks each batch as synced.
  * On auth failure, retries once after a delay. Unsynced rows are never
- * deleted — they persist in SQLite for future retry.
+ * deleted — they persist in the local queue for future retry.
  */
 async function syncUnsyncedToConvex(
   organizationId: string,
@@ -1799,7 +1849,7 @@ async function syncUnsyncedToConvex(
     if (isAuthError && retryAttempt < MAX_AUTH_RETRIES) {
       const delay = AUTH_RETRY_DELAYS[retryAttempt] ?? 12000;
       lg.warn(
-        `Sync auth failed (attempt ${retryAttempt + 1}/${MAX_AUTH_RETRIES}), retrying in ${delay / 1000}s... (SQLite data safe)`,
+        `Sync auth failed (attempt ${retryAttempt + 1}/${MAX_AUTH_RETRIES}), retrying in ${delay / 1000}s... (queue data safe)`,
       );
       await new Promise((r) => setTimeout(r, delay));
       return syncUnsyncedToConvex(organizationId, retryAttempt + 1);
@@ -1807,7 +1857,7 @@ async function syncUnsyncedToConvex(
 
     const remaining = await getUnsyncedCount();
     lg.error(
-      `Sync failed (attempt ${retryAttempt + 1}): ${errorMsg} — ${remaining} points retained in SQLite for later`,
+      `Sync failed (attempt ${retryAttempt + 1}): ${errorMsg} — ${remaining} points retained in local queue for later`,
     );
     return { success: false, synced: 0 };
   }

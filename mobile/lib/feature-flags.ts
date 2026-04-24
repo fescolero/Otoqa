@@ -26,6 +26,16 @@ import { api } from '../../convex/_generated/api';
 const lg = log('FeatureFlags');
 const CACHE_KEY = 'feature_flags_cache';
 
+// Canonical flag keys. Every value in the Convex `featureFlags` table is
+// serialized as a string (the column type is v.string()) — the accessors
+// below parse each one to the right shape. Add a new flag by:
+//   1) inserting a row in `featureFlags` (see convex/featureFlags.ts)
+//   2) adding the key constant here
+//   3) calling getFlagBool / getFlagNumber / getFlagString at the read site
+export const FLAG_GPS_QUEUE_BACKEND = 'gps_queue_backend';
+export const FLAG_QUEUE_ENCRYPTION_ENABLED = 'queue_encryption_enabled';
+export const FLAG_PING_INGESTED_SAMPLE_RATE = 'ping_ingested_sample_rate';
+
 // How long getQueueBackend is willing to wait on a fresh refresh when the
 // cache is empty, before falling back to the in-code default (sqlite).
 // Keeps first-launch cold-start delay bounded while still giving an online
@@ -176,4 +186,61 @@ export async function getQueueBackend(): Promise<Backend> {
 
   const refreshed = inMemory?.gps_queue_backend;
   return refreshed === 'mmkv' || refreshed === 'sqlite' ? refreshed : 'sqlite';
+}
+
+// ============================================================================
+// GENERIC TYPED ACCESSORS
+// ============================================================================
+//
+// Cache-first, non-blocking. Returns whatever is in the local cache and fires
+// a background refresh for the next launch. On a truly cold cache (first app
+// launch, no network), returns the caller-supplied default.
+//
+// For flags that gate capabilities which can be safely disabled on first
+// launch (Phase 0/1: queue_encryption_enabled, ping_ingested_sample_rate,
+// ar_wake_enabled, fcm_wake_enabled), this is the right shape — defaults are
+// conservative (off / low-impact) so a cold-cache launch can't ship anything
+// dangerous.
+//
+// Flags that *require* the right value on first launch (today: only
+// gps_queue_backend — picking the wrong backend would strand data) should
+// use getQueueBackend above instead, which does a bounded-wait refresh.
+// ============================================================================
+
+async function getRawFlag(key: string): Promise<string | undefined> {
+  const flags = await loadCacheIntoMemory();
+  // Kick off a refresh for the next launch. Don't await — the caller gets
+  // whatever the cache has now.
+  refreshFromServer().catch(() => {});
+  return flags[key];
+}
+
+export async function getFlagString(
+  key: string,
+  defaultValue: string,
+): Promise<string> {
+  const raw = await getRawFlag(key);
+  return raw ?? defaultValue;
+}
+
+export async function getFlagBool(
+  key: string,
+  defaultValue: boolean,
+): Promise<boolean> {
+  const raw = await getRawFlag(key);
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  // Any other stored value (empty string, garbage, undefined) → default.
+  // A malformed flag value shouldn't silently flip a capability on.
+  return defaultValue;
+}
+
+export async function getFlagNumber(
+  key: string,
+  defaultValue: number,
+): Promise<number> {
+  const raw = await getRawFlag(key);
+  if (raw === undefined) return defaultValue;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : defaultValue;
 }

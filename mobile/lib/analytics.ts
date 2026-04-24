@@ -439,6 +439,14 @@ export function trackLocationQueueMigrated(context: {
   capture('location_queue_migrated', context);
 }
 
+export function trackLocationQueueEncryptionMigrated(context: {
+  pingsDrained: number;
+  durationMs: number;
+  resumed: boolean;
+}) {
+  capture('location_queue_encryption_migrated', context);
+}
+
 /**
  * Register the queue backend as a super-property so every subsequent event
  * (watch_location_saved, bg_task_result, etc.) carries `queue_backend` in
