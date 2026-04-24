@@ -26,6 +26,7 @@
 
 import { clearCachedPushToken } from './push-token';
 import { resetLocationQueue } from './location-queue';
+import { stopMotionService } from './motion-service';
 import { log } from './log';
 
 const lg = log('Logout');
@@ -49,6 +50,14 @@ export async function performSignOut(
   } catch (err) {
     lg.warn(
       `resetLocationQueue failed (continuing): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  try {
+    await stopMotionService();
+  } catch (err) {
+    lg.warn(
+      `stopMotionService failed (continuing): ${err instanceof Error ? err.message : err}`,
     );
   }
 

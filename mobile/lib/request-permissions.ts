@@ -1,4 +1,4 @@
-import { Alert, Platform } from 'react-native';
+import { Alert, Platform, PermissionsAndroid } from 'react-native';
 import { useEffect, useRef } from 'react';
 import * as Location from 'expo-location';
 import { Camera } from 'expo-camera';
@@ -62,6 +62,21 @@ async function requestAllPermissions() {
 
   // 6. Photo library
   await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+  // 7. Activity recognition (Android 10+, runtime). Required by the
+  //    Phase 1d `otoqa-motion` native module. Pre-Q the permission is
+  //    install-time (com.google.android.gms.permission.ACTIVITY_RECOGNITION
+  //    in app.json) and always granted. On denial we leave motion-service
+  //    inert — the FCM wake path (PR 1b) still covers dead-FGS recovery.
+  if (Platform.OS === 'android' && Platform.Version >= 29) {
+    try {
+      await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACTIVITY_RECOGNITION,
+      );
+    } catch (err) {
+      console.log('ACTIVITY_RECOGNITION request error:', err);
+    }
+  }
 
   await AsyncStorage.setItem(PERMISSIONS_REQUESTED_KEY, Date.now().toString());
 }
