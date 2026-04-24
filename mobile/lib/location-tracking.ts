@@ -1,7 +1,7 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import Constants from 'expo-constants';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import { storage } from './storage';
 import { convex } from './convex';
 import { ConvexHttpClient } from 'convex/browser';
@@ -1423,10 +1423,40 @@ async function maybeReregisterBgTaskHeartbeat(
     );
     if (isRegistered) return; // healthy — nothing to do
 
-    // BG task is gone but foreground watch is still firing. That means the
-    // OS killed the headless JS context (zombie recycle). Re-register
-    // immediately so the next screen-off / app-background event doesn't
-    // drop into a silent capture gap.
+    // BG task is gone. We'd like to re-register immediately, BUT Android 12+
+    // (API 31+) forbids starting a foreground service from the background —
+    // Location.startLocationUpdatesAsync throws ForegroundServiceStartNotAllowedException
+    // with message "Foreground service cannot be started when the application
+    // is in the background." This callback fires from watchPositionAsync, which
+    // can briefly outlive the FGS during a background kill, so hitting this
+    // path WITH AppState != 'active' is the common case, not an edge case.
+    //
+    // Two consequences:
+    //   • Heartbeat can only self-heal background-kills that happen WHILE the
+    //     app is foreground — a narrow window (mostly OS-wake-word churn on
+    //     Samsung + similar OEMs while screen is on).
+    //   • The "app was backgrounded, FGS got killed, driver is driving with
+    //     screen off" case — the common one — cannot be recovered in-process.
+    //     It needs FCM high-priority push to wake the app into foreground
+    //     first, which our server-push wake-up PR addresses.
+    //
+    // So: in background, emit a "skipped_backgrounded" signal and return.
+    // We DON'T even attempt the register call; avoids log noise + uncaught
+    // SecurityException in telemetry.
+    const appState = AppState.currentState;
+    if (appState !== 'active') {
+      trackBGTaskReregistered({
+        source: 'heartbeat',
+        wasRegistered: false,
+        success: false,
+        error: `skipped_backgrounded:${appState}`,
+      });
+      lg.debug(
+        `Heartbeat: BG task dead but app is ${appState} — can't restart FGS from background, deferring to foreground_return or FCM wake`,
+      );
+      return;
+    }
+
     lg.warn('Heartbeat: BG task is NOT registered during active tracking — re-registering');
     let success = false;
     let error: string | undefined;
