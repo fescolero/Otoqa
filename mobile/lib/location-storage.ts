@@ -38,23 +38,35 @@ interface ResolvedBackend {
 }
 
 let resolved: ResolvedBackend | null = null;
+let inflightResolve: Promise<Backend> | null = null;
 
 /**
- * Resolve the backend at boot. Must be awaited exactly once in the root
- * layout BEFORE any tracking code runs. Subsequent calls are no-ops; the
- * decision is locked for the session.
+ * Resolve the backend at boot. Idempotent — multiple callers receive the
+ * same decision. The decision is locked for the session; a mid-session
+ * backend swap would strand unsynced pings in the old backend (the exact
+ * data-loss we're eliminating), so we deliberately forbid it.
  *
- * A mid-session backend swap would strand unsynced pings in the old
- * backend — the exact data-loss we're eliminating — so we deliberately
- * forbid it.
+ * Concurrent callers are handled: if a resolve is in-flight, new callers
+ * await the same promise rather than starting a parallel resolution. This
+ * prevents a race where a (app) layout mounts and fires resumeTracking
+ * before root layout's resolveBackend() completes — both would otherwise
+ * race to set `resolved` and double-register the PostHog super-property.
  */
 export async function resolveBackend(): Promise<Backend> {
   if (resolved) return resolved.backend;
-  const backend = await getQueueBackend();
-  resolved = { backend };
-  registerQueueBackend(backend);
-  lg.debug(`Queue backend resolved: ${backend}`);
-  return backend;
+  if (inflightResolve) return inflightResolve;
+
+  inflightResolve = (async () => {
+    const backend = await getQueueBackend();
+    resolved = { backend };
+    registerQueueBackend(backend);
+    lg.debug(`Queue backend resolved: ${backend}`);
+    return backend;
+  })().finally(() => {
+    inflightResolve = null;
+  });
+
+  return inflightResolve;
 }
 
 export function getResolvedBackend(): Backend {
