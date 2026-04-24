@@ -644,6 +644,7 @@ Future contributors may be tempted to implement these. This section documents wh
 - PR [#106](https://github.com/fescolero/Otoqa/pull/106) — Phase 0 storage hardening (encryption + boot-state + clock-skew guard + typed flag accessors)
 - PR [#107](https://github.com/fescolero/Otoqa/pull/107) — Phase 1a GPS wake-up server foundation (schema + ingest debounce + pushTokens API)
 - PR [#108](https://github.com/fescolero/Otoqa/pull/108) — Phase 1b FCM server send path (`fcmWake.ts` + cron + OAuth2)
+- PR [#109](https://github.com/fescolero/Otoqa/pull/109) — Phase 1c mobile push-token + FCM receive + reactive flag subscription + logout centralization
 
 ---
 
@@ -685,7 +686,7 @@ If you are implementing this plan more than 30 days after the date above, re-run
 - [ ] Named mobile tracking-stack owner — 1 senior engineer; CODEOWNERS entries added per § 11
 - [ ] Firebase service account created with FCM send scope; JSON stored as Convex env var `FCM_SERVICE_ACCOUNT_JSON`. **Single shared Firebase project for dev today.** If prod traffic volume or quota isolation requires it later, split into separate projects and rotate per-environment env vars; not needed for initial rollout
 - [ ] Firebase project: upload APNs auth key so the SERVER-side FCM HTTP v1 can route to iOS tokens (the key lives in Firebase console, not on the device)
-- [ ] Add `google-services.json` (Android) to `mobile/` and wire into `app.json`. **Under Path B**, `GoogleService-Info.plist` is NOT required on iOS because we are not adding Firebase iOS SDK — APNs is handled natively by Apple + `expo-notifications`
+- [x] Add `google-services.json` (Android) to `mobile/` and wire into `app.json`. **Under Path B**, `GoogleService-Info.plist` is NOT required on iOS because we are not adding Firebase iOS SDK — APNs is handled natively by Apple + `expo-notifications` *(PR 1c — `android.googleServicesFile: "./google-services.json"` + runtime version bump 1.3.1→1.4.0)*
 - [ ] **Canary convention** (applies to every feature flag in this plan): "canary" = any org that has a row in the `featureFlags` table for the flag in question. Default absent = disabled. To canary a new capability on a specific driver's org, insert the flag row for that org id. To expand, insert rows for more orgs. No dedicated "is_canary" boolean — presence of the flag row IS the enrollment signal. Current canary org for ongoing rollouts: Christian's org (`org_01KAEYJHZNV9KQCXF9FN9N3CCY`)
 - [ ] Device lab decision finalized — default recommendation: Firebase Test Lab (automated CI) + 3 physical Samsung Galaxy devices for manual testing
 - [ ] **Runtime version discipline** — every PR that touches `mobile/modules/otoqa-motion/`, `mobile/android/`, `mobile/ios/`, or adds/removes a native dependency MUST bump `expo.runtimeVersion` in `app.json`. Add a CI check that fails the PR if native files changed without a version bump. Repeated past incident: OTA shipped to older native clients that lacked the new module → crash loop
@@ -746,7 +747,7 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
 
 - **1a — Server foundation** (PR [#107](https://github.com/fescolero/Otoqa/pull/107), merged / in review): schema + indexes, `batchInsertLocations` lastPingAt debounce + sampled `ping_ingested` emit, Phase 1 feature-flag keys, `pushTokens.ts` register/clear mutations. Dark (no callers yet).
 - **1b — FCM server send path** (PR [#108](https://github.com/fescolero/Otoqa/pull/108), in review): `fcmWake.sweep` cron + `sendWake` action with atomic cooldown mutation, FCM HTTP v1 POST + error-code handling (backoff, token clear), cron registration. Still dark until 1c arrives (no mobile caller → no pushTokens stored → sweep's `pushTokenPlatform='android'` filter short-circuits).
-- **1c — Mobile push-token + FCM receive**: `mobile/lib/push-token.ts` + `mobile/lib/fcm-handler.ts` (Path B: `expo-notifications` only), `mobile/lib/logout.ts` centralization refactor, session-active guard, real-time flag subscription, Android `POST_NOTIFICATIONS` permission, Proguard rules. Flip `fcm_wake_enabled` on canary → end-to-end FCM wake works without AR.
+- **1c — Mobile push-token + FCM receive** (PR [#109](https://github.com/fescolero/Otoqa/pull/109), in review): `mobile/lib/push-token.ts` + `mobile/lib/fcm-handler.ts` (Path B: `expo-notifications` only), `mobile/lib/logout.ts` centralization refactor (4 call-sites migrated), session-active guard, reactive Convex flag subscription, Android `POST_NOTIFICATIONS` permission + `googleServicesFile` wiring, runtime version bumped `1.3.1 → 1.4.0`. Proguard rules deferred to 1d (they guard Kotlin symbols in `otoqa-motion` which doesn't exist yet). Flip `fcm_wake_enabled` on canary → end-to-end FCM wake works without AR.
 - **1d — `otoqa-motion` native module**: first Expo local module, Kotlin AR wrapper, broadcast receiver, JS bridge, runtime `ACTIVITY_RECOGNITION` permission, dev-mock `fakeTransition`, `motion-service.ts` with debounce + rate-limit. Ships behind `ar_shadow_mode=true` only. **First native module → bumps `expo.runtimeVersion`.**
 - **1e — Shadow→live flip**: after ≥7 days shadow-mode on canary with § Phase-1 thresholds met (1–20 transitions/hr, debounce-hit < 30%, phantoms < 5/driver/day), flip `ar_shadow_mode=false` + `ar_wake_enabled=true`. PR contents: exit-criteria evidence doc + flag flips.
 
@@ -807,9 +808,9 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
 - [ ] Register `BroadcastReceiver` for transition events
 - [ ] Bridge transitions to JS via `Event` emitter
 - [ ] Permissions in `app.json` — verified current state in [`mobile/app.json:43-53`](../app.json); these are already present: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_LOCATION`, `ACCESS_BACKGROUND_LOCATION`, `RECEIVE_BOOT_COMPLETED`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. **NEW additions needed**:
-  - [ ] `com.google.android.gms.permission.ACTIVITY_RECOGNITION` (legacy; Android ≤ 9)
-  - [ ] `android.permission.ACTIVITY_RECOGNITION` (Android 10+, runtime)
-  - [ ] `android.permission.POST_NOTIFICATIONS` (Android 13+, runtime — required for the FGS notification to render)
+  - [ ] `com.google.android.gms.permission.ACTIVITY_RECOGNITION` (legacy; Android ≤ 9) *(PR 1d)*
+  - [ ] `android.permission.ACTIVITY_RECOGNITION` (Android 10+, runtime) *(PR 1d)*
+  - [x] `android.permission.POST_NOTIFICATIONS` (Android 13+, runtime — required for the FGS notification to render) *(PR 1c — app.json)*
 - [ ] Runtime permission request flow for `ACTIVITY_RECOGNITION` (Android 10+) and `POST_NOTIFICATIONS` (Android 13+); handle denial with a non-blocking rationale banner
 - [ ] FGS notification channel — verified against [Expo docs](https://docs.expo.dev/versions/latest/sdk/location/): `Location.startLocationUpdatesAsync`'s `foregroundService` object supports only `notificationTitle`, `notificationBody`, `notificationColor`, `killServiceOnDestroy`. **It does NOT accept a `channelId` option**, so we cannot direct the FGS to a custom channel through the public API. Implication: `expo-location` manages its own notification channel internally; we accept the default. A future enhancement to give drivers a separate mute toggle for the FGS notification would require a native Expo module wrapping `LocationManager` directly — out of scope for Phase 1. No code change needed here; this line exists only to record why we didn't add a channel
 - [ ] **Push notification library — Path B locked** (use `expo-notifications` alone; no new native dep, no runtime-version bump):
@@ -831,16 +832,16 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
 
 **Mobile JS**:
 
-- [ ] Create `mobile/lib/push-token.ts` (Path B implementation — uses `expo-notifications` APIs only):
-  - [ ] Persist the last-registered token in `expo-secure-store` under key `otoqa.pushToken.lastRegistered` (so we can compare against fresh token on app open and skip re-registering when unchanged — saves writes)
-  - [ ] On tracking start: call `Notifications.getDevicePushTokenAsync()` → returns `{ type: 'fcm' | 'apns', data: string }`. Call `registerPushToken({ token: data, platform: type === 'fcm' ? 'android' : 'ios' })` mutation if the token differs from the secure-store cache
-  - [ ] On app foreground (via `AppState 'active'` listener): re-fetch via `getDevicePushTokenAsync()` and diff-check against the cache — this is Path B's stand-in for `onTokenRefresh`. If changed, re-register and update the cache
-  - [ ] Hook into the Clerk sign-out flow. **Verified**: there is no single `logout()` helper today; `signOut()` is called from 4 sites:
+- [x] Create `mobile/lib/push-token.ts` (Path B implementation — uses `expo-notifications` APIs only): *(PR 1c)*
+  - [x] Persist the last-registered token in `expo-secure-store` under key `otoqa.pushToken.lastRegistered` (so we can compare against fresh token on app open and skip re-registering when unchanged — saves writes)
+  - [x] On tracking start: call `Notifications.getDevicePushTokenAsync()` → returns `{ type: 'fcm' | 'apns', data: string }`. Call `registerPushToken({ token: data, platform: type === 'fcm' ? 'android' : 'ios' })` mutation if the token differs from the secure-store cache. **Implementation note**: wired via `useEffect` in `(app)/_layout.tsx` to fire on mount + `AppState 'active'` transitions. "Tracking start" triggers implicitly — mount happens when the driver hits the post-auth stack, which is exactly before tracking-start screens
+  - [x] On app foreground (via `AppState 'active'` listener): re-fetch via `getDevicePushTokenAsync()` and diff-check against the cache — this is Path B's stand-in for `onTokenRefresh`. If changed, re-register and update the cache
+  - [x] Hook into the Clerk sign-out flow. **Verified**: there is no single `logout()` helper today; `signOut()` is called from 4 sites:
     - [`mobile/app/(app)/role-switch.tsx:172`](../app/(app)/role-switch.tsx)
     - [`mobile/app/(app)/(driver-tabs)/more.tsx:157`](../app/(app)/(driver-tabs)/more.tsx)
     - [`mobile/app/(app)/_layout.tsx:427`](../app/(app)/_layout.tsx)
     - [`mobile/app/(app)/owner/(tabs)/profile.tsx:31`](../app/(app)/owner/(tabs)/profile.tsx)
-  - [ ] Preferred: introduce a `mobile/lib/logout.ts` helper that (1) clears the push-token secure-store entry, (2) calls `resetLocationQueue`, (3) calls Clerk `signOut()`. Refactor all 4 sites to use it. Locking this in now prevents future sign-out additions from forgetting the cleanup
+  - [x] Preferred: introduce a `mobile/lib/logout.ts` helper that (1) clears the push-token secure-store entry, (2) calls `resetLocationQueue`, (3) calls Clerk `signOut()`. Refactor all 4 sites to use it. Locking this in now prevents future sign-out additions from forgetting the cleanup *(PR 1c — all 4 sites migrated to `performSignOut(signOut, reason)`)*
 - [ ] Create `mobile/lib/motion-service.ts`:
   - [ ] Register AR transitions on tracking start — subscribe to `STILL ↔ IN_VEHICLE` **only** (other activity types are noise for trucking, per § 6.2)
   - [ ] **No confidence gate** — `ActivityTransitionEvent` does not expose confidence per Google's docs (see § 6.2). False-positive defense is rate + debounce instead, below
@@ -850,12 +851,12 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
   - [ ] `STILL → IN_VEHICLE` listener: verify FGS registered, start if not (via AR-transition exemption § 4.1 #2)
   - [ ] `IN_VEHICLE → STILL` listener: record timestamp (for stationary geofence in Phase 2 + for the debounce check)
   - [ ] Unregister on `stopLocationTracking`
-- [ ] Create `mobile/lib/fcm-handler.ts` (despite the name, uses `expo-notifications` APIs — Path B):
-  - [ ] Foreground listener: `Notifications.addNotificationReceivedListener((notification) => ...)` — reads `notification.request.content.data.type === 'wake_tracking'`
-  - [ ] Background listener: `Notifications.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK_NAME)` paired with `TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK_NAME, ({ data, error }) => ...)` — same payload inspection
-  - [ ] Gate on `fcm_wake_enabled` flag (locally cached, same pattern as queue backend flag)
-  - [ ] **Session-active guard**: before starting FGS, call `api.driverSessions.getActiveSession` via `ConvexHttpClient` (same pattern used by feature-flags.ts). Verify the result is non-null AND `_id` matches the `sessionId` on the wake payload. If the driver clocked out between cron dispatch and push delivery, emit `fcm_wake_session_inactive` and return without touching FGS
-  - [ ] On valid `wake_tracking`: start FGS if needed, capture fresh fix, trigger sync
+- [x] Create `mobile/lib/fcm-handler.ts` (despite the name, uses `expo-notifications` APIs — Path B): *(PR 1c)*
+  - [x] Foreground listener: `Notifications.addNotificationReceivedListener((notification) => ...)` — reads `notification.request.content.data.type === 'wake_tracking'`
+  - [x] Background listener: `Notifications.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK_NAME)` paired with `TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK_NAME, ({ data, error }) => ...)` — same payload inspection. **Note**: `defineTask` is called at module evaluation time (top-level side effect in `fcm-handler.ts`), not inside a function — matches the `LOCATION_TASK_NAME` pattern and is required by `expo-task-manager` to find the handler on cold-start wake
+  - [x] Gate on `fcm_wake_enabled` flag (locally cached, same pattern as queue backend flag)
+  - [x] **Session-active guard**: before starting FGS, call `api.driverSessions.getActiveSession` via `ConvexHttpClient` (same pattern used by feature-flags.ts). Verify the result is non-null AND `_id` matches the `sessionId` on the wake payload. If the driver clocked out between cron dispatch and push delivery, emit `fcm_wake_session_inactive` and return without touching FGS
+  - [x] On valid `wake_tracking`: start FGS if needed, capture fresh fix, trigger sync. **Implementation note**: calls `resumeTracking()` (the existing restart-on-foreground helper) which force-cycles the background task, restarts foreground polling, and syncs any queued pings. Idempotent — safe to call when FGS is already live
 - [ ] Emulator / simulator dev-mock path:
   - [ ] Detect `__DEV__ && isEmulator()` at boot
   - [ ] Expose a dev-only `fakeTransition(to: 'IN_VEHICLE' | 'STILL')` on the module so Maestro and manual devs can drive the state machine
@@ -864,18 +865,21 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
   - [ ] iOS: `activityType: Location.ActivityType.OtherNavigation` and `pausesUpdatesAutomatically: false` on `Location.startLocationUpdatesAsync` options. These are iOS-only (no Android equivalent exists)
   - [ ] Android: correct `LocationRequest` priority per motion state (per § 6.1 Android table)
   - [ ] Regression assertion (runtime log or test) so a future refactor can't silently drop these
-- [ ] Real-time kill-switch path for feature flags:
-  - [ ] Extend `mobile/lib/feature-flags.ts` to subscribe to `featureFlags.getForOrg` as a Convex reactive query during active tracking (not just cold-start cache refresh)
-  - [ ] On flag change observed, update the in-memory cache and re-evaluate gates in `motion-service` and `fcm-handler` (unregister AR / drop FCM handler if newly disabled)
-  - [ ] This makes P0 kill-switches effective within seconds instead of the next cold start
-- [ ] Wire all three into `mobile/app/_layout.tsx` root init (push-token → motion-service → fcm-handler)
-- [ ] Add analytics events:
-  - [ ] `activity_recognition_transition` with `{ from, to, shadow, debounced?, rateLimited? }` — no `confidence` field (API doesn't provide one)
-  - [ ] `activity_recognition_fgs_restart` with `{ success, error }`
-  - [ ] `fcm_wake_received` with `{ type, sessionId }`
-  - [ ] `fcm_wake_resume_success` with `{ pingCaptured }`
-  - [ ] `push_token_registered` with `{ platform, rotated }`
-  - [ ] `push_token_cleared` with `{ reason }`
+- [x] Real-time kill-switch path for feature flags: *(PR 1c)*
+  - [x] Extend `mobile/lib/feature-flags.ts` to subscribe to `featureFlags.getForOrg` as a Convex reactive query during active tracking (not just cold-start cache refresh). **Implementation note**: subscription lives in `(app)/_layout.tsx` via `useQuery(api.featureFlags.getForOrg, {})`, and `applyFlagSnapshot` (new helper in `feature-flags.ts`) writes every push into both the in-memory cache and the MMKV-backed persistent cache. Subscribes whenever the post-auth layout is mounted — which covers "during active tracking" and also covers the foreground/idle case (the overhead of a reactive query on a handful of flag keys is negligible)
+  - [x] On flag change observed, update the in-memory cache and re-evaluate gates in `motion-service` and `fcm-handler` (unregister AR / drop FCM handler if newly disabled). **PR 1c scope**: `fcm-handler` checks the flag on every wake event (not on registration), so a flipped flag is effective for the next push without explicit re-evaluation. `motion-service` doesn't exist yet (PR 1d) — when it lands, same cache-read pattern on each transition callback handles the kill-switch
+  - [x] This makes P0 kill-switches effective within seconds instead of the next cold start
+- [x] Wire all three into `mobile/app/_layout.tsx` root init (push-token → motion-service → fcm-handler). **PR 1c**: push-token + fcm-handler wired into `(app)/_layout.tsx`. motion-service arrives in 1d
+- [x] Add analytics events: *(PR 1c — motion / AR events deferred to 1d)*
+  - [ ] `activity_recognition_transition` with `{ from, to, shadow, debounced?, rateLimited? }` — no `confidence` field (API doesn't provide one) *(PR 1d)*
+  - [ ] `activity_recognition_fgs_restart` with `{ success, error }` *(PR 1d)*
+  - [x] `fcm_wake_received` with `{ type, sessionId, deliveryPath }` — extended with `deliveryPath` ('foreground' | 'background') so dashboards can split the two receive paths
+  - [x] `fcm_wake_resume_success` with `{ pingCaptured, preFlushQueueSize }` — extended with queue size so dashboards can see how many pings the wake recovered
+  - [x] `fcm_wake_session_inactive` with `{ payloadSessionId, currentSessionId }` — fires when the session-active guard rejects the push (driver clocked out between dispatch and delivery)
+  - [x] `fcm_wake_ignored` with `{ reason, detail?, error? }` — covers flag-disabled, no-auth-token, resume-declined, resume-error cases
+  - [x] `push_token_registered` with `{ platform, rotated }`
+  - [x] `push_token_cleared` with `{ reason }`
+  - [x] `push_token_skipped` with `{ reason, server_reason?, error? }` — fires when the Convex mutation returns `registered: false` (most common: no active session)
 
 **Shadow-mode rollout (required intermediate step)**:
 

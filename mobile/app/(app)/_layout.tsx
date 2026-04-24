@@ -21,6 +21,13 @@ import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import RoleSwitchScreen from './role-switch';
 import { useRequestPermissionsOnce } from '../../lib/request-permissions';
 import { useRegisterPushToken } from '../../lib/hooks/useRegisterPushToken';
+import { performSignOut } from '../../lib/logout';
+import { refreshPushTokenIfChanged } from '../../lib/push-token';
+import {
+  registerBackgroundWakeTask,
+  registerForegroundWakeListener,
+} from '../../lib/fcm-handler';
+import { applyFlagSnapshot } from '../../lib/feature-flags';
 import {
   identifyUser,
   resetUser,
@@ -274,6 +281,45 @@ export default function AppLayout() {
   // no-ops when driverId is null so it's safe to call every render.
   useRegisterPushToken(profile?._id ?? null);
 
+  // -----------------------------------------------------------------------
+  // PHASE 1C — WAKE-PUSH (FCM) WIRING
+  // -----------------------------------------------------------------------
+  // These hooks live above any conditional return, same hoisting rule as
+  // useRegisterPushToken above. All of them are inert in Expo Go + when
+  // not signed in (internal guards handle those cases).
+
+  // 1. Register the background task + foreground listener for wake pushes.
+  //    Idempotent; the native task registration persists across JS reloads.
+  useEffect(() => {
+    registerBackgroundWakeTask().catch(() => {});
+    const cleanup = registerForegroundWakeListener();
+    return cleanup;
+  }, []);
+
+  // 2. Refresh the device push token on mount + on every foreground
+  //    return. This is Path B's stand-in for Firebase's onTokenRefresh:
+  //    we diff-check against the secure-store cache and re-register only
+  //    on rotation. Non-blocking — errors swallowed inside the helper.
+  useEffect(() => {
+    refreshPushTokenIfChanged().catch(() => {});
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') refreshPushTokenIfChanged().catch(() => {});
+    });
+    return () => sub.remove();
+  }, []);
+
+  // 3. Reactive feature-flag subscription. Convex pushes new snapshots
+  //    on every write to featureFlags for the caller's org, which means
+  //    flipping `fcm_wake_enabled=false` (or any other capability flag)
+  //    takes effect on live clients within seconds — no cold start
+  //    required. applyFlagSnapshot writes both the in-memory cache and
+  //    the MMKV-backed persistent cache so next cold start also sees
+  //    the new value.
+  const liveFlags = useQuery(api.featureFlags.getForOrg, {});
+  useEffect(() => {
+    if (liveFlags) applyFlagSnapshot(liveFlags);
+  }, [liveFlags]);
+
   // Self-heal orphan GPS tracking.
   //
   // Problem: several codepaths flip `mode` without going through the
@@ -424,7 +470,7 @@ export default function AppLayout() {
       console.warn('Failed to clear mode from storage:', e);
     }
     resetUser();
-    await signOut();
+    await performSignOut(signOut, '(app)_layout_handoff');
   };
 
   // Get router for initial-screen navigation

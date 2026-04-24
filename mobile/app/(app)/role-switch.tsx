@@ -28,6 +28,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Rect, Circle, G, Defs, RadialGradient, Stop } from 'react-native-svg';
 import { useRouter } from 'expo-router';
 import { useClerk } from '@clerk/clerk-expo';
+import { performSignOut } from '../../lib/logout';
 import { useAppMode } from './_layout';
 import { useDriver } from './_layout';
 import { Icon } from '../../lib/design-icons';
@@ -169,7 +170,7 @@ export default function RoleSwitchScreen() {
           {driverName || 'Driver'}
         </Text>
         <Pressable
-          onPress={() => void signOut()}
+          onPress={() => void performSignOut(signOut, 'role_switch_header')}
           style={({ pressed }) => [styles.signOutBtn, pressed && { opacity: 0.7 }]}
         >
           <Text style={styles.signOutText}>Sign out</Text>

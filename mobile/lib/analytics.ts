@@ -457,6 +457,59 @@ export function registerQueueBackend(backend: 'mmkv' | 'sqlite') {
   posthogClient?.register({ queue_backend: backend });
 }
 
+// ============================================
+// PHASE 1C — PUSH TOKEN + FCM WAKE EVENTS
+// ============================================
+
+export function trackPushTokenRegistered(context: {
+  platform: 'ios' | 'android';
+  rotated: boolean;
+}) {
+  capture('push_token_registered', context);
+}
+
+export function trackPushTokenSkipped(context: {
+  reason: string;
+  server_reason?: string;
+  error?: string;
+}) {
+  capture('push_token_skipped', context);
+}
+
+export function trackPushTokenCleared(context: { reason: string }) {
+  capture('push_token_cleared', context);
+}
+
+export function trackFcmWakeReceived(context: {
+  type: string;
+  sessionId: string;
+  deliveryPath: 'foreground' | 'background';
+}) {
+  capture('fcm_wake_received', context);
+}
+
+export function trackFcmWakeIgnored(context: {
+  reason: string;
+  detail?: string;
+  error?: string;
+}) {
+  capture('fcm_wake_ignored', context);
+}
+
+export function trackFcmWakeSessionInactive(context: {
+  payloadSessionId: string;
+  currentSessionId: string | null;
+}) {
+  capture('fcm_wake_session_inactive', context);
+}
+
+export function trackFcmWakeResumeSuccess(context: {
+  pingCaptured: boolean;
+  preFlushQueueSize: number;
+}) {
+  capture('fcm_wake_resume_success', context);
+}
+
 function maskPhone(phone: string): string {
   if (phone.length <= 4) return '****';
   return phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);
