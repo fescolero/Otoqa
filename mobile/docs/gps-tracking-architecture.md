@@ -643,6 +643,7 @@ Future contributors may be tempted to implement these. This section documents wh
 - PR [#105](https://github.com/fescolero/Otoqa/pull/105) — MMKV migration + battery-opt + heartbeat
 - PR [#106](https://github.com/fescolero/Otoqa/pull/106) — Phase 0 storage hardening (encryption + boot-state + clock-skew guard + typed flag accessors)
 - PR [#107](https://github.com/fescolero/Otoqa/pull/107) — Phase 1a GPS wake-up server foundation (schema + ingest debounce + pushTokens API)
+- PR [#108](https://github.com/fescolero/Otoqa/pull/108) — Phase 1b FCM server send path (`fcmWake.ts` + cron + OAuth2)
 
 ---
 
@@ -744,7 +745,7 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
 **Sub-phase slicing** (shipping as 5 sequential PRs instead of one bundle — keeps each reviewable, isolates the first runtime-version bump to PR 1d, and lets server changes bake before native touches the client):
 
 - **1a — Server foundation** (PR [#107](https://github.com/fescolero/Otoqa/pull/107), merged / in review): schema + indexes, `batchInsertLocations` lastPingAt debounce + sampled `ping_ingested` emit, Phase 1 feature-flag keys, `pushTokens.ts` register/clear mutations. Dark (no callers yet).
-- **1b — FCM server send path**: `fcmWake.sweep` cron + `sendWake` action with atomic cooldown mutation, FCM HTTP v1 POST + error-code handling (backoff, token clear), cron registration, `FCM_SERVICE_ACCOUNT_JSON` env wiring. Still dark until 1c arrives.
+- **1b — FCM server send path** (PR [#108](https://github.com/fescolero/Otoqa/pull/108), in review): `fcmWake.sweep` cron + `sendWake` action with atomic cooldown mutation, FCM HTTP v1 POST + error-code handling (backoff, token clear), cron registration. Still dark until 1c arrives (no mobile caller → no pushTokens stored → sweep's `pushTokenPlatform='android'` filter short-circuits).
 - **1c — Mobile push-token + FCM receive**: `mobile/lib/push-token.ts` + `mobile/lib/fcm-handler.ts` (Path B: `expo-notifications` only), `mobile/lib/logout.ts` centralization refactor, session-active guard, real-time flag subscription, Android `POST_NOTIFICATIONS` permission, Proguard rules. Flip `fcm_wake_enabled` on canary → end-to-end FCM wake works without AR.
 - **1d — `otoqa-motion` native module**: first Expo local module, Kotlin AR wrapper, broadcast receiver, JS bridge, runtime `ACTIVITY_RECOGNITION` permission, dev-mock `fakeTransition`, `motion-service.ts` with debounce + rate-limit. Ships behind `ar_shadow_mode=true` only. **First native module → bumps `expo.runtimeVersion`.**
 - **1e — Shadow→live flip**: after ≥7 days shadow-mode on canary with § Phase-1 thresholds met (1–20 transitions/hr, debounce-hit < 30%, phantoms < 5/driver/day), flip `ar_shadow_mode=false` + `ar_wake_enabled=true`. PR contents: exit-criteria evidence doc + flag flips.
@@ -772,16 +773,18 @@ Small follow-ups on the already-shipped MMKV queue. Keep scope tight — do not 
 - [x] Create `convex/pushTokens.ts`: *(PR 1a)*
   - [x] `registerPushToken({ token, platform })` mutation — auth-gated via `resolveAuthenticatedDriver`; stores on active session. **Spec clarification**: the original text said "or driver row if no active session", but the schema additions only added push-token fields to `driverSessions`. PR 1a takes the simpler interpretation — no-op + telemetry (`no_active_session` reason) when no active session, and the mobile client re-registers on the next tracking-start. A driver-row fallback would require a schema addition not otherwise motivated
   - [x] `clearPushToken({ token })` internal mutation — called on FCM `UNREGISTERED` / `INVALID_ARGUMENT` response *(caller not wired until PR 1b)*
-- [ ] Create `convex/fcmWake.ts`:
-  - [ ] `internal.fcmWake.sweep` cron handler — scan `by_active_lastping`, take(500), schedule sends; gate on `fcm_wake_enabled` flag per org. **Do NOT check the 5-min cooldown in sweep** — defer to the mutation inside `sendWake` to avoid read-then-write races across concurrent sweeps
-  - [ ] `internal.fcmWake.sendWake({ sessionId, driverId })` action — wraps an internal mutation that atomically re-reads `fcmLastPushAt` AND `fcmBackoffUntil`, aborts if either blocks, and patches `fcmLastPushAt=now` before the action fires the HTTP POST. This is the only writer to `fcmLastPushAt`
-  - [ ] POST FCM HTTP v1; emit `fcm_dispatched({ sessionId, outcome: 'success' | 'failure', error? })` — the "outcome" field is the `success/failure/error bucket` referenced in § 6.5
-  - [ ] Payload must stay under FCM's 4KB limit — keep it to `{ type, sessionId }` only, do not add fleet/load metadata here
-  - [ ] Handle FCM error codes:
-    - On `UNREGISTERED` / `INVALID_ARGUMENT` / `SENDER_ID_MISMATCH`: call `clearPushToken`, reset `fcmConsecutiveFailures=0`
-    - On `QUOTA_EXCEEDED` / `UNAVAILABLE` / `INTERNAL`: increment `fcmConsecutiveFailures`, set `fcmBackoffUntil = now + (60_000 << Math.min(fcmConsecutiveFailures, 6))` (1min → 64min ceiling)
+- [x] Create `convex/fcmWake.ts`: *(PR 1b)*
+  - [x] `internal.fcmWake.sweep` cron handler — scan `by_active_lastping`, take(500), schedule sends; gate on `fcm_wake_enabled` flag per org. **Do NOT check the 5-min cooldown in sweep** — defer to the mutation inside `sendWake` to avoid read-then-write races across concurrent sweeps. **Implementation note**: sweep is an `internalAction` (not a mutation) because the per-org flag lookup cache is most natural inside a single action invocation; it calls an `internalQuery` for the stale-session scan. Also filters `pushTokenPlatform='android'` — see iOS note below
+  - [x] `internal.fcmWake.sendWake({ sessionId })` action — wraps an internal mutation (`claimSendSlot`) that atomically re-reads `fcmLastPushAt` AND `fcmBackoffUntil`, aborts if either blocks, and patches `fcmLastPushAt=now` before the action fires the HTTP POST. This is the only writer to `fcmLastPushAt`. Arg simplified to just `sessionId` (driverId derivable from the session row, not needed by the FCM call)
+  - [x] POST FCM HTTP v1; emit `fcm_dispatched({ sessionId, outcome: 'success' | 'failure', error? })` — the "outcome" field is the `success/failure/error bucket` referenced in § 6.5
+  - [x] Payload must stay under FCM's 4KB limit — keep it to `{ type, sessionId }` only, do not add fleet/load metadata here
+  - [x] Handle FCM error codes:
+    - On `UNREGISTERED` / `INVALID_ARGUMENT` / `SENDER_ID_MISMATCH`: wipe `pushToken` fields on the session row directly (simpler than calling `clearPushToken` since we have the sessionId in hand), reset `fcmConsecutiveFailures=0`. Also emits a `[pushTokens.clearPushToken]` log line so downstream dashboards pick it up the same way
+    - On `QUOTA_EXCEEDED` / `UNAVAILABLE` / `INTERNAL` / other transient: increment `fcmConsecutiveFailures`, set `fcmBackoffUntil = now + (60_000 << Math.min(fcmConsecutiveFailures-1, 6))` (1min → 64min ceiling)
     - On success: reset `fcmConsecutiveFailures=0`, clear `fcmBackoffUntil`
-- [ ] Register cron in [`convex/crons.ts`](../../../convex/crons.ts) — use `crons.interval('fcm-wake-sweep', { minutes: 1 }, internal.fcmWake.sweep, {})` (matches the shipped pattern at `crons.ts:7,11,41`). Either `crons.interval` or `crons.cron` with a crontab string works; `interval` is more idiomatic for fixed cadence
+  - [x] **OAuth2 token mint**: implemented inline using V8 Web Crypto API (`crypto.subtle.importKey` + `RSASSA-PKCS1-v1_5` signing) — no `'use node'` required, no new npm deps. Mints per `sendWake` call (no cache); volume is bounded by the 5-min per-session cooldown
+  - [x] **iOS handling**: sweep filters `pushTokenPlatform='android'` only. Rationale: under the current Path B design, iOS devices give us raw APNs tokens (via `getDevicePushTokenAsync()`), and FCM HTTP v1's `message.token` field requires an FCM registration token. Phase 4 must resolve the A-vs-B question before iOS sessions become wake-eligible. Code is structured so removing this filter is the full iOS change once that decision lands
+- [x] Register cron in [`convex/crons.ts`](../../../convex/crons.ts) — use `crons.interval('fcm-wake-sweep', { minutes: 1 }, internal.fcmWake.sweep, {})` (matches the shipped pattern at `crons.ts:7,11,41`). Either `crons.interval` or `crons.cron` with a crontab string works; `interval` is more idiomatic for fixed cadence *(PR 1b)*
 - [x] Store `FCM_SERVICE_ACCOUNT_JSON` as Convex env var (one-time, see Pre-work) *(dev deployment, 2026-04-24; prod still pending until the live flip)*
 
 **Checkpoint — server standalone** (do not proceed to native until green):
