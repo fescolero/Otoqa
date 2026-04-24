@@ -19,7 +19,10 @@ import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush,
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import RoleSwitchScreen from './role-switch';
-import { useRequestPermissionsOnce } from '../../lib/request-permissions';
+import {
+  useRequestPermissionsOnce,
+  useRequestActivityRecognitionOnce,
+} from '../../lib/request-permissions';
 import { useRegisterPushToken } from '../../lib/hooks/useRegisterPushToken';
 import { performSignOut } from '../../lib/logout';
 import { refreshPushTokenIfChanged } from '../../lib/push-token';
@@ -191,6 +194,13 @@ export default function AppLayout() {
 
   // Request all permissions (camera, location, notifications, etc.) once after sign-in
   useRequestPermissionsOnce();
+
+  // Phase 1d — ACTIVITY_RECOGNITION (Android 10+, runtime). Separate
+  // hook so existing drivers (who already have PERMISSIONS_REQUESTED_KEY
+  // set from pre-1d) get prompted on their next app open. Uses OS-level
+  // `check()` as the gate — no storage key — so it's a no-op once
+  // granted or permanently denied.
+  useRequestActivityRecognitionOnce();
 
   // Wrap setMode to persist to AsyncStorage
   const setMode = useCallback(async (newMode: 'driver' | 'owner') => {
