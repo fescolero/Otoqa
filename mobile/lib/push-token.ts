@@ -7,18 +7,19 @@
  * stores **Expo** push tokens for driver-facing notifications.
  *
  * Path B: uses `expo-notifications` only — no `@react-native-firebase/*`
- * dependency, no runtime-version bump beyond the one landing with this
- * PR. `getDevicePushTokenAsync()` returns:
+ * dependency. `getDevicePushTokenAsync()` returns:
  *   • Android: raw FCM registration token
  *   • iOS:     raw APNs device token
  *
- * Token lifecycle:
- *   1. On tracking start → call refreshPushTokenIfChanged()
- *   2. On app foreground → refreshPushTokenIfChanged() diff-checks
- *      against the secure-store cache. This is Path B's stand-in for
- *      Firebase's `onTokenRefresh` callback, which only fires in the
- *      `@react-native-firebase/messaging` path we're not using.
- *   3. On sign-out → clearCachedPushToken() wipes the local cache.
+ * Server-authoritative model: the client calls `registerPushToken` on
+ * every tracking-state inflection (mount, foreground, session change),
+ * and the server short-circuits with `changed: false` when the active
+ * session row already holds the same (token, platform) pair. No
+ * client-side cache — that approach (an earlier iteration of this file)
+ * leaked across day-2-onward shifts: the device token didn't rotate but
+ * the active session did, so the cache hit and a fresh session was
+ * created without any pushToken on the server. Letting the server
+ * decide makes correctness self-healing.
  *
  * iOS caveat (same as server-side § 6.2 note): Phase 1c registers iOS
  * tokens as `platform: 'ios'`, but the server-side sweep filters to
@@ -28,7 +29,6 @@
  */
 
 import * as Notifications from 'expo-notifications';
-import * as SecureStore from 'expo-secure-store';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Platform } from 'react-native';
 import { convex } from './convex';
@@ -36,24 +36,20 @@ import { api } from '../../convex/_generated/api';
 import { log } from './log';
 import {
   trackPushTokenRegistered,
-  trackPushTokenCleared,
   trackPushTokenSkipped,
+  trackPushTokenCleared,
 } from './analytics';
 
 const lg = log('PushToken');
 
-// Keychain / Keystore-backed storage. The device token itself is not a
-// secret (Google/Apple return the same value to every caller on the same
-// install), but routing it through SecureStore avoids one more writer
-// on the AsyncStorage surface and guarantees the rotation-diff key
-// survives app upgrades and storage clears.
-const SECURE_KEY = 'otoqa.pushToken.lastRegistered';
-
 /**
- * Fetch the current device push token, compare against the local cache,
- * and call the Convex `registerPushToken` mutation if it's new or rotated.
+ * Fetch the current device push token and ask the server to register it
+ * against the active session. The mutation is idempotent server-side —
+ * if the session row already has the matching (token, platform) pair,
+ * the mutation returns `{ changed: false }` and we silently no-op (no
+ * DB write, no analytics event).
  *
- * Safe to call eagerly — early-returns on Expo Go (no native FCM) and
+ * Safe to call eagerly and frequently — early-returns on Expo Go,
  * swallows errors (push is supplementary; not surfacing to the driver).
  */
 export async function refreshPushTokenIfChanged(): Promise<void> {
@@ -79,19 +75,6 @@ export async function refreshPushTokenIfChanged(): Promise<void> {
     return;
   }
 
-  let cached: string | null = null;
-  try {
-    cached = await SecureStore.getItemAsync(SECURE_KEY);
-  } catch (err) {
-    // SecureStore failures are rare (usually mean Keystore is locked or
-    // the key was deleted). Proceed with registration — worst case we
-    // register a token that was already registered, which the server
-    // upserts idempotently.
-    lg.warn(`SecureStore read failed: ${err instanceof Error ? err.message : err}`);
-  }
-
-  if (cached === device.data) return; // Nothing to do.
-
   const platform: 'ios' | 'android' = Platform.OS === 'ios' ? 'ios' : 'android';
 
   try {
@@ -101,17 +84,25 @@ export async function refreshPushTokenIfChanged(): Promise<void> {
     });
     if (!result.registered) {
       // Most common reason: no active session yet. The mobile side will
-      // re-call this on the next tracking-start, so don't cache the
-      // token as registered until the server accepted it.
+      // re-call this on the next tracking-start.
       trackPushTokenSkipped({
         reason: 'not_registered_by_server',
         server_reason: result.reason ?? 'unknown',
       });
       return;
     }
-    await SecureStore.setItemAsync(SECURE_KEY, device.data).catch(() => {});
-    trackPushTokenRegistered({ platform, rotated: cached !== null });
-    lg.debug(`Registered token (rotated=${cached !== null})`);
+    if (!result.changed) {
+      // Server short-circuited — session already had this exact token.
+      // Silent: dashboards count `push_token_registered` as actual
+      // registration writes, not heartbeat calls.
+      return;
+    }
+    // `rotated` semantics: the server changed something — either a fresh
+    // session getting its first token, or a real token rotation. The
+    // server doesn't distinguish (and doesn't need to) for Phase 1's
+    // FCM wake purposes.
+    trackPushTokenRegistered({ platform, rotated: false });
+    lg.debug(`Registered push token on active session`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     lg.warn(`registerPushToken mutation failed: ${msg}`);
@@ -120,21 +111,15 @@ export async function refreshPushTokenIfChanged(): Promise<void> {
 }
 
 /**
- * Clear the local token cache on sign-out so the next driver who signs
- * in on the same device will register their token on first tracking
- * start (cache miss → fresh registration).
+ * Sign-out hook. Kept for API stability with logout.ts; emits a
+ * telemetry event so we can see sign-out frequency.
  *
- * Does NOT call the server's clearPushToken — that's scoped to
- * invalid-token responses from FCM and would wipe the token off an
- * active session mid-shift.
+ * Previously wiped a SecureStore cache. With server-authoritative
+ * registration, no client cache exists. Server-side cleanup is
+ * unnecessary too: the next driver on this device will overwrite the
+ * session's pushToken on their first registration call.
  */
 export async function clearCachedPushToken(reason: string): Promise<void> {
-  try {
-    await SecureStore.deleteItemAsync(SECURE_KEY);
-  } catch {
-    // If the entry doesn't exist, delete throws on some SDK versions.
-    // Treat as success.
-  }
   trackPushTokenCleared({ reason });
-  lg.debug(`Cleared cached push token (reason=${reason})`);
+  lg.debug(`Push-token cleared marker (reason=${reason}) — no cache to wipe`);
 }

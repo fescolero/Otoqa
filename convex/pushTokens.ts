@@ -24,17 +24,28 @@ import { resolveAuthenticatedDriver } from './driverMobile';
 
 /**
  * Register the raw device push token for the caller's active session.
+ * The server is the source of truth — clients call this on every
+ * tracking-state inflection (mount, foreground, session change). The
+ * mutation is idempotent: if the active session already holds the
+ * exact same (token, platform) pair, we skip the DB patch and return
+ * `changed: false`. This lets clients drop their own caching layer
+ * (which leaked across day-2-onward shifts when the device token
+ * didn't rotate but the active session did) and keep correctness.
  *
  * Resolution order:
  *   1. Authenticate via Clerk phone claim → driver row.
  *   2. Look up the driver's active session (status='active'). If none,
- *      return { registered: false, reason: 'no_active_session' } — the
- *      mobile client will re-register on the next tracking-start.
- *   3. Patch pushToken / pushTokenPlatform / pushTokenUpdatedAt on the
- *      session row.
+ *      return { registered: false, changed: false, reason: 'no_active_session' }.
+ *   3. If session.pushToken === token AND session.pushTokenPlatform ===
+ *      platform → return { registered: true, changed: false } without
+ *      patching. This is the steady-state hot path: a foregrounded app
+ *      that's still on the same shift and same device.
+ *   4. Otherwise patch pushToken / pushTokenPlatform / pushTokenUpdatedAt
+ *      and return { registered: true, changed: true }.
  *
- * Idempotent: re-registering the same token is a cheap patch. Token
- * rotation (mobile-side diff-check sees a changed token) just overwrites.
+ * `changed: true` is the only signal that drives a `push_token_registered`
+ * analytics event on the client. `changed: false` is silent — dashboards
+ * count real registrations, not redundant heartbeat calls.
  */
 export const registerPushToken = mutation({
   args: {
@@ -43,6 +54,7 @@ export const registerPushToken = mutation({
   },
   returns: v.object({
     registered: v.boolean(),
+    changed: v.boolean(),
     reason: v.optional(v.string()),
   }),
   handler: async (ctx, { token, platform }) => {
@@ -62,7 +74,19 @@ export const registerPushToken = mutation({
         `[pushTokens.registerPushToken] no_active_session ` +
           `driverId=${driver._id}`,
       );
-      return { registered: false, reason: 'no_active_session' };
+      return { registered: false, changed: false, reason: 'no_active_session' };
+    }
+
+    // Idempotency check — read-then-no-op when the row is already correct.
+    // Saves a DB write and the index churn that comes with it. The server
+    // is the source of truth; if ANYTHING differs (token rotation, fresh
+    // session without token, platform changed because driver swapped
+    // devices) we patch.
+    if (
+      activeSession.pushToken === token &&
+      activeSession.pushTokenPlatform === platform
+    ) {
+      return { registered: true, changed: false };
     }
 
     await ctx.db.patch(activeSession._id, {
@@ -70,7 +94,7 @@ export const registerPushToken = mutation({
       pushTokenPlatform: platform,
       pushTokenUpdatedAt: Date.now(),
     });
-    return { registered: true };
+    return { registered: true, changed: true };
   },
 });
 
