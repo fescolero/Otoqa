@@ -47,6 +47,7 @@ import {
   trackFcmWakeResumeSuccess,
   trackFcmWakeSessionInactive,
   trackFcmWakeIgnored,
+  trackFcmWakeAuthFallback,
 } from './analytics';
 
 const lg = log('FcmHandler');
@@ -99,40 +100,75 @@ async function handleWakePayload(
     return;
   }
 
-  // Session-active guard. The sweep dispatched this push based on a
-  // server-side freshness probe; if the driver clocked out between
-  // dispatch and delivery, starting FGS here would resurrect a session
-  // the driver explicitly ended. Verify the _id still matches.
+  // Session-active guard, best-effort.
   //
-  // Use a fresh ConvexHttpClient (not the ConvexReactClient) because
-  // background-task context may fire before React mounts.
+  // Why best-effort: the previous "hard guard" implementation blocked
+  // every background-context wake for two days in canary. Cold-start
+  // background JS can't always authenticate to Convex — Clerk's React
+  // singleton isn't loaded, and the fallback `getStoredAuthToken()`
+  // returns the last cached JWT which is typically expired (Clerk
+  // tokens live ~1 hour). Convex rejected those tokens with
+  // "Could not verify OIDC token claim" and we silently dropped the
+  // wake. Empirical evidence: 3 fcm_wake_received events on
+  // 04-25 PDT, all 3 followed by fcm_wake_ignored
+  // reason=session_query_error, zero fcm_wake_resume_success.
+  //
+  // The guard's purpose is to prevent waking a session the driver has
+  // already ended. Two things give us defense-in-depth:
+  //   1. Server's `claimSendSlot` mutation atomically re-checks
+  //      `session.status === 'active'` at dispatch time. The race
+  //      window between claim and FCM delivery is seconds.
+  //   2. `resumeTracking()` reads local TrackingState and bails if
+  //      `state.isActive === false` — which `stopLocationTracking()`
+  //      sets when the driver hits End Shift on this same device.
+  //
+  // The unique value the server-side guard adds is the multi-device
+  // case: driver ends shift on Device A, Device B's FGS dies, push
+  // arrives at Device B with stale local state. We preserve that
+  // protection in foreground (where Clerk auth works) and gracefully
+  // degrade in background (where local state suffices).
+  //
+  // A future-perfect alternative is signed wake tokens in the FCM
+  // payload — out of scope for this fix; tracked as an architecture
+  // option if multi-device becomes a real concern.
   const url = process.env.EXPO_PUBLIC_CONVEX_URL;
   if (!url) {
-    lg.warn('EXPO_PUBLIC_CONVEX_URL not set — cannot verify session');
-    trackFcmWakeIgnored({ reason: 'no_convex_url' });
-    return;
+    lg.warn('EXPO_PUBLIC_CONVEX_URL not set — proceeding without guard');
+    trackFcmWakeAuthFallback({ reason: 'no_convex_url' });
   }
 
-  let active: Awaited<
-    ReturnType<ConvexHttpClient['query']>
-  > | null = null;
-  try {
-    const token = await getFreshToken();
-    if (!token) {
-      trackFcmWakeIgnored({ reason: 'no_auth_token' });
-      return;
+  let active: Awaited<ReturnType<ConvexHttpClient['query']>> | null = null;
+  let guardSucceeded = false;
+  if (url) {
+    try {
+      const token = await getFreshToken();
+      if (!token) {
+        // No Clerk session reachable at all — common in cold-start
+        // background. Skip guard; trust payload + resumeTracking's
+        // local state check.
+        trackFcmWakeAuthFallback({ reason: 'no_auth_token' });
+      } else {
+        const httpClient = new ConvexHttpClient(url);
+        httpClient.setAuth(token);
+        active = await httpClient.query(api.driverSessions.getActiveSession, {});
+        guardSucceeded = true;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isAuthError = msg.includes('Unauthenticated') || msg.includes('OIDC');
+      lg.warn(`getActiveSession failed (proceeding without guard): ${msg}`);
+      trackFcmWakeAuthFallback({
+        reason: isAuthError ? 'token_rejected' : 'query_error',
+        error: msg,
+      });
     }
-    const httpClient = new ConvexHttpClient(url);
-    httpClient.setAuth(token);
-    active = await httpClient.query(api.driverSessions.getActiveSession, {});
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    lg.warn(`getActiveSession failed: ${msg}`);
-    trackFcmWakeIgnored({ reason: 'session_query_error', error: msg });
-    return;
   }
 
-  if (!active || active._id !== data.sessionId) {
+  // Only enforce the guard when we successfully got an answer. If the
+  // guard couldn't run (auth fallback above), we trust the payload's
+  // sessionId and let resumeTracking's local-state check serve as
+  // secondary defense.
+  if (guardSucceeded && (!active || active._id !== data.sessionId)) {
     trackFcmWakeSessionInactive({
       payloadSessionId: data.sessionId,
       currentSessionId: active?._id ?? null,
