@@ -496,6 +496,24 @@ export function trackFcmWakeIgnored(context: {
   capture('fcm_wake_ignored', context);
 }
 
+/**
+ * Fires when the session-active guard couldn't run (auth unavailable
+ * in background context, network error, missing config) and we proceed
+ * to resumeTracking trusting the payload + local TrackingState.
+ *
+ * Distinguished from `fcm_wake_ignored` because this is NOT a stop —
+ * we continue to the resume path. Tracking this separately surfaces
+ * how often the background-auth gap actually fires; if it's rare,
+ * the current best-effort approach is fine, if it's common we may
+ * want to invest in signed wake tokens.
+ */
+export function trackFcmWakeAuthFallback(context: {
+  reason: 'no_auth_token' | 'token_rejected' | 'query_error' | 'no_convex_url';
+  error?: string;
+}) {
+  capture('fcm_wake_auth_fallback', context);
+}
+
 export function trackFcmWakeSessionInactive(context: {
   payloadSessionId: string;
   currentSessionId: string | null;
