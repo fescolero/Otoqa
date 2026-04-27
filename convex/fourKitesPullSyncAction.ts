@@ -1,25 +1,14 @@
 import { internalAction } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { fetchShipments, type FourKitesAuthCredentials } from "./fourKitesApiClient";
+import { fetchShipments } from "./fourKitesApiClient";
+import {
+  isCancelledStatus,
+  mapTrackingStatus,
+  resolveFourKitesCredentials,
+} from "./fourKitesUtils";
 
 type FailureStage = "fetch" | "process";
-
-// ------------------------------------------------------------------
-// HELPER: STATUS MAPPING
-// ------------------------------------------------------------------
-function mapTrackingStatus(fkStatus: string): "Pending" | "In Transit" | "Completed" | "Delayed" | "Canceled" {
-  const map: Record<string, "Pending" | "In Transit" | "Completed" | "Delayed" | "Canceled"> = {
-    "PLANNED": "Pending",
-    "IN_TRANSIT": "In Transit",
-    "ARRIVED": "In Transit",
-    "DELIVERED": "Completed",
-    "COMPLETED": "Completed",
-    "CANCELLED": "Canceled",
-    "CANCELED": "Canceled"
-  };
-  return map[fkStatus] || "Pending";
-}
 
 function extractErrorReason(error: unknown): string {
   if (error instanceof Error) {
@@ -35,47 +24,6 @@ function extractErrorReason(error: unknown): string {
 function normalizeFailureKey(reason: string): string {
   // Remove long numeric IDs to make bucketing more useful.
   return reason.replace(/\b\d{6,}\b/g, "<id>").slice(0, 160);
-}
-
-function resolveAuthCredentials(credentials: unknown): FourKitesAuthCredentials | null {
-  if (!credentials) {
-    return null;
-  }
-
-  let parsedCredentials: unknown = credentials;
-  if (typeof credentials === "string") {
-    try {
-      parsedCredentials = JSON.parse(credentials);
-    } catch {
-      const rawValue = credentials.trim();
-      return rawValue ? { apiKey: rawValue } : null;
-    }
-  }
-
-  if (!parsedCredentials || typeof parsedCredentials !== "object" || Array.isArray(parsedCredentials)) {
-    return null;
-  }
-
-  const source = parsedCredentials as Record<string, unknown>;
-  const result: FourKitesAuthCredentials = {};
-
-  if (typeof source.apiKey === "string" && source.apiKey.trim()) {
-    result.apiKey = source.apiKey.trim();
-  }
-  if (typeof source.username === "string" && source.username.trim()) {
-    result.username = source.username.trim();
-  }
-  if (typeof source.password === "string" && source.password.trim()) {
-    result.password = source.password.trim();
-  }
-  if (typeof source.clientSecret === "string" && source.clientSecret.trim()) {
-    result.clientSecret = source.clientSecret.trim();
-  }
-  if (typeof source.accessToken === "string" && source.accessToken.trim()) {
-    result.accessToken = source.accessToken.trim();
-  }
-
-  return Object.keys(result).length > 0 ? result : null;
 }
 
 function buildSuggestedActions(topReason: string | undefined): string[] {
@@ -161,7 +109,7 @@ export const processOrg = internalAction({
   },
   handler: async (ctx, args) => {
     const { orgId, credentials, lookbackHours } = args;
-    const authCredentials = resolveAuthCredentials(credentials);
+    const authCredentials = resolveFourKitesCredentials(credentials);
     
     let processed = 0;
     let errors = 0;
@@ -285,7 +233,7 @@ export const processOrg = internalAction({
               data: loadData,
             });
 
-            if (shipment.status === 'CANCELED' || shipment.status === 'WITHDRAWN') {
+            if (isCancelledStatus(shipment.status)) {
               await ctx.runMutation(internal.fourKitesSyncHelpers.updateLoad, {
                 loadId: existingLoad._id,
                 data: { status: 'Canceled' },
@@ -311,7 +259,8 @@ export const processOrg = internalAction({
               try {
                 const stopId = stop.fourKitesStopID || stop.id;
                 const appointmentTime = stop.schedule?.appointmentTime;
-                
+                const appointmentDay = appointmentTime?.split('T')[0];
+
                 const dbStop = existingStops.find((s: { externalStopId?: string; _id: any; windowBeginTime?: string; windowEndTime?: string; windowBeginDate?: string; windowEndDate?: string }) => s.externalStopId === String(stopId));
 
                 if (dbStop) {
@@ -320,8 +269,8 @@ export const processOrg = internalAction({
                     data: {
                       windowBeginTime: appointmentTime || dbStop.windowBeginTime,
                       windowEndTime: appointmentTime || dbStop.windowEndTime,
-                      windowBeginDate: appointmentTime?.split('T')[0] || dbStop.windowBeginDate,
-                      windowEndDate: appointmentTime?.split('T')[0] || dbStop.windowEndDate,
+                      windowBeginDate: appointmentDay || dbStop.windowBeginDate,
+                      windowEndDate: appointmentDay || dbStop.windowEndDate,
                       city: stop.city,
                       latitude: stop.latitude,
                       longitude: stop.longitude,

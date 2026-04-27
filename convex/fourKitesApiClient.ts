@@ -3,6 +3,8 @@
  * Used by the sync worker to fetch shipment data from FourKites API
  */
 
+import { parseShipmentsResponse } from './fourKitesUtils';
+
 const FOURKITES_API_URL = process.env.FOURKITES_API_URL || 'https://api.fourkites.com/shipments';
 
 export interface FourKitesAuthCredentials {
@@ -333,34 +335,25 @@ export async function fetchShipments(
       }
     }
     
-    // Extract shipments and metadata
-    // FourKites API returns: { data: { shipments: [...], page, perPage, totalCount }, requestId }
-    let shipments: any[];
-    if (firstData && firstData.data && Array.isArray(firstData.data.shipments)) {
-      // FourKites standard format - data.shipments is the array
-      shipments = firstData.data.shipments;
-      // Get pagination metadata from data object
-      totalCount = firstData.data.totalCount || 0;
-    } else if (Array.isArray(firstData)) {
-      shipments = firstData;
-    } else if (firstData && Array.isArray(firstData.data)) {
-      shipments = firstData.data;
-    } else if (firstData && Array.isArray(firstData.shipments)) {
-      shipments = firstData.shipments;
+    // Extract shipments and metadata via shared parser (handles all FK
+    // response shapes: { data: { shipments } }, { data: [] }, { shipments },
+    // raw array). Single source of truth lives in fourKitesUtils.
+    const parsed = parseShipmentsResponse(firstData);
+    const shipments = parsed.shipments;
+    totalCount = parsed.totalCount;
+
+    if (shipments.length === 0) {
+      console.error(
+        'Unexpected FourKites API response format. First 500 chars:',
+        JSON.stringify(firstData).substring(0, 500),
+      );
     } else {
-      console.error('Unexpected FourKites API response format. First 500 chars:', JSON.stringify(firstData).substring(0, 500));
-      shipments = [];
-    }
-    
-    if (shipments.length > 0) {
-      // Map FourKites fields to our expected format
       const mappedShipments = shipments.map(mapShipmentFields);
       allShipments.push(...mappedShipments);
     }
 
-    // Get totalCount from response (may already be set above)
     if (totalCount === 0) {
-      totalCount = firstData.totalCount || firstData.total || 0;
+      totalCount = firstData?.totalCount || firstData?.total || 0;
     }
     
     // Calculate total pages
@@ -390,20 +383,8 @@ export async function fetchShipments(
       }
 
       const data = await response.json();
-      // FourKites API returns: { data: { shipments: [...] }, requestId }
-      let pageShipments: any[];
-      if (data && data.data && Array.isArray(data.data.shipments)) {
-        pageShipments = data.data.shipments;
-      } else if (Array.isArray(data)) {
-        pageShipments = data;
-      } else if (data && Array.isArray(data.data)) {
-        pageShipments = data.data;
-      } else if (data && Array.isArray(data.shipments)) {
-        pageShipments = data.shipments;
-      } else {
-        pageShipments = [];
-      }
-      
+      const pageShipments = parseShipmentsResponse(data).shipments;
+
       if (pageShipments.length === 0) {
         break; // No more data
       }

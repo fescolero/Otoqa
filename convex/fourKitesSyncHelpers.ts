@@ -11,6 +11,13 @@ import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
 import { setLoadTag, getLoadFacets } from "./lib/loadFacets";
 import { syncLegsAffectedByStop } from "./_helpers/timeUtils";
+import {
+  buildLoadInternalId,
+  buildStopRecord,
+  computeLaneBilling,
+  mapTrackingStatus,
+  metersToMiles,
+} from "./fourKitesUtils";
 
 // Read-only lane lookup using the compound index (reads ~1 doc instead of full table scan)
 export const findContractLane = internalQuery({
@@ -227,18 +234,6 @@ export const getCustomerName = internalQuery({
   },
 });
 
-// Helper to map tracking status
-function mapTrackingStatus(status: string): "Pending" | "In Transit" | "Completed" | "Delayed" | "Canceled" {
-  const statusMap: Record<string, "Pending" | "In Transit" | "Completed" | "Delayed" | "Canceled"> = {
-    'DELIVERED': 'Completed',
-    'IN_TRANSIT': 'In Transit',
-    'DELAYED': 'Delayed',
-    'CANCELED': 'Canceled',
-    'WITHDRAWN': 'Canceled',
-  };
-  return statusMap[status] || 'Pending';
-}
-
 // Import load and stops from FourKites shipment
 // This is the single source of truth for creating loads from FourKites data
 export const importLoadFromShipment = internalMutation({
@@ -259,44 +254,11 @@ export const importLoadFromShipment = internalMutation({
     }
     const customerName = customer.name;
 
-    // Calculate imported miles from FourKites data first
-    const importedMiles = shipment.totalDistanceInMeters
-      ? Math.round((shipment.totalDistanceInMeters * 0.000621371) * 100) / 100
-      : undefined;
-
-    // Calculate effective miles for billing: contract > imported
-    const effectiveMiles = contractLane.miles ?? importedMiles;
-
-    // Calculate billing amounts for invoice
+    // Miles + billing math (DOE_INDEX would need an external call, skipped).
+    const importedMiles = metersToMiles(shipment.totalDistanceInMeters);
     const stopCount = shipment.stops?.length || 0;
-    
-    let baseRate = 0;
-    if (contractLane.rateType === "Per Mile" && effectiveMiles) {
-      baseRate = contractLane.rate * effectiveMiles;
-    } else if (contractLane.rateType === "Flat Rate") {
-      baseRate = contractLane.rate;
-    } else if (contractLane.rateType === "Per Stop") {
-      baseRate = contractLane.rate * stopCount;
-    }
-
-    // Calculate stop-off charges (accessorials)
-    const includedStops = contractLane.includedStops || 2;
-    const extraStops = Math.max(0, stopCount - includedStops);
-    const stopOffCharges = extraStops * (contractLane.stopOffRate || 0);
-
-    // Calculate fuel surcharge
-    let fuelSurcharge = 0;
-    if (contractLane.fuelSurchargeType === "PERCENTAGE") {
-      fuelSurcharge = baseRate * ((contractLane.fuelSurchargeValue || 0) / 100);
-    } else if (contractLane.fuelSurchargeType === "FLAT") {
-      fuelSurcharge = contractLane.fuelSurchargeValue || 0;
-    }
-    // DOE_INDEX calculation would require external API call - skip for now
-
-    // Calculate totals for invoice
-    const subtotal = baseRate;
-    const accessorialsTotal = stopOffCharges;
-    const totalAmount = subtotal + fuelSurcharge + accessorialsTotal;
+    const billing = computeLaneBilling({ contractLane, stopCount, importedMiles });
+    const effectiveMiles = billing.effectiveMiles;
 
     // Prepare load data
     const loadData = {
@@ -318,7 +280,7 @@ export const importLoadFromShipment = internalMutation({
       externalReferenceNumbers: shipment.referenceNumbers,
       status: "Open",
       ...loadData,
-      internalId: `FK-${shipment.loadNumber || shipment.id}`,
+      internalId: buildLoadInternalId(shipment),
       orderNumber: shipment.loadNumber || shipment.id,
       createdBy,
       createdAt: Date.now(),
@@ -338,39 +300,19 @@ export const importLoadFromShipment = internalMutation({
     // ✅ Update organization stats for load creation
     await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
-    // Create stops
+    const internalId = buildLoadInternalId(shipment);
     for (const stop of shipment.stops || []) {
       try {
-        const stopId = stop.fourKitesStopID || stop.id;
-        const appointmentTime = stop.schedule?.appointmentTime;
-
-        await ctx.db.insert("loadStops", {
-          workosOrgId,
-          loadId,
-          createdBy: "FourKites",
-          internalId: `FK-${shipment.loadNumber || shipment.id}`,
-          externalStopId: String(stopId),
-          sequenceNumber: stop.sequence,
-          stopType: stop.stopType, // 'PICKUP' or 'DELIVERY'
-          loadingType: "APPT",
-          address: "", // Leave empty - will be populated from another source
-          city: stop.city,
-          state: stop.state,
-          postalCode: stop.postalCode,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
-          timeZone: stop.timeZone,
-          windowBeginDate: appointmentTime?.split("T")[0] || "TBD",
-          windowBeginTime: appointmentTime || "TBD",
-          windowEndDate: appointmentTime?.split("T")[0] || "TBD",
-          windowEndTime: appointmentTime || "TBD",
-          status: "Pending",
-          commodityDescription: shipment.commodity || "",
-          commodityUnits: "Pieces",
-          pieces: stop.pallets?.[0]?.parts?.[0]?.quantity ? parseInt(stop.pallets[0].parts[0].quantity) : 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
+        await ctx.db.insert(
+          "loadStops",
+          buildStopRecord({
+            workosOrgId,
+            loadId: loadId as Id<"loadInformation">,
+            internalId,
+            stop,
+            commodityDescription: shipment.commodity,
+          }) as any,
+        );
       } catch (stopErr) {
         console.error(`Failed to create stop for shipment ${shipment.id}:`, stopErr);
         // Don't throw - continue with other stops
@@ -496,12 +438,7 @@ export const importUnmappedLoad = internalMutation({
       });
     }
 
-    // Calculate imported miles from FourKites data
-    const importedMiles = shipment.totalDistanceInMeters
-      ? Math.round((shipment.totalDistanceInMeters * 0.000621371) * 100) / 100
-      : undefined;
-
-    // Create load with UNMAPPED status (ops data only)
+    const importedMiles = metersToMiles(shipment.totalDistanceInMeters);
     const stopCount = shipment.stops?.length || 0;
     
     const loadId = await ctx.db.insert("loadInformation", {
@@ -515,7 +452,7 @@ export const importUnmappedLoad = internalMutation({
       lastExternalUpdatedAt: shipment.updated_at,
       
       // Basic Information
-      internalId: `FK-${shipment.loadNumber || shipment.id}`,
+      internalId: buildLoadInternalId(shipment),
       orderNumber: shipment.loadNumber || shipment.id,
       status: "Open",
       trackingStatus: mapTrackingStatus(shipment.status),
@@ -549,39 +486,19 @@ export const importUnmappedLoad = internalMutation({
     // ✅ Update organization stats for unmapped load creation
     await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
-    // Create stops (same as CONTRACT/SPOT loads)
+    const internalId = buildLoadInternalId(shipment);
     for (const stop of shipment.stops || []) {
       try {
-        const stopId = stop.fourKitesStopID || stop.id;
-        const appointmentTime = stop.schedule?.appointmentTime;
-
-        await ctx.db.insert("loadStops", {
-          workosOrgId,
-          loadId,
-          createdBy: "FourKites",
-          internalId: `FK-${shipment.loadNumber || shipment.id}`,
-          externalStopId: String(stopId),
-          sequenceNumber: stop.sequence,
-          stopType: stop.stopType,
-          loadingType: "APPT",
-          address: "",
-          city: stop.city,
-          state: stop.state,
-          postalCode: stop.postalCode,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
-          timeZone: stop.timeZone,
-          windowBeginDate: appointmentTime?.split("T")[0] || "TBD",
-          windowBeginTime: appointmentTime || "TBD",
-          windowEndDate: appointmentTime?.split("T")[0] || "TBD",
-          windowEndTime: appointmentTime || "TBD",
-          status: "Pending",
-          commodityDescription: shipment.commodity || "",
-          commodityUnits: "Pieces",
-          pieces: stop.pallets?.[0]?.parts?.[0]?.quantity ? parseInt(stop.pallets[0].parts[0].quantity) : 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
+        await ctx.db.insert(
+          "loadStops",
+          buildStopRecord({
+            workosOrgId,
+            loadId: loadId as Id<"loadInformation">,
+            internalId,
+            stop,
+            commodityDescription: shipment.commodity,
+          }) as any,
+        );
       } catch (stopErr) {
         console.error(`Failed to create stop for unmapped shipment ${shipment.id}:`, stopErr);
       }
@@ -676,40 +593,21 @@ export const promoteUnmappedLoad = internalMutation({
       .first();
 
     if (invoice && invoice.status === "MISSING_DATA") {
-      // Calculate billing amounts
       const stopCount = load.stopCount || 2;
-      const includedStops = contractLane.includedStops || 2;
-      const extraStops = Math.max(0, stopCount - includedStops);
-      const effectiveMiles = contractLane.miles ?? load.contractMiles;
-
-      let baseRate = 0;
-      if (contractLane.rateType === "Per Mile" && effectiveMiles) {
-        baseRate = contractLane.rate * effectiveMiles;
-      } else if (contractLane.rateType === "Flat Rate") {
-        baseRate = contractLane.rate;
-      } else if (contractLane.rateType === "Per Stop") {
-        baseRate = contractLane.rate * stopCount;
-      }
-
-      let fuelSurcharge = 0;
-      if (contractLane.fuelSurchargeType === "PERCENTAGE" && contractLane.fuelSurchargeValue) {
-        fuelSurcharge = baseRate * (contractLane.fuelSurchargeValue / 100);
-      } else if (contractLane.fuelSurchargeType === "FLAT" && contractLane.fuelSurchargeValue) {
-        fuelSurcharge = contractLane.fuelSurchargeValue;
-      }
-
-      const stopOffCharges = extraStops * (contractLane.stopOffRate || 0);
-      const subtotal = baseRate;
-      const totalAmount = subtotal + fuelSurcharge + stopOffCharges;
+      const billing = computeLaneBilling({
+        contractLane,
+        stopCount,
+        fallbackContractMiles: load.contractMiles,
+      });
 
       await ctx.db.patch(invoice._id, {
         status: "DRAFT",
         customerId: contractLane.customerCompanyId,
         contractLaneId: contractLane._id,
-        subtotal,
-        fuelSurcharge: fuelSurcharge > 0 ? fuelSurcharge : undefined,
-        accessorialsTotal: stopOffCharges > 0 ? stopOffCharges : undefined,
-        totalAmount,
+        subtotal: billing.subtotal,
+        fuelSurcharge: billing.fuelSurcharge > 0 ? billing.fuelSurcharge : undefined,
+        accessorialsTotal: billing.stopOffCharges > 0 ? billing.stopOffCharges : undefined,
+        totalAmount: billing.totalAmount,
         missingDataReason: undefined, // Clear error
         updatedAt: Date.now(),
       });
