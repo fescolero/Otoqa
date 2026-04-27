@@ -1,15 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { Input } from '@/components/ui/input';
-import { Search } from 'lucide-react';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { FilterBarShell, FilterSearch, FilterSelect } from '@/components/filters/filter-bar';
 
 interface TrailerFilterBarProps {
   onSearchChange: (value: string) => void;
@@ -18,6 +10,29 @@ interface TrailerFilterBarProps {
   onSizeChange: (value: string) => void;
   onBodyTypeChange: (value: string) => void;
 }
+
+const SIZE_OPTIONS = [
+  { value: 'all', label: 'All Sizes' },
+  { value: "28'", label: "28'" },
+  { value: "48'", label: "48'" },
+  { value: "53'", label: "53'" },
+];
+
+const BODY_TYPE_OPTIONS = [
+  { value: 'all', label: 'All Types' },
+  { value: 'Dry Van', label: 'Dry Van' },
+  { value: 'Refrigerated', label: 'Refrigerated' },
+  { value: 'Flatbed', label: 'Flatbed' },
+];
+
+const EXPIRATION_OPTIONS = [
+  { value: 'valid', label: 'Valid' },
+  { value: 'expiring', label: 'Expiring Soon' },
+  { value: 'expired', label: 'Expired' },
+];
+
+const REGISTRATION_OPTIONS = [{ value: 'all', label: 'All Registration' }, ...EXPIRATION_OPTIONS];
+const INSURANCE_OPTIONS = [{ value: 'all', label: 'All Insurance' }, ...EXPIRATION_OPTIONS];
 
 export function TrailerFilterBar({
   onSearchChange,
@@ -32,97 +47,53 @@ export function TrailerFilterBar({
   const [size, setSize] = React.useState('all');
   const [bodyType, setBodyType] = React.useState('all');
 
-  const handleSearchChange = (value: string) => {
-    setSearch(value);
-    onSearchChange(value);
-  };
-
-  const handleRegistrationStatusChange = (value: string) => {
-    setRegistrationStatus(value);
-    onRegistrationStatusChange(value === 'all' ? '' : value);
-  };
-
-  const handleInsuranceStatusChange = (value: string) => {
-    setInsuranceStatus(value);
-    onInsuranceStatusChange(value === 'all' ? '' : value);
-  };
-
-  const handleSizeChange = (value: string) => {
-    setSize(value);
-    onSizeChange(value === 'all' ? '' : value);
-  };
-
-  const handleBodyTypeChange = (value: string) => {
-    setBodyType(value);
-    onBodyTypeChange(value === 'all' ? '' : value);
+  // Each handler keeps local select state in sync and emits 'all' as ''.
+  const makeSelectHandler = (
+    setLocal: (v: string) => void,
+    emit: (v: string) => void
+  ) => (value: string) => {
+    setLocal(value);
+    emit(value === 'all' ? '' : value);
   };
 
   return (
-    <div className="bg-slate-50/50 border-y border-slate-200/60 px-4 py-6">
-      <div className="flex items-center gap-3 flex-wrap">
-        {/* Search */}
-        <div className="relative w-full max-w-md">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" strokeWidth={2} />
-          <Input
-            placeholder="Search unit ID, VIN, plate..."
-            value={search}
-            onChange={(e) => handleSearchChange(e.target.value)}
-            className="pl-9 h-9 bg-white"
-          />
-        </div>
-
-        {/* Size Filter */}
-        <Select value={size} onValueChange={handleSizeChange}>
-          <SelectTrigger className="w-32 h-9">
-            <SelectValue placeholder="Size" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Sizes</SelectItem>
-            <SelectItem value="28'">28'</SelectItem>
-            <SelectItem value="48'">48'</SelectItem>
-            <SelectItem value="53'">53'</SelectItem>
-          </SelectContent>
-        </Select>
-
-        {/* Body Type Filter */}
-        <Select value={bodyType} onValueChange={handleBodyTypeChange}>
-          <SelectTrigger className="w-36 h-9">
-            <SelectValue placeholder="Body Type" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Types</SelectItem>
-            <SelectItem value="Dry Van">Dry Van</SelectItem>
-            <SelectItem value="Refrigerated">Refrigerated</SelectItem>
-            <SelectItem value="Flatbed">Flatbed</SelectItem>
-          </SelectContent>
-        </Select>
-
-        {/* Registration Status */}
-        <Select value={registrationStatus} onValueChange={handleRegistrationStatusChange}>
-          <SelectTrigger className="w-40 h-9">
-            <SelectValue placeholder="Registration" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Registration</SelectItem>
-            <SelectItem value="valid">Valid</SelectItem>
-            <SelectItem value="expiring">Expiring Soon</SelectItem>
-            <SelectItem value="expired">Expired</SelectItem>
-          </SelectContent>
-        </Select>
-
-        {/* Insurance Status */}
-        <Select value={insuranceStatus} onValueChange={handleInsuranceStatusChange}>
-          <SelectTrigger className="w-36 h-9">
-            <SelectValue placeholder="Insurance" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Insurance</SelectItem>
-            <SelectItem value="valid">Valid</SelectItem>
-            <SelectItem value="expiring">Expiring Soon</SelectItem>
-            <SelectItem value="expired">Expired</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-    </div>
+    <FilterBarShell>
+      <FilterSearch
+        value={search}
+        onChange={(v) => {
+          setSearch(v);
+          onSearchChange(v);
+        }}
+        placeholder="Search unit ID, VIN, plate..."
+      />
+      <FilterSelect
+        value={size}
+        onValueChange={makeSelectHandler(setSize, onSizeChange)}
+        placeholder="Size"
+        options={SIZE_OPTIONS}
+        triggerClassName="w-32"
+      />
+      <FilterSelect
+        value={bodyType}
+        onValueChange={makeSelectHandler(setBodyType, onBodyTypeChange)}
+        placeholder="Body Type"
+        options={BODY_TYPE_OPTIONS}
+        triggerClassName="w-36"
+      />
+      <FilterSelect
+        value={registrationStatus}
+        onValueChange={makeSelectHandler(setRegistrationStatus, onRegistrationStatusChange)}
+        placeholder="Registration"
+        options={REGISTRATION_OPTIONS}
+        triggerClassName="w-40"
+      />
+      <FilterSelect
+        value={insuranceStatus}
+        onValueChange={makeSelectHandler(setInsuranceStatus, onInsuranceStatusChange)}
+        placeholder="Insurance"
+        options={INSURANCE_OPTIONS}
+        triggerClassName="w-36"
+      />
+    </FilterBarShell>
   );
 }

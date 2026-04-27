@@ -1,9 +1,6 @@
 'use client';
 
-import { useRef } from 'react';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import { Id } from '@/convex/_generated/dataModel';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
@@ -13,6 +10,7 @@ import {
   getAssetExpirationStatus as getExpirationStatus,
   getAssetExpirationStatusColor as getExpirationStatusColor,
 } from '@/lib/status-colors';
+import { BaseVirtualizedTable, BaseColumn } from '@/components/ui/base-virtualized-table';
 
 interface Truck {
   _id: Id<'trucks'>;
@@ -53,6 +51,11 @@ function formatDate(dateString?: string): string {
   }
 }
 
+function expirationLabel(status: ReturnType<typeof getExpirationStatus>): string {
+  if (status === 'unknown') return 'No Date';
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
 export function VirtualizedTrucksTable({
   trucks,
   selectedIds,
@@ -63,171 +66,107 @@ export function VirtualizedTrucksTable({
   onRowClick,
   emptyMessage = 'No trucks found',
 }: VirtualizedTrucksTableProps) {
-  const parentRef = useRef<HTMLDivElement>(null);
-
-  const rowVirtualizer = useVirtualizer({
-    count: trucks.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 56, // Row height for two-line content
-    overscan: 10,
-  });
-
-  if (trucks.length === 0) {
-    return (
-      <div className="flex flex-col flex-1 min-h-0">
-        {/* Fixed Header */}
-        <div className="flex-shrink-0 border-b bg-background">
-          <div className="flex items-center h-10 w-full">
-            <div className="px-2 w-12 flex items-center">
-              <Checkbox
-                checked={isAllSelected}
-                onCheckedChange={onSelectAll}
-                aria-label="Select all"
-              />
-            </div>
-            <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Unit Info</div>
-            <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Details</div>
-            <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Plate</div>
-            <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Status</div>
-            <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Registration</div>
-            <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Insurance</div>
+  const columns: BaseColumn<Truck>[] = [
+    {
+      key: 'unit',
+      header: 'Unit Info',
+      width: 'flex-[1.5]',
+      cell: (truck) => (
+        <Link
+          href={`/fleet/trucks/${truck._id}`}
+          className="hover:text-blue-600"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="font-semibold text-sm truncate whitespace-nowrap">{truck.unitId}</div>
+          <div className="text-xs text-muted-foreground truncate whitespace-nowrap">{truck.vin}</div>
+        </Link>
+      ),
+    },
+    {
+      key: 'details',
+      header: 'Details',
+      width: 'flex-[1.5]',
+      cell: (truck) => (
+        <>
+          <div className="text-sm truncate whitespace-nowrap">
+            {truck.make} {truck.model}
           </div>
-        </div>
-        
-        {/* Empty State */}
-        <div className="flex-1 flex items-center justify-center py-12 text-muted-foreground">
-          {emptyMessage}
-        </div>
-      </div>
-    );
-  }
+          <div className="text-xs text-muted-foreground truncate whitespace-nowrap">
+            {truck.year ? `${truck.year}` : 'Year N/A'}
+          </div>
+        </>
+      ),
+    },
+    {
+      key: 'plate',
+      header: 'Plate',
+      width: 'flex-[0.8]',
+      cell: (truck) => (
+        <div className="text-sm font-medium truncate whitespace-nowrap">{truck.plate || 'N/A'}</div>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      width: 'flex-[0.8]',
+      cell: (truck) => (
+        <Badge variant="outline" className={cn('text-xs font-medium whitespace-nowrap', getAssetStatusColor(truck.status))}>
+          {truck.status}
+        </Badge>
+      ),
+    },
+    {
+      key: 'registration',
+      header: 'Registration',
+      width: 'flex-[1.2]',
+      cell: (truck) => {
+        const status = getExpirationStatus(truck.registrationExpiration);
+        return (
+          <>
+            <div className="text-xs truncate whitespace-nowrap">{formatDate(truck.registrationExpiration)}</div>
+            <Badge
+              variant="outline"
+              className={cn('text-xs font-medium mt-0.5 whitespace-nowrap', getExpirationStatusColor(status))}
+            >
+              {expirationLabel(status)}
+            </Badge>
+          </>
+        );
+      },
+    },
+    {
+      key: 'insurance',
+      header: 'Insurance',
+      width: 'flex-[1.2]',
+      cell: (truck) => {
+        const status = getExpirationStatus(truck.insuranceExpiration);
+        return (
+          <>
+            <div className="text-xs truncate whitespace-nowrap">{formatDate(truck.insuranceExpiration)}</div>
+            <Badge
+              variant="outline"
+              className={cn('text-xs font-medium mt-0.5 whitespace-nowrap', getExpirationStatusColor(status))}
+            >
+              {expirationLabel(status)}
+            </Badge>
+          </>
+        );
+      },
+    },
+  ];
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
-      {/* Fixed Header */}
-      <div className="flex-shrink-0 border-b bg-background">
-        <div className="flex items-center h-10 w-full">
-          <div className="px-2 w-12 flex items-center">
-            <Checkbox
-              checked={isAllSelected}
-              onCheckedChange={onSelectAll}
-              aria-label="Select all"
-            />
-          </div>
-          <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Unit Info</div>
-          <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Details</div>
-          <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Plate</div>
-          <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">Status</div>
-          <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Registration</div>
-          <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Insurance</div>
-        </div>
-      </div>
-      
-      {/* Scrollable Body */}
-      <div className="flex-1 overflow-auto" ref={parentRef}>
-        <div className="relative" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
-          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            const truck = trucks[virtualRow.index];
-            const index = virtualRow.index;
-            const registrationStatus = getExpirationStatus(truck.registrationExpiration);
-            const insuranceStatus = getExpirationStatus(truck.insuranceExpiration);
-
-            return (
-              <div
-                key={truck._id}
-                data-index={virtualRow.index}
-                className={cn(
-                  'absolute top-0 left-0 w-full h-[56px] cursor-pointer hover:bg-slate-50/80 transition-colors group border-b flex items-center',
-                  focusedRowIndex === index && 'ring-2 ring-primary'
-                )}
-                style={{
-                  transform: `translateY(${virtualRow.start}px)`,
-                }}
-                onClick={(e) => {
-                  if (!(e.target as HTMLElement).closest('input[type="checkbox"]')) {
-                    onRowClick(truck._id);
-                  }
-                }}
-              >
-                {/* Checkbox */}
-                <div className="px-2 w-12 flex items-center" onClick={(e) => e.stopPropagation()}>
-                  <Checkbox
-                    checked={selectedIds.has(truck._id)}
-                    onCheckedChange={(checked) => onSelectRow(truck._id, checked as boolean)}
-                    aria-label={`Select ${truck.unitId}`}
-                  />
-                </div>
-
-                {/* Unit Info Column */}
-                <div className="px-4 flex-[1.5] min-w-0">
-                  <Link 
-                    href={`/fleet/trucks/${truck._id}`} 
-                    className="hover:text-blue-600"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="font-semibold text-sm truncate whitespace-nowrap">
-                      {truck.unitId}
-                    </div>
-                    <div className="text-xs text-muted-foreground truncate whitespace-nowrap">
-                      {truck.vin}
-                    </div>
-                  </Link>
-                </div>
-
-                {/* Details Column */}
-                <div className="px-4 flex-[1.5] min-w-0">
-                  <div className="text-sm truncate whitespace-nowrap">
-                    {truck.make} {truck.model}
-                  </div>
-                  <div className="text-xs text-muted-foreground truncate whitespace-nowrap">
-                    {truck.year ? `${truck.year}` : 'Year N/A'}
-                  </div>
-                </div>
-
-                {/* Plate Column */}
-                <div className="px-4 flex-[0.8] min-w-0">
-                  <div className="text-sm font-medium truncate whitespace-nowrap">
-                    {truck.plate || 'N/A'}
-                  </div>
-                </div>
-
-                {/* Status Column */}
-                <div className="px-4 flex-[0.8] min-w-0">
-                  <Badge variant="outline" className={cn('text-xs font-medium whitespace-nowrap', getAssetStatusColor(truck.status))}>
-                    {truck.status}
-                  </Badge>
-                </div>
-
-                {/* Registration Column */}
-                <div className="px-4 flex-[1.2] min-w-0">
-                  <div className="text-xs truncate whitespace-nowrap">
-                    {formatDate(truck.registrationExpiration)}
-                  </div>
-                  <Badge 
-                    variant="outline" 
-                    className={cn('text-xs font-medium mt-0.5 whitespace-nowrap', getExpirationStatusColor(registrationStatus))}
-                  >
-                    {registrationStatus === 'unknown' ? 'No Date' : registrationStatus.charAt(0).toUpperCase() + registrationStatus.slice(1)}
-                  </Badge>
-                </div>
-
-                {/* Insurance Column */}
-                <div className="px-4 flex-[1.2] min-w-0">
-                  <div className="text-xs truncate whitespace-nowrap">
-                    {formatDate(truck.insuranceExpiration)}
-                  </div>
-                  <Badge 
-                    variant="outline" 
-                    className={cn('text-xs font-medium mt-0.5 whitespace-nowrap', getExpirationStatusColor(insuranceStatus))}
-                  >
-                    {insuranceStatus === 'unknown' ? 'No Date' : insuranceStatus.charAt(0).toUpperCase() + insuranceStatus.slice(1)}
-                  </Badge>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+    <BaseVirtualizedTable<Truck>
+      rows={trucks}
+      columns={columns}
+      selectedIds={selectedIds}
+      isAllSelected={isAllSelected}
+      onSelectAll={onSelectAll}
+      onSelectRow={onSelectRow}
+      onRowClick={(truck) => onRowClick(truck._id)}
+      focusedRowIndex={focusedRowIndex}
+      emptyMessage={emptyMessage}
+      rowAriaLabel={(truck) => `Select ${truck.unitId}`}
+    />
   );
 }
