@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { query, internalMutation } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
+import { queryByOrg } from './_helpers/queryByOrg';
 
 /**
  * Universal audit logging utility for tracking all actions across the project
@@ -96,9 +97,7 @@ export const getOrganizationAuditLog = query({
     }
 
     // Get all logs for organization
-    const logs = await ctx.db
-      .query('auditLog')
-      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
+    const logs = await queryByOrg(ctx, 'auditLog', callerOrgId)
       .order('desc')
       .take(limit);
 
@@ -137,9 +136,7 @@ export const getRecentActivity = query({
     const hoursAgo = args.hours || 24;
     const cutoffTime = args.nowMs - hoursAgo * 60 * 60 * 1000;
 
-    const logs = await ctx.db
-      .query('auditLog')
-      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
+    const logs = await queryByOrg(ctx, 'auditLog', callerOrgId)
       .order('desc')
       .filter((q) => q.gte(q.field('timestamp'), cutoffTime))
       .take(100);

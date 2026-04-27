@@ -9,16 +9,14 @@
 
 import { MutationCtx } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
+import { queryByOrg } from "./_helpers/queryByOrg";
 
 /**
  * Get or create organization stats document
  * Uses .first() since stats might not exist yet (before migration or first mutation)
  */
 async function getOrCreateStats(ctx: MutationCtx, orgId: string): Promise<Id<"organizationStats">> {
-  let stats = await ctx.db
-    .query("organizationStats")
-    .withIndex("by_org", (q) => q.eq("workosOrgId", orgId))
-    .first();
+  let stats = await queryByOrg(ctx, "organizationStats", orgId).first();
   
   if (!stats) {
     // Initialize stats with zeros for new organization
