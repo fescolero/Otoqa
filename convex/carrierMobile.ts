@@ -8,24 +8,13 @@ import {
   scheduleUpdateClerkUserPhone,
   scheduleDeleteClerkUser,
 } from './clerkSyncScheduler';
+import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
 /**
  * Carrier Mobile API
  * Specialized queries/mutations for carrier owner mobile app
  * Focused on owner dashboard, load management, and driver oversight
  */
-
-/**
- * Normalize a phone number to its 10-digit US form for comparison.
- * Handles +17607553340, 17607553340, 7607553340, +1760-755-3340, (760) 755-3340, etc.
- */
-function normalizePhoneForMatch(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
-  if (digits.length === 11 && digits.startsWith('1')) {
-    return digits.slice(1);
-  }
-  return digits;
-}
 
 /**
  * Helper to authenticate carrier mobile requests.
