@@ -1,7 +1,14 @@
 import { v } from 'convex/values';
-import { mutation, query, internalMutation, internalQuery } from './_generated/server';
+import {
+  mutation,
+  query,
+  internalMutation,
+  internalQuery,
+  type QueryCtx,
+  type MutationCtx,
+} from './_generated/server';
 import { internal } from './_generated/api';
-import { Id, Doc } from './_generated/dataModel';
+import { Id, Doc, TableNames } from './_generated/dataModel';
 import {
   getLegTimeRange,
   doTimeRangesOverlap,
@@ -18,6 +25,34 @@ import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from '
  * Dispatch Legs - The atomic unit of work
  * A Load can have multiple Legs (for splits/repowers)
  */
+
+/**
+ * Fetch a set of documents by ID, deduplicating repeated IDs and skipping
+ * nullish ones. Returns a Map keyed by Id for O(1) lookup when enriching
+ * a list of legs. Convex bills per document read, so on a dispatch board
+ * with N legs sharing K unique drivers we drop driver reads from N to K.
+ *
+ * This is the standard "list with related entities" pattern for Convex —
+ * preserve the recommended `Promise.all(ids.map(ctx.db.get))` join idiom,
+ * but issue each unique fetch once.
+ */
+async function getManyByIds<T extends TableNames>(
+  ctx: QueryCtx | MutationCtx,
+  ids: ReadonlyArray<Id<T> | null | undefined>
+): Promise<Map<Id<T>, Doc<T>>> {
+  const unique = new Set<Id<T>>();
+  for (const id of ids) {
+    if (id) unique.add(id);
+  }
+  const idList = Array.from(unique);
+  const docs = await Promise.all(idList.map((id) => ctx.db.get(id)));
+  const map = new Map<Id<T>, Doc<T>>();
+  idList.forEach((id, i) => {
+    const doc = docs[i];
+    if (doc) map.set(id, doc);
+  });
+  return map;
+}
 
 const legStatusValidator = v.union(
   v.literal('PENDING'),
@@ -54,29 +89,34 @@ export const getByLoad = query({
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .collect();
 
-    // Enrich with driver, truck, trailer details
-    const enrichedLegs = await Promise.all(
-      legs.map(async (leg) => {
-        const [driver, truck, trailer, startStop, endStop] = await Promise.all([
-          leg.driverId ? ctx.db.get(leg.driverId) : null,
-          leg.truckId ? ctx.db.get(leg.truckId) : null,
-          leg.trailerId ? ctx.db.get(leg.trailerId) : null,
-          ctx.db.get(leg.startStopId),
-          ctx.db.get(leg.endStopId),
-        ]);
+    // Enrich with driver, truck, trailer, stop details. Fetch each unique
+    // referenced doc once; multiple legs frequently share the same driver/
+    // truck/trailer (and on a single load every leg shares the same stops).
+    const [driversById, trucksById, trailersById, stopsById] = await Promise.all([
+      getManyByIds(ctx, legs.map((l) => l.driverId)),
+      getManyByIds(ctx, legs.map((l) => l.truckId)),
+      getManyByIds(ctx, legs.map((l) => l.trailerId)),
+      getManyByIds(ctx, legs.flatMap((l) => [l.startStopId, l.endStopId])),
+    ]);
 
-        return {
-          ...leg,
-          driverName: driver ? `${driver.firstName} ${driver.lastName}` : null,
-          truckUnitId: truck?.unitId ?? null,
-          trailerUnitId: trailer?.unitId ?? null,
-          startStopCity: startStop?.city,
-          startStopState: startStop?.state,
-          endStopCity: endStop?.city,
-          endStopState: endStop?.state,
-        };
-      })
-    );
+    const enrichedLegs = legs.map((leg) => {
+      const driver = leg.driverId ? driversById.get(leg.driverId) ?? null : null;
+      const truck = leg.truckId ? trucksById.get(leg.truckId) ?? null : null;
+      const trailer = leg.trailerId ? trailersById.get(leg.trailerId) ?? null : null;
+      const startStop = stopsById.get(leg.startStopId);
+      const endStop = stopsById.get(leg.endStopId);
+
+      return {
+        ...leg,
+        driverName: driver ? `${driver.firstName} ${driver.lastName}` : null,
+        truckUnitId: truck?.unitId ?? null,
+        trailerUnitId: trailer?.unitId ?? null,
+        startStopCity: startStop?.city,
+        startStopState: startStop?.state,
+        endStopCity: endStop?.city,
+        endStopState: endStop?.state,
+      };
+    });
 
     // Sort by sequence
     return enrichedLegs.sort((a, b) => a.sequence - b.sequence);
@@ -105,18 +145,19 @@ export const getByDriver = query({
 
     const legs = await legsQuery.collect();
 
-    // Enrich with load details
-    const enrichedLegs = await Promise.all(
-      legs.map(async (leg) => {
-        const load = await ctx.db.get(leg.loadId);
-        return {
-          ...leg,
-          loadInternalId: load?.internalId,
-          loadOrderNumber: load?.orderNumber,
-          loadStatus: load?.status,
-        };
-      })
-    );
+    // Enrich with load details. A driver with N legs typically has far fewer
+    // unique loads (e.g. 10 legs across 5 loads → 5 reads instead of 10).
+    const loadsById = await getManyByIds(ctx, legs.map((l) => l.loadId));
+
+    const enrichedLegs = legs.map((leg) => {
+      const load = loadsById.get(leg.loadId);
+      return {
+        ...leg,
+        loadInternalId: load?.internalId,
+        loadOrderNumber: load?.orderNumber,
+        loadStatus: load?.status,
+      };
+    });
 
     return enrichedLegs;
   },
@@ -1216,18 +1257,21 @@ export const getAvailableDrivers = query({
       }
     }
 
-    // 5. Fetch conflict load docs (one per driver with an overlap) in parallel.
-    const driverOverlaps = new Map<string, { overlapMinutes: number; orderNumber?: string; loadId: string }>();
-    await Promise.all(
-      Array.from(winningLegByDriver.entries()).map(async ([driverId, winner]) => {
-        const conflictLoad = await ctx.db.get(winner.loadId);
-        driverOverlaps.set(driverId, {
-          overlapMinutes: winner.overlapMinutes,
-          orderNumber: conflictLoad?.orderNumber,
-          loadId: winner.loadId as string,
-        });
-      })
+    // 5. Fetch conflict load docs once per unique loadId (multiple drivers can
+    //    overlap the same load — e.g. a busy lane), then resolve per-driver.
+    const conflictLoadsById = await getManyByIds(
+      ctx,
+      Array.from(winningLegByDriver.values()).map((w) => w.loadId)
     );
+    const driverOverlaps = new Map<string, { overlapMinutes: number; orderNumber?: string; loadId: string }>();
+    for (const [driverId, winner] of winningLegByDriver.entries()) {
+      const conflictLoad = conflictLoadsById.get(winner.loadId);
+      driverOverlaps.set(driverId, {
+        overlapMinutes: winner.overlapMinutes,
+        orderNumber: conflictLoad?.orderNumber,
+        loadId: winner.loadId as string,
+      });
+    }
 
     // 6. Enrich drivers with truck data and overlap insight (parallel).
     const drivers = await Promise.all(
@@ -1303,16 +1347,27 @@ export const getDriverSchedule = query({
 
     if (legs.length === 0) return [];
 
-    // 2. Enrich with time ranges and load details
+    // 2. Pre-fetch each unique referenced doc once. A driver's schedule
+    //    typically reuses the same load (multiple legs per load), the same
+    //    truck/trailer across many legs, and stops shared within a load.
+    const [loadsById, stopsById, trucksById, trailersById] = await Promise.all([
+      getManyByIds(ctx, legs.map((l) => l.loadId)),
+      getManyByIds(ctx, legs.flatMap((l) => [l.startStopId, l.endStopId])),
+      getManyByIds(ctx, legs.map((l) => l.truckId)),
+      getManyByIds(ctx, legs.map((l) => l.trailerId)),
+    ]);
+
+    // Enrich with time ranges and pre-fetched related docs. getLegTimeRange
+    // still re-reads the start/end stops (it lives in _helpers and is shared
+    // with mutation paths); leaving it untouched preserves null-fallback
+    // semantics for unparsable times.
     const enrichedLegs = await Promise.all(
       legs.map(async (leg) => {
-        const [load, startStop, endStop, truck, trailer] = await Promise.all([
-          ctx.db.get(leg.loadId),
-          ctx.db.get(leg.startStopId),
-          ctx.db.get(leg.endStopId),
-          leg.truckId ? ctx.db.get(leg.truckId) : null,
-          leg.trailerId ? ctx.db.get(leg.trailerId) : null,
-        ]);
+        const load = loadsById.get(leg.loadId) ?? null;
+        const startStop = stopsById.get(leg.startStopId) ?? null;
+        const endStop = stopsById.get(leg.endStopId) ?? null;
+        const truck = leg.truckId ? trucksById.get(leg.truckId) ?? null : null;
+        const trailer = leg.trailerId ? trailersById.get(leg.trailerId) ?? null : null;
 
         const timeRange = await getLegTimeRange(ctx, leg);
 
