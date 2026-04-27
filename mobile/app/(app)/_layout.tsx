@@ -1,39 +1,23 @@
 import { Redirect, Stack, useRouter } from 'expo-router';
-import { useAuth, useUser } from '@clerk/clerk-expo';
 import {
   View,
   StyleSheet,
   Text,
   Pressable,
-  AppState,
 } from 'react-native';
 import { LoadingRingScreen } from '../../lib/otoqa-loader';
-import { useQuery, useMutation } from 'convex/react';
-import { api } from '../../../convex/_generated/api';
 import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import { useQuery } from 'convex/react';
+import { api } from '../../../convex/_generated/api';
 import { Id } from '../../../convex/_generated/dataModel';
-import { useConvexAuthState } from '../../lib/convex';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, typography, borderRadius } from '../../lib/theme';
-import { resumeTracking, getTrackingState, getBufferedLocationCount, forceFlush, restartForegroundServices, stopSessionTracking } from '../../lib/location-tracking';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import RoleSwitchScreen from './role-switch';
-import {
-  useRequestPermissionsOnce,
-  useRequestActivityRecognitionOnce,
-} from '../../lib/request-permissions';
 import { useRegisterPushToken } from '../../lib/hooks/useRegisterPushToken';
 import { performSignOut } from '../../lib/logout';
-import { refreshPushTokenIfChanged } from '../../lib/push-token';
 import {
-  registerBackgroundWakeTask,
-  registerForegroundWakeListener,
-} from '../../lib/fcm-handler';
-import { applyFlagSnapshot } from '../../lib/feature-flags';
-import { startMotionService, stopMotionService } from '../../lib/motion-service';
-import {
-  identifyUser,
   resetUser,
   trackRoleSelected,
   trackLoadingGateTimeout,
@@ -42,8 +26,12 @@ import {
   trackAppSessionHealth,
   type LoadingGate,
 } from '../../lib/analytics';
+import { useBootstrap, MODE_STORAGE_KEY } from '../../lib/hooks/useBootstrap';
+import { usePermissionGates } from '../../lib/hooks/usePermissionGates';
+import { usePushWake } from '../../lib/hooks/usePushWake';
+import { useLocationService } from '../../lib/hooks/useLocationService';
+import { useAnalyticsInit } from '../../lib/hooks/useAnalyticsInit';
 
-const MODE_STORAGE_KEY = '@app_mode_selection';
 const GATE_TIMEOUT_MS = 12_000;
 
 function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<string, unknown>) {
@@ -184,102 +172,19 @@ export function useCarrierOwner() {
 }
 
 export default function AppLayout() {
-  const { isSignedIn, isLoaded: clerkLoaded, userId, signOut } = useAuth();
-  const { user } = useUser();
-  const convexAuth = useConvexAuthState();
-  const hasResumedRef = useRef(false);
-  const [mode, setModeState] = useState<'driver' | 'owner'>('driver');
-  const [hasSelectedRole, setHasSelectedRole] = useState(false);
-  const [isLoadingStoredMode, setIsLoadingStoredMode] = useState(true);
+  // Auth + persisted mode + live queries (roles / profile / active session)
+  // + auto-mode-switch logic. All hooks are called unconditionally inside.
+  const boot = useBootstrap();
+  const {
+    isSignedIn, clerkLoaded, userId, user, signOut,
+    convexAuth, clerkOrgId,
+    mode, setMode, hasSelectedRole, setHasSelectedRole, isLoadingStoredMode,
+    userRoles, profile, activeSession, carrierOrg,
+    canBeDriver, canBeOwner, canSwitchModes, isRolesLoading,
+  } = boot;
 
-  // Request all permissions (camera, location, notifications, etc.) once after sign-in
-  useRequestPermissionsOnce();
-
-  // Phase 1d — ACTIVITY_RECOGNITION (Android 10+, runtime). Separate
-  // hook so existing drivers (who already have PERMISSIONS_REQUESTED_KEY
-  // set from pre-1d) get prompted on their next app open. Uses OS-level
-  // `check()` as the gate — no storage key — so it's a no-op once
-  // granted or permanently denied.
-  useRequestActivityRecognitionOnce();
-
-  // Wrap setMode to persist to AsyncStorage
-  const setMode = useCallback(async (newMode: 'driver' | 'owner') => {
-    setModeState(newMode);
-    try {
-      await AsyncStorage.setItem(MODE_STORAGE_KEY, JSON.stringify({ mode: newMode, hasSelected: true }));
-    } catch (e) {
-      console.warn('Failed to save mode to storage:', e);
-    }
-  }, []);
-
-  // Load persisted mode on mount - but DON'T auto-select role
-  // Carriers should always see the role selection screen on sign-in
-  useEffect(() => {
-    let cancelled = false;
-    const loadStoredMode = async () => {
-      try {
-        const stored = await AsyncStorage.getItem(MODE_STORAGE_KEY);
-        if (cancelled) return;
-        if (stored) {
-          const { mode: storedMode } = JSON.parse(stored);
-          if (storedMode) {
-            setModeState(storedMode);
-          }
-        }
-      } catch (e) {
-        console.warn('Failed to load mode from storage:', e);
-      } finally {
-        if (!cancelled) setIsLoadingStoredMode(false);
-      }
-    };
-    loadStoredMode();
-    return () => { cancelled = true; };
-  }, []);
-
-  // Get user's organization ID from Clerk (for legacy support)
-  const clerkOrgId = user?.organizationMemberships?.[0]?.organization?.id;
-
-  // Query user roles to determine if driver, owner, or both
-  // This now also returns carrier org info directly
-  const userRolesLive = useQuery(
-    api.carrierMobile.getUserRoles,
-    convexAuth.isAuthenticated && userId
-      ? { clerkUserId: userId, clerkOrgId: clerkOrgId }
-      : 'skip'
-  );
-
-  // Cache the last known roles so transient undefined states (token refresh,
-  // reactive re-subscription) don't flash the "Checking permissions..." screen.
-  const cachedRolesRef = useRef(userRolesLive);
-  if (userRolesLive !== undefined) {
-    cachedRolesRef.current = userRolesLive;
-  }
-  const userRoles = userRolesLive ?? cachedRolesRef.current;
-
-  // Query driver profile if user can be a driver (needed for mode switching)
-  // Pass driverId from getUserRoles so owner-operators can be found by direct lookup
-  // instead of relying solely on phone number matching
-  const profileLive = useQuery(
-    api.driverMobile.getMyProfile,
-    convexAuth.isAuthenticated && hasSelectedRole && (userRoles?.isDriver || mode === 'driver')
-      ? { driverId: (userRoles?.driverId ?? undefined) as Id<'drivers'> | undefined }
-      : 'skip'
-  );
-
-  // Cache last known profile to avoid flashing loading screen during re-subscriptions
-  const cachedProfileRef = useRef(profileLive);
-  if (profileLive !== undefined) {
-    cachedProfileRef.current = profileLive;
-  }
-  const profile = profileLive ?? cachedProfileRef.current;
-
-  // Active driver session — drives the "must scan a truck before any
-  // driver work" gate below. Skip-guarded on profile._id so we don't
-  // fire pre-auth or for owner-only users.
-  const activeSession = useQuery(
-    api.driverSessions.getActiveSession,
-    profile?._id ? { driverId: profile._id as Id<'drivers'> } : 'skip',
-  );
+  // Permission prompts (camera/location/notifications + ACTIVITY_RECOGNITION).
+  usePermissionGates();
 
   // Register the Expo push token once the driver is hydrated. CRITICAL:
   // this call must sit ABOVE every conditional `return` below — if it's
@@ -292,158 +197,30 @@ export default function AppLayout() {
   // no-ops when driverId is null so it's safe to call every render.
   useRegisterPushToken(profile?._id ?? null);
 
-  // -----------------------------------------------------------------------
-  // PHASE 1C — WAKE-PUSH (FCM) WIRING
-  // -----------------------------------------------------------------------
-  // These hooks live above any conditional return, same hoisting rule as
-  // useRegisterPushToken above. All of them are inert in Expo Go + when
-  // not signed in (internal guards handle those cases).
+  // Phase 1c FCM wake wiring + token-refresh + feature flags + motion
+  // service. Same hoisting rule as useRegisterPushToken — must sit
+  // above any conditional return.
+  usePushWake(activeSession ?? null);
 
-  // 1. Register the background task + foreground listener for wake pushes.
-  //    Idempotent; the native task registration persists across JS reloads.
-  useEffect(() => {
-    registerBackgroundWakeTask().catch(() => {});
-    const cleanup = registerForegroundWakeListener();
-    return cleanup;
-  }, []);
+  // Location-tracking lifecycle: resume-on-mount, foreground flush, and
+  // orphan-tracking self-heal. Same hoisting rule.
+  useLocationService({
+    mode,
+    driverId: profile?._id ?? null,
+    activeSession: activeSession ?? null,
+  });
 
-  // 2. Refresh the device push token on mount + on every foreground
-  //    return. This is Path B's stand-in for Firebase's onTokenRefresh:
-  //    we diff-check against the secure-store cache and re-register only
-  //    on rotation. Non-blocking — errors swallowed inside the helper.
-  useEffect(() => {
-    refreshPushTokenIfChanged().catch(() => {});
-    const sub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') refreshPushTokenIfChanged().catch(() => {});
-    });
-    return () => sub.remove();
-  }, []);
-
-  // 2b. Re-register the device push token whenever the active session
-  //     _id transitions. Without this, the "sign in → Start Shift
-  //     without backgrounding" flow never populates pushToken on the
-  //     session: the mount effect fires before a session exists (server
-  //     returns { registered: false, reason: 'no_active_session' }),
-  //     the token isn't cached locally, and nothing else triggers
-  //     another attempt. Reactive session query → re-run registration
-  //     closes the gap with no user-visible seams.
-  useEffect(() => {
-    if (activeSession?._id) {
-      refreshPushTokenIfChanged().catch(() => {});
-    }
-  }, [activeSession?._id]);
-
-  // 3. Reactive feature-flag subscription. Convex pushes new snapshots
-  //    on every write to featureFlags for the caller's org, which means
-  //    flipping `fcm_wake_enabled=false` (or any other capability flag)
-  //    takes effect on live clients within seconds — no cold start
-  //    required. applyFlagSnapshot writes both the in-memory cache and
-  //    the MMKV-backed persistent cache so next cold start also sees
-  //    the new value.
-  const liveFlags = useQuery(api.featureFlags.getForOrg, {});
-  useEffect(() => {
-    if (liveFlags) applyFlagSnapshot(liveFlags);
-  }, [liveFlags]);
-
-  // 4. Activity Recognition (Phase 1d). Native module registers
-  //    STILL↔IN_VEHICLE transitions via Google Play Services and
-  //    forwards them to motion-service, which gates on ar_wake_enabled
-  //    + ar_shadow_mode flags. Telemetry fires in shadow mode; FGS
-  //    restart fires only in live mode. No-op on iOS (Phase 4 decision
-  //    for the iOS motion path is separate). The subscription is
-  //    torn down on unmount — the stopLocationTracking flow separately
-  //    tears it down when the driver ends their shift.
-  useEffect(() => {
-    startMotionService().catch(() => {});
-    return () => {
-      stopMotionService().catch(() => {});
-    };
-  }, []);
-
-  // Self-heal orphan GPS tracking.
-  //
-  // Problem: several codepaths flip `mode` without going through the
-  // graceful teardown in RoleSwitchSheet (which ends the session and
-  // stops tracking before calling setMode). Examples:
-  //   • The auto-switch useEffect below that flips driver→owner when
-  //     `profile === null` fires during a reactive query hiccup.
-  //   • The AsyncStorage mode-load on app start after a crash mid-
-  //     role-switch (state.isActive=true in SQLite but stored mode
-  //     flipped to 'owner' before the crash).
-  //   • Any future codepath that calls `setMode` directly.
-  //
-  // Wrapping setMode isn't enough — `setModeState` is also called
-  // directly (AsyncStorage load, line ~208) and would bypass a wrapper.
-  //
-  // This declarative effect is the backstop: whenever mode is NOT
-  // driver, tracking must not be running. If it is, end the session
-  // (best-effort) and stop tracking. endSession failure is non-fatal —
-  // stopping the client-side tracking is the critical half, because
-  // that's what orphans the GPS stream against a dead context.
-  //
-  // Same hoisting rule as useRegisterPushToken: must sit above any
-  // conditional return so React's hook count stays stable.
-  const endSessionMutation = useMutation(api.driverSessions.endSession);
-  useEffect(() => {
-    if (mode === 'driver') return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const state = await getTrackingState();
-        if (cancelled || !state?.isActive) return;
-        console.warn(
-          '[AppLayout] Orphan tracking detected in non-driver mode; self-healing',
-        );
-        if (activeSession) {
-          await endSessionMutation({
-            sessionId: activeSession._id,
-            endReason: 'driver_manual',
-          }).catch((err) => {
-            // Non-fatal. Server may have already ended the session, or
-            // the driver's auth might be in a weird state. What matters
-            // is stopping the client-side tracking below.
-            console.warn(
-              '[AppLayout] endSession failed during self-heal:',
-              err instanceof Error ? err.message : String(err),
-            );
-          });
-        }
-        await stopSessionTracking();
-      } catch (err) {
-        console.warn(
-          '[AppLayout] Self-heal failed:',
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [mode, activeSession, endSessionMutation]);
-
-  // Carrier org info is now returned directly from userRoles
-  // No need for separate query - use carrierOrgConvexId and carrierOrgName from userRoles
-  const carrierOrg = userRoles?.isCarrierOwner ? {
-    _id: userRoles.carrierOrgConvexId,
-    name: userRoles.carrierOrgName || 'Carrier',
-    clerkOrgId: userRoles.carrierOrgId,
-    workosOrgId: userRoles.carrierOrgId,
-    orgType: userRoles.orgType,
-  } : null;
-
-  // Check if owner-operator needs to complete driver profile
+  // Check if owner-operator needs to complete driver profile.
   const needsDriverProfileResult = useQuery(
     api.carrierMobile.needsDriverProfile,
     mode === 'owner' && userRoles?.isCarrierOwner && userRoles.isOwnerOperator && userRoles.carrierOrgConvexId
       ? { carrierOrgId: userRoles.carrierOrgConvexId }
-      : 'skip'
+      : 'skip',
   );
-  
   const needsDriverProfileOnboarding = needsDriverProfileResult?.needsProfile === true;
 
   const isProfileLoading = mode === 'driver' && hasSelectedRole && userRoles?.isDriver && profile === undefined;
   const isCarrierOrgLoading = mode === 'owner' && hasSelectedRole && userRoles === undefined;
-  const isRolesLoading = userRoles === undefined;
   // For drivers, also wait for the active-session query before rendering
   // any (app) screen — otherwise the default Stack child (driver-tabs)
   // flashes for a frame before our navigation effect can route the user
@@ -462,45 +239,14 @@ export default function AppLayout() {
   const profileGate = useLoadingGate('driver_profile', !!isProfileLoading);
   const carrierOrgGate = useLoadingGate('carrier_org', !!isCarrierOrgLoading);
 
-  // Determine which modes are available
-  const canBeDriver = userRoles?.isDriver ?? false;
-  const canBeOwner = userRoles?.isCarrierOwner ?? false;
-  const canSwitchModes = canBeDriver && canBeOwner;
-
-
-  // Auto-select role ONLY if user has just one role.
-  // Single-role users should never see the picker — they go straight
-  // to home. The picker is only meaningful when both roles are
-  // available and the user genuinely has a choice to make.
-  useEffect(() => {
-    if (!userRoles || isRolesLoading || hasSelectedRole) return;
-    if (userRoles.isDriver && !userRoles.isCarrierOwner) {
-      setMode('driver');
-      setHasSelectedRole(true);
-    } else if (!userRoles.isDriver && userRoles.isCarrierOwner) {
-      setMode('owner');
-      setHasSelectedRole(true);
-    }
-  }, [userRoles, isRolesLoading, hasSelectedRole]);
-
-  // Identify user in PostHog once roles are known and mode is selected
-  const hasIdentifiedRef = useRef(false);
-  useEffect(() => {
-    if (hasIdentifiedRef.current || !userId || !userRoles || !hasSelectedRole) return;
-    hasIdentifiedRef.current = true;
-
-    const role = userRoles.isDriver && userRoles.isCarrierOwner
-      ? 'both'
-      : userRoles.isDriver ? 'driver' : 'owner';
-
-    identifyUser({
-      id: userId,
-      phone: user?.primaryPhoneNumber?.phoneNumber,
-      name: user?.fullName ?? undefined,
-      organizationId: userRoles.carrierOrgId ?? clerkOrgId ?? undefined,
-      role,
-    });
-  }, [userId, userRoles, hasSelectedRole, user, clerkOrgId]);
+  // Identify user in PostHog once roles are known and mode is selected.
+  useAnalyticsInit({
+    userId,
+    user,
+    userRoles,
+    hasSelectedRole,
+    clerkOrgId,
+  });
 
   // Handle sign out - clear stored mode
   const handleSignOut = async () => {
@@ -555,60 +301,6 @@ export default function AppLayout() {
     router.navigate(desiredRoute as never);
   }, [desiredRoute, mode]);
 
-  // Resume location tracking on app start if it was active
-  useEffect(() => {
-    let cancelled = false;
-    if (!hasResumedRef.current && profile?._id) {
-      hasResumedRef.current = true;
-      resumeTracking().then((result) => {
-        if (!cancelled && result.resumed) {
-          console.log('[App] Location tracking resumed:', result.message);
-        }
-      });
-    }
-    return () => { cancelled = true; };
-  }, [profile?._id]);
-
-  // When app returns to foreground:
-  // 1. Restart foreground watch + sync interval (iOS suspends JS timers in background)
-  // 2. Flush any buffered locations collected while backgrounded
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', async (nextState) => {
-      if (nextState === 'active') {
-        try {
-          // Restart foreground location watch and sync timer
-          await restartForegroundServices();
-
-          const state = await getTrackingState();
-          if (!state?.isActive) return;
-          const count = await getBufferedLocationCount();
-          if (count > 0) {
-            console.log(`[App] Foreground: ${count} buffered locations, flushing...`);
-            const result = await forceFlush();
-            console.log(`[App] Foreground flush result: synced=${result.synced}, success=${result.success}`);
-          }
-        } catch (err) {
-          console.warn('[App] Foreground resume failed:', err);
-        }
-      }
-    });
-    return () => subscription.remove();
-  }, []);
-
-  // Auto-switch modes when profile/org is not found
-  useEffect(() => {
-    // If in driver mode but no driver profile, switch to owner if possible
-    if (mode === 'driver' && profile === null && canBeOwner) {
-      console.log('Driver profile not found, switching to owner mode');
-      setMode('owner');
-    }
-    // If in owner mode but no carrier org, switch to driver if possible  
-    if (mode === 'owner' && (!carrierOrg || !carrierOrg._id) && canBeDriver && profile) {
-      console.log('Carrier org not found, switching to driver mode');
-      setMode('driver');
-    }
-  }, [mode, profile, carrierOrg, canBeOwner, canBeDriver]);
-
   // Wait for Clerk to be ready and stored mode to load
   if (!clerkLoaded || isLoadingStoredMode) {
     return <LoadingRingScreen statusText="Loading…" subText="Hang tight" />;
@@ -622,18 +314,13 @@ export default function AppLayout() {
   if (convexAuth.isLoading) {
     if (convexAuthGate.isTimedOut) {
       return (
-        <View style={styles.loading}>
-          <Ionicons name="cloud-offline-outline" size={48} color={colors.warning} />
-          <Text style={styles.loadingTitle}>Connection Slow</Text>
-          <Text style={styles.loadingSubtext}>Having trouble connecting to the server.</Text>
-          <Pressable style={styles.retryButton} onPress={() => { convexAuthGate.retry(); }}>
-            <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </Pressable>
-          <Pressable style={styles.signOutLink} onPress={handleSignOut}>
-            <Text style={styles.signOutLinkText}>Sign out</Text>
-          </Pressable>
-        </View>
+        <GateErrorScreen
+          icon="cloud-offline-outline"
+          title="Connection Slow"
+          subtext="Having trouble connecting to the server."
+          onRetry={() => { convexAuthGate.retry(); }}
+          onSignOut={handleSignOut}
+        />
       );
     }
     return <LoadingRingScreen statusText="Connecting to server…" subText="Hang tight" />;
@@ -643,18 +330,13 @@ export default function AppLayout() {
   if (isRolesLoading) {
     if (rolesGate.isTimedOut) {
       return (
-        <View style={styles.loading}>
-          <Ionicons name="shield-outline" size={48} color={colors.warning} />
-          <Text style={styles.loadingTitle}>Taking Longer Than Expected</Text>
-          <Text style={styles.loadingSubtext}>Still checking your permissions. You can retry or sign out and try again.</Text>
-          <Pressable style={styles.retryButton} onPress={() => { rolesGate.retry(); }}>
-            <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </Pressable>
-          <Pressable style={styles.signOutLink} onPress={handleSignOut}>
-            <Text style={styles.signOutLinkText}>Sign out</Text>
-          </Pressable>
-        </View>
+        <GateErrorScreen
+          icon="shield-outline"
+          title="Taking Longer Than Expected"
+          subtext="Still checking your permissions. You can retry or sign out and try again."
+          onRetry={() => { rolesGate.retry(); }}
+          onSignOut={handleSignOut}
+        />
       );
     }
     return <LoadingRingScreen statusText="Checking permissions…" subText="Hang tight" />;
@@ -722,18 +404,13 @@ export default function AppLayout() {
     const activeGate = isProfileLoading ? profileGate : carrierOrgGate;
     if (activeGate.isTimedOut) {
       return (
-        <View style={styles.loading}>
-          <Ionicons name="person-outline" size={48} color={colors.warning} />
-          <Text style={styles.loadingTitle}>Profile Load Slow</Text>
-          <Text style={styles.loadingSubtext}>Having trouble loading your profile data.</Text>
-          <Pressable style={styles.retryButton} onPress={() => { activeGate.retry(); }}>
-            <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </Pressable>
-          <Pressable style={styles.signOutLink} onPress={handleSignOut}>
-            <Text style={styles.signOutLinkText}>Sign out</Text>
-          </Pressable>
-        </View>
+        <GateErrorScreen
+          icon="person-outline"
+          title="Profile Load Slow"
+          subtext="Having trouble loading your profile data."
+          onRetry={() => { activeGate.retry(); }}
+          onSignOut={handleSignOut}
+        />
       );
     }
     return <LoadingRingScreen statusText="Loading profile…" subText="Hang tight" />;
@@ -741,10 +418,10 @@ export default function AppLayout() {
 
   // Handle deleted organization (shows specific message with reason)
   if (userRoles?.orgStatus === 'deleted') {
-    const deletedDate = userRoles.orgDeletedAt 
-      ? new Date(userRoles.orgDeletedAt).toLocaleDateString() 
+    const deletedDate = userRoles.orgDeletedAt
+      ? new Date(userRoles.orgDeletedAt).toLocaleDateString()
       : 'recently';
-    
+
     return (
       <View style={styles.error}>
         <Ionicons name="close-circle" size={64} color={colors.destructive} />
@@ -762,7 +439,7 @@ export default function AppLayout() {
           If you believe this is an error, please contact support at support@otoqa.com
           or call 1-800-XXX-XXXX for assistance.
         </Text>
-        <Pressable 
+        <Pressable
           style={styles.errorButton}
           onPress={handleSignOut}
         >
@@ -776,63 +453,31 @@ export default function AppLayout() {
   // Handle case where user has no roles
   if (!canBeDriver && !canBeOwner) {
     return (
-      <View style={styles.error}>
-        <Ionicons name="warning" size={64} color={colors.warning} />
-        <Text style={styles.errorTitle}>Not Registered</Text>
-        <Text style={styles.errorText}>
-          Your phone number is not registered as a driver or carrier owner in the system.
-          Please contact your dispatcher or company administrator.
-        </Text>
-        <Pressable 
-          style={styles.errorButton}
-          onPress={handleSignOut}
-        >
-          <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
-          <Text style={styles.errorButtonText}>Back to Sign In</Text>
-        </Pressable>
-      </View>
+      <NotRegisteredScreen
+        message="Your phone number is not registered as a driver or carrier owner in the system. Please contact your dispatcher or company administrator."
+        onSignOut={handleSignOut}
+      />
     );
   }
 
   // Handle driver mode when driver profile not found and can't switch
   if (mode === 'driver' && profile === null && !canBeOwner) {
     return (
-      <View style={styles.error}>
-        <Ionicons name="warning" size={64} color={colors.warning} />
-        <Text style={styles.errorTitle}>Not Registered</Text>
-        <Text style={styles.errorText}>
-          Your phone number is not registered as a driver in the system.
-          Please contact your dispatcher.
-        </Text>
-        <Pressable 
-          style={styles.errorButton}
-          onPress={handleSignOut}
-        >
-          <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
-          <Text style={styles.errorButtonText}>Back to Sign In</Text>
-        </Pressable>
-      </View>
+      <NotRegisteredScreen
+        message="Your phone number is not registered as a driver in the system. Please contact your dispatcher."
+        onSignOut={handleSignOut}
+      />
     );
   }
 
   // Handle owner mode when carrier org not found and can't switch
   if (mode === 'owner' && (!carrierOrg || !carrierOrg._id) && !canBeDriver) {
     return (
-      <View style={styles.error}>
-        <Ionicons name="warning" size={64} color={colors.warning} />
-        <Text style={styles.errorTitle}>Organization Not Found</Text>
-        <Text style={styles.errorText}>
-          Your carrier organization is not set up yet.
-          Please contact support to complete registration.
-        </Text>
-        <Pressable 
-          style={styles.errorButton}
-          onPress={handleSignOut}
-        >
-          <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
-          <Text style={styles.errorButtonText}>Back to Sign In</Text>
-        </Pressable>
-      </View>
+      <NotRegisteredScreen
+        title="Organization Not Found"
+        message="Your carrier organization is not set up yet. Please contact support to complete registration."
+        onSignOut={handleSignOut}
+      />
     );
   }
 
@@ -908,6 +553,64 @@ export default function AppLayout() {
         </DriverContext.Provider>
       </CarrierOwnerContext.Provider>
     </AppModeContext.Provider>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Reusable UI primitives for gate / error screens
+// ─────────────────────────────────────────────────────────────────────
+
+function GateErrorScreen({
+  icon,
+  title,
+  subtext,
+  onRetry,
+  onSignOut,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+  subtext: string;
+  onRetry: () => void;
+  onSignOut: () => void;
+}) {
+  return (
+    <View style={styles.loading}>
+      <Ionicons name={icon} size={48} color={colors.warning} />
+      <Text style={styles.loadingTitle}>{title}</Text>
+      <Text style={styles.loadingSubtext}>{subtext}</Text>
+      <Pressable style={styles.retryButton} onPress={onRetry}>
+        <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+        <Text style={styles.retryButtonText}>Retry</Text>
+      </Pressable>
+      <Pressable style={styles.signOutLink} onPress={onSignOut}>
+        <Text style={styles.signOutLinkText}>Sign out</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function NotRegisteredScreen({
+  title = 'Not Registered',
+  message,
+  onSignOut,
+}: {
+  title?: string;
+  message: string;
+  onSignOut: () => void;
+}) {
+  return (
+    <View style={styles.error}>
+      <Ionicons name="warning" size={64} color={colors.warning} />
+      <Text style={styles.errorTitle}>{title}</Text>
+      <Text style={styles.errorText}>{message}</Text>
+      <Pressable
+        style={styles.errorButton}
+        onPress={onSignOut}
+      >
+        <Ionicons name="arrow-back" size={18} color={colors.primaryForeground} style={{ marginRight: 8 }} />
+        <Text style={styles.errorButtonText}>Back to Sign In</Text>
+      </Pressable>
+    </View>
   );
 }
 
