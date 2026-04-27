@@ -7,6 +7,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
+import { formatPhoneNumber } from '@/lib/format-phone';
 import Link from 'next/link';
 
 interface Driver {
@@ -55,20 +56,6 @@ function calculateAge(dob?: string): number | null {
 // Helper to get initials from name
 function getInitials(firstName: string, lastName: string): string {
   return `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase();
-}
-
-// Helper to format phone number
-function formatPhoneNumber(phone: string): string {
-  // Remove all non-digit characters
-  const cleaned = phone.replace(/\D/g, '');
-  
-  // Format as (XXX) XXX-XXXX
-  if (cleaned.length === 10) {
-    return `(${cleaned.slice(0, 3)}) ${cleaned.slice(3, 6)}-${cleaned.slice(6)}`;
-  }
-  
-  // Return original if not 10 digits
-  return phone;
 }
 
 export function VirtualizedDriversTable({

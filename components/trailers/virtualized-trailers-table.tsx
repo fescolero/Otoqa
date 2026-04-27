@@ -8,6 +8,11 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
 import { format } from 'date-fns';
+import {
+  getAssetStatusColor,
+  getAssetExpirationStatus as getExpirationStatus,
+  getAssetExpirationStatusColor as getExpirationStatusColor,
+} from '@/lib/status-colors';
 
 interface Trailer {
   _id: Id<'trailers'>;
@@ -51,24 +56,6 @@ function getExpirationStatus(dateString?: string): 'expired' | 'expiring' | 'val
   if (diffDays < 0) return 'expired';
   if (diffDays <= 30) return 'expiring';
   return 'valid';
-}
-
-// Helper function to get status pill color
-function getStatusColor(status: string): string {
-  switch (status) {
-    case 'Active':
-      return 'bg-green-100 text-green-800 border-green-200';
-    case 'Out of Service':
-      return 'bg-red-100 text-red-800 border-red-200';
-    case 'In Repair':
-      return 'bg-orange-100 text-orange-800 border-orange-200';
-    case 'Maintenance':
-      return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-    case 'Sold':
-      return 'bg-gray-100 text-gray-800 border-gray-200';
-    default:
-      return 'bg-gray-100 text-gray-800 border-gray-200';
-  }
 }
 
 // Helper function to get expiration status pill color
@@ -240,7 +227,7 @@ export function VirtualizedTrailersTable({
 
                 {/* Status Column */}
                 <div className="px-4 flex-[0.8] min-w-0">
-                  <Badge variant="outline" className={cn('text-xs font-medium whitespace-nowrap', getStatusColor(trailer.status))}>
+                  <Badge variant="outline" className={cn('text-xs font-medium whitespace-nowrap', getAssetStatusColor(trailer.status))}>
                     {trailer.status}
                   </Badge>
                 </div>

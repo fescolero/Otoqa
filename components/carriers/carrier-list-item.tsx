@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Phone, Mail, Pencil, Eye, AlertTriangle, CheckCircle2, Clock, Building2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
+import { getCarrierStatusColor } from '@/lib/status-colors';
 
 type Carrier = {
   _id: string;
@@ -92,21 +93,6 @@ const formatDate = (dateString?: string) => {
   });
 };
 
-const getStatusColor = (status: string) => {
-  switch (status) {
-    case 'Active':
-      return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
-    case 'Inactive':
-      return 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
-    case 'Vetting':
-      return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200';
-    case 'Suspended':
-      return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
-    default:
-      return 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
-  }
-};
-
 const getSafetyRatingColor = (rating?: string) => {
   switch (rating) {
     case 'Satisfactory':
@@ -168,7 +154,7 @@ export function CarrierListItem({ carrier, isSelected, onSelectionChange }: Carr
             <h3 className="font-semibold text-base truncate">
               {carrier.companyName}
             </h3>
-            <Badge className={getStatusColor(carrier.status)}>
+            <Badge className={getCarrierStatusColor(carrier.status)}>
               {carrier.status}
             </Badge>
           </div>

@@ -7,6 +7,7 @@ import { Doc } from '@/convex/_generated/dataModel';
 import { Pencil, Eye, Building2, Mail, Phone } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
+import { getCustomerStatusColor } from '@/lib/status-colors';
 
 type Customer = Doc<'customers'>;
 
@@ -15,19 +16,6 @@ interface CustomerListItemProps {
   isSelected: boolean;
   onSelectionChange: (id: string, selected: boolean) => void;
 }
-
-const getStatusColor = (status: string) => {
-  switch (status) {
-    case 'Active':
-      return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
-    case 'Inactive':
-      return 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
-    case 'Prospect':
-      return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200';
-    default:
-      return 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
-  }
-};
 
 const getCompanyTypeColor = (type: string) => {
   switch (type) {
@@ -80,7 +68,7 @@ export function CustomerListItem({ customer, isSelected, onSelectionChange }: Cu
             <h3 className="font-semibold text-base truncate">
               {customer.name}
             </h3>
-            <Badge className={getStatusColor(customer.status)}>
+            <Badge className={getCustomerStatusColor(customer.status)}>
               {customer.status}
             </Badge>
           </div>

@@ -6,6 +6,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Building2, Link2, User } from "lucide-react";
 import { format } from "date-fns";
+import { getCarrierStatusVariant } from "@/lib/status-colors";
 
 // Support both legacy carriers and partnership data
 interface CarrierData {
@@ -86,27 +87,6 @@ export function VirtualizedCarriersTable({
     if (daysUntilExpiration < 0) return { label: "Expired", variant: "destructive" as const };
     if (daysUntilExpiration <= 30) return { label: "Expiring", variant: "warning" as const };
     return { label: "Valid", variant: "success" as const };
-  };
-
-  const getStatusColor = (status: string) => {
-    // Handle both legacy and partnership statuses
-    switch (status.toUpperCase()) {
-      case "ACTIVE":
-      case "ACTIVE":
-        return "success";
-      case "VETTING":
-      case "INVITED":
-        return "default";
-      case "SUSPENDED":
-        return "destructive";
-      case "INACTIVE":
-      case "PENDING":
-        return "secondary";
-      case "TERMINATED":
-        return "destructive";
-      default:
-        return "default";
-    }
   };
 
   // Helper to get display name from either format
@@ -275,7 +255,7 @@ export function VirtualizedCarriersTable({
                   </div>
                 </div>
                 <div className="px-4 flex-1">
-                  <Badge variant={getStatusColor(carrier.status)}>
+                  <Badge variant={getCarrierStatusVariant(carrier.status)}>
                     {carrier.status}
                   </Badge>
                 </div>
