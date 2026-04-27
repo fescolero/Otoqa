@@ -13,12 +13,10 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { Plus, Download, Upload } from "lucide-react";
 import { CustomerList } from "@/components/customers/customer-list";
-import { useRouter } from "next/navigation";
-import { useOrganizationId } from "@/contexts/organization-context";
+import { usePageInitialize } from "@/hooks/use-page-initialize";
 
 export default function CustomersPage() {
-  const router = useRouter();
-  const workosOrgId = useOrganizationId();
+  const { orgId: workosOrgId, router } = usePageInitialize();
 
   const handleCreateCustomer = () => {
     router.push("/operations/customers/create");

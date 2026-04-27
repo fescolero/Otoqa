@@ -10,31 +10,28 @@ import {
 } from '@/components/ui/breadcrumb';
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
-import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { useOrganizationId } from '@/contexts/organization-context';
-import { useAuthQuery } from '@/hooks/use-auth-query';
+import { usePageInitialize } from '@/hooks/use-page-initialize';
+import { useOrgQuery } from '@/hooks/use-org-query';
 import { FuelEntryForm, FuelEntryFormData } from '@/components/diesel/fuel-entry-form';
 import { toast } from 'sonner';
 import { Id } from '@/convex/_generated/dataModel';
 
 export default function CreateDefEntryPage() {
-  const { user } = useAuth();
-  const router = useRouter();
-  const organizationId = useOrganizationId();
+  const { user, orgId: organizationId, router } = usePageInitialize();
   const createDefEntry = useMutation(api.defEntries.create);
   const generateUploadUrl = useMutation(api.defEntries.generateUploadUrl);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const drivers = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
-  const trucks = useAuthQuery(api.trucks.list, organizationId ? { organizationId } : 'skip');
-  const vendors = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId, activeOnly: true } : 'skip');
-  const carriersRaw = useAuthQuery(
+  const drivers = useOrgQuery(api.drivers.list, {});
+  const trucks = useOrgQuery(api.trucks.list, {});
+  const vendors = useOrgQuery(api.fuelVendors.list, { activeOnly: true });
+  const carriersRaw = useOrgQuery(
     api.carrierPartnerships.listForBroker,
-    organizationId ? { brokerOrgId: organizationId } : 'skip',
+    {},
+    'brokerOrgId',
   );
 
   const carriers = (carriersRaw ?? []).map((c) => ({

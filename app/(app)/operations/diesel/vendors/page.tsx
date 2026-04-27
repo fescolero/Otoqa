@@ -20,24 +20,17 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { useRouter } from 'next/navigation';
-import { useOrganizationId } from '@/contexts/organization-context';
-import { useAuthQuery } from '@/hooks/use-auth-query';
+import { usePageInitialize } from '@/hooks/use-page-initialize';
+import { useOrgQuery } from '@/hooks/use-org-query';
 import { Plus, Power, PowerOff } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function FuelVendorsPage() {
-  const { user } = useAuth();
-  const router = useRouter();
-  const workosOrgId = useOrganizationId();
+  const { user, router } = usePageInitialize();
 
-  const vendors = useAuthQuery(
-    api.fuelVendors.list,
-    workosOrgId ? { organizationId: workosOrgId } : 'skip'
-  );
+  const vendors = useOrgQuery(api.fuelVendors.list, {});
 
   const toggleActive = useMutation(api.fuelVendors.toggleActive);
 

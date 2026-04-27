@@ -12,19 +12,15 @@ import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Button } from '@/components/ui/button';
 import { Plus, Download, Upload } from 'lucide-react';
-import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
-import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { TrailerList } from '@/components/trailers/trailer-list';
-import { useRouter } from 'next/navigation';
-import { useOrganizationId } from '@/contexts/organization-context';
 import { useMemo } from 'react';
+import { usePageInitialize } from '@/hooks/use-page-initialize';
+import { useOrgQuery } from '@/hooks/use-org-query';
 
 export default function TrailersPage() {
-  const { user } = useAuth();
-  const router = useRouter();
-  const organizationId = useOrganizationId();
+  const { user, orgId: organizationId, router } = usePageInitialize();
 
   const todayDateStr = useMemo(() => {
     const d = new Date();
@@ -32,7 +28,7 @@ export default function TrailersPage() {
   }, []);
 
   // Query trailers from Convex
-  const trailers = useAuthQuery(api.trailers.list, { organizationId, todayDateStr });
+  const trailers = useOrgQuery(api.trailers.list, { todayDateStr });
   const bulkDeactivateTrailers = useMutation(api.trailers.bulkDeactivate);
 
   // Get user initials for avatar fallback
