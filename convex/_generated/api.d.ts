@@ -73,6 +73,7 @@ import type * as invoices from "../invoices.js";
 import type * as laneAnalyzer from "../laneAnalyzer.js";
 import type * as laneAnalyzerActions from "../laneAnalyzerActions.js";
 import type * as laneAnalyzerCalculations from "../laneAnalyzerCalculations.js";
+import type * as laneAnalyzerMath from "../laneAnalyzerMath.js";
 import type * as laneAnalyzerOptimization from "../laneAnalyzerOptimization.js";
 import type * as laneScheduleImport from "../laneScheduleImport.js";
 import type * as lanes from "../lanes.js";
@@ -198,6 +199,7 @@ declare const fullApi: ApiFromModules<{
   laneAnalyzer: typeof laneAnalyzer;
   laneAnalyzerActions: typeof laneAnalyzerActions;
   laneAnalyzerCalculations: typeof laneAnalyzerCalculations;
+  laneAnalyzerMath: typeof laneAnalyzerMath;
   laneAnalyzerOptimization: typeof laneAnalyzerOptimization;
   laneScheduleImport: typeof laneScheduleImport;
   lanes: typeof lanes;
