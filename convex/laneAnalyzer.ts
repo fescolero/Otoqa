@@ -11,7 +11,7 @@ import {
   buildShiftsForDay,
   buildAdjacencyGraph,
   haversineDistance,
-} from './laneAnalyzerCalculations';
+} from './laneAnalyzerMath';
 
 // ==========================================
 // LANE ANALYZER — CRUD & Queries
