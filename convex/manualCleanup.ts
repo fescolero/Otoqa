@@ -21,6 +21,9 @@ export const triggerCleanup = mutation({
     batchSize: v.optional(v.number()), // Default 50, max 100
   },
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const BATCH_SIZE = Math.min(args.batchSize || 50, 100);
     

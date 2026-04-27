@@ -10,6 +10,9 @@ export const checkWildcardLanes = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const lanes = await ctx.db
       .query("contractLanes")

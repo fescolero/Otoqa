@@ -10,6 +10,9 @@ export const countLoadsAndStops = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Count loads
     const loads = await ctx.db
