@@ -11,7 +11,7 @@ export interface BaseColumn<T> {
   /** Tailwind classes that control the column slot width (e.g. `flex-[1.5]`, `w-12`). */
   width: string;
   cell: (row: T, index: number) => ReactNode;
-  /** Extra classes applied to the cell wrapper (defaults to `px-4 min-w-0`). */
+  /** Extra classes appended after the `px-4 min-w-0` baseline. The baseline always applies; tailwind-merge dedupes if the column overrides `px-*`, and `min-w-0` survives unless the column explicitly sets a different `min-w-*`. */
   cellClassName?: string;
   /** Extra classes applied to the header cell (defaults to `px-4 font-medium text-muted-foreground text-sm`). */
   headerClassName?: string;
@@ -131,7 +131,7 @@ export function BaseVirtualizedTable<T extends { _id: string }>({
                 {columns.map((col) => (
                   <div
                     key={col.key}
-                    className={cn(col.width, col.cellClassName ?? 'px-4 min-w-0')}
+                    className={cn(col.width, 'px-4 min-w-0', col.cellClassName)}
                   >
                     {col.cell(row, virtualRow.index)}
                   </div>
