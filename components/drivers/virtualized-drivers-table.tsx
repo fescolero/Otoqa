@@ -1,14 +1,12 @@
 'use client';
 
-import { useRef } from 'react';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import { Id } from '@/convex/_generated/dataModel';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 import { formatPhoneNumber } from '@/lib/format-phone';
 import Link from 'next/link';
+import { BaseVirtualizedTable, BaseColumn } from '@/components/ui/base-virtualized-table';
 
 interface Driver {
   _id: Id<'drivers'>;
@@ -40,7 +38,6 @@ interface VirtualizedDriversTableProps {
   emptyMessage?: string;
 }
 
-// Helper function to calculate age from date of birth
 function calculateAge(dob?: string): number | null {
   if (!dob) return null;
   const birthDate = new Date(dob);
@@ -53,7 +50,6 @@ function calculateAge(dob?: string): number | null {
   return age;
 }
 
-// Helper to get initials from name
 function getInitials(firstName: string, lastName: string): string {
   return `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase();
 }
@@ -72,189 +68,126 @@ export function VirtualizedDriversTable({
   getExpirationStatusColor,
   emptyMessage = 'No drivers found',
 }: VirtualizedDriversTableProps) {
-  const parentRef = useRef<HTMLDivElement>(null);
-
-  const rowVirtualizer = useVirtualizer({
-    count: drivers.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 56, // Row height
-    overscan: 10,
-  });
-
-  if (drivers.length === 0) {
-    return (
-      <div className="flex flex-col flex-1 min-h-0">
-        {/* Fixed Header */}
-        <div className="flex-shrink-0 border-b bg-background">
-          <div className="flex items-center h-10 w-full">
-            <div className="px-2 w-12 flex items-center">
-              <Checkbox
-                checked={isAllSelected}
-                onCheckedChange={onSelectAll}
-                aria-label="Select all"
-              />
+  const columns: BaseColumn<Driver>[] = [
+    {
+      key: 'driver',
+      header: 'Driver',
+      width: 'flex-[2]',
+      cell: (driver) => {
+        const age = calculateAge(driver.dateOfBirth);
+        return (
+          <Link
+            href={`/fleet/drivers/${driver._id}`}
+            className="flex items-center gap-3 hover:text-blue-600"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Avatar className="h-10 w-10">
+              <AvatarFallback className="bg-blue-100 text-blue-600 font-semibold">
+                {getInitials(driver.firstName, driver.lastName)}
+              </AvatarFallback>
+            </Avatar>
+            <div className="min-w-0">
+              <div className="font-semibold text-sm truncate">
+                {driver.firstName} {driver.lastName}
+              </div>
+              {age && <div className="text-xs text-muted-foreground">{age} years</div>}
             </div>
-            <div className="px-4 flex-[2] font-medium text-muted-foreground text-sm">Driver</div>
-            <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Contact</div>
-            <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">License</div>
-            <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Medical</div>
-            <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">State</div>
-            <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
-          </div>
-        </div>
-        
-        {/* Empty State */}
-        <div className="flex-1 flex items-center justify-center py-12 text-muted-foreground">
-          {emptyMessage}
-        </div>
-      </div>
-    );
-  }
+          </Link>
+        );
+      },
+    },
+    {
+      key: 'contact',
+      header: 'Contact',
+      width: 'flex-[1.5]',
+      cell: (driver) => (
+        <>
+          <div className="text-sm truncate">{formatPhoneNumber(driver.phone)}</div>
+          <div className="text-xs text-muted-foreground truncate">{driver.email}</div>
+        </>
+      ),
+    },
+    {
+      key: 'license',
+      header: 'License',
+      width: 'flex-[1.5]',
+      cell: (driver) => {
+        const status = getExpirationStatus(driver.licenseExpiration);
+        return (
+          <>
+            <div className="text-sm font-medium">
+              {driver.licenseClass} {driver.licenseNumber && `- ${driver.licenseNumber}`}
+            </div>
+            <div className="flex items-center gap-1 mt-0.5">
+              <span className="text-xs text-muted-foreground">{formatDate(driver.licenseExpiration)}</span>
+              <Badge
+                variant="outline"
+                className={cn('text-xs px-1 py-0', getExpirationStatusColor(status))}
+              >
+                {status === 'expired' ? 'Expired' : status === 'expiring' ? 'Expiring' : 'Valid'}
+              </Badge>
+            </div>
+          </>
+        );
+      },
+    },
+    {
+      key: 'medical',
+      header: 'Medical',
+      width: 'flex-[1.2]',
+      cell: (driver) => {
+        if (!driver.medicalExpiration) {
+          return <span className="text-xs text-muted-foreground">N/A</span>;
+        }
+        const status = getExpirationStatus(driver.medicalExpiration);
+        return (
+          <>
+            <div className="text-xs text-muted-foreground">Medical Card</div>
+            <div className="flex items-center gap-1 mt-0.5">
+              <span className="text-xs text-muted-foreground">{formatDate(driver.medicalExpiration)}</span>
+              <Badge
+                variant="outline"
+                className={cn('text-xs px-1 py-0', getExpirationStatusColor(status))}
+              >
+                {status === 'expired' ? 'Expired' : status === 'expiring' ? 'Expiring' : 'Valid'}
+              </Badge>
+            </div>
+          </>
+        );
+      },
+    },
+    {
+      key: 'state',
+      header: 'State',
+      width: 'flex-[0.8]',
+      cellClassName: 'px-4 text-sm font-medium',
+      cell: (driver) => driver.licenseState,
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      width: 'flex-1',
+      cellClassName: 'px-4',
+      cell: (driver) => (
+        <Badge variant="outline" className={getEmploymentStatusColor(driver.employmentStatus)}>
+          {driver.employmentStatus}
+        </Badge>
+      ),
+    },
+  ];
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
-      {/* Fixed Header */}
-      <div className="flex-shrink-0 border-b bg-background">
-        <div className="flex items-center h-10 w-full">
-          <div className="px-2 w-12 flex items-center">
-            <Checkbox
-              checked={isAllSelected}
-              onCheckedChange={onSelectAll}
-              aria-label="Select all"
-            />
-          </div>
-          <div className="px-4 flex-[2] font-medium text-muted-foreground text-sm">Driver</div>
-          <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">Contact</div>
-          <div className="px-4 flex-[1.5] font-medium text-muted-foreground text-sm">License</div>
-          <div className="px-4 flex-[1.2] font-medium text-muted-foreground text-sm">Medical</div>
-          <div className="px-4 flex-[0.8] font-medium text-muted-foreground text-sm">State</div>
-          <div className="px-4 flex-1 font-medium text-muted-foreground text-sm">Status</div>
-        </div>
-      </div>
-      
-      {/* Scrollable Body */}
-      <div className="flex-1 overflow-auto" ref={parentRef}>
-        <div className="relative" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
-          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            const driver = drivers[virtualRow.index];
-            const index = virtualRow.index;
-            const age = calculateAge(driver.dateOfBirth);
-            const licenseStatus = getExpirationStatus(driver.licenseExpiration);
-            const medicalStatus = getExpirationStatus(driver.medicalExpiration);
-
-            return (
-              <div
-                key={driver._id}
-                data-index={virtualRow.index}
-                className={cn(
-                  'absolute top-0 left-0 w-full h-[56px] cursor-pointer hover:bg-slate-50/80 transition-colors group border-b flex items-center',
-                  focusedRowIndex === index && 'ring-2 ring-primary'
-                )}
-                style={{
-                  transform: `translateY(${virtualRow.start}px)`,
-                }}
-                onClick={(e) => {
-                  if (!(e.target as HTMLElement).closest('input[type="checkbox"]')) {
-                    onRowClick(driver._id);
-                  }
-                }}
-              >
-                {/* Checkbox */}
-                <div className="px-2 w-12 flex items-center" onClick={(e) => e.stopPropagation()}>
-                  <Checkbox
-                    checked={selectedIds.has(driver._id)}
-                    onCheckedChange={(checked) => onSelectRow(driver._id, checked as boolean)}
-                    aria-label={`Select ${driver.firstName} ${driver.lastName}`}
-                  />
-                </div>
-
-                {/* Driver Column */}
-                <div className="px-4 flex-[2] min-w-0">
-                  <Link 
-                    href={`/fleet/drivers/${driver._id}`} 
-                    className="flex items-center gap-3 hover:text-blue-600"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <Avatar className="h-10 w-10">
-                      <AvatarFallback className="bg-blue-100 text-blue-600 font-semibold">
-                        {getInitials(driver.firstName, driver.lastName)}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="min-w-0">
-                      <div className="font-semibold text-sm truncate">
-                        {driver.firstName} {driver.lastName}
-                      </div>
-                      {age && (
-                        <div className="text-xs text-muted-foreground">
-                          {age} years
-                        </div>
-                      )}
-                    </div>
-                  </Link>
-                </div>
-
-                {/* Contact Column */}
-                <div className="px-4 flex-[1.5] min-w-0">
-                  <div className="text-sm truncate">{formatPhoneNumber(driver.phone)}</div>
-                  <div className="text-xs text-muted-foreground truncate">{driver.email}</div>
-                </div>
-
-                {/* License Column */}
-                <div className="px-4 flex-[1.5] min-w-0">
-                  <div className="text-sm font-medium">
-                    {driver.licenseClass} {driver.licenseNumber && `- ${driver.licenseNumber}`}
-                  </div>
-                  <div className="flex items-center gap-1 mt-0.5">
-                    <span className="text-xs text-muted-foreground">
-                      {formatDate(driver.licenseExpiration)}
-                    </span>
-                    <Badge 
-                      variant="outline" 
-                      className={cn('text-xs px-1 py-0', getExpirationStatusColor(licenseStatus))}
-                    >
-                      {licenseStatus === 'expired' ? 'Expired' : licenseStatus === 'expiring' ? 'Expiring' : 'Valid'}
-                    </Badge>
-                  </div>
-                </div>
-
-                {/* Medical Column */}
-                <div className="px-4 flex-[1.2] min-w-0">
-                  {driver.medicalExpiration ? (
-                    <>
-                      <div className="text-xs text-muted-foreground">Medical Card</div>
-                      <div className="flex items-center gap-1 mt-0.5">
-                        <span className="text-xs text-muted-foreground">
-                          {formatDate(driver.medicalExpiration)}
-                        </span>
-                        <Badge 
-                          variant="outline" 
-                          className={cn('text-xs px-1 py-0', getExpirationStatusColor(medicalStatus))}
-                        >
-                          {medicalStatus === 'expired' ? 'Expired' : medicalStatus === 'expiring' ? 'Expiring' : 'Valid'}
-                        </Badge>
-                      </div>
-                    </>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">N/A</span>
-                  )}
-                </div>
-
-                {/* License State Column */}
-                <div className="px-4 flex-[0.8] text-sm font-medium">
-                  {driver.licenseState}
-                </div>
-
-                {/* Employment Status Column */}
-                <div className="px-4 flex-1">
-                  <Badge variant="outline" className={getEmploymentStatusColor(driver.employmentStatus)}>
-                    {driver.employmentStatus}
-                  </Badge>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+    <BaseVirtualizedTable<Driver>
+      rows={drivers}
+      columns={columns}
+      selectedIds={selectedIds}
+      isAllSelected={isAllSelected}
+      onSelectAll={onSelectAll}
+      onSelectRow={onSelectRow}
+      onRowClick={(driver) => onRowClick(driver._id)}
+      focusedRowIndex={focusedRowIndex}
+      emptyMessage={emptyMessage}
+      rowAriaLabel={(driver) => `Select ${driver.firstName} ${driver.lastName}`}
+    />
   );
 }
