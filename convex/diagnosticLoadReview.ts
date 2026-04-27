@@ -14,6 +14,9 @@ export const checkReviewLoads = query({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const loads = await ctx.db
       .query("loadInformation")

@@ -81,6 +81,9 @@ export const ensureSimulatorCustomer = internalMutation({
   args: {},
   returns: v.id('customers'),
   handler: async (ctx) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const existing = await ctx.db
       .query('customers')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', TEST_ORG))
@@ -120,6 +123,9 @@ export const simulateLoadCreate = internalMutation({
   },
   returns: v.id('loadInformation'),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const now = Date.now();
     const loadId = await ctx.db.insert('loadInformation', {
       internalId: `SIM-${args.label}`,
@@ -163,6 +169,9 @@ export const simulateLoadDelete = internalMutation({
   args: { loadId: v.id('loadInformation') },
   returns: v.null(),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     await removeAllTagsForLoad(ctx, args.loadId);
     await ctx.db.delete(args.loadId);
     return null;
@@ -193,6 +202,9 @@ export const runMixedBurnIn = internalAction({
     loadsPerSecond: v.number(),
   }),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const loadCount = args.loadCount ?? 200;
     const concurrency = args.concurrency ?? 10;
     const deletePercent = args.deletePercent ?? 20;
@@ -264,6 +276,9 @@ export const runHotKeyBurst = internalAction({
     elapsedMs: v.number(),
   }),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const count = args.count ?? 50;
     const hcr = args.sameHcr ?? 'HOTKEY1';
     const trip = args.sameTrip ?? 'HOTTRIP';
@@ -300,6 +315,9 @@ export const runCasingStorm = internalAction({
   args: { count: v.optional(v.number()) },
   returns: v.object({ created: v.number() }),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const count = args.count ?? 30;
     const customerId = await ctx.runMutation(self.ensureSimulatorCustomer, {});
     const variants = ['917dk', '917DK', '917Dk', '917dK', ' 917DK ', '917DK\n'];
@@ -348,6 +366,9 @@ export const summary = internalQuery({
     consistent: v.boolean(),
   }),
   handler: async (ctx) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const loads = await ctx.db
       .query('loadInformation')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', TEST_ORG))
@@ -446,6 +467,9 @@ export const facetHealthCheck = internalQuery({
     firstFewTripFacetValues: v.array(v.string()),
   }),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const CAP = 500; // sample cap; if more exist, numbers shown as CAP
 
     const hcrFacets = await ctx.db
@@ -528,6 +552,9 @@ export const findLoadsByFacetValue = internalQuery({
     ),
   }),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     // Sources HCR/Trip from loadTags (the column is gone post Phase 5b).
     // Uses the by_org_key_canonical_date index for an exact canonical
     // match against the facet registry.
@@ -658,6 +685,9 @@ export const scanDistinctFacetValues = internalQuery({
     }),
   }),
   handler: async (ctx, args) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     // Aggregate from loadTags only — DO NOT scan loadInformation. The
     // earlier version .collected() all loads to sample externalSource
     // per facet value, which blows the 16MB per-transaction read budget
@@ -771,6 +801,9 @@ export const cleanup = internalAction({
     deletedCustomers: v.number(),
   }),
   handler: async (ctx) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     return await ctx.runMutation(self.cleanupMutation, {});
   },
 });
@@ -784,6 +817,9 @@ export const cleanupMutation = internalMutation({
     deletedCustomers: v.number(),
   }),
   handler: async (ctx) => {
+    if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+    }
     const loads = await ctx.db
       .query('loadInformation')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', TEST_ORG))
