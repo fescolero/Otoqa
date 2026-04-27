@@ -43,19 +43,32 @@ export const generateDailyLoads = internalAction({
     let totalSkipped = 0;
     let totalErrors = 0;
 
-    // Process each org
-    for (const workosOrgId of orgIds) {
-      try {
-        const result = await ctx.runAction(internal.recurringLoads.processRecurringTemplates, {
+    // Process each org in parallel. Orgs are tenant-isolated by workosOrgId
+    // (processRecurringTemplates only reads/writes documents scoped to its
+    // own workosOrgId), so concurrent runs don't share mutable state.
+    // Promise.allSettled preserves the inline per-org error-handling profile
+    // — DO NOT switch to ctx.scheduler.runAfter(0, ...) because scheduled
+    // actions are at-most-once and silent failures would hide here.
+    const results = await Promise.allSettled(
+      orgIds.map((workosOrgId) =>
+        ctx.runAction(internal.recurringLoads.processRecurringTemplates, {
           workosOrgId,
           targetDate: generationDate,
-        });
+        })
+      )
+    );
 
-        totalGenerated += result.generated;
-        totalSkipped += result.skipped;
-        totalErrors += result.errors;
-      } catch (error) {
-        console.error(`Error processing recurring templates for org ${workosOrgId}:`, error);
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === 'fulfilled') {
+        totalGenerated += r.value.generated;
+        totalSkipped += r.value.skipped;
+        totalErrors += r.value.errors;
+      } else {
+        console.error(
+          `Error processing recurring templates for org ${orgIds[i]}:`,
+          r.reason
+        );
         totalErrors++;
       }
     }
