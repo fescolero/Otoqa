@@ -40,38 +40,6 @@ interface VirtualizedTrailersTableProps {
   emptyMessage?: string;
 }
 
-// Helper function to determine expiration status
-function getExpirationStatus(dateString?: string): 'expired' | 'expiring' | 'valid' | 'unknown' {
-  if (!dateString) return 'unknown';
-  
-  const date = new Date(dateString);
-  date.setHours(0, 0, 0, 0);
-  
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  
-  const diffTime = date.getTime() - today.getTime();
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  
-  if (diffDays < 0) return 'expired';
-  if (diffDays <= 30) return 'expiring';
-  return 'valid';
-}
-
-// Helper function to get expiration status pill color
-function getExpirationStatusColor(status: string): string {
-  switch (status) {
-    case 'valid':
-      return 'bg-green-100 text-green-800 border-green-200';
-    case 'expiring':
-      return 'bg-orange-100 text-orange-800 border-orange-200';
-    case 'expired':
-      return 'bg-red-100 text-red-800 border-red-200';
-    default:
-      return 'bg-gray-100 text-gray-800 border-gray-200';
-  }
-}
-
 // Format date — parses YYYY-MM-DD by component to avoid timezone shift
 function formatDate(dateString?: string): string {
   if (!dateString) return 'N/A';
