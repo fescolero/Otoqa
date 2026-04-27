@@ -3,6 +3,12 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import {
+  scheduleSyncCarrierOwnerToClerk,
+  scheduleUpdateClerkUserPhone,
+  scheduleDeleteClerkUser,
+  scheduleDeleteClerkUserById,
+} from './clerkSyncScheduler';
 
 /**
  * Carrier Partnerships API
@@ -568,7 +574,7 @@ export const create = mutation({
       });
 
       // Schedule Clerk user creation for mobile app access (uses syncSingleCarrierOwnerToClerk which updates the userIdentityLinks record)
-      await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+      await scheduleSyncCarrierOwnerToClerk(ctx, {
         organizationId: newCarrierOrgId,
         phone: normalizedContactPhone,
         firstName: normalizedContactFirstName || normalizedCarrierName.split(' ')[0] || 'Owner',
@@ -885,7 +891,7 @@ export const update = mutation({
               newOwnerPhone: nextOwnerPhone,
             });
 
-            await ctx.scheduler.runAfter(0, internal.clerkSync.updateClerkUserPhone, {
+            await scheduleUpdateClerkUserPhone(ctx, {
               oldPhone: ownerDriver.phone,
               newPhone: nextOwnerPhone,
               firstName: (updates.ownerDriverFirstName as string) || ownerDriver.firstName,
@@ -1022,7 +1028,7 @@ export const updateStatus = mutation({
           partnership.carrierName.split(' ').slice(1).join(' ') ||
           '';
 
-        await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+        await scheduleSyncCarrierOwnerToClerk(ctx, {
           organizationId: newCarrierOrgId,
           phone: phone,
           firstName,
@@ -1183,7 +1189,7 @@ export const retryClerkSync = mutation({
       '';
 
     // Schedule Clerk user creation
-    await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+    await scheduleSyncCarrierOwnerToClerk(ctx, {
       organizationId: partnership.carrierOrgId as Id<'organizations'>,
       phone: phone,
       firstName,
@@ -1641,13 +1647,13 @@ export const bulkTerminate = mutation({
               // Schedule Clerk user deletion to free up phone number
               if (link.clerkUserId && !link.clerkUserId.startsWith('pending_')) {
                 // Have actual Clerk user ID - delete by ID
-                await ctx.scheduler.runAfter(0, internal.clerkSync.deleteClerkUserById, {
+                await scheduleDeleteClerkUserById(ctx, {
                   clerkUserId: link.clerkUserId,
                   reason: `Partnership terminated for ${partnership.carrierName}`,
                 });
               } else if (link.phone) {
                 // Clerk user might exist but link wasn't updated - delete by phone
-                await ctx.scheduler.runAfter(0, internal.clerkSync.deleteClerkUser, {
+                await scheduleDeleteClerkUser(ctx, {
                   phone: link.phone,
                 });
               }
@@ -1802,7 +1808,7 @@ export const bulkReactivate = mutation({
                 partnership.carrierName.split(' ').slice(1).join(' ') ||
                 '';
 
-              await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+              await scheduleSyncCarrierOwnerToClerk(ctx, {
                 organizationId: carrierOrg._id,
                 phone: phone,
                 firstName,
@@ -1900,7 +1906,7 @@ export const bulkReactivate = mutation({
             partnership.carrierName.split(' ').slice(1).join(' ') ||
             '';
 
-          await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+          await scheduleSyncCarrierOwnerToClerk(ctx, {
             organizationId: newCarrierOrgId,
             phone: phone,
             firstName,
@@ -2101,14 +2107,14 @@ export const permanentlyDelete = mutation({
         // === 9. Schedule Clerk user deletion ===
         if (clerkUserIdToDelete) {
           // Have actual Clerk user ID - delete by ID
-          await ctx.scheduler.runAfter(0, internal.clerkSync.deleteClerkUserById, {
+          await scheduleDeleteClerkUserById(ctx, {
             clerkUserId: clerkUserIdToDelete,
             reason: `Partnership permanently deleted for ${partnership.carrierName}`,
           });
           clerkUserDeleted = true;
         } else if (phoneToFree) {
           // Clerk user might exist but link wasn't updated - delete by phone
-          await ctx.scheduler.runAfter(0, internal.clerkSync.deleteClerkUser, {
+          await scheduleDeleteClerkUser(ctx, {
             phone: phoneToFree,
           });
           clerkUserDeleted = true;
@@ -2279,7 +2285,7 @@ export const syncPartnershipForMobileAccess = mutation({
 
     // Schedule Clerk user creation (uses syncSingleCarrierOwnerToClerk which updates the userIdentityLinks record)
     if (carrierOrg) {
-      await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+      await scheduleSyncCarrierOwnerToClerk(ctx, {
         organizationId: carrierOrg._id,
         phone: partnership.contactPhone,
         firstName: partnership.contactFirstName || partnership.carrierName.split(' ')[0] || 'Owner',

@@ -3,6 +3,11 @@ import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
+import {
+  scheduleCreateClerkUserForDriver,
+  scheduleUpdateClerkUserPhone,
+  scheduleDeleteClerkUser,
+} from './clerkSyncScheduler';
 
 /**
  * Carrier Mobile API
@@ -1285,7 +1290,7 @@ export const createDriver = mutation({
 
     // Create Clerk user for mobile app authentication (async, non-blocking)
     // This allows the driver to log in via phone number
-    ctx.scheduler.runAfter(0, internal.clerkSync.createClerkUserForDriver, {
+    scheduleCreateClerkUserForDriver(ctx, {
       phone: args.phone,
       firstName: args.firstName,
       lastName: args.lastName,
@@ -1359,7 +1364,7 @@ export const updateDriver = mutation({
 
     // If phone number changed, update Clerk user
     if (updates.phone && updates.phone !== driver.phone) {
-      ctx.scheduler.runAfter(0, internal.clerkSync.updateClerkUserPhone, {
+      scheduleUpdateClerkUserPhone(ctx, {
         oldPhone: driver.phone,
         newPhone: updates.phone,
         firstName: updates.firstName || driver.firstName,
@@ -1367,7 +1372,7 @@ export const updateDriver = mutation({
       });
     } else {
       // Phone didn't change - ensure Clerk user exists (for drivers created before sync was added)
-      ctx.scheduler.runAfter(0, internal.clerkSync.createClerkUserForDriver, {
+      scheduleCreateClerkUserForDriver(ctx, {
         phone: updates.phone || driver.phone,
         firstName: updates.firstName || driver.firstName,
         lastName: updates.lastName || driver.lastName,
@@ -1451,7 +1456,7 @@ export const deleteDriver = mutation({
     });
 
     // Delete Clerk user to prevent login
-    ctx.scheduler.runAfter(0, internal.clerkSync.deleteClerkUser, {
+    scheduleDeleteClerkUser(ctx, {
       phone: driver.phone,
     });
 
@@ -1614,7 +1619,7 @@ export const createOwnerDriver = mutation({
     });
 
     // Create Clerk user for mobile app authentication
-    ctx.scheduler.runAfter(0, internal.clerkSync.createClerkUserForDriver, {
+    scheduleCreateClerkUserForDriver(ctx, {
       phone: args.phone,
       firstName: args.firstName,
       lastName: args.lastName,
