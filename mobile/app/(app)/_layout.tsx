@@ -17,6 +17,7 @@ import CompleteDriverProfileScreen from './owner/complete-driver-profile';
 import RoleSwitchScreen from './role-switch';
 import { useRegisterPushToken } from '../../lib/hooks/useRegisterPushToken';
 import { performSignOut } from '../../lib/logout';
+import { useAutoUpdate } from '../../lib/auto-update';
 import {
   resetUser,
   trackRoleSelected,
@@ -185,6 +186,12 @@ export default function AppLayout() {
 
   // Permission prompts (camera/location/notifications + ACTIVITY_RECOGNITION).
   usePermissionGates();
+
+  // Sole reload-decision point for downloaded OTA bundles. Inert until
+  // expo-updates flips `isUpdatePending`, then reloads at the next safe
+  // boundary (foreground transition with no active driver session). See
+  // `mobile/lib/auto-update.ts` for the full rationale + safety gates.
+  useAutoUpdate();
 
   // Register the Expo push token once the driver is hydrated. CRITICAL:
   // this call must sit ABOVE every conditional `return` below — if it's

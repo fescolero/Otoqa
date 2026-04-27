@@ -128,6 +128,18 @@ export function trackOtaUpdateCheck(result: 'available' | 'none' | 'error', erro
   capture('ota_update_check', { result, error: error ?? null, ...getAppVersionContext() });
 }
 
+export function trackAutoUpdateReload(context: {
+  trigger: 'foreground_no_tracking' | 'mount_no_tracking';
+}) {
+  capture('auto_update_reload', { ...context, ...getAppVersionContext() });
+}
+
+export function trackAutoUpdateSkipped(context: {
+  reason: 'active_tracking' | 'app_not_active';
+}) {
+  capture('auto_update_skipped', { ...context, ...getAppVersionContext() });
+}
+
 export function trackWeatherFetchFailed(error: string) {
   capture('weather_fetch_failed', { error });
 }

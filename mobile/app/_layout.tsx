@@ -336,10 +336,15 @@ export default function RootLayout() {
         if (cancelled) return;
         if (update.isAvailable) {
           trackOtaUpdateCheck('available');
+          // Download only — activation is delegated to `useAutoUpdate`
+          // (mobile/lib/auto-update.ts), which gates reload on
+          // `!isTracking()` so we never kill the FGS mid-shift.
+          // The previous version called `Updates.reloadAsync()` here,
+          // but a `cancelled` race during the deeply-nested provider
+          // mount sequence consistently bailed before the reload fired
+          // (verified empirically 2026-04-27 — Christian's device
+          // emitted four `available` events, never reloaded).
           await Updates.fetchUpdateAsync();
-          if (cancelled) return;
-          // Reload immediately — applies the new JS bundle
-          await Updates.reloadAsync();
         } else {
           trackOtaUpdateCheck('none');
         }
