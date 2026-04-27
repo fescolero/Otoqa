@@ -11,6 +11,10 @@ import { DriverFilterBar, DriverFilterState } from './driver-filter-bar';
 import { VirtualizedDriversTable } from './virtualized-drivers-table';
 import { useQuery, useConvexAuth } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import {
+  getExpirationStatusColor,
+  getDriverEmploymentStatusColor,
+} from '@/lib/status-colors';
 
 type Driver = Doc<'drivers'>;
 
@@ -203,33 +207,6 @@ export function DriverList({ data, organizationId, onDeactivateDrivers }: Driver
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  // Color helpers
-  const getEmploymentStatusColor = (status: string) => {
-    switch (status) {
-      case 'Active':
-        return 'bg-green-100 text-green-800 border-green-200';
-      case 'Inactive':
-        return 'bg-gray-100 text-gray-800 border-gray-200';
-      case 'On Leave':
-        return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-      default:
-        return 'bg-gray-100 text-gray-800 border-gray-200';
-    }
-  };
-
-  const getExpirationStatusColor = (status: string) => {
-    switch (status) {
-      case 'expired':
-        return 'bg-red-100 text-red-800 border-red-200';
-      case 'expiring':
-        return 'bg-orange-100 text-orange-800 border-orange-200';
-      case 'valid':
-        return 'bg-green-100 text-green-800 border-green-200';
-      default:
-        return 'bg-gray-100 text-gray-800 border-gray-200';
-    }
-  };
-
   // Bulk action handlers
   const handleBulkMessage = () => {
     console.log('Message drivers:', Array.from(selectedDrivers));
@@ -370,7 +347,7 @@ export function DriverList({ data, organizationId, onDeactivateDrivers }: Driver
                     console.log('Open driver:', driverId);
                   }}
                   formatDate={formatDate}
-                  getEmploymentStatusColor={getEmploymentStatusColor}
+                  getEmploymentStatusColor={getDriverEmploymentStatusColor}
                   getExpirationStatus={getDateStatus}
                   getExpirationStatusColor={getExpirationStatusColor}
                   emptyMessage={`No ${activeTab === 'all' ? '' : activeTab + ' '}drivers${filters.search ? ' matching your search' : ''}`}

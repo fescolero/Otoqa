@@ -5,6 +5,7 @@ import { useRef } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Users } from "lucide-react";
+import { getCustomerStatusVariant } from "@/lib/status-colors";
 
 interface Customer {
   _id: string;
@@ -42,19 +43,6 @@ export function VirtualizedCustomersTable({
     estimateSize: () => 56,
     overscan: 5,
   });
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "Active":
-        return "success";
-      case "Prospect":
-        return "default";
-      case "Inactive":
-        return "secondary";
-      default:
-        return "default";
-    }
-  };
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -152,7 +140,7 @@ export function VirtualizedCustomersTable({
                   {customer.loadingType || "N/A"}
                 </div>
                 <div className="px-4 flex-1">
-                  <Badge variant={getStatusColor(customer.status)}>
+                  <Badge variant={getCustomerStatusVariant(customer.status)}>
                     {customer.status}
                   </Badge>
                 </div>

@@ -7,6 +7,7 @@ import { Doc } from '@/convex/_generated/dataModel';
 import { Phone, Mail, Pencil, Eye, AlertTriangle, CheckCircle2, Clock } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
+import { getDriverEmploymentStatusColor } from '@/lib/status-colors';
 
 type Driver = Doc<'drivers'>;
 
@@ -94,12 +95,6 @@ export function DriverListItem({ driver, isSelected, onSelectionChange }: Driver
   const licenseStatus = getDateStatus(driver.licenseExpiration);
   const medicalStatus = getDateStatus(driver.medicalExpiration);
 
-  const statusColors = {
-    'Active': 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-    'Inactive': 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200',
-    'On Leave': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-  };
-
   // Determine the most critical status to show
   const criticalStatus = [licenseStatus, medicalStatus]
     .filter(Boolean)
@@ -139,9 +134,7 @@ export function DriverListItem({ driver, isSelected, onSelectionChange }: Driver
               {driver.firstName} {driver.middleName ? `${driver.middleName} ` : ''}
               {driver.lastName}
             </h3>
-            <Badge
-              className={`${statusColors[driver.employmentStatus as keyof typeof statusColors] || 'bg-gray-100 text-gray-800'}`}
-            >
+            <Badge className={getDriverEmploymentStatusColor(driver.employmentStatus)}>
               {driver.employmentStatus}
             </Badge>
           </div>

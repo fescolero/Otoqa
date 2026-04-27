@@ -8,6 +8,11 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
 import { format } from 'date-fns';
+import {
+  getAssetStatusColor,
+  getAssetExpirationStatus as getExpirationStatus,
+  getAssetExpirationStatusColor as getExpirationStatusColor,
+} from '@/lib/status-colors';
 
 interface Trailer {
   _id: Id<'trailers'>;
@@ -33,56 +38,6 @@ interface VirtualizedTrailersTableProps {
   onSelectRow: (id: string, checked: boolean) => void;
   onRowClick: (id: Id<'trailers'>) => void;
   emptyMessage?: string;
-}
-
-// Helper function to determine expiration status
-function getExpirationStatus(dateString?: string): 'expired' | 'expiring' | 'valid' | 'unknown' {
-  if (!dateString) return 'unknown';
-  
-  const date = new Date(dateString);
-  date.setHours(0, 0, 0, 0);
-  
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  
-  const diffTime = date.getTime() - today.getTime();
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  
-  if (diffDays < 0) return 'expired';
-  if (diffDays <= 30) return 'expiring';
-  return 'valid';
-}
-
-// Helper function to get status pill color
-function getStatusColor(status: string): string {
-  switch (status) {
-    case 'Active':
-      return 'bg-green-100 text-green-800 border-green-200';
-    case 'Out of Service':
-      return 'bg-red-100 text-red-800 border-red-200';
-    case 'In Repair':
-      return 'bg-orange-100 text-orange-800 border-orange-200';
-    case 'Maintenance':
-      return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-    case 'Sold':
-      return 'bg-gray-100 text-gray-800 border-gray-200';
-    default:
-      return 'bg-gray-100 text-gray-800 border-gray-200';
-  }
-}
-
-// Helper function to get expiration status pill color
-function getExpirationStatusColor(status: string): string {
-  switch (status) {
-    case 'valid':
-      return 'bg-green-100 text-green-800 border-green-200';
-    case 'expiring':
-      return 'bg-orange-100 text-orange-800 border-orange-200';
-    case 'expired':
-      return 'bg-red-100 text-red-800 border-red-200';
-    default:
-      return 'bg-gray-100 text-gray-800 border-gray-200';
-  }
 }
 
 // Format date — parses YYYY-MM-DD by component to avoid timezone shift
@@ -240,7 +195,7 @@ export function VirtualizedTrailersTable({
 
                 {/* Status Column */}
                 <div className="px-4 flex-[0.8] min-w-0">
-                  <Badge variant="outline" className={cn('text-xs font-medium whitespace-nowrap', getStatusColor(trailer.status))}>
+                  <Badge variant="outline" className={cn('text-xs font-medium whitespace-nowrap', getAssetStatusColor(trailer.status))}>
                     {trailer.status}
                   </Badge>
                 </div>
