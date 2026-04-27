@@ -17,6 +17,7 @@
 import { internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
+import { queryByOrg } from "./_helpers/queryByOrg";
 
 const BATCH_SIZE = 5000;
 
@@ -103,10 +104,7 @@ export const countStatus = internalMutation({
       VOID: accumulated["loadInvoices:VOID"] ?? 0,
     };
 
-    const stats = await ctx.db
-      .query("organizationStats")
-      .withIndex("by_org", (q) => q.eq("workosOrgId", workosOrgId))
-      .first();
+    const stats = await queryByOrg(ctx, "organizationStats", workosOrgId).first();
 
     const now = Date.now();
     if (stats) {
