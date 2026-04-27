@@ -4,6 +4,11 @@ import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { getDateStatus } from './_helpers/dateUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import {
+  scheduleCreateClerkUserForDriver,
+  scheduleUpdateClerkUserPhone,
+  scheduleDeleteClerkUser,
+} from './clerkSyncScheduler';
 
 // Count drivers by status for tab badges
 export const countDriversByStatus = query({
@@ -282,7 +287,7 @@ export const create = mutation({
     });
 
     // Create Clerk user for mobile app authentication (async, non-blocking)
-    ctx.scheduler.runAfter(0, internal.clerkSync.createClerkUserForDriver, {
+    scheduleCreateClerkUserForDriver(ctx, {
       phone: args.phone,
       firstName: args.firstName,
       lastName: args.lastName,
@@ -404,7 +409,7 @@ export const update = mutation({
 
     // If phone number changed, update Clerk user (async, non-blocking)
     if (updates.phone && updates.phone !== driver.phone) {
-      ctx.scheduler.runAfter(0, internal.clerkSync.updateClerkUserPhone, {
+      scheduleUpdateClerkUserPhone(ctx, {
         oldPhone: driver.phone,
         newPhone: updates.phone,
         firstName: updates.firstName || driver.firstName,
@@ -634,7 +639,7 @@ export const permanentDelete = mutation({
 
     // Delete Clerk user (async, non-blocking)
     if (driver.phone) {
-      ctx.scheduler.runAfter(0, internal.clerkSync.deleteClerkUser, {
+      scheduleDeleteClerkUser(ctx, {
         phone: driver.phone,
       });
     }

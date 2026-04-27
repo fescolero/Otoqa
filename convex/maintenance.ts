@@ -8,6 +8,7 @@
 import { internalMutation, internalAction } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
+import { scheduleSyncCarrierOwnerToClerk } from "./clerkSyncScheduler";
 
 // Batch size for reconciliation (keeps under read limits)
 const RECONCILIATION_BATCH_SIZE = 200;
@@ -225,7 +226,7 @@ export const syncCarrierOwnerToClerk = internalMutation({
     }
 
     // Schedule the Clerk sync action
-    await ctx.scheduler.runAfter(0, internal.clerkSync.syncSingleCarrierOwnerToClerk, {
+    await scheduleSyncCarrierOwnerToClerk(ctx, {
       organizationId: args.organizationId,
       phone: args.phone,
       firstName: args.firstName,
