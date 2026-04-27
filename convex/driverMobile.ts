@@ -4,6 +4,7 @@ import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
 import { calculateDistanceMeters } from './lib/geo';
+import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
 // ============================================
 // DRIVER MOBILE API
@@ -19,18 +20,6 @@ const MAX_CHECKIN_DISTANCE_METERS = 500; // ~0.3 miles
 
 // Clerk issuer URL prefix for validating driver tokens
 const CLERK_ISSUER_PREFIX = 'https://clerk.';
-
-/**
- * Normalize a phone number to its 10-digit US form for comparison.
- * Handles +17607553340, 17607553340, 7607553340, +1760-755-3340, (760) 755-3340, etc.
- */
-function normalizePhoneForMatch(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
-  if (digits.length === 11 && digits.startsWith('1')) {
-    return digits.slice(1);
-  }
-  return digits;
-}
 
 /**
  * Helper to extract phone number from Clerk JWT
