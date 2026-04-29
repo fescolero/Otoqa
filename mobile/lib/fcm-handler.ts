@@ -86,6 +86,7 @@ import {
   trackFcmWakeReceived,
   trackFcmWakeResumeSuccess,
   trackFcmWakeIgnored,
+  flushAnalytics,
 } from './analytics';
 
 const lg = log('FcmHandler');
@@ -359,6 +360,18 @@ TaskManager.defineTask(
     await handleWakePayload(payload, 'background').catch((err) => {
       lg.warn(
         `background handleWakePayload threw: ${err instanceof Error ? err.message : err}`,
+      );
+    });
+    // CRITICAL: flush analytics before this BG TaskManager task
+    // returns. The headless JS context may be torn down immediately
+    // after this function resolves, and any events captured into the
+    // BG-only PostHog client (see analytics.ts note) live in memory
+    // until uploaded. Without this flush, fcm_wake_received and
+    // related events are lost to a dying context — leaving us blind
+    // to whether the handler ran at all.
+    await flushAnalytics().catch((err) => {
+      lg.warn(
+        `flushAnalytics threw (non-critical): ${err instanceof Error ? err.message : err}`,
       );
     });
   },

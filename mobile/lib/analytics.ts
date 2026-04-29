@@ -3,10 +3,76 @@ import type { PostHogEventProperties } from '@posthog/core';
 import * as Updates from 'expo-updates';
 import * as Application from 'expo-application';
 
+// ============================================================================
+// PostHog client wiring — TWO contexts, ONE shared identity
+// ============================================================================
+//
+// Two execution contexts need to fire events:
+//
+//   1. Foreground React tree
+//      The PostHogProvider in mobile/app/_layout.tsx constructs an
+//      internal client and surfaces it via usePostHog(). The
+//      PostHogInit component grabs that client and registers it via
+//      setPostHogClient() below.
+//
+//   2. Headless TaskManager background context
+//      expo-task-manager.defineTask() handlers (FCM wake, BG location
+//      sync, etc.) run in a JS context where React NEVER mounts. The
+//      PostHogProvider's useEffect doesn't run, setPostHogClient() is
+//      never called, and the React-tree client is unreachable.
+//
+// Pre-fix behavior: BG-context capture() calls fell into eventBuffer
+// (a module-level array) and the events were lost when the JS context
+// died. Verified empirically 2026-04-29: the S26 Ultra demonstrated
+// lastPingAt advancing after an FCM-fired wake (proving the handler
+// ran), but ZERO fcm_wake_received events appeared in PostHog —
+// captured into the buffer of a dying JS context.
+//
+// Post-fix: we lazily construct a SEPARATE PostHog instance the first
+// time capture() is called from a context where setPostHogClient
+// hasn't run. Both clients share the same AsyncStorage namespace
+// (keyed off the API key), so they share distinct_id, identity, and
+// session state. Events from the BG client correctly attribute to
+// whichever driver was last identified in foreground.
+//
+// flushAnalytics() (exported) force-uploads pending events. BG tasks
+// MUST call this before completing — otherwise the JS context dies
+// with events still buffered in memory.
+
 let posthogClient: PostHog | null = null;
 
-// Buffer events that fire before PostHog is initialized (e.g. auth setup
-// events that race with the PostHogProvider useEffect).
+// Lazy-constructed BG fallback client. See note above.
+let bgPosthogClient: PostHog | null = null;
+
+const POSTHOG_KEY = process.env.EXPO_PUBLIC_POSTHOG_KEY;
+const POSTHOG_HOST = process.env.EXPO_PUBLIC_POSTHOG_HOST || 'https://us.i.posthog.com';
+
+function getOrCreateBgClient(): PostHog | null {
+  if (!POSTHOG_KEY) return null;
+  if (!bgPosthogClient) {
+    try {
+      bgPosthogClient = new PostHog(POSTHOG_KEY, {
+        host: POSTHOG_HOST,
+        // Aggressive flush settings — BG context dies fast; we can't
+        // afford to batch.
+        flushAt: 1,
+        flushInterval: 1000,
+        // No session replay in BG: it requires native UI hooks that
+        // don't exist in headless contexts.
+        enableSessionReplay: false,
+      });
+    } catch {
+      // Module load shouldn't crash if PostHog itself fails to init.
+      // Lose telemetry, keep the wake working.
+    }
+  }
+  return bgPosthogClient;
+}
+
+// Buffer events that fire before EITHER client is available (rare —
+// only at module-load time before getOrCreateBgClient() runs, e.g.
+// during top-level side effects). Drained when the React-tree client
+// arrives via setPostHogClient.
 let eventBuffer: Array<{ event: string; properties?: PostHogEventProperties }> = [];
 
 export function setPostHogClient(client: PostHog) {
@@ -20,9 +86,37 @@ export function setPostHogClient(client: PostHog) {
 function capture(event: string, properties?: PostHogEventProperties) {
   if (posthogClient) {
     posthogClient.capture(event, properties);
-  } else {
-    eventBuffer.push({ event, properties });
+    return;
   }
+  // Fall back to BG client — used in headless TaskManager context
+  // where React never mounted.
+  const bg = getOrCreateBgClient();
+  if (bg) {
+    bg.capture(event, properties);
+    return;
+  }
+  // No client available (e.g. API key not set in this env) — buffer
+  // for the React-tree client to drain later.
+  eventBuffer.push({ event, properties });
+}
+
+/**
+ * Force-flush both PostHog clients. BG TaskManager handlers MUST call
+ * this before completing — otherwise the JS context dies with events
+ * still buffered in memory.
+ *
+ * Returns immediately on no-op. Errors are swallowed — losing a flush
+ * is preferable to crashing the BG task.
+ */
+export async function flushAnalytics(): Promise<void> {
+  const tasks: Array<Promise<void>> = [];
+  if (posthogClient) {
+    tasks.push(posthogClient.flush().catch(() => undefined));
+  }
+  if (bgPosthogClient) {
+    tasks.push(bgPosthogClient.flush().catch(() => undefined));
+  }
+  await Promise.all(tasks);
 }
 
 // ============================================
