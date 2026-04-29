@@ -633,6 +633,25 @@ export const sendWake = internalAction({
               title: 'Otoqa Driver',
               body: 'Tracking active',
               channel_id: 'otoqa_wake',
+              // Constant tag — Android replaces the previous wake
+              // notification with the same tag instead of stacking
+              // them in the shade. Without this, every cron tick
+              // (every 5+ min during a stale window) would post a
+              // fresh notification that piles up.
+              //
+              // The mobile-side dismissWakeNotifications handler in
+              // fcm-handler.ts is still the primary path for
+              // dismissal post-resume, but it depends on the JS
+              // handler firing reliably — which expo issue #38223
+              // says doesn't always happen on Android headless
+              // contexts (verified empirically on S26 Ultra
+              // 2026-04-28: some background wakes posted
+              // notifications without firing the JS task at all).
+              //
+              // The tag-based replacement is OS-level dedup that
+              // works regardless of whether our JS handler runs.
+              // Belt and suspenders.
+              tag: 'otoqa_wake',
               notification_priority: 'PRIORITY_MIN' as const,
               default_sound: false,
               default_vibrate_timings: false,
