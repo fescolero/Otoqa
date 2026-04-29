@@ -580,7 +580,7 @@ export const sendWake = internalAction({
           token: claim.pushToken,
           // 4KB FCM payload ceiling. Keep this to the bare identifier —
           // the mobile handler resolves all other context (session
-          // validity, leg state, etc.) via getActiveSession before
+          // validity, leg state, etc.) via local TrackingState before
           // starting FGS.
           data: {
             type: 'wake_tracking',
@@ -591,6 +591,53 @@ export const sendWake = internalAction({
             // § 4.1 #3. Normal priority wouldn't let us start the
             // foreground service from the FCM handler.
             priority: 'HIGH' as const,
+            // Combined notification+data payload (was data-only).
+            //
+            // Why: pure data-only high-priority FCM messages were being
+            // silently dropped by Google's anti-abuse system per
+            // https://firebase.google.com/docs/cloud-messaging/concept-options#delivery
+            // ("If FCM detects a pattern in which the developer is
+            // sending high priority messages but failing to generate
+            // user-facing interaction, your messages may be deprioritized
+            // to normal priority, or delegated for handling by Google
+            // Play services.") We dispatch ~80+ silent wakes per device
+            // per day with zero user-visible interaction — exactly the
+            // pattern Google flags.
+            //
+            // Reproduced 2026-04-28 on a Samsung S26 Ultra in EXEMPTED
+            // app-standby bucket: HTTP v1 returned `outcome=success`
+            // for every dispatch, but the device's Firebase Messaging
+            // log channel never logged any message arriving, and the
+            // expo-notifications wake task (otoqa-fcm-wake-task) never
+            // fired. Only the LOCATION FGS task (OTOQA_LOCATION_TRACKING)
+            // fired, triggered by Find My Device's location reporting —
+            // unrelated to our wake messages.
+            //
+            // Adding a `notification` block bypasses the silent-push
+            // deprioritization heuristic AND routes through expo-
+            // notifications' battle-tested notification path instead of
+            // the data-only path that has open expo bugs (#27345, #38223
+            // — TaskManager + Notifications fail on Android 14 / SDK 54).
+            //
+            // UX cost is minimal: PRIORITY_MIN means the notification
+            // appears only in the shade (no popup, no sound, no peek)
+            // and the mobile handler dismisses it immediately after the
+            // wake completes (see fcm-handler.ts handleWakePayload).
+            // The driver sees at most a 1-second flash in the shade.
+            //
+            // Channel: 'otoqa_wake' is created on the mobile side at
+            // startup (mobile/lib/fcm-handler.ts) — must exist before
+            // the first wake arrives or Android falls back to the
+            // default channel and ignores our priority/visibility hints.
+            notification: {
+              title: 'Otoqa Driver',
+              body: 'Tracking active',
+              channel_id: 'otoqa_wake',
+              notification_priority: 'PRIORITY_MIN' as const,
+              default_sound: false,
+              default_vibrate_timings: false,
+              visibility: 'PRIVATE' as const,
+            },
           },
         },
       };
