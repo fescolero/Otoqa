@@ -31,6 +31,7 @@ import {
   trackWatchLocationSaved,
   trackWatchLocationError,
   trackTrackingStateSelfHealed,
+  flushAnalytics,
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
 import { setBootState, clearBootState } from './boot-state';
@@ -849,6 +850,14 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     syncCount: syncAttempted ? syncCount : undefined,
     durationMs,
   });
+
+  // Force-flush analytics before this BG TaskManager task returns.
+  // The headless JS context may be torn down immediately after; events
+  // captured into the BG-only PostHog client (see analytics.ts) live
+  // in memory until uploaded. Without this flush, bg_task_fired,
+  // bg_task_result, and watch_location_* events from BG firings are
+  // lost. See PR for full context.
+  await flushAnalytics().catch(() => undefined);
 
   lg.debug(`===== BG TASK COMPLETE (${durationMs}ms) =====`);
 });
