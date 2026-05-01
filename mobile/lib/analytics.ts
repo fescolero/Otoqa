@@ -139,6 +139,53 @@ export function getAppVersionContext(): Record<string, string | null> {
   };
 }
 
+// ============================================================================
+// BUNDLE-LOAD TELEMETRY (module-level side effect — runs at JS context start)
+// ============================================================================
+//
+// Fires the moment this module first evaluates. Buffers if no PostHog
+// client is available yet (drained later when the React tree mounts
+// OR when the BG fallback client is constructed on first capture).
+//
+// Why this matters: 2026-04-30, Christian's device fired
+// `auto_update_reload` at 17:12:59 (PR #132's hook), the JS context
+// restarted (two `app_started` events, 1 sec apart), but the post-
+// reload bundle was STILL the embedded `d7afd3df`. PR #135's bundle
+// (`019dda9f...`) was confirmed available via direct manifest query
+// to u.expo.dev, yet the device never landed on it.
+//
+// Hypothesis: PR #135 either failed to download fully (unlikely — 14h
+// elapsed since publish) OR crashed during launch and was rolled back
+// by expo-updates' default error-recovery policy.
+//
+// This event tells us:
+//   1. The PR #136 bundle DID load (we'll see `bundle_loaded` with the
+//      new ota_update_id).
+//   2. Whether the load happened in a foreground context (React tree
+//      will mount) or headless context (TaskManager BG task).
+//   3. Whether expo-updates is rolling back PR #136 — if we see
+//      `bundle_loaded` with the new ID once and then events with the
+//      embedded ID afterwards, we'll know.
+//
+// This is a debug-leaning instrumentation we may keep around or strip
+// after the bundle-load mystery is resolved.
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-floating-promises
+  Promise.resolve().then(() => {
+    capture('bundle_loaded', {
+      ...getAppVersionContext(),
+      // Sentinel string — easy to grep in PostHog to confirm a NEW
+      // bundle activated. If you see this with `bundle_marker:'pr-136'`
+      // and an ota_update_id ≠ d7afd3df / ddbd1b41, the new bundle is
+      // running.
+      bundle_marker: 'pr-136',
+    });
+  });
+} catch {
+  // Telemetry should never crash the app on launch.
+}
+
 export function identifyUser(user: {
   id: string;
   phone?: string;
