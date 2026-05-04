@@ -413,42 +413,81 @@ export default function DriverDetailPage() {
     </div>
   );
 
+  // Pay tab. The chassis treatment matches the design's "Default profile +
+  // template picker" intent: a single card titled "Compensation" wraps the
+  // pay-plan picker on top of the assigned-profile list. Templates are
+  // edited at /org-settings/pay-plans (link below); this surface stays a
+  // picker, never an in-place value editor.
   const payrollContent = (
     <div className="flex flex-col gap-3">
-      <PayPlanBar
-        currentPlanId={driver.payPlanId ?? null}
-        plans={payPlans ?? []}
-        loading={isAssigningPayPlan}
-        onChange={async (planId) => {
-          if (!user) return;
-          setIsAssigningPayPlan(true);
-          try {
-            await assignPayPlan({
-              driverId,
-              planId: planId as Id<'payPlans'> | undefined,
-            });
-            toast.success(planId ? 'Pay plan assigned' : 'Pay plan removed');
-          } catch (e) {
-            console.error(e);
-            toast.error('Failed to update pay plan');
-          } finally {
-            setIsAssigningPayPlan(false);
-          }
-        }}
-        onManage={() => router.push('/org-settings/pay-plans')}
-      />
-      {organizationId && user ? (
-        <DriverPaySettingsSection
-          driverId={driverId}
-          organizationId={organizationId}
-          userId={user.id}
+      <DSCard
+        title="Compensation"
+        action={
+          <WBtn size="xs" variant="ghost" leading="arrow-up-right" onClick={() => router.push('/org-settings/pay-plans')}>
+            Manage templates
+          </WBtn>
+        }
+        bodyClassName="flex flex-col gap-3"
+      >
+        <PayPlanBar
+          currentPlanId={driver.payPlanId ?? null}
+          plans={payPlans ?? []}
+          loading={isAssigningPayPlan}
+          onChange={async (planId) => {
+            if (!user) return;
+            setIsAssigningPayPlan(true);
+            try {
+              await assignPayPlan({
+                driverId,
+                planId: planId as Id<'payPlans'> | undefined,
+              });
+              toast.success(planId ? 'Pay plan assigned' : 'Pay plan removed');
+            } catch (e) {
+              console.error(e);
+              toast.error('Failed to update pay plan');
+            } finally {
+              setIsAssigningPayPlan(false);
+            }
+          }}
+          onManage={() => router.push('/org-settings/pay-plans')}
         />
-      ) : (
-        <DSCard title="Pay profiles">
+        {organizationId && user ? (
+          <DriverPaySettingsSection
+            driverId={driverId}
+            organizationId={organizationId}
+            userId={user.id}
+          />
+        ) : (
           <p className="m-0 text-[12.5px] text-[var(--text-tertiary)]">Loading payroll settings…</p>
-        </DSCard>
-      )}
+        )}
+      </DSCard>
     </div>
+  );
+
+  // Loads tab — wrap the legacy AssignedLoadsTable so it picks up the same
+  // card chrome as the Overview cards. The table itself stays on its own
+  // chassis until Loads gets its full Phase-4-style migration.
+  const loadsContent = (
+    <DSCard title="Assigned loads" bodyClassName="p-0">
+      <div className="p-4">
+        <AssignedLoadsTable
+          loads={(driverLoadsData ?? []) as AssignedLoad[]}
+          isLoading={driverLoadsData === undefined}
+          statusFilter={loadStatusFilter}
+          onStatusFilterChange={setLoadStatusFilter}
+        />
+      </div>
+    </DSCard>
+  );
+
+  // Sessions tab — same pattern: chassis card chrome around the legacy
+  // history table.
+  const sessionsContent = (
+    <DSCard title="Session history" bodyClassName="p-0">
+      <div className="p-4">
+        <DriverSessionsHistory driverId={driverId as Id<'drivers'>} />
+      </div>
+    </DSCard>
   );
 
   const sections: FPSection[] = [
@@ -459,20 +498,13 @@ export default function DriverDetailPage() {
       label: 'Loads',
       icon: 'package',
       count: driverLoadsData?.length,
-      content: (
-        <AssignedLoadsTable
-          loads={(driverLoadsData ?? []) as AssignedLoad[]}
-          isLoading={driverLoadsData === undefined}
-          statusFilter={loadStatusFilter}
-          onStatusFilterChange={setLoadStatusFilter}
-        />
-      ),
+      content: loadsContent,
     },
     {
       id: 'sessions',
       label: 'Sessions',
       icon: 'pulse',
-      content: <DriverSessionsHistory driverId={driverId as Id<'drivers'>} />,
+      content: sessionsContent,
     },
   ];
 
