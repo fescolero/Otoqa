@@ -1,15 +1,22 @@
 /**
  * Detail-Slide card primitives.
  *
- *   DSCard         — bordered card with optional header bar (title + action)
- *   DSProps        — key/value grid (120px label col, 1fr value col) with
- *                    hairline dividers between rows; falsy items dropped
- *   DSStat         — large number stat with label and optional delta
- *   DSSectionBlock — labeled section grouping for the scroll layout
+ *   DSCard          — bordered card with optional header bar (title + action)
+ *   DSProps         — key/value grid (120px label col, 1fr value col) with
+ *                     hairline dividers between rows; falsy items dropped
+ *   DSPropsEditable — same shape, but each value is an inline-editable
+ *                     <EditableField>. Items can opt out per-row via
+ *                     `readOnly: true`, or carry an `editor: { type, options,
+ *                     placeholder }` config that selects the editor flavour
+ *                     (text / phone / email / textarea / date / select /
+ *                     multiselect)
+ *   DSStat          — large number stat with label and optional delta
+ *   DSSectionBlock  — labeled section grouping for the scroll layout
  */
 
 import * as React from 'react';
 import { cn } from '@/lib/utils';
+import { EditableField, type EditableSelectOption } from './editable-field';
 import { WIcon, type IconName } from './icons';
 
 interface DSCardProps {
@@ -47,6 +54,39 @@ export interface DSPropItem {
   hint?: React.ReactNode;
 }
 
+export type DSPropsEditableType =
+  | 'text'
+  | 'email'
+  | 'phone'
+  | 'textarea'
+  | 'date'
+  | 'select'
+  | 'multiselect';
+
+export interface DSPropsEditableEditor {
+  type?: DSPropsEditableType;
+  options?: EditableSelectOption[];
+  placeholder?: string;
+  rows?: number;
+  /** Date display format passed to date-fns. */
+  format?: string;
+}
+
+export interface DSPropsEditableItem {
+  /** Stable key used by `onCommit` to identify the field. */
+  key: string;
+  label: React.ReactNode;
+  /** Current raw value (string for most types, string[] for `multiselect`). */
+  value: string | string[];
+  /** Optional rich display override — chips, highlights, formatted spans. */
+  display?: React.ReactNode;
+  editor?: DSPropsEditableEditor;
+  /** Skips edit affordance — renders the display value only. */
+  readOnly?: boolean;
+  placeholder?: string;
+  ariaLabel?: string;
+}
+
 interface DSPropsProps {
   items: Array<DSPropItem | null | undefined | false>;
   className?: string;
@@ -80,6 +120,131 @@ export function DSProps({ items, className, labelWidth = 120 }: DSPropsProps) {
         </React.Fragment>
       ))}
     </dl>
+  );
+}
+
+interface DSPropsEditableProps {
+  items: Array<DSPropsEditableItem | null | undefined | false>;
+  /** Called when a row's editor commits a new value. */
+  onCommit?: (key: string, next: string | string[]) => void;
+  className?: string;
+  labelWidth?: number;
+}
+
+export function DSPropsEditable({
+  items,
+  onCommit,
+  className,
+  labelWidth = 120,
+}: DSPropsEditableProps) {
+  const live = items.filter(Boolean) as DSPropsEditableItem[];
+  return (
+    <dl className={cn('grid gap-0', className)} style={{ gridTemplateColumns: `${labelWidth}px 1fr` }}>
+      {live.map((it, i) => (
+        <React.Fragment key={it.key}>
+          <dt
+            className={cn(
+              'py-2.5 pr-3 text-[12.5px] text-[var(--text-tertiary)]',
+              i > 0 && 'border-t border-[var(--border-hairline)]',
+            )}
+          >
+            {it.label}
+          </dt>
+          <dd
+            className={cn(
+              'py-2.5 m-0 text-[13px] text-foreground inline-flex items-center min-w-0',
+              i > 0 && 'border-t border-[var(--border-hairline)]',
+            )}
+          >
+            <DSPropsEditableField item={it} onCommit={onCommit} />
+          </dd>
+        </React.Fragment>
+      ))}
+    </dl>
+  );
+}
+
+function DSPropsEditableField({
+  item,
+  onCommit,
+}: {
+  item: DSPropsEditableItem;
+  onCommit?: (key: string, next: string | string[]) => void;
+}) {
+  const editor = item.editor ?? {};
+  const type = editor.type ?? 'text';
+  const commit = (next: string | string[]) => onCommit?.(item.key, next);
+
+  if (type === 'multiselect') {
+    const value = Array.isArray(item.value) ? item.value : item.value ? item.value.split(' · ').map((s) => s.trim()).filter(Boolean) : [];
+    return (
+      <EditableField
+        type="multiselect"
+        value={value}
+        options={editor.options ?? []}
+        display={item.display}
+        placeholder={item.placeholder ?? editor.placeholder}
+        readOnly={item.readOnly}
+        onCommit={(next) => commit(next)}
+        ariaLabel={item.ariaLabel}
+      />
+    );
+  }
+
+  const value = Array.isArray(item.value) ? item.value.join(', ') : item.value ?? '';
+
+  if (type === 'date') {
+    return (
+      <EditableField
+        type="date"
+        value={value}
+        display={item.display}
+        format={editor.format}
+        placeholder={item.placeholder ?? editor.placeholder}
+        readOnly={item.readOnly}
+        onCommit={(next) => commit(next)}
+        ariaLabel={item.ariaLabel}
+      />
+    );
+  }
+  if (type === 'select') {
+    return (
+      <EditableField
+        type="select"
+        value={value}
+        options={editor.options ?? []}
+        display={item.display}
+        placeholder={item.placeholder ?? editor.placeholder}
+        readOnly={item.readOnly}
+        onCommit={(next) => commit(next)}
+        ariaLabel={item.ariaLabel}
+      />
+    );
+  }
+  if (type === 'textarea') {
+    return (
+      <EditableField
+        type="textarea"
+        value={value}
+        rows={editor.rows}
+        display={item.display}
+        placeholder={item.placeholder ?? editor.placeholder}
+        readOnly={item.readOnly}
+        onCommit={(next) => commit(next)}
+        ariaLabel={item.ariaLabel}
+      />
+    );
+  }
+  return (
+    <EditableField
+      type={type as 'text' | 'email' | 'phone'}
+      value={value}
+      display={item.display}
+      placeholder={item.placeholder ?? editor.placeholder}
+      readOnly={item.readOnly}
+      onCommit={(next: string) => commit(next)}
+      ariaLabel={item.ariaLabel}
+    />
   );
 }
 

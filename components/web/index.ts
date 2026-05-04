@@ -23,10 +23,20 @@ export { DetailsSlideOver } from './details-slide-over';
 export type { DetailsLayout, DetailsSection } from './details-slide-over';
 export { DSActivity } from './ds-activity';
 export type { DSActivityItem } from './ds-activity';
-export { DSCard, DSProps, DSStat, DSSectionBlock } from './ds-card';
-export type { DSPropItem } from './ds-card';
+export { DSCard, DSProps, DSPropsEditable, DSStat, DSSectionBlock } from './ds-card';
+export type {
+  DSPropItem,
+  DSPropsEditableEditor,
+  DSPropsEditableItem,
+  DSPropsEditableType,
+} from './ds-card';
 export { DSMiniTable, DSUploadRow } from './ds-mini-table';
-export type { DSMiniColumn, DSRowAction } from './ds-mini-table';
+export type {
+  DSMiniCellEditor,
+  DSMiniCellEditorType,
+  DSMiniColumn,
+  DSRowAction,
+} from './ds-mini-table';
 export { EditableField } from './editable-field';
 export type { EditableSelectOption } from './editable-field';
 export { FilterBar } from './filter-bar';
