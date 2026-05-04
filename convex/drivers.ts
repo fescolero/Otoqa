@@ -337,10 +337,30 @@ export const update = mutation({
     emergencyContactName: v.optional(v.string()),
     emergencyContactRelationship: v.optional(v.string()),
     emergencyContactPhone: v.optional(v.string()),
+    // Status-change context — when present, the audit log entry uses
+    // action='status_changed' and stuffs the structured payload into
+    // metadata so the Status history card on the driver detail page can
+    // re-hydrate it. Provided by the StatusPicker primitive.
+    statusReason: v.optional(v.string()),
+    statusNote: v.optional(v.string()),
+    statusEffectiveDate: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
-    const { id, userId: _argUserId, userName: _argUserName, organizationId, ssn, licenseNumber, dateOfBirth, payPlanId, ...updates } = args;
+    const {
+      id,
+      userId: _argUserId,
+      userName: _argUserName,
+      organizationId,
+      ssn,
+      licenseNumber,
+      dateOfBirth,
+      payPlanId,
+      statusReason,
+      statusNote,
+      statusEffectiveDate,
+      ...updates
+    } = args;
 
     // Get current driver data for audit log
     const driver = await ctx.db.get(id);
@@ -388,17 +408,38 @@ export const update = mutation({
     {
       const allUpdates = { ...updates, ...sensitiveUpdates };
       const changedFields = Object.keys(allUpdates).filter((key) => key !== 'updatedAt');
+      const isStatusChange =
+        changedFields.includes('employmentStatus') && statusReason !== undefined;
+      const statusBefore = driver.employmentStatus;
+      const statusAfter = updates.employmentStatus;
+      const description = isStatusChange
+        ? `Changed status: ${statusBefore ?? 'Unknown'} → ${statusAfter ?? 'Unknown'} (${statusReason})`
+        : `Updated driver ${driver.firstName} ${driver.lastName}`;
+      const metadata = isStatusChange
+        ? JSON.stringify({
+            kind: 'status_change',
+            from: statusBefore ?? null,
+            to: statusAfter ?? null,
+            reason: statusReason,
+            note: statusNote ?? null,
+            effectiveDate: statusEffectiveDate ?? null,
+          })
+        : undefined;
       await ctx.runMutation(internal.auditLog.logAction, {
         organizationId: callerOrgId,
         entityType: 'driver',
         entityId: id,
         entityName: `${driver.firstName} ${driver.lastName}`,
-        action: 'updated',
+        action: isStatusChange ? 'status_changed' : 'updated',
         performedBy: userId,
         performedByName: userName,
-        description: `Updated driver ${driver.firstName} ${driver.lastName}`,
+        description,
         changedFields,
+        changesBefore: isStatusChange
+          ? JSON.stringify({ employmentStatus: statusBefore ?? null })
+          : undefined,
         changesAfter: JSON.stringify(allUpdates),
+        metadata,
       });
     }
 

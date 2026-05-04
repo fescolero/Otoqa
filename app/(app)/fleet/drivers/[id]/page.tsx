@@ -22,7 +22,12 @@ import {
   DetailsFullPage,
   type FPSection,
   type FPKpi,
+  StatusHistoryCard,
+  type StatusHistoryEntry,
+  StatusPicker,
+  type StatusChangePayload,
   WBtn,
+  resolveStatusId,
 } from '@/components/web';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
@@ -144,20 +149,36 @@ export default function DriverDetailPage() {
     }
   };
 
-  // ─── Hero ────────────────────────────────────────────────────────────
-  const status = (driver.employmentStatus ?? '').toLowerCase();
+  // ─── Hero status chip (click-to-change) ─────────────────────────────
+  // The driver record stores `employmentStatus` as a free-form string. The
+  // status-machine ID is resolved from it; on commit, the user-friendly
+  // label of the chosen state is written back. The audit log captures the
+  // reason/note so the Status history card can re-hydrate.
+  const statusId = resolveStatusId('driver', driver.employmentStatus);
+  const onChangeStatus = async (payload: StatusChangePayload) => {
+    if (!user) return;
+    try {
+      await updateDriver({
+        id: driverId,
+        userId: user.id,
+        userName,
+        employmentStatus: payload.to.label,
+        statusReason: payload.reason,
+        statusNote: payload.note,
+        statusEffectiveDate: payload.effectiveDate,
+        ...(payload.to.id === 'terminated' ? { terminationDate: payload.effectiveDate } : {}),
+      });
+      toast.success(`Status changed to ${payload.to.label}`);
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to change status');
+    }
+  };
+
   const eyebrow = (
     <span className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
       <Avatar name={fullName} size={28} />
-      <Chip
-        status={
-          status === 'active' ? 'active'
-            : status === 'on leave' ? 'pending'
-            : driver.isDeleted ? 'cancelled'
-            : 'inactive'
-        }
-        label={driver.employmentStatus ?? 'Inactive'}
-      />
+      <StatusPicker entity="driver" currentId={statusId} onChange={onChangeStatus} />
       {driver.terminationDate && new Date(driver.terminationDate) > new Date() && (
         <Chip status="warning" label="Pending Termination" />
       )}
@@ -397,19 +418,22 @@ export default function DriverDetailPage() {
   ];
 
   const overviewContent = (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-      <DSCard title="License">
-        <DSPropsEditable items={licenseItems} onCommit={commitField} />
-      </DSCard>
-      <DSCard title="Employment">
-        <DSPropsEditable items={employmentItems} onCommit={commitField} />
-      </DSCard>
-      <DSCard title="Personal">
-        <DSPropsEditable items={personalItems} onCommit={commitField} />
-      </DSCard>
-      <DSCard title="Emergency contact">
-        <DSPropsEditable items={emergencyItems} onCommit={commitField} />
-      </DSCard>
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <DSCard title="License">
+          <DSPropsEditable items={licenseItems} onCommit={commitField} />
+        </DSCard>
+        <DSCard title="Employment">
+          <DSPropsEditable items={employmentItems} onCommit={commitField} />
+        </DSCard>
+        <DSCard title="Personal">
+          <DSPropsEditable items={personalItems} onCommit={commitField} />
+        </DSCard>
+        <DSCard title="Emergency contact">
+          <DSPropsEditable items={emergencyItems} onCommit={commitField} />
+        </DSCard>
+      </div>
+      <DriverStatusHistoryCard driverId={driverId} />
     </div>
   );
 
@@ -631,4 +655,91 @@ function PayPlanBar({
       </WBtn>
     </div>
   );
+}
+
+/**
+ * Reads the audit log for this driver and renders the status-change
+ * entries as a `<StatusHistoryCard>`. Filters to entries where
+ * `employmentStatus` actually changed; the picker writes the structured
+ * payload (from / to / reason / note / effectiveDate) into `metadata`.
+ */
+function DriverStatusHistoryCard({ driverId }: { driverId: Id<'drivers'> }) {
+  const log = useQuery(api.auditLog.getEntityAuditLog, {
+    entityType: 'driver',
+    entityId: driverId as unknown as string,
+    limit: 50,
+  });
+  const entries = React.useMemo<StatusHistoryEntry[]>(() => {
+    if (!log) return [];
+    return log
+      .filter((e) => e.changedFields?.includes('employmentStatus'))
+      .map((e) => {
+        let from = '';
+        let to = '';
+        let reason = e.description ?? '';
+        let note: string | undefined;
+        let effectiveDate: string | undefined;
+        if (e.metadata) {
+          try {
+            const m = JSON.parse(e.metadata) as {
+              kind?: string;
+              from?: string | null;
+              to?: string | null;
+              reason?: string;
+              note?: string | null;
+              effectiveDate?: string | null;
+            };
+            if (m.kind === 'status_change') {
+              from = m.from ?? '';
+              to = m.to ?? '';
+              reason = m.reason ?? reason;
+              note = m.note ?? undefined;
+              effectiveDate = m.effectiveDate ?? undefined;
+            }
+          } catch {
+            // metadata wasn't JSON — fall through to changesBefore/After
+          }
+        }
+        if (!to) {
+          // Fall back to the changesAfter / changesBefore JSON from older
+          // audit entries that don't carry the structured metadata.
+          try {
+            if (e.changesAfter) {
+              const after = JSON.parse(e.changesAfter) as { employmentStatus?: string };
+              if (after.employmentStatus) to = after.employmentStatus;
+            }
+            if (e.changesBefore) {
+              const before = JSON.parse(e.changesBefore) as { employmentStatus?: string };
+              if (before.employmentStatus) from = before.employmentStatus;
+            }
+          } catch {
+            // ignore
+          }
+        }
+        return {
+          date: effectiveDate
+            ? formatDate(effectiveDate)
+            : new Date(e.timestamp).toLocaleDateString('en-US', {
+                month: 'short',
+                day: '2-digit',
+                year: 'numeric',
+              }),
+          fromId: resolveStatusId('driver', from),
+          toId: resolveStatusId('driver', to),
+          reason,
+          note,
+          by: e.performedByName ?? 'System',
+        };
+      });
+  }, [log]);
+
+  if (log === undefined) {
+    return (
+      <DSCard title="Status history">
+        <p className="m-0 text-[12.5px] text-[var(--text-tertiary)]">Loading status history…</p>
+      </DSCard>
+    );
+  }
+  if (entries.length === 0) return null;
+  return <StatusHistoryCard entity="driver" entries={entries} />;
 }
