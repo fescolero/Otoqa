@@ -23,12 +23,47 @@ interface SavedViewsProps {
   views: SavedView[];
   activeId: string;
   onChange: (id: string) => void;
+  /** Click handler for the "+" button. Mutually exclusive with `renderAddButton`. */
   onAddView?: () => void;
+  /** If provided, replaces the default "+" button entirely. Useful for
+   *  wrapping the trigger in a popover (see SavedViewCreatePopover). */
+  renderAddButton?: () => React.ReactNode;
   actions?: React.ReactNode;
   className?: string;
 }
 
-export function SavedViews({ views, activeId, onChange, onAddView, actions, className }: SavedViewsProps) {
+/** Default + button — also exported so consumers can wrap it in a popover trigger. */
+export const SavedViewsAddButton = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement>>(
+  function SavedViewsAddButton(props, ref) {
+    return (
+      <button
+        type="button"
+        ref={ref}
+        title="Save current view"
+        {...props}
+        className={cn(
+          'focus-ring inline-flex items-center justify-center h-8 w-8 ml-1 mb-2 rounded-md',
+          'text-[var(--text-tertiary)] cursor-pointer',
+          'hover:bg-[var(--bg-row-hover)] hover:text-foreground',
+          'transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]',
+          props.className,
+        )}
+      >
+        <WIcon name="plus" size={14} />
+      </button>
+    );
+  },
+);
+
+export function SavedViews({
+  views,
+  activeId,
+  onChange,
+  onAddView,
+  renderAddButton,
+  actions,
+  className,
+}: SavedViewsProps) {
   return (
     <div
       className={cn(
@@ -60,21 +95,7 @@ export function SavedViews({ views, activeId, onChange, onAddView, actions, clas
           </button>
         );
       })}
-      {onAddView && (
-        <button
-          type="button"
-          onClick={onAddView}
-          title="Save current view"
-          className={cn(
-            'focus-ring inline-flex items-center justify-center h-8 w-8 ml-1 mb-2 rounded-md',
-            'text-[var(--text-tertiary)] cursor-pointer',
-            'hover:bg-[var(--bg-row-hover)] hover:text-foreground',
-            'transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]',
-          )}
-        >
-          <WIcon name="plus" size={14} />
-        </button>
-      )}
+      {renderAddButton ? renderAddButton() : onAddView ? <SavedViewsAddButton onClick={onAddView} /> : null}
       {actions && (
         <>
           <div className="flex-1" />

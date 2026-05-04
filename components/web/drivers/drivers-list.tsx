@@ -14,7 +14,7 @@
 'use client';
 
 import * as React from 'react';
-import Link from 'next/link';
+import { useQuery } from 'convex/react';
 import {
   BulkAction,
   BulkBar,
@@ -27,7 +27,9 @@ import {
   InfiniteFooter,
   PageHeader,
   SavedViews,
+  SavedViewsAddButton,
   type SavedView as SavedViewTab,
+  SavedViewCreatePopover,
   Table,
   type TableColumn,
   TableToolbar,
@@ -35,6 +37,7 @@ import {
   WIcon,
   Avatar,
 } from '@/components/web';
+import { api } from '@/convex/_generated/api';
 import { useUserPreferences } from '@/components/web/shell/use-user-preferences';
 import {
   buildDriverDetails,
@@ -184,6 +187,13 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
     new Set(COLUMNS.map((c) => c.key)),
   );
 
+  // Persisted (user + org) views — system defaults stay in code.
+  const persisted = useQuery(api.savedViews.listForEntity, { entity: 'drivers' });
+  const allUserOrgViews = React.useMemo(() => {
+    if (!persisted) return [];
+    return [...persisted.user, ...persisted.org];
+  }, [persisted]);
+
   // Counts per view for the saved-views badges.
   const counts = React.useMemo(() => {
     const out: Record<string, number> = {};
@@ -191,10 +201,14 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
     return out;
   }, [drivers]);
 
-  // Apply view + filters + search.
-  const view = SYSTEM_VIEWS.find((v) => v.id === viewId) ?? SYSTEM_VIEWS[0];
+  // Apply view + filters + search. System views filter by predicate;
+  // persisted views replay their stored filters (and don't constrain rows
+  // by status — they trust whatever filter chips were saved).
+  const systemView = SYSTEM_VIEWS.find((v) => v.id === viewId);
+  const persistedView = !systemView ? allUserOrgViews.find((v) => v._id === viewId) : null;
+
   const filtered = React.useMemo(() => {
-    let rows = drivers.filter(view.predicate);
+    let rows = systemView ? drivers.filter(systemView.predicate) : drivers.filter((d) => !d.isDeleted);
     for (const chip of filters) {
       const wanted = new Set(chip.values);
       rows = rows.filter((d) => {
@@ -232,7 +246,26 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
       });
     }
     return rows;
-  }, [drivers, view, filters, search, sortKey, sortDir]);
+  }, [drivers, systemView, filters, search, sortKey, sortDir]);
+
+  // Whenever a persisted view is selected, apply its stored filters / sort /
+  // visible columns to the current state.
+  React.useEffect(() => {
+    if (!persistedView) return;
+    if (Array.isArray(persistedView.filters)) {
+      setFilters(persistedView.filters as FilterChipValue[]);
+    } else {
+      setFilters([]);
+    }
+    if (persistedView.sort) {
+      setSortKey(persistedView.sort.key);
+      setSortDir(persistedView.sort.dir);
+    }
+    if (Array.isArray(persistedView.visibleColumns) && persistedView.visibleColumns.length > 0) {
+      setVisibleCols(new Set(persistedView.visibleColumns));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [persistedView?._id]);
 
   // Filter properties driven by data + static enums.
   const properties: FilterProperty[] = React.useMemo(() => {
@@ -283,12 +316,18 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
     }
   };
 
-  const tabs: SavedViewTab[] = SYSTEM_VIEWS.map((v) => ({
-    id: v.id,
-    label: v.label,
-    count: counts[v.id],
-    tone: v.tone,
-  }));
+  const tabs: SavedViewTab[] = [
+    ...SYSTEM_VIEWS.map((v) => ({
+      id: v.id,
+      label: v.label,
+      count: counts[v.id],
+      tone: v.tone,
+    })),
+    ...allUserOrgViews.map((v) => ({
+      id: v._id,
+      label: v.scope === 'org' ? `${v.name} · team` : v.name,
+    })),
+  ];
 
   const stats = [
     { value: counts.all,       label: 'total' },
@@ -309,7 +348,22 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
           </>
         }
       />
-      <SavedViews views={tabs} activeId={viewId} onChange={setViewId} />
+      <SavedViews
+        views={tabs}
+        activeId={viewId}
+        onChange={setViewId}
+        renderAddButton={() => (
+          <SavedViewCreatePopover
+            entity="drivers"
+            filters={filters}
+            sort={sortKey ? { key: sortKey, dir: sortDir } : undefined}
+            visibleColumns={[...visibleCols]}
+            onCreated={(id) => setViewId(id)}
+          >
+            <SavedViewsAddButton />
+          </SavedViewCreatePopover>
+        )}
+      />
       <TableToolbar
         searchPlaceholder="Search drivers…"
         searchValue={search}
