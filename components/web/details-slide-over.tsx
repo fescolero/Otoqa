@@ -86,7 +86,9 @@ export function DetailsSlideOver({
           onPointerDownOutside={(e) => isThreeCol && e.preventDefault()}
           onInteractOutside={(e) => isThreeCol && e.preventDefault()}
           className={cn(
-            'fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-card border-l border-[var(--border-hairline)] shadow-[var(--shadow-popover)]',
+            // Use the canvas tone for the panel itself so DSCards rendered
+            // inside (white surface) read as elevated rather than blending.
+            'fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-background border-l border-[var(--border-hairline)] shadow-[var(--shadow-popover)]',
             'data-[state=open]:slide-in-right data-[state=closed]:animate-out data-[state=closed]:fade-out',
             className,
           )}

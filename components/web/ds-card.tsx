@@ -26,7 +26,9 @@ export function DSCard({ title, action, children, className, bodyClassName }: DS
       className={cn('rounded-xl border border-[var(--border-hairline)] bg-card overflow-hidden', className)}
     >
       {(title || action) && (
-        <header className="flex items-center justify-between gap-2 px-4 h-11 border-b border-[var(--border-hairline)]">
+        <header
+          className="flex items-center justify-between gap-2 px-4 h-11 border-b border-[var(--border-hairline)] bg-[var(--bg-surface-2)]"
+        >
           {title && (
             <h3 className="m-0 text-[13px] font-semibold text-foreground tracking-[0.002em]">{title}</h3>
           )}
