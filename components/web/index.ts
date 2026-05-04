@@ -56,6 +56,22 @@ export type { PageHeaderStat } from './page-header';
 export { SavedViews, SavedViewsAddButton } from './saved-views';
 export type { SavedView } from './saved-views';
 export { SavedViewCreatePopover } from './saved-view-create';
+export {
+  CATEGORY_TONES,
+  REASONS_BY_TARGET,
+  STATE_MACHINES,
+  resolveStatusId,
+} from './status-machines';
+export type {
+  StatusCategory,
+  StatusEntity,
+  StatusMachine,
+  StatusState,
+} from './status-machines';
+export { StatusHistoryCard } from './status-history-card';
+export type { StatusHistoryEntry } from './status-history-card';
+export { StatusPicker } from './status-picker';
+export type { StatusChangePayload } from './status-picker';
 export { Table } from './table';
 export type { Density, SortDir, TableColumn } from './table';
 export { TableToolbar } from './table-toolbar';
