@@ -398,6 +398,11 @@ export default defineSchema({
     unitSystem: v.union(v.literal('Imperial'), v.literal('Metric')),
     theme: v.union(v.literal('light'), v.literal('dark'), v.literal('system')),
     timezone: v.string(),
+    // Otoqa Web design — UI shell prefs (optional for backward compat).
+    density: v.optional(v.union(v.literal('compact'), v.literal('comfortable'))),
+    sidebarMode: v.optional(
+      v.union(v.literal('hover'), v.literal('pinned'), v.literal('rail')),
+    ),
     updatedAt: v.number(),
   }).index('by_user_org', ['userId', 'workosOrgId']),
 
