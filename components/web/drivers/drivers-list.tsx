@@ -291,7 +291,9 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
   }, [drivers]);
 
   const visibleColumns = COLUMNS.filter((c) => visibleCols.has(c.key));
-  const detailProps = activeRecord ? buildDriverDetails(activeRecord, { withComments: true }) : null;
+  const detailProps = activeRecord
+    ? buildDriverDetails(activeRecord, { withComments: true, compact: true })
+    : null;
 
   const onToggleSelect = (id: string) => {
     setSelected((s) => {
@@ -433,7 +435,7 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
           open
           onClose={() => setActiveRecord(null)}
           layout="tabs"
-          width={520}
+          width={640}
           header={
             <div className="flex items-start justify-between gap-2">
               {detailProps.header}

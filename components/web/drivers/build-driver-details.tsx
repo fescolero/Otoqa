@@ -123,7 +123,7 @@ export function countAttention(driver: DriverRow): number {
 
 // ─── Section renderers ──────────────────────────────────────────────────
 
-function OverviewSection({ driver }: { driver: DriverRow }) {
+function OverviewSection({ driver, compact }: { driver: DriverRow; compact?: boolean }) {
   const fullName = [driver.firstName, driver.middleName, driver.lastName].filter(Boolean).join(' ');
   const identity: Array<DSPropItem | null> = [
     { label: 'Name',  value: fullName },
@@ -149,8 +149,13 @@ function OverviewSection({ driver }: { driver: DriverRow }) {
       ]
     : [];
 
+  // Compact (slide-over) — single column so each card spans the full panel
+  // width, keeping names / emails / phones from truncating in a narrow
+  // viewport. Full-page (default) keeps the 2-col grid on md+.
+  const gridClass = compact ? 'grid grid-cols-1 gap-3' : 'grid grid-cols-1 md:grid-cols-2 gap-3';
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div className={gridClass}>
       <DSCard title="Identity"><DSProps items={identity} /></DSCard>
       <DSCard title="Employment"><DSProps items={employment} /></DSCard>
       {license.filter(Boolean).length > 0 && (
@@ -215,6 +220,10 @@ interface BuildOptions {
   /** When true, include the Comments section (slide-over only — full page
    *  shows comments in the right rail instead). */
   withComments?: boolean;
+  /** When true, lay sections out for a narrow container (slide-over).
+   *  Stacks Overview cards vertically so labels and values get the full
+   *  panel width. Default false (full-page 2-col grid). */
+  compact?: boolean;
 }
 
 export function buildDriverDetails(driver: DriverRow, opts: BuildOptions = {}) {
@@ -248,7 +257,7 @@ export function buildDriverDetails(driver: DriverRow, opts: BuildOptions = {}) {
       content: (
         <div className="flex flex-col gap-3">
           <StatsBlock driver={driver} />
-          <OverviewSection driver={driver} />
+          <OverviewSection driver={driver} compact={opts.compact} />
         </div>
       ),
     },
