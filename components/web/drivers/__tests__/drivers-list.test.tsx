@@ -22,6 +22,14 @@ vi.mock('@/components/web/comments-thread', () => ({
   CommentsThread: () => <div data-testid="comments-thread-stub" />,
 }));
 
+// DriversList queries api.savedViews.listForEntity for persisted views and
+// the SavedViewCreatePopover uses a mutation to insert one. Stub both so
+// the page renders deterministically with no persisted views.
+vi.mock('convex/react', () => ({
+  useQuery: () => ({ user: [], org: [] }),
+  useMutation: () => vi.fn(),
+}));
+
 const driver = (over: Partial<DriverRow>): DriverRow => ({
   _id: over._id ?? Math.random().toString(36).slice(2),
   firstName: 'Sergio',
