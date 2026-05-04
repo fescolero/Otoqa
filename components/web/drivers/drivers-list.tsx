@@ -331,17 +331,10 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
     })),
   ];
 
-  const stats = [
-    { value: counts.all,       label: 'total' },
-    { value: counts.active,    label: 'active' },
-    { value: counts.attention, label: 'need attention' },
-  ];
-
   return (
     <div className="flex-1 flex flex-col min-h-0 relative">
       <PageHeader
         title="Drivers"
-        stats={stats}
         actions={
           <>
             <WBtn variant="ghost" size="sm" leading="export" onClick={onExport}>Export CSV</WBtn>
