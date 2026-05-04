@@ -17,8 +17,8 @@ import {
   Chip,
   CommentsThread,
   DSCard,
-  DSProps,
-  DSStat,
+  DSPropsEditable,
+  type DSPropsEditableItem,
   DetailsFullPage,
   type FPSection,
   type FPKpi,
@@ -78,6 +78,7 @@ export default function DriverDetailPage() {
   const restoreDriver = useMutation(api.drivers.restore);
   const permanentDeleteDriver = useMutation(api.drivers.permanentDelete);
   const assignPayPlan = useMutation(api.payPlans.assignToDriver);
+  const updateDriver = useMutation(api.drivers.update);
 
   const [showDeleteDialog, setShowDeleteDialog] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
@@ -197,68 +198,218 @@ export default function DriverDetailPage() {
     { label: 'TWIC',    value: docKpiLabel(twicStatus),    delta: { value: formatDate(driver.twicExpiration), tone: docKpiTone(twicStatus) } },
   ];
 
+  // ─── Inline-edit commit ─────────────────────────────────────────────
+  // Each Overview field commits a single-arg patch to api.drivers.update.
+  // The mutation handler accepts the same field names as Convex args; we
+  // map known field keys here and skip unknown ones.
+  type DriverField =
+    | 'firstName' | 'middleName' | 'lastName'
+    | 'email' | 'phone'
+    | 'licenseClass' | 'licenseState' | 'licenseExpiration'
+    | 'employmentType' | 'employmentStatus' | 'hireDate'
+    | 'preEmploymentCheckDate' | 'terminationDate'
+    | 'address' | 'address2' | 'city' | 'state' | 'zipCode'
+    | 'emergencyContactName' | 'emergencyContactRelationship' | 'emergencyContactPhone'
+    | 'medicalExpiration' | 'badgeExpiration' | 'twicExpiration';
+
+  const commitField = async (key: string, next: string | string[]) => {
+    if (!user) return;
+    const value = Array.isArray(next) ? next.join(', ') : next;
+    const patch: Partial<Record<DriverField, string>> = { [key as DriverField]: value };
+    try {
+      await updateDriver({ id: driverId, userId: user.id, userName, ...patch });
+      toast.success('Saved');
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to save change');
+    }
+  };
+
   // ─── Sections ───────────────────────────────────────────────────────
+  const licenseItems: Array<DSPropsEditableItem | null> = [
+    {
+      key: 'licenseClass',
+      label: 'Class',
+      value: driver.licenseClass ?? '',
+      editor: {
+        type: 'select',
+        // Stored as the human-readable string (matches the legacy driver
+        // form + table chip rendering). Keep this in sync with whatever
+        // the create/edit flow writes.
+        options: [
+          { value: 'Class A', label: 'Class A' },
+          { value: 'Class B', label: 'Class B' },
+          { value: 'Class C', label: 'Class C' },
+        ],
+      },
+      placeholder: 'Pick class',
+    },
+    {
+      key: 'licenseState',
+      label: 'State',
+      value: driver.licenseState ?? '',
+      editor: { type: 'text' },
+      placeholder: 'CA',
+    },
+    {
+      key: 'licenseExpiration',
+      label: 'Expiration',
+      value: driver.licenseExpiration ?? '',
+      display: <span className="num">{formatDate(driver.licenseExpiration)}</span>,
+      editor: { type: 'date' },
+      placeholder: 'Pick date',
+    },
+    {
+      key: 'licenseNumber',
+      label: 'Number',
+      value: driver.licenseNumber ?? '',
+      display: <span className="num">{driver.licenseNumber || '—'}</span>,
+      readOnly: true,
+    },
+  ];
+
+  const employmentItems: Array<DSPropsEditableItem | null> = [
+    {
+      key: 'employmentType',
+      label: 'Type',
+      value: driver.employmentType ?? '',
+      editor: {
+        type: 'select',
+        options: [
+          { value: 'Full-time', label: 'Full-time' },
+          { value: 'Part-time', label: 'Part-time' },
+          { value: 'Contractor', label: 'Contractor' },
+        ],
+      },
+      placeholder: 'Pick type',
+    },
+    {
+      key: 'hireDate',
+      label: 'Hire date',
+      value: driver.hireDate ?? '',
+      display: <span className="num">{formatDate(driver.hireDate)}</span>,
+      editor: { type: 'date' },
+      placeholder: 'Pick date',
+    },
+    driver.preEmploymentCheckDate
+      ? {
+          key: 'preEmploymentCheckDate',
+          label: 'Pre-emp check',
+          value: driver.preEmploymentCheckDate,
+          display: <span className="num">{formatDate(driver.preEmploymentCheckDate)}</span>,
+          editor: { type: 'date' },
+        }
+      : null,
+    driver.terminationDate
+      ? {
+          key: 'terminationDate',
+          label: 'Termination',
+          value: driver.terminationDate,
+          display: <span className="num">{formatDate(driver.terminationDate)}</span>,
+          editor: { type: 'date' },
+        }
+      : null,
+  ];
+
+  const personalItems: Array<DSPropsEditableItem | null> = [
+    driver.dateOfBirth
+      ? {
+          key: 'dateOfBirth',
+          label: 'DOB',
+          value: driver.dateOfBirth,
+          display: <span className="num">{formatDate(driver.dateOfBirth)}</span>,
+          // DOB is sensitive — the mutation routes it via a separate path,
+          // so keep it read-only on the page for now.
+          readOnly: true,
+        }
+      : null,
+    driver.ssn
+      ? {
+          key: 'ssn',
+          label: 'SSN',
+          value: driver.ssn,
+          display: <span className="num">***-**-{driver.ssn.slice(-4)}</span>,
+          readOnly: true,
+        }
+      : null,
+    {
+      key: 'address',
+      label: 'Street',
+      value: driver.address ?? '',
+      editor: { type: 'text' },
+      placeholder: 'Street',
+    },
+    {
+      key: 'city',
+      label: 'City',
+      value: driver.city ?? '',
+      editor: { type: 'text' },
+      placeholder: 'City',
+    },
+    {
+      key: 'state',
+      label: 'State',
+      value: driver.state ?? '',
+      editor: { type: 'text' },
+      placeholder: 'CA',
+    },
+    {
+      key: 'zipCode',
+      label: 'Zip',
+      value: driver.zipCode ?? '',
+      editor: { type: 'text' },
+      placeholder: '95823',
+    },
+  ];
+
+  const emergencyItems: Array<DSPropsEditableItem | null> = [
+    {
+      key: 'emergencyContactName',
+      label: 'Name',
+      value: driver.emergencyContactName ?? '',
+      editor: { type: 'text' },
+      placeholder: 'Add contact',
+    },
+    {
+      key: 'emergencyContactRelationship',
+      label: 'Relationship',
+      value: driver.emergencyContactRelationship ?? '',
+      editor: { type: 'text' },
+      placeholder: 'Spouse, Parent…',
+    },
+    {
+      key: 'emergencyContactPhone',
+      label: 'Phone',
+      value: driver.emergencyContactPhone ?? '',
+      display: driver.emergencyContactPhone
+        ? (
+          <a
+            href={`tel:${getPhoneLink(driver.emergencyContactPhone)}`}
+            className="text-[var(--accent)] hover:underline"
+          >
+            {formatPhoneNumber(driver.emergencyContactPhone)}
+          </a>
+        )
+        : undefined,
+      editor: { type: 'phone' },
+      placeholder: 'Add phone',
+    },
+  ];
+
   const overviewContent = (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <DSCard title="License">
-        <DSProps
-          items={[
-            { label: 'Number',     value: <span className="num">{driver.licenseNumber || '—'}</span> },
-            { label: 'Class',      value: driver.licenseClass || '—' },
-            { label: 'State',      value: driver.licenseState || '—' },
-            { label: 'Expiration', value: formatDate(driver.licenseExpiration) },
-          ]}
-        />
+        <DSPropsEditable items={licenseItems} onCommit={commitField} />
       </DSCard>
       <DSCard title="Employment">
-        <DSProps
-          items={[
-            { label: 'Type',       value: driver.employmentType ?? '—' },
-            { label: 'Hire date',  value: formatDate(driver.hireDate) },
-            driver.preEmploymentCheckDate ? { label: 'Pre-emp check', value: formatDate(driver.preEmploymentCheckDate) } : null,
-            driver.terminationDate ? { label: 'Termination', value: formatDate(driver.terminationDate) } : null,
-          ]}
-        />
+        <DSPropsEditable items={employmentItems} onCommit={commitField} />
       </DSCard>
       <DSCard title="Personal">
-        <DSProps
-          items={[
-            driver.dateOfBirth ? { label: 'DOB', value: formatDate(driver.dateOfBirth) } : null,
-            driver.ssn ? { label: 'SSN', value: <span className="num">***-**-{driver.ssn.slice(-4)}</span> } : null,
-            (driver.city || driver.state) ? {
-              label: 'Address',
-              value: (
-                <span className="flex flex-col gap-0.5 leading-tight">
-                  {driver.address && <span>{driver.address}</span>}
-                  {driver.address2 && <span>{driver.address2}</span>}
-                  <span>
-                    {driver.city && `${driver.city}, `}
-                    {driver.state} {driver.zipCode}
-                  </span>
-                </span>
-              ),
-            } : null,
-          ]}
-        />
+        <DSPropsEditable items={personalItems} onCommit={commitField} />
       </DSCard>
-      {(driver.emergencyContactName || driver.emergencyContactPhone) && (
-        <DSCard title="Emergency contact">
-          <DSProps
-            items={[
-              driver.emergencyContactName ? { label: 'Name', value: driver.emergencyContactName } : null,
-              driver.emergencyContactRelationship ? { label: 'Relationship', value: driver.emergencyContactRelationship } : null,
-              driver.emergencyContactPhone ? {
-                label: 'Phone',
-                value: (
-                  <a href={`tel:${getPhoneLink(driver.emergencyContactPhone)}`} className="text-[var(--accent)] hover:underline">
-                    {formatPhoneNumber(driver.emergencyContactPhone)}
-                  </a>
-                ),
-              } : null,
-            ]}
-          />
-        </DSCard>
-      )}
+      <DSCard title="Emergency contact">
+        <DSPropsEditable items={emergencyItems} onCommit={commitField} />
+      </DSCard>
     </div>
   );
 

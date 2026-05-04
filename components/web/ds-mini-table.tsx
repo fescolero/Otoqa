@@ -10,7 +10,26 @@
 import * as React from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { cn } from '@/lib/utils';
+import { EditableField, type EditableSelectOption } from './editable-field';
 import { WIcon, type IconName } from './icons';
+
+export type DSMiniCellEditorType =
+  | 'text'
+  | 'email'
+  | 'phone'
+  | 'textarea'
+  | 'date'
+  | 'select'
+  | 'multiselect';
+
+export interface DSMiniCellEditor {
+  type?: DSMiniCellEditorType;
+  options?: EditableSelectOption[];
+  placeholder?: string;
+  /** Date display format passed to date-fns. */
+  format?: string;
+  rows?: number;
+}
 
 export interface DSMiniColumn<R extends { id: string | number }> {
   key: string;
@@ -19,6 +38,16 @@ export interface DSMiniColumn<R extends { id: string | number }> {
   width?: string;
   align?: 'left' | 'right';
   tnum?: boolean;
+  /** When set AND the table is in `editable` mode, the cell value is wrapped
+   *  in an `<EditableField>`. Resolve the raw value via `getValue` (defaults
+   *  to `row[key]`). */
+  editor?: DSMiniCellEditor;
+  /** Skips the editor — renders display value only, even when the table is
+   *  in `editable` mode. Use for derived columns (status, etc.). */
+  readOnly?: boolean;
+  /** Override how the raw value is read for the editor — useful when the
+   *  cell renders a Chip but the editor needs the underlying string. */
+  getValue?: (row: R) => string | string[];
 }
 
 export interface DSRowAction {
@@ -37,6 +66,11 @@ interface DSMiniTableProps<R extends { id: string | number }> {
   rowActions?: (row: R) => DSRowAction[];
   uploadRow?: React.ReactNode;
   className?: string;
+  /** Turns on per-cell inline editing for any column carrying an `editor`
+   *  config. When false (default) every cell renders read-only. */
+  editable?: boolean;
+  /** Called when a per-cell editor commits a new value. */
+  onCellCommit?: (row: R, key: string, next: string | string[]) => void;
 }
 
 export function DSMiniTable<R extends { id: string | number }>({
@@ -47,6 +81,8 @@ export function DSMiniTable<R extends { id: string | number }>({
   rowActions,
   uploadRow,
   className,
+  editable,
+  onCellCommit,
 }: DSMiniTableProps<R>) {
   const showViewAll = onViewAll && total != null && total > rows.length;
   const grid = columns.map((c) => c.width ?? '1fr').join(' ') + (rowActions ? ' 32px' : '');
@@ -72,7 +108,15 @@ export function DSMiniTable<R extends { id: string | number }>({
       {/* rows */}
       <div>
         {rows.map((row) => (
-          <DSRow key={row.id} columns={columns} row={row} grid={grid} rowActions={rowActions?.(row)} />
+          <DSRow
+            key={row.id}
+            columns={columns}
+            row={row}
+            grid={grid}
+            rowActions={rowActions?.(row)}
+            editable={editable}
+            onCellCommit={onCellCommit}
+          />
         ))}
       </div>
 
@@ -100,11 +144,15 @@ function DSRow<R extends { id: string | number }>({
   row,
   grid,
   rowActions,
+  editable,
+  onCellCommit,
 }: {
   columns: DSMiniColumn<R>[];
   row: R;
   grid: string;
   rowActions?: DSRowAction[];
+  editable?: boolean;
+  onCellCommit?: (row: R, key: string, next: string | string[]) => void;
 }) {
   const [hover, setHover] = React.useState(false);
   return (
@@ -119,22 +167,119 @@ function DSRow<R extends { id: string | number }>({
       style={{ gridTemplateColumns: grid, minHeight: 36 }}
     >
       {columns.map((c) => (
-        <div
+        <DSCell
           key={c.key}
-          className={cn(
-            'px-1 text-[12.5px] text-foreground truncate',
-            c.tnum && 'num',
-            c.align === 'right' && 'text-right',
-          )}
-        >
-          {c.render ? c.render(row) : (row as Record<string, unknown>)[c.key] as React.ReactNode}
-        </div>
+          column={c}
+          row={row}
+          editable={editable}
+          onCellCommit={onCellCommit}
+        />
       ))}
       {rowActions && rowActions.length > 0 && (
         <div className={cn('flex items-center justify-center transition-opacity', hover ? 'opacity-100' : 'opacity-0')}>
           <DSRowActions actions={rowActions} />
         </div>
       )}
+    </div>
+  );
+}
+
+function DSCell<R extends { id: string | number }>({
+  column,
+  row,
+  editable,
+  onCellCommit,
+}: {
+  column: DSMiniColumn<R>;
+  row: R;
+  editable?: boolean;
+  onCellCommit?: (row: R, key: string, next: string | string[]) => void;
+}) {
+  const display = column.render ? column.render(row) : ((row as Record<string, unknown>)[column.key] as React.ReactNode);
+  const editorOk = editable && column.editor && !column.readOnly;
+  const cellClass = cn(
+    'px-1 text-[12.5px] text-foreground min-w-0',
+    column.tnum && 'num',
+    column.align === 'right' && 'text-right',
+    !editorOk && 'truncate',
+  );
+  if (!editorOk) {
+    return <div className={cellClass}>{display}</div>;
+  }
+  const editor = column.editor!;
+  const type = editor.type ?? 'text';
+  const raw = column.getValue ? column.getValue(row) : ((row as Record<string, unknown>)[column.key] as string | string[] | undefined);
+  const commit = (next: string | string[]) => onCellCommit?.(row, column.key, next);
+
+  if (type === 'multiselect') {
+    const value: string[] = Array.isArray(raw) ? raw : raw ? String(raw).split(' · ').map((s) => s.trim()).filter(Boolean) : [];
+    return (
+      <div className={cellClass}>
+        <EditableField
+          type="multiselect"
+          value={value}
+          options={editor.options ?? []}
+          display={display}
+          placeholder={editor.placeholder}
+          onCommit={(next) => commit(next)}
+        />
+      </div>
+    );
+  }
+
+  const value = Array.isArray(raw) ? raw.join(', ') : raw == null ? '' : String(raw);
+
+  if (type === 'date') {
+    return (
+      <div className={cellClass}>
+        <EditableField
+          type="date"
+          value={value}
+          format={editor.format}
+          display={display}
+          placeholder={editor.placeholder}
+          onCommit={(next) => commit(next)}
+        />
+      </div>
+    );
+  }
+  if (type === 'select') {
+    return (
+      <div className={cellClass}>
+        <EditableField
+          type="select"
+          value={value}
+          options={editor.options ?? []}
+          display={display}
+          placeholder={editor.placeholder}
+          onCommit={(next) => commit(next)}
+        />
+      </div>
+    );
+  }
+  if (type === 'textarea') {
+    return (
+      <div className={cellClass}>
+        <EditableField
+          type="textarea"
+          value={value}
+          rows={editor.rows}
+          display={display}
+          placeholder={editor.placeholder}
+          onCommit={(next) => commit(next)}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className={cellClass}>
+      <EditableField
+        type={type as 'text' | 'email' | 'phone'}
+        value={value}
+        display={display}
+        placeholder={editor.placeholder}
+        onCommit={(next: string) => commit(next)}
+      />
     </div>
   );
 }
