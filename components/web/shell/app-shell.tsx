@@ -124,7 +124,13 @@ function ShellLayout({
       />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar onCmdk={() => setCmdkOpen(true)} />
-        <main className="flex-1 overflow-auto scroll-thin relative">{children}</main>
+        {/* main is a flex column with no scroll of its own — pages own
+            their scroll context. Migrated screens (e.g. DriversList) use
+            a flex-col layout with sticky chrome (PageHeader / SavedViews /
+            TableToolbar) at the top and the Table managing internal
+            overflow. Legacy screens that expect main to scroll wrap
+            themselves in <main className="flex-1 overflow-auto"> already. */}
+        <main className="flex-1 flex flex-col min-h-0 overflow-hidden relative">{children}</main>
       </div>
       <CommandPalette open={cmdkOpen} onOpenChange={setCmdkOpen} />
     </div>
