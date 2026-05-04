@@ -1,4 +1,4 @@
-import { AppLayoutClient } from '@/components/app-layout-client';
+import { AppShell } from '@/components/web/shell/app-shell';
 import { withAuth } from '@workos-inc/authkit-nextjs';
 import { redirect } from 'next/navigation';
 import { fetchQuery } from 'convex/nextjs';
@@ -61,7 +61,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY;
 
   return (
-    <AppLayoutClient 
+    <AppShell
       user={userData}
       workosUserId={user.id}
       organizationId={organizationId}
@@ -69,6 +69,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       googleMapsApiKey={googleMapsApiKey}
     >
       {children}
-    </AppLayoutClient>
+    </AppShell>
   );
 }

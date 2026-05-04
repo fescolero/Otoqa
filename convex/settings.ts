@@ -215,3 +215,57 @@ export const updateUserPreferences = mutation({
     }
   },
 });
+
+/**
+ * Update UI Shell Preferences (theme / density / sidebar mode).
+ *
+ * Granular partner to updateUserPreferences — used by the Otoqa Web shell
+ * (Topbar density toggle, Sidebar pin/rail). Each field is optional so the
+ * caller can patch one without supplying the others. Creates a row with
+ * sensible defaults if none exists yet.
+ */
+export const updateUiPreferences = mutation({
+  args: {
+    workosOrgId: v.string(),
+    theme: v.optional(v.union(v.literal('light'), v.literal('dark'), v.literal('system'))),
+    density: v.optional(v.union(v.literal('compact'), v.literal('comfortable'))),
+    sidebarMode: v.optional(
+      v.union(v.literal('hover'), v.literal('pinned'), v.literal('rail')),
+    ),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const identity = (await ctx.auth.getUserIdentity())!;
+
+    const existing = await ctx.db
+      .query('userPreferences')
+      .withIndex('by_user_org', (q) =>
+        q.eq('userId', identity.subject).eq('workosOrgId', args.workosOrgId),
+      )
+      .unique();
+
+    if (existing) {
+      const patch: Record<string, unknown> = { updatedAt: Date.now() };
+      if (args.theme !== undefined) patch.theme = args.theme;
+      if (args.density !== undefined) patch.density = args.density;
+      if (args.sidebarMode !== undefined) patch.sidebarMode = args.sidebarMode;
+      await ctx.db.patch(existing._id, patch);
+      return existing._id;
+    }
+
+    return await ctx.db.insert('userPreferences', {
+      userId: identity.subject,
+      workosOrgId: args.workosOrgId,
+      // Defaults for required fields when no row exists yet — caller can
+      // refine via updateUserPreferences. These match the shell's default
+      // appearance.
+      language: 'English',
+      unitSystem: 'Imperial',
+      timezone: 'America/Los_Angeles',
+      theme: args.theme ?? 'light',
+      density: args.density ?? 'compact',
+      sidebarMode: args.sidebarMode ?? 'pinned',
+      updatedAt: Date.now(),
+    });
+  },
+});
