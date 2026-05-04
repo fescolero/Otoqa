@@ -6,6 +6,7 @@
  */
 
 export { Avatar } from './avatar';
+export { CommentsThread } from './comments-thread';
 export { BulkAction, BulkBar } from './bulk-bar';
 export { WBtn } from './btn';
 export type { BtnSize, BtnVariant } from './btn';

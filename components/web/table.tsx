@@ -14,6 +14,9 @@
  *
  * Render columns either by `key` (uses `row[key]`) or by `render(row)`.
  * Right-aligned numeric columns set `tnum: true` for tabular nums.
+ *
+ * Row identity defaults to `row.id` but consumers can pass `getRowId`
+ * for shapes like Convex docs that use `_id`.
  */
 
 import * as React from 'react';
@@ -24,8 +27,9 @@ import { Checkbox } from './checkbox';
 
 export type Density = 'compact' | 'comfortable';
 export type SortDir = 'asc' | 'desc';
+export type RowId = string | number;
 
-export interface TableColumn<R extends { id: string | number }> {
+export interface TableColumn<R> {
   key: string;
   label: React.ReactNode;
   width?: string;
@@ -35,18 +39,20 @@ export interface TableColumn<R extends { id: string | number }> {
   render?: (row: R) => React.ReactNode;
 }
 
-interface TableProps<R extends { id: string | number }> {
+interface TableProps<R> {
   columns: TableColumn<R>[];
   rows: R[];
   density?: Density;
-  selected?: Array<R['id']>;
-  onSelect?: (id: R['id']) => void;
+  selected?: RowId[];
+  onSelect?: (id: RowId) => void;
   onSelectAll?: () => void;
   sortKey?: string;
   sortDir?: SortDir;
   onSort?: (key: string) => void;
   onRowClick?: (row: R) => void;
-  activeRowId?: R['id'] | null;
+  activeRowId?: RowId | null;
+  /** Extract the unique id for a row. Defaults to `(r) => r.id`. */
+  getRowId?: (row: R) => RowId;
   /** Force virtualization on/off; default = auto (rows.length >= virtualizeThreshold). */
   virtualize?: boolean;
   virtualizeThreshold?: number;
@@ -57,7 +63,9 @@ const ROW_H: Record<Density, number> = { compact: 36, comfortable: 52 };
 const HEAD_PY: Record<Density, number> = { compact: 10, comfortable: 12 };
 const CELL_PY: Record<Density, number> = { compact: 8, comfortable: 14 };
 
-export function Table<R extends { id: string | number }>({
+const defaultGetRowId = <R,>(row: R): RowId => (row as { id?: RowId }).id as RowId;
+
+export function Table<R>({
   columns,
   rows,
   density = 'compact',
@@ -69,6 +77,7 @@ export function Table<R extends { id: string | number }>({
   onSort,
   onRowClick,
   activeRowId,
+  getRowId = defaultGetRowId,
   virtualize,
   virtualizeThreshold = 200,
   className,
@@ -79,6 +88,7 @@ export function Table<R extends { id: string | number }>({
   const shouldVirtualize = virtualize ?? rows.length >= virtualizeThreshold;
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const selectedSet = React.useMemo(() => new Set(selected), [selected]);
 
   return (
     <div ref={scrollRef} className={cn('scroll-thin flex-1 overflow-auto bg-card', className)}>
@@ -100,7 +110,8 @@ export function Table<R extends { id: string | number }>({
           rows={rows}
           grid={grid}
           density={density}
-          selected={new Set(selected)}
+          selected={selectedSet}
+          getRowId={getRowId}
           onSelect={onSelect}
           onRowClick={onRowClick}
           activeRowId={activeRowId ?? null}
@@ -111,7 +122,8 @@ export function Table<R extends { id: string | number }>({
           rows={rows}
           grid={grid}
           density={density}
-          selected={new Set(selected)}
+          selected={selectedSet}
+          getRowId={getRowId}
           onSelect={onSelect}
           onRowClick={onRowClick}
           activeRowId={activeRowId ?? null}
@@ -123,7 +135,7 @@ export function Table<R extends { id: string | number }>({
 
 // ─── Header ─────────────────────────────────────────────────────────────
 
-interface HeaderProps<R extends { id: string | number }> {
+interface HeaderProps<R> {
   columns: TableColumn<R>[];
   grid: string;
   density: Density;
@@ -135,7 +147,7 @@ interface HeaderProps<R extends { id: string | number }> {
   onSelectAll?: () => void;
 }
 
-function Header<R extends { id: string | number }>({
+function Header<R>({
   columns,
   grid,
   density,
@@ -202,42 +214,47 @@ function Header<R extends { id: string | number }>({
 
 // ─── Plain (non-virtualized) body ───────────────────────────────────────
 
-interface BodyProps<R extends { id: string | number }> {
+interface BodyProps<R> {
   columns: TableColumn<R>[];
   rows: R[];
   grid: string;
   density: Density;
-  selected: Set<R['id']>;
-  onSelect?: (id: R['id']) => void;
+  selected: Set<RowId>;
+  getRowId: (row: R) => RowId;
+  onSelect?: (id: RowId) => void;
   onRowClick?: (row: R) => void;
-  activeRowId: R['id'] | null;
+  activeRowId: RowId | null;
 }
 
-function PlainBody<R extends { id: string | number }>(p: BodyProps<R>) {
+function PlainBody<R>(p: BodyProps<R>) {
   return (
     <div>
-      {p.rows.map((row) => (
-        <Row
-          key={String(row.id)}
-          row={row}
-          columns={p.columns}
-          grid={p.grid}
-          density={p.density}
-          isSelected={p.selected.has(row.id)}
-          onSelect={p.onSelect}
-          onRowClick={p.onRowClick}
-          isActive={p.activeRowId === row.id}
-          virtualHeight={undefined}
-          translateY={undefined}
-        />
-      ))}
+      {p.rows.map((row) => {
+        const id = p.getRowId(row);
+        return (
+          <Row
+            key={String(id)}
+            row={row}
+            id={id}
+            columns={p.columns}
+            grid={p.grid}
+            density={p.density}
+            isSelected={p.selected.has(id)}
+            onSelect={p.onSelect}
+            onRowClick={p.onRowClick}
+            isActive={p.activeRowId === id}
+            virtualHeight={undefined}
+            translateY={undefined}
+          />
+        );
+      })}
     </div>
   );
 }
 
 // ─── Virtualized body ───────────────────────────────────────────────────
 
-function VirtualBody<R extends { id: string | number }>(
+function VirtualBody<R>(
   p: BodyProps<R> & { scrollRef: React.RefObject<HTMLDivElement | null> },
 ) {
   const rowH = ROW_H[p.density];
@@ -252,17 +269,19 @@ function VirtualBody<R extends { id: string | number }>(
     <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
       {items.map((vr) => {
         const row = p.rows[vr.index];
+        const id = p.getRowId(row);
         return (
           <Row
-            key={String(row.id)}
+            key={String(id)}
             row={row}
+            id={id}
             columns={p.columns}
             grid={p.grid}
             density={p.density}
-            isSelected={p.selected.has(row.id)}
+            isSelected={p.selected.has(id)}
             onSelect={p.onSelect}
             onRowClick={p.onRowClick}
-            isActive={p.activeRowId === row.id}
+            isActive={p.activeRowId === id}
             virtualHeight={vr.size}
             translateY={vr.start}
           />
@@ -274,21 +293,23 @@ function VirtualBody<R extends { id: string | number }>(
 
 // ─── Row ────────────────────────────────────────────────────────────────
 
-interface RowProps<R extends { id: string | number }> {
+interface RowProps<R> {
   row: R;
+  id: RowId;
   columns: TableColumn<R>[];
   grid: string;
   density: Density;
   isSelected: boolean;
-  onSelect?: (id: R['id']) => void;
+  onSelect?: (id: RowId) => void;
   onRowClick?: (row: R) => void;
   isActive: boolean;
   virtualHeight: number | undefined;
   translateY: number | undefined;
 }
 
-function Row<R extends { id: string | number }>({
+function Row<R>({
   row,
+  id,
   columns,
   grid,
   density,
@@ -337,8 +358,8 @@ function Row<R extends { id: string | number }>({
       >
         <Checkbox
           checked={isSelected}
-          onChange={() => onSelect?.(row.id)}
-          ariaLabel={`Select row ${row.id}`}
+          onChange={() => onSelect?.(id)}
+          ariaLabel={`Select row ${id}`}
         />
       </div>
       {columns.map((c) => (

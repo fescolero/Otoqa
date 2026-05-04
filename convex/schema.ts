@@ -390,6 +390,50 @@ export default defineSchema({
     .index('by_assignment', ['assignmentId'])
     .index('by_carrier', ['carrierOrgId']),
 
+  // Saved table views for entity list pages (Drivers / Loads / etc.).
+  // System defaults are code-only and surfaced by the page module — only
+  // user-owned and org-shared views land in this table.
+  savedViews: defineTable({
+    workosOrgId: v.string(),
+    /** Entity slug — e.g. 'drivers' | 'loads' | 'trucks' | 'carriers'. */
+    entity: v.string(),
+    name: v.string(),
+    scope: v.union(v.literal('user'), v.literal('org')),
+    /** WorkOS userId — set for scope='user'; absent for scope='org'. */
+    ownerId: v.optional(v.string()),
+    /** Filter predicate as opaque JSON; the page module owns the shape. */
+    filters: v.optional(v.any()),
+    sort: v.optional(
+      v.object({
+        key: v.string(),
+        dir: v.union(v.literal('asc'), v.literal('desc')),
+      }),
+    ),
+    /** Visible column keys (omit to inherit page defaults). */
+    visibleColumns: v.optional(v.array(v.string())),
+    /** True if this view should be auto-selected for its scope. Only one
+     *  per (org, entity, scope) should be flagged. */
+    isDefault: v.optional(v.boolean()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org_entity', ['workosOrgId', 'entity'])
+    .index('by_owner_entity', ['ownerId', 'entity']),
+
+  // Comments thread per record. entityType is a slug — e.g. 'driver',
+  // 'load', 'truck'. entityId is the Convex id of that record (string-coerced
+  // because it varies by entity type).
+  comments: defineTable({
+    workosOrgId: v.string(),
+    entityType: v.string(),
+    entityId: v.string(),
+    body: v.string(),
+    authorId: v.string(),
+    authorName: v.string(),
+    createdAt: v.number(),
+    editedAt: v.optional(v.number()),
+  }).index('by_entity', ['workosOrgId', 'entityType', 'entityId']),
+
   // User preferences for individual UI/UX settings
   userPreferences: defineTable({
     userId: v.string(), // WorkOS User ID from identity.subject
