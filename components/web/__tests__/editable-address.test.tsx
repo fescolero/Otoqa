@@ -34,12 +34,13 @@ describe('<EditableAddress>', () => {
     expect(screen.getByText('Add address')).toBeInTheDocument();
   });
 
-  it('swaps to the autocomplete input on click', async () => {
+  it('swaps to a slim input pre-filled with the current address on click', async () => {
     const user = userEvent.setup();
     render(<EditableAddress value={value} onCommit={() => {}} />);
     await user.click(screen.getByRole('button', { name: 'Edit address' }));
-    expect(screen.getByPlaceholderText('Add address')).toBeInTheDocument();
-    expect(screen.getByText(/esc to cancel/)).toBeInTheDocument();
+    const input = screen.getByPlaceholderText('Add address') as HTMLInputElement;
+    expect(input).toBeInTheDocument();
+    expect(input.value).toBe('4825 Florin Rd, Sacramento, CA, 95823');
   });
 
   it('reverts on Escape without calling onCommit', async () => {
