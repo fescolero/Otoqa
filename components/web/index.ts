@@ -5,7 +5,18 @@
  * also importable directly for tree-shaking.
  */
 
+export { AttentionBand } from './attention-band';
+export type { AttentionItem, AttentionTone } from './attention-band';
 export { Avatar } from './avatar';
+export { ComplianceMicroBars } from './compliance-micro-bars';
+export type { ComplianceItem } from './compliance-micro-bars';
+export {
+  NowDriverAvailable,
+  NowDriverInTransit,
+} from './now-card';
+export type { DriverActiveLoad, DriverMatchedLoad } from './now-card';
+export { QuickStats } from './quick-stats';
+export type { QuickStat, DeltaTone } from './quick-stats';
 export { CommentsThread } from './comments-thread';
 export { BulkAction, BulkBar } from './bulk-bar';
 export { WBtn } from './btn';

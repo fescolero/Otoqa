@@ -4,7 +4,7 @@ import * as React from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation, useQuery } from 'convex/react';
-import { Loader2, MapPin, Phone, Mail, Briefcase, User } from 'lucide-react';
+import { Loader2, MapPin, Phone, Mail, Briefcase } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { api } from '@/convex/_generated/api';
@@ -13,15 +13,24 @@ import { useOrganizationId } from '@/contexts/organization-context';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
 
 import {
+  AttentionBand,
+  type AttentionItem,
   Avatar,
   Chip,
   CommentsThread,
+  ComplianceMicroBars,
+  type ComplianceItem,
   DSCard,
+  DSMiniTable,
+  type DSMiniColumn,
   DSPropsEditable,
   type DSPropsEditableItem,
   DetailsFullPage,
   type FPSection,
-  type FPKpi,
+  NowDriverAvailable,
+  NowDriverInTransit,
+  type DriverActiveLoad,
+  QuickStats,
   StatusHistoryCard,
   type StatusHistoryEntry,
   StatusPicker,
@@ -29,6 +38,10 @@ import {
   WBtn,
   resolveStatusId,
 } from '@/components/web';
+import {
+  buildDriverDetails,
+  type DriverRow,
+} from '@/components/web/drivers/build-driver-details';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
 import { DriverPaySettingsSection } from '@/components/driver-pay';
@@ -54,17 +67,6 @@ const formatDate = (s?: string): string => {
   return `${months[parseInt(m[2], 10) - 1]} ${parseInt(m[3], 10)}, ${m[1]}`;
 };
 
-const docKpiLabel = (status: DocStatus): string =>
-  status === 'expired' ? 'Expired'
-    : status === 'expiring' ? 'Expiring'
-    : status === 'warning'  ? 'Warning'
-    : status === 'na'       ? 'Not Set'
-    : 'Valid';
-
-const docKpiTone = (status: DocStatus): 'up' | 'down' | 'neutral' =>
-  status === 'expired' || status === 'expiring' ? 'down'
-    : status === 'valid' ? 'up'
-    : 'neutral';
 
 export default function DriverDetailPage() {
   const router = useRouter();
@@ -88,6 +90,8 @@ export default function DriverDetailPage() {
   const [showDeleteDialog, setShowDeleteDialog] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
   const [isAssigningPayPlan, setIsAssigningPayPlan] = React.useState(false);
+  // Controlled active section id so the AttentionBand can navigate.
+  const [activeSection, setActiveSection] = React.useState('overview');
 
   if (driver === undefined) {
     return (
@@ -212,12 +216,9 @@ export default function DriverDetailPage() {
   const badgeStatus   = getDocStatus(driver.badgeExpiration);
   const twicStatus    = getDocStatus(driver.twicExpiration);
 
-  const kpis: FPKpi[] = [
-    { label: 'CDL',     value: docKpiLabel(cdlStatus),     delta: { value: formatDate(driver.licenseExpiration), tone: docKpiTone(cdlStatus) } },
-    { label: 'Medical', value: docKpiLabel(medicalStatus), delta: { value: formatDate(driver.medicalExpiration), tone: docKpiTone(medicalStatus) } },
-    { label: 'Badge',   value: docKpiLabel(badgeStatus),   delta: { value: formatDate(driver.badgeExpiration), tone: docKpiTone(badgeStatus) } },
-    { label: 'TWIC',    value: docKpiLabel(twicStatus),    delta: { value: formatDate(driver.twicExpiration), tone: docKpiTone(twicStatus) } },
-  ];
+  // Hero KPI grid intentionally removed — the AttentionBand inside the
+  // Overview composer now carries "what needs doing now" instead of the
+  // cold 4-up CDL/Medical/Badge/TWIC stat block.
 
   // ─── Inline-edit commit ─────────────────────────────────────────────
   // Each Overview field commits a single-arg patch to api.drivers.update.
@@ -417,24 +418,261 @@ export default function DriverDetailPage() {
     },
   ];
 
+  // ─── Overview composer ─────────────────────────────────────────────────
+  // Driver Overview (design v4 "C+A"):
+  //   AttentionBand → QuickStats → 2-col (Now + Compliance) → Recent
+  //   trips (mini-preview) → Status history
+  // The deep reference data (License / Employment / Personal / Emergency)
+  // moved to a dedicated Profile tab; Documents has its own tab too.
+
+  // Active load detection — derive from the Assigned loads query so the
+  // Now block flips between in-transit and Available without manual
+  // wiring. We treat any 'In Transit' / 'Picked Up' / 'En Route' tracking
+  // status as "active"; otherwise fall back to Available.
+  const inTransitLoad = ((driverLoadsData ?? []) as AssignedLoad[]).find((l) => {
+    const t = (l.trackingStatus || '').toLowerCase();
+    return t === 'in transit' || t === 'picked up' || t === 'en route';
+  });
+  const onLoad = Boolean(inTransitLoad);
+  const firstName = driver.firstName || fullName.split(' ')[0];
+
+  type ChipStatusForCompliance = 'valid' | 'expiring' | 'expired' | 'na';
+
+  // Compliance items — License + Medical from real data; Background / MVR /
+  // Drug screen as "Not tracked" placeholders until the backend lands them.
+  const chipFor = (s: DocStatus): ChipStatusForCompliance => {
+    if (s === 'expired') return 'expired';
+    if (s === 'expiring' || s === 'warning') return 'expiring';
+    if (s === 'na') return 'na';
+    return 'valid';
+  };
+  const complianceItems: ComplianceItem[] = [
+    {
+      label: 'License',
+      number: driver.licenseNumber ?? '—',
+      expires: driver.licenseExpiration ? formatDate(driver.licenseExpiration) : '—',
+      status: chipFor(cdlStatus),
+    },
+    {
+      label: 'Medical',
+      number: driver.medicalExpiration ? '—' : 'Not on file',
+      expires: driver.medicalExpiration ? formatDate(driver.medicalExpiration) : '—',
+      status: chipFor(medicalStatus),
+    },
+    {
+      label: 'Badge',
+      number: driver.badgeExpiration ? '—' : 'Not on file',
+      expires: driver.badgeExpiration ? formatDate(driver.badgeExpiration) : '—',
+      status: chipFor(badgeStatus),
+    },
+    {
+      label: 'TWIC',
+      number: driver.twicExpiration ? '—' : 'Not on file',
+      expires: driver.twicExpiration ? formatDate(driver.twicExpiration) : '—',
+      status: chipFor(twicStatus),
+    },
+    { label: 'Background',  untracked: true },
+    { label: 'MVR',         untracked: true },
+    { label: 'Drug screen', untracked: true },
+  ];
+
+  // Attention items — same chips the design source emits, derived from
+  // our real data. Each item carries a `tab` so the band navigates.
+  const attentionItems: AttentionItem[] = [];
+  if (onLoad && inTransitLoad) {
+    attentionItems.push({
+      tone: 'info',
+      icon: 'truck',
+      tab: 'loads',
+      title: <>On <span className="num text-[var(--accent)] font-medium">{inTransitLoad.orderNumber}</span></>,
+      detail: inTransitLoad.firstStopDate ? `Pickup ${inTransitLoad.firstStopDate}` : undefined,
+    });
+  } else {
+    attentionItems.push({
+      tone: 'ok',
+      icon: 'check',
+      tab: 'loads',
+      title: 'Available to dispatch',
+      detail: driver.city ? `Last seen in ${driver.city}` : 'Ready for next dispatch',
+    });
+  }
+  if (cdlStatus === 'expired')
+    attentionItems.push({ tone: 'crit', icon: 'shield', tab: 'documents', title: 'License expired', detail: formatDate(driver.licenseExpiration) });
+  else if (cdlStatus === 'expiring')
+    attentionItems.push({ tone: 'warn', icon: 'shield', tab: 'documents', title: 'License expiring soon', detail: formatDate(driver.licenseExpiration) });
+  if (medicalStatus === 'expired')
+    attentionItems.push({ tone: 'crit', icon: 'alert', tab: 'documents', title: 'Medical card expired', detail: formatDate(driver.medicalExpiration) });
+  else if (medicalStatus === 'expiring')
+    attentionItems.push({ tone: 'warn', icon: 'alert', tab: 'documents', title: 'Medical card expiring soon', detail: formatDate(driver.medicalExpiration) });
+
+  const docsAttention = countAttention({
+    _id: driver._id,
+    firstName: driver.firstName,
+    lastName: driver.lastName,
+    email: driver.email,
+    phone: driver.phone,
+    licenseExpiration: driver.licenseExpiration,
+    medicalExpiration: driver.medicalExpiration,
+    badgeExpiration: driver.badgeExpiration,
+    twicExpiration: driver.twicExpiration,
+  });
+  attentionItems.push({
+    tone: 'info',
+    icon: 'file-text',
+    tab: 'documents',
+    title: '4 documents on file',
+    detail: docsAttention > 0 ? `${docsAttention} require renewal` : 'all current',
+  });
+
+  const headline = onLoad ? (
+    <span>
+      <strong className="text-foreground">{firstName}</strong> is in transit on{' '}
+      <span className="num text-[var(--accent)] font-medium">{inTransitLoad?.orderNumber}</span>
+      {cdlStatus === 'valid' && medicalStatus === 'valid'
+        ? <>, all compliance current.</>
+        : <>, with compliance items needing attention before next dispatch.</>}
+    </span>
+  ) : (
+    <span>
+      <strong className="text-foreground">{firstName}</strong> is{' '}
+      <span style={{ color: '#0F8C5F', fontWeight: 500 }}>available</span> and ready to dispatch
+      {cdlStatus === 'valid' && medicalStatus === 'valid'
+        ? <> — all compliance current.</>
+        : <> — compliance items pending review.</>}
+    </span>
+  );
+
+  type RecentTripRow = AssignedLoad & { id: string };
+  const recentTripsCols: DSMiniColumn<RecentTripRow>[] = [
+    { key: 'orderNumber', label: 'Trip', width: '1fr',
+      render: (r) => <span className="num text-[var(--accent)] font-medium">{r.orderNumber}</span> },
+    { key: 'route', label: 'Route', width: '1.6fr',
+      render: (r) =>
+        [r.origin?.city, r.destination?.city].filter(Boolean).join(' → ') || '—' },
+    { key: 'firstStopDate', label: 'Date', width: '110px',
+      render: (r) => <span className="num">{r.firstStopDate ?? '—'}</span> },
+    { key: 'status', label: 'Status', width: '110px',
+      render: (r) => <Chip status={r.status === 'In Transit' ? 'active' : r.status === 'Delivered' ? 'delivered' : 'assigned'} label={r.status} /> },
+  ];
+  const recentTrips: RecentTripRow[] = ((driverLoadsData ?? []) as AssignedLoad[])
+    .slice(0, 4)
+    .map((l) => ({ ...l, id: l._id as unknown as string }));
+
   const overviewContent = (
-    <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <DSCard title="License">
-          <DSPropsEditable items={licenseItems} onCommit={commitField} />
-        </DSCard>
-        <DSCard title="Employment">
-          <DSPropsEditable items={employmentItems} onCommit={commitField} />
-        </DSCard>
-        <DSCard title="Personal">
-          <DSPropsEditable items={personalItems} onCommit={commitField} />
-        </DSCard>
-        <DSCard title="Emergency contact">
-          <DSPropsEditable items={emergencyItems} onCommit={commitField} />
+    <div className="flex flex-col gap-3.5">
+      <AttentionBand
+        headline={headline}
+        items={attentionItems}
+        onJump={(tab) => setActiveSection(tab)}
+      />
+
+      <QuickStats
+        stats={[
+          { label: 'Active loads', value: onLoad ? '1' : '0' },
+          { label: 'Loads YTD',    value: '—' },
+          { label: 'Miles YTD',    value: '—' },
+          { label: 'Score',        value: '—' },
+          { label: 'On-time',      value: '—' },
+        ]}
+      />
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+        {onLoad && inTransitLoad ? (
+          <DSCard
+            title="Now"
+            action={<WBtn size="sm" leading="arrow-up-right" onClick={() => setActiveSection('loads')}>Open trip</WBtn>}
+          >
+            <NowDriverInTransit
+              load={{
+                id: inTransitLoad.orderNumber,
+                from: [inTransitLoad.origin?.city, inTransitLoad.origin?.state].filter(Boolean).join(', ') || '—',
+                to: [inTransitLoad.destination?.city, inTransitLoad.destination?.state].filter(Boolean).join(', ') || '—',
+                eta: inTransitLoad.firstStopDate,
+              } as DriverActiveLoad}
+            />
+          </DSCard>
+        ) : (
+          <DSCard
+            title="Now"
+            action={<WBtn size="sm" leading="plus" onClick={() => setActiveSection('loads')}>Assign load</WBtn>}
+          >
+            <NowDriverAvailable
+              location={[driver.city, driver.state].filter(Boolean).join(', ') || undefined}
+              hosAvailable="—"
+              equipment={driver.licenseClass ?? undefined}
+            />
+          </DSCard>
+        )}
+
+        <DSCard title="Compliance">
+          <ComplianceMicroBars items={complianceItems} />
         </DSCard>
       </div>
+
+      <DSCard title="Recent trips" bodyClassName="p-0"
+        action={<WBtn size="sm" leading="arrow-up-right" onClick={() => setActiveSection('loads')}>View all</WBtn>}>
+        {recentTrips.length > 0 ? (
+          <DSMiniTable columns={recentTripsCols} rows={recentTrips}
+            total={driverLoadsData?.length}/>
+        ) : (
+          <p className="m-0 px-4 py-3 text-[12.5px] text-[var(--text-tertiary)]">No trips on file.</p>
+        )}
+      </DSCard>
+
       <DriverStatusHistoryCard driverId={driverId} />
     </div>
+  );
+
+  // Profile tab — deep reference data, edited inline. Every previously-
+  // Overview field lives here.
+  const profileContent = (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <DSCard title="License">
+        <DSPropsEditable items={licenseItems} onCommit={commitField} />
+      </DSCard>
+      <DSCard title="Employment">
+        <DSPropsEditable items={employmentItems} onCommit={commitField} />
+      </DSCard>
+      <DSCard title="Personal">
+        <DSPropsEditable items={personalItems} onCommit={commitField} />
+      </DSCard>
+      <DSCard title="Emergency contact">
+        <DSPropsEditable items={emergencyItems} onCommit={commitField} />
+      </DSCard>
+    </div>
+  );
+
+  // Documents tab — for now, the same compact view the slide-over uses
+  // (a 4-row mini-preview of CDL / Medical / Badge / TWIC). The backend
+  // for a real per-doc table lands in a separate phase.
+  const driverRow: DriverRow = {
+    _id: driver._id,
+    firstName: driver.firstName,
+    lastName: driver.lastName,
+    email: driver.email,
+    phone: driver.phone,
+    licenseExpiration: driver.licenseExpiration,
+    medicalExpiration: driver.medicalExpiration,
+    badgeExpiration: driver.badgeExpiration,
+    twicExpiration: driver.twicExpiration,
+    licenseClass: driver.licenseClass,
+    licenseState: driver.licenseState,
+    licenseNumber: driver.licenseNumber,
+    employmentStatus: driver.employmentStatus,
+    employmentType: driver.employmentType,
+    hireDate: driver.hireDate,
+    city: driver.city,
+    state: driver.state,
+    emergencyContactName: driver.emergencyContactName,
+    emergencyContactRelationship: driver.emergencyContactRelationship,
+    emergencyContactPhone: driver.emergencyContactPhone,
+    isDeleted: driver.isDeleted,
+  };
+  const docsSection = buildDriverDetails(driverRow).sections.find((s) => s.id === 'documents');
+  const documentsContent = (
+    <DSCard title={`Documents (${4})`} bodyClassName="p-4">
+      {docsSection?.content}
+    </DSCard>
   );
 
   // Pay tab. The chassis treatment matches the design's "Default profile +
@@ -515,8 +753,10 @@ export default function DriverDetailPage() {
   );
 
   const sections: FPSection[] = [
-    { id: 'overview', label: 'Overview',  icon: 'id-card',     content: overviewContent },
-    { id: 'payroll',  label: 'Payroll',   icon: 'doc-dollar',  content: payrollContent },
+    { id: 'overview',  label: 'Overview',  icon: 'home',       content: overviewContent },
+    { id: 'profile',   label: 'Profile',   icon: 'users',      content: profileContent },
+    { id: 'documents', label: 'Documents', icon: 'file-text',  count: 4, content: documentsContent },
+    { id: 'payroll',   label: 'Payroll',   icon: 'doc-dollar', content: payrollContent },
     {
       id: 'loads',
       label: 'Loads',
@@ -532,19 +772,10 @@ export default function DriverDetailPage() {
     },
   ];
 
-  const attentionTotal = countAttention({
-    _id: driver._id,
-    firstName: driver.firstName,
-    lastName: driver.lastName,
-    email: driver.email,
-    phone: driver.phone,
-    licenseExpiration: driver.licenseExpiration,
-    medicalExpiration: driver.medicalExpiration,
-    badgeExpiration: driver.badgeExpiration,
-    twicExpiration: driver.twicExpiration,
-  });
-  if (attentionTotal > 0) {
-    sections[0] = { ...sections[0], attention: attentionTotal };
+  // Documents tab carries the attention badge (it's where the user goes to
+  // resolve expiring docs).
+  if (docsAttention > 0) {
+    sections[2] = { ...sections[2], attention: docsAttention };
   }
 
   const rightRail = (
@@ -595,8 +826,9 @@ export default function DriverDetailPage() {
         title={fullName}
         eyebrow={eyebrow}
         subtitle={subtitle}
-        kpis={kpis}
         sections={sections}
+        activeId={activeSection}
+        onActiveChange={setActiveSection}
         rightRail={rightRail}
       />
       <DeleteConfirmationDialog
