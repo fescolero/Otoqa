@@ -379,8 +379,61 @@ export default function DriverDetailPage() {
           readOnly: true,
         }
       : null,
-    // Address handled by a single <EditableAddress> row below — Google
-    // Places autocomplete fills street/city/state/zip/country in one go.
+    // Address row uses <EditableAddress> via the `custom` slot —
+    // Google Places autocomplete fills street/city/state/zip/country in
+    // one mutation (commitAddress). The remaining rows below are
+    // individually inline-editable so users can override any single
+    // field manually without re-running the autocomplete.
+    {
+      key: 'address',
+      label: 'Address',
+      custom: (
+        <EditableAddress
+          value={{
+            address: driver.address,
+            city: driver.city,
+            state: driver.state,
+            postalCode: driver.zipCode,
+            country: driver.country,
+          }}
+          display={
+            driver.address || (
+              <span className="text-[var(--text-tertiary)]">Add address</span>
+            )
+          }
+          onCommit={commitAddress}
+          placeholder="Add address"
+        />
+      ),
+    },
+    {
+      key: 'address2',
+      label: 'Address 2',
+      value: driver.address2 ?? '',
+      editor: { type: 'text' },
+      placeholder: 'Apt, suite, unit',
+    },
+    {
+      key: 'city',
+      label: 'City',
+      value: driver.city ?? '',
+      editor: { type: 'text' },
+      placeholder: 'City',
+    },
+    {
+      key: 'state',
+      label: 'State',
+      value: driver.state ?? '',
+      editor: { type: 'text' },
+      placeholder: 'CA',
+    },
+    {
+      key: 'zipCode',
+      label: 'Zip',
+      value: driver.zipCode ?? '',
+      editor: { type: 'text' },
+      placeholder: '95823',
+    },
   ];
 
   const emergencyItems: Array<DSPropsEditableItem | null> = [
@@ -632,32 +685,8 @@ export default function DriverDetailPage() {
       <DSCard title="Employment">
         <DSPropsEditable items={employmentItems} onCommit={commitField} />
       </DSCard>
-      <DSCard title="Personal" bodyClassName="flex flex-col">
-        {personalItems.filter(Boolean).length > 0 && (
-          <DSPropsEditable items={personalItems} onCommit={commitField} />
-        )}
-        <div
-          className="grid items-start gap-0"
-          style={{
-            gridTemplateColumns: '120px 1fr',
-            borderTop: personalItems.filter(Boolean).length > 0 ? '1px solid var(--border-hairline)' : undefined,
-          }}
-        >
-          <div className="py-2.5 pr-3 text-[12.5px] text-[var(--text-tertiary)]">Address</div>
-          <div className="py-2.5 text-[13px] text-foreground min-w-0">
-            <EditableAddress
-              value={{
-                address: driver.address,
-                city: driver.city,
-                state: driver.state,
-                postalCode: driver.zipCode,
-                country: driver.country,
-              }}
-              onCommit={commitAddress}
-              placeholder="Add address"
-            />
-          </div>
-        </div>
+      <DSCard title="Personal">
+        <DSPropsEditable items={personalItems} onCommit={commitField} />
       </DSCard>
       <DSCard title="Emergency contact">
         <DSPropsEditable items={emergencyItems} onCommit={commitField} />
