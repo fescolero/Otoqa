@@ -48,6 +48,8 @@ export type {
   DSMiniColumn,
   DSRowAction,
 } from './ds-mini-table';
+export { EditableAddress } from './editable-address';
+export type { AddressData, EditableAddressValue } from './editable-address';
 export { EditableField } from './editable-field';
 export type { EditableSelectOption } from './editable-field';
 export { FilterBar } from './filter-bar';

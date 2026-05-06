@@ -13,6 +13,7 @@ import { useOrganizationId } from '@/contexts/organization-context';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
 
 import {
+  type AddressData,
   AttentionBand,
   type AttentionItem,
   Avatar,
@@ -26,6 +27,7 @@ import {
   DSPropsEditable,
   type DSPropsEditableItem,
   DetailsFullPage,
+  EditableAddress,
   type FPSection,
   NowDriverAvailable,
   NowDriverInTransit,
@@ -247,6 +249,29 @@ export default function DriverDetailPage() {
     }
   };
 
+  // Multi-field commit for the address autocomplete — writes street /
+  // city / state / zip / country in a single mutation so the audit log
+  // shows one entry instead of five.
+  const commitAddress = async (data: AddressData) => {
+    if (!user) return;
+    try {
+      await updateDriver({
+        id: driverId,
+        userId: user.id,
+        userName,
+        address: data.address,
+        city: data.city,
+        state: data.state,
+        zipCode: data.postalCode,
+        country: data.country,
+      });
+      toast.success('Address saved');
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to save address');
+    }
+  };
+
   // ─── Sections ───────────────────────────────────────────────────────
   const licenseItems: Array<DSPropsEditableItem | null> = [
     {
@@ -354,34 +379,8 @@ export default function DriverDetailPage() {
           readOnly: true,
         }
       : null,
-    {
-      key: 'address',
-      label: 'Street',
-      value: driver.address ?? '',
-      editor: { type: 'text' },
-      placeholder: 'Street',
-    },
-    {
-      key: 'city',
-      label: 'City',
-      value: driver.city ?? '',
-      editor: { type: 'text' },
-      placeholder: 'City',
-    },
-    {
-      key: 'state',
-      label: 'State',
-      value: driver.state ?? '',
-      editor: { type: 'text' },
-      placeholder: 'CA',
-    },
-    {
-      key: 'zipCode',
-      label: 'Zip',
-      value: driver.zipCode ?? '',
-      editor: { type: 'text' },
-      placeholder: '95823',
-    },
+    // Address handled by a single <EditableAddress> row below — Google
+    // Places autocomplete fills street/city/state/zip/country in one go.
   ];
 
   const emergencyItems: Array<DSPropsEditableItem | null> = [
@@ -633,8 +632,32 @@ export default function DriverDetailPage() {
       <DSCard title="Employment">
         <DSPropsEditable items={employmentItems} onCommit={commitField} />
       </DSCard>
-      <DSCard title="Personal">
-        <DSPropsEditable items={personalItems} onCommit={commitField} />
+      <DSCard title="Personal" bodyClassName="flex flex-col">
+        {personalItems.filter(Boolean).length > 0 && (
+          <DSPropsEditable items={personalItems} onCommit={commitField} />
+        )}
+        <div
+          className="grid items-start gap-0"
+          style={{
+            gridTemplateColumns: '120px 1fr',
+            borderTop: personalItems.filter(Boolean).length > 0 ? '1px solid var(--border-hairline)' : undefined,
+          }}
+        >
+          <div className="py-2.5 pr-3 text-[12.5px] text-[var(--text-tertiary)]">Address</div>
+          <div className="py-2.5 text-[13px] text-foreground min-w-0">
+            <EditableAddress
+              value={{
+                address: driver.address,
+                city: driver.city,
+                state: driver.state,
+                postalCode: driver.zipCode,
+                country: driver.country,
+              }}
+              onCommit={commitAddress}
+              placeholder="Add address"
+            />
+          </div>
+        </div>
       </DSCard>
       <DSCard title="Emergency contact">
         <DSPropsEditable items={emergencyItems} onCommit={commitField} />
