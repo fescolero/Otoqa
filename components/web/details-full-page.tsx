@@ -54,6 +54,10 @@ interface DetailsFullPageProps {
   sections: FPSection[];
   rightRail?: React.ReactNode;
   className?: string;
+  /** Controlled active-section id. Combine with `onActiveChange` so an
+   *  outer composer (e.g. an AttentionBand jump) can drive the tabs. */
+  activeId?: string;
+  onActiveChange?: (id: string) => void;
 }
 
 export function DetailsFullPage({
@@ -71,11 +75,22 @@ export function DetailsFullPage({
   sections,
   rightRail,
   className,
+  activeId: controlledActiveId,
+  onActiveChange,
 }: DetailsFullPageProps) {
-  const [activeId, setActiveId] = React.useState(sections[0]?.id ?? '');
+  const [internalActiveId, setInternalActiveId] = React.useState(sections[0]?.id ?? '');
+  const isControlled = controlledActiveId !== undefined;
+  const activeId = isControlled ? controlledActiveId : internalActiveId;
+  const setActiveId = (id: string) => {
+    if (!isControlled) setInternalActiveId(id);
+    onActiveChange?.(id);
+  };
   React.useEffect(() => {
-    if (!sections.find((s) => s.id === activeId) && sections[0]) setActiveId(sections[0].id);
-  }, [sections, activeId]);
+    if (isControlled) return;
+    if (!sections.find((s) => s.id === internalActiveId) && sections[0]) {
+      setInternalActiveId(sections[0].id);
+    }
+  }, [sections, internalActiveId, isControlled]);
 
   const active = sections.find((s) => s.id === activeId) ?? sections[0];
 
