@@ -310,8 +310,13 @@ export default function DriverDetailPage() {
       key: 'licenseNumber',
       label: 'Number',
       value: driver.licenseNumber ?? '',
-      display: <span className="num">{driver.licenseNumber || '—'}</span>,
-      readOnly: true,
+      display: driver.licenseNumber
+        ? <span className="num">{driver.licenseNumber}</span>
+        : undefined,
+      // Convex update routes licenseNumber through drivers_sensitive_info
+      // and audit-logs the change, so inline edit is safe.
+      editor: { type: 'text' },
+      placeholder: 'Add license number',
     },
   ];
 
