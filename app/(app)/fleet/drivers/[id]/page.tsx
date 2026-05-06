@@ -359,17 +359,19 @@ export default function DriverDetailPage() {
   ];
 
   const personalItems: Array<DSPropsEditableItem | null> = [
-    driver.dateOfBirth
-      ? {
-          key: 'dateOfBirth',
-          label: 'DOB',
-          value: driver.dateOfBirth,
-          display: <span className="num">{formatDate(driver.dateOfBirth)}</span>,
-          // DOB is sensitive — the mutation routes it via a separate path,
-          // so keep it read-only on the page for now.
-          readOnly: true,
-        }
-      : null,
+    {
+      key: 'dateOfBirth',
+      label: 'DOB',
+      value: driver.dateOfBirth ?? '',
+      display: driver.dateOfBirth
+        ? <span className="num">{formatDate(driver.dateOfBirth)}</span>
+        : undefined,
+      // The Convex update mutation already routes dateOfBirth through the
+      // sensitive-info table — inline edit is safe; the audit log captures
+      // the change.
+      editor: { type: 'date' },
+      placeholder: 'Pick date of birth',
+    },
     driver.ssn
       ? {
           key: 'ssn',
