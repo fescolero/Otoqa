@@ -77,19 +77,25 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
   const updateUi = useMutation(api.settings.updateUiPreferences);
   const { setTheme: setNextTheme } = useTheme();
 
-  // Initial state: localStorage > defaults. Convex result overrides once it
-  // arrives.
-  const initial = React.useMemo<UiPreferences>(() => {
-    const local = readLocal();
-    return {
-      theme: (local?.theme as UiTheme) ?? DEFAULTS.theme,
-      density: (local?.density as UiDensity) ?? DEFAULTS.density,
-      sidebarMode: (local?.sidebarMode as SidebarMode) ?? DEFAULTS.sidebarMode,
-    };
-  }, []);
-
-  const [prefs, setPrefs] = React.useState<UiPreferences>(initial);
+  // Initial state must match what the server renders, otherwise React
+  // throws a hydration mismatch (the server has no localStorage). Start
+  // from the defaults; the post-mount effect below reads the saved values
+  // and applies them in a follow-up render. Convex hydrates after that.
+  const [prefs, setPrefs] = React.useState<UiPreferences>(DEFAULTS);
   const [isHydrating, setIsHydrating] = React.useState(true);
+
+  // Post-mount: read localStorage. Runs on the client only, so the first
+  // paint matches the SSR HTML and the cached preferences land on the
+  // very next render before any user interaction.
+  React.useEffect(() => {
+    const local = readLocal();
+    if (!local) return;
+    setPrefs((prev) => ({
+      theme: (local.theme as UiTheme) ?? prev.theme,
+      density: (local.density as UiDensity) ?? prev.density,
+      sidebarMode: (local.sidebarMode as SidebarMode) ?? prev.sidebarMode,
+    }));
+  }, []);
 
   // When Convex hydrates, prefer its value over local cache.
   React.useEffect(() => {
