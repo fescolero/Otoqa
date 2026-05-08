@@ -31,6 +31,7 @@ import {
   trackWatchLocationSaved,
   trackWatchLocationError,
   trackTrackingStateSelfHealed,
+  trackBgSyncOutcome,
   flushAnalytics,
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
@@ -799,14 +800,44 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
   // Step 6: Sync to Convex via the HTTP endpoint (no Clerk JWT needed).
   // Uses a static API key that works regardless of auth state.
+  //
+  // Per-call telemetry via trackBgSyncOutcome:
+  //   - Captures queue depth at sync time so we can see if pings are
+  //     accumulating between BG fires (the key signal that BG sync
+  //     isn't keeping up in real-time).
+  //   - Captures oldest-unsynced-ping age so we can see the actual
+  //     latency the dispatcher experiences.
+  //   - Captures HTTP call duration to distinguish network/server
+  //     delay from queue-processing delay.
+  //   - Logs outcome=skipped_* so we can count silent skips (vs.
+  //     trackBGTaskResult which only sets syncAttempted=false without
+  //     the reason).
+  //
+  // See PR for the 2026-05-08 sync-latency context (median 8.4 min,
+  // p99 58 min — needed to know if BG task is firing at all).
+  const queueDepthBefore = await getBufferedLocationCount().catch(() => 0);
   let syncAttempted = false;
   let syncSuccess = false;
   let syncCount = 0;
-  if (sqliteAvailable && MOBILE_LOCATION_API_KEY) {
+  if (!sqliteAvailable) {
+    trackBgSyncOutcome({ outcome: 'skipped_no_sqlite', queueDepthBefore });
+  } else if (!MOBILE_LOCATION_API_KEY) {
+    lg.warn('BG sync skipped: MOBILE_LOCATION_API_KEY not configured');
+    trackBgSyncOutcome({ outcome: 'skipped_no_key', queueDepthBefore });
+  } else {
+    const syncStart = Date.now();
     try {
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
-      if (unsynced.length > 0) {
+      if (unsynced.length === 0) {
+        trackBgSyncOutcome({
+          outcome: 'skipped_no_pings',
+          queueDepthBefore,
+          syncDurationMs: Date.now() - syncStart,
+        });
+      } else {
         syncAttempted = true;
+        // First entry is oldest by recordedAt (queue is FIFO by capture time).
+        const oldestUnsyncedAgeSec = (Date.now() - unsynced[0].recordedAt) / 1000;
         const payload: SyncPing[] = unsynced.map((loc) => ({
           driverId: loc.driverId,
           loadId: loc.loadId ?? undefined,
@@ -826,15 +857,26 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         syncCount = result.inserted;
 
         await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+        trackBgSyncOutcome({
+          outcome: 'success',
+          queueDepthBefore,
+          syncCount: result.inserted,
+          oldestUnsyncedAgeSec,
+          syncDurationMs: Date.now() - syncStart,
+        });
       }
     } catch (flushError) {
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
       lg.warn(`BG HTTP sync failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
       trackBGTaskError({ step: 'sync', error: errMsg });
+      trackBgSyncOutcome({
+        outcome: 'failure',
+        queueDepthBefore,
+        syncDurationMs: Date.now() - syncStart,
+        error: errMsg,
+      });
     }
-  } else if (!MOBILE_LOCATION_API_KEY) {
-    lg.warn('BG sync skipped: MOBILE_LOCATION_API_KEY not configured');
   }
 
   const durationMs = Date.now() - taskStartTime;
