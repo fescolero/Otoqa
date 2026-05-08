@@ -503,6 +503,44 @@ export function trackBGTaskError(context: { step: string; error: string }) {
   capture('bg_task_error', context);
 }
 
+/**
+ * Fired on every BG TaskManager task firing where the sync section runs.
+ * Gives us per-call visibility into the BG sync HTTP path that's
+ * currently a black box: we know syncAttempted/syncCount via
+ * trackBGTaskResult, but we don't know:
+ *   - whether the queue was empty (skipped because nothing to sync)
+ *   - how stale the oldest queued ping was (sync latency baseline)
+ *   - how long the HTTP call itself took (network vs server delay)
+ *   - why a sync was skipped (no API key, sqlite unavailable)
+ *
+ * The 2026-05-08 sync-latency analysis (median 8.4 min, p99 58 min)
+ * suggested BG sync isn't firing per-capture as intended — but we
+ * couldn't tell whether the BG TASK isn't firing OR the sync inside
+ * it is repeatedly skipping. This event disambiguates.
+ *
+ * Outcomes:
+ *   - 'success' — HTTP call succeeded, pings synced
+ *   - 'failure' — HTTP call threw or returned non-OK
+ *   - 'skipped_no_pings' — BG task ran but queue was empty (sync caught up)
+ *   - 'skipped_no_key' — MOBILE_LOCATION_API_KEY env var missing
+ *   - 'skipped_no_sqlite' — local SQLite unavailable (rare init issue)
+ */
+export function trackBgSyncOutcome(context: {
+  outcome:
+    | 'success'
+    | 'failure'
+    | 'skipped_no_pings'
+    | 'skipped_no_key'
+    | 'skipped_no_sqlite';
+  queueDepthBefore: number;
+  syncCount?: number;
+  oldestUnsyncedAgeSec?: number;
+  syncDurationMs?: number;
+  error?: string;
+}) {
+  capture('bg_sync_outcome', context);
+}
+
 export function trackBGTaskReregistered(context: {
   source: 'foreground_return' | 'app_resume' | 'heartbeat';
   wasRegistered: boolean;
