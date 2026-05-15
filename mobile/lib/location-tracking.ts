@@ -801,7 +801,10 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   // Step 6: Sync to Convex via the HTTP endpoint (no Clerk JWT needed).
   // Uses a static API key that works regardless of auth state.
   //
-  // Per-call telemetry via trackBgSyncOutcome:
+  // Per-call telemetry via trackBgSyncOutcome (PR #150) PLUS bounded
+  // retry-with-backoff inside the headless task (cherry-pick from
+  // claude/web-design-fix-hydration-density-toggle):
+  //
   //   - Captures queue depth at sync time so we can see if pings are
   //     accumulating between BG fires (the key signal that BG sync
   //     isn't keeping up in real-time).
@@ -812,6 +815,15 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   //   - Logs outcome=skipped_* so we can count silent skips (vs.
   //     trackBGTaskResult which only sets syncAttempted=false without
   //     the reason).
+  //   - Retries syncViaHttpEndpoint with [1000, 3000]ms backoff on
+  //     transient errors. Absorbs brief dead zones and 5xx without
+  //     waiting for the next LOCATION_TASK invocation — empirically
+  //     the gap between fires can be 15-40 min when Android Doze is
+  //     batching FGS callbacks, so the cost of waiting is high.
+  //   - Total worst-case retry budget: ~4s. Headless-context ceiling
+  //     is ~20s (Firebase Messaging SDK 23.2.1 background broadcast
+  //     timeout) to ~30s (expo-task-manager). Terminal HTTP errors
+  //     (401/403/400) skip retry since they won't resolve.
   //
   // See PR for the 2026-05-08 sync-latency context (median 8.4 min,
   // p99 58 min — needed to know if BG task is firing at all).
@@ -819,6 +831,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   let syncAttempted = false;
   let syncSuccess = false;
   let syncCount = 0;
+  let syncRetries = 0;
   if (!sqliteAvailable) {
     trackBgSyncOutcome({ outcome: 'skipped_no_sqlite', queueDepthBefore });
   } else if (!MOBILE_LOCATION_API_KEY) {
@@ -852,22 +865,74 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
           recordedAt: loc.recordedAt,
         }));
 
-        const result = await syncViaHttpEndpoint(payload, state.organizationId);
-        syncSuccess = true;
-        syncCount = result.inserted;
+        // Attempt 1 fires immediately; subsequent attempts wait the
+        // corresponding delay before re-firing. Total attempts = delays + 1.
+        const BG_RETRY_DELAYS_MS = [1000, 3000];
+        let result: IngestResponse | null = null;
+        let lastErr: unknown = null;
 
-        await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
-        trackBgSyncOutcome({
-          outcome: 'success',
-          queueDepthBefore,
-          syncCount: result.inserted,
-          oldestUnsyncedAgeSec,
-          syncDurationMs: Date.now() - syncStart,
-        });
+        for (let attempt = 0; attempt <= BG_RETRY_DELAYS_MS.length; attempt++) {
+          if (attempt > 0) {
+            await new Promise((r) => setTimeout(r, BG_RETRY_DELAYS_MS[attempt - 1]));
+            syncRetries++;
+          }
+          try {
+            result = await syncViaHttpEndpoint(payload, state.organizationId);
+            break; // success
+          } catch (err) {
+            lastErr = err;
+            const msg = err instanceof Error ? err.message : String(err);
+            // Terminal errors won't resolve on retry — don't burn budget.
+            // 4xx (except 408/429) indicates a client-side problem; auth
+            // won't change between attempts. 5xx, timeouts, and TypeError
+            // (network) fall through and get retried.
+            if (
+              msg.includes('HTTP 401') ||
+              msg.includes('HTTP 403') ||
+              msg.includes('HTTP 400')
+            ) {
+              lg.warn(`BG HTTP sync terminal error (no retry): ${msg}`);
+              break;
+            }
+            if (attempt < BG_RETRY_DELAYS_MS.length) {
+              lg.warn(
+                `BG HTTP sync attempt ${attempt + 1}/${BG_RETRY_DELAYS_MS.length + 1} failed: ${msg} — retrying`,
+              );
+            }
+          }
+        }
+
+        if (result) {
+          syncSuccess = true;
+          syncCount = result.inserted;
+          await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+          trackBgSyncOutcome({
+            outcome: 'success',
+            queueDepthBefore,
+            syncCount: result.inserted,
+            oldestUnsyncedAgeSec,
+            syncDurationMs: Date.now() - syncStart,
+          });
+        } else {
+          const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+          lg.warn(
+            `BG HTTP sync failed after ${BG_RETRY_DELAYS_MS.length + 1} attempts (points safe in local queue): ${errMsg}`,
+          );
+          trackBGTaskError({ step: 'sync', error: errMsg });
+          trackBgSyncOutcome({
+            outcome: 'failure',
+            queueDepthBefore,
+            oldestUnsyncedAgeSec,
+            syncDurationMs: Date.now() - syncStart,
+            error: errMsg,
+          });
+        }
       }
     } catch (flushError) {
+      // Catches errors from getUnsyncedLocations / payload prep — not the
+      // HTTP call (that's handled inside the retry loop).
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
-      lg.warn(`BG HTTP sync failed (points safe in local queue): ${errMsg}`);
+      lg.warn(`BG sync prep failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
       trackBGTaskError({ step: 'sync', error: errMsg });
       trackBgSyncOutcome({
