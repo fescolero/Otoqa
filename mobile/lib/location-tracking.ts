@@ -912,6 +912,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             syncCount: result.inserted,
             oldestUnsyncedAgeSec,
             syncDurationMs: Date.now() - syncStart,
+            syncRetries,
           });
         } else {
           const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
@@ -925,6 +926,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             oldestUnsyncedAgeSec,
             syncDurationMs: Date.now() - syncStart,
             error: errMsg,
+            syncRetries,
           });
         }
       }

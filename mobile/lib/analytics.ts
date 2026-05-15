@@ -536,6 +536,15 @@ export function trackBgSyncOutcome(context: {
   syncCount?: number;
   oldestUnsyncedAgeSec?: number;
   syncDurationMs?: number;
+  /**
+   * Number of retries fired inside the bounded retry loop in LOCATION_TASK
+   * Step 6. 0 = success on the first attempt (no retry needed); 1-2 =
+   * transient blip absorbed by the inline retry instead of waiting for
+   * the next BG fire. Only meaningful when outcome is 'success' or
+   * 'failure'; absent on the 'skipped_*' branches (the retry loop only
+   * runs once we have pings to send).
+   */
+  syncRetries?: number;
   error?: string;
 }) {
   capture('bg_sync_outcome', context);
