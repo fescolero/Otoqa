@@ -41,9 +41,13 @@ const pingValidator = v.object({
   heading: v.optional(v.float64()),
   trackingType: v.union(v.literal('LOAD_ROUTE'), v.literal('SESSION_ROUTE')),
   recordedAt: v.float64(),
+  // Optional source tag. Mobile callers omit it (rows default to MOBILE on
+  // read). Samsara backup-ingest stamps 'SAMSARA'. Stripped before partner
+  // API serialization — internal-only.
+  source: v.optional(v.union(v.literal('MOBILE'), v.literal('SAMSARA'))),
 });
 
-type PingInput = {
+export type PingInput = {
   driverId: Id<'drivers'>;
   loadId?: Id<'loadInformation'>;
   sessionId?: Id<'driverSessions'>;
@@ -54,6 +58,7 @@ type PingInput = {
   heading?: number;
   trackingType: 'LOAD_ROUTE' | 'SESSION_ROUTE';
   recordedAt: number;
+  source?: 'MOBILE' | 'SAMSARA';
 };
 
 /**
@@ -98,7 +103,7 @@ type PingInput = {
  * Invariant: inserted + duplicates + permanentlyRejected + transientlyRejected
  *            === pings.length (modulo bugs — telemetry surfaces drift).
  */
-type IngestOutcome = {
+export type IngestOutcome = {
   inserted: number;
   duplicates: number;
   permanentlyRejected: number;
@@ -133,7 +138,7 @@ const LAST_PING_DEBOUNCE_MS = 15_000;
 // and keeps PostHog event volume bounded at scale.
 const PING_INGESTED_SAMPLE_RATE_FALLBACK = 0.01;
 
-async function ingestBatch(
+export async function ingestBatch(
   ctx: MutationCtx,
   pings: PingInput[],
   orgId: string
@@ -355,6 +360,7 @@ async function ingestBatch(
       trackingType: loc.trackingType,
       recordedAt: loc.recordedAt,
       createdAt: now,
+      source: loc.source,
     });
     inserted++;
 

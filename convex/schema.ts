@@ -1,8 +1,45 @@
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { scheduleRuleValidator } from './lib/validators';
+import {
+  chargeComponents,
+  fuelSurchargeCalculators,
+  payeeBankAccounts,
+  payeeTaxStatus,
+  payProfiles,
+  payRules,
+  payeeProfileAssignments,
+  recurringItemDefinitions,
+  payItems,
+  settlements,
+  settlementDisputes,
+  payoutBatches,
+  taxEngineRuns,
+  glExportRuns,
+} from './payEngine/schema';
 
 export default defineSchema({
+  // ==========================================================================
+  // PAY ENGINE (new architecture) — see convex/payEngine/schema.ts
+  // Lives alongside legacy rateProfiles/rateRules/loadPayables/driverSettlements
+  // etc. during migration. New tables that would collide with legacy names use
+  // the `pay*` prefix (payProfiles, payRules); other names are unique already.
+  // ==========================================================================
+  chargeComponents,
+  fuelSurchargeCalculators,
+  payeeBankAccounts,
+  payeeTaxStatus,
+  payProfiles,
+  payRules,
+  payeeProfileAssignments,
+  recurringItemDefinitions,
+  payItems,
+  settlements,
+  settlementDisputes,
+  payoutBatches,
+  taxEngineRuns,
+  glExportRuns,
+
   // Organization settings for multi-tenant configuration
   // Unified for both Brokers and Carriers (distinguished by orgType)
   organizations: defineTable({
@@ -24,6 +61,11 @@ export default defineSchema({
     industry: v.optional(v.string()),
     domain: v.optional(v.string()),
     logoStorageId: v.optional(v.id('_storage')), // Company Logo from Convex Storage
+
+    // PAY ENGINE — default currency for new pay-engine entities (profiles,
+    // settlements, payItems). Fallback when no more specific source applies.
+    // Optional for backward compatibility; treat as 'USD' when missing.
+    defaultCurrency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
 
     // Billing Information
     billingEmail: v.string(),
@@ -497,12 +539,14 @@ export default defineSchema({
     email: v.string(),
     phone: v.string(),
     dateOfBirth: v.optional(v.string()), // Date of birth (YYYY-MM-DD)
+    citizenship: v.optional(v.string()),
 
     // License Information (non-sensitive)
     licenseNumber: v.optional(v.string()), // Driver's license number
     licenseState: v.string(),
     licenseExpiration: v.string(),
     licenseClass: v.string(), // Class A, B, C
+    gender: v.optional(v.string()), // M / F / X — appears on the license
 
     // Medical
     medicalExpiration: v.optional(v.string()),
@@ -634,12 +678,18 @@ export default defineSchema({
     lastLocationLat: v.optional(v.float64()),
     lastLocationLng: v.optional(v.float64()),
     lastLocationUpdatedAt: v.optional(v.float64()),
+
+    // Telematics — opt-in mapping to the org's Samsara fleet. When present,
+    // the Samsara backup-ingest cron attributes GPS pings for this Samsara
+    // vehicle to this truck (and from there to the open driverSession).
+    samsaraVehicleId: v.optional(v.string()),
   })
     .index('by_organization', ['organizationId'])
     .index('by_unit_id', ['unitId'])
     .index('by_vin', ['vin'])
     .index('by_status', ['status'])
-    .index('by_deleted', ['isDeleted']),
+    .index('by_deleted', ['isDeleted'])
+    .index('by_samsara_vehicle', ['samsaraVehicleId']),
 
   trailers: defineTable({
     // Identity & Basic Info
@@ -1044,6 +1094,61 @@ export default defineSchema({
     .index('by_organization', ['workosOrgId'])
     .index('by_provider', ['workosOrgId', 'provider']),
 
+  /**
+   * fourKitesPushState — per-load cursor for the Dispatcher Update push.
+   * Hot-write companion to loadInformation so the 60s push cron doesn't
+   * churn the load row's reactive subscriptions. One row per FourKites-
+   * sourced load that has ever been pushed.
+   *
+   * lastPushedRecordedAt is the dedup key: we only push a load again when
+   * the latest driverLocations.recordedAt for that load exceeds this value.
+   */
+  fourKitesPushState: defineTable({
+    loadId: v.id('loadInformation'),
+    workosOrgId: v.string(),
+
+    // Dedup against pushing the same ping twice.
+    lastPushedAt: v.optional(v.number()),
+    lastPushedRecordedAt: v.optional(v.number()),
+
+    // Observability — last successful FourKites requestId + error trail.
+    lastRequestId: v.optional(v.string()),
+    lastError: v.optional(v.string()),
+    lastErrorAt: v.optional(v.number()),
+    consecutiveFailures: v.optional(v.number()),
+
+    updatedAt: v.number(),
+  })
+    .index('by_load', ['loadId'])
+    .index('by_org', ['workosOrgId']),
+
+  /**
+   * samsaraSyncState — hot-write per-integration runtime state for the
+   * Samsara GPS backup-ingest cron (polled every ~10s). Kept separate from
+   * orgIntegrations so that cursor updates don't churn the credential row
+   * (and any reactive subscriptions to it). One row per Samsara
+   * orgIntegrations row.
+   */
+  samsaraSyncState: defineTable({
+    integrationId: v.id('orgIntegrations'),
+    workosOrgId: v.string(),
+
+    // Cursor returned by the previous /fleet/vehicles/stats/feed call.
+    // Undefined on first poll; cleared back to undefined if Samsara returns
+    // a 4xx that indicates the cursor is stale.
+    pollCursor: v.optional(v.string()),
+
+    // Observability — last successful poll, last error, ingest counts.
+    lastPolledAt: v.optional(v.number()),
+    lastTickPingsIngested: v.optional(v.number()),
+    lastErrorAt: v.optional(v.number()),
+    lastErrorMessage: v.optional(v.string()),
+
+    updatedAt: v.number(),
+  })
+    .index('by_integration', ['integrationId'])
+    .index('by_org', ['workosOrgId']),
+
   loadInformation: defineTable({
     // External Integration
     externalSource: v.optional(v.string()), // null for manual, 'FOURKITES' for FourKites
@@ -1136,6 +1241,26 @@ export default defineSchema({
     primaryCarrierId: v.optional(v.string()),
     isHazmat: v.optional(v.boolean()), // Triggers ATTR_HAZMAT pay rule
     requiresTarp: v.optional(v.boolean()), // Triggers ATTR_TARP pay rule
+    isOversize: v.optional(v.boolean()), // Triggers ATTR_OVERSIZE pay rule
+
+    // PAY ENGINE — load-level pay profile override. Higher precedence than
+    // payeeProfileAssignments, lower than leg.payProfileOverrideId. Customer
+    // contract drives this (e.g. Davis-Bacon-tagged load forces the prevailing
+    // wage profile regardless of who drives it).
+    payProfileOverrideId: v.optional(v.id('payProfiles')),
+
+    // PAY ENGINE — contract tag for JURISDICTION-strategy profile selection.
+    // Examples: "DAVIS_BACON", "UNION_LOCAL_70", "PREVAILING_WAGE_CA".
+    contractTag: v.optional(v.string()),
+
+    // PAY ENGINE — multi-state work allocation for tax withholding. Used when
+    // the load's work spans multiple states (e.g. CA→NV→AZ). Each entry's
+    // portionBps reflects share of work performed; entries sum to 10000.
+    // If absent, calc falls back to leg.workState (single state).
+    workStateAllocation: v.optional(v.array(v.object({
+      state: v.string(),       // e.g. "US-CA"
+      portionBps: v.number(),  // basis points; entries sum to 10000
+    }))),
 
     // Denormalized First Stop Date (for efficient date range filtering)
     // Source of truth: loadStops where sequenceNumber = 1, windowBeginDate
@@ -1598,6 +1723,18 @@ export default defineSchema({
     autoCarryover: v.boolean(), // Auto-move held items to next period
     includeStandaloneAdjustments: v.boolean(), // Pull in unassigned bonuses/deductions
 
+    // === PAY ENGINE (new architecture) ===
+    // Plan currency — must match settlements + payItems produced under this plan.
+    // Optional for backward compat; new pay engine requires this set.
+    currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+    // Policy for when load data changes after its period is closed/verified.
+    // CASCADE_TO_NEXT is the safe default and recommended for new orgs.
+    amendmentPolicy: v.optional(v.union(
+      v.literal('REJECT_LATE_CHANGES'),  // amendments after period close are blocked
+      v.literal('CASCADE_TO_NEXT'),       // reversal + replacement on next settlement
+      v.literal('REOPEN_ALLOWED'),        // explicit reopen with admin permission
+    )),
+
     // === Metadata ===
     isActive: v.boolean(),
     createdAt: v.float64(),
@@ -1620,6 +1757,29 @@ export default defineSchema({
     carrierId: v.optional(v.string()),
     truckId: v.optional(v.id('trucks')),
     trailerId: v.optional(v.id('trailers')),
+
+    // PAY ENGINE — team-driver support. When present, pay calc fans out one
+    // payItem per entry with quantity scaled by splitBps/10000.
+    // Single-driver legs use driverId only and leave this undefined.
+    // splitBps across entries must sum to 10000 (100%).
+    drivers: v.optional(v.array(v.object({
+      driverId: v.id('drivers'),
+      splitBps: v.number(),
+      role: v.optional(v.union(
+        v.literal('CO_DRIVER'),
+        v.literal('TRAINEE'),
+        v.literal('TRAINER'),
+      )),
+    }))),
+
+    // PAY ENGINE — leg-level pay profile override (highest precedence in
+    // profile selection). Set by operations for one-off exceptions.
+    payProfileOverrideId: v.optional(v.id('payProfiles')),
+
+    // PAY ENGINE — primary work jurisdiction for this leg. Used by
+    // JURISDICTION profile-selection strategy and for tax allocation.
+    workState: v.optional(v.string()),   // e.g. "US-CA"
+    workCountry: v.optional(v.string()), // e.g. "US"
 
     sequence: v.float64(), // 1, 2, 3...
 
@@ -2081,6 +2241,11 @@ export default defineSchema({
     // Timestamps
     recordedAt: v.float64(), // Device timestamp (when GPS captured)
     createdAt: v.float64(), // Server timestamp (when synced)
+
+    // Optional source tag. Undefined on legacy rows (treat as MOBILE on read).
+    // Internal-only — NEVER serialized in the partner API. Used for analytics
+    // (mobile vs. telematics-backup coverage, gap detection) and debugging.
+    source: v.optional(v.union(v.literal('MOBILE'), v.literal('SAMSARA'))),
   })
     .index('by_driver_time', ['driverId', 'recordedAt'])
     .index('by_org_time', ['organizationId', 'recordedAt'])
@@ -2172,6 +2337,10 @@ export default defineSchema({
     .index('by_driver_status', ['driverId', 'status'])
     .index('by_org_active', ['organizationId', 'status'])
     .index('by_org_started', ['organizationId', 'startedAt'])
+    // Samsara backup ingest: find the currently-open session for a truck.
+    // Mirrors the by_driver_status convention used elsewhere in this table —
+    // status='active' is the canonical "session is open" predicate.
+    .index('by_truck_status', ['truckId', 'status'])
     // Powers the daily auto-timeout cron. Scans only active sessions sorted
     // by startedAt so we can short-circuit the moment we hit one inside the
     // 18-hour window (status='active' first → tightest selectivity).

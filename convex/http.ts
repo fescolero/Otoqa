@@ -54,13 +54,6 @@ async function sha256(input: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Rate limit tier to requests/min mapping
-const RATE_LIMITS: Record<string, number> = {
-  low: 60,
-  medium: 300,
-  high: 1000,
-};
-
 interface AuthContext {
   keyId: string;
   workosOrgId: string;
@@ -115,28 +108,25 @@ async function authenticateRequest(
     );
   }
 
-  // Determine rate limit
-  const rateLimitPerMin = keyData.rateLimitTier === 'custom'
-    ? (keyData.customRateLimit ?? 300)
-    : (RATE_LIMITS[keyData.rateLimitTier] ?? 300);
-
-  // Rate limit enforcement using sliding window via audit log count
-  // Check recent request count for this key within the last minute
-  const oneMinuteAgo = Date.now() - 60_000;
-  const recentRequestCount = await ctx.runQuery(
-    internal.externalTrackingAuth.countRecentRequests,
-    { keyId: keyData.keyId, since: oneMinuteAgo }
+  // Rate limit enforcement via @convex-dev/rate-limiter token bucket.
+  // Sharded per tier — high tier (1000/min) gets 10 shards so OCC retries
+  // stay flat under concurrent partner traffic. Replaces the previous
+  // audit-log scan which was O(requests-in-last-minute) per call.
+  const rl = await ctx.runMutation(
+    internal.externalTrackingAuth.consumeRateLimit,
+    { keyId: keyData.keyId, tier: keyData.rateLimitTier },
   );
+  const rateLimitPerMin = rl.limit;
 
-  if (recentRequestCount >= rateLimitPerMin) {
-    const retryAfter = '60';
+  if (!rl.ok) {
+    const retryAfterSec = Math.max(1, Math.ceil(rl.retryAfter / 1000));
     return errorResponse(
       'RATE_LIMITED',
       `Rate limit exceeded. Limit: ${rateLimitPerMin} requests/min`,
       429,
       requestId,
       {
-        'Retry-After': retryAfter,
+        'Retry-After': retryAfterSec.toString(),
         'X-RateLimit-Limit': rateLimitPerMin.toString(),
         'X-RateLimit-Remaining': '0',
       }
@@ -304,6 +294,7 @@ http.route({
       const since = url.searchParams.get('since');
       const until = url.searchParams.get('until');
       const limit = url.searchParams.get('limit');
+      const downsampleSecondsRaw = url.searchParams.get('downsampleSeconds');
 
       // Validate date parameters
       const sinceTs = since ? new Date(since).getTime() : undefined;
@@ -319,6 +310,15 @@ http.route({
       if (limit && (parsedPosLimit === undefined || isNaN(parsedPosLimit) || parsedPosLimit < 1)) {
         return errorResponse('INVALID_PARAMETER', 'limit must be a positive integer', 400, requestId);
       }
+      // Validate downsampleSeconds (0 = raw cadence, max 600s)
+      let downsampleSeconds: number | undefined;
+      if (downsampleSecondsRaw !== null) {
+        const parsed = parseInt(downsampleSecondsRaw);
+        if (isNaN(parsed) || parsed < 0 || parsed > 600) {
+          return errorResponse('INVALID_PARAMETER', 'downsampleSeconds must be an integer between 0 and 600', 400, requestId);
+        }
+        downsampleSeconds = parsed;
+      }
 
       const result = await ctx.runQuery(internal.externalTracking.getPositions, {
         loadId: load.loadId,
@@ -326,6 +326,7 @@ http.route({
         since: sinceTs,
         until: untilTs,
         limit: parsedPosLimit ? Math.min(parsedPosLimit, 1000) : undefined,
+        downsampleSeconds,
       });
 
       // ETag based on latest recordedAt

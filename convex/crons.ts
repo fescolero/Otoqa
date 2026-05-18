@@ -130,6 +130,39 @@ crons.interval(
 );
 
 // ==========================================
+// FOURKITES DISPATCHER PUSH
+// ==========================================
+
+// ✅ Push GPS updates to FourKites Dispatcher Update API (every 60 seconds)
+// One outbound POST per org per tick (batched, up to 100 loads per request).
+// FourKites's rate limit is 60 req/min per key — at most a couple req/min
+// per org under realistic load. Mirror of the cron model used by Samsara
+// ingest, but outbound. See convex/fourKitesDispatcherPush.ts.
+crons.interval(
+  'fourkites-dispatcher-push',
+  { seconds: 60 },
+  internal.fourKitesDispatcherPush.pushFourKitesUpdates,
+  {},
+);
+
+// ==========================================
+// SAMSARA GPS BACKUP INGEST
+// ==========================================
+
+// ✅ Poll Samsara Vehicle Stats GPS feed (every 10 seconds)
+// Backup GPS source for trucks whose mobile app has gone silent mid-shift.
+// Cursor-paginated per integration; sequential per tick. Samsara's
+// endpoint rate limit is 50 req/sec per org — at 10s × <100 integrations
+// we use ~0.1 req/sec per org, two orders of magnitude of headroom.
+// See convex/samsaraIngest.ts for the orchestration.
+crons.interval(
+  'samsara-gps-poll',
+  { seconds: 10 },
+  internal.samsaraIngest.pollAllIntegrations,
+  {},
+);
+
+// ==========================================
 // FACET SYSTEM MAINTENANCE
 // ==========================================
 
