@@ -19,6 +19,15 @@ import type { Id } from './_generated/dataModel';
 const ORG = 'org_samsara_test';
 const USER_SUBJECT = 'user_samsara_test';
 
+// Ping timestamps anchored to "now" so the SKEW_PAST_MS guard
+// (48h) in driverLocations.ingestBatch never rejects them
+// regardless of when the test runs. Two pings 30s apart, both
+// within the last hour.
+const RECENT_PING_MS = Date.now() - 60 * 60 * 1000; // 1h ago
+const RECENT_PING_ISO = new Date(RECENT_PING_MS).toISOString();
+const RECENT_PING_PLUS_30S_MS = RECENT_PING_MS + 30 * 1000;
+const RECENT_PING_PLUS_30S_ISO = new Date(RECENT_PING_PLUS_30S_MS).toISOString();
+
 interface SeededWorld {
   customerId: Id<'customers'>;
   driverId: Id<'drivers'>;
@@ -93,6 +102,10 @@ async function seedWorld(
     updatedAt: now,
   });
 
+  // Stop window is "today" relative to the test run, so the leg's
+  // pickupAppt anchor lands in a stable position relative to the
+  // ping timestamps (which are also relative — see RECENT_PING_ISO below).
+  const todayIso = new Date(now).toISOString().slice(0, 10);
   const loadStopId = await ctx.db.insert('loadStops', {
     loadId,
     internalId: 'LD-SAM-1',
@@ -102,9 +115,9 @@ async function seedWorld(
     address: '1 Pickup St',
     city: 'Pickupville',
     state: 'CA',
-    windowBeginDate: '2026-05-17',
+    windowBeginDate: todayIso,
     windowBeginTime: '09:00:00-07:00',
-    windowEndDate: '2026-05-17',
+    windowEndDate: todayIso,
     windowEndTime: '11:00:00-07:00',
     workosOrgId: ORG,
     createdBy: USER_SUBJECT,
@@ -162,14 +175,14 @@ describe('processVehicleStats', () => {
                 longitude: -87.658994,
                 headingDegrees: 92.4,
                 speedMilesPerHour: 60,
-                time: '2026-05-17T16:00:00.000Z',
+                time: RECENT_PING_ISO,
               },
               {
                 latitude: 41.825,
                 longitude: -87.650,
                 headingDegrees: 88,
                 speedMilesPerHour: 65,
-                time: '2026-05-17T16:00:30.000Z',
+                time: RECENT_PING_PLUS_30S_ISO,
               },
             ],
           },
@@ -205,8 +218,8 @@ describe('processVehicleStats', () => {
     expect(rows[1].speed).toBeCloseTo(65 * 0.44704, 4);
 
     // recordedAt parsed from RFC 3339
-    expect(rows[0].recordedAt).toBe(Date.parse('2026-05-17T16:00:00.000Z'));
-    expect(rows[1].recordedAt).toBe(Date.parse('2026-05-17T16:00:30.000Z'));
+    expect(rows[0].recordedAt).toBe(RECENT_PING_MS);
+    expect(rows[1].recordedAt).toBe(RECENT_PING_PLUS_30S_MS);
   });
 
   it('skips vehicles not mapped to any Otoqa truck', async () => {
@@ -229,7 +242,7 @@ describe('processVehicleStats', () => {
                 latitude: 1,
                 longitude: 2,
                 speedMilesPerHour: 50,
-                time: '2026-05-17T16:00:00.000Z',
+                time: RECENT_PING_ISO,
               },
             ],
           },
@@ -269,7 +282,7 @@ describe('processVehicleStats', () => {
                 latitude: 41.0,
                 longitude: -87.0,
                 speedMilesPerHour: 30,
-                time: '2026-05-17T16:00:00.000Z',
+                time: RECENT_PING_ISO,
               },
             ],
           },
