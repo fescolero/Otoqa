@@ -446,6 +446,96 @@ export const getPositions = internalQuery({
 });
 
 /**
+ * Per-load latest-position resolver, shared by getLatestPosition (single)
+ * and getLatestPositionsForLoads (batched). Pure ctx.db reads — safe to
+ * call N times in parallel from one query.
+ */
+async function resolveLatestPositionForLoad(
+  ctx: { db: any },
+  loadId: string,
+  isSandbox: boolean,
+): Promise<any | null> {
+  let position;
+  if (isSandbox) {
+    position = await ctx.db
+      .query('sandboxPositions')
+      .withIndex('by_load', (q: any) =>
+        q.eq('sandboxLoadId', loadId as Id<'sandboxLoads'>)
+      )
+      .order('desc')
+      .first();
+  } else {
+    const loadIdId = loadId as Id<'loadInformation'>;
+
+    const loadTaggedLatest = await ctx.db
+      .query('driverLocations')
+      .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
+      .order('desc')
+      .first();
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
+      .collect();
+
+    const sessionLatestArr = await Promise.all(
+      legs.map(async (leg: any) => {
+        let sessionId: Id<'driverSessions'> | null = leg.sessionId ?? null;
+        if (!sessionId && leg.driverId) {
+          const openSession = await ctx.db
+            .query('driverSessions')
+            .withIndex('by_driver_status', (q: any) =>
+              q.eq('driverId', leg.driverId!).eq('status', 'active'),
+            )
+            .first();
+          sessionId = openSession?._id ?? null;
+        }
+        if (!sessionId) return null;
+
+        let pickupAnchorMs: number | null = leg.scheduledStartMs ?? null;
+        if (pickupAnchorMs === null) {
+          const startStop = await ctx.db.get(leg.startStopId);
+          if (startStop) {
+            pickupAnchorMs = parseStopDateTime(
+              startStop.windowBeginDate,
+              startStop.windowBeginTime,
+            );
+          }
+        }
+        const approachFloor =
+          pickupAnchorMs !== null ? pickupAnchorMs - APPROACH_WINDOW_MS : 0;
+        return ctx.db
+          .query('driverLocations')
+          .withIndex('by_session_time', (q: any) =>
+            q.eq('sessionId', sessionId!).gte('recordedAt', approachFloor),
+          )
+          .order('desc')
+          .first();
+      }),
+    );
+
+    const candidates = [loadTaggedLatest, ...sessionLatestArr].filter(
+      (p): p is NonNullable<typeof p> => p !== null && p !== undefined,
+    );
+    position = candidates.reduce<typeof candidates[number] | undefined>(
+      (best, cur) => (best === undefined || cur.recordedAt > best.recordedAt ? cur : best),
+      undefined,
+    );
+  }
+
+  if (!position) return null;
+
+  return {
+    latitude: round(position.latitude, 6)!,
+    longitude: round(position.longitude, 6)!,
+    speed: round(position.speed, 2),
+    heading: round(position.heading, 2),
+    accuracy: round(position.accuracy, 2),
+    recordedAt: new Date(position.recordedAt).toISOString(),
+  };
+}
+
+/**
  * Get the latest position for a load.
  */
 export const getLatestPosition = internalQuery({
@@ -455,94 +545,43 @@ export const getLatestPosition = internalQuery({
   },
   returns: v.union(externalPositionValidator, v.null()),
   handler: async (ctx, args) => {
-    let position;
-    if (args.isSandbox) {
-      position = await ctx.db
-        .query('sandboxPositions')
-        .withIndex('by_load', (q: any) =>
-          q.eq('sandboxLoadId', args.loadId as Id<'sandboxLoads'>)
-        )
-        .order('desc')
-        .first();
-    } else {
-      // Production path: latest of (load-tagged latest, session-tagged
-      // latest across all legs' sessions). Same union pattern as getPositions
-      // but reduced to a single max — reads at most legCount + 1 candidate
-      // pings rather than the full history.
-      const loadIdId = args.loadId as Id<'loadInformation'>;
+    return resolveLatestPositionForLoad(ctx, args.loadId, args.isSandbox);
+  },
+});
 
-      const loadTaggedLatest = await ctx.db
-        .query('driverLocations')
-        .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
-        .order('desc')
-        .first();
-
-      const legs = await ctx.db
-        .query('dispatchLegs')
-        .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
-        .collect();
-
-      // Apply the same approach-window floor as getPositions so /latest
-      // doesn't expose a session ping from before pickupAppt - APPROACH_WINDOW.
-      // Mirror getPositions' pre-check-in fallback: if a leg has no sessionId
-      // stamped but does have a driverId, look up that driver's open session.
-      const sessionLatestArr = await Promise.all(
-        legs.map(async (leg) => {
-          let sessionId: Id<'driverSessions'> | null = leg.sessionId ?? null;
-          if (!sessionId && leg.driverId) {
-            const openSession = await ctx.db
-              .query('driverSessions')
-              .withIndex('by_driver_status', (q: any) =>
-                q.eq('driverId', leg.driverId!).eq('status', 'active'),
-              )
-              .first();
-            sessionId = openSession?._id ?? null;
-          }
-          if (!sessionId) return null;
-
-          let pickupAnchorMs: number | null = leg.scheduledStartMs ?? null;
-          if (pickupAnchorMs === null) {
-            const startStop = await ctx.db.get(leg.startStopId);
-            if (startStop) {
-              pickupAnchorMs = parseStopDateTime(
-                startStop.windowBeginDate,
-                startStop.windowBeginTime,
-              );
-            }
-          }
-          const approachFloor =
-            pickupAnchorMs !== null
-              ? pickupAnchorMs - APPROACH_WINDOW_MS
-              : 0;
-          return ctx.db
-            .query('driverLocations')
-            .withIndex('by_session_time', (q: any) =>
-              q.eq('sessionId', sessionId!).gte('recordedAt', approachFloor),
-            )
-            .order('desc')
-            .first();
-        }),
-      );
-
-      const candidates = [loadTaggedLatest, ...sessionLatestArr].filter(
-        (p): p is NonNullable<typeof p> => p !== null && p !== undefined,
-      );
-      position = candidates.reduce<typeof candidates[number] | undefined>(
-        (best, cur) => (best === undefined || cur.recordedAt > best.recordedAt ? cur : best),
-        undefined,
-      );
-    }
-
-    if (!position) return null;
-
-    return {
-      latitude: round(position.latitude, 6)!,
-      longitude: round(position.longitude, 6)!,
-      speed: round(position.speed, 2),
-      heading: round(position.heading, 2),
-      accuracy: round(position.accuracy, 2),
-      recordedAt: new Date(position.recordedAt).toISOString(),
-    };
+/**
+ * Batched variant of getLatestPosition — resolves N loads in one query
+ * roundtrip. The caller (notably the FourKites push cron) was previously
+ * doing one ctx.runQuery per load from a Node action, eating ~7ms × N in
+ * Node↔V8 RPC overhead. By moving the iteration inside a single V8 query
+ * we collapse that to one roundtrip; per-load reads happen in parallel
+ * via Promise.all.
+ *
+ * Caller must chunk to keep the per-query read budget bounded (Convex
+ * limit: 16k docs per query). At ~5–10 reads per load, a chunk size of
+ * 200 stays under 2k reads in steady state.
+ */
+export const getLatestPositionsForLoads = internalQuery({
+  args: {
+    loadIds: v.array(v.string()),
+    isSandbox: v.boolean(),
+  },
+  returns: v.array(
+    v.object({
+      loadId: v.string(),
+      position: v.union(externalPositionValidator, v.null()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const positions = await Promise.all(
+      args.loadIds.map((loadId) =>
+        resolveLatestPositionForLoad(ctx, loadId, args.isSandbox),
+      ),
+    );
+    return args.loadIds.map((loadId, i) => ({
+      loadId,
+      position: positions[i],
+    }));
   },
 });
 

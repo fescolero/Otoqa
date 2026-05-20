@@ -18,7 +18,7 @@
 export interface DispatcherIdentifierKey {
   identifier: string;
   rawIdentifier?: string;
-  identifierType: string; // 'BillOfLading' for V1 per the user's call
+  identifierType: string; // FK-standard: loadNumber | proNumber | loadReferenceNumber | loadTrackingNumber | carrierReferenceNumber
 }
 
 export interface DispatcherLocationUpdate {
@@ -65,9 +65,9 @@ export type DispatcherPushResult =
   | { kind: 'validation_failed'; status: number; message: string }
   // Hit the 60 req/min ceiling. Honor Retry-After if present; otherwise
   // back off until next cron tick.
-  | { kind: 'rate_limited'; retryAfterSec: number }
+  | { kind: 'rate_limited'; retryAfterSec: number; responseBody?: string }
   // 5xx / network. Retry next cron tick naturally — no state change.
-  | { kind: 'transient_error'; status?: number; message: string };
+  | { kind: 'transient_error'; status?: number; message: string; responseBody?: string };
 
 const DISPATCHER_PATH = '/load/update/dispatcher-api/async';
 
@@ -109,9 +109,11 @@ export async function postDispatcherUpdates(args: {
   if (response.status === 429) {
     const header = response.headers.get('Retry-After');
     const sec = header ? parseInt(header, 10) : 60;
+    const body = await safeReadError(response);
     return {
       kind: 'rate_limited',
       retryAfterSec: Number.isFinite(sec) ? sec : 60,
+      responseBody: body,
     };
   }
   if (response.status >= 400 && response.status < 500) {
@@ -120,7 +122,12 @@ export async function postDispatcherUpdates(args: {
   }
   if (response.status >= 500) {
     const message = await safeReadError(response);
-    return { kind: 'transient_error', status: response.status, message };
+    return {
+      kind: 'transient_error',
+      status: response.status,
+      message,
+      responseBody: message,
+    };
   }
 
   // 2xx — FourKites returns 202 on accept.
@@ -141,6 +148,7 @@ export async function postDispatcherUpdates(args: {
       kind: 'transient_error',
       status: response.status,
       message: 'Malformed Dispatcher success body (missing requestId)',
+      responseBody: JSON.stringify(parsed).slice(0, 500),
     };
   }
 
@@ -152,7 +160,14 @@ export async function postDispatcherUpdates(args: {
 // Exported separately so they can be unit-tested without the HTTP layer.
 // ============================================
 
-const IDENTIFIER_TYPE_DEFAULT = 'BillOfLading';
+// Per FourKites docs the only identifierTypes that get matching priority
+// are: loadNumber, proNumber, loadReferenceNumber, loadTrackingNumber,
+// carrierReferenceNumber. Anything outside that set is treated as
+// informational and silently degrades to the no-billToCode default
+// (match against FK Load Number across the carrier's whole network).
+// We default to 'loadNumber' because that aligns with what we receive
+// during inbound sync (shipment.loadNumber → load.orderNumber).
+const IDENTIFIER_TYPE_DEFAULT = 'loadNumber';
 
 /**
  * Build a single DispatcherUpdate for a load's latest GPS ping.
