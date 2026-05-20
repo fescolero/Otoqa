@@ -307,10 +307,25 @@ export const recalculate = mutation({
       throw new Error('Cannot recalculate carrier pay: no carrier assigned');
     }
 
-    // Trigger recalculation
+    // Trigger legacy recalculation (source of truth in v1)
     await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
       legId: args.legId,
       userId,
+    });
+
+    // Cascade: also fire the new pay engine for shadow validation. Scheduled
+    // (not awaited) so a missing payProfile assignment on the new engine
+    // never breaks the legacy recalc. Once we cut over to payItems as the
+    // source of truth, this becomes the primary call and the legacy one
+    // drops away.
+    //
+    // Latest-wins coalesce: see schema.ts:dispatchLegs.latestRecalcRequestedAt.
+    const recalcRequestedAt = Date.now();
+    await ctx.db.patch(args.legId, { latestRecalcRequestedAt: recalcRequestedAt });
+    await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForLeg.calculatePayForLeg, {
+      legId: args.legId,
+      userId,
+      requestedAt: recalcRequestedAt,
     });
 
     return args.legId;

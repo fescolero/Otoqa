@@ -440,6 +440,24 @@ export const calculateCarrierPay = internalMutation({
       await ctx.db.patch(leg.loadId, { primaryCarrierPartnershipId: carrierPartnershipId });
     }
 
+    // 10. Cascade to the new pay engine — mirrors the driver cascade in
+    //     driverPayCalculation.calculateDriverPay. Scheduled (not awaited)
+    //     so a missing carrier payProfileAssignment on the new engine
+    //     can't break legacy carrier pay.
+    //
+    //     Latest-wins coalesce: see schema.ts:dispatchLegs.latestRecalcRequestedAt.
+    //     Patching this BEFORE scheduling guarantees that if driver pay
+    //     cascade fires concurrently for the same leg, only the
+    //     latest-requested calc actually does work; the older job exits
+    //     early in calculatePayForLeg.
+    const recalcRequestedAt = Date.now();
+    await ctx.db.patch(args.legId, { latestRecalcRequestedAt: recalcRequestedAt });
+    await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForLeg.calculatePayForLeg, {
+      legId: args.legId,
+      userId: args.userId,
+      requestedAt: recalcRequestedAt,
+    });
+
     return {
       success: true,
       total: totalPay,
