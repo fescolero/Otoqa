@@ -45,6 +45,17 @@ crons.cron(
   {},
 );
 
+// ✅ Prune stale driverLatestLocation cache rows daily
+// Removes denormalized cache rows for drivers who haven't pinged in 30+
+// days. ingestBatch will re-insert on the next ping if a stale driver
+// returns. Keeps the cache table bounded against driver churn.
+crons.cron(
+  'prune-stale-driver-latest-location',
+  '30 3 * * *', // Daily at 3:30 AM UTC (after archive-old-locations)
+  internal.driverLocations.pruneStaleDriverLatestLocation,
+  {},
+);
+
 // ==========================================
 // AUTO-ASSIGNMENT & RECURRING LOADS
 // ==========================================

@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import {
   query,
   mutation,
+  internalAction,
   internalQuery,
   internalMutation,
   MutationCtx,
@@ -124,13 +125,20 @@ export type IngestOutcome = {
 const SKEW_FUTURE_MS = 5 * 60 * 1000;
 const SKEW_PAST_MS = 48 * 60 * 60 * 1000;
 
-// Phase 1: debounce threshold for driverSessions.lastPingAt writes. A
-// session patched on every batch would churn reactive query subscriptions
-// for dispatchers watching the session row; 15s cuts write rate by ~15×
-// for a driver reporting every second while keeping the freshness probe
-// accurate enough for the fcmWake.sweep cron (which trips at 2 min of
-// silence).
-const LAST_PING_DEBOUNCE_MS = 15_000;
+// Debounce threshold for driverSessions.lastPingAt writes. A session
+// patched on every batch would churn reactive query subscriptions for
+// dispatchers watching the session row AND collide with the parallel
+// writer (mobile + Samsara ingest paths both flow through ingestBatch).
+//
+// 60s cuts write rate by ~60× for a driver reporting every second while
+// keeping the freshness probe accurate enough for the fcmWake.sweep cron
+// (which trips at 2 min of silence — debounce window + threshold = 3 min
+// worst-case-to-detect, well within the wake intent).
+//
+// History: was 15s; bumped to 60s after observing OCC retries between
+// samsaraIngestMutations:processVehicleStats and
+// driverLocations:batchInsertLocations on the lastPingAt patch.
+const LAST_PING_DEBOUNCE_MS = 60_000;
 
 // Phase 1: fallback sample rate for the ping_ingested server-side emit
 // when the `ping_ingested_sample_rate` flag is missing or malformed. 1%
@@ -346,6 +354,12 @@ export async function ingestBatch(
   // (no sessionId) are excluded — the FCM wake path only targets sessions.
   const insertedMaxRecordedAtBySession = new Map<Id<'driverSessions'>, number>();
 
+  // Per-driver "newest ping seen in this batch" — drives the
+  // driverLatestLocation upsert at end-of-batch. Tracks the whole ping
+  // (not just recordedAt) because the upsert copies position + context
+  // fields off the winning ping.
+  const newestPingByDriver = new Map<Id<'drivers'>, PingInput>();
+
   const insertPing = async (loc: PingInput) => {
     await ctx.db.insert('driverLocations', {
       driverId: loc.driverId,
@@ -369,6 +383,14 @@ export async function ingestBatch(
       if (loc.recordedAt > prev) {
         insertedMaxRecordedAtBySession.set(loc.sessionId, loc.recordedAt);
       }
+    }
+
+    // Track newest ping per driver for the driverLatestLocation upsert
+    // below. Captures the whole ping so the upsert has all the position
+    // + context fields available without a re-read.
+    const prevNewest = newestPingByDriver.get(loc.driverId);
+    if (!prevNewest || loc.recordedAt > prevNewest.recordedAt) {
+      newestPingByDriver.set(loc.driverId, loc);
     }
 
     // Sampled ping_ingested emit. Sole server-side source of the
@@ -505,6 +527,49 @@ export async function ingestBatch(
     }
   }
 
+  // Denormalized "latest ping per driver" upsert. Powers the dispatcher
+  // helicopter-view reactive subscription so it doesn't have to scan the
+  // full driverLocations history (~9k rows per org per 30min window) on
+  // every new ping. One read + one patch/insert per driver per batch
+  // (NOT per ping) — negligible compared to the per-ping write rate.
+  //
+  // recordedAt-guard: a stale ping (older than what we have stored) never
+  // overwrites a fresher one. Concurrent batches for the same driver
+  // (mobile + Samsara) OCC on this row; Convex's OCC retry re-reads, sees
+  // the newer recordedAt, and the loser correctly no-ops.
+  for (const [driverId, newest] of newestPingByDriver) {
+    const existing = await ctx.db
+      .query('driverLatestLocation')
+      .withIndex('by_driver', (q) => q.eq('driverId', driverId))
+      .first();
+
+    if (existing && existing.recordedAt >= newest.recordedAt) {
+      // Stored ping is at least as fresh — nothing to do.
+      continue;
+    }
+
+    const row = {
+      driverId,
+      organizationId: orgId,
+      latitude: newest.latitude,
+      longitude: newest.longitude,
+      accuracy: newest.accuracy,
+      speed: newest.speed,
+      heading: newest.heading,
+      loadId: newest.loadId,
+      sessionId: newest.sessionId,
+      trackingType: newest.trackingType,
+      recordedAt: newest.recordedAt,
+      updatedAt: now,
+    };
+
+    if (existing) {
+      await ctx.db.patch(existing._id, row);
+    } else {
+      await ctx.db.insert('driverLatestLocation', row);
+    }
+  }
+
   const skippedTotal =
     skippedDriver +
     skippedOrgMismatch +
@@ -599,8 +664,17 @@ export const internalBatchInsertLocations = internalMutation({
 // ============================================
 
 /**
- * Get latest location for all active drivers (helicopter view)
- * Returns drivers who have reported location in the last 30 minutes
+ * Get latest location for all active drivers (helicopter view).
+ * Returns drivers whose latest ping is within the last 30 minutes AND
+ * is attached to a load (load-centric view — session-only pings are
+ * filtered).
+ *
+ * Reads from driverLatestLocation (denormalized cache maintained by
+ * ingestBatch) rather than scanning the full driverLocations history.
+ * That collapses the reactive-subscription invalidation surface from
+ * O(history rows in 30min window) to O(active drivers) — critical
+ * because this query is subscribed to by helicopter-view + live-route-map
+ * components on the dispatcher dashboard.
  */
 export const getActiveDriverLocations = query({
   args: { organizationId: v.string(), nowMs: v.number() },
@@ -622,26 +696,15 @@ export const getActiveDriverLocations = query({
   ),
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
-    // Get locations from last 30 minutes (active tracking)
     const cutoff = args.nowMs - 30 * 60 * 1000;
 
-    const recentLocations = await ctx.db
-      .query('driverLocations')
-      .withIndex('by_org_time', (q) =>
+    const latestRows = await ctx.db
+      .query('driverLatestLocation')
+      .withIndex('by_org_recordedAt', (q) =>
         q.eq('organizationId', args.organizationId).gte('recordedAt', cutoff)
       )
-      .order('desc')
       .collect();
 
-    // Get latest per driver (dedup)
-    const latestByDriver = new Map<Id<'drivers'>, Doc<'driverLocations'>>();
-    for (const loc of recentLocations) {
-      if (!latestByDriver.has(loc.driverId)) {
-        latestByDriver.set(loc.driverId, loc);
-      }
-    }
-
-    // Enrich with driver and load info
     const results: Array<{
       driverId: Id<'drivers'>;
       driverName: string;
@@ -657,40 +720,40 @@ export const getActiveDriverLocations = query({
       truckUnitId?: string;
     }> = [];
 
-    for (const loc of latestByDriver.values()) {
-      // Session-only pings (no loadId) aren't included in this view — it's a
-      // load-centric feed. They still flow to driverLocations but surface in
-      // other queries (session history, dispatcher freshness).
+    for (const loc of latestRows) {
+      // Session-only pings (no loadId) aren't included in this view — it's
+      // a load-centric feed. They still occupy a driverLatestLocation row
+      // (for other future consumers), but this query filters them out.
       if (!loc.loadId) continue;
 
       const driver = await ctx.db.get(loc.driverId);
+      if (!driver || driver.isDeleted) continue;
+
       const load = await ctx.db.get(loc.loadId);
+      if (!load) continue;
 
-      if (driver && !driver.isDeleted && load) {
-        // Get truck info if available
-        let truckUnitId: string | undefined;
-        if (driver.currentTruckId) {
-          const truck = await ctx.db.get(driver.currentTruckId);
-          if (truck && !truck.isDeleted) {
-            truckUnitId = truck.unitId;
-          }
+      let truckUnitId: string | undefined;
+      if (driver.currentTruckId) {
+        const truck = await ctx.db.get(driver.currentTruckId);
+        if (truck && !truck.isDeleted) {
+          truckUnitId = truck.unitId;
         }
-
-        results.push({
-          driverId: loc.driverId,
-          driverName: `${driver.firstName} ${driver.lastName}`,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-          accuracy: loc.accuracy,
-          speed: loc.speed,
-          heading: loc.heading,
-          loadId: loc.loadId,
-          loadInternalId: load.internalId,
-          trackingType: loc.trackingType,
-          recordedAt: loc.recordedAt,
-          truckUnitId,
-        });
       }
+
+      results.push({
+        driverId: loc.driverId,
+        driverName: `${driver.firstName} ${driver.lastName}`,
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy: loc.accuracy,
+        speed: loc.speed,
+        heading: loc.heading,
+        loadId: loc.loadId,
+        loadInternalId: load.internalId,
+        trackingType: loc.trackingType,
+        recordedAt: loc.recordedAt,
+        truckUnitId,
+      });
     }
 
     return results;
@@ -937,5 +1000,105 @@ export const listArchivedFilesInWindow = internalQuery({
         minRecordedAt: f.minRecordedAt,
         maxRecordedAt: f.maxRecordedAt,
       }));
+  },
+});
+
+// ============================================
+// DRIVER LATEST LOCATION — GC
+// ============================================
+
+/**
+ * Daily GC for the driverLatestLocation denormalized cache. Drivers who
+ * haven't pinged in 30 days get their cache row removed. If they ever
+ * ping again, ingestBatch will re-insert. Keeps the table bounded
+ * against driver churn (deleted drivers, seasonal fleets, etc.).
+ *
+ * Batched + paginated so a single mutation tick never exceeds Convex's
+ * per-mutation read/write caps. Returns continueCursor so the orchestrator
+ * action can loop until done.
+ */
+const LATEST_LOCATION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const LATEST_LOCATION_GC_BATCH_SIZE = 500;
+
+export const pruneStaleDriverLatestLocationBatch = internalMutation({
+  args: { cursor: v.optional(v.string()) },
+  returns: v.object({
+    scanned: v.number(),
+    pruned: v.number(),
+    isDone: v.boolean(),
+    continueCursor: v.union(v.string(), v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const cutoff = Date.now() - LATEST_LOCATION_TTL_MS;
+    const result = await ctx.db
+      .query('driverLatestLocation')
+      .paginate({
+        cursor: args.cursor ?? null,
+        numItems: LATEST_LOCATION_GC_BATCH_SIZE,
+      });
+
+    let pruned = 0;
+    for (const row of result.page) {
+      if (row.recordedAt < cutoff) {
+        await ctx.db.delete(row._id);
+        pruned++;
+      }
+    }
+
+    return {
+      scanned: result.page.length,
+      pruned,
+      isDone: result.isDone,
+      continueCursor: result.isDone ? null : result.continueCursor,
+    };
+  },
+});
+
+/**
+ * Cron orchestrator. Loops the batch mutation until done. Bounded by a
+ * MAX_ITERATIONS safety cap so a stuck pagination cursor can't infinite-
+ * loop and burn the action budget.
+ */
+export const pruneStaleDriverLatestLocation = internalAction({
+  args: {},
+  returns: v.object({
+    totalScanned: v.number(),
+    totalPruned: v.number(),
+  }),
+  handler: async (ctx) => {
+    const MAX_ITERATIONS = 20_000;
+    let cursor: string | null = null;
+    let totalScanned = 0;
+    let totalPruned = 0;
+    let iterations = 0;
+
+    while (iterations < MAX_ITERATIONS) {
+      iterations++;
+      const batch: {
+        scanned: number;
+        pruned: number;
+        isDone: boolean;
+        continueCursor: string | null;
+      } = await ctx.runMutation(
+        internal.driverLocations.pruneStaleDriverLatestLocationBatch,
+        { cursor: cursor ?? undefined },
+      );
+      totalScanned += batch.scanned;
+      totalPruned += batch.pruned;
+      if (batch.isDone) break;
+      cursor = batch.continueCursor;
+    }
+
+    if (iterations >= MAX_ITERATIONS) {
+      console.warn(
+        `[driverLatestLocation.gc] iteration cap hit: scanned=${totalScanned} pruned=${totalPruned} ` +
+          `(remaining rows will be picked up on tomorrow's cron run)`,
+      );
+    }
+
+    console.log(
+      `[driverLatestLocation.gc] scanned=${totalScanned} pruned=${totalPruned}`,
+    );
+    return { totalScanned, totalPruned };
   },
 });
