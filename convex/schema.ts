@@ -1092,7 +1092,14 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_organization', ['workosOrgId'])
-    .index('by_provider', ['workosOrgId', 'provider']),
+    .index('by_provider', ['workosOrgId', 'provider'])
+    // Cross-org sweep by provider only — powers the FourKites push cron's
+    // listFourKitesOrgsWithIntegration, the FourKites pull-sync dispatcher,
+    // and the Samsara cron's getActiveSamsaraIntegrations. Without this
+    // they fall back to .collect() across every orgIntegrations row and
+    // JS-filter on `provider`, which scales linearly with total
+    // integration count rather than per-provider count.
+    .index('by_provider_only', ['provider']),
 
   /**
    * fourKitesPushState — per-load cursor for the Dispatcher Update push.
@@ -1111,6 +1118,26 @@ export default defineSchema({
     lastPushedAt: v.optional(v.number()),
     lastPushedRecordedAt: v.optional(v.number()),
 
+    // Running counter of successful pushes. Lets us compare "what we sent"
+    // vs "what FK shows on their dashboard" to attribute drops between
+    // our pipeline and FK's deduplication. Optional so existing rows
+    // backfill lazily (treated as 0/unknown when missing).
+    pushCount: v.optional(v.number()),
+
+    // AUDIT-ONLY: the JSON body of the most recent successful Dispatcher
+    // Update entry we sent for this load (single-update view, not the
+    // batched body). Lets us hand a customer / FK support the literal
+    // payload bytes for verification without round-tripping through FK.
+    // Typical size: 200-500 bytes per load. Kept short by storing only
+    // the latest — we don't accumulate history.
+    //
+    // SAFE TO REMOVE LATER: this field is purely for the initial
+    // integration debugging window. Once the FK push has been verified
+    // stable for the customer, this column can be dropped (or stop
+    // being populated) without affecting any runtime logic — the cron,
+    // dedup cursor, and error reporting all work without it.
+    lastRequestBody: v.optional(v.string()),
+
     // Observability — last successful FourKites requestId + error trail.
     lastRequestId: v.optional(v.string()),
     lastError: v.optional(v.string()),
@@ -1121,6 +1148,61 @@ export default defineSchema({
   })
     .index('by_load', ['loadId'])
     .index('by_org', ['workosOrgId']),
+
+  /**
+   * fourKitesPushTickHealth — per-org rollup of the LAST push cron tick.
+   * One row per workosOrgId, upserted at the end of every pushOneOrg run
+   * regardless of outcome. Makes "what happened on the last tick" a single
+   * indexed read instead of scrolling logs or scanning fourKitesPushState.
+   *
+   * Distinguishes the four meaningful states:
+   *   - empty           : no candidates, OR all candidates already up-to-date
+   *   - ok              : every batch accepted by FK
+   *   - partial         : some batches accepted, others rejected/transient
+   *   - all_failed      : no batches accepted (rate limit, transient, auth)
+   *
+   * `lastErrorBody` carries the truncated FK response body on transient /
+   * rate_limit failures — currently the only signal we have for "FK is
+   * returning something unexpected" since those branches don't touch
+   * fourKitesPushState.
+   */
+  fourKitesPushTickHealth: defineTable({
+    workosOrgId: v.string(),
+
+    lastTickAt: v.number(),
+    lastTickKind: v.union(
+      v.literal('empty'),
+      v.literal('ok'),
+      v.literal('partial'),
+      v.literal('all_failed'),
+    ),
+
+    // Funnel counters
+    candidateCount: v.number(),
+    skippedNoPing: v.number(),
+    skippedAlreadyPushed: v.number(),
+    plansBuilt: v.number(),
+
+    // Batch outcome counters
+    batchesSent: v.number(),
+    batchOk: v.number(),
+    batchValidationFail: v.number(),
+    batchAuthFail: v.number(),
+    batchRateLimit: v.number(),
+    batchTransient: v.number(),
+
+    // Diagnostic — populated on any non-ok terminal batch
+    lastErrorKind: v.optional(v.string()),
+    lastErrorStatus: v.optional(v.number()),
+    lastErrorBody: v.optional(v.string()), // truncated 500
+    lastErrorAt: v.optional(v.number()),
+
+    // Resets to 0 whenever a tick produces at least one ok batch
+    consecutiveTransientTicks: v.number(),
+
+    // Wall-clock duration of the tick (ms)
+    tickDurationMs: v.number(),
+  }).index('by_org', ['workosOrgId']),
 
   /**
    * samsaraSyncState — hot-write per-integration runtime state for the
@@ -1143,6 +1225,14 @@ export default defineSchema({
     lastTickPingsIngested: v.optional(v.number()),
     lastErrorAt: v.optional(v.number()),
     lastErrorMessage: v.optional(v.string()),
+
+    // Overlap guard for pollOneIntegration. Stamped at the start of a
+    // tick by tryClaimPollSlot; next tick exits early if this is within
+    // SAMSARA_POLL_LOCK_TIMEOUT_MS (30s). Prevents the next 10s cron tick
+    // from racing the cursor update of a still-running previous tick.
+    // Falls open after the timeout so a genuinely hung action can't lock
+    // the integration forever.
+    lastTickStartedAt: v.optional(v.number()),
 
     updatedAt: v.number(),
   })
@@ -1826,6 +1916,17 @@ export default defineSchema({
     scheduledStartMs: v.optional(v.float64()),
     scheduledEndMs: v.optional(v.float64()),
 
+    // PAY ENGINE — latest-wins coalesce key for calculatePayForLeg.
+    // Upstream sites that schedule a pay-engine recalc (legacy
+    // calculateDriverPay/calculateCarrierPay + the manual recalculate
+    // mutations) patch this field with Date.now() immediately before
+    // ctx.scheduler.runAfter(0, ...calculatePayForLeg, { ..., requestedAt }).
+    // Each scheduled job exits early if `args.requestedAt < leg.latestRecalcRequestedAt`
+    // — i.e. a NEWER recalc has been queued and our work would be
+    // immediately stale. Prevents the OCC collisions observed on
+    // payItems when assignment fires driver + carrier cascades together.
+    latestRecalcRequestedAt: v.optional(v.float64()),
+
     workosOrgId: v.string(),
     createdAt: v.float64(),
     updatedAt: v.float64(),
@@ -2253,6 +2354,81 @@ export default defineSchema({
     .index('by_session_time', ['sessionId', 'recordedAt'])
     .index('by_org_created', ['organizationId', 'createdAt']),
 
+  /**
+   * systemState — generic singleton key/value store for cross-action
+   * cached state that doesn't belong on any per-org or per-load row.
+   * Keyed by `key` (string). Values are JSON-encoded into `value` so
+   * we can host heterogeneous cache shapes without per-key schema churn.
+   *
+   * Current consumers:
+   *   - fcm_access_token: cached Google OAuth2 token for FCM HTTP v1
+   *     (see fcmWake.ts). Mints are free at Google but cost ~150ms each,
+   *     and at ~1000 active drivers we'd see ~200/min worst case
+   *     without caching.
+   *
+   * Race notes: concurrent writers (two sendWake actions both seeing an
+   * expired token) both mint and patch; last write wins. Tokens are
+   * idempotent (same scope, same SA → equally valid) so the duplicate
+   * mint just wastes one free Google call. Acceptable.
+   */
+  systemState: defineTable({
+    key: v.string(),
+    value: v.string(), // JSON-encoded payload — shape varies per key
+    expiresAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index('by_key', ['key']),
+
+  /**
+   * driverLatestLocation — one row per driver, holding the latest GPS ping
+   * seen. Maintained by ingestBatch as a denormalized read cache so the
+   * dispatcher's helicopter-view reactive subscription doesn't have to
+   * scan the full driverLocations history every time a new ping lands.
+   *
+   * Why this exists: getActiveDriverLocations is used by two reactive
+   * client subscriptions (helicopter-view, live-route-map). Every
+   * driverLocations insert in the 30-minute window invalidates those
+   * subscriptions and forces a re-read of O(history) rows (~9k+ at scale).
+   * Reading from this denormalized table collapses that to O(active
+   * drivers).
+   *
+   * Upsert contract: ingestBatch groups inserted pings by driverId,
+   * picks the max-recordedAt ping per driver, and patches this row
+   * (or inserts on first ping). recordedAt is monotonic per driver —
+   * a stale ping never overwrites a fresher one. Daily GC prunes rows
+   * older than 30d to keep the table bounded against driver churn.
+   *
+   * Note: this table holds the LATEST ping regardless of whether it
+   * carries a loadId. Consumers that only care about load-tagged drivers
+   * (helicopter-view, dispatcher map) filter `loadId != null` at read.
+   */
+  driverLatestLocation: defineTable({
+    driverId: v.id('drivers'),
+    organizationId: v.string(),
+
+    // GPS Data — same shape as driverLocations row
+    latitude: v.float64(),
+    longitude: v.float64(),
+    accuracy: v.optional(v.float64()),
+    speed: v.optional(v.float64()),
+    heading: v.optional(v.float64()),
+
+    // Tracking context — copied from the source ping
+    loadId: v.optional(v.id('loadInformation')),
+    sessionId: v.optional(v.id('driverSessions')),
+    trackingType: v.union(
+      v.literal('LOAD_ROUTE'),
+      v.literal('SESSION_ROUTE'),
+    ),
+
+    // Timestamps
+    recordedAt: v.float64(), // device timestamp of the latest ping
+    updatedAt: v.number(),   // server timestamp of the last upsert
+  })
+    .index('by_driver', ['driverId'])
+    // Powers the helicopter-view subscription:
+    //   .withIndex('by_org_recordedAt', q => q.eq('organizationId', X).gte('recordedAt', cutoff))
+    .index('by_org_recordedAt', ['organizationId', 'recordedAt']),
+
   // ==========================================
   // DRIVER SESSION SYSTEM (Phase 1)
   // Work-shift lifecycle, per-load geofence progress, and geofence events.
@@ -2523,7 +2699,12 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_org', ['workosOrgId', 'status'])
-    .index('by_partner_key', ['partnerKeyId']),
+    .index('by_partner_key', ['partnerKeyId'])
+    // Used by the cross-org webhook delivery cron to scan only ACTIVE
+    // subscriptions without filtering in JS. Previously
+    // getActiveSubscriptions scanned every subscription in every org
+    // every 5min and JS-filtered.
+    .index('by_status', ['status']),
 
   webhookDeliveryQueue: defineTable({
     subscriptionId: v.id('webhookSubscriptions'),

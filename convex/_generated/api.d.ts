@@ -55,6 +55,7 @@ import type * as fcmWake from "../fcmWake.js";
 import type * as featureFlags from "../featureFlags.js";
 import type * as forceResync from "../forceResync.js";
 import type * as fourKitesApiClient from "../fourKitesApiClient.js";
+import type * as fourKitesDiag from "../fourKitesDiag.js";
 import type * as fourKitesDispatcherClient from "../fourKitesDispatcherClient.js";
 import type * as fourKitesDispatcherPush from "../fourKitesDispatcherPush.js";
 import type * as fourKitesDispatcherPushMutations from "../fourKitesDispatcherPushMutations.js";
@@ -208,6 +209,7 @@ declare const fullApi: ApiFromModules<{
   featureFlags: typeof featureFlags;
   forceResync: typeof forceResync;
   fourKitesApiClient: typeof fourKitesApiClient;
+  fourKitesDiag: typeof fourKitesDiag;
   fourKitesDispatcherClient: typeof fourKitesDispatcherClient;
   fourKitesDispatcherPush: typeof fourKitesDispatcherPush;
   fourKitesDispatcherPushMutations: typeof fourKitesDispatcherPushMutations;
