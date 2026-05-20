@@ -22,18 +22,15 @@ export const getActiveSamsaraIntegrations = internalQuery({
     }),
   ),
   handler: async (ctx) => {
-    // No global "all-orgs by provider" index on orgIntegrations today —
-    // by_provider is keyed on (workosOrgId, provider). For the cron we
-    // need a cross-org sweep. .collect() across `orgIntegrations` is fine
-    // at expected fleet size (tens to low hundreds of org rows). If this
-    // ever grows, add `by_provider_only` index on `[provider]`.
-    const all = await ctx.db.query('orgIntegrations').collect();
-    return all
-      .filter(
-        (i) =>
-          i.provider === 'samsara' &&
-          i.syncSettings?.isEnabled === true,
-      )
+    // Filters provider at the by_provider_only index level (cross-org
+    // sweep). syncSettings.isEnabled is a nested field that Convex
+    // indexes can't reference, so it stays in JS.
+    const samsaraIntegrations = await ctx.db
+      .query('orgIntegrations')
+      .withIndex('by_provider_only', (q) => q.eq('provider', 'samsara'))
+      .collect();
+    return samsaraIntegrations
+      .filter((i) => i.syncSettings?.isEnabled === true)
       .map((i) => ({ integrationId: i._id }));
   },
 });
@@ -254,6 +251,62 @@ async function lookupTruck(
   return truck;
 }
 
+/**
+ * Atomic claim for the every-10s pollOneIntegration cron lock. Called at
+ * the top of each tick before any other work. Returns `claimed: true` if
+ * the previous tick either completed (lastPolledAt > lastTickStartedAt)
+ * or has been running longer than SAMSARA_POLL_LOCK_TIMEOUT_MS (so it's
+ * presumed hung and we steal the lock). Otherwise returns
+ * `claimed: false` and the caller exits.
+ *
+ * 30s timeout = 3× the 10s cron interval. Tight enough that a hung tick
+ * releases the lock within ~3 cycles; generous enough that a normally
+ * slow Samsara response (1-2s) doesn't drop ticks.
+ */
+const SAMSARA_POLL_LOCK_TIMEOUT_MS = 30 * 1000;
+
+export const tryClaimPollSlot = internalMutation({
+  args: { syncStateId: v.id('samsaraSyncState') },
+  returns: v.union(
+    v.object({ claimed: v.literal(true), now: v.number() }),
+    v.object({ claimed: v.literal(false), reason: v.string() }),
+  ),
+  handler: async (ctx, { syncStateId }) => {
+    const state = await ctx.db.get(syncStateId);
+    if (!state) {
+      // Sync state row vanished mid-cron (integration deleted). Treat as
+      // claimable so the action can exit cleanly without throwing.
+      return { claimed: true as const, now: Date.now() };
+    }
+
+    const now = Date.now();
+    const lastStart = state.lastTickStartedAt;
+    const lastEnd = state.lastPolledAt;
+
+    // Previous tick is "in flight" if it started and hasn't completed.
+    // Completed = lastPolledAt was updated AFTER lastTickStartedAt.
+    const inFlight =
+      lastStart !== undefined &&
+      (lastEnd === undefined || lastEnd < lastStart);
+
+    // Within lock window if the in-flight start was recent enough.
+    const withinLockWindow =
+      inFlight && now - lastStart! < SAMSARA_POLL_LOCK_TIMEOUT_MS;
+
+    if (withinLockWindow) {
+      return {
+        claimed: false as const,
+        reason: `prev_tick_in_flight startedMsAgo=${now - lastStart!}`,
+      };
+    }
+
+    // Either no previous tick, completed cleanly, or presumed-hung past
+    // the lock timeout. Stamp our start time and proceed.
+    await ctx.db.patch(syncStateId, { lastTickStartedAt: now });
+    return { claimed: true as const, now };
+  },
+});
+
 export const updateSyncStateAfterTick = internalMutation({
   args: {
     syncStateId: v.id('samsaraSyncState'),
@@ -338,8 +391,11 @@ export const getSamsaraIntegrationHealth = internalQuery({
     }),
   ),
   handler: async (ctx) => {
-    const all = await ctx.db.query('orgIntegrations').collect();
-    const samsaraIntegrations = all.filter((i) => i.provider === 'samsara');
+    // Filter provider at the index level (cross-org sweep).
+    const samsaraIntegrations = await ctx.db
+      .query('orgIntegrations')
+      .withIndex('by_provider_only', (q) => q.eq('provider', 'samsara'))
+      .collect();
 
     const rows: Array<{
       integrationId: Id<'orgIntegrations'>;

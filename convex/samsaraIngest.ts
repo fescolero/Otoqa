@@ -93,6 +93,22 @@ export const pollOneIntegration = internalAction({
       return { ok: true, pingsIngested: 0, pagesDrained: 0 };
     }
 
+    // Overlap guard. The cron fires every 10s but a slow Samsara response
+    // or a stuck network call can push a tick past 10s — without this
+    // claim, the next tick would race the previous one's cursor update
+    // and cause OCC retries on samsaraSyncState. Lock auto-expires after
+    // 30s so a genuinely hung tick can't block forever.
+    const claim = await ctx.runMutation(
+      internal.samsaraIngestMutations.tryClaimPollSlot,
+      { syncStateId: context.syncStateId },
+    );
+    if (!claim.claimed) {
+      console.log(
+        `[samsaraIngest.pollOneIntegration] skipped integrationId=${args.integrationId} reason=${claim.reason}`,
+      );
+      return { ok: true, pingsIngested: 0, pagesDrained: 0 };
+    }
+
     // Decrypt the API token in its own action (samsaraCrypto runs in node).
     const apiToken: string = await ctx.runAction(
       internal.samsaraCrypto.decryptSamsaraToken,
