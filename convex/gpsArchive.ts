@@ -3,6 +3,7 @@
 import { v } from 'convex/values';
 import { internalAction, action } from './_generated/server';
 import { internal } from './_generated/api';
+import { assertCallerOwnsOrg } from './lib/auth';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { gzipSync } from 'zlib';
@@ -344,6 +345,8 @@ export const getArchivedPositionFiles = action({
     })
   ),
   handler: async (ctx, args): Promise<ArchiveSignedUrlRow[]> => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
+
     const s3 = createArchiveS3Client();
     if (!s3) {
       throw new Error('Archive storage not configured');
