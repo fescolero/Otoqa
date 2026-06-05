@@ -111,6 +111,19 @@ export const registerPushToken = mutation({
  * as historical state are left alone — they're inert for the sweep cron
  * (which filters status='active') and keeping the value preserves
  * forensic context if the session is inspected later.
+ *
+ * Compare-and-clear discipline: re-checks `session.pushToken === token`
+ * on the loaded row before patching. The index lookup already filters
+ * by token, but a concurrent `registerPushToken` mutation that lands
+ * between this fn's index read and the patch could leave us with a row
+ * whose pushToken has been replaced. Convex OCC will retry the txn on
+ * the index-write conflict, but the explicit re-check is cheap insurance
+ * AND documents the invariant for future readers.
+ *
+ * Today this fn has no callers in code — fcmWake.recordResult does the
+ * clear inline so it has the sessionId in hand. The defensive check
+ * stays here so that if a future caller wires it up, the race-safety
+ * comes for free.
  */
 export const clearPushToken = internalMutation({
   args: {
@@ -125,6 +138,16 @@ export const clearPushToken = internalMutation({
 
     for (const session of matches) {
       if (session.status !== 'active') continue;
+      // Compare-and-clear: re-verify the row still holds the token we
+      // were asked to clear. If `registerPushToken` overwrote it during
+      // this txn, leave the fresh value alone — wiping it would silently
+      // undo a registration the mobile side intended.
+      if (session.pushToken !== token) {
+        console.warn(
+          `[pushTokens.clearPushToken] skipped sessionId=${session._id} note=token_rotated`,
+        );
+        continue;
+      }
       await ctx.db.patch(session._id, {
         pushToken: undefined,
         pushTokenPlatform: undefined,

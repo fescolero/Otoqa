@@ -470,6 +470,16 @@ export const claimSendSlot = internalMutation({
  * clears the token on invalid-token outcomes so the next sweep doesn't
  * waste a cooldown slot on a dead token. Emits fcm_dispatched with the
  * outcome bucket for the § 6.5 PostHog dashboard.
+ *
+ * `tokenSent` is the value `claimSendSlot` snapshotted into the HTTP
+ * POST. The invalid-token branch only wipes the session's pushToken
+ * when the row STILL holds that exact value: between claim and FCM's
+ * UNREGISTERED response (network + Google's processing window — can be
+ * many seconds), the mobile side may have called `registerPushToken`
+ * and overwritten the row with a fresh token. Without this guard, the
+ * stale clear would silently undo the fresh registration and starve
+ * the sweep again on the next stale window. Compare-and-clear with no
+ * schema change: the existing `pushToken` field IS the version vector.
  */
 export const recordResult = internalMutation({
   args: {
@@ -481,9 +491,14 @@ export const recordResult = internalMutation({
       v.literal('config_error'),
     ),
     errorCode: v.optional(v.string()),
+    // The token actually dispatched, captured at claim time. Required
+    // for outcome='invalid_token' so we can compare-and-clear and not
+    // wipe a fresh token that overwrote the dead one mid-flight.
+    // Optional for back-compat; passed by sendWake on every invocation.
+    tokenSent: v.optional(v.string()),
   },
   returns: v.null(),
-  handler: async (ctx, { sessionId, outcome, errorCode }) => {
+  handler: async (ctx, { sessionId, outcome, errorCode, tokenSent }) => {
     const session = await ctx.db.get(sessionId);
     if (!session) return null;
 
@@ -501,22 +516,40 @@ export const recordResult = internalMutation({
     }
 
     if (outcome === 'invalid_token') {
-      // Clear the dead token so the next sweep skips this session until
-      // the mobile side re-registers (on next tracking-start / foreground
-      // diff-check). Reset failure counter — the problem is token
-      // identity, not delivery capacity.
-      await ctx.db.patch(sessionId, {
-        pushToken: undefined,
-        pushTokenPlatform: undefined,
-        pushTokenUpdatedAt: undefined,
-        fcmConsecutiveFailures: 0,
-        fcmBackoffUntil: undefined,
-      });
+      // Compare-and-clear: only wipe if the session's pushToken is
+      // still the one we sent. If `registerPushToken` ran between
+      // claim and now, the row already holds a fresh token and the
+      // FCM error refers to the previous (now-replaced) value. We
+      // still need to reset the failure counter / backoff because
+      // the BACKOFF was for the dead token's delivery; the new token
+      // gets a clean slate.
+      const tokenStillStale =
+        tokenSent !== undefined && session.pushToken === tokenSent;
+      if (tokenStillStale) {
+        await ctx.db.patch(sessionId, {
+          pushToken: undefined,
+          pushTokenPlatform: undefined,
+          pushTokenUpdatedAt: undefined,
+          fcmConsecutiveFailures: 0,
+          fcmBackoffUntil: undefined,
+        });
+        console.warn(
+          `[pushTokens.clearPushToken] cleared sessionId=${sessionId} reason=${errorCode ?? 'invalid_token'}`,
+        );
+      } else {
+        // Token already rotated. Don't clear, but DO reset failure
+        // state so the next sweep tries the fresh token without
+        // dragging the dead-token backoff into the new generation.
+        await ctx.db.patch(sessionId, {
+          fcmConsecutiveFailures: 0,
+          fcmBackoffUntil: undefined,
+        });
+        console.warn(
+          `[pushTokens.clearPushToken] skipped sessionId=${sessionId} reason=${errorCode ?? 'invalid_token'} note=token_rotated_during_dispatch`,
+        );
+      }
       console.warn(
         `[fcmWake.sendWake] fcm_dispatched sessionId=${sessionId} outcome=failure error=${errorCode ?? 'invalid_token'}`,
-      );
-      console.warn(
-        `[pushTokens.clearPushToken] cleared sessionId=${sessionId} reason=${errorCode ?? 'invalid_token'}`,
       );
       return null;
     }
@@ -694,24 +727,33 @@ export const sendWake = internalAction({
       await ctx.runMutation(internal.fcmWake.recordResult, {
         sessionId,
         outcome: 'success',
+        tokenSent: claim.pushToken,
       });
     } else if (outcome.kind === 'invalid_token') {
       await ctx.runMutation(internal.fcmWake.recordResult, {
         sessionId,
         outcome: 'invalid_token',
         errorCode: outcome.errorCode,
+        // CRITICAL: pass the token we actually sent so the recordResult
+        // mutation can compare-and-clear instead of blanket-wiping. If
+        // the mobile client registered a fresh token between claim and
+        // this point, the row's pushToken won't match and we'll skip
+        // the clear (preserving the fresh token for the next sweep).
+        tokenSent: claim.pushToken,
       });
     } else if (outcome.kind === 'transient') {
       await ctx.runMutation(internal.fcmWake.recordResult, {
         sessionId,
         outcome: 'transient',
         errorCode: outcome.errorCode,
+        tokenSent: claim.pushToken,
       });
     } else {
       await ctx.runMutation(internal.fcmWake.recordResult, {
         sessionId,
         outcome: 'config_error',
         errorCode: outcome.message.slice(0, 80),
+        tokenSent: claim.pushToken,
       });
     }
     return null;
