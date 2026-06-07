@@ -39,6 +39,7 @@ import {
 } from '@/components/web';
 import { api } from '@/convex/_generated/api';
 import { useUserPreferences } from '@/components/web/shell/use-user-preferences';
+import { DraftListPill } from '@/components/web/create-form';
 import {
   buildDriverDetails,
   countAttention,
@@ -344,6 +345,11 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
         stats={stats}
         actions={
           <>
+            <DraftListPill
+              entity="driver"
+              draftKey="driver-create-v1"
+              createHref="/fleet/drivers/create"
+            />
             <WBtn variant="ghost" size="sm" leading="export" onClick={onExport}>Export CSV</WBtn>
             <WBtn variant="ghost" size="sm" leading="import" onClick={onImport}>Import CSV</WBtn>
             <WBtn variant="primary" size="sm" leading="plus" onClick={onCreate}>Create Driver</WBtn>

@@ -8,6 +8,7 @@ export { CreateForm } from './create-form';
 export type { CreateFormDraft } from './create-form';
 export { useFormState } from './use-form-state';
 export { bindUploaders } from './bind-uploaders';
+export { DraftListPill } from './draft-list-pill';
 export type {
   CreateFormSchema,
   FormSection,
