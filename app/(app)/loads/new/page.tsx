@@ -1,110 +1,97 @@
+'use client';
+
+/**
+ * Load create page.
+ *
+ * Thin wrapper around `<CreateForm>` + the load schema. Replaces the
+ * ~1,057-line `components/create-load-form.tsx`.
+ *
+ * Load is the only create flow whose option list (`customers`) comes
+ * from a live Convex query, so the schema is a factory. The stops
+ * composite handles all per-stop logic; the wrapper only translates
+ * scalar values for the mutation.
+ */
+
+import * as React from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@workos-inc/authkit-nextjs/components';
+import { useMutation } from 'convex/react';
+import { toast } from 'sonner';
+import { api } from '@/convex/_generated/api';
+import { useOrganizationId } from '@/contexts/organization-context';
+import { useAuthQuery } from '@/hooks/use-auth-query';
+import { CreateForm } from '@/components/web/create-form';
 import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
-import { withAuth } from '@workos-inc/authkit-nextjs';
-import { redirect } from 'next/navigation';
-import { CreateLoadForm } from '@/components/create-load-form';
-import { requireWorkOS } from '@/lib/workos';
+  buildLoadSchema,
+  mapValsToLoadArgs,
+  type CustomerOptionRow,
+} from '@/lib/forms/schemas/load';
+import { useCreateDraft } from '@/lib/forms/use-create-draft';
 
-export default async function NewLoadPage() {
-  const { user } = await withAuth();
+export default function CreateLoadPage() {
+  const router = useRouter();
+  const { user } = useAuth();
+  const organizationId = useOrganizationId();
+  const createLoad = useMutation(api.loads.createLoad);
 
-  if (!user) {
-    redirect('/sign-in');
-  }
+  // Phase 4 — see lib/forms/use-create-draft.ts. Load is the largest
+  // draft payload (stops-list + freeform instructions); a single
+  // draft can hit ~10KB during heavy editing. Still well within
+  // Convex's 1MB doc limit but the biggest of our four entities.
+  const draftProps = useCreateDraft({
+    entity: 'load',
+    draftKey: 'load-create-v1',
+  });
 
-  const workos = requireWorkOS();
-
-  // Fetch organization data
-  let organization = null;
-  try {
-    const memberships = await workos.userManagement.listOrganizationMemberships({
-      userId: user.id,
-      limit: 1,
-    });
-
-    if (memberships.data && memberships.data.length > 0) {
-      const organizationId = memberships.data[0].organizationId;
-      const org = await workos.organizations.getOrganization(organizationId);
-
-      organization = JSON.parse(
-        JSON.stringify({
-          id: org.id,
-          name: org.name,
-        }),
-      );
-    }
-  } catch (error) {
-    console.error('Error fetching organization:', error);
-  }
-
-  const getUserInitials = (name?: string, email?: string) => {
-    if (name) {
-      const names = name.split(' ');
-      if (names.length >= 2) {
-        return `${names[0][0]}${names[1][0]}`.toUpperCase();
-      }
-      return name.slice(0, 2).toUpperCase();
-    }
-    if (email) {
-      return email.slice(0, 2).toUpperCase();
-    }
-    return 'U';
-  };
-
-  const userData = JSON.parse(
-    JSON.stringify({
-      name: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.email,
-      email: user.email,
-      avatar: user.profilePictureUrl || '',
-      initials: getUserInitials(
-        user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : undefined,
-        user.email,
-      ),
-    }),
+  // Customer options — loaded once on mount; the schema rebuilds
+  // when the query resolves so the dropdown populates.
+  const customersQ = useAuthQuery(
+    api.customers.list,
+    organizationId ? { workosOrgId: organizationId } : 'skip',
   );
 
-  const serializedUser = JSON.parse(
-    JSON.stringify({
-      id: user.id,
-      email: user.email,
-    }),
+  const customers = React.useMemo<CustomerOptionRow[]>(
+    () =>
+      (customersQ ?? []).map((c) => ({
+        _id: c._id,
+        name: c.name,
+      })),
+    [customersQ],
+  );
+
+  const schema = React.useMemo(
+    () => buildLoadSchema({ customers }),
+    [customers],
   );
 
   return (
-    <>
-        <header className="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b">
-          <div className="flex items-center gap-2 px-4">
-            <SidebarTrigger className="-ml-1" />
-            <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-            <Breadcrumb>
-              <BreadcrumbList>
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem>
-                  <BreadcrumbLink href="/loads">Loads</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem>
-                  <BreadcrumbPage>Create Load</BreadcrumbPage>
-                </BreadcrumbItem>
-              </BreadcrumbList>
-            </Breadcrumb>
-          </div>
-        </header>
-
-        <div className="flex flex-1 flex-col gap-6 p-6">
-          {organization && <CreateLoadForm organizationId={organization.id} userId={serializedUser.id} />}
-        </div>
-      </>
+    <CreateForm
+      schema={schema}
+      {...draftProps}
+      onCancel={() => router.push('/loads')}
+      onSaved={async (vals, andNew) => {
+        if (!organizationId || !user) {
+          toast.error('Not signed in — please refresh and try again.');
+          return;
+        }
+        try {
+          const args = mapValsToLoadArgs(vals);
+          const id = await createLoad({
+            ...args,
+            workosOrgId: organizationId,
+            createdBy: user.id,
+          });
+          toast.success(
+            andNew ? 'Load saved. Ready for the next one.' : 'Load saved.',
+          );
+          if (!andNew) router.push(`/loads/${id}`);
+        } catch (err) {
+          console.error('Failed to create load:', err);
+          const msg =
+            err instanceof Error ? err.message : 'Please try again.';
+          toast.error(`Failed to create load — ${msg}`);
+        }
+      }}
+    />
   );
 }

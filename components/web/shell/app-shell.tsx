@@ -122,7 +122,15 @@ function ShellLayout({
           </span>
         }
       />
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* `min-h-0` is load-bearing: without it, the flex-col can't
+          shrink below its content, so a child <main> with `flex-1
+          min-h-0 overflow-hidden` (e.g. on a tall create-form page)
+          ends up sized to its content instead of to the viewport — and
+          its own scroll context never engages. Every detail/list page
+          already has its own overflow boundary so adding this here is
+          a no-op for them; the create-form rollout was the first
+          screen to surface the bug. */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
         <Topbar onCmdk={() => setCmdkOpen(true)} />
         {/* main is a flex column with no scroll of its own — pages own
             their scroll context. Migrated screens (e.g. DriversList) use

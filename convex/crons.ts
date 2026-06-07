@@ -104,11 +104,14 @@ crons.cron('external-tracking-sandbox-refresh', '0 4 * * *', internal.sandboxDat
 // LOAD EXPIRATION
 // ==========================================
 
-// ✅ Auto-expire stale loads (daily at 1 AM UTC)
-// Phase 1: Marks Open/Assigned loads as Expired when the pickup date has passed
-//          and no tracking data was received (trackingStatus still 'Pending')
-// Phase 2: Marks In Transit loads as Expired when no activity for 3+ days
-crons.cron('auto-expire-stale-loads', '0 1 * * *', internal.loads.autoExpireStaleLoads, {});
+// ✅ Auto-expire stale loads (hourly)
+// Phase 1: Marks Open/Assigned loads as Expired when the pickup date has arrived
+//          (firstStopDate <= today) AND the load has been idle for 6+ hours with
+//          trackingStatus still 'Pending'.
+// Phase 2: Marks In Transit loads as Expired after 12+ hours of no activity.
+// Hourly cadence keeps the 6h/12h windows honored within ~1h instead of the
+// previous up-to-24h lag from a once-daily run.
+crons.cron('auto-expire-stale-loads', '0 * * * *', internal.loads.autoExpireStaleLoads, {});
 
 // ==========================================
 // DRIVER SESSION SYSTEM
@@ -156,6 +159,18 @@ crons.interval(
   {},
 );
 
+// ✅ AUDIT-ONLY: prune fourKitesPushAuditLog rows older than 14 days.
+// Tied to the AUDIT-ONLY feature for FK integration verification. Remove
+// this cron when the audit log table is removed.
+// Runs every 30 min and deletes a bounded batch (200 rows/run) so a
+// single tick can't time out even if a large backlog accumulates.
+crons.interval(
+  'fourkites-audit-log-prune',
+  { minutes: 30 },
+  internal.fourKitesDispatcherPushMutations.pruneFourKitesPushAuditLog,
+  {},
+);
+
 // ==========================================
 // SAMSARA GPS BACKUP INGEST
 // ==========================================
@@ -186,6 +201,19 @@ crons.cron(
   'prune-orphaned-facet-values',
   '0 5 * * *',
   internal.facetMaintenance.pruneOrphanedFacetValues,
+  {},
+);
+
+// ✅ Expire create-form drafts older than 30 days (daily at 4 AM UTC)
+// Backs Phase 4 of the create-form rollout. Drafts that haven't been
+// touched in 30 days are presumed abandoned. Batched 500 per run; a
+// single nightly run easily handles the working set for a normal-size
+// org. See convex/createDrafts.ts for the implementation + the
+// docs/schema-evolution.md playbook for when this matters.
+crons.cron(
+  'expire-create-drafts',
+  '0 4 * * *',
+  internal.createDrafts.expireOld,
   {},
 );
 

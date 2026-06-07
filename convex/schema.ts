@@ -1150,6 +1150,36 @@ export default defineSchema({
     .index('by_org', ['workosOrgId']),
 
   /**
+   * fourKitesPushAuditLog — AUDIT-ONLY. One row per successful Dispatcher
+   * Update POST per load. Lets us produce an exact (not reconstructed)
+   * historical replay of what we sent for any load, for handing to FK
+   * support when investigating "you got N updates, we display M."
+   *
+   * Volume: ~one row per cron tick per active load = up to ~1.5K rows/day
+   * at current fleet size. Pruned to 14 days by a daily cron — see
+   * pruneFourKitesPushAuditLog in fourKitesDispatcherPushMutations.ts.
+   *
+   * SAFE TO REMOVE LATER: this table is purely for the initial integration
+   * debugging window. Once FK push has been verified stable, the table,
+   * the writes in recordPushResults, the read in getPushAuditLogForLoad,
+   * and the prune cron can all be deleted without affecting runtime push
+   * behavior. Grep for AUDIT-ONLY across the codebase to find every site.
+   */
+  fourKitesPushAuditLog: defineTable({
+    loadId: v.id('loadInformation'),
+    workosOrgId: v.string(),
+    pushedAt: v.number(),         // when we POSTed (server time)
+    pushedRecordedAt: v.number(), // recordedAt of the ping we sent
+    requestId: v.optional(v.string()), // FK's accept-receipt id
+    requestBody: v.string(),      // JSON body of the single-update entry
+  })
+    // by_load_time: per-load chronological audit ("show me everything
+    // we sent for load X between t1 and t2").
+    .index('by_load_time', ['loadId', 'pushedAt'])
+    // by_pushed_at: for the prune cron (delete rows older than N days).
+    .index('by_pushed_at', ['pushedAt']),
+
+  /**
    * fourKitesPushTickHealth — per-org rollup of the LAST push cron tick.
    * One row per workosOrgId, upserted at the end of every pushOneOrg run
    * regardless of outcome. Makes "what happened on the last tick" a single
@@ -1936,7 +1966,12 @@ export default defineSchema({
     .index('by_driver_status_scheduled_start', ['driverId', 'status', 'scheduledStartMs'])
     .index('by_carrier_partnership', ['carrierPartnershipId', 'status'])
     .index('by_org', ['workosOrgId'])
-    .index('by_truck', ['truckId']),
+    .index('by_truck', ['truckId'])
+    // Active Sessions live-ops uses this to render multi-trip timelines —
+    // "every leg in this shift, in order". Without it, per-session leg
+    // queries fall back to scanning the driver's entire leg history
+    // (cheap for a fresh driver, embarrassing for a long-tenured one).
+    .index('by_session', ['sessionId']),
 
   /**
    * Load Payables - Calculated pay line items
@@ -3299,4 +3334,37 @@ export default defineSchema({
   })
     .index('by_org', ['workosOrgId'])
     .index('by_org_key', ['workosOrgId', 'key']),
+
+  // ============================================================================
+  // CREATE-FORM DRAFTS — autosaved in-flight create flows
+  // ============================================================================
+  //
+  // Backs Phase 4 of the create-form rollout. Every 800ms after a user edits a
+  // long create form (Carrier / Customer / Driver / Load), the page wrapper
+  // upserts the form's flat `vals` map (JSON-stringified) into this table. On
+  // return the user sees a "You have an unsaved draft from N ago" banner with
+  // Resume / Discard actions.
+  //
+  // Uniqueness is per (userId, entity, draftKey). The draftKey is set on each
+  // long-form schema (e.g. `'carrier-create'`) — bump it whenever a breaking
+  // schema change ships (renamed field, removed field, changed enum values,
+  // changed field kind). See `docs/schema-evolution.md` for the playbook.
+  //
+  // The 30-day nightly cron (`expireOld` in `convex/createDrafts.ts`) is the
+  // backstop against unbounded growth. Most drafts are short-lived (saved or
+  // explicitly discarded) so the cron's working set stays small.
+  createDrafts: defineTable({
+    workosOrgId: v.string(),
+    userId: v.string(),            // WorkOS user id from useAuth().user.id
+    entity: v.string(),            // 'carrier' | 'customer' | 'driver' | 'load'
+    draftKey: v.string(),          // Matches `schema.draftKey`; bump on breaking schema changes.
+    vals: v.string(),              // JSON.stringify(vals). Plain string by design — see comment above.
+    updatedAt: v.number(),
+  })
+    // Primary lookup path — getByEntity / upsert / discard all hit this index.
+    .index('by_user_entity', ['userId', 'entity', 'draftKey'])
+    // List a user's drafts across all entities (list-page banner / cleanup tools).
+    .index('by_org_user', ['workosOrgId', 'userId'])
+    // Cron-side scan — find expired drafts without a full collect.
+    .index('by_updatedAt', ['updatedAt']),
 });
