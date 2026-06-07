@@ -29,6 +29,12 @@ export interface NumberControlProps {
   suffix?: string;
   disabled?: boolean;
   hasError?: boolean;
+  /**
+   * Apply thousands-separator commas. Defaults to `true`. Pass `false`
+   * for ID-shaped numerics (years, serial numbers, PINs) where a
+   * comma is wrong (e.g. `2,024` instead of `2024`).
+   */
+  grouping?: boolean;
 }
 
 export function NumberControl({
@@ -41,6 +47,7 @@ export function NumberControl({
   suffix,
   disabled,
   hasError,
+  grouping,
 }: NumberControlProps) {
   const input = (
     <NumberInput
@@ -50,6 +57,7 @@ export function NumberControl({
       onBlur={onBlur}
       placeholder={placeholder}
       disabled={disabled}
+      grouping={grouping}
       aria-invalid={hasError ? true : undefined}
       className={cn(
         hasError && 'border-[#B43030] focus-visible:ring-[#B43030]/40',

@@ -8,20 +8,29 @@ export interface NumberInputProps extends Omit<React.InputHTMLAttributes<HTMLInp
   value?: number;
   defaultValue?: number;
   onValueChange?: (value: number | undefined) => void;
+  /**
+   * Apply thousands-separator commas to the display value.
+   * Defaults to `true`. Set `false` for ID-shaped numerics where a
+   * comma is nonsensical — years (2,024 → 2024), serial numbers,
+   * PINs, etc.
+   */
+  grouping?: boolean;
 }
 
 const NumberInput = React.forwardRef<HTMLInputElement, NumberInputProps>(
-  ({ className, value, defaultValue, onValueChange, onChange, name, ...props }, ref) => {
+  ({ className, value, defaultValue, onValueChange, onChange, name, grouping = true, ...props }, ref) => {
     const [displayValue, setDisplayValue] = React.useState('');
     const hiddenInputRef = React.useRef<HTMLInputElement>(null);
 
-    // Format number with commas
+    // Format number with commas (or just clean digits when grouping=false)
     const formatNumber = (num: number | string | undefined): string => {
       if (num === undefined || num === '') return '';
       const numStr = typeof num === 'number' ? num.toString() : num;
       const cleaned = numStr.replace(/[^0-9.]/g, '');
       if (cleaned === '') return '';
-      
+
+      if (!grouping) return cleaned;
+
       const parts = cleaned.split('.');
       parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
       return parts.join('.');

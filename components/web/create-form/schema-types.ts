@@ -107,6 +107,13 @@ export interface FormField {
    * the formatted display string (no separate raw-vs-display state).
    */
   format?: 'phone-us';
+  /**
+   * `kind: 'number'` only. Apply thousands-separator commas to the
+   * display value. Defaults to `true`. Set `false` for ID-shaped
+   * numerics where a comma is wrong — years (`2,024` → `2024`),
+   * serial numbers, PINs.
+   */
+  grouping?: boolean;
   /** Helper line shown under the field when there's no error. */
   hint?: string;
   /** Initial value. If omitted, the shell seeds an empty value for the kind. */

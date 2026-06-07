@@ -137,6 +137,9 @@ export function buildTrailerSchema(): CreateFormSchema {
             kind: 'number',
             recommended: true,
             placeholder: '2024',
+            // Years aren't quantities — suppress the thousands
+            // separator so 2024 stays "2024", not "2,024".
+            grouping: false,
           },
           {
             id: ids.make,

@@ -98,6 +98,7 @@ export function renderField({
           prefix={field.prefix}
           suffix={field.suffix}
           hasError={!!error}
+          grouping={field.grouping}
         />
       );
       break;
