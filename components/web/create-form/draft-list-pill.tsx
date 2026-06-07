@@ -21,6 +21,7 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';
@@ -36,7 +37,35 @@ interface DraftListPillProps {
   createHref: string;
 }
 
-export function DraftListPill({
+/**
+ * Public export. The real implementation runs client-only — see the
+ * `dynamic({ ssr: false })` wrap below.
+ *
+ * Why client-only:
+ *   The pill calls Convex's `useQuery` (via `useAuthQuery`). On the
+ *   server side, `useConvexAuth()` returns `isAuthenticated: false`,
+ *   so `useQuery` runs in 'skip' mode and contributes one shape to
+ *   the React hook + id-counter state. On the client, after auth
+ *   establishes, `useQuery` switches modes and Convex's internal
+ *   subscription hooks change the React tree's `useId()` outputs.
+ *   That shifts every Radix-generated `aria-controls` ID downstream,
+ *   producing a hydration mismatch on the FilterBar's popover and
+ *   the ColumnsButton trigger that come right after the pill in the
+ *   SavedViews actions row.
+ *
+ *   A simple `mounted` state guard was insufficient because the
+ *   pill's hooks still run on the SSR pass (they just gate the
+ *   render). `next/dynamic({ ssr: false })` removes the component
+ *   from the SSR tree entirely — the placeholder is a literal
+ *   `null` — so the React tree is identical between SSR and the
+ *   client's first paint.
+ */
+export const DraftListPill = dynamic(
+  () => Promise.resolve(DraftListPillImpl),
+  { ssr: false, loading: () => null },
+);
+
+function DraftListPillImpl({
   entity,
   draftKey,
   createHref,
