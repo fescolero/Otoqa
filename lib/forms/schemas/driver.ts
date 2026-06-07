@@ -31,9 +31,9 @@ import type {
 import { US_STATE_OPTIONS } from '@/lib/forms/options/us-states';
 
 const LICENSE_CLASS_OPTIONS: FieldOption[] = [
-  { value: 'A', label: 'Class A · combination 26k+' },
-  { value: 'B', label: 'Class B · single 26k+' },
-  { value: 'C', label: 'Class C · light + endorsements' },
+  { value: 'A', label: 'Class A' },
+  { value: 'B', label: 'Class B' },
+  { value: 'C', label: 'Class C' },
 ];
 
 const EMPLOYMENT_STATUS_OPTIONS: FieldOption[] = [
