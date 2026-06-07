@@ -19,9 +19,9 @@
  * DOB). They land in the sensitive table on the server. The schema
  * does NOT mask or encrypt — that's the persistence layer's job.
  *
- * Note: `licenseClass` is `kind: 'segmented'` (A/B/C is the common
- * trucking case). Schema authors who add edge cases like CDL+P should
- * convert to `select`.
+ * Note: `licenseClass` is `kind: 'select'` with three CDL classes
+ * (A / B / C). Schema authors adding edge cases like CDL+P can
+ * extend the option list without changing the control shape.
  */
 
 import type {
@@ -31,9 +31,9 @@ import type {
 import { US_STATE_OPTIONS } from '@/lib/forms/options/us-states';
 
 const LICENSE_CLASS_OPTIONS: FieldOption[] = [
-  { value: 'A', label: 'A · combination 26k+' },
-  { value: 'B', label: 'B · single 26k+' },
-  { value: 'C', label: 'C · light + endorsements' },
+  { value: 'A', label: 'Class A · combination 26k+' },
+  { value: 'B', label: 'Class B · single 26k+' },
+  { value: 'C', label: 'Class C · light + endorsements' },
 ];
 
 const EMPLOYMENT_STATUS_OPTIONS: FieldOption[] = [
@@ -202,11 +202,16 @@ export function buildDriverSchema(): CreateFormSchema {
         title: 'License',
         fields: [
           {
+            // Was segmented (A / B / C pills with descriptive
+            // sublines). Dropping to a select keeps the License row
+            // tidy alongside CDL # / State / Expires and matches the
+            // visual weight of those neighbors. Option `value`
+            // strings unchanged ('A' / 'B' / 'C'), so existing rows
+            // continue to deserialize identically.
             id: ids.licenseClass,
             label: 'Class',
-            kind: 'segmented',
+            kind: 'select',
             required: 'tier1',
-            span: 2,
             default: 'A',
             options: LICENSE_CLASS_OPTIONS,
           },
