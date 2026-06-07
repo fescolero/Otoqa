@@ -43,10 +43,18 @@ const EMPLOYMENT_STATUS_OPTIONS: FieldOption[] = [
   { value: 'Terminated', label: 'Terminated' },
 ];
 
+// Schedule-commitment axis — matches the canonical column comment in
+// `convex/schema.ts` (`Full-time, Part-time, Contract`). The earlier
+// list (Company Driver / Owner Operator / 1099 Contractor) described
+// driver-relationship instead and has been retired here. Note: the
+// Carrier Owner-Op bootstrap flow still writes
+// `employmentType: 'Owner Operator'` on `carrierOrg.ts:~200`; that's
+// a follow-up to align with this list (or move that flag onto a
+// dedicated `driverRelationship` column).
 const EMPLOYMENT_TYPE_OPTIONS: FieldOption[] = [
-  { value: 'Company Driver', label: 'Company driver' },
-  { value: 'Owner Operator', label: 'Owner operator' },
-  { value: '1099 Contractor', label: '1099 contractor' },
+  { value: 'Full Time', label: 'Full Time' },
+  { value: 'Part Time', label: 'Part Time' },
+  { value: 'Contract', label: 'Contract' },
 ];
 
 const CITIZENSHIP_OPTIONS: FieldOption[] = [
@@ -271,10 +279,14 @@ export function buildDriverSchema(): CreateFormSchema {
           {
             id: ids.employmentType,
             label: 'Type',
-            kind: 'segmented',
+            // Was segmented (Company Driver / Owner Op / 1099). Now
+            // a dropdown across schedule-commitment values
+            // (Full Time / Part Time / Contract) to match the
+            // Convex column's canonical contract. Dropping `span: 2`
+            // since a select doesn't need the extra width.
+            kind: 'select',
             required: 'tier1',
-            span: 2,
-            default: 'Company Driver',
+            default: 'Full Time',
             options: EMPLOYMENT_TYPE_OPTIONS,
           },
           {
@@ -389,7 +401,7 @@ export function mapValsToDriverArgs(
     badgeExpiration: optionalStr(vals[ids.badgeExpiration]),
     hireDate: String(vals[ids.hireDate] ?? todayYmd()),
     employmentStatus: String(vals[ids.employmentStatus] ?? 'Active'),
-    employmentType: String(vals[ids.employmentType] ?? 'Company Driver'),
+    employmentType: String(vals[ids.employmentType] ?? 'Full Time'),
     preEmploymentCheckDate: optionalStr(vals[ids.preEmploymentCheckDate]),
     address: optionalStr(vals[ids.addrStreet]),
     address2: optionalStr(vals[ids.addrSuite]),
