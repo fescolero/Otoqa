@@ -10,10 +10,11 @@
  *      field's value. The page wrapper then passes it into the create
  *      mutation as `receiptStorageId: vals.attachment as Id<'_storage'>`.
  *
- * Mirrors the wiring in `components/diesel/fuel-entry-form.tsx` so the
- * eventual swap is mechanical. If the schema's `uploader` is missing
- * (page wrapper forgot to bind), the control renders disabled with a
- * dev-only console warning.
+ * Mirrors the wiring in the original `components/diesel/fuel-entry-form.tsx`
+ * (retired in the Phase 4 cleanup; see git history) so the eventual swap
+ * was mechanical. If the schema's `uploader` is missing (page wrapper
+ * forgot to bind), the control renders disabled with a dev-only console
+ * warning.
  */
 
 'use client';

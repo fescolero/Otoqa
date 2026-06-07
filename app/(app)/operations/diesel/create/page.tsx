@@ -13,10 +13,11 @@
  *   4. Auth ambient context (`organizationId`, `createdBy`) that the
  *      mutation expects but isn't a form field.
  *
- * The 562-line `FuelEntryForm` component this replaces stays in the
- * tree for one bake cycle; once Diesel + DEF have shipped on the new
- * shell for ~1 week, that component (and its inline state mgmt) is
- * scheduled for deletion. Tracked in docs/create-form-rollout.md.
+ * Replaces the 562-line `components/diesel/fuel-entry-form.tsx` that
+ * was retired in the Phase 4 cleanup. Both create routes (diesel +
+ * DEF) and the edit page (operations/diesel/[id]/edit) now run on
+ * the schema-driven shell. `git log` has the historical diff if
+ * behavior comparison is ever needed.
  */
 
 import * as React from 'react';

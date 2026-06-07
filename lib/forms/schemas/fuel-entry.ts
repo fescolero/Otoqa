@@ -72,6 +72,15 @@ export interface CarrierRow {
 export interface BuildFuelEntrySchemaArgs {
   /** 'fuel' = diesel pump fill-up. 'def' = DEF jug top-off. */
   kind: 'fuel' | 'def';
+  /**
+   * 'create' (default) → fresh-record title + draftKey set.
+   * 'edit'             → edit-record title, no draftKey (drafts are
+   *                      only for in-flight create flows). Tactical
+   *                      difference; the field/section layout is
+   *                      identical for both modes since the create
+   *                      and update mutations accept the same fields.
+   */
+  mode?: 'create' | 'edit';
   vendors: FuelVendorRow[];
   drivers: DriverRow[];
   trucks: TruckRow[];
@@ -124,8 +133,9 @@ export const FUEL_ENTRY_FIELD_IDS = {
 export function buildFuelEntrySchema(
   args: BuildFuelEntrySchemaArgs,
 ): CreateFormSchema {
-  const { kind, vendors, drivers, trucks, carriers } = args;
+  const { kind, mode = 'create', vendors, drivers, trucks, carriers } = args;
   const isFuel = kind === 'fuel';
+  const isEdit = mode === 'edit';
   const ids = FUEL_ENTRY_FIELD_IDS;
 
   const vendorOptions: FieldOption[] = vendors.map((v) => ({
@@ -148,17 +158,23 @@ export function buildFuelEntrySchema(
     label: c.carrierName,
   }));
 
+  // Edit mode skips the title prefix and uses an "Edit" label. The
+  // breadcrumb still ends with the current page's name. Drafts are
+  // never set for edit — `draftKey` is conditionally added only on
+  // create.
+  const createLabel = isFuel ? 'Log fill-up' : 'Log DEF top-off';
+  const editLabel = isFuel ? 'Edit fuel entry' : 'Edit DEF entry';
+  const label = isEdit ? editLabel : createLabel;
+
   return {
     entity: kind === 'fuel' ? 'fuelEntry' : 'defEntry',
-    breadcrumb: [
-      'Company Operations',
-      'Diesel',
-      isFuel ? 'Log fill-up' : 'Log DEF top-off',
-    ],
-    title: isFuel ? 'Log fill-up' : 'Log DEF top-off',
-    subtitle: isFuel
-      ? 'One row per pump transaction. Gallons × price-per-gallon = total — we compute that on save.'
-      : 'One row per DEF top-off. Gallons × price-per-gallon = total — we compute that on save.',
+    breadcrumb: ['Company Operations', 'Diesel', label],
+    title: label,
+    subtitle: isEdit
+      ? 'Update the captured values; gallons × price-per-gallon = total recomputes on save.'
+      : isFuel
+        ? 'One row per pump transaction. Gallons × price-per-gallon = total — we compute that on save.'
+        : 'One row per DEF top-off. Gallons × price-per-gallon = total — we compute that on save.',
     sections: [
       {
         id: 'when',
@@ -413,6 +429,89 @@ export function mapValsToFuelEntryArgs(
  *  Small helpers — kept private; not part of the schema's public
  *  surface.
  * ──────────────────────────────────────────────────────────────── */
+
+/* ────────────────────────────────────────────────────────────────────
+ *  Edit-mode helpers
+ *
+ *  `mapRecordToFuelEntryVals(record)` is the inverse of
+ *  `mapValsToFuelEntryArgs(vals)` — takes a stored fuelEntries /
+ *  defEntries row and produces the flat `vals` object the shell
+ *  seeds the form with. Same field-id map, same scalar shapes — the
+ *  only translation work is `entryDate: number → YYYY-MM-DD string`
+ *  (the date control's expected shape).
+ *
+ *  Unknown record fields are skipped silently. Missing optional
+ *  fields seed as empty strings (the shell would do the same via
+ *  `emptyForKind` if we just didn't set the key, but being explicit
+ *  here makes future schema evolution easier to diff).
+ * ──────────────────────────────────────────────────────────────── */
+
+/** Subset of the persisted record shape that the schema reads. We
+ *  redeclare these locally instead of importing from Convex's
+ *  generated types so the schema file stays Convex-import-free. */
+export interface FuelEntryRecord {
+  entryDate: number;
+  vendorId: string;
+  gallons: number;
+  pricePerGallon: number;
+  driverId?: string;
+  carrierId?: string;
+  truckId?: string;
+  loadId?: string;
+  odometerReading?: number;
+  location?: { city: string; state: string };
+  paymentMethod?: string;
+  fuelCardNumber?: string;
+  receiptNumber?: string;
+  notes?: string;
+  receiptStorageId?: string;
+}
+
+export function mapRecordToFuelEntryVals(
+  record: FuelEntryRecord,
+): Record<string, unknown> {
+  const ids = FUEL_ENTRY_FIELD_IDS;
+  return {
+    [ids.date]: unixMsToYmd(record.entryDate),
+    [ids.vendorId]: record.vendorId,
+    [ids.gallons]: record.gallons,
+    [ids.pricePerGallon]: record.pricePerGallon,
+    [ids.driverId]: record.driverId ?? '',
+    [ids.truckId]: record.truckId ?? '',
+    [ids.carrierId]: record.carrierId ?? '',
+    [ids.loadId]: record.loadId ?? '',
+    [ids.odometerReading]: record.odometerReading ?? '',
+    [ids.city]: record.location?.city ?? '',
+    [ids.state]: record.location?.state ?? '',
+    [ids.paymentMethod]: record.paymentMethod ?? '',
+    [ids.fuelCardNumber]: record.fuelCardNumber ?? '',
+    [ids.receiptNumber]: record.receiptNumber ?? '',
+    [ids.notes]: record.notes ?? '',
+    [ids.attachment]: record.receiptStorageId ?? '',
+  };
+}
+
+/** Same wire shape as the create args but without `vendorId` / `gallons` /
+ *  `pricePerGallon` being required — Convex's `update` validator
+ *  accepts all fields as optional. We just narrow the create translator's
+ *  return type so the page wrapper can spread it into the update call. */
+export type FuelEntryUpdateArgs = Partial<FuelEntryCreateArgs>;
+
+export function mapValsToFuelEntryUpdateArgs(
+  vals: Record<string, unknown>,
+): FuelEntryUpdateArgs {
+  // Same shape; update mutation just doesn't require the
+  // organizationId / createdBy that create needs.
+  return mapValsToFuelEntryArgs(vals);
+}
+
+function unixMsToYmd(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 function todayYmd(): string {
   const d = new Date();
