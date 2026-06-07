@@ -105,11 +105,31 @@ export function CreateForm({
   // component state avoids re-flashing the banner mid-session.
   const [draftActed, setDraftActed] = React.useState(false);
 
-  // Once typing starts, drop the banner — the user has implicitly
-  // chosen to start fresh. Without this, Resume after typing would
-  // overwrite their fresh edits.
-  const showDraftBanner =
-    !!initialDraft && !draftActed && !form.dirty;
+  // The banner is shown only when there's an unresumed draft AND the
+  // user hasn't acted on it yet. We deliberately do NOT also gate on
+  // `!form.dirty` here: once we lock the fields below, typing while
+  // the banner is visible is impossible, so `dirty` can't go true
+  // through the form. (It could still flip if a non-Save flow calls
+  // form.set externally, but no such call exists today.)
+  const showDraftBanner = !!initialDraft && !draftActed;
+
+  // OVERWRITE PROTECTION:
+  //
+  // When an unresumed draft exists, lock the form. Without this, a
+  // user who lands on the create page, sees the banner, ignores it
+  // and starts typing fresh data will silently overwrite the draft
+  // — the autosave fires 800ms after the first keystroke and the
+  // single-row-per-(user, entity, draftKey) storage means the prior
+  // draft's contents are clobbered.
+  //
+  // The lock is `pointer-events: none` on the section stack (clicks
+  // dropped, can't focus fields) plus opacity 0.55 (visual cue) plus
+  // disabling the Save / Save & New buttons. The banner sits OUTSIDE
+  // the locked region so Resume / Discard stay clickable.
+  //
+  // To start fresh after returning to the page: click Discard. To
+  // continue prior work: click Resume.
+  const fieldsLocked = showDraftBanner;
 
   // Visible sections — recompute on every value change so progressive
   // disclosure stays consistent with the rail and validation.
@@ -272,10 +292,26 @@ export function CreateForm({
             />
           )}
           <div
+            // `aria-disabled` mirrors the visual lock for assistive
+            // tech. We can't use the `disabled` attribute on a div,
+            // and a full <fieldset disabled> wouldn't propagate
+            // through every custom control (radix Select, the
+            // address autocomplete, etc.) — so we lock at the
+            // pointer-events layer instead and let each control
+            // remain technically focusable for screen readers in the
+            // locked-but-not-disabled state.
+            aria-disabled={fieldsLocked || undefined}
             style={{
               display: 'flex',
               flexDirection: 'column',
               gap: 16,
+              ...(fieldsLocked
+                ? {
+                    pointerEvents: 'none',
+                    opacity: 0.55,
+                    transition: 'opacity 200ms ease-out',
+                  }
+                : { transition: 'opacity 200ms ease-out' }),
             }}
           >
             {visibleSections.map((section) => (
@@ -311,7 +347,11 @@ export function CreateForm({
           onCancel={onCancel}
           onSave={() => runSave(false)}
           onSaveAndNew={() => runSave(true)}
-          isSubmitting={submitting}
+          // Lock Save buttons while the banner is waiting on a
+          // decision. The pointer-events lock above already blocks
+          // form mutation; this prevents a confusing "Save" click
+          // that fires validation against an empty form.
+          isSubmitting={submitting || fieldsLocked}
         />
       </div>
     </div>

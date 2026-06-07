@@ -70,7 +70,10 @@ export function DraftResumeBanner({
       >
         You have an unsaved draft from{' '}
         <strong style={{ fontWeight: 600 }}>{formatRelative(updatedAt)}</strong>
-        . Resume where you left off, or discard it to start fresh.
+        . The form is locked until you{' '}
+        <strong style={{ fontWeight: 600 }}>Resume</strong> the draft
+        or <strong style={{ fontWeight: 600 }}>Discard</strong> it to
+        start fresh — this prevents accidentally overwriting it.
       </span>
       <WBtn size="xs" variant="secondary" onClick={onResume}>
         Resume
