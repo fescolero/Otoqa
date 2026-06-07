@@ -339,18 +339,24 @@ export function CustomersList({ workosOrgId, onCreate, onImport, onExport }: Cus
         stats={stats}
         actions={
           <>
-            <DraftListPill
-              entity="customer"
-              draftKey="customer-create-v1"
-              createHref="/operations/customers/create"
-            />
             <WBtn variant="ghost" size="sm" leading="export" onClick={onExport}>Export CSV</WBtn>
             <WBtn variant="ghost" size="sm" leading="import" onClick={onImport}>Import CSV</WBtn>
             <WBtn variant="primary" size="sm" leading="plus" onClick={onCreate}>Create Customer</WBtn>
           </>
         }
       />
-      <SavedViews views={tabs} activeId={viewId} onChange={setViewId} />
+      <SavedViews
+        views={tabs}
+        activeId={viewId}
+        onChange={setViewId}
+        actions={
+          <DraftListPill
+            entity="customer"
+            draftKey="customer-create-v1"
+            createHref="/operations/customers/create"
+          />
+        }
+      />
       <TableToolbar
         searchPlaceholder="Search name, city, contact…"
         searchValue={search}

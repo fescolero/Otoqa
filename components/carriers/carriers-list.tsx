@@ -512,18 +512,24 @@ export function CarriersList({ workosOrgId, onCreate, onImport, onExport }: Carr
         stats={stats}
         actions={
           <>
-            <DraftListPill
-              entity="carrier"
-              draftKey="carrier-create-v1"
-              createHref="/operations/carriers/create"
-            />
             <WBtn variant="ghost" size="sm" leading="export" onClick={onExport}>Export CSV</WBtn>
             <WBtn variant="ghost" size="sm" leading="import" onClick={onImport}>Import CSV</WBtn>
             <WBtn variant="primary" size="sm" leading="plus" onClick={onCreate}>Create Carrier</WBtn>
           </>
         }
       />
-      <SavedViews views={tabs} activeId={viewId} onChange={setViewId} />
+      <SavedViews
+        views={tabs}
+        activeId={viewId}
+        onChange={setViewId}
+        actions={
+          <DraftListPill
+            entity="carrier"
+            draftKey="carrier-create-v1"
+            createHref="/operations/carriers/create"
+          />
+        }
+      />
       <TableToolbar
         searchPlaceholder="Search name, MC#, DOT#, contact…"
         searchValue={search}
