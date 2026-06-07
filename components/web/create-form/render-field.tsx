@@ -232,6 +232,7 @@ export function renderField({
           onBlur={() => blur(field.id)}
           placeholder={field.placeholder}
           hasError={!!error}
+          format={field.format}
         />
       );
   }

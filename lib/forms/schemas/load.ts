@@ -286,6 +286,7 @@ export function buildLoadSchema(args: BuildLoadSchemaArgs): CreateFormSchema {
             label: 'Phone',
             kind: 'text',
             placeholder: '(555) 555-0123',
+            format: 'phone-us',
           },
           {
             id: ids.contactPersonEmail,

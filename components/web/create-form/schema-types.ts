@@ -100,6 +100,13 @@ export interface FormField {
   span?: 1 | 2;
   /** Placeholder text. */
   placeholder?: string;
+  /**
+   * Live-format the value as the user types. Currently only
+   * `'phone-us'` is implemented — strips non-digits, caps at 10, and
+   * renders as `(XXX) XXX-XXXX` progressively. Storage value matches
+   * the formatted display string (no separate raw-vs-display state).
+   */
+  format?: 'phone-us';
   /** Helper line shown under the field when there's no error. */
   hint?: string;
   /** Initial value. If omitted, the shell seeds an empty value for the kind. */

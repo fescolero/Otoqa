@@ -123,6 +123,7 @@ export function buildFuelVendorSchema(): CreateFormSchema {
             label: 'Phone',
             kind: 'text',
             placeholder: '(555) 555-0123',
+            format: 'phone-us',
           },
         ],
       },

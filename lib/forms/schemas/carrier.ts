@@ -153,6 +153,7 @@ export function buildCarrierSchema(): CreateFormSchema {
             kind: 'text',
             recommended: true,
             placeholder: '(555) 555-0123',
+            format: 'phone-us',
             hint:
               'If filled, the carrier gets an Otoqa Driver account auto-provisioned on save.',
           },
