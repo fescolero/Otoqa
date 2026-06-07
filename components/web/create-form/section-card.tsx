@@ -46,7 +46,16 @@ export function ASectionCard({
           ? '1px solid rgba(46, 92, 255, 0.30)'
           : '1px solid var(--border-hairline)',
         borderRadius: 10,
-        overflow: 'hidden',
+        // We deliberately do NOT clip overflow here. A previous version
+        // used `overflow: hidden` to keep the header's bg-surface-2
+        // tone inside the rounded corners, but that clipping also
+        // trimmed every absolutely-positioned popover rendered by
+        // fields inside the section — the AddressAutocomplete
+        // suggestions dropdown was the most visible casualty: it
+        // disappeared mid-list because the section's border-box ate
+        // the bottom half. Instead we leave overflow visible and
+        // shape the header's own corners (see below) so the bg tone
+        // still sits flush inside the rounded section frame.
         scrollMarginTop: 24,
         boxShadow: accent ? '0 0 0 3px rgba(46, 92, 255, 0.06)' : 'none',
       }}
@@ -56,6 +65,12 @@ export function ASectionCard({
           padding: subtitle ? '10px 16px 9px' : '10px 16px',
           borderBottom: '1px solid var(--border-hairline)',
           background: accent ? 'rgba(46, 92, 255, 0.05)' : 'var(--bg-surface-2)',
+          // Match the section's top corners so the bg tone reads as
+          // flush with the rounded frame even though the section no
+          // longer clips. `borderRadius: 10` on the section minus 1px
+          // border = 9px inside corner radius for the header.
+          borderTopLeftRadius: 9,
+          borderTopRightRadius: 9,
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
