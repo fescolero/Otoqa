@@ -106,12 +106,27 @@ export function CreateForm({
   const [draftActed, setDraftActed] = React.useState(false);
 
   // The banner is shown only when there's an unresumed draft AND the
-  // user hasn't acted on it yet. We deliberately do NOT also gate on
-  // `!form.dirty` here: once we lock the fields below, typing while
-  // the banner is visible is impossible, so `dirty` can't go true
-  // through the form. (It could still flip if a non-Save flow calls
-  // form.set externally, but no such call exists today.)
-  const showDraftBanner = !!initialDraft && !draftActed;
+  // user hasn't acted on it yet AND they haven't started typing.
+  //
+  // The `!form.dirty` gate is load-bearing. Without it, this race
+  // fires on a fresh session:
+  //   1. User lands on create page with no prior draft.
+  //   2. Banner doesn't show (initialDraft is null), form unlocked.
+  //   3. User types — `dirty` flips, autosave queued for 800ms.
+  //   4. Autosave writes the (fresh) draft row to Convex.
+  //   5. `useAuthQuery(getByEntity)` is reactive — it re-resolves
+  //      with that row's data, so `initialDraft` flips null → object.
+  //   6. Without the `!dirty` gate, the banner now appears and the
+  //      fields lock, trapping the user in a draft they just wrote
+  //      themselves a moment ago.
+  //
+  // With the `!dirty` gate, that scenario is handled correctly:
+  //   - On mount with a stale draft and dirty=false, banner shows
+  //     and the lock engages — same as before.
+  //   - Once the user starts typing (Resume or fresh session), dirty
+  //     flips true and STAYS true; the banner does NOT re-appear
+  //     even if the underlying Convex row updates from autosave.
+  const showDraftBanner = !!initialDraft && !draftActed && !form.dirty;
 
   // OVERWRITE PROTECTION:
   //
