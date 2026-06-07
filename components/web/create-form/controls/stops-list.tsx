@@ -14,8 +14,10 @@
  * them so we don't ship stale coordinates with a hand-typed address.
  *
  * Ported from `components/create-load-form.tsx` (the 1,057-line
- * legacy form) — kept the field names + ergonomics identical so an
- * operator switching pages won't have to relearn anything.
+ * legacy form, retired in the Phase 4 cleanup) — kept the field
+ * names + ergonomics identical so an operator switching pages won't
+ * have to relearn anything. Use `git log -- components/create-load-form.tsx`
+ * to find the historical implementation if questions arise.
  */
 
 'use client';

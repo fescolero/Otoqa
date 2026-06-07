@@ -4,7 +4,9 @@
  * Load create page.
  *
  * Thin wrapper around `<CreateForm>` + the load schema. Replaces the
- * ~1,057-line `components/create-load-form.tsx`.
+ * 1,057-line `components/create-load-form.tsx` that was retired with
+ * the Phase 4 cleanup (commit history has the diff if you need to
+ * compare behavior).
  *
  * Load is the only create flow whose option list (`customers`) comes
  * from a live Convex query, so the schema is a factory. The stops
