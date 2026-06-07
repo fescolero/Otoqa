@@ -104,7 +104,7 @@ export function buildDriverSchema(): CreateFormSchema {
     breadcrumb: ['Fleet Management', 'Drivers', 'New driver'],
     title: 'New driver',
     subtitle:
-      'Hire info, license, medical card. Sensitive fields (DOB, SSN, CDL #) are stored separately on the server.',
+      'Hire info, license, medical card. Sensitive fields (DOB, SSN, DL #) are stored separately on the server.',
     sections: [
       {
         id: 'identity',
@@ -204,7 +204,7 @@ export function buildDriverSchema(): CreateFormSchema {
           {
             // Was segmented (A / B / C pills with descriptive
             // sublines). Dropping to a select keeps the License row
-            // tidy alongside CDL # / State / Expires and matches the
+            // tidy alongside DL # / State / Expires and matches the
             // visual weight of those neighbors. Option `value`
             // strings unchanged ('A' / 'B' / 'C'), so existing rows
             // continue to deserialize identically.
@@ -217,7 +217,7 @@ export function buildDriverSchema(): CreateFormSchema {
           },
           {
             id: ids.licenseNumber,
-            label: 'CDL #',
+            label: 'DL #',
             kind: 'mono',
             required: 'tier1',
             placeholder: '00000000',
