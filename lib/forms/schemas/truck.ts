@@ -158,7 +158,11 @@ export function buildTruckSchema(): CreateFormSchema {
           {
             id: ids.bodyType,
             label: 'Body type',
-            kind: 'segmented',
+            // Two options, but the segmented pills wrap awkwardly into
+            // adjacent fields on narrow grid columns. A dropdown keeps
+            // the row tidy and matches the visual weight of the
+            // Fuel type / GVWR / GCWR fields next to it.
+            kind: 'select',
             options: BODY_TYPE_OPTIONS,
           },
           {
