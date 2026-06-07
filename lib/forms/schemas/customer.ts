@@ -96,9 +96,13 @@ export function buildCustomerSchema(): CreateFormSchema {
           {
             id: ids.companyType,
             label: 'Customer type',
-            kind: 'segmented',
+            // Was segmented (Shipper / Broker / Manufacturer /
+            // Distributor pills). Dropping to a select keeps the
+            // Type row clean and matches the Status select's
+            // visual weight in the same row. Dropping `span: 2`
+            // since a select needs no extra width.
+            kind: 'select',
             required: 'tier1',
-            span: 2,
             default: 'Shipper',
             options: COMPANY_TYPE_OPTIONS,
           },
