@@ -14,6 +14,7 @@ import * as React from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { cn } from '@/lib/utils';
 import { WIcon, type IconName } from './icons';
+import { Calendar } from '@/components/ui/calendar';
 
 export type FilterOperator = 'is' | 'is any of' | 'is between';
 
@@ -205,6 +206,12 @@ function FilterChip({
       const opt = (prop.options ?? []).find((o) => o.value === v);
       return opt ? opt.label : v;
     }
+    if (prop.kind === 'date') {
+      // Humanize a stored YYYY-MM-DD..YYYY-MM-DD into "Apr 30 – May 6".
+      // Named presets pass through unchanged.
+      const range = parseDateRangeValue(v);
+      return range ? formatDateRangeShort(range) : v;
+    }
     return v;
   });
   const display =
@@ -359,26 +366,13 @@ function ValuePicker({
   }, [property.kind, sel, onCancel, onCommit]);
 
   if (property.kind === 'date') {
-    const presets = property.presets ?? ['Today', 'Yesterday', 'Last 7 days', 'Last 30 days', 'This month', 'Last month'];
     return (
-      <div className="p-3 text-[12.5px] text-[var(--text-secondary)]">
-        <div className="mb-2 font-medium text-foreground">{property.label}</div>
-        <div className="grid grid-cols-2 gap-1.5 mb-2">
-          {presets.map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => onCommit([p])}
-              className="focus-ring h-7 px-2.5 rounded text-left text-[12] text-foreground bg-card border border-[var(--border-hairline)] hover:bg-[var(--bg-row-hover)]"
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-        <div className="border-t border-[var(--border-hairline)] pt-2 text-[11.5px] text-[var(--text-tertiary)]">
-          Custom range — pick from calendar
-        </div>
-      </div>
+      <DateValuePicker
+        property={property}
+        initial={initial}
+        onCommit={onCommit}
+        onCancel={onCancel}
+      />
     );
   }
 
@@ -447,4 +441,163 @@ function ValuePicker({
       </div>
     </>
   );
+}
+
+// ─── Date value picker ──────────────────────────────────────────────────
+// Two surfaces share the same popover: a 6-up preset grid (default) and a
+// react-day-picker calendar in range mode (when "Custom range" is picked).
+// Custom ranges round-trip as `YYYY-MM-DD..YYYY-MM-DD` strings stored on
+// the chip; named presets stay as-is.
+
+function DateValuePicker({
+  property,
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  property: FilterProperty;
+  initial: string[];
+  onCommit: (vals: string[]) => void;
+  onCancel: () => void;
+}) {
+  const presets = property.presets ?? ['Today', 'Yesterday', 'Last 7 days', 'Last 30 days', 'This month', 'Last month'];
+  const initialRange = initial[0] ? parseDateRangeValue(initial[0]) : null;
+  const [mode, setMode] = React.useState<'presets' | 'custom'>(initialRange ? 'custom' : 'presets');
+  const [range, setRange] = React.useState<{ from?: Date; to?: Date } | undefined>(
+    initialRange ? { from: initialRange.from, to: initialRange.to } : undefined,
+  );
+
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onCancel]);
+
+  if (mode === 'custom') {
+    const canApply = !!(range?.from && range?.to);
+    return (
+      <div className="text-[12.5px] text-[var(--text-secondary)]">
+        <div className="px-3 pt-3 pb-1 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setMode('presets')}
+            className="focus-ring inline-flex items-center gap-1 text-[12px] text-[var(--text-tertiary)] hover:text-foreground"
+          >
+            <WIcon name="chevron-left" size={11} />
+            <span>Presets</span>
+          </button>
+          <span className="font-medium text-foreground">{property.label}</span>
+          <span style={{ width: 60 }} />
+        </div>
+        {/*
+          The filter popover is `w-60` (240px). The Calendar's default
+          cell-size is 32px → 7 cells = 224px + the `p-3` (12px each
+          side) padding around the day grid = 248px total. That made
+          the calendar overflow the popover on the right, leaving the
+          right-edge day numbers visually flush with the border while
+          the left side had ~17px of breathing room. Shrinking the
+          cell-size to 28px brings the inner calendar down to 196px +
+          24px padding = 220px, which centers cleanly inside the
+          240px popover with 10px of margin on each side.
+        */}
+        <div className="flex justify-center">
+          <Calendar
+            mode="range"
+            className="[--cell-size:1.75rem] p-3"
+            selected={range as never}
+            onSelect={(next) => setRange(next as { from?: Date; to?: Date } | undefined)}
+            numberOfMonths={1}
+          />
+        </div>
+        <div className="border-t border-[var(--border-hairline)] p-1.5 flex items-center justify-between text-[11.5px] text-[var(--text-tertiary)]">
+          <span>
+            {range?.from && range?.to
+              ? formatDateRangeShort({ from: range.from, to: range.to })
+              : 'Pick start and end'}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setRange(undefined)}
+              disabled={!range?.from}
+              className="focus-ring h-6 px-2 rounded text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-row-hover)] disabled:opacity-50"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              disabled={!canApply}
+              onClick={() => {
+                if (!canApply) return;
+                onCommit([formatDateRangeValue({ from: range!.from!, to: range!.to! })]);
+              }}
+              className="focus-ring h-6 px-2.5 rounded bg-[var(--accent)] text-white text-[12px] font-medium disabled:opacity-50"
+            >
+              Apply
+            </button>
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3 text-[12.5px] text-[var(--text-secondary)]">
+      <div className="mb-2 font-medium text-foreground">{property.label}</div>
+      <div className="grid grid-cols-2 gap-1.5">
+        {presets.map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onCommit([p])}
+            className="focus-ring h-7 px-2.5 rounded text-left text-[12] text-foreground bg-card border border-[var(--border-hairline)] hover:bg-[var(--bg-row-hover)]"
+          >
+            {p}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => setMode('custom')}
+          className="focus-ring h-7 px-2.5 rounded inline-flex items-center gap-1.5 text-left text-[12] text-foreground bg-card border border-[var(--border-hairline)] hover:bg-[var(--bg-row-hover)]"
+        >
+          <WIcon name="calendar" size={11} className="text-[var(--text-tertiary)]" />
+          <span>Custom</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Date range round-trip helpers ──────────────────────────────────────
+// `YYYY-MM-DD..YYYY-MM-DD` chip values let the FilterChip display "Apr 30
+// – May 6" while consumers parse the same string back into Date pairs.
+
+const DATE_RANGE_RE = /^(\d{4})-(\d{2})-(\d{2})\.\.(\d{4})-(\d{2})-(\d{2})$/;
+
+export function parseDateRangeValue(value: string): { from: Date; to: Date } | null {
+  const m = DATE_RANGE_RE.exec(value);
+  if (!m) return null;
+  const from = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const to = new Date(Number(m[4]), Number(m[5]) - 1, Number(m[6]));
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null;
+  return { from, to };
+}
+
+export function formatDateRangeValue(range: { from: Date; to: Date }): string {
+  const ymd = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+  };
+  return `${ymd(range.from)}..${ymd(range.to)}`;
+}
+
+function formatDateRangeShort(range: { from: Date; to: Date }): string {
+  const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  const fromStr = range.from.toLocaleDateString('en-US', opts);
+  const toStr = range.to.toLocaleDateString('en-US', opts);
+  return `${fromStr} – ${toStr}`;
 }
