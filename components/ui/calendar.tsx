@@ -6,10 +6,17 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
 } from "lucide-react"
-import { DayButton, DayPicker, getDefaultClassNames } from "react-day-picker"
+import { DayButton, DayPicker, getDefaultClassNames, type DropdownProps } from "react-day-picker"
 
 import { cn } from "@/lib/utils"
 import { Button, buttonVariants } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 function Calendar({
   className,
@@ -48,17 +55,17 @@ function Calendar({
         ),
         month: cn("flex flex-col w-full gap-4", defaultClassNames.month),
         nav: cn(
-          "flex items-center gap-1 w-full absolute top-0 inset-x-0 justify-between",
+          "flex items-center gap-1 w-full absolute top-0 inset-x-0 justify-between pointer-events-none",
           defaultClassNames.nav
         ),
         button_previous: cn(
           buttonVariants({ variant: buttonVariant }),
-          "size-(--cell-size) aria-disabled:opacity-50 p-0 select-none",
+          "size-(--cell-size) aria-disabled:opacity-50 p-0 select-none pointer-events-auto",
           defaultClassNames.button_previous
         ),
         button_next: cn(
           buttonVariants({ variant: buttonVariant }),
-          "size-(--cell-size) aria-disabled:opacity-50 p-0 select-none",
+          "size-(--cell-size) aria-disabled:opacity-50 p-0 select-none pointer-events-auto",
           defaultClassNames.button_next
         ),
         month_caption: cn(
@@ -100,7 +107,13 @@ function Calendar({
           defaultClassNames.week_number
         ),
         day: cn(
-          "relative w-full h-full p-0 text-center [&:last-child[data-selected=true]_button]:rounded-r-md group/day aspect-square select-none",
+          // `flex-1` (not `w-full`) so each day cell takes exactly
+          // 1/7 of the week row, lining up with the weekday header
+          // cells above (which also use flex-1). `w-full` made each
+          // cell claim 100% of the flex axis, which flexbox then
+          // resolved inconsistently — columns drifted relative to
+          // the Sun/Mon/Tue header row.
+          "relative flex-1 h-full p-0 text-center [&:last-child[data-selected=true]_button]:rounded-r-md group/day aspect-square select-none",
           props.showWeekNumber
             ? "[&:nth-child(2)[data-selected=true]_button]:rounded-l-md"
             : "[&:first-child[data-selected=true]_button]:rounded-l-md",
@@ -159,6 +172,7 @@ function Calendar({
           )
         },
         DayButton: CalendarDayButton,
+        Dropdown: CalendarDropdown,
         WeekNumber: ({ children, ...props }) => {
           return (
             <td {...props}>
@@ -210,6 +224,44 @@ function CalendarDayButton({
       )}
       {...props}
     />
+  )
+}
+
+function CalendarDropdown({
+  options,
+  value,
+  onChange,
+  "aria-label": ariaLabel,
+}: DropdownProps) {
+  const handleValueChange = (next: string) => {
+    if (!onChange) return
+    onChange({
+      target: { value: next },
+    } as unknown as React.ChangeEvent<HTMLSelectElement>)
+  }
+
+  return (
+    <Select value={value?.toString()} onValueChange={handleValueChange} modal={false}>
+      <SelectTrigger
+        size="sm"
+        aria-label={ariaLabel}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="h-7 px-2 py-0 gap-1 border-0 shadow-none bg-transparent focus-visible:ring-0 focus-visible:border-0 hover:bg-accent/50"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent className="max-h-[200px]" position="popper" side="bottom">
+        {options?.map((option) => (
+          <SelectItem
+            key={option.value}
+            value={option.value.toString()}
+            disabled={option.disabled}
+          >
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
 
