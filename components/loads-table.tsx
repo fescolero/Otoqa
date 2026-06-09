@@ -16,8 +16,8 @@ import {
 import { SavedViews, type SavedView, WBtn } from '@/components/web';
 import { DraftListPill } from '@/components/web/create-form';
 import { LoadFilterState } from './loads/load-filter-bar';
-import type { ColumnVisibility } from './loads/virtualized-loads-table';
-import { DEFAULT_COLUMN_VISIBILITY } from './loads/virtualized-loads-table';
+import type { ColumnVisibility } from './loads/column-visibility';
+import { DEFAULT_COLUMN_VISIBILITY } from './loads/column-visibility';
 import { BulkActionResolutionModal } from './loads/bulk-action-resolution-modal';
 import { CancellationReasonModal, CancellationReasonCode } from './loads/cancellation-reason-modal';
 import { toast } from 'sonner';
