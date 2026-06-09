@@ -162,6 +162,15 @@ function FilterTriggerButton({
         <PopoverPrimitive.Content
           align="start"
           sideOffset={6}
+          // `data-slot="popover-content"` is what the shared
+          // shadcn `Calendar` component looks for to flip its own
+          // background to transparent. Without it, the Calendar's
+          // default `bg-background` (white on light theme) sits
+          // inside the popover's `bg-card` (light gray) and reads
+          // as a "card inside a card". Matching the contract
+          // shadcn already uses for its PopoverContent keeps the
+          // popover one continuous surface tone.
+          data-slot="popover-content"
           className="z-50 w-60 rounded-lg border border-[var(--border-hairline-strong)] bg-card shadow-[var(--shadow-popover)] overflow-hidden"
         >
           {drillProp ? (
@@ -270,6 +279,15 @@ function FilterChip({
         <PopoverPrimitive.Content
           align="start"
           sideOffset={6}
+          // `data-slot="popover-content"` is what the shared
+          // shadcn `Calendar` component looks for to flip its own
+          // background to transparent. Without it, the Calendar's
+          // default `bg-background` (white on light theme) sits
+          // inside the popover's `bg-card` (light gray) and reads
+          // as a "card inside a card". Matching the contract
+          // shadcn already uses for its PopoverContent keeps the
+          // popover one continuous surface tone.
+          data-slot="popover-content"
           className="z-50 w-60 rounded-lg border border-[var(--border-hairline-strong)] bg-card shadow-[var(--shadow-popover)] overflow-hidden"
         >
           <ValuePicker
