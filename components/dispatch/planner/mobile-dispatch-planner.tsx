@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery, useMutation, usePaginatedQuery, useConvexAuth } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { Id } from '@/convex/_generated/dataModel';
@@ -158,16 +158,28 @@ export function MobileDispatchPlanner({
     workosOrgId: organizationId,
   });
 
-  const loadsData = useAuthQuery(api.loads.getLoads, {
-    workosOrgId: organizationId,
-    status: statusFilter as 'Open' | 'Assigned' | 'Completed' | 'Canceled',
-    search: filters.search || undefined,
-    hcr: filters.hcr || undefined,
-    tripNumber: filters.tripNumber || undefined,
-    startDate: filters.startDate || undefined,
-    endDate: filters.endDate || undefined,
-    paginationOpts: { numItems: 100, cursor: null },
-  });
+  // Infinite-scroll the load list. usePaginatedQuery injects `paginationOpts`
+  // and accumulates pages, so the list is no longer capped at the first 100.
+  const { isAuthenticated } = useConvexAuth();
+  const {
+    results: loads,
+    status: loadsStatus,
+    loadMore: loadMoreLoads,
+  } = usePaginatedQuery(
+    api.loads.getLoads,
+    isAuthenticated
+      ? {
+          workosOrgId: organizationId,
+          status: statusFilter as 'Open' | 'Assigned' | 'Completed' | 'Canceled',
+          search: filters.search || undefined,
+          hcr: filters.hcr || undefined,
+          tripNumber: filters.tripNumber || undefined,
+          startDate: filters.startDate || undefined,
+          endDate: filters.endDate || undefined,
+        }
+      : 'skip',
+    { initialNumItems: 100 },
+  );
 
   const loadDetails = useQuery(
     api.loads.getByIdWithRange,
@@ -196,8 +208,7 @@ export function MobileDispatchPlanner({
 
   // ── Derived data ────────────────────────────────────────────────────────────
 
-  const loads = loadsData?.page ?? [];
-  const isLoadingLoads = loadsData === undefined;
+  const isLoadingLoads = loadsStatus === 'LoadingFirstPage';
   const driversToShow: DriverWithTruck[] =
     loadDetails?.startTime != null ? (availableDrivers ?? []) : (allDrivers ?? []);
 
@@ -389,7 +400,16 @@ export function MobileDispatchPlanner({
       </div>
 
       {/* Load list */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-3 pb-4 space-y-2">
+      <div
+        className="flex-1 min-h-0 overflow-y-auto px-3 pb-4 space-y-2"
+        onScroll={(e) => {
+          if (loadsStatus !== 'CanLoadMore') return;
+          const el = e.currentTarget;
+          if (el.scrollHeight - el.scrollTop - el.clientHeight <= 320) {
+            loadMoreLoads(100);
+          }
+        }}
+      >
         {isLoadingLoads && (
           <div className="space-y-2 pt-1">
             {[...Array(6)].map((_, i) => (
@@ -454,6 +474,10 @@ export function MobileDispatchPlanner({
               </div>
             </button>
           ))}
+
+        {loadsStatus === 'LoadingMore' && (
+          <div className="py-3 text-center text-xs text-muted-foreground">Loading more…</div>
+        )}
       </div>
 
       {/* ── Load Detail / Asset Select Sheet ──────────────────────────────── */}

@@ -681,6 +681,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
           onSelectAll={() => handleSelectAll(!isAllSelected)}
           onRowClick={(row) => router.push(`/loads/${row._id}`)}
           getRowId={(row) => row._id as unknown as string}
+          onEndReached={paginationStatus === 'CanLoadMore' ? () => loadMore(50) : undefined}
         />
         {paginationStatus === 'LoadingFirstPage' && loadRows.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center text-[12.5px] text-[var(--text-tertiary)]">
