@@ -92,7 +92,14 @@ function Calendar({
           defaultClassNames.caption_label
         ),
         table: "w-full border-collapse",
-        weekdays: cn("flex", defaultClassNames.weekdays),
+        // `w-full` is load-bearing — without it the weekday row
+        // shrink-wraps to "Su Mo Tu We Th Fr Sa" at natural width
+        // while the day rows below use `flex w-full` and spread out.
+        // Two rows, two widths → the day grid drifts wider than the
+        // header strip. Matching the row's `w-full` keeps the header
+        // and the day grid the same overall width so flex-1 columns
+        // line up on both rows.
+        weekdays: cn("flex w-full", defaultClassNames.weekdays),
         weekday: cn(
           "text-muted-foreground rounded-md flex-1 font-normal text-[0.8rem] select-none",
           defaultClassNames.weekday
