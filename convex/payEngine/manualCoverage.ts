@@ -21,6 +21,7 @@ import type { MutationCtx } from '../_generated/server';
 import { v } from 'convex/values';
 import type { Id, Doc } from '../_generated/dataModel';
 import { centsFromNumber, microCentsFromNumber, rawCents, rawMicroCents } from '../lib/money';
+import { FINALIZED_SETTLEMENT_STATUSES } from './schema';
 
 type ManualTable = 'loadPayables' | 'loadCarrierPayables';
 
@@ -64,9 +65,6 @@ async function anchorFor(ctx: MutationCtx, line: ManualLine): Promise<number> {
   return (s as { periodStart?: number } | null)?.periodStart ?? line.createdAt;
 }
 
-// New-ledger statuses past which a settlement is frozen (aggregator won't run).
-const FINALIZED_NEW = new Set(['VERIFIED', 'SENT', 'PAID', 'CLOSED', 'VOID']);
-
 /**
  * Forward-path anchor with roll-forward. A manual line whose natural period
  * already has a FINALIZED new-ledger statement can't be aggregated into it — it
@@ -89,13 +87,31 @@ async function resolveForwardAnchor(
   const containing = settlements.find(
     (s) => naturalAnchor >= s.periodStart && naturalAnchor <= s.periodEnd,
   );
-  if (!containing || !FINALIZED_NEW.has(containing.status)) {
+  if (!containing || !FINALIZED_SETTLEMENT_STATUSES.has(containing.status)) {
     return { anchor: naturalAnchor, rolledForward: false };
   }
   const nextOpen = settlements
-    .filter((s) => !FINALIZED_NEW.has(s.status) && s.periodStart > containing.periodStart)
+    .filter((s) => !FINALIZED_SETTLEMENT_STATUSES.has(s.status) && s.periodStart > containing.periodStart)
     .sort((a, b) => a.periodStart - b.periodStart)[0];
-  return { anchor: nextOpen ? nextOpen.periodStart : now, rolledForward: true };
+  // No open period yet: anchor just past the finalized window (never inside it),
+  // so the next generated open period picks it up rather than orphaning it.
+  return {
+    anchor: nextOpen ? nextOpen.periodStart : Math.max(now, containing.periodEnd + 1),
+    rolledForward: true,
+  };
+}
+
+/**
+ * True if a mirror payItem is already frozen on a FINALIZED settlement. Such a
+ * mirror was settled/paid and must not be voided by a downstream legacy edit —
+ * doing so would drop money from a locked statement (its frozen totals still
+ * count it, but the by_settlement read no longer would). Post-payment
+ * corrections belong on a fresh adjustment, not a retroactive void.
+ */
+async function isOnFinalizedSettlement(ctx: MutationCtx, item: Doc<'payItems'>): Promise<boolean> {
+  if (!item.settlementId) return false;
+  const s = await ctx.db.get(item.settlementId);
+  return s != null && FINALIZED_SETTLEMENT_STATUSES.has(s.status);
 }
 
 function buildManualRow(
@@ -198,12 +214,17 @@ export const syncManualPayItem = internalMutation({
         : await ctx.db.get(args.payableId as Id<'loadCarrierPayables'>);
     const isManual = raw != null && raw.sourceType === 'MANUAL';
 
-    // Deleted or no longer a manual line → void the mirror.
+    // Deleted or no longer a manual line → void the mirror, EXCEPT any already
+    // frozen on a finalized settlement (it was paid; leave it on that statement).
     if (!isManual) {
+      let voided = 0;
+      let keptFinalized = 0;
       for (const e of existing) {
+        if (await isOnFinalizedSettlement(ctx, e)) { keptFinalized++; continue; }
         await ctx.db.patch(e._id, { isVoided: true, voidedAt: now, voidReason: 'legacy manual line removed/changed', updatedAt: now });
+        voided++;
       }
-      return { action: 'voided' as const, voided: existing.length };
+      return { action: 'voided' as const, voided, keptFinalized };
     }
 
     const comps = await resolveLegacyComponents(ctx, args.workosOrgId);
@@ -229,10 +250,17 @@ export const syncManualPayItem = internalMutation({
       }
     }
 
-    // Supersede any prior mirror, insert fresh.
+    // Supersede any prior mirror, EXCEPT one frozen on a finalized settlement.
+    let supersededFinalized = false;
     for (const e of existing) {
+      if (await isOnFinalizedSettlement(ctx, e)) { supersededFinalized = true; continue; }
       await ctx.db.patch(e._id, { isVoided: true, voidedAt: now, voidReason: 'superseded by manual re-sync', updatedAt: now });
     }
+    // The prior mirror is frozen/paid on a finalized statement: don't insert a
+    // fresh full-amount mirror (that would double-pay). A post-payment correction
+    // must be an explicit adjustment on an open period.
+    if (supersededFinalized) return { action: 'skipped-finalized' as const };
+
     const natural = await anchorFor(ctx, line);
     const { anchor, rolledForward } = await resolveForwardAnchor(ctx, payeeType, payeeId, natural, now);
     await ctx.db.insert('payItems', buildManualRow(args.workosOrgId, payeeType, payeeId, line, comp, anchor, args.table, now, runId));

@@ -15,6 +15,7 @@ import type { QueryCtx } from '../_generated/server';
 import { v } from 'convex/values';
 import { paginationOptsValidator } from 'convex/server';
 import type { Doc, Id } from '../_generated/dataModel';
+import { FINALIZED_SETTLEMENT_STATUSES } from './schema';
 import { requireCallerOrgId, assertCallerOwnsOrg } from '../lib/auth';
 import {
   ageDays,
@@ -110,20 +111,25 @@ async function bucketOf(ctx: QueryCtx, caches: AdapterCaches, componentId: strin
   return b;
 }
 
-// Statuses at/after which a settlement's membership is FROZEN — the aggregator
-// no longer runs, so the items rolled into `totals` are exactly those it stamped
-// with this settlementId. Mirrors the aggregator's LOCKED_STATUSES / write
-// layer's FINALIZED set.
-const FINALIZED_STATUSES = new Set<NewStatus>(['VERIFIED', 'SENT', 'PAID', 'CLOSED', 'VOID']);
-
-/** Live period window (accruing) — used for OPEN / IN_REVIEW settlements. */
-function payItemsForPeriod(ctx: QueryCtx, settlement: Doc<'settlements'>): Promise<Doc<'payItems'>[]> {
-  return ctx.db
+/**
+ * Live period window (accruing) — used for OPEN / IN_REVIEW settlements. Mirrors
+ * the aggregator's relevance filter (aggregateSettlement.ts): only APPLIED items,
+ * and never an item already stamped onto a DIFFERENT settlement (cross-settlement
+ * exclusion), so a non-finalized row's preview net can't exceed the totals it
+ * will freeze to. isVoided is filtered downstream in linesFromItems / payables.
+ */
+async function payItemsForPeriod(ctx: QueryCtx, settlement: Doc<'settlements'>): Promise<Doc<'payItems'>[]> {
+  const items = await ctx.db
     .query('payItems')
     .withIndex('by_payee_period', (q) =>
       q.eq('payeeType', settlement.payeeType).eq('payeeId', settlement.payeeId)
         .gte('periodAnchorAt', settlement.periodStart).lte('periodAnchorAt', settlement.periodEnd))
     .collect();
+  return items.filter(
+    (it) =>
+      it.lifecycleStatus === 'APPLIED' &&
+      (it.settlementId == null || it.settlementId === settlement._id),
+  );
 }
 
 /** Frozen membership — exactly the items the aggregator attached to this row. */
@@ -142,7 +148,7 @@ function payItemsOnSettlement(ctx: QueryCtx, settlementId: Id<'settlements'>): P
  * before the next aggregation stamps them.
  */
 function payItemsForSettlement(ctx: QueryCtx, settlement: Doc<'settlements'>): Promise<Doc<'payItems'>[]> {
-  return FINALIZED_STATUSES.has(settlement.status)
+  return FINALIZED_SETTLEMENT_STATUSES.has(settlement.status)
     ? payItemsOnSettlement(ctx, settlement._id)
     : payItemsForPeriod(ctx, settlement);
 }
@@ -178,6 +184,31 @@ async function linesFromItems(
 /** Collect a settlement's items (frozen if finalized) and project them to lines. */
 async function linesFor(ctx: QueryCtx, caches: AdapterCaches, settlement: Doc<'settlements'>): Promise<AdaptedLine[]> {
   return linesFromItems(ctx, caches, await payItemsForSettlement(ctx, settlement));
+}
+
+/** Project already-collected payItems into the detail-shape payable rows (driver + carrier). */
+async function payablesFromItems(ctx: QueryCtx, caches: AdapterCaches, items: Doc<'payItems'>[]) {
+  const payables = [];
+  for (const it of items) {
+    if (it.isVoided) continue;
+    const category = bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
+    const dollars = Number(it.amountCents) / 100;
+    payables.push({
+      _id: it._id,
+      loadId: it.sourceRef.loadId,
+      description: it.description,
+      quantity: it.quantity,
+      rate: Number(it.rateMicroCents) / 100000,
+      totalAmount: category === 'DEDUCTION' ? -dollars : dollars,
+      sourceType: (it.kind === 'MANUAL_ADJUSTMENT' ? 'MANUAL' : 'SYSTEM') as 'MANUAL' | 'SYSTEM',
+      category,
+      isLocked: it.isLocked,
+      warningMessage: it.warning,
+      createdAt: it.createdAt,
+      edited: it.reviewerEdit != null,
+    });
+  }
+  return payables;
 }
 
 /** One new-ledger settlement → the dashboard's SettlementRow (driver). */
@@ -262,9 +293,16 @@ async function enrichNewDriverSettlement(
 
 // ── driver settlement statuses that map to each legacy grouping ──────────────
 const ACTIVE_NEW_STATUSES: NewStatus[] = ['OPEN', 'IN_REVIEW'];
+// Each settled tab maps to the new-ledger status that actually occurs today.
+// SENT (post-VERIFIED) and CLOSED (post-PAID) exist in the status union but NO
+// mutation writes them yet (updateSettlementStatus only sets VERIFIED/PAID/VOID).
+// list and getViewStats both read from this map, so keeping ONE status per group
+// guarantees the rows and the counts can't diverge. When the send/close flows
+// land, these groups will need real multi-status pagination (a denormalized
+// settled-group field, or a first-page merge of the rare secondary status).
 const SETTLED_MAP: Record<'APPROVED' | 'PAID' | 'VOID', NewStatus[]> = {
-  APPROVED: ['VERIFIED', 'SENT'],
-  PAID: ['PAID', 'CLOSED'],
+  APPROVED: ['VERIFIED'],
+  PAID: ['PAID'],
   VOID: ['VOID'],
 };
 
@@ -317,8 +355,7 @@ export const listSettled = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // Settled statuses are two-per-group; paginate the primary and merge the
-    // secondary (SENT/CLOSED are rare). Primary drives the cursor.
+    // One status per settled group today (see SETTLED_MAP); paginate it directly.
     const [primary] = SETTLED_MAP[args.status];
     const result = await ctx.db
       .query('settlements')
@@ -348,7 +385,10 @@ export const getViewStats = query({
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const caches = newAdapterCaches();
 
-    const active = (await driverSettlementsByStatus(ctx, args.workosOrgId, ACTIVE_NEW_STATUSES)).slice(0, ACTIVE_ROW_CAP);
+    // Same subset listActive shows (most-recent-first, capped) so tiles and rows agree.
+    const active = (await driverSettlementsByStatus(ctx, args.workosOrgId, ACTIVE_NEW_STATUSES))
+      .sort((a, b) => b.periodStart - a.periodStart)
+      .slice(0, ACTIVE_ROW_CAP);
     let openCount = 0, attentionCount = 0, readyCount = 0;
     let openAccruing = 0, readyNet = 0, blockedNet = 0;
     let oldestBlockedId: Id<'settlements'> | null = null, oldestBlockedAge = -1;
@@ -408,27 +448,7 @@ export const getSettlementDetails = query({
     );
 
     // Payables in the detail shape (description-level lines).
-    const payables = [];
-    for (const it of items) {
-      if (it.isVoided) continue;
-      const bucket = await bucketOf(ctx, caches, it.componentId as string);
-      const dollars = Number(it.amountCents) / 100;
-      const category = bucketToCategory(bucket);
-      payables.push({
-        _id: it._id,
-        loadId: it.sourceRef.loadId,
-        description: it.description,
-        quantity: it.quantity,
-        rate: Number(it.rateMicroCents) / 100000,
-        totalAmount: category === 'DEDUCTION' ? -dollars : dollars,
-        sourceType: (it.kind === 'MANUAL_ADJUSTMENT' ? 'MANUAL' : 'SYSTEM') as 'MANUAL' | 'SYSTEM',
-        category,
-        isLocked: it.isLocked,
-        warningMessage: it.warning,
-        createdAt: it.createdAt,
-        edited: it.reviewerEdit != null,
-      });
-    }
+    const payables = await payablesFromItems(ctx, caches, items);
 
     return {
       settlement: {
@@ -547,10 +567,11 @@ async function carrierSettlementsByStatus(ctx: QueryCtx, orgId: string, statuses
   return out;
 }
 
-// Carriers add a DISPUTED settled bucket the new ledger doesn't model yet → [].
+// One status per settled group today (see SETTLED_MAP for the SENT/CLOSED note);
+// DISPUTED isn't modeled in the new ledger yet → [].
 const CARRIER_SETTLED_MAP: Record<'APPROVED' | 'PAID' | 'VOID' | 'DISPUTED', NewStatus[]> = {
-  APPROVED: ['VERIFIED', 'SENT'],
-  PAID: ['PAID', 'CLOSED'],
+  APPROVED: ['VERIFIED'],
+  PAID: ['PAID'],
   VOID: ['VOID'],
   DISPUTED: [],
 };
@@ -620,7 +641,10 @@ export const carrierGetViewStats = query({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const caches = newAdapterCaches();
-    const active = (await carrierSettlementsByStatus(ctx, args.workosOrgId, ACTIVE_NEW_STATUSES)).slice(0, ACTIVE_ROW_CAP);
+    // Same subset carrierListActive shows (most-recent-first, capped) so tiles and rows agree.
+    const active = (await carrierSettlementsByStatus(ctx, args.workosOrgId, ACTIVE_NEW_STATUSES))
+      .sort((a, b) => b.periodStart - a.periodStart)
+      .slice(0, ACTIVE_ROW_CAP);
     let openCount = 0, attentionCount = 0, readyCount = 0;
     let openAccruing = 0, readyNet = 0, blockedNet = 0;
     let oldestBlockedId: Id<'settlements'> | null = null, oldestBlockedAge = -1;
@@ -674,27 +698,7 @@ export const carrierGetSettlementDetails = query({
       settlement.acknowledgedBlockers,
     );
 
-    const payables = [];
-    for (const it of items) {
-      if (it.isVoided) continue;
-      const bucket = await bucketOf(ctx, caches, it.componentId as string);
-      const dollars = Number(it.amountCents) / 100;
-      const category = bucketToCategory(bucket);
-      payables.push({
-        _id: it._id,
-        loadId: it.sourceRef.loadId,
-        description: it.description,
-        quantity: it.quantity,
-        rate: Number(it.rateMicroCents) / 100000,
-        totalAmount: category === 'DEDUCTION' ? -dollars : dollars,
-        sourceType: (it.kind === 'MANUAL_ADJUSTMENT' ? 'MANUAL' : 'SYSTEM') as 'MANUAL' | 'SYSTEM',
-        category,
-        isLocked: it.isLocked,
-        warningMessage: it.warning,
-        createdAt: it.createdAt,
-        edited: it.reviewerEdit != null,
-      });
-    }
+    const payables = await payablesFromItems(ctx, caches, items);
 
     return {
       settlement: {

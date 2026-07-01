@@ -27,6 +27,7 @@ import {
   type Currency,
 } from '../lib/money';
 import { nextStatementNumber, cadenceFromPaymentTerms } from '../lib/settlementShared';
+import { FINALIZED_SETTLEMENT_STATUSES as LOCKED_STATUSES } from './schema';
 
 export type Variance = {
   level: 'INFO' | 'WARNING' | 'FLAG';
@@ -155,8 +156,6 @@ export function rollupSettlementTotals(items: RollupItem[]): RollupResult {
 
 // ── Convex wrapper ──────────────────────────────────────────────────────────
 
-/** Statuses we never touch — human- or payment-committed. */
-const LOCKED_STATUSES = new Set(['VERIFIED', 'SENT', 'PAID', 'CLOSED', 'VOID']);
 
 type PeriodSource =
   | { kind: 'PAY_PLAN'; payPlanId: Id<'payPlans'> }

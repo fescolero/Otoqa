@@ -169,6 +169,42 @@ describe('settlementReads (new-ledger adapter)', () => {
     expect(d.payables).toHaveLength(2); // the orphan $75 is excluded, not 3
     expect(d.summary.net).toBe(650);    // frozen at the approved total, not 725
   });
+
+  // The OPEN/IN_REVIEW live-window read must mirror the aggregator's relevance
+  // filter: only APPLIED items, and never one stamped onto a DIFFERENT settlement.
+  it('OPEN read excludes cross-settlement and non-APPLIED in-window items', async () => {
+    const t = convexTest(schema);
+    const { driverId, settlementId } = await seed(t, { status: 'OPEN', periodEndFromNow: 3 * DAY });
+    await t.run(async (ctx) => {
+      const s = (await ctx.db.get(settlementId))!;
+      const wage = await ctx.db.query('chargeComponents')
+        .withIndex('by_org_code', (q) => q.eq('workosOrgId', ORG).eq('code', 'WAGE_HOURLY')).first();
+      const other = await ctx.db.insert('settlements', {
+        workosOrgId: ORG, statementNumber: 'SET-OTHER', payeeType: 'DRIVER', payeeId: driverId,
+        periodStart: s.periodStart, periodEnd: s.periodEnd, currency: 'USD', status: 'OPEN',
+        totals: {
+          earningsCents: 0n, bonusesCents: 0n, creditsCents: 0n, deductionsCents: 0n,
+          taxWithholdingCents: 0n, garnishmentsCents: 0n, adjustmentsCents: 0n,
+          grossCents: 0n, netCents: 0n, holdbackTotalCents: 0n, itemCount: 0,
+        },
+        componentTotals: [], createdAt: Date.now(), updatedAt: Date.now(), createdBy: USER,
+      });
+      const common = {
+        workosOrgId: ORG, payeeType: 'DRIVER' as const, payeeId: driverId, kind: 'EARNING' as const,
+        componentId: wage!._id, description: 'excluded', quantity: 1, rateMicroCents: 100000n,
+        amountCents: 99900n, currency: 'USD' as const, periodAnchorAt: s.periodStart + DAY,
+        sourceRef: { kind: 'RATE_RULE' as const, id: 'r' }, isLocked: false, isVoided: false,
+        createdAt: Date.now(), updatedAt: Date.now(), createdBy: USER,
+      };
+      await ctx.db.insert('payItems', { ...common, settlementId: other, lifecycleStatus: 'APPLIED' }); // cross-settlement
+      await ctx.db.insert('payItems', { ...common, lifecycleStatus: 'PENDING_APPROVAL' });             // not APPLIED
+    });
+    const at = t.withIdentity({ subject: USER, org_id: ORG });
+
+    const d = await at.query(api.payEngine.settlementReads.getSettlementDetails, { settlementId });
+    expect(d.payables).toHaveLength(2); // only the 2 seeded (this-settlement, APPLIED) items
+    expect(d.summary.net).toBe(650);    // the $999 cross-settlement + pending items excluded
+  });
 });
 
 async function seedCarrier(t: T) {

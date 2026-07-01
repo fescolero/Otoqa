@@ -864,6 +864,15 @@ export const settlements = defineTable({
   .index('by_org_statementNumber', ['workosOrgId', 'statementNumber'])
   .index('by_org_glPending', ['workosOrgId', 'glExportRunId']);
 
+// Statuses at/after which a settlement is FROZEN — the single source of truth for
+// that boundary across the pay engine: the aggregator no longer re-runs it, the
+// write layer blocks edits/acks/adjustments, the read adapter reads its stamped
+// membership instead of the live period window, and manual-sync rolls new lines
+// forward past it. Keep this in sync with the `settlements.status` union above.
+export const FINALIZED_SETTLEMENT_STATUSES: ReadonlySet<string> = new Set([
+  'VERIFIED', 'SENT', 'PAID', 'CLOSED', 'VOID',
+]);
+
 // ============================================================================
 // settlementDisputes — payee-raised disputes on a settlement
 // ============================================================================

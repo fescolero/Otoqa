@@ -260,4 +260,90 @@ describe('syncManualPayItem — roll-forward past finalized periods', () => {
     expect(res.rolledForward).toBe(false);
     expect((await liveItem(t, driverId)).periodAnchorAt).toBe(createdAt);
   });
+
+  // #4: the finalized period itself contains `now` and there's no later open
+  // period — anchor must land PAST the finalized window, never inside it.
+  it('finalized period contains now, no open period → anchors past the finalized window', async () => {
+    const t = convexTest(schema);
+    const { driverId } = await seedComps(t);
+    const base = Date.now();
+    const p1End = base + 5 * DAY;
+    const payableId = await t.run(async (ctx) => {
+      await mkSettlement(ctx, driverId, base - 5 * DAY, p1End, 'VERIFIED', 'SET-P1'); // window contains now
+      return mkPayable(ctx, driverId, base); // natural anchor = now, inside finalized P1
+    });
+    const res = await sync(t, payableId);
+    expect(res.rolledForward).toBe(true);
+    expect((await liveItem(t, driverId)).periodAnchorAt).toBeGreaterThan(p1End);
+  });
+});
+
+// #2: a legacy edit/delete must not void a mirror already frozen on a finalized
+// settlement (that would drop money from a paid statement / desync stat vs detail).
+describe('syncManualPayItem — finalized-mirror guard', () => {
+  const DAY = 86_400_000;
+  const sync = (t: T, payableId: string) =>
+    t.mutation(internal.payEngine.manualCoverage.syncManualPayItem, {
+      workosOrgId: ORG, table: 'loadPayables', payableId,
+    });
+  const mkVerified = (ctx: any, driverId: string, base: number) =>
+    ctx.db.insert('settlements', {
+      workosOrgId: ORG, statementNumber: 'SET-FIN', payeeType: 'DRIVER', payeeId: driverId,
+      periodStart: base - 10 * DAY, periodEnd: base - 5 * DAY, currency: 'USD', status: 'VERIFIED',
+      totals: {
+        earningsCents: 0n, bonusesCents: 0n, creditsCents: 0n, deductionsCents: 0n,
+        taxWithholdingCents: 0n, garnishmentsCents: 0n, adjustmentsCents: 0n,
+        grossCents: 0n, netCents: 0n, holdbackTotalCents: 0n, itemCount: 0,
+      },
+      componentTotals: [], createdAt: Date.now(), updatedAt: Date.now(), createdBy: USER,
+    });
+  const mkPayable = (ctx: any, driverId: string, base: number) =>
+    ctx.db.insert('loadPayables', {
+      driverId, description: 'Safety bonus', quantity: 1, rate: 75, totalAmount: 75,
+      sourceType: 'MANUAL', isLocked: true, workosOrgId: ORG, createdBy: USER, createdAt: base - 8 * DAY,
+    });
+  // Create the mirror (first sync) and stamp it onto the finalized settlement, as
+  // the aggregator would have when that statement was approved.
+  const attachMirror = async (t: T, driverId: string, payableId: string, settlementId: string) => {
+    await sync(t, payableId);
+    const mirrorId = (await driverItems(t, driverId))[0]._id;
+    await t.run(async (ctx) => ctx.db.patch(mirrorId as any, { settlementId: settlementId as any }));
+    return mirrorId;
+  };
+
+  it('edit → skipped-finalized: frozen mirror untouched, no double-pay insert', async () => {
+    const t = convexTest(schema);
+    const { driverId } = await seedComps(t);
+    const base = Date.now();
+    const { payableId, settlementId } = await t.run(async (ctx) => ({
+      settlementId: await mkVerified(ctx, driverId, base),
+      payableId: await mkPayable(ctx, driverId, base),
+    }));
+    const mirrorId = await attachMirror(t, driverId, payableId, settlementId);
+    await t.run(async (ctx) => ctx.db.patch(payableId, { rate: 100, totalAmount: 100 }));
+
+    const res = await sync(t, payableId);
+    expect(res.action).toBe('skipped-finalized');
+    const items = await driverItems(t, driverId);
+    expect(items).toHaveLength(1);            // no fresh mirror inserted
+    expect(items[0]._id).toBe(mirrorId);      // original frozen mirror survives
+    expect(items[0].amountCents).toBe(7500n); // still the paid $75, not $100
+  });
+
+  it('delete → keeps the frozen mirror on the paid statement', async () => {
+    const t = convexTest(schema);
+    const { driverId } = await seedComps(t);
+    const base = Date.now();
+    const { payableId, settlementId } = await t.run(async (ctx) => ({
+      settlementId: await mkVerified(ctx, driverId, base),
+      payableId: await mkPayable(ctx, driverId, base),
+    }));
+    await attachMirror(t, driverId, payableId, settlementId);
+    await t.run(async (ctx) => ctx.db.delete(payableId));
+
+    const res = await sync(t, payableId);
+    expect(res.action).toBe('voided');
+    expect(res.keptFinalized).toBe(1);
+    expect(await driverItems(t, driverId)).toHaveLength(1); // frozen mirror kept
+  });
 });

@@ -31,10 +31,8 @@ import {
   rawCents,
   rawMicroCents,
 } from '../lib/money';
-
 // Settlement states past which a line is finalized and must not be edited.
-// Mirrors legacy's APPROVED/PAID guard over the new lifecycle enum.
-const FINALIZED_STATES = new Set(['VERIFIED', 'SENT', 'PAID', 'CLOSED', 'VOID']);
+import { FINALIZED_SETTLEMENT_STATUSES as FINALIZED_STATES } from './schema';
 
 /**
  * Paid hours for a shift = corrected clock span − break, floored at 0, rounded

@@ -11,6 +11,7 @@ import { v } from 'convex/values';
 import type { Doc, Id } from '../_generated/dataModel';
 import { requireCallerIdentity, requireCallerOrgId } from '../lib/auth';
 import { centsFromNumber, microCentsFromNumber, rawCents, rawMicroCents } from '../lib/money';
+import { FINALIZED_SETTLEMENT_STATUSES as FINALIZED } from './schema';
 
 // Legacy status the dashboard sends → new lifecycle status.
 const STATUS_MAP: Record<'DRAFT' | 'PENDING' | 'APPROVED' | 'PAID' | 'VOID', Doc<'settlements'>['status']> = {
@@ -20,9 +21,6 @@ const STATUS_MAP: Record<'DRAFT' | 'PENDING' | 'APPROVED' | 'PAID' | 'VOID', Doc
   PAID: 'PAID',
   VOID: 'VOID',
 };
-
-// Past these the settlement is finalized — no edits/acks/adds/removes.
-const FINALIZED = new Set(['VERIFIED', 'SENT', 'PAID', 'CLOSED', 'VOID']);
 
 async function getOwnedSettlement(ctx: MutationCtx, settlementId: Id<'settlements'>, orgId: string) {
   const s = await ctx.db.get(settlementId);
