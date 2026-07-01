@@ -130,6 +130,32 @@ export async function reverseInvoice(
 }
 
 /**
+ * Reverse a payment when a paid invoice is restored to an unpaid finalized
+ * state (e.g. undo of a manual mark-as-paid back to PENDING_PAYMENT).
+ * Leaves invoiced totals untouched.
+ *
+ * @param ctx - Mutation context
+ * @param orgId - Organization ID
+ * @param paidAmount - The paid amount to reverse
+ * @param timestamp - The timestamp of the original period
+ */
+export async function reversePaymentCollected(
+  ctx: MutationCtx,
+  orgId: string,
+  paidAmount: number,
+  timestamp: number,
+): Promise<void> {
+  const periodKey = getPeriodKey(timestamp);
+  const stats = await getOrCreatePeriodStats(ctx, orgId, periodKey);
+
+  await ctx.db.patch(stats._id, {
+    totalCollected: Math.max(0, stats.totalCollected - paidAmount),
+    paidInvoiceCount: Math.max(0, stats.paidInvoiceCount - 1),
+    updatedAt: Date.now(),
+  });
+}
+
+/**
  * Reverse a payment when an invoice is reset from PAID to DRAFT.
  *
  * @param ctx - Mutation context

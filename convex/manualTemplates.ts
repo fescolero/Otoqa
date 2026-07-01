@@ -103,6 +103,79 @@ export const listTemplates = query({
 });
 
 /**
+ * Adjustment presets for the Settlement Review "Add adjustment" menu.
+ *
+ * Presets are entry shortcuts, NOT fixed amounts: each carries a label,
+ * icon, and a default category (which sets the earning / reimbursement /
+ * deduction section and therefore the sign). Selecting one pre-fills the
+ * adjustment form so the reviewer types the dollar amount. Curated,
+ * party-specific defaults are merged with the org's configured
+ * MANUAL_TEMPLATE rate rules (deduped by label).
+ */
+const DRIVER_PRESETS = [
+  { id: 'bonus', icon: 'sparkle', label: 'Safety bonus', category: 'EARNING' as const },
+  { id: 'detention', icon: 'clock', label: 'Detention', category: 'EARNING' as const },
+  { id: 'lumper', icon: 'package', label: 'Lumper / unload', category: 'REIMBURSEMENT' as const },
+  { id: 'tolls', icon: 'compass', label: 'Tolls', category: 'REIMBURSEMENT' as const },
+  { id: 'scale', icon: 'receipt', label: 'Scale ticket', category: 'REIMBURSEMENT' as const },
+  { id: 'cash-adv', icon: 'doc-dollar', label: 'Cash advance', category: 'DEDUCTION' as const },
+  { id: 'fuel-adv', icon: 'fuel', label: 'Fuel advance', category: 'DEDUCTION' as const },
+];
+const CARRIER_PRESETS = [
+  { id: 'detention', icon: 'clock', label: 'Detention', category: 'EARNING' as const },
+  { id: 'lumper', icon: 'package', label: 'Lumper pass-through', category: 'REIMBURSEMENT' as const },
+  { id: 'tonu', icon: 'truck', label: 'TONU', category: 'EARNING' as const },
+  { id: 'qp-fee', icon: 'doc-dollar', label: 'Quick-pay fee', category: 'DEDUCTION' as const },
+  { id: 'chargeback', icon: 'warn-tri', label: 'Chargeback', category: 'DEDUCTION' as const },
+];
+
+export const listAdjustmentPresets = query({
+  args: {
+    workosOrgId: v.string(),
+    party: v.union(v.literal('driver'), v.literal('carrier')),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const curated = args.party === 'carrier' ? CARRIER_PRESETS : DRIVER_PRESETS;
+
+    // Merge the org's configured MANUAL_TEMPLATE rules (deduped by label).
+    const profileType = args.party === 'carrier' ? 'CARRIER' : 'DRIVER';
+    const profiles = (
+      await ctx.db
+        .query('rateProfiles')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect()
+    ).filter((p) => p.profileType === profileType);
+
+    const seen = new Set(curated.map((p) => p.label.toLowerCase()));
+    const fromRules: Array<{ id: string; icon: string; label: string; category: 'EARNING' | 'REIMBURSEMENT' | 'DEDUCTION' }> = [];
+    for (const profile of profiles) {
+      const rules = await ctx.db
+        .query('rateRules')
+        .withIndex('by_profile', (q) => q.eq('profileId', profile._id))
+        .filter((q) => q.and(q.eq(q.field('category'), 'MANUAL_TEMPLATE'), q.eq(q.field('isActive'), true)))
+        .collect();
+      for (const rule of rules) {
+        const label = rule.name;
+        if (seen.has(label.toLowerCase())) continue;
+        seen.add(label.toLowerCase());
+        // Name heuristic for obvious deductions (advance/fee/chargeback/escrow).
+        const isDeduction = /advance|fee|chargeback|escrow|deduct/i.test(label);
+        fromRules.push({
+          id: 'tpl-' + rule._id,
+          icon: isDeduction ? 'doc-dollar' : 'plus',
+          label,
+          category: isDeduction ? 'DEDUCTION' : 'EARNING',
+        });
+      }
+    }
+
+    return [...curated, ...fromRules];
+  },
+});
+
+/**
  * Get common adjustment types (predefined list)
  * Used when no templates are configured
  */

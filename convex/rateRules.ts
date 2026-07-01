@@ -13,6 +13,7 @@ const triggerEventValidator = v.union(
   v.literal('MILE_LOADED'),
   v.literal('MILE_EMPTY'),
   v.literal('TIME_DURATION'),
+  v.literal('SESSION_DURATION'),
   v.literal('TIME_WAITING'),
   v.literal('COUNT_STOPS'),
   v.literal('FLAT_LOAD'),

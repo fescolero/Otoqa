@@ -101,6 +101,21 @@ async function endSessionInternal(
     totalActiveMinutes,
   });
 
+  // Session-based hourly pay: one payable per completed shift for drivers
+  // whose profile has a SESSION_DURATION rule. Scheduled (not inline) so
+  // shift end stays fast; idempotent; daily backstop cron catches misses.
+  await ctx.scheduler.runAfter(0, internal.sessionPay.paySession, {
+    sessionId: session._id,
+  });
+
+  // NEW PAY ENGINE (shadow): the same shift through the new engine — emits
+  // payItems per `session.*`-triggered rule, keyed by sessionId. Runs in
+  // parallel with legacy paySession during migration; not yet the source of
+  // truth. Idempotent via payItems.by_session.
+  await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForSession.calculatePayForSession, {
+    sessionId: session._id,
+  });
+
   // Clear the driver's current truck pairing on session end. This forces
   // a fresh QR scan to start the next shift — the driver might be on a
   // different unit tomorrow, and we never want to silently bind a stale
@@ -130,6 +145,29 @@ async function endSessionInternal(
       endReason: args.endReason ?? 'unknown',
       affectedLegIds,
     });
+  }
+
+  // Notify the driver's mobile app that the session is over so the
+  // foreground location tracker stops emitting pings. Without this, a
+  // server-side end (dispatch override, auto-timeout, handoff, another
+  // device closing the session) leaves the mobile app's local
+  // TrackingState.isActive=true and it keeps streaming GPS for hours.
+  //
+  // Scheduled (not awaited) so the end-shift mutation returns quickly
+  // even if FCM is slow. The push is best-effort — the strict ping
+  // rejection in driverLocations.ts::ingestBatch is the actual data
+  // correctness guarantee.
+  //
+  // Skip when the driver themselves ended the shift via the mobile UI
+  // (`driver_manual` / `role_switch`) — in those cases mobile already
+  // called stopSessionTracking() locally before invoking the mutation,
+  // so the push would be redundant and just churn FCM quota.
+  if (!INTENTIONAL_DRIVER_END_REASONS.includes(args.endReason)) {
+    await ctx.scheduler.runAfter(
+      0,
+      internal.fcmWake.sendSessionEnded,
+      { sessionId: session._id },
+    );
   }
 }
 

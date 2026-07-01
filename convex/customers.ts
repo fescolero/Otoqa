@@ -253,6 +253,18 @@ export const update = mutation({
     locationScheduleType: v.optional(v.union(v.literal('24/7'), v.literal('Business Hours'), v.literal('Appointment Only'), v.literal('Specific Hours'))),
     instructions: v.optional(v.string()),
 
+    // Payment Preferences
+    paymentTerms: v.optional(
+      v.union(
+        v.literal('NET_15'),
+        v.literal('NET_30'),
+        v.literal('NET_45'),
+        v.literal('NET_60'),
+        v.literal('NET_90'),
+        v.literal('DUE_ON_RECEIPT'),
+      ),
+    ),
+
     // Internal
     internalNotes: v.optional(v.string()),
   },

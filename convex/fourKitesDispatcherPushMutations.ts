@@ -288,6 +288,20 @@ export const recordPushResults = internalMutation({
           updatedAt: now,
         });
       }
+
+      // AUDIT-ONLY: append one row per successful push to the audit log.
+      // Safe to remove with the rest of the AUDIT-ONLY sites when the
+      // integration is verified — see fourKitesPushAuditLog schema note.
+      if (ok.requestBody) {
+        await ctx.db.insert('fourKitesPushAuditLog', {
+          loadId: ok.loadId,
+          workosOrgId: args.workosOrgId,
+          pushedAt: now,
+          pushedRecordedAt: ok.pushedRecordedAt,
+          requestId: ok.requestId,
+          requestBody: ok.requestBody,
+        });
+      }
     }
 
     for (const failure of args.failures) {
@@ -1416,5 +1430,346 @@ export const findFourKitesLoadsWithFallbackOrderNumber = internalQuery({
       breakdownByTrackingStatus: breakdown,
       samples,
     };
+  },
+});
+
+// ============================================
+// PUSH-HISTORY RECONSTRUCTION INPUTS
+//
+// Returns the raw data needed to reconstruct the cron's push timeline
+// for a load (when historical lastRequestBody wasn't being persisted).
+// The reconstructPushHistoryForLoad action consumes this, simulates the
+// 60s cron logic, and produces a list of "what we likely sent at each
+// tick" payloads that can be handed to FK support.
+//
+// AUDIT-ONLY: paired with the lastRequestBody field — once the
+// integration is verified and history isn't needed, this query can be
+// dropped without affecting runtime push behavior.
+// ============================================
+
+const APPROACH_WINDOW_MS_RECON = 30 * 60 * 1000;
+
+export const getPushHistoryReconstructionInputs = internalQuery({
+  args: {
+    workosOrgId: v.string(),
+    loadRef: v.string(),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      loadId: v.id('loadInformation'),
+      internalId: v.string(),
+      externalLoadId: v.string(),
+      orderNumber: v.string(),
+      trackingStatus: v.string(),
+      reconstructionEndMs: v.number(), // legEndedAt of latest leg OR now, whichever earlier
+      legs: v.array(
+        v.object({
+          legId: v.id('dispatchLegs'),
+          legStatus: v.string(),
+          approachFloorMs: v.number(),
+          legStartedAt: v.optional(v.number()),
+          legEndedAt: v.optional(v.number()),
+          resolvedSessionId: v.optional(v.id('driverSessions')),
+        }),
+      ),
+      // Union of load-tagged + session-route pings across the
+      // reconstruction window, ordered ascending by recordedAt.
+      pings: v.array(
+        v.object({
+          recordedAt: v.number(),
+          latitude: v.number(),
+          longitude: v.number(),
+          source: v.optional(v.string()),
+          origin: v.string(), // 'load-tagged' | 'session-route'
+        }),
+      ),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    // Reuse the same lookup strategy as the diagnostic.
+    let load = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_internal_id', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('internalId', args.loadRef),
+      )
+      .first();
+    if (!load) {
+      load =
+        (await ctx.db
+          .query('loadInformation')
+          .withIndex('by_external_id', (q: any) =>
+            q.eq('externalSource', 'FourKites').eq('externalLoadId', args.loadRef),
+          )
+          .first()) ||
+        (await ctx.db
+          .query('loadInformation')
+          .withIndex('by_external_id', (q: any) =>
+            q.eq('externalSource', 'FOURKITES').eq('externalLoadId', args.loadRef),
+          )
+          .first());
+      if (load && load.workosOrgId !== args.workosOrgId) load = null;
+    }
+    if (!load) return null;
+    if (!isFourKitesSource(load.externalSource)) return null;
+    if (!load.externalLoadId) return null;
+
+    const now = Date.now();
+    const legRows = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect();
+    if (legRows.length === 0) return null;
+
+    // Per leg: resolve session + compute approach floor.
+    const legs: Array<{
+      legId: any;
+      legStatus: string;
+      approachFloorMs: number;
+      legStartedAt?: number;
+      legEndedAt?: number;
+      resolvedSessionId?: any;
+    }> = [];
+
+    let earliestApproachFloor = Number.POSITIVE_INFINITY;
+    let latestLegEnd = -Infinity;
+    let anyLegOngoing = false;
+
+    for (const leg of legRows) {
+      let resolvedSessionId: any = leg.sessionId ?? undefined;
+      if (!resolvedSessionId && leg.driverId) {
+        const openSession = await ctx.db
+          .query('driverSessions')
+          .withIndex('by_driver_status', (q) =>
+            q.eq('driverId', leg.driverId!).eq('status', 'active'),
+          )
+          .first();
+        resolvedSessionId = openSession?._id ?? undefined;
+      }
+
+      let pickupAnchorMs: number | undefined = leg.scheduledStartMs;
+      if (pickupAnchorMs === undefined) {
+        const startStop = await ctx.db.get(leg.startStopId);
+        if (startStop?.windowBeginDate && startStop?.windowBeginTime) {
+          const parsed = parseStopDateTime(
+            startStop.windowBeginDate,
+            startStop.windowBeginTime,
+          );
+          if (parsed !== null) pickupAnchorMs = parsed;
+        }
+      }
+      const approachFloorMs =
+        pickupAnchorMs !== undefined
+          ? pickupAnchorMs - APPROACH_WINDOW_MS_RECON
+          : 0;
+
+      if (approachFloorMs < earliestApproachFloor) {
+        earliestApproachFloor = approachFloorMs;
+      }
+      if (leg.endedAt !== undefined && leg.endedAt > latestLegEnd) {
+        latestLegEnd = leg.endedAt;
+      } else if (leg.endedAt === undefined) {
+        anyLegOngoing = true;
+      }
+
+      legs.push({
+        legId: leg._id,
+        legStatus: leg.status,
+        approachFloorMs,
+        legStartedAt: leg.startedAt,
+        legEndedAt: leg.endedAt,
+        resolvedSessionId,
+      });
+    }
+
+    // If any leg has no endedAt, the load is still active → use 'now' as
+    // the upper bound. Otherwise use the latest legEndedAt.
+    const reconstructionEndMs = anyLegOngoing ? now : latestLegEnd;
+
+    // ── Gather pings ────────────────────────────────────────────────
+    // 1) Load-tagged pings (any time)
+    const loadTaggedPings = await ctx.db
+      .query('driverLocations')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect();
+
+    // 2) Session-route pings per leg, recordedAt >= approachFloor
+    const sessionPingArrays = await Promise.all(
+      legs.map(async (leg) => {
+        if (!leg.resolvedSessionId) return [];
+        const arr = await ctx.db
+          .query('driverLocations')
+          .withIndex('by_session_time', (q: any) =>
+            q
+              .eq('sessionId', leg.resolvedSessionId)
+              .gte('recordedAt', leg.approachFloorMs),
+          )
+          .collect();
+        return arr;
+      }),
+    );
+    const sessionRoutePings = sessionPingArrays.flat();
+
+    // Deduplicate by (recordedAt, latitude, longitude) since a ping
+    // tagged with BOTH loadId and sessionId would appear in both lists.
+    type Ping = {
+      recordedAt: number;
+      latitude: number;
+      longitude: number;
+      source?: string;
+      origin: string;
+    };
+    const seen = new Set<string>();
+    const merged: Ping[] = [];
+    const tryAdd = (p: any, origin: string) => {
+      const key = `${p.recordedAt}|${p.latitude}|${p.longitude}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push({
+        recordedAt: p.recordedAt,
+        latitude: p.latitude,
+        longitude: p.longitude,
+        source: p.source,
+        origin,
+      });
+    };
+    for (const p of loadTaggedPings) tryAdd(p, 'load-tagged');
+    for (const p of sessionRoutePings) tryAdd(p, 'session-route');
+    merged.sort((a, b) => a.recordedAt - b.recordedAt);
+
+    return {
+      loadId: load._id,
+      internalId: load.internalId,
+      externalLoadId: load.externalLoadId,
+      orderNumber: load.orderNumber ?? '',
+      trackingStatus: load.trackingStatus,
+      reconstructionEndMs,
+      legs,
+      pings: merged,
+    };
+  },
+});
+
+// ============================================
+// AUDIT-ONLY: fourKitesPushAuditLog reader + pruner.
+// See schema.ts note on fourKitesPushAuditLog — these can be removed
+// together with the table when integration is verified stable.
+// ============================================
+
+/**
+ * Return every audit row for a load, ordered by pushedAt ascending.
+ * Caps the result at `limit` (default 500) — at 60-90 pushes per leg
+ * a typical load fits well under, but we bound just in case a load
+ * stays In Transit unusually long.
+ */
+export const getPushAuditLogForLoad = internalQuery({
+  args: {
+    workosOrgId: v.string(),
+    loadRef: v.string(),
+    limit: v.optional(v.number()),
+  },
+  returns: v.object({
+    found: v.boolean(),
+    note: v.string(),
+    loadRef: v.optional(v.string()),
+    externalLoadId: v.optional(v.string()),
+    orderNumber: v.optional(v.string()),
+    trackingStatus: v.optional(v.string()),
+    rowCount: v.optional(v.number()),
+    rows: v.optional(
+      v.array(
+        v.object({
+          pushedAt: v.number(),
+          pushedAtIso: v.string(),
+          pushedRecordedAt: v.number(),
+          pushedRecordedAtIso: v.string(),
+          requestId: v.optional(v.string()),
+          requestBody: v.string(),
+        }),
+      ),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    // Reuse the loadRef lookup pattern from the diagnostic.
+    let load = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_internal_id', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('internalId', args.loadRef),
+      )
+      .first();
+    if (!load) {
+      load =
+        (await ctx.db
+          .query('loadInformation')
+          .withIndex('by_external_id', (q: any) =>
+            q.eq('externalSource', 'FourKites').eq('externalLoadId', args.loadRef),
+          )
+          .first()) ||
+        (await ctx.db
+          .query('loadInformation')
+          .withIndex('by_external_id', (q: any) =>
+            q.eq('externalSource', 'FOURKITES').eq('externalLoadId', args.loadRef),
+          )
+          .first());
+      if (load && load.workosOrgId !== args.workosOrgId) load = null;
+    }
+    if (!load) {
+      return {
+        found: false,
+        note: `No FK-sourced load found for loadRef="${args.loadRef}" in org ${args.workosOrgId}.`,
+      };
+    }
+
+    const limit = args.limit ?? 500;
+    const rows = await ctx.db
+      .query('fourKitesPushAuditLog')
+      .withIndex('by_load_time', (q) => q.eq('loadId', load._id))
+      .take(limit);
+
+    return {
+      found: true,
+      note:
+        rows.length === 0
+          ? `No audit rows yet for ${load.internalId}. Audit logging only began on ${new Date().toISOString().slice(0, 10)}; for loads completed before that, use reconstructPushHistoryForLoad instead.`
+          : `Exact replay of ${rows.length} successful pushes for ${load.internalId}. Each row contains the literal JSON body POSTed to FK plus their accept-receipt requestId.`,
+      loadRef: load.internalId,
+      externalLoadId: load.externalLoadId,
+      orderNumber: load.orderNumber ?? '',
+      trackingStatus: load.trackingStatus,
+      rowCount: rows.length,
+      rows: rows.map((r) => ({
+        pushedAt: r.pushedAt,
+        pushedAtIso: new Date(r.pushedAt).toISOString(),
+        pushedRecordedAt: r.pushedRecordedAt,
+        pushedRecordedAtIso: new Date(r.pushedRecordedAt).toISOString(),
+        requestId: r.requestId,
+        requestBody: r.requestBody,
+      })),
+    };
+  },
+});
+
+/**
+ * Daily prune cron — deletes audit rows older than 14 days. Safety net so
+ * the table doesn't grow unbounded if the AUDIT-ONLY feature is left on
+ * for months. Removing the audit feature should also remove this cron
+ * registration in convex/crons.ts.
+ */
+const AUDIT_LOG_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+const AUDIT_LOG_PRUNE_BATCH = 200;
+
+export const pruneFourKitesPushAuditLog = internalMutation({
+  args: {},
+  returns: v.object({ deleted: v.number() }),
+  handler: async (ctx) => {
+    const cutoff = Date.now() - AUDIT_LOG_RETENTION_MS;
+    const stale = await ctx.db
+      .query('fourKitesPushAuditLog')
+      .withIndex('by_pushed_at', (q) => q.lt('pushedAt', cutoff))
+      .take(AUDIT_LOG_PRUNE_BATCH);
+    for (const row of stale) {
+      await ctx.db.delete(row._id);
+    }
+    return { deleted: stale.length };
   },
 });

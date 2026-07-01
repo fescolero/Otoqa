@@ -1656,6 +1656,16 @@ export default defineSchema({
     createdAt: v.number(),
   }).index('by_invoice', ['invoiceId']),
 
+  // Per-org invoice numbering sequence (INV-YYYY-NNNN). One row per org+year;
+  // nextSeq is claimed inside the billing/backfill mutations, so Convex's
+  // serializable transactions guarantee race-free, gap-free numbers.
+  invoiceCounters: defineTable({
+    workosOrgId: v.string(),
+    year: v.number(),
+    nextSeq: v.number(),
+    updatedAt: v.number(),
+  }).index('by_org_year', ['workosOrgId', 'year']),
+
   // ==========================================
   // DRIVER PAY ENGINE
   // ==========================================
@@ -1714,7 +1724,8 @@ export default defineSchema({
     triggerEvent: v.union(
       v.literal('MILE_LOADED'),
       v.literal('MILE_EMPTY'),
-      v.literal('TIME_DURATION'), // Total hours
+      v.literal('TIME_DURATION'), // Leg door-to-door hours (legacy hourly)
+      v.literal('SESSION_DURATION'), // Driver shift check-in → check-out hours
       v.literal('TIME_WAITING'), // Detention
       v.literal('COUNT_STOPS'),
       v.literal('FLAT_LOAD'), // Flat rate per entire load
@@ -1996,11 +2007,51 @@ export default defineSchema({
       v.literal('MANUAL'), // Added/Edited by User
     ),
 
+    // Statement section this line belongs to. Optional for backward compat —
+    // rows without it are classified by fallback (negative amount → DEDUCTION,
+    // rebillable manual accessorial → REIMBURSEMENT, else EARNING).
+    category: v.optional(v.union(
+      v.literal('EARNING'),
+      v.literal('REIMBURSEMENT'),
+      v.literal('DEDUCTION'),
+    )),
+
     // If TRUE, Rules Engine will NEVER delete/overwrite this row
     isLocked: v.boolean(),
 
     // Settlement Assignment
     settlementId: v.optional(v.id('driverSettlements')), // Which pay period this belongs to
+
+    // Set when the payable's work date fell in an already-settled period and
+    // autoCarryover swept it into a later statement (prior-period pay).
+    carriedOverAt: v.optional(v.float64()),
+
+    // Session-based hourly pay: one payable per completed driver shift
+    // (SESSION_DURATION rules). Links back to the shift for traceability,
+    // idempotent generation, and work-start resolution (session.startedAt).
+    sessionId: v.optional(v.id('driverSessions')),
+
+    // Review-time line edit (Settlement Review modal). When a reviewer
+    // corrects a SYSTEM line's hours/rate, we override in place and lock the
+    // line so the rules engine won't overwrite it, preserving the original
+    // for audit. `original*` are stamped once, on the first edit.
+    editedAt: v.optional(v.float64()),
+    editedBy: v.optional(v.string()),
+    editReason: v.optional(v.string()),
+    originalQuantity: v.optional(v.float64()),
+    originalRate: v.optional(v.float64()),
+    originalTotalAmount: v.optional(v.float64()),
+    // Shift lines (SESSION_DURATION): reviewer-corrected clock window + unpaid
+    // break. Paid hours derive from (overrideEndAt − overrideStartAt − break);
+    // the driver session record stays the untouched GPS truth.
+    breakMinutes: v.optional(v.float64()),
+    overrideStartAt: v.optional(v.float64()),
+    overrideEndAt: v.optional(v.float64()),
+    // Rules-drift flag: when a later recalc would compute a different amount
+    // than this locked reviewer edit, rulesAmount holds the engine's current
+    // value and rulesChangedAt marks when it diverged. Cleared when back in sync.
+    rulesAmount: v.optional(v.float64()),
+    rulesChangedAt: v.optional(v.float64()),
 
     // Rebillable to Customer (for manual accessorials)
     isRebillable: v.optional(v.boolean()), // Should this be added to customer invoice?
@@ -2030,7 +2081,8 @@ export default defineSchema({
     .index('by_settlement', ['settlementId'])
     .index('by_driver_unassigned', ['driverId', 'settlementId']) // For gathering unassigned payables
     .index('by_org_created', ['workosOrgId', 'createdAt'])
-    .index('by_driver_created', ['driverId', 'createdAt']),
+    .index('by_driver_created', ['driverId', 'createdAt'])
+    .index('by_session', ['sessionId']), // one payable per shift — idempotency check
 
   /**
    * Driver push-notification tokens.
@@ -2158,6 +2210,27 @@ export default defineSchema({
       v.literal('MANUAL'), // Added/Edited by User
     ),
 
+    // Statement section this line belongs to. Optional for backward compat —
+    // rows without it are classified by fallback (negative amount → DEDUCTION,
+    // else EARNING).
+    category: v.optional(v.union(
+      v.literal('EARNING'),
+      v.literal('REIMBURSEMENT'),
+      v.literal('DEDUCTION'),
+    )),
+
+    // Review-time line edit (Settlement Review modal) — override in place,
+    // lock, preserve original for audit. Mirrors loadPayables.
+    editedAt: v.optional(v.float64()),
+    editedBy: v.optional(v.string()),
+    editReason: v.optional(v.string()),
+    originalQuantity: v.optional(v.float64()),
+    originalRate: v.optional(v.float64()),
+    originalTotalAmount: v.optional(v.float64()),
+    // Rules-drift flag (mirrors loadPayables).
+    rulesAmount: v.optional(v.float64()),
+    rulesChangedAt: v.optional(v.float64()),
+
     // If TRUE, Rules Engine will NEVER delete/overwrite this row
     isLocked: v.boolean(),
 
@@ -2204,7 +2277,12 @@ export default defineSchema({
       v.literal('APPROVED'), // Locked for payment processing
       v.literal('PAID'), // Payment completed
       v.literal('DISPUTED'), // Carrier disputed
+      v.literal('VOID'), // Cancelled/reversed
     ),
+
+    // Statement Identification (e.g., "CST-2026-001"). Optional for backward
+    // compat — settlements created before numbering existed have none.
+    statementNumber: v.optional(v.string()),
 
     // Totals (denormalized for quick display)
     totalGross: v.float64(), // Sum of all payables
@@ -2221,6 +2299,22 @@ export default defineSchema({
     carrierName: v.optional(v.string()),
     carrierMcNumber: v.optional(v.string()),
 
+    // Reviewer-acknowledged blockers (Settlement Review verify-to-clear). Each
+    // entry records who cleared which blocker and when, so an acknowledged
+    // hard blocker no longer gates approval but stays auditable.
+    acknowledgedBlockers: v.optional(v.array(v.object({
+      key: v.string(),
+      by: v.string(),
+      at: v.float64(),
+      note: v.optional(v.string()),
+    }))),
+
+    // Audit Trail
+    notes: v.optional(v.string()),
+    voidedBy: v.optional(v.string()),
+    voidedAt: v.optional(v.float64()),
+    voidReason: v.optional(v.string()),
+
     createdAt: v.float64(),
     createdBy: v.string(),
     updatedAt: v.optional(v.float64()),
@@ -2230,7 +2324,9 @@ export default defineSchema({
     .index('by_carrier_partnership', ['carrierPartnershipId'])
     .index('by_org', ['workosOrgId'])
     .index('by_status', ['status'])
-    .index('by_period', ['periodStart', 'periodEnd']),
+    .index('by_org_status', ['workosOrgId', 'status'])
+    .index('by_period', ['periodStart', 'periodEnd'])
+    .index('by_statement_number', ['workosOrgId', 'statementNumber']),
 
   /**
    * Driver Settlements - Pay Period Statements
@@ -2273,8 +2369,19 @@ export default defineSchema({
 
     // Payment Tracking
     paidAt: v.optional(v.float64()),
+    paidBy: v.optional(v.string()), // WorkOS userId who recorded the payment
     paidMethod: v.optional(v.string()), // ACH, Check, Wire, etc.
     paidReference: v.optional(v.string()), // Check number, transaction ID
+
+    // Reviewer-acknowledged blockers (Settlement Review verify-to-clear). Each
+    // entry records who cleared which blocker and when, so an acknowledged
+    // hard blocker no longer gates approval but stays auditable.
+    acknowledgedBlockers: v.optional(v.array(v.object({
+      key: v.string(),
+      by: v.string(),
+      at: v.float64(),
+      note: v.optional(v.string()),
+    }))),
 
     // Audit Trail
     notes: v.optional(v.string()),
@@ -2293,6 +2400,20 @@ export default defineSchema({
     .index('by_period', ['driverId', 'periodStart', 'periodEnd'])
     .index('by_statement_number', ['workosOrgId', 'statementNumber'])
     .index('by_pay_plan', ['payPlanId', 'periodStart']),
+
+  /**
+   * Statement-number counters (aggregate pattern, like organizationStats).
+   * One doc per org × scope × year. Replaces the collect-all-settlements
+   * scan that made statement numbering O(total statements) per generation —
+   * the root cause of bulk-generate timeouts.
+   */
+  settlementCounters: defineTable({
+    workosOrgId: v.string(),
+    scope: v.union(v.literal('DRIVER'), v.literal('CARRIER')),
+    year: v.number(),
+    lastNumber: v.number(),
+    updatedAt: v.float64(),
+  }).index('by_org_scope_year', ['workosOrgId', 'scope', 'year']),
 
   // Organization statistics for fast count queries (aggregate table pattern)
   organizationStats: defineTable({
@@ -2322,6 +2443,66 @@ export default defineSchema({
 
     // Timestamps
     updatedAt: v.number(),
+  }).index('by_org', ['workosOrgId']),
+
+  /**
+   * loadStatusCounts — eventually-exact cache for the Dispatch Planner badges
+   * (countLoadsByStatusFiltered). Rebuilt from source by a change-gated job
+   * (see convex/loadStatusCounts.ts), so it CANNOT drift — only lag (≤ the
+   * rebuild cadence). Replaces the per-query facet/date scan that hit the 4096
+   * read limit. Design: docs/eventually-exact-load-counts-design.md.
+   *
+   * One row per (org, epoch, scope, scopeValue, bucket, status). Queries pin
+   * (org, activeEpoch, scope, scopeValue) and range over `bucket`:
+   *   - bucket = 'YYYY-MM-DD' → day grain, materialized only within the
+   *     rolling 18-month window (loads inside the window).
+   *   - bucket = '__total__'  → all-time roll-up (EVERY load, incl. no/old
+   *     firstStopDate). No-date queries read this; date queries range the day
+   *     buckets (digits sort before '_', so a date range excludes '__total__').
+   *   - scope 'HCRTRIP' is materialized at '__total__' ONLY (the rare HCR∧TRIP
+   *     + date drills back to a bounded scan).
+   */
+  loadStatusCounts: defineTable({
+    workosOrgId: v.string(),
+    epoch: v.number(),
+    scope: v.union(
+      v.literal('ALL'),
+      v.literal('HCR'),
+      v.literal('TRIP'),
+      v.literal('HCRTRIP'),
+    ),
+    scopeValue: v.string(), // '*' for ALL; canonical HCR/TRIP; `${hcr}\x00${trip}` for HCRTRIP
+    bucket: v.string(), // 'YYYY-MM-DD' | '__total__'
+    status: v.union(
+      v.literal('Open'),
+      v.literal('Assigned'),
+      v.literal('Completed'),
+      v.literal('Canceled'),
+      v.literal('Expired'),
+    ),
+    count: v.number(),
+  }).index('by_scope_bucket', [
+    'workosOrgId',
+    'epoch',
+    'scope',
+    'scopeValue',
+    'bucket',
+  ]),
+
+  /**
+   * loadStatusCountsMeta — one control row per org for the cache above.
+   * `activeEpoch` is the generation queries read; a rebuild writes a NEW epoch
+   * and flips `activeEpoch` atomically when complete, so readers never see a
+   * half-built generation. `buildingEpoch`/`buildStartedAt` guard against
+   * concurrent/overlapping rebuilds.
+   */
+  loadStatusCountsMeta: defineTable({
+    workosOrgId: v.string(),
+    activeEpoch: v.optional(v.number()),
+    buildingEpoch: v.optional(v.number()),
+    buildStartedAt: v.optional(v.number()),
+    lastBuiltAt: v.optional(v.number()),
+    lastBuildRows: v.optional(v.number()), // observability: cache rows written last build
   }).index('by_org', ['workosOrgId']),
 
   // Accounting period statistics for fast reporting queries (aggregate table pattern)
@@ -2387,7 +2568,13 @@ export default defineSchema({
     .index('by_org_time', ['organizationId', 'recordedAt'])
     .index('by_load', ['loadId', 'recordedAt'])
     .index('by_session_time', ['sessionId', 'recordedAt'])
-    .index('by_org_created', ['organizationId', 'createdAt']),
+    .index('by_org_created', ['organizationId', 'createdAt'])
+    // Cross-org range on createdAt for the archival cron. The archival query
+    // wants the globally-oldest rows regardless of org, which by_org_created
+    // can't serve (org is the leading key, so createdAt isn't globally
+    // ordered). Without this, getLocationsOlderThan fell back to a full-table
+    // .filter() scan and neared the per-query document/bytes read limit.
+    .index('by_created', ['createdAt']),
 
   /**
    * systemState — generic singleton key/value store for cross-action

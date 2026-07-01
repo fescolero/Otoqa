@@ -800,3 +800,178 @@ export const sendWake = internalAction({
     return null;
   },
 });
+
+// ============================================================================
+// SESSION-ENDED PUSH — server-side notify mobile that a session is over
+// ============================================================================
+//
+// Companion to `sendWake` but with reversed intent. When a driver session
+// ends *server-side* (dispatch override, auto-timeout cron, handoff,
+// another device closing it), the local mobile tracker has no way to
+// know — without this push it keeps emitting GPS pings indefinitely,
+// which the dispatcher map renders as "still tracking after shift end."
+//
+// This action sends a data-only FCM push to the session's stored
+// pushToken with payload:
+//
+//   data: {
+//     type: 'session_ended',
+//     sessionId: <id>,
+//     endedAt: <ms>,
+//     endReason: <string>,
+//   }
+//
+// MOBILE CONTRACT (consumer side — see mobile/lib/fcmHandler.ts):
+//   On receipt of `type=session_ended`, the mobile app MUST:
+//     1. Stop the foreground location service.
+//     2. Drain its outbound ping queue.
+//     3. Clear local TrackingState.isActive.
+//   The reactive getActiveSession subscription is a backup safety net
+//   (catches missed pushes within ~1-2s), not a replacement.
+//
+// Differences from `sendWake`:
+//   • No cooldown / backoff logic — session end is fire-once. If it
+//     fails, the next sweep doesn't matter (no future pings should
+//     reach us anyway once the session is closed and ingestBatch
+//     rejects them).
+//   • No claimSendSlot dance — no concurrent-fire concern (called
+//     exactly once, from endSessionInternal).
+//   • iOS: same Phase-4 limitation as sendWake. APNs tokens can't go
+//     through FCM HTTP v1; skipped silently with a log.
+//
+// On failure, we log loudly but don't retry — the server-side ping
+// rejection in driverLocations.ts::ingestBatch is the actual guarantee
+// of correct data. This push is purely a UX improvement that stops the
+// driver's phone from burning battery + bandwidth on doomed sends.
+export const sendSessionEnded = internalAction({
+  args: { sessionId: v.id('driverSessions') },
+  returns: v.null(),
+  handler: async (ctx, { sessionId }) => {
+    const session = await ctx.runQuery(internal.fcmWake.getSessionForEndedPush, {
+      sessionId,
+    });
+    if (!session) {
+      console.warn(
+        `[fcmWake.sendSessionEnded] no_session sessionId=${sessionId}`,
+      );
+      return null;
+    }
+    if (!session.pushToken || !session.pushTokenPlatform) {
+      console.info(
+        `[fcmWake.sendSessionEnded] no_token sessionId=${sessionId} — skipping`,
+      );
+      return null;
+    }
+    if (session.pushTokenPlatform === 'ios') {
+      // Phase 4 — iOS requires APNs (or FCM for iOS via Firebase iOS
+      // SDK). For now, drop with a log so we can grep for affected
+      // sessions when iOS support lands.
+      console.info(
+        `[fcmWake.sendSessionEnded] ios_skipped sessionId=${sessionId} — APNs not wired`,
+      );
+      return null;
+    }
+
+    let projectId: string;
+    try {
+      projectId = loadServiceAccount().project_id;
+    } catch (err) {
+      console.warn(
+        `[fcmWake.sendSessionEnded] service_account_error sessionId=${sessionId} err=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+
+    try {
+      const accessToken = await getCachedOrMintFcmAccessToken(ctx);
+      const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
+      const reqBody = {
+        message: {
+          token: session.pushToken,
+          data: {
+            type: 'session_ended',
+            sessionId: sessionId,
+            endedAt: String(session.endedAt ?? Date.now()),
+            endReason: session.endReason ?? 'unknown',
+          },
+          android: {
+            // HIGH priority so the mobile data-handler runs even if the
+            // app was backgrounded / dozed at end time.
+            priority: 'HIGH' as const,
+          },
+        },
+      };
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(reqBody),
+      });
+
+      if (res.ok) {
+        console.info(
+          `[fcmWake.sendSessionEnded] dispatched sessionId=${sessionId} reason=${session.endReason ?? 'unknown'}`,
+        );
+      } else {
+        // 401 = token revoked. Invalidate so the next caller mints fresh.
+        if (res.status === 401) {
+          await ctx.runMutation(internal.fcmWake.invalidateCachedFcmToken, {});
+        }
+        const errBody = await res.text().catch(() => '');
+        console.warn(
+          `[fcmWake.sendSessionEnded] fcm_failed sessionId=${sessionId} status=${res.status} body=${errBody.slice(0, 200)}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[fcmWake.sendSessionEnded] config_or_network_error sessionId=${sessionId} err=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    return null;
+  },
+});
+
+/**
+ * Lean read used only by `sendSessionEnded` — returns just the push
+ * fields the action needs without leaking the full session document.
+ */
+export const getSessionForEndedPush = internalQuery({
+  args: { sessionId: v.id('driverSessions') },
+  returns: v.union(
+    v.null(),
+    v.object({
+      pushToken: v.optional(v.string()),
+      pushTokenPlatform: v.optional(
+        v.union(v.literal('ios'), v.literal('android')),
+      ),
+      endedAt: v.optional(v.float64()),
+      endReason: v.optional(
+        v.union(
+          v.literal('driver_manual'),
+          v.literal('dispatch_override'),
+          v.literal('auto_timeout'),
+          v.literal('next_session_opened'),
+          v.literal('handoff_complete'),
+          v.literal('role_switch'),
+        ),
+      ),
+    }),
+  ),
+  handler: async (ctx, { sessionId }) => {
+    const s = await ctx.db.get(sessionId);
+    if (!s) return null;
+    return {
+      pushToken: s.pushToken,
+      pushTokenPlatform: s.pushTokenPlatform,
+      endedAt: s.endedAt,
+      endReason: s.endReason,
+    };
+  },
+});

@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { seedChargeComponentsLogic } from './payEngine/seedChargeComponents';
 
 /**
  * Settings Management for Multi-Tenant Organizations
@@ -126,6 +127,14 @@ export const updateOrgSettings = mutation({
         performedByEmail: identity.email ?? undefined,
         performedByName: identity.name ?? undefined,
         timestamp: Date.now(),
+      });
+
+      // Seed pay-engine chargeComponents catalog. Idempotent — re-runs skip
+      // existing rows by templateId — so this is safe even if the seeder is
+      // also invoked later via the admin refresh path.
+      await seedChargeComponentsLogic(ctx, {
+        workosOrgId: args.workosOrgId,
+        createdBy: identity.subject,
       });
 
       return orgId;

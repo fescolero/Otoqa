@@ -28,28 +28,10 @@ async function generateStatementNumber(
   ctx: any,
   workosOrgId: string
 ): Promise<string> {
-  const year = new Date().getFullYear();
-  const prefix = `SET-${year}-`;
-
-  // Find the highest statement number for this year
-  const existingStatements = await ctx.db
-    .query('driverSettlements')
-    .withIndex('by_org_status', (q: any) => q.eq('workosOrgId', workosOrgId))
-    .collect();
-
-  const thisYearStatements = existingStatements.filter((s: Doc<'driverSettlements'>) =>
-    s.statementNumber.startsWith(prefix)
-  );
-
-  let maxNumber = 0;
-  for (const stmt of thisYearStatements) {
-    const numPart = stmt.statementNumber.split('-')[2];
-    const num = parseInt(numPart, 10);
-    if (num > maxNumber) maxNumber = num;
-  }
-
-  const nextNumber = maxNumber + 1;
-  return `${prefix}${String(nextNumber).padStart(3, '0')}`;
+  // Counter-doc pattern — one read + one write, instead of collecting every
+  // settlement in the org per generated statement (the old approach made
+  // bulk generation O(n²) and hit Convex's system-operation limit).
+  return nextStatementNumber(ctx, { workosOrgId, scope: 'DRIVER' });
 }
 
 /**
@@ -223,91 +205,25 @@ function calculatePlanPeriod(
 }
 
 /**
- * Get the payable trigger timestamp based on the plan's trigger type
- * Maps payableTrigger to actual database fields
+ * Get the payable's period-inclusion timestamp.
  *
- * @param preloadedLoad - Optional pre-fetched load to avoid duplicate reads
- * @param stopsCache - Optional shared cache for loadStops queries keyed by loadId string
+ * Work is attributed to WHEN IT WAS DONE — the load's start (first pickup),
+ * resolved by lib/settlementShared.resolveWorkStartTimestamp. The legacy
+ * DELIVERY_DATE / COMPLETION_DATE triggers both resolve this way now: those
+ * dates (and the old payable.createdAt fallbacks) put work into the wrong
+ * period whenever a load delivered or calculated after the period it was
+ * driven in. APPROVAL_DATE remains an explicit opt-in gate on approvedAt.
  */
 async function getPayableTriggerTimestamp(
   ctx: any,
   payable: Doc<'loadPayables'>,
   triggerType: 'DELIVERY_DATE' | 'COMPLETION_DATE' | 'APPROVAL_DATE',
-  preloadedLoad?: any,
-  stopsCache?: Map<string, any[]>
+  caches?: WorkStartCaches
 ): Promise<number | null> {
-  switch (triggerType) {
-    case 'APPROVAL_DATE':
-      return payable.approvedAt || null;
-
-    case 'DELIVERY_DATE':
-    case 'COMPLETION_DATE':
-      if (!payable.loadId) {
-        return payable.createdAt;
-      }
-
-      if (payable.legId) {
-        const leg = await ctx.db.get(payable.legId);
-        if (leg) {
-          if (triggerType === 'COMPLETION_DATE' && leg.completedAt) {
-            return leg.completedAt;
-          }
-
-          if (leg.endStopId) {
-            const endStop = await ctx.db.get(leg.endStopId);
-            if (endStop?.checkedOutAt) {
-              const timestamp = new Date(endStop.checkedOutAt).getTime();
-              if (!isNaN(timestamp)) return timestamp;
-            }
-          }
-
-          if (leg.completedAt) return leg.completedAt;
-        }
-      }
-
-      const load = preloadedLoad ?? await ctx.db.get(payable.loadId);
-      if (load) {
-        const loadIdStr = payable.loadId as string;
-        let stops: any[];
-        if (stopsCache && stopsCache.has(loadIdStr)) {
-          stops = stopsCache.get(loadIdStr)!;
-        } else {
-          stops = await ctx.db
-            .query('loadStops')
-            .withIndex('by_load', (q: any) => q.eq('loadId', payable.loadId))
-            .collect();
-          if (stopsCache) stopsCache.set(loadIdStr, stops);
-        }
-
-        const deliveryStops = stops
-          .filter((s: typeof stops[0]) => s.stopType === 'DELIVERY')
-          .sort((a: typeof stops[0], b: typeof stops[0]) => (b.sequenceNumber || 0) - (a.sequenceNumber || 0));
-
-        if (deliveryStops.length > 0) {
-          const lastDelivery = deliveryStops[0];
-
-          if (lastDelivery.checkedOutAt) {
-            const timestamp = new Date(lastDelivery.checkedOutAt).getTime();
-            if (!isNaN(timestamp)) return timestamp;
-          }
-
-          if (lastDelivery.windowEndTime) {
-            const timestamp = new Date(lastDelivery.windowEndTime).getTime();
-            if (!isNaN(timestamp)) return timestamp;
-          }
-
-          if (lastDelivery.windowBeginTime) {
-            const timestamp = new Date(lastDelivery.windowBeginTime).getTime();
-            if (!isNaN(timestamp)) return timestamp;
-          }
-        }
-      }
-
-      return null;
-
-    default:
-      return null;
+  if (triggerType === 'APPROVAL_DATE') {
+    return payable.approvedAt || null;
   }
+  return resolveWorkStartTimestamp(ctx, payable, caches ?? newWorkStartCaches());
 }
 
 /**
@@ -381,12 +297,19 @@ export const listForOrganization = query({
       approvedBy: v.optional(v.string()),
       approvedAt: v.optional(v.float64()),
       paidAt: v.optional(v.float64()),
+      paidBy: v.optional(v.string()),
       paidMethod: v.optional(v.string()),
       paidReference: v.optional(v.string()),
       notes: v.optional(v.string()),
       voidedBy: v.optional(v.string()),
       voidedAt: v.optional(v.float64()),
       voidReason: v.optional(v.string()),
+      acknowledgedBlockers: v.optional(v.array(v.object({
+        key: v.string(),
+        by: v.string(),
+        at: v.float64(),
+        note: v.optional(v.string()),
+      }))),
       createdAt: v.float64(),
       createdBy: v.string(),
       updatedAt: v.float64(),
@@ -499,12 +422,19 @@ export const listForDriver = query({
       approvedBy: v.optional(v.string()),
       approvedAt: v.optional(v.float64()),
       paidAt: v.optional(v.float64()),
+      paidBy: v.optional(v.string()),
       paidMethod: v.optional(v.string()),
       paidReference: v.optional(v.string()),
       notes: v.optional(v.string()),
       voidedBy: v.optional(v.string()),
       voidedAt: v.optional(v.float64()),
       voidReason: v.optional(v.string()),
+      acknowledgedBlockers: v.optional(v.array(v.object({
+        key: v.string(),
+        by: v.string(),
+        at: v.float64(),
+        note: v.optional(v.string()),
+      }))),
       createdAt: v.float64(),
       createdBy: v.string(),
       updatedAt: v.float64(),
@@ -566,12 +496,19 @@ export const getSettlementDetails = query({
       approvedBy: v.optional(v.string()),
       approvedAt: v.optional(v.float64()),
       paidAt: v.optional(v.float64()),
+      paidBy: v.optional(v.string()),
       paidMethod: v.optional(v.string()),
       paidReference: v.optional(v.string()),
       notes: v.optional(v.string()),
       voidedBy: v.optional(v.string()),
       voidedAt: v.optional(v.float64()),
       voidReason: v.optional(v.string()),
+      acknowledgedBlockers: v.optional(v.array(v.object({
+        key: v.string(),
+        by: v.string(),
+        at: v.float64(),
+        note: v.optional(v.string()),
+      }))),
       createdAt: v.float64(),
       createdBy: v.string(),
       updatedAt: v.float64(),
@@ -593,11 +530,42 @@ export const getSettlementDetails = query({
         rate: v.float64(),
         totalAmount: v.float64(),
         sourceType: v.union(v.literal('SYSTEM'), v.literal('MANUAL')),
+        category: v.optional(v.union(
+          v.literal('EARNING'),
+          v.literal('REIMBURSEMENT'),
+          v.literal('DEDUCTION'),
+        )),
         isLocked: v.boolean(),
         warningMessage: v.optional(v.string()),
         receiptStorageId: v.optional(v.id('_storage')),
         isRebillable: v.optional(v.boolean()),
         createdAt: v.float64(),
+        // When the work happened: load first-pickup / session check-in.
+        // workEnd is set for shift lines (session check-out) so the panel
+        // can render the time range.
+        workStart: v.optional(v.float64()),
+        workEnd: v.optional(v.float64()),
+        // Shift lines: the loads run during the session, one reviewable row
+        // each (scheduled time + order number + lane).
+        shiftLoads: v.optional(v.array(v.object({
+          label: v.string(),
+          // Actual check-in at the leg's start stop — the reviewable truth.
+          actualAt: v.optional(v.float64()),
+          // Dispatch-planned start, shown alongside for comparison.
+          scheduledAt: v.optional(v.float64()),
+          lane: v.optional(v.string()),
+        }))),
+        // Review-edit state for inline correction (Phase 2).
+        edited: v.boolean(),
+        breakMinutes: v.optional(v.float64()),
+        clockStart: v.optional(v.float64()),
+        clockEnd: v.optional(v.float64()),
+        originalRate: v.optional(v.float64()),
+        originalQuantity: v.optional(v.float64()),
+        originalTotalAmount: v.optional(v.float64()),
+        // Rules-drift: engine now computes a different amount than this edit.
+        rulesChanged: v.boolean(),
+        rulesAmount: v.optional(v.float64()),
       })
     ),
     heldPayables: v.array(
@@ -688,10 +656,90 @@ export const getSettlementDetails = query({
     }
 
     // Enrich payables with load details and map to return type
+    const detailCaches = newWorkStartCaches();
     const enrichedPayables = await Promise.all(
       payables.map(async (payable) => {
         let loadInternalId: string | undefined = undefined;
         let loadOrderNumber: string | undefined = undefined;
+
+        // When the work happened — shift lines also carry their end time and
+        // the loads run during the session.
+        const workStart = await resolveWorkStartTimestamp(ctx, payable, detailCaches);
+        let workEnd: number | undefined;
+        let shiftLoads: Array<{ label: string; scheduledAt?: number; lane?: string }> | undefined;
+        if (payable.sessionId) {
+          const sessionKey = payable.sessionId as string;
+          let session = detailCaches.sessions.get(sessionKey);
+          if (session === undefined) {
+            session = ((await ctx.db.get(payable.sessionId)) ?? null) as Doc<'driverSessions'> | null;
+            detailCaches.sessions.set(sessionKey, session);
+          }
+          workEnd = session?.endedAt ?? undefined;
+
+          if (session?.endedAt) {
+            // Legs whose scheduled start falls inside the shift window (padded
+            // 2h earlier — drivers often check in after the first scheduled
+            // start). ACTIVE included so the live shift's current load shows.
+            const PAD = 2 * 60 * 60 * 1000;
+            const legs: Doc<'dispatchLegs'>[] = [];
+            for (const status of ['COMPLETED', 'ACTIVE'] as const) {
+              const batch = await ctx.db
+                .query('dispatchLegs')
+                .withIndex('by_driver_status_scheduled_start', (q: any) =>
+                  q
+                    .eq('driverId', settlement.driverId)
+                    .eq('status', status)
+                    .gte('scheduledStartMs', session!.startedAt - PAD)
+                    .lte('scheduledStartMs', session!.endedAt!),
+                )
+                .take(50);
+              legs.push(...batch);
+            }
+            legs.sort((a, b) => (a.scheduledStartMs ?? 0) - (b.scheduledStartMs ?? 0));
+            const rows: Array<{ label: string; actualAt?: number; scheduledAt?: number; lane?: string }> = [];
+            const seen = new Set<string>();
+            for (const leg of legs) {
+              if (seen.has(leg.loadId)) continue;
+              seen.add(leg.loadId);
+              const loadKey = leg.loadId as string;
+              let legLoad = detailCaches.loads.get(loadKey);
+              if (legLoad === undefined) {
+                legLoad = ((await ctx.db.get(leg.loadId)) ?? null) as Doc<'loadInformation'> | null;
+                detailCaches.loads.set(loadKey, legLoad);
+              }
+              const label = legLoad?.orderNumber ?? legLoad?.internalId;
+              if (!label) continue;
+
+              // Actual check-in at the leg's start stop, when recorded.
+              let actualAt: number | undefined;
+              const stopKey = leg.startStopId as string;
+              let startStop = detailCaches.stopDocs.get(stopKey);
+              if (startStop === undefined) {
+                startStop = ((await ctx.db.get(leg.startStopId)) ?? null) as Doc<'loadStops'> | null;
+                detailCaches.stopDocs.set(stopKey, startStop);
+              }
+              if (startStop?.checkedInAt) {
+                const t = new Date(startStop.checkedInAt).getTime();
+                if (!isNaN(t)) actualAt = t;
+              }
+              const origin = legLoad?.originCity
+                ? `${legLoad.originCity}${legLoad.originState ? ', ' + legLoad.originState : ''}`
+                : null;
+              const dest = legLoad?.destinationCity
+                ? `${legLoad.destinationCity}${legLoad.destinationState ? ', ' + legLoad.destinationState : ''}`
+                : null;
+              rows.push({
+                label,
+                actualAt,
+                scheduledAt: leg.scheduledStartMs ?? undefined,
+                lane: origin && dest ? `${origin} → ${dest}` : (origin ?? dest ?? undefined),
+              });
+            }
+            // Read in the order the work actually happened.
+            rows.sort((a, b) => (a.actualAt ?? a.scheduledAt ?? 0) - (b.actualAt ?? b.scheduledAt ?? 0));
+            if (rows.length > 0) shiftLoads = rows;
+          }
+        }
 
         if (payable.loadId) {
           const load = await ctx.db.get(payable.loadId);
@@ -710,11 +758,26 @@ export const getSettlementDetails = query({
           rate: payable.rate,
           totalAmount: payable.totalAmount,
           sourceType: payable.sourceType,
+          category: payable.category,
           isLocked: payable.isLocked,
           warningMessage: payable.warningMessage,
           receiptStorageId: payable.receiptStorageId,
           isRebillable: payable.isRebillable,
           createdAt: payable.createdAt,
+          workStart: workStart ?? undefined,
+          workEnd,
+          shiftLoads,
+          // Review-edit state. Clock window prefers the reviewer override,
+          // falling back to the session-derived work start / end.
+          edited: payable.editedAt != null,
+          breakMinutes: payable.breakMinutes,
+          clockStart: payable.overrideStartAt ?? (payable.sessionId ? (workStart ?? undefined) : undefined),
+          clockEnd: payable.overrideEndAt ?? (payable.sessionId ? workEnd : undefined),
+          originalRate: payable.originalRate,
+          originalQuantity: payable.originalQuantity,
+          originalTotalAmount: payable.originalTotalAmount,
+          rulesChanged: payable.rulesChangedAt != null,
+          rulesAmount: payable.rulesAmount,
         };
       })
     );
@@ -1014,6 +1077,7 @@ export const getUnassignedPayables = query({
     // Separate into regular and held
     const unassignedPayables: Array<any> = [];
     const heldPayables: Array<any> = [];
+    const workStartCaches = newWorkStartCaches();
 
     for (const payable of allUnassigned) {
       // Check if load is held
@@ -1042,9 +1106,14 @@ export const getUnassignedPayables = query({
       if (isHeld) {
         heldPayables.push({ ...enriched, heldReason });
       } else {
-        // Apply date filter if provided
-        if (args.periodStart && payable.createdAt < args.periodStart) continue;
-        if (args.periodEnd && payable.createdAt > args.periodEnd) continue;
+        // Apply date filter if provided — keyed on when the work was done
+        // (load start), not when the payable row was created.
+        if (args.periodStart || args.periodEnd) {
+          const workStart = await resolveWorkStartTimestamp(ctx, payable, workStartCaches);
+          if (workStart == null) continue;
+          if (args.periodStart && workStart < args.periodStart) continue;
+          if (args.periodEnd && workStart > args.periodEnd) continue;
+        }
         unassignedPayables.push({ ...enriched, isHeld: false });
       }
     }
@@ -1104,15 +1173,18 @@ export const generateStatement = mutation({
       )
       .collect();
 
-    // Filter payables
+    // Filter payables — period inclusion keys on when the work was done
+    // (load start), not when the payable row was created.
     const payablesToAssign: Array<Id<'loadPayables'>> = [];
     let grossTotal = 0;
+    const caches = newWorkStartCaches();
 
     for (const payable of allUnassigned) {
       // Check if load is held
       let isLoadHeld = false;
       if (payable.loadId) {
         const load = await ctx.db.get(payable.loadId);
+        caches.loads.set(payable.loadId as string, load ?? null);
         if (load?.isHeld) {
           isLoadHeld = true;
         }
@@ -1120,7 +1192,7 @@ export const generateStatement = mutation({
 
       // Include logic:
       // 1. If held and includeHeldItems=true, include it
-      // 2. If not held and within date range, include it
+      // 2. If not held and work started within the period, include it
       // 3. Otherwise skip
 
       if (isLoadHeld) {
@@ -1129,8 +1201,8 @@ export const generateStatement = mutation({
           grossTotal += payable.totalAmount;
         }
       } else {
-        // Check date range
-        if (payable.createdAt >= args.periodStart && payable.createdAt <= args.periodEnd) {
+        const workStart = await resolveWorkStartTimestamp(ctx, payable, caches);
+        if (workStart != null && workStart >= args.periodStart && workStart <= args.periodEnd) {
           payablesToAssign.push(payable._id);
           grossTotal += payable.totalAmount;
         }
@@ -1164,6 +1236,53 @@ export const generateStatement = mutation({
       payablesAssigned: payablesToAssign.length,
       grossTotal,
     };
+  },
+});
+
+/**
+ * Reviewer acknowledges (verifies) a readiness blocker so it no longer gates
+ * approval — recorded with who/when for audit. Idempotent per key. The
+ * blocker stays visible (shown as verified); only its gating effect lifts.
+ */
+export const acknowledgeBlocker = mutation({
+  args: {
+    settlementId: v.id('driverSettlements'),
+    blockerKey: v.string(),
+    note: v.optional(v.string()),
+    userId: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const settlement = await ctx.db.get(args.settlementId);
+    if (!settlement || settlement.workosOrgId !== callerOrgId) throw new Error('Settlement not found');
+    if (settlement.status === 'APPROVED' || settlement.status === 'PAID') {
+      throw new Error('Settlement is already finalized');
+    }
+    const existing = settlement.acknowledgedBlockers ?? [];
+    if (existing.some((a) => a.key === args.blockerKey)) return null; // idempotent
+    await ctx.db.patch(args.settlementId, {
+      acknowledgedBlockers: [...existing, { key: args.blockerKey, by: userId, at: Date.now(), note: args.note }],
+      updatedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+/** Undo a blocker acknowledgement (reviewer changed their mind). */
+export const unacknowledgeBlocker = mutation({
+  args: { settlementId: v.id('driverSettlements'), blockerKey: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const settlement = await ctx.db.get(args.settlementId);
+    if (!settlement || settlement.workosOrgId !== callerOrgId) throw new Error('Settlement not found');
+    if (settlement.status === 'APPROVED' || settlement.status === 'PAID') return null;
+    await ctx.db.patch(args.settlementId, {
+      acknowledgedBlockers: (settlement.acknowledgedBlockers ?? []).filter((a) => a.key !== args.blockerKey),
+      updatedAt: Date.now(),
+    });
+    return null;
   },
 });
 
@@ -1243,6 +1362,7 @@ export const updateSettlementStatus = mutation({
       }
     } else if (args.newStatus === 'PAID') {
       updates.paidAt = now;
+      updates.paidBy = userId;
       updates.paidMethod = args.paidMethod;
       updates.paidReference = args.paidReference;
     } else if (args.newStatus === 'VOID') {
@@ -1262,6 +1382,43 @@ export const updateSettlementStatus = mutation({
 });
 
 /**
+ * Reverse a recorded payment: PAID → APPROVED.
+ *
+ * Undoes a mistaken "Record payment" — restores the settlement to its approved
+ * (still-locked) state and clears the payment stamps so it can be re-recorded.
+ * Totals stay frozen from approval; payables stay locked. Only a currently-PAID
+ * settlement can be reversed.
+ */
+export const reversePayment = mutation({
+  args: {
+    settlementId: v.id('driverSettlements'),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId } = await requireCallerIdentity(ctx);
+    const settlement = await ctx.db.get(args.settlementId);
+    if (!settlement) throw new Error('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
+    if (settlement.status !== 'PAID') {
+      throw new Error('Only a paid settlement can have its payment reversed');
+    }
+
+    await ctx.db.patch(args.settlementId, {
+      status: 'APPROVED',
+      paidAt: undefined,
+      paidBy: undefined,
+      paidMethod: undefined,
+      paidReference: undefined,
+      updatedAt: Date.now(),
+    });
+
+    return null;
+  },
+});
+
+/**
  * Add a manual adjustment to a settlement
  * This is the "Quick Add" feature for accountants
  */
@@ -1273,6 +1430,11 @@ export const addManualAdjustment = mutation({
     description: v.string(),
     amount: v.float64(),
     isRebillable: v.optional(v.boolean()),
+    category: v.optional(v.union(
+      v.literal('EARNING'),
+      v.literal('REIMBURSEMENT'),
+      v.literal('DEDUCTION'),
+    )),
     workosOrgId: v.string(),
     userId: v.string(),
   },
@@ -1302,6 +1464,9 @@ export const addManualAdjustment = mutation({
       rate: args.amount,
       totalAmount: args.amount,
       sourceType: 'MANUAL',
+      // Deductions are stored as negative amounts; default classification
+      // follows the sign unless the caller picks a section explicitly.
+      category: args.category ?? (args.amount < 0 ? 'DEDUCTION' : args.isRebillable ? 'REIMBURSEMENT' : 'EARNING'),
       isLocked: true, // Manual adjustments are always locked
       isRebillable: args.isRebillable,
       workosOrgId: args.workosOrgId,
@@ -1311,6 +1476,165 @@ export const addManualAdjustment = mutation({
     });
 
     return payableId;
+  },
+});
+
+/**
+ * Review-time line edit (Settlement Review modal). Override a SYSTEM line in
+ * place and lock it so the rules engine won't overwrite, preserving the
+ * original for audit (decisions: override-in-place + keep original; pay-hours
+ * override only — the driver session record stays the GPS truth).
+ *
+ * Shift lines (SESSION_DURATION): pass overrideStartAt / overrideEndAt /
+ * breakMinutes and the paid hours derive from the corrected clock span minus
+ * break; the rate may also change. Load lines: pass rate (and/or quantity)
+ * and the amount recomputes as quantity × rate.
+ */
+export const editPayableLine = mutation({
+  args: {
+    payableId: v.id('loadPayables'),
+    rate: v.optional(v.float64()),
+    quantity: v.optional(v.float64()),
+    overrideStartAt: v.optional(v.float64()),
+    overrideEndAt: v.optional(v.float64()),
+    breakMinutes: v.optional(v.float64()),
+    reason: v.optional(v.string()),
+    userId: v.string(),
+  },
+  returns: v.object({ totalAmount: v.float64(), quantity: v.float64(), rate: v.float64() }),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const payable = await ctx.db.get(args.payableId);
+    if (!payable || payable.workosOrgId !== callerOrgId) throw new Error('Line not found');
+    if (payable.settlementId) {
+      const settlement = await ctx.db.get(payable.settlementId);
+      if (settlement && (settlement.status === 'APPROVED' || settlement.status === 'PAID')) {
+        throw new Error('Cannot edit a finalized settlement');
+      }
+    }
+
+    const now = Date.now();
+    const newRate = args.rate != null ? +args.rate.toFixed(4) : payable.rate;
+
+    // Shift line: derive paid hours from the corrected clock span − break.
+    const isShift = !!payable.sessionId;
+    let newQuantity = args.quantity != null ? args.quantity : payable.quantity;
+    let overrideStartAt = payable.overrideStartAt;
+    let overrideEndAt = payable.overrideEndAt;
+    let breakMinutes = payable.breakMinutes;
+    if (isShift && (args.overrideStartAt != null || args.overrideEndAt != null || args.breakMinutes != null || args.quantity == null)) {
+      const session = payable.sessionId ? await ctx.db.get(payable.sessionId) : null;
+      const baseStart = session?.startedAt ?? payable.overrideStartAt ?? now;
+      const baseEnd = session?.endedAt ?? payable.overrideEndAt ?? now;
+      overrideStartAt = args.overrideStartAt ?? payable.overrideStartAt ?? baseStart;
+      overrideEndAt = args.overrideEndAt ?? payable.overrideEndAt ?? baseEnd;
+      breakMinutes = args.breakMinutes ?? payable.breakMinutes ?? 0;
+      const hours = Math.max((overrideEndAt - overrideStartAt) / 3_600_000 - breakMinutes / 60, 0);
+      newQuantity = +hours.toFixed(2);
+    }
+
+    const newTotal = +(newQuantity * newRate).toFixed(2);
+
+    // Stamp the original once, on the first edit.
+    const firstEdit = payable.editedAt == null;
+    await ctx.db.patch(args.payableId, {
+      rate: newRate,
+      quantity: newQuantity,
+      totalAmount: newTotal,
+      ...(isShift ? { overrideStartAt, overrideEndAt, breakMinutes } : {}),
+      isLocked: true,
+      editedAt: now,
+      editedBy: userId,
+      editReason: args.reason ?? payable.editReason,
+      ...(firstEdit
+        ? {
+            originalQuantity: payable.quantity,
+            originalRate: payable.rate,
+            originalTotalAmount: payable.totalAmount,
+          }
+        : {}),
+      updatedAt: now,
+    });
+    return { totalAmount: newTotal, quantity: newQuantity, rate: newRate };
+  },
+});
+
+/** Restore a reviewer-edited line to its original system values. */
+export const revertPayableEdit = mutation({
+  args: { payableId: v.id('loadPayables') },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const payable = await ctx.db.get(args.payableId);
+    if (!payable || payable.workosOrgId !== callerOrgId) throw new Error('Line not found');
+    if (payable.editedAt == null) return null;
+    if (payable.settlementId) {
+      const settlement = await ctx.db.get(payable.settlementId);
+      if (settlement && (settlement.status === 'APPROVED' || settlement.status === 'PAID')) {
+        throw new Error('Cannot edit a finalized settlement');
+      }
+    }
+    await ctx.db.patch(args.payableId, {
+      quantity: payable.originalQuantity ?? payable.quantity,
+      rate: payable.originalRate ?? payable.rate,
+      totalAmount: payable.originalTotalAmount ?? payable.totalAmount,
+      overrideStartAt: undefined,
+      overrideEndAt: undefined,
+      breakMinutes: undefined,
+      originalQuantity: undefined,
+      originalRate: undefined,
+      originalTotalAmount: undefined,
+      editedAt: undefined,
+      editedBy: undefined,
+      editReason: undefined,
+      rulesAmount: undefined,
+      rulesChangedAt: undefined,
+      // SYSTEM lines return to the rules engine's control; MANUAL stay locked.
+      isLocked: payable.sourceType === 'MANUAL',
+      updatedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+/**
+ * Adopt the rules engine's current amount for a line that drifted from a
+ * reviewer edit (rulesChangedAt set). Sets the line to the engine value,
+ * clears the edit + drift flags, and unlocks it so rules own it going forward.
+ */
+export const applyRulesAmount = mutation({
+  args: { payableId: v.id('loadPayables') },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const payable = await ctx.db.get(args.payableId);
+    if (!payable || payable.workosOrgId !== callerOrgId) throw new Error('Line not found');
+    if (payable.rulesAmount == null) return null;
+    if (payable.settlementId) {
+      const settlement = await ctx.db.get(payable.settlementId);
+      if (settlement && (settlement.status === 'APPROVED' || settlement.status === 'PAID')) {
+        throw new Error('Cannot edit a finalized settlement');
+      }
+    }
+    const newTotal = payable.rulesAmount;
+    await ctx.db.patch(args.payableId, {
+      totalAmount: newTotal,
+      rate: payable.quantity ? +(newTotal / payable.quantity).toFixed(4) : newTotal,
+      overrideStartAt: undefined,
+      overrideEndAt: undefined,
+      breakMinutes: undefined,
+      originalQuantity: undefined,
+      originalRate: undefined,
+      originalTotalAmount: undefined,
+      editedAt: undefined,
+      editedBy: undefined,
+      editReason: undefined,
+      rulesAmount: undefined,
+      rulesChangedAt: undefined,
+      isLocked: false, // rules own it again
+      updatedAt: Date.now(),
+    });
+    return null;
   },
 });
 
@@ -1484,12 +1808,14 @@ export const refreshDraftSettlement = mutation({
 
         const periodStart = new Date(settlement.periodStart);
         const periodEnd = new Date(settlement.periodEnd);
+        const refreshCaches = newWorkStartCaches();
 
         for (const payable of allUnassigned) {
           // Check if load is held
           let isLoadHeld = false;
           if (payable.loadId) {
             const load = await ctx.db.get(payable.loadId);
+            refreshCaches.loads.set(payable.loadId as string, load ?? null);
             if (load?.isHeld) {
               isLoadHeld = true;
             }
@@ -1499,8 +1825,8 @@ export const refreshDraftSettlement = mutation({
           if (isLoadHeld) continue;
 
           // Get the trigger timestamp based on plan configuration
-          const triggerTimestamp = await getPayableTriggerTimestamp(ctx, payable, plan.payableTrigger);
-          
+          const triggerTimestamp = await getPayableTriggerTimestamp(ctx, payable, plan.payableTrigger, refreshCaches);
+
           if (!triggerTimestamp) {
             // Skip payables without a valid trigger timestamp
             continue;
@@ -1528,19 +1854,21 @@ export const refreshDraftSettlement = mutation({
         }
       }
     } else {
-      // No pay plan - use simple date range filtering
+      // No pay plan — date-range filter keyed on when the work was done.
       const allUnassigned = await ctx.db
         .query('loadPayables')
         .withIndex('by_driver_unassigned', (q) =>
           q.eq('driverId', settlement.driverId).eq('settlementId', undefined)
         )
         .collect();
+      const fallbackCaches = newWorkStartCaches();
 
       for (const payable of allUnassigned) {
         // Check if load is held
         let isLoadHeld = false;
         if (payable.loadId) {
           const load = await ctx.db.get(payable.loadId);
+          fallbackCaches.loads.set(payable.loadId as string, load ?? null);
           if (load?.isHeld) {
             isLoadHeld = true;
           }
@@ -1549,9 +1877,8 @@ export const refreshDraftSettlement = mutation({
         // Skip held loads
         if (isLoadHeld) continue;
 
-        // Simple date range check using createdAt
-        const triggerTime = payable.createdAt;
-        if (triggerTime >= settlement.periodStart && triggerTime <= settlement.periodEnd) {
+        const workStart = await resolveWorkStartTimestamp(ctx, payable, fallbackCaches);
+        if (workStart != null && workStart >= settlement.periodStart && workStart <= settlement.periodEnd) {
           payablesToAssign.push(payable._id);
           grossTotal += payable.totalAmount;
         }
@@ -1648,12 +1975,14 @@ export const generateStatementFromPlan = mutation({
     // Filter payables based on plan trigger and cutoff
     const payablesToAssign: Array<Id<'loadPayables'>> = [];
     let grossTotal = 0;
+    const planCaches = newWorkStartCaches();
 
     for (const payable of allUnassigned) {
       // Check if load is held
       let isLoadHeld = false;
       if (payable.loadId) {
         const load = await ctx.db.get(payable.loadId);
+        planCaches.loads.set(payable.loadId as string, load ?? null);
         if (load?.isHeld) {
           isLoadHeld = true;
         }
@@ -1669,8 +1998,8 @@ export const generateStatementFromPlan = mutation({
       }
 
       // Get the trigger timestamp based on plan configuration
-      const triggerTimestamp = await getPayableTriggerTimestamp(ctx, payable, plan.payableTrigger);
-      
+      const triggerTimestamp = await getPayableTriggerTimestamp(ctx, payable, plan.payableTrigger, planCaches);
+
       if (!triggerTimestamp) {
         // Skip payables without a valid trigger timestamp
         continue;
@@ -1773,92 +2102,64 @@ export const generateStatementFromPlan = mutation({
 });
 
 /**
- * Bulk generate settlements for all drivers on a specific Pay Plan
- * VERSION: 2026-03-16-v3 (with load/stops caching + reduced logging)
+ * Period number within the year for a plan period (Week 23, Period 11, ...).
  */
-export const bulkGenerateByPlan = mutation({
+function planPeriodNumber(plan: Doc<'payPlans'>, periodStart: Date): number {
+  const yearStart = new Date(periodStart.getFullYear(), 0, 1);
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysSinceYearStart = Math.floor((periodStart.getTime() - yearStart.getTime()) / msPerDay);
+  switch (plan.frequency) {
+    case 'WEEKLY':
+      return Math.floor(daysSinceYearStart / 7) + 1;
+    case 'BIWEEKLY':
+      return Math.floor(daysSinceYearStart / 14) + 1;
+    case 'SEMIMONTHLY':
+      return periodStart.getMonth() * 2 + (periodStart.getDate() <= 15 ? 1 : 2);
+    case 'MONTHLY':
+      return periodStart.getMonth() + 1;
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Per-driver settlement generation for the current plan period.
+ *
+ * One bounded transaction per driver — the fan-out target for
+ * bulkGenerateByPlan and the hourly settlements cron. Behavior:
+ *   - no settlement for the period yet → create a DRAFT when at least one
+ *     payable's work start falls inside the window (no empty statements)
+ *   - a DRAFT already exists and `additive` → assign newly-landed in-window
+ *     payables to it. ADDITIVE ONLY: never unassigns lines and never touches
+ *     manual adjustments — the destructive rebuild stays exclusive to the
+ *     user-invoked refreshDraftSettlement.
+ *   - settlement exists in any other status → no-op
+ */
+export const generateOrRefreshForDriver = internalMutation({
   args: {
+    driverId: v.id('drivers'),
     planId: v.id('payPlans'),
     workosOrgId: v.string(),
     userId: v.string(),
     includeHeldItems: v.optional(v.boolean()),
     referenceDate: v.optional(v.float64()),
+    additive: v.optional(v.boolean()),
+    /** Continuation cursor — large backlogs sweep in chunks (self-rescheduled). */
+    cursor: v.optional(v.string()),
   },
-  returns: v.object({
-    success: v.number(),
-    failed: v.number(),
-    settlements: v.array(v.object({
-      driverId: v.id('drivers'),
-      driverName: v.string(),
-      settlementId: v.optional(v.id('driverSettlements')),
-      statementNumber: v.optional(v.string()),
-      grossTotal: v.optional(v.float64()),
-      error: v.optional(v.string()),
-    })),
-  }),
+  returns: v.null(),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    console.log(`[BULK_SETTLE] v3 | Plan: ${args.planId} | Drivers on plan: pending...`);
-
     const plan = await ctx.db.get(args.planId);
-    if (!plan) throw new Error('Pay Plan not found');
-    if (plan.workosOrgId !== callerOrgId) throw new Error('Pay Plan not found');
-    if (!plan.isActive) throw new Error('Pay Plan is inactive');
-
-    // Get all drivers on this plan
-    const drivers = await ctx.db
-      .query('drivers')
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('organizationId'), args.workosOrgId),
-          q.eq(q.field('payPlanId'), args.planId),
-          q.neq(q.field('isDeleted'), true)
-        )
-      )
-      .collect();
-
-    let success = 0;
-    let failed = 0;
-    const settlements: Array<{
-      driverId: Id<'drivers'>;
-      driverName: string;
-      settlementId?: Id<'driverSettlements'>;
-      statementNumber?: string;
-      grossTotal?: number;
-      error?: string;
-    }> = [];
+    if (!plan || !plan.isActive || plan.workosOrgId !== args.workosOrgId) return null;
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== args.workosOrgId || driver.payPlanId !== args.planId) {
+      return null;
+    }
 
     const now = Date.now();
     const refDate = args.referenceDate ? new Date(args.referenceDate) : new Date();
     const { periodStart, periodEnd } = calculatePlanPeriod(plan, refDate);
 
-    // Calculate period number (periods since start of year)
-    const yearStart = new Date(periodStart.getFullYear(), 0, 1);
-    const msPerDay = 24 * 60 * 60 * 1000;
-    const daysSinceYearStart = Math.floor((periodStart.getTime() - yearStart.getTime()) / msPerDay);
-    
-    let periodNumber: number;
-    switch (plan.frequency) {
-      case 'WEEKLY':
-        periodNumber = Math.floor(daysSinceYearStart / 7) + 1;
-        break;
-      case 'BIWEEKLY':
-        periodNumber = Math.floor(daysSinceYearStart / 14) + 1;
-        break;
-      case 'SEMIMONTHLY':
-        // 2 periods per month
-        const month = periodStart.getMonth();
-        const isFirstHalf = periodStart.getDate() <= 15;
-        periodNumber = month * 2 + (isFirstHalf ? 1 : 2);
-        break;
-      case 'MONTHLY':
-        periodNumber = periodStart.getMonth() + 1;
-        break;
-      default:
-        periodNumber = 1;
-    }
-
-    // Resolve timezone once
     let timezone = plan.timezone;
     if (!timezone) {
       const org = await ctx.db
@@ -1868,194 +2169,600 @@ export const bulkGenerateByPlan = mutation({
       timezone = org?.defaultTimezone || 'America/New_York';
     }
 
-    // Shared caches to avoid duplicate reads across drivers
-    const loadCache = new Map<string, any>();
-    const stopsCache = new Map<string, any[]>();
-
-    // Pre-fetch the highest statement number once instead of per-driver
-    const existingStatements = await ctx.db
+    const existing = await ctx.db
       .query('driverSettlements')
-      .withIndex('by_org_status', (q: any) => q.eq('workosOrgId', args.workosOrgId))
-      .collect();
-    const year = new Date().getFullYear();
-    const stmtPrefix = `SET-${year}-`;
-    let maxStatementNum = 0;
-    for (const stmt of existingStatements) {
-      if (stmt.statementNumber.startsWith(stmtPrefix)) {
-        const num = parseInt(stmt.statementNumber.split('-')[2], 10);
-        if (num > maxStatementNum) maxStatementNum = num;
+      .withIndex('by_period', (q) =>
+        q
+          .eq('driverId', args.driverId)
+          .eq('periodStart', periodStart.getTime())
+          .eq('periodEnd', periodEnd.getTime()),
+      )
+      .first();
+
+    // Only a DRAFT may be topped up; anything past DRAFT is owned by the
+    // approval workflow. (Late-landing pay for a locked current period is
+    // swept forward by autoCarryover once the next period becomes current.)
+    const currentWritable = !existing || (existing.status === 'DRAFT' && !!args.additive);
+
+    // Chunked scan: a driver's stranded backlog can exceed the per-transaction
+    // read budget (observed: 1,200+ unassigned payables), so each run sweeps
+    // one page and reschedules itself with the continuation cursor.
+    const CHUNK = 200;
+    const page = await ctx.db
+      .query('loadPayables')
+      .withIndex('by_driver_unassigned', (q) =>
+        q.eq('driverId', args.driverId).eq('settlementId', undefined),
+      )
+      .paginate({ numItems: CHUNK, cursor: args.cursor ?? null });
+    const allUnassigned = page.page;
+
+    const caches = newWorkStartCaches();
+    // Routing buckets — a statement only ever contains its own period's work:
+    //   assignToCurrent — work started inside the current period
+    //   assignToPrior   — late pay whose own period's statement is still DRAFT
+    //                     (assigned there: correct period attribution)
+    //   backfill        — late pay whose period has NO statement yet → create
+    //                     that period's DRAFT and put the work where it belongs
+    //   carryOver       — ONLY late pay whose period is already settled/locked
+    //                     (can't reopen); moves to the current draft when the
+    //                     plan opts in via autoCarryover, stamped carriedOverAt
+    const assignToCurrent: Array<Id<'loadPayables'>> = [];
+    const assignToPrior = new Map<Id<'driverSettlements'>, Array<Id<'loadPayables'>>>();
+    const backfill = new Map<number, { periodStart: Date; periodEnd: Date; ids: Array<Id<'loadPayables'>> }>();
+    const carryOver: Array<Id<'loadPayables'>> = [];
+
+    // Driver's settlement history, fetched lazily on the first late payable.
+    let history: Array<Doc<'driverSettlements'>> | null = null;
+    const coveringSettlement = async (ts: number) => {
+      if (history === null) {
+        history = await ctx.db
+          .query('driverSettlements')
+          .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
+          .collect();
+      }
+      return history.find(
+        (s) => s.status !== 'VOID' && ts >= s.periodStart && ts <= s.periodEnd,
+      );
+    };
+
+    for (const payable of allUnassigned) {
+      let isLoadHeld = false;
+      if (payable.loadId) {
+        const loadKey = payable.loadId as string;
+        let load = caches.loads.get(loadKey);
+        if (load === undefined) {
+          load = ((await ctx.db.get(payable.loadId)) ?? null) as Doc<'loadInformation'> | null;
+          caches.loads.set(loadKey, load);
+        }
+        if (load?.isHeld) isLoadHeld = true;
+      }
+      if (isLoadHeld) {
+        if (args.includeHeldItems && currentWritable) assignToCurrent.push(payable._id);
+        continue;
+      }
+
+      // Standalone adjustments respect the plan's opt-in flag.
+      if (!payable.loadId && !payable.legId && !plan.includeStandaloneAdjustments) continue;
+
+      const triggerTimestamp = await getPayableTriggerTimestamp(
+        ctx,
+        payable,
+        plan.payableTrigger,
+        caches,
+      );
+      if (triggerTimestamp == null) continue;
+
+      // Future work belongs to a later period — leave it for that period.
+      if (triggerTimestamp > periodEnd.getTime()) continue;
+
+      if (triggerTimestamp >= periodStart.getTime()) {
+        if (!currentWritable) continue;
+        if (!isWithinCutoffWindow(triggerTimestamp, periodEnd.getTime(), plan.cutoffTime, timezone!)) {
+          continue;
+        }
+        assignToCurrent.push(payable._id);
+        continue;
+      }
+
+      // Late pay — work started before the current period.
+      const covering = await coveringSettlement(triggerTimestamp);
+      if (covering?.status === 'DRAFT') {
+        const list = assignToPrior.get(covering._id) ?? [];
+        list.push(payable._id);
+        assignToPrior.set(covering._id, list);
+      } else if (covering) {
+        // That period is settled/locked — the one legitimate carry-forward.
+        if (plan.autoCarryover && currentWritable) carryOver.push(payable._id);
+        // else: left unassigned for manual handling.
+      } else {
+        // No statement covers that period — backfill one for the period the
+        // work was done in. (Historical backfill skips the cutoff test: the
+        // cutoff only disambiguates the live period boundary.)
+        const p = calculatePlanPeriod(plan, new Date(triggerTimestamp));
+        const key = p.periodStart.getTime();
+        const group = backfill.get(key) ?? { periodStart: p.periodStart, periodEnd: p.periodEnd, ids: [] };
+        group.ids.push(payable._id);
+        backfill.set(key, group);
       }
     }
 
-    const getLoadCached = async (loadId: Id<'loadInformation'>): Promise<any> => {
-      const key = loadId as string;
-      if (loadCache.has(key)) return loadCache.get(key);
-      const load = await ctx.db.get(loadId);
-      loadCache.set(key, load);
-      return load;
-    };
+    // Top up prior-period DRAFTs first — their period owns the work.
+    for (const [priorId, payableIds] of assignToPrior) {
+      for (const payableId of payableIds) {
+        await ctx.db.patch(payableId, { settlementId: priorId, updatedAt: now });
+      }
+      await ctx.db.patch(priorId, { updatedAt: now });
+    }
 
-    for (const driver of drivers) {
-      try {
-        const existingSettlement = await ctx.db
-          .query('driverSettlements')
-          .withIndex('by_driver_status', (q) => q.eq('driverId', driver._id))
-          .filter((q) =>
-            q.and(
-              q.eq(q.field('periodStart'), periodStart.getTime()),
-              q.eq(q.field('periodEnd'), periodEnd.getTime())
-            )
-          )
-          .first();
+    // Backfill statements for past periods that never got one. Later chunks
+    // (and later runs) find these via the covering-settlement lookup and top
+    // them up as prior DRAFTs.
+    for (const group of backfill.values()) {
+      const statementNumber = await generateStatementNumber(ctx, args.workosOrgId);
+      const backfillId = await ctx.db.insert('driverSettlements', {
+        driverId: args.driverId,
+        workosOrgId: args.workosOrgId,
+        periodStart: group.periodStart.getTime(),
+        periodEnd: group.periodEnd.getTime(),
+        payPlanId: plan._id,
+        periodNumber: planPeriodNumber(plan, group.periodStart),
+        payPlanName: plan.name,
+        status: 'DRAFT',
+        statementNumber,
+        createdAt: now,
+        createdBy: args.userId,
+        updatedAt: now,
+      });
+      for (const payableId of group.ids) {
+        await ctx.db.patch(payableId, { settlementId: backfillId, updatedAt: now });
+      }
+    }
 
-        if (existingSettlement) {
-          settlements.push({
-            driverId: driver._id,
-            driverName: `${driver.firstName} ${driver.lastName}`,
-            error: 'Settlement already exists for this period',
-          });
-          failed++;
-          continue;
-        }
-
-        const allUnassigned = await ctx.db
-          .query('loadPayables')
-          .withIndex('by_driver_unassigned', (q) =>
-            q.eq('driverId', driver._id).eq('settlementId', undefined)
-          )
-          .collect();
-
-        const payablesToAssign: Array<Id<'loadPayables'>> = [];
-        let grossTotal = 0;
-        let skippedNoTimestamp = 0;
-        let skippedOutOfPeriod = 0;
-        let skippedHeld = 0;
-
-        for (const payable of allUnassigned) {
-          let isLoadHeld = false;
-          let cachedLoad: any = null;
-          if (payable.loadId) {
-            cachedLoad = await getLoadCached(payable.loadId);
-            if (cachedLoad?.isHeld) isLoadHeld = true;
-          }
-
-          if (isLoadHeld) {
-            if (args.includeHeldItems) {
-              payablesToAssign.push(payable._id);
-              grossTotal += payable.totalAmount;
-            } else {
-              skippedHeld++;
-            }
-            continue;
-          }
-
-          const triggerTimestamp = await getPayableTriggerTimestamp(
-            ctx, payable, plan.payableTrigger, cachedLoad, stopsCache
-          );
-
-          if (!triggerTimestamp) {
-            skippedNoTimestamp++;
-            continue;
-          }
-
-          const withinPeriod =
-            triggerTimestamp >= periodStart.getTime() &&
-            triggerTimestamp <= periodEnd.getTime();
-
-          if (!withinPeriod) {
-            skippedOutOfPeriod++;
-            continue;
-          }
-
-          const withinCutoff = isWithinCutoffWindow(
-            triggerTimestamp,
-            periodEnd.getTime(),
-            plan.cutoffTime,
-            timezone!
-          );
-
-          if (withinCutoff) {
-            payablesToAssign.push(payable._id);
-            grossTotal += payable.totalAmount;
-          }
-        }
-
-        // Handle standalone adjustments
-        if (plan.includeStandaloneAdjustments) {
-          const standalonePayables = allUnassigned.filter(p => !p.loadId && !p.legId);
-          for (const payable of standalonePayables) {
-            if (!payablesToAssign.includes(payable._id)) {
-              if (payable.createdAt >= periodStart.getTime() && payable.createdAt <= periodEnd.getTime()) {
-                payablesToAssign.push(payable._id);
-                grossTotal += payable.totalAmount;
-              }
-            }
-          }
-        }
-
-        // #region agent log
-        console.log(`[BULK_SETTLE] Driver: ${driver.firstName} ${driver.lastName} | Payables: ${allUnassigned.length} | Matched: ${payablesToAssign.length} | OutOfPeriod: ${skippedOutOfPeriod} | NoTimestamp: ${skippedNoTimestamp} | Held: ${skippedHeld}`);
-        // #endregion
-
-        if (payablesToAssign.length === 0) {
-          settlements.push({
-            driverId: driver._id,
-            driverName: `${driver.firstName} ${driver.lastName}`,
-            error: 'No payables found for this period',
-          });
-          failed++;
-          continue;
-        }
-
-        // Increment shared counter instead of re-querying all settlements
-        maxStatementNum++;
-        const statementNumber = `${stmtPrefix}${String(maxStatementNum).padStart(3, '0')}`;
-
-        const settlementId = await ctx.db.insert('driverSettlements', {
-          driverId: driver._id,
+    const currentItems = [...assignToCurrent, ...carryOver];
+    if (currentItems.length > 0) {
+      let settlementId = existing?._id;
+      if (!settlementId) {
+        const statementNumber = await generateStatementNumber(ctx, args.workosOrgId);
+        settlementId = await ctx.db.insert('driverSettlements', {
+          driverId: args.driverId,
           workosOrgId: args.workosOrgId,
           periodStart: periodStart.getTime(),
           periodEnd: periodEnd.getTime(),
           payPlanId: plan._id,
-          periodNumber,
+          periodNumber: planPeriodNumber(plan, periodStart),
           payPlanName: plan.name,
           status: 'DRAFT',
           statementNumber,
           createdAt: now,
-          createdBy: userId,
+          createdBy: args.userId,
           updatedAt: now,
         });
-
-        for (const payableId of payablesToAssign) {
-          await ctx.db.patch(payableId, {
-            settlementId,
-            updatedAt: now,
-          });
-        }
-
-        settlements.push({
-          driverId: driver._id,
-          driverName: `${driver.firstName} ${driver.lastName}`,
-          settlementId,
-          statementNumber,
-          grossTotal,
-        });
-        success++;
-      } catch (error) {
-        settlements.push({
-          driverId: driver._id,
-          driverName: `${driver.firstName} ${driver.lastName}`,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-        failed++;
       }
+
+      for (const payableId of assignToCurrent) {
+        await ctx.db.patch(payableId, { settlementId, updatedAt: now });
+      }
+      for (const payableId of carryOver) {
+        await ctx.db.patch(payableId, { settlementId, carriedOverAt: now, updatedAt: now });
+      }
+      await ctx.db.patch(settlementId, { updatedAt: now });
     }
 
-    // #region agent log
-    console.log(`[BULK_SETTLE] Complete | Drivers: ${drivers.length} | Success: ${success} | Failed: ${failed} | LoadCache: ${loadCache.size} | StopsCache: ${stopsCache.size}`);
-    // #endregion
-
-    return { success, failed, settlements };
+    // More backlog to scan — continue from the cursor in a fresh transaction.
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.driverSettlements.generateOrRefreshForDriver, {
+        driverId: args.driverId,
+        planId: args.planId,
+        workosOrgId: args.workosOrgId,
+        userId: args.userId,
+        includeHeldItems: args.includeHeldItems,
+        referenceDate: args.referenceDate,
+        additive: args.additive,
+        cursor: page.continueCursor,
+      });
+    }
+    return null;
   },
 });
 
+/**
+ * Bulk generate settlements for all drivers on a Pay Plan.
+ *
+ * Fans out one scheduled generateOrRefreshForDriver per driver instead of
+ * running every driver inside a single transaction — the monolithic version
+ * exceeded Convex's system-operation limit on real fleets ("Your request
+ * timed out performing too many system operations"). Statements stream into
+ * the list reactively as each driver's transaction commits.
+ */
+export const bulkGenerateByPlan = mutation({
+  args: {
+    planId: v.id('payPlans'),
+    workosOrgId: v.string(),
+    userId: v.string(),
+    includeHeldItems: v.optional(v.boolean()),
+    referenceDate: v.optional(v.float64()),
+  },
+  returns: v.object({ scheduled: v.number() }),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const plan = await ctx.db.get(args.planId);
+    if (!plan) throw new Error('Pay Plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new Error('Pay Plan not found');
+    if (!plan.isActive) throw new Error('Pay Plan is inactive');
+
+    const drivers = await ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
+      .filter((q) =>
+        q.and(q.eq(q.field('payPlanId'), args.planId), q.neq(q.field('isDeleted'), true)),
+      )
+      .collect();
+
+    let scheduled = 0;
+    for (const driver of drivers) {
+      // Stagger slightly so the statement-number counter doc isn't hammered
+      // by N simultaneous transactions (OCC retries are safe but wasteful).
+      await ctx.scheduler.runAfter(
+        scheduled * 150,
+        internal.driverSettlements.generateOrRefreshForDriver,
+        {
+          driverId: driver._id,
+          planId: args.planId,
+          workosOrgId: args.workosOrgId,
+          userId,
+          includeHeldItems: args.includeHeldItems,
+          referenceDate: args.referenceDate,
+          additive: true,
+        },
+      );
+      scheduled++;
+    }
+
+    console.log(`[BULK_SETTLE] v4 fan-out | Plan: ${args.planId} | Scheduled: ${scheduled}`);
+    return { scheduled };
+  },
+});
+
+// ============================================
+// SETTLEMENTS HUB (web redesign)
+// ============================================
+//
+// The Accounting → Driver Settlements screen works in lifecycle buckets
+// computed over the raw statuses (see convex/lib/settlementShared.ts):
+// open (accruing) / attention (closed + hard blockers) / ready / approved /
+// paid / void. Active rows (DRAFT + PENDING) are a bounded working set, so
+// they ship as one enriched list; settled history (APPROVED / PAID / VOID)
+// is paginated.
+
+import { paginationOptsValidator } from 'convex/server';
+import { internal } from './_generated/api';
+import {
+  ageDays,
+  applyAcknowledgements,
+  bucketForSettlement,
+  cadenceFromFrequency,
+  classifyPayable,
+  computeDriverBlockers,
+  loadsForPayables,
+  newWorkStartCaches,
+  nextStatementNumber,
+  payDateFromLag,
+  resolveDriverPayBasis,
+  resolveWorkStartTimestamp,
+  summarizeLines,
+  unitsLabel,
+  type PayBasisInfo,
+  type WorkStartCaches,
+} from './lib/settlementShared';
+
+interface DriverEnrichCaches {
+  drivers: Map<string, Doc<'drivers'> | null>;
+  payPlans: Map<string, Doc<'payPlans'> | null>;
+  payBasis: Map<string, PayBasisInfo | null>;
+  loads: Map<string, Doc<'loadInformation'> | null>;
+}
+
+const newDriverCaches = (): DriverEnrichCaches => ({
+  drivers: new Map(),
+  payPlans: new Map(),
+  payBasis: new Map(),
+  loads: new Map(),
+});
+
+/**
+ * One settlement → one screen row. Reads payables + referenced loads to
+ * compute totals and blockers; resolves pay basis / cadence / pay date from
+ * the driver's rate-profile assignment and pay plan.
+ */
+async function enrichDriverSettlement(
+  ctx: any,
+  settlement: Doc<'driverSettlements'>,
+  caches: DriverEnrichCaches,
+  options: { withBlockers: boolean },
+) {
+  const driverKey = settlement.driverId as string;
+  let driver = caches.drivers.get(driverKey);
+  if (driver === undefined) {
+    driver = ((await ctx.db.get(settlement.driverId)) ?? null) as Doc<'drivers'> | null;
+    caches.drivers.set(driverKey, driver);
+  }
+
+  const planId = settlement.payPlanId ?? driver?.payPlanId;
+  let payPlan: Doc<'payPlans'> | null = null;
+  if (planId) {
+    const planKey = planId as string;
+    const cached = caches.payPlans.get(planKey);
+    if (cached === undefined) {
+      payPlan = (await ctx.db.get(planId)) ?? null;
+      caches.payPlans.set(planKey, payPlan);
+    } else {
+      payPlan = cached;
+    }
+  }
+
+  let basisInfo = caches.payBasis.get(driverKey);
+  if (basisInfo === undefined) {
+    basisInfo = await resolveDriverPayBasis(ctx, settlement.driverId);
+    caches.payBasis.set(driverKey, basisInfo);
+  }
+
+  const payables = await ctx.db
+    .query('loadPayables')
+    .withIndex('by_settlement', (q: any) => q.eq('settlementId', settlement._id))
+    .collect();
+
+  const summary = summarizeLines(payables);
+  let blockers: ReturnType<typeof computeDriverBlockers> = [];
+  if (options.withBlockers) {
+    const loads = await loadsForPayables(ctx, payables, caches.loads);
+    blockers = applyAcknowledgements(
+      computeDriverBlockers({ payables, loads, net: summary.net }),
+      settlement.acknowledgedBlockers,
+    );
+  }
+
+  const payDate = payPlan ? payDateFromLag(settlement.periodEnd, payPlan.paymentLagDays) : null;
+
+  return {
+    _id: settlement._id,
+    statementNumber: settlement.statementNumber,
+    status: settlement.status,
+    bucket: bucketForSettlement(settlement.status, settlement.periodEnd, blockers),
+    payeeId: settlement.driverId,
+    payeeName: driver ? `${driver.firstName} ${driver.lastName}` : 'Unknown Driver',
+    payeeSub: settlement.payPlanName ?? payPlan?.name ?? null,
+    periodStart: settlement.periodStart,
+    periodEnd: settlement.periodEnd,
+    periodNumber: settlement.periodNumber ?? null,
+    payDate,
+    paidAt: settlement.paidAt ?? null,
+    paidMethod: settlement.paidMethod ?? null,
+    paidReference: settlement.paidReference ?? null,
+    planBasis: basisInfo?.basis ?? null,
+    planDetail: basisInfo?.planDetail ?? null,
+    cadence: cadenceFromFrequency(payPlan?.frequency),
+    units: unitsLabel(basisInfo?.basis ?? null, summary),
+    loadCount: summary.loadCount,
+    lineCount: summary.lineCount,
+    earnTotal: summary.earnTotal,
+    reimbTotal: summary.reimbTotal,
+    deductTotal: summary.deductTotal,
+    net: summary.net,
+    blockers,
+    ageDays: ageDays(settlement.periodEnd),
+    voidReason: settlement.voidReason ?? null,
+    notes: settlement.notes ?? null,
+  };
+}
+
+export type EnrichedDriverSettlementRow = Awaited<ReturnType<typeof enrichDriverSettlement>>;
+
+/** Cap on the active (DRAFT + PENDING) working set returned in one shot. */
+const ACTIVE_ROW_CAP = 500;
+
+/**
+ * Active settlements (DRAFT + PENDING) for the open / attention / ready
+ * views, enriched and bucketed. The active set is bounded by the number of
+ * drivers × open periods, so this returns the full filtered set (capped).
+ */
+export const listActive = query({
+  args: {
+    workosOrgId: v.string(),
+    view: v.union(v.literal('open'), v.literal('attention'), v.literal('ready')),
+    search: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const [drafts, pendings] = await Promise.all([
+      ctx.db
+        .query('driverSettlements')
+        .withIndex('by_org_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', 'DRAFT'),
+        )
+        .collect(),
+      ctx.db
+        .query('driverSettlements')
+        .withIndex('by_org_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', 'PENDING'),
+        )
+        .collect(),
+    ]);
+
+    const active = [...drafts, ...pendings]
+      .sort((a, b) => b.periodStart - a.periodStart)
+      .slice(0, ACTIVE_ROW_CAP);
+
+    const caches = newDriverCaches();
+    const rows = [];
+    for (const settlement of active) {
+      rows.push(await enrichDriverSettlement(ctx, settlement, caches, { withBlockers: true }));
+    }
+
+    let filtered = rows.filter((r) => r.bucket === args.view);
+    if (args.search && args.search.trim() !== '') {
+      const needle = args.search.toLowerCase().trim();
+      filtered = filtered.filter(
+        (r) =>
+          r.statementNumber.toLowerCase().includes(needle) ||
+          r.payeeName.toLowerCase().includes(needle),
+      );
+    }
+    return { rows: filtered, truncated: active.length === ACTIVE_ROW_CAP };
+  },
+});
+
+/**
+ * Settled history (APPROVED / PAID / VOID) — properly paginated since paid
+ * history grows without bound.
+ */
+export const listSettled = query({
+  args: {
+    workosOrgId: v.string(),
+    status: v.union(v.literal('APPROVED'), v.literal('PAID'), v.literal('VOID')),
+    paginationOpts: paginationOptsValidator,
+    search: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const result = await ctx.db
+      .query('driverSettlements')
+      .withIndex('by_org_status', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('status', args.status),
+      )
+      .order('desc')
+      .paginate(args.paginationOpts);
+
+    const caches = newDriverCaches();
+    let page = [];
+    for (const settlement of result.page) {
+      // Blockers only matter pre-approval; settled rows skip the load reads.
+      page.push(await enrichDriverSettlement(ctx, settlement, caches, { withBlockers: false }));
+    }
+
+    if (args.search && args.search.trim() !== '') {
+      const needle = args.search.toLowerCase().trim();
+      page = page.filter(
+        (r) =>
+          r.statementNumber.toLowerCase().includes(needle) ||
+          r.payeeName.toLowerCase().includes(needle),
+      );
+    }
+
+    return { ...result, page };
+  },
+});
+
+/**
+ * View counts + header stats for the settlements screen:
+ * due this run (ready + approved net), open accruing, blocked count, paid MTD.
+ */
+export const getViewStats = query({
+  args: { workosOrgId: v.string() },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const [drafts, pendings, approved] = await Promise.all([
+      ctx.db
+        .query('driverSettlements')
+        .withIndex('by_org_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', 'DRAFT'),
+        )
+        .collect(),
+      ctx.db
+        .query('driverSettlements')
+        .withIndex('by_org_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', 'PENDING'),
+        )
+        .collect(),
+      ctx.db
+        .query('driverSettlements')
+        .withIndex('by_org_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', 'APPROVED'),
+        )
+        .collect(),
+    ]);
+
+    const caches = newDriverCaches();
+    let openCount = 0;
+    let attentionCount = 0;
+    let readyCount = 0;
+    let openAccruing = 0;
+    let readyNet = 0;
+    let blockedNet = 0;
+    let oldestBlockedId: Id<'driverSettlements'> | null = null;
+    let oldestBlockedAge = -1;
+
+    for (const settlement of [...drafts, ...pendings].slice(0, ACTIVE_ROW_CAP)) {
+      const row = await enrichDriverSettlement(ctx, settlement, caches, { withBlockers: true });
+      if (row.bucket === 'open') {
+        openCount++;
+        openAccruing += row.net;
+      } else if (row.bucket === 'attention') {
+        attentionCount++;
+        blockedNet += Math.max(row.net, 0);
+        if (row.ageDays > oldestBlockedAge) {
+          oldestBlockedAge = row.ageDays;
+          oldestBlockedId = settlement._id;
+        }
+      } else {
+        readyCount++;
+        readyNet += row.net;
+      }
+    }
+
+    // Approved totals were frozen at approval time (grossTotal nets out
+    // deductions because deduction payables carry negative amounts).
+    const approvedNet = approved.reduce((sum, s) => sum + (s.grossTotal ?? 0), 0);
+
+    // Paid month-to-date. Recent-first scan capped — paid history is the one
+    // unbounded status; a month of statements sits far below the cap.
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const paidRecent = await ctx.db
+      .query('driverSettlements')
+      .withIndex('by_org_status', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID'),
+      )
+      .order('desc')
+      .take(1000);
+    const paidMtd = paidRecent
+      .filter((s) => (s.paidAt ?? 0) >= monthStart.getTime())
+      .reduce((sum, s) => sum + (s.grossTotal ?? 0), 0);
+
+    const [paidCount, voidCount] = await Promise.all([
+      ctx.db
+        .query('driverSettlements')
+        .withIndex('by_org_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID'),
+        )
+        .collect()
+        .then((r) => r.length),
+      ctx.db
+        .query('driverSettlements')
+        .withIndex('by_org_status', (q) =>
+          q.eq('workosOrgId', args.workosOrgId).eq('status', 'VOID'),
+        )
+        .collect()
+        .then((r) => r.length),
+    ]);
+
+    return {
+      counts: {
+        attention: attentionCount,
+        open: openCount,
+        ready: readyCount,
+        approved: approved.length,
+        paid: paidCount,
+        void: voidCount,
+      },
+      dueThisRun: readyNet + approvedNet,
+      openAccruing,
+      blockedNet,
+      paidMtd,
+      oldestBlockedId,
+    };
+  },
+});

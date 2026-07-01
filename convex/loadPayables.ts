@@ -165,6 +165,8 @@ export const addManual = mutation({
       rate: args.rate,
       totalAmount,
       sourceType: 'MANUAL',
+      // Sign-based default: negative manual lines are deductions.
+      category: totalAmount < 0 ? ('DEDUCTION' as const) : ('EARNING' as const),
       isLocked: true, // Manual items are always locked
       workosOrgId: load.workosOrgId,
       createdAt: now,
@@ -183,6 +185,11 @@ export const addManual = mutation({
       performedBy: userId,
       performedByName: userName,
       description: `Added manual pay "${args.description}" ($${totalAmount.toFixed(2)}) for ${driver?.firstName} ${driver?.lastName}`,
+    });
+
+    // Shadow dual-write: mirror this manual line into the new-ledger payItems.
+    await ctx.scheduler.runAfter(0, internal.payEngine.manualCoverage.syncManualPayItem, {
+      workosOrgId: load.workosOrgId, table: 'loadPayables', payableId,
     });
 
     return payableId;
@@ -246,6 +253,11 @@ export const update = mutation({
       changedFields: Object.keys(updates),
     });
 
+    // Shadow dual-write: re-sync the mirrored payItem to the edited values.
+    await ctx.scheduler.runAfter(0, internal.payEngine.manualCoverage.syncManualPayItem, {
+      workosOrgId: payable.workosOrgId, table: 'loadPayables', payableId,
+    });
+
     return payableId;
   },
 });
@@ -280,6 +292,11 @@ export const remove = mutation({
     });
 
     await ctx.db.delete(args.payableId);
+
+    // Shadow dual-write: void the mirrored payItem (the line is gone).
+    await ctx.scheduler.runAfter(0, internal.payEngine.manualCoverage.syncManualPayItem, {
+      workosOrgId: payable.workosOrgId, table: 'loadPayables', payableId: args.payableId,
+    });
 
     return args.payableId;
   },

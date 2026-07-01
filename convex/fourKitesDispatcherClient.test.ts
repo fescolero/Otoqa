@@ -9,7 +9,7 @@ import { buildLocationUpdate } from './fourKitesDispatcherClient';
  */
 
 describe('buildLocationUpdate', () => {
-  it('builds a single-update payload with BillOfLading identifier', () => {
+  it('builds a single-update payload with loadNumber identifier (FK-standard default)', () => {
     const update = buildLocationUpdate({
       externalLoadId: '664095554',
       rawIdentifier: 'FK-109624134',
@@ -23,7 +23,7 @@ describe('buildLocationUpdate', () => {
       {
         identifier: '664095554',
         rawIdentifier: 'FK-109624134',
-        identifierType: 'BillOfLading',
+        identifierType: 'loadNumber',
       },
     ]);
     expect(update.loadUpdate).toHaveLength(1);

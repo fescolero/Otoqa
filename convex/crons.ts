@@ -70,6 +70,30 @@ crons.interval('recurring-load-generation', { hours: 1 }, internal.recurringLoad
 crons.interval('scheduled-auto-assignment', { hours: 1 }, internal.autoAssignmentCron.runScheduledAutoAssignment, {});
 
 // ==========================================
+// DRIVER SETTLEMENTS
+// ==========================================
+
+// ✅ Driver settlement generation (hourly)
+// Pay plans define the cadence; this keeps the current period's DRAFT
+// statements existing and accruing as work lands (create-if-missing +
+// additive top-up via generateOrRefreshForDriver). Never touches manual
+// adjustments or statements past DRAFT. See convex/settlementsCron.ts.
+crons.interval('driver-settlement-generation', { hours: 1 }, internal.settlementsCron.tick, {});
+
+// ✅ Pay-engine (new-ledger) settlement generation — SHADOW (hourly)
+// Mirrors the legacy periods into the new settlements/payItems ledger so the
+// read adapter stays current behind the `settlements_read_ledger` flag.
+// Additive/shadow-only — writes new-ledger settlements, never touches legacy or
+// the dashboard until the flag is flipped. See convex/payEngine/generationCron.ts.
+crons.interval('pay-engine-settlement-generation', { hours: 1 }, internal.payEngine.generationCron.tick, {});
+
+// ✅ Session pay backstop (daily at 1 AM UTC)
+// Catches completed shifts from the last 7 days whose SESSION_DURATION
+// payable was never created (missed hook / transient failure). paySession
+// is idempotent, so broad re-scheduling is safe. See convex/sessionPay.ts.
+crons.cron('session-pay-backstop', '0 1 * * *', internal.sessionPay.backstopSweep, {});
+
+// ==========================================
 // EXTERNAL TRACKING API
 // ==========================================
 
@@ -201,6 +225,31 @@ crons.cron(
   'prune-orphaned-facet-values',
   '0 5 * * *',
   internal.facetMaintenance.pruneOrphanedFacetValues,
+  {},
+);
+
+// ✅ Eventually-exact load status counts — change-gated rebuild (every 1 min)
+// Powers the Dispatch Planner badges (loads.countLoadsByStatusFiltered) without
+// the per-query facet/date scan that hit the 4096 read limit. The tick is cheap:
+// it only schedules a rebuild for orgs whose loads actually changed since the
+// last build (organizationStats.updatedAt moved), plus a ≤30-min safety-net.
+// Idle orgs cost ~2 reads/min. See convex/loadStatusCounts.ts + the design doc.
+crons.interval(
+  'load-status-counts-rebuild-gate',
+  { minutes: 1 },
+  internal.loadStatusCounts.tickRebuildGate,
+  {},
+);
+
+// ✅ Load status count cross-check (every 30 min)
+// Asserts the cache's all-time totals equal organizationStats (an independent
+// oracle). A full rebuild can't drift, so a mismatch flags a bug in either
+// mechanism. Doubles as the dark-launch confidence gate before flipping the
+// per-org loadStatusCounts.readFromCache flag.
+crons.interval(
+  'load-status-counts-verify',
+  { minutes: 30 },
+  internal.loadStatusCounts.verifyAllOrgs,
   {},
 );
 

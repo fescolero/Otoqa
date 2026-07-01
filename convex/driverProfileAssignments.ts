@@ -24,24 +24,44 @@ export const getForDriver = query({
       .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
       .collect();
 
-    // Enrich with profile details and base rate/threshold
+    // Enrich with profile details + a small rule-derived summary so the
+    // Pay & Expenses tab can render snapshot rows (Rate / Empty % /
+    // Detention / Bonus) without a second roundtrip per profile.
     const enrichedAssignments = await Promise.all(
       assignments.map(async (assignment) => {
         const profile = await ctx.db.get(assignment.profileId);
-        
-        // Get the BASE rule to find the base rate and minThreshold
+
         let baseRate: number | undefined;
         let minThreshold: number | undefined;
+        let emptyMileRate: number | undefined;
+        let detentionRate: number | undefined;
+        let detentionMinHours: number | undefined;
+        let detentionMaxCap: number | undefined;
+        let bonusSummary: string | undefined;
+
         if (profile) {
           const rules = await ctx.db
             .query('rateRules')
             .withIndex('by_profile', (q) => q.eq('profileId', assignment.profileId))
             .collect();
-          const baseRule = rules.find((r) => r.category === 'BASE' && r.isActive);
+          const active = rules.filter((r) => r.isActive);
+          const baseRule = active.find((r) => r.category === 'BASE');
           baseRate = baseRule?.rateAmount;
           minThreshold = baseRule?.minThreshold;
+          const emptyRule = active.find((r) => r.triggerEvent === 'MILE_EMPTY');
+          emptyMileRate = emptyRule?.rateAmount;
+          const detentionRule = active.find((r) => r.triggerEvent === 'TIME_WAITING');
+          detentionRate = detentionRule?.rateAmount;
+          detentionMinHours = detentionRule?.minThreshold;
+          detentionMaxCap = detentionRule?.maxCap;
+          const bonusRules = active.filter(
+            (r) => r.category === 'ACCESSORIAL' && r.triggerEvent !== 'TIME_WAITING' && r.triggerEvent !== 'MILE_EMPTY',
+          );
+          if (bonusRules.length > 0) {
+            bonusSummary = bonusRules.map((r) => r.name).join(' · ');
+          }
         }
-        
+
         return {
           ...assignment,
           profileName: profile?.name,
@@ -49,6 +69,11 @@ export const getForDriver = query({
           profileIsActive: profile?.isActive,
           baseRate,
           minThreshold,
+          emptyMileRate,
+          detentionRate,
+          detentionMinHours,
+          detentionMaxCap,
+          bonusSummary,
         };
       })
     );

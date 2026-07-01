@@ -156,6 +156,11 @@ function evaluateRule(
       break;
     }
 
+    case 'SESSION_DURATION':
+      // Shift-based hourly pay fires per driver session (convex/sessionPay.ts),
+      // not per leg — a leg recalculation never produces or owns these lines.
+      return { qty: 0, amount: 0, warning: null };
+
     case 'TIME_WAITING':
       // For detention - would need dwell time tracking
       // V1: Sum up dwellTime from stops if available
@@ -357,23 +362,29 @@ export const calculateDriverPay = internalMutation({
       invoiceTotal = invoice.totalAmount;
     }
 
-    // 6. Delete existing SYSTEM payables for this leg (that are NOT locked)
-    const existingPayables = await ctx.db
+    // 6. Replace SYSTEM lines for this leg. Locked lines are reviewer edits —
+    //    they win over recalc, so we never delete them; only the unlocked
+    //    rule-generated lines are cleared and regenerated. Locked lines are
+    //    indexed by ruleId so step 7 can skip re-inserting a duplicate and
+    //    instead flag rules drift.
+    const allLegPayables = await ctx.db
       .query('loadPayables')
       .withIndex('by_leg', (q) => q.eq('legId', args.legId))
-      .filter((q) => 
-        q.and(
-          q.eq(q.field('sourceType'), 'SYSTEM'),
-          q.eq(q.field('isLocked'), false)
-        )
-      )
+      .filter((q) => q.eq(q.field('sourceType'), 'SYSTEM'))
       .collect();
 
-    for (const payable of existingPayables) {
-      await ctx.db.delete(payable._id);
+    const lockedByRule = new Map<string, Doc<'loadPayables'>>();
+    for (const p of allLegPayables) {
+      if (p.isLocked) {
+        // Session-paid lines (hourly shifts) are owned by sessionPay, not the
+        // per-leg engine — never treat them as leg rule drift.
+        if (p.ruleId && p.sessionId == null) lockedByRule.set(p.ruleId as string, p);
+      } else {
+        await ctx.db.delete(p._id);
+      }
     }
 
-    // 7. Evaluate each rule and insert payables
+    // 7. Evaluate each rule and insert payables (or flag drift on a locked edit)
     let totalPay = 0;
     const warnings: string[] = [];
 
@@ -382,6 +393,28 @@ export const calculateDriverPay = internalMutation({
 
       if (warning) {
         warnings.push(warning);
+      }
+
+      // Edit wins: a locked reviewer line for this rule survives — don't
+      // duplicate it. Drift = the rules now compute something different than
+      // the SYSTEM value captured when the line was edited (originalTotalAmount),
+      // i.e. a genuine rule/input change since the edit — NOT just the override
+      // disagreeing with the rule (that's the whole point of overriding). Stamp
+      // rulesAmount/rulesChangedAt so the UI can offer the update; clear it when
+      // the rules line back up with the captured baseline.
+      const locked = lockedByRule.get(rule._id as string);
+      if (locked) {
+        const fresh = amount > 0 ? +amount.toFixed(2) : 0;
+        const baseline = locked.originalTotalAmount ?? locked.totalAmount;
+        if (Math.abs(fresh - baseline) > 0.005) {
+          if (locked.rulesAmount !== fresh || locked.rulesChangedAt == null) {
+            await ctx.db.patch(locked._id, { rulesAmount: fresh, rulesChangedAt: now, updatedAt: now });
+          }
+        } else if (locked.rulesChangedAt != null) {
+          await ctx.db.patch(locked._id, { rulesAmount: undefined, rulesChangedAt: undefined, updatedAt: now });
+        }
+        totalPay += locked.totalAmount;
+        continue;
       }
 
       // Only insert if amount > 0
@@ -395,6 +428,7 @@ export const calculateDriverPay = internalMutation({
           rate: rule.rateAmount,
           totalAmount: amount,
           sourceType: 'SYSTEM',
+          category: rule.category === 'DEDUCTION' ? 'DEDUCTION' : 'EARNING',
           isLocked: false,
           ruleId: rule._id,
           warningMessage: warning ?? undefined,
@@ -407,10 +441,19 @@ export const calculateDriverPay = internalMutation({
       }
     }
 
-    // 8. If no payables were created but rules exist, add a $0 line with warning
-    if (totalPay === 0 && rules.length > 0) {
-      const warningMessage = warnings.length > 0 
-        ? warnings.join('; ') 
+    // 8. If no payables were created but rules exist, add a $0 line with warning.
+    //
+    // Skip this for session-paid profiles: their base pay is SESSION_DURATION,
+    // which fires per driver shift (convex/sessionPay.ts), not per leg — so a
+    // $0 leg result is expected, not an error. Without this guard, every leg
+    // recalc on an hourly/session driver would litter the statement with a
+    // "(No applicable charges)" $0 line.
+    const isSessionPaid = rules.some(
+      (r) => r.isActive && r.triggerEvent === 'SESSION_DURATION',
+    );
+    if (totalPay === 0 && rules.length > 0 && !isSessionPaid) {
+      const warningMessage = warnings.length > 0
+        ? warnings.join('; ')
         : 'All rules evaluated to $0';
 
       await ctx.db.insert('loadPayables', {

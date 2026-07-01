@@ -176,11 +176,13 @@ export const create = mutation({
     // Sensitive Information (will be stored separately)
     dateOfBirth: v.optional(v.string()),
     ssn: v.optional(v.string()),
+    citizenship: v.optional(v.string()),
     licenseNumber: v.string(),
     // License Information (non-sensitive)
     licenseState: v.string(),
     licenseExpiration: v.string(),
     licenseClass: v.string(),
+    gender: v.optional(v.string()),
     // Medical
     medicalExpiration: v.optional(v.string()),
     // Security Access
@@ -308,11 +310,13 @@ export const update = mutation({
     phone: v.optional(v.string()),
     dateOfBirth: v.optional(v.string()),
     ssn: v.optional(v.string()),
+    citizenship: v.optional(v.string()),
     // License Information
     licenseNumber: v.optional(v.string()),
     licenseState: v.optional(v.string()),
     licenseExpiration: v.optional(v.string()),
     licenseClass: v.optional(v.string()),
+    gender: v.optional(v.string()),
     // Medical
     medicalExpiration: v.optional(v.string()),
     // Security Access

@@ -157,6 +157,15 @@ export async function ingestBatch(
   let skippedOrgMismatch = 0;
   let skippedLoad = 0;
   let skippedSession = 0;
+  // Counts pings rejected because they arrived after the session was
+  // ended (status === 'completed') or after session.endedAt. Tracked
+  // separately from skippedSession so we can monitor mobile shutdown
+  // bugs vs. unrelated session/driver mismatches.
+  let skippedSessionEnded = 0;
+  // Counts pings rejected because they carried a loadId stamped to a
+  // dispatchLeg that's now COMPLETED or CANCELED. Surfaces drivers who
+  // forgot to check out before the next leg started.
+  let skippedLegInactive = 0;
   let skippedShape = 0;
   let skippedDuplicate = 0;
   let skippedSkew = 0;
@@ -184,6 +193,12 @@ export async function ingestBatch(
     if (!loadCache.has(id)) loadCache.set(id, await ctx.db.get(id));
     return loadCache.get(id)!;
   };
+
+  // Memo for the leg-active check below. Keyed on `${driverId}|${loadId}`
+  // so repeated pings in the same batch (same driver, same load) share
+  // a single index lookup instead of N redundant ones. true = at least
+  // one ACTIVE leg matches the (driver, load) pair.
+  const activeLegByDriverLoad = new Map<string, boolean>();
 
   // First pass: per-ping validation. Build the "valid" list for dedup + insert.
   const valid: PingInput[] = [];
@@ -250,16 +265,59 @@ export async function ingestBatch(
         skippedSession++;
         continue;
       }
-      // Quietly accept pings for sessions that have ended — they may be
-      // late-arriving background syncs. We still store them so history is
-      // complete, but they won't trigger the evaluator (scheduled below
-      // only when an ACTIVE leg exists).
+      // STRICT session-end rejection. Mobile is supposed to call
+      // stopSessionTracking() on shift end, but without a server→mobile
+      // signal it sometimes keeps sending pings after the session is
+      // closed (dispatch override, auto-timeout, or another device
+      // ending). Dropping them here is the simple, deterministic fix.
+      //
+      // Two conditions catch the same family of bugs from different
+      // angles:
+      //   • status !== 'active': the session row is closed. Anything
+      //     stamped with this sessionId is now post-shift drift.
+      //   • recordedAt > endedAt: defensive on clock skew. If somehow
+      //     status is still 'active' but endedAt is set (race during
+      //     end), still reject.
+      if (session.status !== 'active') {
+        skippedSessionEnded++;
+        continue;
+      }
+      if (session.endedAt != null && loc.recordedAt > session.endedAt) {
+        skippedSessionEnded++;
+        continue;
+      }
     }
 
     if (loc.loadId) {
       const load = await getLoad(loc.loadId);
       if (!load) {
         skippedLoad++;
+        continue;
+      }
+      // STRICT leg-status rejection. If the ping carries a loadId, the
+      // driver should currently be ACTIVE on a dispatch leg for that
+      // load. If no ACTIVE leg matches the (driverId, loadId) pair, the
+      // loadId is stamped stale (driver forgot to check out and
+      // mobile's foreground tracker kept assigning the old loadId).
+      //
+      // Memoized: most batches contain many pings sharing one or two
+      // loadIds, so we query the dispatchLegs index at most once per
+      // unique (driver, load) pair across the whole batch.
+      const cacheKey = `${loc.driverId}|${loc.loadId}`;
+      let hasActiveLeg = activeLegByDriverLoad.get(cacheKey);
+      if (hasActiveLeg === undefined) {
+        const activeLegForLoad = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_driver', (q) =>
+            q.eq('driverId', loc.driverId).eq('status', 'ACTIVE'),
+          )
+          .filter((q) => q.eq(q.field('loadId'), loc.loadId))
+          .first();
+        hasActiveLeg = !!activeLegForLoad;
+        activeLegByDriverLoad.set(cacheKey, hasActiveLeg);
+      }
+      if (!hasActiveLeg) {
+        skippedLegInactive++;
         continue;
       }
     }
@@ -487,15 +545,16 @@ export async function ingestBatch(
   }
 
   for (const loc of evaluatorTargets.values()) {
-    // Only schedule if the driver has an ACTIVE leg for this load. This
-    // prevents evaluator fanout for legs that are PENDING/COMPLETED or
-    // for sessions that lost their leg mid-batch.
-    const activeLeg = await ctx.db
-      .query('dispatchLegs')
-      .withIndex('by_driver', (q) => q.eq('driverId', loc.driverId).eq('status', 'ACTIVE'))
-      .filter((q) => q.eq(q.field('loadId'), loc.loadId!))
-      .first();
-    if (!activeLeg) continue;
+    // Only schedule if the driver has an ACTIVE leg for this load. Reuse the
+    // activeLegByDriverLoad memo populated during validation rather than
+    // re-querying dispatchLegs: every target here came from a ping that
+    // already passed the active-leg check (a ping can't reach `valid` with a
+    // loadId otherwise), so the memo is authoritative and within this single
+    // transaction's snapshot the answer can't have changed. Dropping the
+    // redundant read shrinks the mutation's read set and shortens its
+    // duration, which narrows the OCC write-conflict window for concurrent
+    // ingest batches (mobile + Samsara) competing on the driverLocations rows.
+    if (!activeLegByDriverLoad.get(`${loc.driverId}|${loc.loadId}`)) continue;
 
     await ctx.scheduler.runAfter(0, internal.geofenceEvaluator.evaluateLatestPing, {
       loadId: loc.loadId!,
@@ -575,6 +634,8 @@ export async function ingestBatch(
     skippedOrgMismatch +
     skippedLoad +
     skippedSession +
+    skippedSessionEnded +
+    skippedLegInactive +
     skippedShape +
     skippedDuplicate +
     skippedSkew;
@@ -582,7 +643,8 @@ export async function ingestBatch(
     console.warn(
       `[driverLocations.ingestBatch] Skipped ${skippedTotal}/${pings.length}:`,
       `driver=${skippedDriver}, orgMismatch=${skippedOrgMismatch} (passed="${orgId}"),`,
-      `load=${skippedLoad}, session=${skippedSession}, shape=${skippedShape},`,
+      `load=${skippedLoad}, session=${skippedSession}, sessionEnded=${skippedSessionEnded},`,
+      `legInactive=${skippedLegInactive}, shape=${skippedShape},`,
       `dup=${skippedDuplicate}, skew=${skippedSkew}, internalDup=${internalDupCount}`
     );
   }
@@ -593,11 +655,19 @@ export async function ingestBatch(
   // transient failure mode (e.g. rate-limit / temporary server error
   // surfaced via this path), we can route it here without changing the
   // contract.
+  //
+  // sessionEnded + legInactive both land in permanentlyRejected so the
+  // mobile client marks the queued pings as synced (they will never
+  // succeed on retry). The mobile push handler we ship in parallel
+  // ensures these counters drop to ~0 once devices receive the
+  // session-ended notification.
   const permanentlyRejected =
     skippedDriver +
     skippedOrgMismatch +
     skippedLoad +
     skippedSession +
+    skippedSessionEnded +
+    skippedLegInactive +
     skippedShape +
     skippedSkew;
 
@@ -869,11 +939,15 @@ export const getLocationsOlderThan = internalQuery({
     })
   ),
   handler: async (ctx, args) => {
-    // Get old locations using createdAt index
+    // Range-bound on the dedicated by_created index so we read AT MOST `limit`
+    // rows (the oldest, in createdAt order). The previous form used
+    // by_org_created with no range and a .filter() — that scans the whole
+    // table in memory and, once archival has caught up (few/no rows past the
+    // cutoff), reads every document/byte to confirm there's nothing left,
+    // which is what neared the per-query read limit.
     const oldLocations = await ctx.db
       .query('driverLocations')
-      .withIndex('by_org_created')
-      .filter((q) => q.lt(q.field('createdAt'), args.cutoffTime))
+      .withIndex('by_created', (q) => q.lt('createdAt', args.cutoffTime))
       .take(args.limit);
 
     return oldLocations.map((loc) => ({

@@ -151,7 +151,7 @@ export const calculatePayForLeg = internalMutation({
 // ids. The schema uses raw int64 (bigint) and Convex Id<> branded strings.
 // This helper does the type-narrowing at the persistence boundary.
 
-function specToPayItemRow(
+export function specToPayItemRow(
   spec: PayItemSpec,
   workosOrgId: string,
   userId: string,
@@ -199,6 +199,7 @@ function specToPayItemRow(
       id: spec.sourceRef.id,
       loadId: spec.sourceRef.loadId as Id<'loadInformation'> | undefined,
       legId: spec.sourceRef.legId as Id<'dispatchLegs'> | undefined,
+      sessionId: spec.sourceRef.sessionId as Id<'driverSessions'> | undefined,
     },
 
     sourceData,
