@@ -1625,6 +1625,7 @@ export default defineSchema({
     missingDataReason: v.optional(v.string()), // e.g., "No Contract Lane found for HCR 925L0"
     erpInvoiceId: v.optional(v.string()), // QuickBooks/Wave ID
     invoiceDateNumeric: v.optional(v.number()), // Unix timestamp, set when BILLED (for indexed reporting)
+    statsFinalized: v.optional(v.boolean()), // true once recordInvoiceFinalized has counted this invoice — guards double-count
 
     // WorkOS Integration
     createdBy: v.string(), // WorkOS user ID
@@ -1636,7 +1637,11 @@ export default defineSchema({
     .index('by_organization', ['workosOrgId'])
     .index('by_status', ['workosOrgId', 'status'])
     .index('by_org_created', ['workosOrgId', 'createdAt'])
-    .index('by_org_status_created', ['workosOrgId', 'status', 'createdAt']),
+    .index('by_org_status_created', ['workosOrgId', 'status', 'createdAt'])
+    // Service-date (reporting) basis — profitability/cost queries filter by the
+    // invoice's service month (invoiceDateNumeric) so they agree with the
+    // period-stats-backed Overview/P&L, not by createdAt (billing day).
+    .index('by_org_status_invoice_date', ['workosOrgId', 'status', 'invoiceDateNumeric']),
 
   invoiceLineItems: defineTable({
     invoiceId: v.id('loadInvoices'),
@@ -1655,6 +1660,27 @@ export default defineSchema({
 
     createdAt: v.number(),
   }).index('by_invoice', ['invoiceId']),
+
+  // Receivables payment ledger — one row per customer payment (audit trail +
+  // partial-payment support). Mirrors the payItems convention: append rows,
+  // void (not delete) for corrections. `loadInvoices.paidAmount` etc. are the
+  // maintained aggregates over the ACTIVE rows here.
+  invoicePayments: defineTable({
+    workosOrgId: v.string(),
+    invoiceId: v.id('loadInvoices'),
+    loadId: v.id('loadInformation'), // denormalized for reporting/cost joins
+    customerId: v.id('customers'), // denormalized for per-customer payment reporting
+    amount: v.number(),
+    miles: v.optional(v.number()), // miles the customer paid on (for mileage reconciliation)
+    paymentDate: v.optional(v.string()), // ISO 8601
+    reference: v.optional(v.string()), // check #, wire/ACH ref
+    note: v.optional(v.string()),
+    status: v.union(v.literal('ACTIVE'), v.literal('VOID')),
+    createdBy: v.string(), // WorkOS user ID
+    createdAt: v.number(),
+  })
+    .index('by_invoice', ['invoiceId'])
+    .index('by_org_created', ['workosOrgId', 'createdAt']),
 
   // Per-org invoice numbering sequence (INV-YYYY-NNNN). One row per org+year;
   // nextSeq is claimed inside the billing/backfill mutations, so Convex's
@@ -2517,6 +2543,12 @@ export default defineSchema({
     invoiceCount: v.number(), // Count of invoices finalized in this period
     paidInvoiceCount: v.number(), // Count of invoices paid in this period
 
+    // A/R (pre-computed, event-driven updates) — powers the uncapped receivables
+    // aging so the summary doesn't have to scan every invoice. Optional for
+    // backfill: rows written before this field default to 0 until the next recalc.
+    totalOutstanding: v.optional(v.number()), // Sum of max(0, totalAmount - paidAmount) for finalized invoices in this period
+    outstandingCount: v.optional(v.number()), // Count of finalized invoices in this period still carrying a balance (recalc-maintained)
+
     // Drift detection
     lastRecalculated: v.optional(v.number()),
 
@@ -2525,6 +2557,18 @@ export default defineSchema({
   })
     .index('by_org', ['workosOrgId'])
     .index('by_org_period', ['workosOrgId', 'periodKey']),
+
+  // Per-customer A/R aging snapshot — ONE row per org holding a compact JSON map
+  // customerId -> periodKey -> [outstandingBalance, outstandingCount]. Powers the
+  // per-customer aging table without scanning (or capping) every invoice; buckets
+  // are computed live at read time from the per-period balances. Recomputed by
+  // the same recalc that maintains accountingPeriodStats (a daily snapshot).
+  customerAgingSnapshots: defineTable({
+    workosOrgId: v.string(),
+    data: v.string(), // JSON: Record<customerId, Record<periodKey, [balance, count]>>
+    lastRecalculated: v.number(),
+    updatedAt: v.number(),
+  }).index('by_org', ['workosOrgId']),
 
   // ==========================================
   // DRIVER LOCATION TRACKING

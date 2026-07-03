@@ -38,6 +38,8 @@ async function getOrCreatePeriodStats(ctx: MutationCtx, orgId: string, periodKey
     totalCollected: 0,
     invoiceCount: 0,
     paidInvoiceCount: 0,
+    totalOutstanding: 0,
+    outstandingCount: 0,
     updatedAt: Date.now(),
   });
 
@@ -65,6 +67,34 @@ export async function recordInvoiceFinalized(
   await ctx.db.patch(stats._id, {
     totalInvoiced: stats.totalInvoiced + totalAmount,
     invoiceCount: stats.invoiceCount + 1,
+    // Newly finalized and unpaid — the full amount + one open item join A/R.
+    totalOutstanding: (stats.totalOutstanding ?? 0) + totalAmount,
+    outstandingCount: (stats.outstandingCount ?? 0) + 1,
+    updatedAt: Date.now(),
+  });
+}
+
+/**
+ * Remove an invoice's remaining A/R contribution when it settles to PAID.
+ *
+ * A PAID invoice owes $0 — a short-pay accepted as final still leaves A/R
+ * entirely — so the residual balance AND its open-item slot come out. This
+ * matches the nightly recalc, which excludes PAID (see accountingStats.ts).
+ * Call ONLY on the transition into PAID; pass the remaining balance
+ * (totalAmount − paidAmount), which is 0 for a full payment.
+ */
+export async function recordInvoiceSettled(
+  ctx: MutationCtx,
+  orgId: string,
+  remainingBalance: number,
+  timestamp: number,
+): Promise<void> {
+  const periodKey = getPeriodKey(timestamp);
+  const stats = await getOrCreatePeriodStats(ctx, orgId, periodKey);
+
+  await ctx.db.patch(stats._id, {
+    totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - Math.max(0, remainingBalance)),
+    outstandingCount: Math.max(0, (stats.outstandingCount ?? 0) - 1),
     updatedAt: Date.now(),
   });
 }
@@ -95,6 +125,9 @@ export async function recordPaymentCollected(
   await ctx.db.patch(stats._id, {
     totalCollected: stats.totalCollected + delta,
     paidInvoiceCount: isNewPayment ? stats.paidInvoiceCount + 1 : stats.paidInvoiceCount,
+    // Payment reduces what's still owed (never below zero). outstandingCount is
+    // recalc-maintained: an aging-driven count is inherently a daily snapshot.
+    totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - delta),
     updatedAt: Date.now(),
   });
 }
@@ -120,11 +153,18 @@ export async function reverseInvoice(
   const periodKey = getPeriodKey(timestamp);
   const stats = await getOrCreatePeriodStats(ctx, orgId, periodKey);
 
+  // A/R contribution being removed: a PAID invoice owes $0 (contributes nothing);
+  // an unpaid/partly-paid one contributes its balance + one open-item slot.
+  const outRemoved = wasPaid ? 0 : Math.max(0, totalAmount - paidAmount);
+  const cntRemoved = wasPaid ? 0 : 1;
+
   await ctx.db.patch(stats._id, {
     totalInvoiced: Math.max(0, stats.totalInvoiced - totalAmount),
     invoiceCount: Math.max(0, stats.invoiceCount - 1),
     totalCollected: wasPaid ? Math.max(0, stats.totalCollected - paidAmount) : stats.totalCollected,
     paidInvoiceCount: wasPaid ? Math.max(0, stats.paidInvoiceCount - 1) : stats.paidInvoiceCount,
+    totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - outRemoved),
+    outstandingCount: Math.max(0, (stats.outstandingCount ?? 0) - cntRemoved),
     updatedAt: Date.now(),
   });
 }
@@ -151,6 +191,9 @@ export async function reversePaymentCollected(
   await ctx.db.patch(stats._id, {
     totalCollected: Math.max(0, stats.totalCollected - paidAmount),
     paidInvoiceCount: Math.max(0, stats.paidInvoiceCount - 1),
+    // Payment reversed — that amount is owed again and the item re-opens.
+    totalOutstanding: (stats.totalOutstanding ?? 0) + paidAmount,
+    outstandingCount: (stats.outstandingCount ?? 0) + 1,
     updatedAt: Date.now(),
   });
 }
@@ -179,6 +222,9 @@ export async function reversePaymentAndInvoice(
     totalCollected: Math.max(0, stats.totalCollected - paidAmount),
     invoiceCount: Math.max(0, stats.invoiceCount - 1),
     paidInvoiceCount: Math.max(0, stats.paidInvoiceCount - 1),
+    // No A/R change: a PAID invoice already contributes $0 / 0 open items
+    // (removed on the settle transition), so resetting it to DRAFT touches
+    // neither totalOutstanding nor outstandingCount.
     updatedAt: Date.now(),
   });
 }

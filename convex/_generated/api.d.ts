@@ -34,6 +34,7 @@ import type * as comments from "../comments.js";
 import type * as contractLanes from "../contractLanes.js";
 import type * as createDrafts from "../createDrafts.js";
 import type * as crons from "../crons.js";
+import type * as customerAging from "../customerAging.js";
 import type * as customers from "../customers.js";
 import type * as defEntries from "../defEntries.js";
 import type * as diagnosticLoadReview from "../diagnosticLoadReview.js";
@@ -118,6 +119,7 @@ import type * as migrations_010_backfill_leg_scheduled_times from "../migrations
 import type * as migrations_011_diagnose_pending_legs from "../migrations/011_diagnose_pending_legs.js";
 import type * as migrations_012_cleanup_orphaned_pending_legs from "../migrations/012_cleanup_orphaned_pending_legs.js";
 import type * as migrations_013_revive_miscron_expired_loads from "../migrations/013_revive_miscron_expired_loads.js";
+import type * as migrations_014_backfill_missing_invoice_anchor from "../migrations/014_backfill_missing_invoice_anchor.js";
 import type * as migrations_backfillDispatchLegs from "../migrations/backfillDispatchLegs.js";
 import type * as migrations_backfillFirstStopDate from "../migrations/backfillFirstStopDate.js";
 import type * as migrations_backfillOrgType from "../migrations/backfillOrgType.js";
@@ -207,6 +209,7 @@ declare const fullApi: ApiFromModules<{
   contractLanes: typeof contractLanes;
   createDrafts: typeof createDrafts;
   crons: typeof crons;
+  customerAging: typeof customerAging;
   customers: typeof customers;
   defEntries: typeof defEntries;
   diagnosticLoadReview: typeof diagnosticLoadReview;
@@ -291,6 +294,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/011_diagnose_pending_legs": typeof migrations_011_diagnose_pending_legs;
   "migrations/012_cleanup_orphaned_pending_legs": typeof migrations_012_cleanup_orphaned_pending_legs;
   "migrations/013_revive_miscron_expired_loads": typeof migrations_013_revive_miscron_expired_loads;
+  "migrations/014_backfill_missing_invoice_anchor": typeof migrations_014_backfill_missing_invoice_anchor;
   "migrations/backfillDispatchLegs": typeof migrations_backfillDispatchLegs;
   "migrations/backfillFirstStopDate": typeof migrations_backfillFirstStopDate;
   "migrations/backfillOrgType": typeof migrations_backfillOrgType;

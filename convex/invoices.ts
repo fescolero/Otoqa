@@ -6,7 +6,7 @@
  * Amounts are only stored for BILLED/PAID/VOID status (frozen snapshot).
  */
 
-import { query, mutation, internalMutation, action, MutationCtx } from './_generated/server';
+import { query, mutation, action, MutationCtx } from './_generated/server';
 import { paginationOptsValidator } from 'convex/server';
 import { v } from 'convex/values';
 import { internal } from './_generated/api';
@@ -16,6 +16,7 @@ import { updateInvoiceCount } from './stats_helpers';
 import { getLoadFacets } from './lib/loadFacets';
 import {
   recordInvoiceFinalized,
+  recordInvoiceSettled,
   recordPaymentCollected,
   reverseInvoice,
   reversePaymentAndInvoice,
@@ -40,7 +41,14 @@ const DAY_MS = 86_400_000;
 /**
  * Helper: Calculate invoice amounts dynamically
  */
-async function enrichInvoiceWithCalculatedAmounts(ctx: any, invoice: Doc<'loadInvoices'>) {
+async function enrichInvoiceWithCalculatedAmounts(
+  ctx: any,
+  invoice: Doc<'loadInvoices'>,
+  // Optional pre-fetched load/lane (undefined = fetch) so a caller that already
+  // has them doesn't pay a second read.
+  prefetchedLoad?: Doc<'loadInformation'> | null,
+  prefetchedLane?: Doc<'contractLanes'> | null,
+) {
   // For finalized invoices (BILLED/PENDING_PAYMENT/PAID), use stored amounts
   const isFinalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(invoice.status);
 
@@ -55,7 +63,7 @@ async function enrichInvoiceWithCalculatedAmounts(ctx: any, invoice: Doc<'loadIn
   }
 
   // For DRAFT/MISSING_DATA: calculate dynamically
-  const load = await ctx.db.get(invoice.loadId);
+  const load = prefetchedLoad === undefined ? await ctx.db.get(invoice.loadId) : prefetchedLoad;
 
   // MISSING_DATA or no contract lane: return $0
   if (!invoice.contractLaneId || !load) {
@@ -70,7 +78,7 @@ async function enrichInvoiceWithCalculatedAmounts(ctx: any, invoice: Doc<'loadIn
   }
 
   // Get contract lane and calculate
-  const contractLane = await ctx.db.get(invoice.contractLaneId);
+  const contractLane = prefetchedLane === undefined ? await ctx.db.get(invoice.contractLaneId) : prefetchedLane;
   if (!contractLane) {
     const zero = getZeroInvoiceAmounts();
     return {
@@ -141,6 +149,9 @@ async function materializeLineItems(
   invoice: Doc<'loadInvoices'>,
   amounts: FrozenAmounts,
   now: number,
+  // Optional pre-fetched load/lane (undefined = fetch) to avoid a redundant read.
+  prefetchedLoad?: Doc<'loadInformation'> | null,
+  prefetchedLane?: Doc<'contractLanes'> | null,
 ): Promise<void> {
   const existing = await ctx.db
     .query('invoiceLineItems')
@@ -148,8 +159,13 @@ async function materializeLineItems(
     .take(1);
   if (existing.length > 0) return;
 
-  const load = await ctx.db.get(invoice.loadId);
-  const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
+  const load = prefetchedLoad === undefined ? await ctx.db.get(invoice.loadId) : prefetchedLoad;
+  const contractLane =
+    prefetchedLane !== undefined
+      ? prefetchedLane
+      : invoice.contractLaneId
+        ? await ctx.db.get(invoice.contractLaneId)
+        : null;
 
   if (amounts.subtotal > 0 && contractLane && load) {
     const isWildcard = (contractLane as any).tripNumber === '*';
@@ -195,6 +211,34 @@ async function materializeLineItems(
       createdAt: now,
     });
   }
+}
+
+/**
+ * Resolve the timestamp an invoice should be *issued* and *reported* under.
+ *
+ * Revenue belongs to the month the service was performed, not the day the
+ * invoice happened to be billed — otherwise a backlogged bulk-send dumps months
+ * of older loads into the current period (which is exactly what happened on the
+ * Jul-2 bulk send). We anchor to the load's first-stop (service) date; if it's
+ * missing or unparseable we fall back to `now`. Callers pass the invoice's
+ * existing `invoiceDateNumeric` first when re-finalizing so a prior anchor is
+ * never overwritten (e.g. re-billing after an undo).
+ */
+async function resolveServiceAnchor(
+  ctx: MutationCtx,
+  invoice: Doc<'loadInvoices'>,
+  now: number,
+  // Pass an already-fetched load (or null) to avoid a redundant read on hot
+  // paths; `undefined` means "fetch it here".
+  prefetchedLoad?: Doc<'loadInformation'> | null,
+): Promise<number> {
+  const load = prefetchedLoad === undefined ? await ctx.db.get(invoice.loadId) : prefetchedLoad;
+  const firstStop = (load as { firstStopDate?: string } | null)?.firstStopDate;
+  if (firstStop) {
+    const parsed = Date.parse(firstStop);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return now;
 }
 
 /**
@@ -893,6 +937,12 @@ export const bulkUpdateStatus = mutation({
             ? await claimInvoiceNumber(ctx, args.workosOrgId, now)
             : invoice.invoiceNumber;
 
+        // Issue/report under the load's service date on first finalization
+        // (matches bulkMarkBilled); an existing anchor is always preserved.
+        const anchor =
+          invoice.invoiceDateNumeric ??
+          (!wasFinalized && willBeFinalized ? await resolveServiceAnchor(ctx, invoice, now) : now);
+
         // Freeze amounts when moving from non-finalized → finalized
         if (!wasFinalized && willBeFinalized && invoice.totalAmount === undefined) {
           const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
@@ -906,14 +956,15 @@ export const bulkUpdateStatus = mutation({
             accessorialsTotal: amounts.accessorialsTotal,
             taxAmount: amounts.taxAmount,
             totalAmount: amounts.totalAmount,
-            invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Set on first finalization only
+            invoiceDate: invoice.invoiceDate ?? new Date(anchor).toISOString(),
+            invoiceDateNumeric: anchor, // Set on first finalization only
             updatedAt: now,
           });
         } else {
           await ctx.db.patch(invoiceId, {
             status: args.newStatus,
             invoiceNumber,
-            invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Set if missing (e.g., legacy data)
+            invoiceDateNumeric: anchor, // Set if missing (e.g., legacy data)
             updatedAt: now,
           });
         }
@@ -936,6 +987,10 @@ export const bulkUpdateStatus = mutation({
         const recordedPaid = invoice.paidAmount ?? 0;
         if (recordedPaid > 0 && oldStatus !== 'PAID' && args.newStatus === 'PAID') {
           await recordPaymentCollected(ctx, invoice.workosOrgId, recordedPaid, 0, dateAnchor);
+          // Settle into PAID: a PAID invoice owes $0, so drop its remaining
+          // balance + open-item out of A/R (matches recordInvoicePayment).
+          const curTotal = (await ctx.db.get(invoiceId))?.totalAmount ?? invoice.totalAmount ?? 0;
+          await recordInvoiceSettled(ctx, invoice.workosOrgId, curTotal - recordedPaid, dateAnchor);
         } else if (recordedPaid > 0 && oldStatus === 'PAID' && args.newStatus !== 'PAID') {
           await reversePaymentCollected(ctx, invoice.workosOrgId, recordedPaid, dateAnchor);
         }
@@ -983,31 +1038,42 @@ export const bulkMarkBilled = mutation({
           continue;
         }
 
-        const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
-        await materializeLineItems(ctx, invoice, amounts, now);
+        // Fetch the load + contract lane ONCE and thread them through enrich,
+        // materialize, and the service-date anchor — they'd otherwise each read
+        // the same two docs (up to 5 redundant reads per invoice, ×40/chunk).
+        const load = await ctx.db.get(invoice.loadId);
+        const contractLane = invoice.contractLaneId ? await ctx.db.get(invoice.contractLaneId) : null;
+
+        const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice, load, contractLane);
+        await materializeLineItems(ctx, invoice, amounts, now, load, contractLane);
 
         // Re-billing after an undo reuses the previously assigned number.
         const invoiceNumber = invoice.invoiceNumber ?? (await claimInvoiceNumber(ctx, args.workosOrgId, now));
         const customer = await ctx.db.get(invoice.customerId);
         const termsDays = PAYMENT_TERMS_DAYS[customer?.paymentTerms ?? ''] ?? DEFAULT_TERMS_DAYS;
 
+        // Issue/report the invoice under the load's service date, not today —
+        // so a backlogged bulk-send lands in the month the work was performed.
+        // A prior anchor (re-billing after undo) is preserved.
+        const anchor = invoice.invoiceDateNumeric ?? (await resolveServiceAnchor(ctx, invoice, now, load));
+
         await ctx.db.patch(invoiceId, {
           status: 'PENDING_PAYMENT',
           invoiceNumber,
-          invoiceDate: new Date(now).toISOString(),
-          dueDate: new Date(now + termsDays * DAY_MS).toISOString(),
+          invoiceDate: new Date(anchor).toISOString(),
+          dueDate: new Date(anchor + termsDays * DAY_MS).toISOString(),
           subtotal: amounts.subtotal,
           fuelSurcharge: amounts.fuelSurcharge,
           accessorialsTotal: amounts.accessorialsTotal,
           taxAmount: amounts.taxAmount,
           totalAmount: amounts.totalAmount,
-          invoiceDateNumeric: invoice.invoiceDateNumeric ?? now,
+          invoiceDateNumeric: anchor,
           updatedAt: now,
         });
 
         await updateInvoiceCount(ctx, args.workosOrgId, 'DRAFT', 'PENDING_PAYMENT');
         if (amounts.totalAmount > 0) {
-          await recordInvoiceFinalized(ctx, args.workosOrgId, amounts.totalAmount, invoice.invoiceDateNumeric ?? now);
+          await recordInvoiceFinalized(ctx, args.workosOrgId, amounts.totalAmount, anchor);
         }
 
         results.success++;
@@ -1111,7 +1177,7 @@ export const bulkMarkPaid = mutation({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    const now = Date.now();
+    const nowIso = new Date(Date.now()).toISOString();
     const results = { success: 0, skipped: 0, failed: 0, errors: [] as string[] };
 
     for (const invoiceId of args.invoiceIds) {
@@ -1127,49 +1193,16 @@ export const bulkMarkPaid = mutation({
           continue;
         }
 
-        const oldStatus = invoice.status;
-        const needsFreeze =
-          !INVOICE_FINALIZED_STATUSES.includes(oldStatus) || invoice.totalAmount === undefined;
-
-        let total = invoice.totalAmount ?? 0;
-        if (needsFreeze) {
-          const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
-          await materializeLineItems(ctx, invoice, amounts, now);
-          total = amounts.totalAmount;
-          await ctx.db.patch(invoiceId, {
-            subtotal: amounts.subtotal,
-            fuelSurcharge: amounts.fuelSurcharge,
-            accessorialsTotal: amounts.accessorialsTotal,
-            taxAmount: amounts.taxAmount,
-            totalAmount: amounts.totalAmount,
-            invoiceDateNumeric: invoice.invoiceDateNumeric ?? now,
-          });
-        }
-
-        const invoiceNumber = invoice.invoiceNumber ?? (await claimInvoiceNumber(ctx, args.workosOrgId, now));
-
-        await ctx.db.patch(invoiceId, {
-          status: 'PAID',
-          invoiceNumber,
-          invoiceDate: invoice.invoiceDate ?? new Date(now).toISOString(),
-          paidAmount: total,
-          paymentDate: new Date(now).toISOString(),
-          paymentReference: 'Manual confirmation',
-          paymentDifference: 0,
-          invoiceDateNumeric: invoice.invoiceDateNumeric ?? now,
-          updatedAt: now,
+        // Settle the full remaining balance through the one primitive — records a
+        // ledger row and keeps stats correct (fixes double-count when marking an
+        // already-partially-paid invoice paid).
+        await recordInvoicePayment(ctx, {
+          invoice,
+          payInFull: true,
+          paymentDate: nowIso,
+          reference: 'Manual confirmation',
+          userId: args.updatedBy,
         });
-
-        await updateInvoiceCount(ctx, args.workosOrgId, oldStatus, 'PAID');
-
-        const dateAnchor = invoice.invoiceDateNumeric ?? now;
-        if (needsFreeze && total > 0) {
-          // Finalized AND paid in one step (DRAFT → PAID, skipping billing)
-          await recordInvoiceFinalized(ctx, args.workosOrgId, total, dateAnchor);
-        }
-        if (total > 0) {
-          await recordPaymentCollected(ctx, args.workosOrgId, total, 0, dateAnchor);
-        }
 
         results.success++;
       } catch (error) {
@@ -1345,8 +1378,6 @@ export const bulkVoidInvoices = mutation({
   },
 });
 
-const PAYMENT_BATCH_SIZE = 25;
-
 const paymentBatchArgs = {
   workosOrgId: v.string(),
   matchType: v.union(v.literal('invoiceNumber'), v.literal('orderNumber')),
@@ -1362,116 +1393,200 @@ const paymentBatchArgs = {
 };
 
 /**
- * Internal mutation: process a small batch of payment confirmations.
- * Called by the confirmPaymentBatch action in chunks to stay within transaction limits.
+ * The one payment-recording primitive. Every payment entry point (single-invoice
+ * UI, bulk mark-paid, CSV import) should funnel through this so miles, payment
+ * difference, the `invoicePayments` ledger row, and accounting stats are always
+ * maintained identically. Freezes the invoice on first payment, appends a ledger
+ * row, recomputes the maintained aggregates on the invoice from the ACTIVE rows,
+ * and applies an O(1) stats delta anchored to the invoice's immutable period.
  */
-export const processPaymentChunk = internalMutation({
-  args: paymentBatchArgs,
-  handler: async (ctx, args) => {
-    const now = Date.now();
-    const results = {
-      success: 0,
-      failed: 0,
-      notFound: [] as string[],
-      discrepancies: [] as Array<{
-        matchKey: string;
-        invoicedAmount: number;
-        paidAmount: number;
-        difference: number;
-      }>,
-    };
+async function recordInvoicePayment(
+  ctx: MutationCtx,
+  args: {
+    invoice: Doc<'loadInvoices'>;
+    amount?: number; // required unless payInFull
+    payInFull?: boolean; // settle the full remaining balance (amount is derived after freeze)
+    miles?: number;
+    paymentDate?: string;
+    reference?: string;
+    note?: string;
+    closeShort?: boolean; // accept an underpayment as final (close the invoice)
+    userId: string;
+  },
+): Promise<void> {
+  const now = Date.now();
+  let invoice = args.invoice;
 
-    for (const payment of args.payments) {
-      try {
-        let invoice: Doc<'loadInvoices'> | null = null;
+  // 1. Finalize once: freeze amounts + claim invoice number + set the immutable
+  //    period anchor, and count the invoiced side into stats exactly once.
+  const needsFreeze =
+    !['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(invoice.status) || invoice.totalAmount === undefined;
+  if (needsFreeze) {
+    const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
+    await materializeLineItems(ctx, invoice, amounts, now);
+    // Anchor a freshly-frozen invoice to its service date (same rule as billing).
+    const freezeAnchor = invoice.invoiceDateNumeric ?? (await resolveServiceAnchor(ctx, invoice, now));
+    await ctx.db.patch(invoice._id, {
+      subtotal: amounts.subtotal,
+      fuelSurcharge: amounts.fuelSurcharge,
+      accessorialsTotal: amounts.accessorialsTotal,
+      taxAmount: amounts.taxAmount,
+      totalAmount: amounts.totalAmount,
+      invoiceNumber: invoice.invoiceNumber ?? (await claimInvoiceNumber(ctx, invoice.workosOrgId, now)),
+      invoiceDate: invoice.invoiceDate ?? new Date(freezeAnchor).toISOString(),
+      invoiceDateNumeric: invoice.invoiceDateNumeric ?? freezeAnchor,
+    });
+    invoice = (await ctx.db.get(invoice._id))!;
+  }
 
-        if (args.matchType === 'invoiceNumber') {
-          const candidates = await ctx.db
-            .query('loadInvoices')
-            .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
-            .filter((q) => q.eq(q.field('invoiceNumber'), payment.matchKey))
-            .take(1);
-          invoice = candidates[0] ?? null;
-        } else {
-          // Try orderNumber first, then internalId, then FK-prefixed internalId
-          let load = await ctx.db
-            .query('loadInformation')
-            .withIndex('by_order_number', (q) =>
-              q.eq('workosOrgId', args.workosOrgId).eq('orderNumber', payment.matchKey),
-            )
-            .first();
+  const total = invoice.totalAmount ?? 0;
+  const anchor = invoice.invoiceDateNumeric ?? now;
 
-          if (!load) {
-            load = await ctx.db
-              .query('loadInformation')
-              .withIndex('by_internal_id', (q) =>
-                q.eq('workosOrgId', args.workosOrgId).eq('internalId', payment.matchKey),
-              )
-              .first();
-          }
-
-          if (!load) {
-            load = await ctx.db
-              .query('loadInformation')
-              .withIndex('by_internal_id', (q) =>
-                q.eq('workosOrgId', args.workosOrgId).eq('internalId', `FK-${payment.matchKey}`),
-              )
-              .first();
-          }
-
-          if (load) {
-            invoice = await ctx.db
-              .query('loadInvoices')
-              .withIndex('by_load', (q) => q.eq('loadId', load._id))
-              .first();
-          }
-        }
-
-        if (!invoice) {
-          results.notFound.push(payment.matchKey);
-          results.failed++;
-          continue;
-        }
-
-        if (invoice.workosOrgId !== args.workosOrgId) {
-          results.notFound.push(payment.matchKey);
-          results.failed++;
-          continue;
-        }
-
-        const invoicedAmount = invoice.totalAmount ?? 0;
-        const difference = payment.paidAmount - invoicedAmount;
-        const oldStatus = invoice.status;
-
-        await ctx.db.patch(invoice._id, {
-          status: 'PAID',
-          paidAmount: payment.paidAmount,
-          paymentDate: payment.paymentDate,
-          paymentReference: payment.paymentReference,
-          paymentDifference: difference,
-          updatedAt: now,
-        });
-
-        if (oldStatus !== 'PAID') {
-          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, 'PAID');
-        }
-
-        if (Math.abs(difference) > 0.005) {
-          results.discrepancies.push({
-            matchKey: payment.matchKey,
-            invoicedAmount,
-            paidAmount: payment.paidAmount,
-            difference,
-          });
-        }
-
-        results.success++;
-      } catch (error) {
-        results.failed++;
-      }
+  // Count the invoiced side into stats exactly once. Record it only when we
+  // actually finalized here (needsFreeze); an invoice that was already finalized
+  // had its invoiced side recorded by whatever finalized it (bulkMarkBilled /
+  // confirmPaymentChunk), so we just mark the flag — never double-count.
+  if (!invoice.statsFinalized) {
+    if (needsFreeze) {
+      await recordInvoiceFinalized(ctx, invoice.workosOrgId, total, anchor);
     }
+    await ctx.db.patch(invoice._id, { statsFinalized: true });
+    invoice = (await ctx.db.get(invoice._id))!;
+  }
 
-    return results;
+  // 2. Migrate-on-touch: if the invoice carries a paidAmount recorded before the
+  //    ledger existed (or otherwise not represented in ACTIVE rows), seed a
+  //    synthetic row for the difference so the invariant "paidAmount = Σ ACTIVE
+  //    rows" holds from the first touch. This is exactly what the one-time
+  //    backfill does, applied lazily — keeping the primitive correct regardless
+  //    of backfill state and preventing a recompute from clobbering prior
+  //    non-ledger payments.
+  const previousPaid = invoice.paidAmount ?? 0;
+  const priorRows = await ctx.db
+    .query('invoicePayments')
+    .withIndex('by_invoice', (q) => q.eq('invoiceId', invoice._id))
+    .collect();
+  const priorActiveSum = priorRows.filter((r) => r.status === 'ACTIVE').reduce((s, r) => s + r.amount, 0);
+  if (previousPaid > priorActiveSum + 0.005) {
+    await ctx.db.insert('invoicePayments', {
+      workosOrgId: invoice.workosOrgId,
+      invoiceId: invoice._id,
+      loadId: invoice.loadId,
+      customerId: invoice.customerId,
+      amount: Math.round((previousPaid - priorActiveSum) * 100) / 100,
+      miles: invoice.paymentMiles,
+      paymentDate: invoice.paymentDate,
+      reference: invoice.paymentReference,
+      note: 'Migrated from prior payment record',
+      status: 'ACTIVE',
+      createdBy: args.userId,
+      createdAt: now,
+    });
+  }
+
+  // The amount to record: an explicit amount, or (payInFull) the remaining
+  // balance derived after freeze so "mark paid in full" settles exactly.
+  const amount = args.payInFull
+    ? Math.max(0, Math.round((total - previousPaid) * 100) / 100)
+    : Math.round((args.amount ?? 0) * 100) / 100;
+
+  // 3. Append this payment to the ledger (skip a no-op $0 settle).
+  if (amount >= 0.005) {
+    await ctx.db.insert('invoicePayments', {
+      workosOrgId: invoice.workosOrgId,
+      invoiceId: invoice._id,
+      loadId: invoice.loadId,
+      customerId: invoice.customerId,
+      amount,
+      miles: args.miles,
+      paymentDate: args.paymentDate,
+      reference: args.reference,
+      note: args.note,
+      status: 'ACTIVE',
+      createdBy: args.userId,
+      createdAt: now,
+    });
+  }
+
+  // 4. Recompute maintained aggregates from the ACTIVE ledger rows.
+  const rows = await ctx.db
+    .query('invoicePayments')
+    .withIndex('by_invoice', (q) => q.eq('invoiceId', invoice._id))
+    .collect();
+  const active = rows.filter((r) => r.status === 'ACTIVE');
+  const paidAmount = Math.round(active.reduce((s, r) => s + r.amount, 0) * 100) / 100;
+  const milesSum = active.reduce((s, r) => s + (r.miles ?? 0), 0);
+  const fullyPaid = paidAmount >= total - 0.005;
+  const newStatus: Doc<'loadInvoices'>['status'] =
+    fullyPaid || args.closeShort || args.payInFull ? 'PAID' : 'PENDING_PAYMENT';
+
+  await ctx.db.patch(invoice._id, {
+    paidAmount,
+    paymentMiles: milesSum > 0 ? milesSum : undefined,
+    paymentDifference: Math.round((paidAmount - total) * 100) / 100,
+    paymentDate: args.paymentDate ?? invoice.paymentDate,
+    paymentReference: args.reference ?? invoice.paymentReference,
+    status: newStatus,
+    updatedAt: now,
+  });
+
+  if (invoice.status !== newStatus) {
+    await updateInvoiceCount(ctx, invoice.workosOrgId, invoice.status, newStatus);
+  }
+
+  // 5. Stats: add this payment's delta to collected, anchored to the invoice's
+  //    immutable period. Passing (new cumulative, old cumulative) reuses the
+  //    helper's delta + first-payment-count logic correctly. Skip on a $0 settle.
+  if (amount >= 0.005) {
+    await recordPaymentCollected(ctx, invoice.workosOrgId, paidAmount, previousPaid, anchor);
+  }
+
+  // 6. A/R: on the transition into PAID, drop the invoice out of Outstanding
+  //    entirely — a PAID invoice owes $0 even on an accepted short-pay, so its
+  //    remaining balance + open-item slot leave A/R (matching the recalc, which
+  //    excludes PAID). recordPaymentCollected above only removed the paid delta,
+  //    which would otherwise leave a short-pay residual stuck in Outstanding.
+  if (newStatus === 'PAID' && invoice.status !== 'PAID') {
+    await recordInvoiceSettled(ctx, invoice.workosOrgId, total - paidAmount, anchor);
+  }
+}
+
+/**
+ * Record a single customer payment against one invoice (manual entry). Supports
+ * partial payments (invoice stays PENDING_PAYMENT with a balance) and accepting
+ * a short-pay as final (`closeShort`). Routes through the shared primitive.
+ */
+export const recordSinglePayment = mutation({
+  args: {
+    workosOrgId: v.string(),
+    invoiceId: v.id('loadInvoices'),
+    userId: v.string(),
+    amount: v.number(),
+    miles: v.optional(v.number()),
+    paymentDate: v.optional(v.string()),
+    reference: v.optional(v.string()),
+    note: v.optional(v.string()),
+    closeShort: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const invoice = await ctx.db.get(args.invoiceId);
+    if (!invoice || invoice.workosOrgId !== args.workosOrgId) throw new Error('Invoice not found');
+    if (invoice.status === 'VOID' || invoice.status === 'MISSING_DATA') {
+      throw new Error(`Cannot record a payment on a ${invoice.status} invoice`);
+    }
+    if (!(args.amount > 0)) throw new Error('Payment amount must be greater than zero');
+    await recordInvoicePayment(ctx, {
+      invoice,
+      amount: args.amount,
+      miles: args.miles,
+      paymentDate: args.paymentDate,
+      reference: args.reference,
+      note: args.note,
+      closeShort: args.closeShort,
+      userId: args.userId,
+    });
+    return { ok: true };
   },
 });
 
