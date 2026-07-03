@@ -38,6 +38,8 @@ async function getOrCreatePeriodStats(ctx: MutationCtx, orgId: string, periodKey
     totalCollected: 0,
     invoiceCount: 0,
     paidInvoiceCount: 0,
+    totalOutstanding: 0,
+    outstandingCount: 0,
     updatedAt: Date.now(),
   });
 
@@ -65,6 +67,8 @@ export async function recordInvoiceFinalized(
   await ctx.db.patch(stats._id, {
     totalInvoiced: stats.totalInvoiced + totalAmount,
     invoiceCount: stats.invoiceCount + 1,
+    // Newly finalized and unpaid — the full amount is now outstanding.
+    totalOutstanding: (stats.totalOutstanding ?? 0) + totalAmount,
     updatedAt: Date.now(),
   });
 }
@@ -95,6 +99,9 @@ export async function recordPaymentCollected(
   await ctx.db.patch(stats._id, {
     totalCollected: stats.totalCollected + delta,
     paidInvoiceCount: isNewPayment ? stats.paidInvoiceCount + 1 : stats.paidInvoiceCount,
+    // Payment reduces what's still owed (never below zero). outstandingCount is
+    // recalc-maintained: an aging-driven count is inherently a daily snapshot.
+    totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - delta),
     updatedAt: Date.now(),
   });
 }
@@ -125,6 +132,8 @@ export async function reverseInvoice(
     invoiceCount: Math.max(0, stats.invoiceCount - 1),
     totalCollected: wasPaid ? Math.max(0, stats.totalCollected - paidAmount) : stats.totalCollected,
     paidInvoiceCount: wasPaid ? Math.max(0, stats.paidInvoiceCount - 1) : stats.paidInvoiceCount,
+    // Remove the balance this invoice was contributing to A/R.
+    totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - Math.max(0, totalAmount - (wasPaid ? paidAmount : 0))),
     updatedAt: Date.now(),
   });
 }
@@ -151,6 +160,8 @@ export async function reversePaymentCollected(
   await ctx.db.patch(stats._id, {
     totalCollected: Math.max(0, stats.totalCollected - paidAmount),
     paidInvoiceCount: Math.max(0, stats.paidInvoiceCount - 1),
+    // Payment reversed — that amount is owed again.
+    totalOutstanding: (stats.totalOutstanding ?? 0) + paidAmount,
     updatedAt: Date.now(),
   });
 }
@@ -179,6 +190,8 @@ export async function reversePaymentAndInvoice(
     totalCollected: Math.max(0, stats.totalCollected - paidAmount),
     invoiceCount: Math.max(0, stats.invoiceCount - 1),
     paidInvoiceCount: Math.max(0, stats.paidInvoiceCount - 1),
+    // Remove any residual balance this invoice contributed (≈0 when fully paid).
+    totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - Math.max(0, totalAmount - paidAmount)),
     updatedAt: Date.now(),
   });
 }
