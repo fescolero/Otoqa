@@ -746,7 +746,11 @@ export const listInvoices = query({
     const result = await ctx.db
       .query('loadInvoices')
       .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status))
-      .order('desc')
+      // Overdue invoices are the OLDEST unpaid ones; since overdueOnly is a
+      // post-fetch page filter, newest-first ordering buries them under the
+      // (current, not-overdue) recent invoices and the view comes back empty.
+      // Ascending surfaces overdue on the first page. Other views keep desc.
+      .order(args.overdueOnly ? 'asc' : 'desc')
       .paginate(args.paginationOpts);
 
     const enriched = await Promise.all(
