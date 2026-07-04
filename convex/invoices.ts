@@ -451,8 +451,11 @@ export const countInvoicesByStatus = query({
  * - overdue: the subset of `outstanding` whose dueDate is in the past.
  *
  * Reads only invoice docs (finalized invoices carry frozen amounts), so no
- * per-invoice enrichment. Bounded by a generous take() per status to stay cheap;
- * if an org ever outgrows this, move the sums into organizationStats.
+ * per-invoice enrichment. The take() per status must cover the FULL unpaid set
+ * or `outstanding` silently undercounts (an earlier 5k cap dropped the newest
+ * unpaid invoices once an org passed 5k open). 15k stays under the Convex
+ * per-query read ceiling (~16k docs); an org that exceeds it should move these
+ * sums into organizationStats/accountingPeriodStats (already materialized).
  */
 export const getInvoiceSummary = query({
   args: {
@@ -461,18 +464,20 @@ export const getInvoiceSummary = query({
   returns: v.object({
     outstanding: v.number(),
     overdue: v.number(),
+    overdueCount: v.number(),
   }),
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     let outstanding = 0;
     let overdue = 0;
+    let overdueCount = 0;
 
     for (const status of ['BILLED', 'PENDING_PAYMENT'] as const) {
       const invoices = await ctx.db
         .query('loadInvoices')
         .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', status))
-        .take(5000);
+        .take(15000);
 
       for (const inv of invoices) {
         const balance = (inv.totalAmount ?? 0) - (inv.paidAmount ?? 0);
@@ -480,11 +485,12 @@ export const getInvoiceSummary = query({
         outstanding += balance;
         if (inv.dueDate && new Date(inv.dueDate).getTime() < now) {
           overdue += balance;
+          overdueCount += 1;
         }
       }
     }
 
-    return { outstanding, overdue };
+    return { outstanding, overdue, overdueCount };
   },
 });
 
