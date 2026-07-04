@@ -115,6 +115,12 @@ export async function recordPaymentCollected(
   paidAmount: number,
   previousPaidAmount: number,
   timestamp: number,
+  // Skip the A/R (totalOutstanding) side. Pass true when the invoice is (and
+  // stays) PAID: a PAID invoice contributes $0 to Outstanding, so a further
+  // payment/correction on it must NOT move A/R. Without this, a negative
+  // correction on a PAID invoice inflates Outstanding, and a second positive
+  // payment wrongly drains it from other invoices in the period.
+  skipOutstanding = false,
 ): Promise<void> {
   const periodKey = getPeriodKey(timestamp);
   const stats = await getOrCreatePeriodStats(ctx, orgId, periodKey);
@@ -127,7 +133,7 @@ export async function recordPaymentCollected(
     paidInvoiceCount: isNewPayment ? stats.paidInvoiceCount + 1 : stats.paidInvoiceCount,
     // Payment reduces what's still owed (never below zero). outstandingCount is
     // recalc-maintained: an aging-driven count is inherently a daily snapshot.
-    totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - delta),
+    ...(skipOutstanding ? {} : { totalOutstanding: Math.max(0, (stats.totalOutstanding ?? 0) - delta) }),
     updatedAt: Date.now(),
   });
 }

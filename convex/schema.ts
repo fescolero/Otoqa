@@ -1676,6 +1676,10 @@ export default defineSchema({
     reference: v.optional(v.string()), // check #, wire/ACH ref
     note: v.optional(v.string()),
     status: v.union(v.literal('ACTIVE'), v.literal('VOID')),
+    // Idempotency key for imported rows: a stable hash of the source row
+    // (reference|amount|date). Re-importing the same reconciliation file skips
+    // rows whose importKey already exists on the invoice, so no double-count.
+    importKey: v.optional(v.string()),
     createdBy: v.string(), // WorkOS user ID
     createdAt: v.number(),
   })

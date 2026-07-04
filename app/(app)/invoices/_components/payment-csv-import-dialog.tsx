@@ -71,6 +71,7 @@ interface ParsedPayment {
   paymentDate?: string;
   paymentMiles?: number;
   paymentReference?: string;
+  importKey: string; // content + per-file occurrence index (set after parsing)
 }
 
 interface ValidationError {
@@ -448,9 +449,16 @@ export function PaymentCsvImportDialog({
         return;
       }
 
-      const cleaned = (amountStr ?? '').replace(/[^0-9.\-]/g, '');
-      const paidAmount = parseFloat(cleaned);
-      if (!cleaned || isNaN(paidAmount) || paidAmount < 0) {
+      // Amounts may be negative — a customer sometimes claws back an earlier
+      // overpayment with a correction row that posts a negative amount. These
+      // are valid and net against the positive rows in the per-load merge below.
+      // Handle both "-9.00" and accounting-style "(9.00)" negatives.
+      const raw = (amountStr ?? '').trim();
+      const parenNegative = /^\(.*\)$/.test(raw);
+      const cleaned = raw.replace(/[^0-9.\-]/g, '');
+      let paidAmount = parseFloat(cleaned);
+      if (parenNegative && paidAmount > 0) paidAmount = -paidAmount;
+      if (!cleaned || Number.isNaN(paidAmount)) {
         errors.push({
           row: rowNum,
           message: `Invalid amount "${amountStr}" for ${matchKey}`,
@@ -463,7 +471,7 @@ export function PaymentCsvImportDialog({
         return;
       }
 
-      const payment: ParsedPayment = { matchKey, paidAmount };
+      const payment: ParsedPayment = { matchKey, paidAmount, importKey: '' };
 
       if (columnMapping.paymentDate) {
         const dateVal = row[columnMapping.paymentDate]?.trim();
@@ -485,6 +493,25 @@ export function PaymentCsvImportDialog({
 
       payments.push(payment);
     });
+
+    // Idempotency key per row: content (matchKey|reference|amount|date) + a
+    // per-file OCCURRENCE index. The source is a cumulative ledger with no unique
+    // transaction id, so occurrence is the stable disambiguator:
+    //  • two legitimately-identical rows get distinct keys (…#1, …#2) → neither
+    //    is dropped (records real split/duplicate payments);
+    //  • re-importing the same file yields the same keys → all deduped (idempotent);
+    //  • a cumulative file that gains a real new identical payment produces a
+    //    fresh …#N → recorded.
+    // The backend funnels each row through the shared payment primitive
+    // (invoicePayments ledger; paidAmount = Σ ACTIVE rows), so split payments
+    // accumulate instead of overwriting. Grouping is intentionally NOT done here.
+    const occ = new Map<string, number>();
+    for (const p of payments) {
+      const content = `${p.matchKey}|${p.paymentReference ?? ''}|${p.paidAmount.toFixed(2)}|${p.paymentDate ?? ''}`;
+      const n = (occ.get(content) ?? 0) + 1;
+      occ.set(content, n);
+      p.importKey = `imp|${content}|#${n}`;
+    }
 
     return { parsedPayments: payments, validationErrors: errors, zeroAmountCount: zeroes };
   }, [csvData, columnMapping]);
@@ -517,6 +544,7 @@ export function PaymentCsvImportDialog({
 
         const result = await confirmPaymentChunk({
           workosOrgId,
+          userId,
           matchType,
           payments: chunk,
         });
@@ -574,7 +602,7 @@ export function PaymentCsvImportDialog({
     } finally {
       setIsProcessing(false);
     }
-  }, [parsedPayments, confirmPaymentChunk, workosOrgId, matchType]);
+  }, [parsedPayments, confirmPaymentChunk, workosOrgId, userId, matchType]);
 
   return (
     <>

@@ -1390,6 +1390,7 @@ export const bulkVoidInvoices = mutation({
 
 const paymentBatchArgs = {
   workosOrgId: v.string(),
+  userId: v.string(),
   matchType: v.union(v.literal('invoiceNumber'), v.literal('orderNumber')),
   payments: v.array(
     v.object({
@@ -1398,6 +1399,9 @@ const paymentBatchArgs = {
       paymentDate: v.optional(v.string()),
       paymentReference: v.optional(v.string()),
       paymentMiles: v.optional(v.number()),
+      // Client-computed idempotency key: content + a per-file occurrence index so
+      // identical rows (no unique txn id) are distinct yet stable on re-import.
+      importKey: v.string(),
     }),
   ),
 };
@@ -1421,9 +1425,11 @@ async function recordInvoicePayment(
     reference?: string;
     note?: string;
     closeShort?: boolean; // accept an underpayment as final (close the invoice)
+    importKey?: string; // idempotency key for imported rows (skip if already applied)
+    skipMigrate?: boolean; // imports: replace a pre-ledger paidAmount rather than preserve it
     userId: string;
   },
-): Promise<void> {
+): Promise<{ duplicate: boolean; paidAmount: number; totalAmount: number; difference: number }> {
   const now = Date.now();
   let invoice = args.invoice;
 
@@ -1476,8 +1482,28 @@ async function recordInvoicePayment(
     .query('invoicePayments')
     .withIndex('by_invoice', (q) => q.eq('invoiceId', invoice._id))
     .collect();
+
+  // Idempotency: an imported row whose importKey already exists on this invoice
+  // was applied by a prior import — skip it so re-importing the full file never
+  // double-counts. The invoice already reflects it (paidAmount = Σ ACTIVE rows).
+  // Dedup regardless of ACTIVE/VOID: a row that was imported then intentionally
+  // VOIDed must NOT be re-created by re-importing the same file.
+  if (args.importKey && priorRows.some((r) => r.importKey === args.importKey)) {
+    const total0 = invoice.totalAmount ?? 0;
+    return {
+      duplicate: true,
+      paidAmount: previousPaid,
+      totalAmount: total0,
+      difference: Math.round((previousPaid - total0) * 100) / 100,
+    };
+  }
+
   const priorActiveSum = priorRows.filter((r) => r.status === 'ACTIVE').reduce((s, r) => s + r.amount, 0);
-  if (previousPaid > priorActiveSum + 0.005) {
+  // Migrate-on-touch preserves a pre-ledger paidAmount as a synthetic row so the
+  // "paidAmount = Σ ACTIVE" invariant holds. Skipped for imports (skipMigrate):
+  // the file is authoritative for customer payments, so an old — possibly buggy —
+  // importer paidAmount must be REPLACED by the file's rows, not preserved.
+  if (!args.skipMigrate && previousPaid > priorActiveSum + 0.005) {
     await ctx.db.insert('invoicePayments', {
       workosOrgId: invoice.workosOrgId,
       invoiceId: invoice._id,
@@ -1500,8 +1526,10 @@ async function recordInvoicePayment(
     ? Math.max(0, Math.round((total - previousPaid) * 100) / 100)
     : Math.round((args.amount ?? 0) * 100) / 100;
 
-  // 3. Append this payment to the ledger (skip a no-op $0 settle).
-  if (amount >= 0.005) {
+  // 3. Append this payment to the ledger (skip a no-op $0 settle). A negative
+  //    amount is a valid correction (customer clawing back an overpayment); it
+  //    nets against the positive rows in the recompute below.
+  if (Math.abs(amount) >= 0.005) {
     await ctx.db.insert('invoicePayments', {
       workosOrgId: invoice.workosOrgId,
       invoiceId: invoice._id,
@@ -1512,6 +1540,7 @@ async function recordInvoicePayment(
       paymentDate: args.paymentDate,
       reference: args.reference,
       note: args.note,
+      importKey: args.importKey,
       status: 'ACTIVE',
       createdBy: args.userId,
       createdAt: now,
@@ -1547,8 +1576,10 @@ async function recordInvoicePayment(
   // 5. Stats: add this payment's delta to collected, anchored to the invoice's
   //    immutable period. Passing (new cumulative, old cumulative) reuses the
   //    helper's delta + first-payment-count logic correctly. Skip on a $0 settle.
-  if (amount >= 0.005) {
-    await recordPaymentCollected(ctx, invoice.workosOrgId, paidAmount, previousPaid, anchor);
+  if (Math.abs(amount) >= 0.005) {
+    // invoice.status is still the PRE-patch status here — skip the A/R side when
+    // the invoice was already PAID (it contributes $0 to Outstanding either way).
+    await recordPaymentCollected(ctx, invoice.workosOrgId, paidAmount, previousPaid, anchor, invoice.status === 'PAID');
   }
 
   // 6. A/R: on the transition into PAID, drop the invoice out of Outstanding
@@ -1559,6 +1590,13 @@ async function recordInvoicePayment(
   if (newStatus === 'PAID' && invoice.status !== 'PAID') {
     await recordInvoiceSettled(ctx, invoice.workosOrgId, total - paidAmount, anchor);
   }
+
+  return {
+    duplicate: false,
+    paidAmount,
+    totalAmount: total,
+    difference: Math.round((paidAmount - total) * 100) / 100,
+  };
 }
 
 /**
@@ -1703,69 +1741,43 @@ export const confirmPaymentChunk = mutation({
           continue;
         }
 
-        // Duplicate protection: skip if already PAID with the same amount
-        if (
-          invoice.status === 'PAID' &&
-          invoice.paidAmount !== undefined &&
-          Math.abs(invoice.paidAmount - payment.paidAmount) < 0.005
-        ) {
+        if (invoice.status === 'VOID' || invoice.status === 'MISSING_DATA') {
+          // Can't record a payment on a void / missing-data invoice.
+          results.failed++;
+          continue;
+        }
+
+        // Funnel through the shared payment primitive so each row becomes a
+        // ledger entry and paidAmount = Σ ACTIVE rows. This ACCUMULATES split
+        // payments (multiple rows, even across chunks) instead of overwriting,
+        // and the client-computed importKey (content + per-file occurrence index)
+        // makes re-imports idempotent while keeping legitimate identical rows
+        // distinct. skipMigrate: the file is authoritative, so any prior
+        // (possibly buggy) importer paidAmount is replaced, not preserved.
+        const res = await recordInvoicePayment(ctx, {
+          invoice,
+          amount: payment.paidAmount,
+          miles: payment.paymentMiles,
+          paymentDate: payment.paymentDate,
+          reference: payment.paymentReference,
+          importKey: payment.importKey,
+          skipMigrate: true,
+          closeShort: true, // an imported payment is the customer's final remittance
+          userId: args.userId,
+        });
+
+        if (res.duplicate) {
           results.alreadyPaid++;
           continue;
         }
 
-        const oldStatus = invoice.status;
-        const needsFreeze =
-          !['BILLED', 'PENDING_PAYMENT', 'PAID'].includes(oldStatus) || invoice.totalAmount === undefined;
-
-        let invoicedAmount = invoice.totalAmount ?? 0;
-        if (needsFreeze) {
-          const amounts = await enrichInvoiceWithCalculatedAmounts(ctx, invoice);
-          invoicedAmount = amounts.totalAmount;
-          await materializeLineItems(ctx, invoice, amounts, now);
-
-          await ctx.db.patch(invoice._id, {
-            subtotal: amounts.subtotal,
-            fuelSurcharge: amounts.fuelSurcharge,
-            accessorialsTotal: amounts.accessorialsTotal,
-            taxAmount: amounts.taxAmount,
-            totalAmount: amounts.totalAmount,
-            invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Set on first finalization
-          });
-        }
-
-        const difference = payment.paidAmount - invoicedAmount;
-
-        await ctx.db.patch(invoice._id, {
-          status: 'PAID',
-          invoiceNumber: invoice.invoiceNumber ?? (await claimInvoiceNumber(ctx, args.workosOrgId, now)),
-          paidAmount: payment.paidAmount,
-          paymentDate: payment.paymentDate,
-          paymentReference: payment.paymentReference,
-          paymentMiles: payment.paymentMiles,
-          paymentDifference: difference,
-          invoiceDateNumeric: invoice.invoiceDateNumeric ?? now, // Ensure set even if skipping freeze
-          updatedAt: now,
-        });
-
-        if (oldStatus !== 'PAID') {
-          await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, 'PAID');
-        }
-
-        // Update accounting period stats
-        const dateAnchor = invoice.invoiceDateNumeric ?? now;
-        if (needsFreeze && invoicedAmount > 0) {
-          // Invoice was finalized AND paid in one step (DRAFT->PAID skip of BILLED)
-          await recordInvoiceFinalized(ctx, invoice.workosOrgId, invoicedAmount, dateAnchor);
-        }
-        const previousPaidAmount = oldStatus === 'PAID' ? (invoice.paidAmount ?? 0) : 0;
-        await recordPaymentCollected(ctx, invoice.workosOrgId, payment.paidAmount, previousPaidAmount, dateAnchor);
-
-        if (Math.abs(difference) > 0.005) {
+        // Material net over/underpayment (≥ $1; sub-dollar is per-mile rounding).
+        if (Math.abs(res.difference) >= 1) {
           results.discrepancies.push({
             matchKey: payment.matchKey,
-            invoicedAmount,
-            paidAmount: payment.paidAmount,
-            difference,
+            invoicedAmount: res.totalAmount,
+            paidAmount: res.paidAmount,
+            difference: res.difference,
           });
         }
 
