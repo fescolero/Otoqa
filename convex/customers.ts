@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 
@@ -8,9 +9,10 @@ export const countCustomersByStatus = query({
   args: {},
   handler: async (ctx) => {
     const callerOrgId = await requireCallerOrgId(ctx);
-    const customers = (await ctx.db.query('customers').collect()).filter(
-      (c) => c.workosOrgId === callerOrgId,
-    );
+    const customers = await ctx.db
+      .query('customers')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', callerOrgId))
+      .collect();
 
     const counts = {
       all: 0,
@@ -48,9 +50,10 @@ export const list = query({
   },
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
-    let customers = (await ctx.db.query('customers').collect()).filter(
-      (c) => c.workosOrgId === callerOrgId,
-    );
+    let customers = await ctx.db
+      .query('customers')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', callerOrgId))
+      .collect();
 
     // Filter out deleted customers unless explicitly requested
     if (args.includeDeleted) {
@@ -273,11 +276,20 @@ export const update = mutation({
     const existing = await ctx.db.get(args.id);
     if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     const { id, ...updates } = args;
-    
+    const nameChanged = args.name !== undefined && args.name !== existing.name;
+
     await ctx.db.patch(id, {
       ...updates,
       updatedAt: Date.now(),
     });
+
+    // The customer name is denormalized into every invoice's searchText — a
+    // rename would leave those stale, so re-index them in the background.
+    if (nameChanged) {
+      await ctx.scheduler.runAfter(0, internal.invoiceSearchText.reindexCustomerInvoices, {
+        customerId: id,
+      });
+    }
 
     return id;
   },

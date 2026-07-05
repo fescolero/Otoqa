@@ -1,5 +1,7 @@
-import { MutationCtx } from './_generated/server';
+import { MutationCtx, internalMutation } from './_generated/server';
+import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
+import { v } from 'convex/values';
 
 /**
  * Build the denormalized search haystack for an invoice: its invoice number,
@@ -44,3 +46,33 @@ export async function refreshInvoiceSearchText(
     await ctx.db.patch(invoiceId, { searchText });
   }
 }
+
+/**
+ * Re-index every invoice of one customer after a rename — searchText embeds the
+ * customer name, so it goes stale otherwise. A customer can own thousands of
+ * invoices, so this paginates and self-schedules the next batch rather than
+ * blocking the mutation. Scheduled from customers.update on a name change.
+ */
+export const reindexCustomerInvoices = internalMutation({
+  args: {
+    customerId: v.id('customers'),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, { customerId, cursor }) => {
+    const page = await ctx.db
+      .query('loadInvoices')
+      .withIndex('by_customer', (q) => q.eq('customerId', customerId))
+      .paginate({ cursor: cursor ?? null, numItems: 200 });
+
+    for (const invoice of page.page) {
+      await refreshInvoiceSearchText(ctx, invoice._id);
+    }
+
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.invoiceSearchText.reindexCustomerInvoices, {
+        customerId,
+        cursor: page.continueCursor,
+      });
+    }
+  },
+});
