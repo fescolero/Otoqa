@@ -362,6 +362,41 @@ export const getInvoice = query({
 });
 
 /**
+ * List the ACTIVE payment ledger rows for an invoice, oldest first.
+ *
+ * `loadInvoices.paidAmount`/`paymentReference`/`paymentDate` are only the
+ * maintained aggregate snapshot (sum, and the *last* reference/date). This
+ * exposes the individual rows so split / partial payments are visible —
+ * each with its own date, reference, miles, and amount.
+ */
+export const listInvoicePayments = query({
+  args: { invoiceId: v.id('loadInvoices') },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const invoice = await ctx.db.get(args.invoiceId);
+    if (!invoice || invoice.workosOrgId !== callerOrgId) return [];
+
+    const rows = await ctx.db
+      .query('invoicePayments')
+      .withIndex('by_invoice', (q) => q.eq('invoiceId', args.invoiceId))
+      .collect();
+
+    return rows
+      .filter((r) => r.status === 'ACTIVE')
+      .map((r) => ({
+        _id: r._id,
+        amount: r.amount,
+        miles: r.miles ?? null,
+        paymentDate: r.paymentDate ?? null,
+        reference: r.reference ?? null,
+        note: r.note ?? null,
+      }))
+      // Oldest first. ISO 8601 dates sort lexically; undated rows sink to the end.
+      .sort((a, b) => (a.paymentDate ?? '￿').localeCompare(b.paymentDate ?? '￿'));
+  },
+});
+
+/**
  * Get invoice for a specific load
  */
 export const getInvoiceByLoad = query({
