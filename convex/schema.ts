@@ -1627,6 +1627,13 @@ export default defineSchema({
     invoiceDateNumeric: v.optional(v.number()), // Unix timestamp, set when BILLED (for indexed reporting)
     statsFinalized: v.optional(v.boolean()), // true once recordInvoiceFinalized has counted this invoice — guards double-count
 
+    // Denormalized full-text search haystack: invoiceNumber + load orderNumber
+    // + customer name, lowercased. Maintained on invoice create + number
+    // assignment (see refreshInvoiceSearchText). Powers the dashboard search
+    // across the whole dataset — a post-fetch page filter can only see the
+    // current page, so deep records were unfindable.
+    searchText: v.optional(v.string()),
+
     // WorkOS Integration
     createdBy: v.string(), // WorkOS user ID
     createdAt: v.number(),
@@ -1641,7 +1648,13 @@ export default defineSchema({
     // Service-date (reporting) basis — profitability/cost queries filter by the
     // invoice's service month (invoiceDateNumeric) so they agree with the
     // period-stats-backed Overview/P&L, not by createdAt (billing day).
-    .index('by_org_status_invoice_date', ['workosOrgId', 'status', 'invoiceDateNumeric']),
+    .index('by_org_status_invoice_date', ['workosOrgId', 'status', 'invoiceDateNumeric'])
+    // Full-text search over invoiceNumber / order # / customer name, scoped to
+    // an org + status tab. Results come back relevance-ordered (not by date).
+    .searchIndex('search_text', {
+      searchField: 'searchText',
+      filterFields: ['workosOrgId', 'status'],
+    }),
 
   invoiceLineItems: defineTable({
     invoiceId: v.id('loadInvoices'),

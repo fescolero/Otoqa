@@ -14,6 +14,7 @@ import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from './invoiceCalcula
 import { Doc } from './_generated/dataModel';
 import { updateInvoiceCount } from './stats_helpers';
 import { getLoadFacets } from './lib/loadFacets';
+import { refreshInvoiceSearchText } from './invoiceSearchText';
 import {
   recordInvoiceFinalized,
   recordInvoiceSettled,
@@ -784,15 +785,29 @@ export const listInvoices = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    const result = await ctx.db
-      .query('loadInvoices')
-      .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status))
-      // Overdue invoices are the OLDEST unpaid ones; since overdueOnly is a
-      // post-fetch page filter, newest-first ordering buries them under the
-      // (current, not-overdue) recent invoices and the view comes back empty.
-      // Ascending surfaces overdue on the first page. Other views keep desc.
-      .order(args.overdueOnly ? 'asc' : 'desc')
-      .paginate(args.paginationOpts);
+    const searchTerm = args.search?.trim();
+
+    // With a search term, run the full-text index over the denormalized
+    // searchText (invoice # / order # / customer), scoped to this org + status.
+    // This scans the WHOLE dataset — the old post-fetch filter only saw the
+    // current page, so deep matches came back empty. Results are relevance-
+    // ordered (so overdueOnly's date ordering doesn't apply while searching).
+    const result = searchTerm
+      ? await ctx.db
+          .query('loadInvoices')
+          .withSearchIndex('search_text', (q) =>
+            q.search('searchText', searchTerm).eq('workosOrgId', args.workosOrgId).eq('status', args.status),
+          )
+          .paginate(args.paginationOpts)
+      : await ctx.db
+          .query('loadInvoices')
+          .withIndex('by_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', args.status))
+          // Overdue invoices are the OLDEST unpaid ones; since overdueOnly is a
+          // post-fetch page filter, newest-first ordering buries them under the
+          // (current, not-overdue) recent invoices and the view comes back empty.
+          // Ascending surfaces overdue on the first page. Other views keep desc.
+          .order(args.overdueOnly ? 'asc' : 'desc')
+          .paginate(args.paginationOpts);
 
     const enriched = await Promise.all(
       result.page.map(async (invoice) => {
@@ -831,24 +846,9 @@ export const listInvoices = query({
       }),
     );
 
-    // Apply post-fetch filters (search, hcr, trip, loadType, dateRange)
+    // Search is handled server-side by the search index above. The remaining
+    // chips (hcr, trip, loadType, dateRange, overdueOnly) filter the page.
     let filtered = enriched;
-
-    if (args.search && args.search.trim() !== '') {
-      const searchLower = args.search.toLowerCase().trim();
-      filtered = filtered.filter((inv) => {
-        const orderNumber = inv.load?.orderNumber?.toLowerCase() || '';
-        const customerName = inv.customer?.name?.toLowerCase() || '';
-        const invoiceNumber = inv.invoiceNumber?.toLowerCase() || '';
-        const amount = inv.totalAmount?.toString() || '';
-        return (
-          orderNumber.includes(searchLower) ||
-          customerName.includes(searchLower) ||
-          invoiceNumber.includes(searchLower) ||
-          amount.includes(searchLower)
-        );
-      });
-    }
 
     if (args.hcr) {
       const canonical = args.hcr.trim().toUpperCase();
@@ -1013,6 +1013,9 @@ export const bulkUpdateStatus = mutation({
             updatedAt: now,
           });
         }
+
+        // Number may have just been assigned — refresh the search haystack.
+        await refreshInvoiceSearchText(ctx, invoiceId);
 
         await updateInvoiceCount(ctx, invoice.workosOrgId, oldStatus, args.newStatus);
 
@@ -1487,6 +1490,8 @@ async function recordInvoicePayment(
       invoiceDate: invoice.invoiceDate ?? new Date(freezeAnchor).toISOString(),
       invoiceDateNumeric: invoice.invoiceDateNumeric ?? freezeAnchor,
     });
+    // Number may have just been assigned — refresh the search haystack.
+    await refreshInvoiceSearchText(ctx, invoice._id);
     invoice = (await ctx.db.get(invoice._id))!;
   }
 
@@ -2117,6 +2122,7 @@ export const backfillInvoiceNumbers = mutation({
       const anchor = invoice.invoiceDateNumeric ?? invoice.createdAt;
       const invoiceNumber = await claimInvoiceNumber(ctx, args.workosOrgId, anchor);
       await ctx.db.patch(invoice._id, { invoiceNumber, updatedAt: now });
+      await refreshInvoiceSearchText(ctx, invoice._id);
       numbered++;
     }
 
