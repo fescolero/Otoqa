@@ -525,6 +525,92 @@ export async function resolveWorkStartTimestamp(
   return null;
 }
 
+// ── shift load rows ─────────────────────────────────────────────────────────
+
+export interface ShiftLoadRow {
+  label: string;
+  /** Actual check-in at the leg's start stop — the reviewable truth. */
+  actualAt?: number;
+  /** Dispatch-planned start, shown alongside for comparison. */
+  scheduledAt?: number;
+  lane?: string;
+}
+
+/**
+ * The loads a driver ran during a completed shift, one row each: legs whose
+ * scheduled start falls inside the session window (padded 2h earlier — drivers
+ * often check in after the first scheduled start). ACTIVE included so the live
+ * shift's current load shows. Shared by the admin settlement detail
+ * (driverSettlements.getSettlementDetails) and the driver-facing mobile
+ * statement detail (mobileSettlements).
+ */
+export async function buildShiftLoadRows(
+  ctx: DbReaderCtx,
+  driverId: Id<'drivers'>,
+  session: Doc<'driverSessions'>,
+  caches: WorkStartCaches,
+): Promise<ShiftLoadRow[] | undefined> {
+  if (!session.endedAt) return undefined;
+  const PAD = 2 * 60 * 60 * 1000;
+  const legs: Doc<'dispatchLegs'>[] = [];
+  for (const status of ['COMPLETED', 'ACTIVE'] as const) {
+    const batch = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver_status_scheduled_start', (q: any) =>
+        q
+          .eq('driverId', driverId)
+          .eq('status', status)
+          .gte('scheduledStartMs', session.startedAt - PAD)
+          .lte('scheduledStartMs', session.endedAt!),
+      )
+      .take(50);
+    legs.push(...batch);
+  }
+  legs.sort((a, b) => (a.scheduledStartMs ?? 0) - (b.scheduledStartMs ?? 0));
+  const rows: ShiftLoadRow[] = [];
+  const seen = new Set<string>();
+  for (const leg of legs) {
+    if (seen.has(leg.loadId)) continue;
+    seen.add(leg.loadId);
+    const loadKey = leg.loadId as string;
+    let legLoad = caches.loads.get(loadKey);
+    if (legLoad === undefined) {
+      legLoad = ((await ctx.db.get(leg.loadId)) ?? null) as Doc<'loadInformation'> | null;
+      caches.loads.set(loadKey, legLoad);
+    }
+    const label = legLoad?.orderNumber ?? legLoad?.internalId;
+    if (!label) continue;
+
+    // Actual check-in at the leg's start stop, when recorded.
+    let actualAt: number | undefined;
+    const stopKey = leg.startStopId as string;
+    let startStop = caches.stopDocs.get(stopKey);
+    if (startStop === undefined) {
+      startStop = ((await ctx.db.get(leg.startStopId)) ?? null) as Doc<'loadStops'> | null;
+      caches.stopDocs.set(stopKey, startStop);
+    }
+    if (startStop?.checkedInAt) {
+      const t = new Date(startStop.checkedInAt).getTime();
+      if (!isNaN(t)) actualAt = t;
+    }
+    const origin = legLoad?.originCity
+      ? `${legLoad.originCity}${legLoad.originState ? ', ' + legLoad.originState : ''}`
+      : null;
+    const dest = legLoad?.destinationCity
+      ? `${legLoad.destinationCity}${legLoad.destinationState ? ', ' + legLoad.destinationState : ''}`
+      : null;
+    rows.push({
+      label,
+      actualAt,
+      scheduledAt: leg.scheduledStartMs ?? undefined,
+      lane: origin && dest ? `${origin} → ${dest}` : (origin ?? dest ?? undefined),
+    });
+  }
+  // Read in the order the work actually happened.
+  rows.sort((a, b) => (a.actualAt ?? a.scheduledAt ?? 0) - (b.actualAt ?? b.scheduledAt ?? 0));
+  return rows.length > 0 ? rows : undefined;
+}
+
 // ── statement numbering ─────────────────────────────────────────────────────
 // Counter-doc pattern (settlementCounters): one read + one write per number,
 // instead of collecting every settlement in the org. Seeded once per

@@ -46,7 +46,7 @@ export const SETTLEMENTS_READ_LEDGER_FLAG = 'settlements_read_ledger';
 
 // New lifecycle status → the legacy status the dashboard + bucket logic expect.
 type NewStatus = Doc<'settlements'>['status'];
-function toLegacyStatus(s: NewStatus): 'DRAFT' | 'PENDING' | 'APPROVED' | 'PAID' | 'VOID' {
+export function toLegacyStatus(s: NewStatus): 'DRAFT' | 'PENDING' | 'APPROVED' | 'PAID' | 'VOID' {
   switch (s) {
     case 'OPEN': return 'DRAFT';
     case 'IN_REVIEW': return 'PENDING';
@@ -85,11 +85,11 @@ interface AdaptedLine {
   isRebillable?: boolean;
 }
 
-function bucketToCategory(bucket: string): PayableCategory {
+export function bucketToCategory(bucket: string): PayableCategory {
   return bucket === 'DEDUCTION' ? 'DEDUCTION' : bucket === 'REIMBURSEMENT' ? 'REIMBURSEMENT' : 'EARNING';
 }
 
-interface AdapterCaches {
+export interface AdapterCaches {
   drivers: Map<string, Doc<'drivers'> | null>;
   partnerships: Map<string, Doc<'carrierPartnerships'> | null>;
   payPlans: Map<string, Doc<'payPlans'> | null>;
@@ -97,12 +97,12 @@ interface AdapterCaches {
   components: Map<string, string>; // componentId → bucket
   loads: ReturnType<typeof newWorkStartCaches>['loads'];
 }
-const newAdapterCaches = (): AdapterCaches => ({
+export const newAdapterCaches = (): AdapterCaches => ({
   drivers: new Map(), partnerships: new Map(), payPlans: new Map(), payBasis: new Map(),
   components: new Map(), loads: new Map(),
 });
 
-async function bucketOf(ctx: QueryCtx, caches: AdapterCaches, componentId: string): Promise<string> {
+export async function bucketOf(ctx: QueryCtx, caches: AdapterCaches, componentId: string): Promise<string> {
   const hit = caches.components.get(componentId);
   if (hit !== undefined) return hit;
   const c = await ctx.db.get(componentId as Id<'chargeComponents'>);
@@ -147,14 +147,14 @@ function payItemsOnSettlement(ctx: QueryCtx, settlementId: Id<'settlements'>): P
  * OPEN / IN_REVIEW statement reads the live period window so accruals show
  * before the next aggregation stamps them.
  */
-function payItemsForSettlement(ctx: QueryCtx, settlement: Doc<'settlements'>): Promise<Doc<'payItems'>[]> {
+export function payItemsForSettlement(ctx: QueryCtx, settlement: Doc<'settlements'>): Promise<Doc<'payItems'>[]> {
   return FINALIZED_SETTLEMENT_STATUSES.has(settlement.status)
     ? payItemsOnSettlement(ctx, settlement._id)
     : payItemsForPeriod(ctx, settlement);
 }
 
 /** Project already-collected payItems into the legacy line shape. */
-async function linesFromItems(
+export async function linesFromItems(
   ctx: QueryCtx,
   caches: AdapterCaches,
   items: Doc<'payItems'>[],

@@ -250,138 +250,6 @@ function isWithinCutoffWindow(
 // QUERIES
 // ============================================
 
-/**
- * Get all settlements for an organization
- */
-export const listForOrganization = query({
-  args: {
-    workosOrgId: v.string(),
-    status: v.optional(
-      v.union(
-        v.literal('DRAFT'),
-        v.literal('PENDING'),
-        v.literal('APPROVED'),
-        v.literal('PAID'),
-        v.literal('VOID')
-      )
-    ),
-    payPlanId: v.optional(v.id('payPlans')),
-  },
-  returns: v.array(
-    v.object({
-      _id: v.id('driverSettlements'),
-      _creationTime: v.number(),
-      driverId: v.id('drivers'),
-      driverName: v.string(),
-      workosOrgId: v.string(),
-      periodStart: v.float64(),
-      periodEnd: v.float64(),
-      // Pay Plan fields
-      payPlanId: v.optional(v.id('payPlans')),
-      periodNumber: v.optional(v.number()),
-      payPlanName: v.optional(v.string()),
-      periodLabel: v.string(),
-      // Status
-      status: v.union(
-        v.literal('DRAFT'),
-        v.literal('PENDING'),
-        v.literal('APPROVED'),
-        v.literal('PAID'),
-        v.literal('VOID')
-      ),
-      grossTotal: v.optional(v.float64()),
-      totalMiles: v.optional(v.float64()),
-      totalLoads: v.optional(v.number()),
-      totalManualAdjustments: v.optional(v.float64()),
-      statementNumber: v.string(),
-      approvedBy: v.optional(v.string()),
-      approvedAt: v.optional(v.float64()),
-      paidAt: v.optional(v.float64()),
-      paidBy: v.optional(v.string()),
-      paidMethod: v.optional(v.string()),
-      paidReference: v.optional(v.string()),
-      notes: v.optional(v.string()),
-      voidedBy: v.optional(v.string()),
-      voidedAt: v.optional(v.float64()),
-      voidReason: v.optional(v.string()),
-      acknowledgedBlockers: v.optional(v.array(v.object({
-        key: v.string(),
-        by: v.string(),
-        at: v.float64(),
-        note: v.optional(v.string()),
-      }))),
-      createdAt: v.float64(),
-      createdBy: v.string(),
-      updatedAt: v.float64(),
-      // Audit flags for dashboard
-      hasAuditWarnings: v.boolean(),
-    })
-  ),
-  handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    let dbQuery = ctx.db
-      .query('driverSettlements')
-      .withIndex('by_org_status', (q) => q.eq('workosOrgId', args.workosOrgId));
-
-    let settlements = await dbQuery.collect();
-
-    // Filter by status if provided
-    if (args.status) {
-      settlements = settlements.filter((s) => s.status === args.status);
-    }
-
-    // Filter by payPlanId if provided
-    if (args.payPlanId) {
-      settlements = settlements.filter((s) => s.payPlanId === args.payPlanId);
-    }
-
-    // Enrich with driver names and format period labels
-    const enrichedSettlements = await Promise.all(
-      settlements.map(async (settlement) => {
-        const driver = await ctx.db.get(settlement.driverId);
-        const driverName = driver
-          ? `${driver.firstName} ${driver.lastName}`
-          : 'Unknown Driver';
-
-        // Format period label: "Period X • Jan 2 - Jan 8"
-        const formatDate = (timestamp: number) => {
-          const d = new Date(timestamp);
-          return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        };
-        
-        const periodLabel = settlement.periodNumber
-          ? `Period ${settlement.periodNumber} • ${formatDate(settlement.periodStart)} - ${formatDate(settlement.periodEnd)}`
-          : `${formatDate(settlement.periodStart)} - ${formatDate(settlement.periodEnd)}`;
-
-        // Check for audit warnings (missing PODs, variance issues)
-        const payables = await ctx.db
-          .query('loadPayables')
-          .filter((q) => q.eq(q.field('settlementId'), settlement._id))
-          .collect();
-
-        let hasAuditWarnings = false;
-        for (const payable of payables) {
-          if (payable.loadId) {
-            const load = await ctx.db.get(payable.loadId);
-            if (load && !load.podStorageId) {
-              hasAuditWarnings = true;
-              break;
-            }
-          }
-        }
-
-        return {
-          ...settlement,
-          driverName,
-          periodLabel,
-          hasAuditWarnings,
-        };
-      })
-    );
-
-    return enrichedSettlements.sort((a, b) => b.periodStart - a.periodStart);
-  },
-});
 
 /**
  * Get all settlements for a driver
@@ -421,6 +289,9 @@ export const listForDriver = query({
       statementNumber: v.string(),
       approvedBy: v.optional(v.string()),
       approvedAt: v.optional(v.float64()),
+      reopenedAt: v.optional(v.float64()),
+      reopenedBy: v.optional(v.string()),
+      reopenReason: v.optional(v.string()),
       paidAt: v.optional(v.float64()),
       paidBy: v.optional(v.string()),
       paidMethod: v.optional(v.string()),
@@ -495,6 +366,9 @@ export const getSettlementDetails = query({
       statementNumber: v.string(),
       approvedBy: v.optional(v.string()),
       approvedAt: v.optional(v.float64()),
+      reopenedAt: v.optional(v.float64()),
+      reopenedBy: v.optional(v.string()),
+      reopenReason: v.optional(v.string()),
       paidAt: v.optional(v.float64()),
       paidBy: v.optional(v.string()),
       paidMethod: v.optional(v.string()),
@@ -666,7 +540,7 @@ export const getSettlementDetails = query({
         // the loads run during the session.
         const workStart = await resolveWorkStartTimestamp(ctx, payable, detailCaches);
         let workEnd: number | undefined;
-        let shiftLoads: Array<{ label: string; scheduledAt?: number; lane?: string }> | undefined;
+        let shiftLoads: ShiftLoadRow[] | undefined;
         if (payable.sessionId) {
           const sessionKey = payable.sessionId as string;
           let session = detailCaches.sessions.get(sessionKey);
@@ -677,67 +551,7 @@ export const getSettlementDetails = query({
           workEnd = session?.endedAt ?? undefined;
 
           if (session?.endedAt) {
-            // Legs whose scheduled start falls inside the shift window (padded
-            // 2h earlier — drivers often check in after the first scheduled
-            // start). ACTIVE included so the live shift's current load shows.
-            const PAD = 2 * 60 * 60 * 1000;
-            const legs: Doc<'dispatchLegs'>[] = [];
-            for (const status of ['COMPLETED', 'ACTIVE'] as const) {
-              const batch = await ctx.db
-                .query('dispatchLegs')
-                .withIndex('by_driver_status_scheduled_start', (q: any) =>
-                  q
-                    .eq('driverId', settlement.driverId)
-                    .eq('status', status)
-                    .gte('scheduledStartMs', session!.startedAt - PAD)
-                    .lte('scheduledStartMs', session!.endedAt!),
-                )
-                .take(50);
-              legs.push(...batch);
-            }
-            legs.sort((a, b) => (a.scheduledStartMs ?? 0) - (b.scheduledStartMs ?? 0));
-            const rows: Array<{ label: string; actualAt?: number; scheduledAt?: number; lane?: string }> = [];
-            const seen = new Set<string>();
-            for (const leg of legs) {
-              if (seen.has(leg.loadId)) continue;
-              seen.add(leg.loadId);
-              const loadKey = leg.loadId as string;
-              let legLoad = detailCaches.loads.get(loadKey);
-              if (legLoad === undefined) {
-                legLoad = ((await ctx.db.get(leg.loadId)) ?? null) as Doc<'loadInformation'> | null;
-                detailCaches.loads.set(loadKey, legLoad);
-              }
-              const label = legLoad?.orderNumber ?? legLoad?.internalId;
-              if (!label) continue;
-
-              // Actual check-in at the leg's start stop, when recorded.
-              let actualAt: number | undefined;
-              const stopKey = leg.startStopId as string;
-              let startStop = detailCaches.stopDocs.get(stopKey);
-              if (startStop === undefined) {
-                startStop = ((await ctx.db.get(leg.startStopId)) ?? null) as Doc<'loadStops'> | null;
-                detailCaches.stopDocs.set(stopKey, startStop);
-              }
-              if (startStop?.checkedInAt) {
-                const t = new Date(startStop.checkedInAt).getTime();
-                if (!isNaN(t)) actualAt = t;
-              }
-              const origin = legLoad?.originCity
-                ? `${legLoad.originCity}${legLoad.originState ? ', ' + legLoad.originState : ''}`
-                : null;
-              const dest = legLoad?.destinationCity
-                ? `${legLoad.destinationCity}${legLoad.destinationState ? ', ' + legLoad.destinationState : ''}`
-                : null;
-              rows.push({
-                label,
-                actualAt,
-                scheduledAt: leg.scheduledStartMs ?? undefined,
-                lane: origin && dest ? `${origin} → ${dest}` : (origin ?? dest ?? undefined),
-              });
-            }
-            // Read in the order the work actually happened.
-            rows.sort((a, b) => (a.actualAt ?? a.scheduledAt ?? 0) - (b.actualAt ?? b.scheduledAt ?? 0));
-            if (rows.length > 0) shiftLoads = rows;
+            shiftLoads = await buildShiftLoadRows(ctx, settlement.driverId, session, detailCaches);
           }
         }
 
@@ -1412,6 +1226,69 @@ export const reversePayment = mutation({
       paidMethod: undefined,
       paidReference: undefined,
       updatedAt: Date.now(),
+    });
+
+    return null;
+  },
+});
+
+/**
+ * Reopen an APPROVED settlement back to DRAFT to correct a mistake.
+ *
+ * Reverses everything approval froze: status → DRAFT, clears the settlement's
+ * approval stamps, and per line clears the approval stamp + unlocks the
+ * auto-generated (SYSTEM, un-edited) lines so the rules engine and the draft
+ * edit tools own them again. Reviewer-edited lines and manual adjustments STAY
+ * locked so prior corrections survive. Records reopenedBy/At + reason for audit.
+ *
+ * PAID settlements must have their payment reversed first (reversePayment) —
+ * we never silently un-pay. Re-approving stamps a fresh approvedAt.
+ */
+export const reopenSettlement = mutation({
+  args: {
+    settlementId: v.id('driverSettlements'),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const settlement = await ctx.db.get(args.settlementId);
+    if (!settlement || settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
+    if (settlement.status !== 'APPROVED') {
+      throw new Error(
+        settlement.status === 'PAID'
+          ? 'Reverse the payment before reopening a paid settlement'
+          : 'Only an approved settlement can be reopened',
+      );
+    }
+    const reason = args.reason.trim();
+    if (!reason) throw new Error('A reason is required to reopen a settlement');
+
+    const now = Date.now();
+    const payables = await ctx.db
+      .query('loadPayables')
+      .withIndex('by_settlement', (q) => q.eq('settlementId', args.settlementId))
+      .collect();
+    for (const p of payables) {
+      await ctx.db.patch(p._id, {
+        approvedAt: undefined,
+        // Keep manual adjustments + reviewer-edited lines locked; return pristine
+        // SYSTEM lines to rules-engine control.
+        isLocked: p.sourceType === 'MANUAL' || p.editedAt != null,
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.patch(args.settlementId, {
+      status: 'DRAFT',
+      approvedBy: undefined,
+      approvedAt: undefined,
+      reopenedBy: userId,
+      reopenedAt: now,
+      reopenReason: reason,
+      updatedAt: now,
     });
 
     return null;
@@ -2440,6 +2317,7 @@ import {
   ageDays,
   applyAcknowledgements,
   bucketForSettlement,
+  buildShiftLoadRows,
   cadenceFromFrequency,
   classifyPayable,
   computeDriverBlockers,
@@ -2452,6 +2330,7 @@ import {
   summarizeLines,
   unitsLabel,
   type PayBasisInfo,
+  type ShiftLoadRow,
   type WorkStartCaches,
 } from './lib/settlementShared';
 

@@ -891,6 +891,8 @@ export default function AppLayout() {
           >
             <Stack.Screen name="(driver-tabs)" />
             <Stack.Screen name="trip/[id]" />
+            <Stack.Screen name="pay/index" />
+            <Stack.Screen name="pay/[id]" />
             <Stack.Screen name="capture-photo" />
             <Stack.Screen name="switch-truck" />
             <Stack.Screen name="permissions" />

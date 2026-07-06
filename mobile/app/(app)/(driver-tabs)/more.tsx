@@ -299,6 +299,13 @@ export default function MoreScreen() {
           )}
           <DrillRow
             palette={palette}
+            icon="dollar"
+            label="My Pay"
+            meta="Statements, earnings & payment history"
+            onPress={() => router.push('/pay')}
+          />
+          <DrillRow
+            palette={palette}
             icon="settings"
             label="App settings"
             meta="Language, notifications, permissions"
