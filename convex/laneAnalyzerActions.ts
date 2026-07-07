@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
-import { action } from './_generated/server';
-import { internal } from './_generated/api';
+import { action, internalAction, internalMutation, internalQuery } from './_generated/server';
+import { internal, api } from './_generated/api';
 
 // ==========================================
 // LANE ANALYZER — External API Actions
@@ -369,17 +369,41 @@ export const runAnalysisWithExternalData = action({
       }));
     }
 
-    // 4. Run the full calculation engine
-    await ctx.runMutation(internal.laneAnalyzerCalculations.runFullAnalysis, {
+    // 4. Run the full calculation engine (per-lane costs, HOS analysis)
+    await ctx.runAction(internal.laneAnalyzerCalculations.runFullAnalysis, {
       sessionId: args.sessionId,
     });
 
-    // 5. Run base optimization (deadhead analysis)
+    // 5. Run Python OR-Tools solver for optimal shift assignments
+    const solverUrl = process.env.SOLVER_API_URL;
+    console.log('SOLVER_API_URL:', solverUrl ?? 'NOT SET');
+    if (solverUrl) {
+      try {
+        console.log('Calling external solver...');
+        await ctx.runAction(internal.laneAnalyzerActions.runExternalSolver, {
+          sessionId: args.sessionId,
+          solverUrl,
+        });
+        console.log('External solver completed successfully');
+      } catch (e) {
+        console.warn('External solver failed, persisting status:', String(e));
+        await ctx.runMutation(internal.laneAnalyzerActions.storeSolverStatus, {
+          sessionId: args.sessionId,
+          status: 'failed',
+          error: String(e),
+          source: 'weekly_solver_v4',
+        });
+      }
+    } else {
+      console.log('No SOLVER_API_URL configured, skipping external solver');
+    }
+
+    // 6. Run base optimization (deadhead analysis)
     await ctx.runMutation(internal.laneAnalyzerOptimization.optimizeBases, {
       sessionId: args.sessionId,
     });
 
-    // 6. Find lane pairing opportunities
+    // 7. Find lane pairing opportunities
     await ctx.runMutation(internal.laneAnalyzerOptimization.findLaneCombinations, {
       sessionId: args.sessionId,
     });
@@ -390,8 +414,6 @@ export const runAnalysisWithExternalData = action({
 
 // ---- INTERNAL HELPERS ----
 // These are internal functions needed by the actions above.
-
-import { internalMutation, internalQuery } from './_generated/server';
 
 export const writeFuelPrice = internalMutation({
   args: {
@@ -719,3 +741,192 @@ async function geocodeAddress(
   const location = data.results[0].geometry.location;
   return { lat: location.lat, lng: location.lng };
 }
+
+// ==========================================
+// External Python OR-Tools Solver Integration
+// ==========================================
+
+/**
+ * Call the external Python solver and store results.
+ */
+export const runExternalSolver = internalAction({
+  args: {
+    sessionId: v.id('laneAnalysisSessions'),
+    solverUrl: v.string(),
+  },
+  handler: async (ctx, args) => {
+    // 1. Read lane data
+    const data = await ctx.runQuery(api.laneAnalyzer.exportEntriesForSolver, {
+      sessionId: args.sessionId,
+    });
+
+    if (!data || !data.entries || data.entries.length === 0) {
+      console.warn('No entries to solve');
+      return;
+    }
+
+    // 2. Read session config
+    const session = await ctx.runQuery(internal.laneAnalyzerActions.getSessionConfig, {
+      sessionId: args.sessionId,
+    });
+
+    // 3. Call the weekly solver API (10h off-duty + full HOS compliance)
+    // No target_drivers — solver finds the minimum automatically
+    const payload = JSON.stringify({
+      lanes: data.entries,
+      config: {
+        max_wait: session?.maxWaitHours ?? 2,
+        max_legs: session?.maxChainingLegs ?? 8,
+        max_deadhead: session?.maxDeadheadMiles ?? 75,
+        hourly_rate: session?.defaultDriverPayRate ?? 31.2,
+        fuel_price: session?.defaultFuelPricePerGallon ?? 7.70,
+        mpg_hwy: session?.defaultMpgHighway ?? 6,
+        mpg_city: session?.defaultMpgCity ?? 10,
+        pre_post_hours: session?.prePostTripMinutes != null ? session.prePostTripMinutes / 60 : 1.0,
+        bases: data.bases,
+      },
+    });
+
+    console.log(`Calling weekly solver at ${args.solverUrl}/solve-weekly with ${data.entries.length} lanes, ${data.bases.length} base(s)...`);
+
+    const response = await fetch(`${args.solverUrl}/solve-weekly`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Solver API returned ${response.status}: ${await response.text()}`);
+    }
+
+    const result = await response.json() as {
+      success: boolean;
+      driverCount: number;
+      hosCompliant: boolean;
+      weeklySchedule?: Array<{
+        driverId: number;
+        days: Record<string, {
+          legs: string[]; legNames: string[]; legCount: number;
+          driveHours: number; dutyHours: number;
+          miles: number; deadheadMiles: number;
+          startTime: number | null; endTime: number | null;
+        }>;
+        totalDriveHours: number;
+        totalDutyHours: number;
+        totalMiles: number;
+        totalDeadheadMiles: number;
+        daysWorked: number;
+      }>;
+      constraints?: { offDutyHours: number; maxWeeklyDuty: number; maxDailyDrive: number; maxDailyDuty: number };
+      error?: string;
+    };
+
+    if (!result.success) {
+      throw new Error(`Solver failed: ${result.error || 'unknown'}`);
+    }
+
+    console.log(`Weekly solver: ${result.driverCount} drivers, HOS compliant: ${result.hosCompliant}`);
+
+    // 4. Store solver results — trim to essential data only
+    // Strip legNames (derivable from nameMap), legCount (legs.length), per-driver totals (derivable from days)
+    const trimmedSchedule = result.weeklySchedule?.map((driver) => ({
+      driverId: driver.driverId,
+      days: Object.fromEntries(
+        Object.entries(driver.days).map(([dayName, dayData]) => [
+          dayName,
+          {
+            legs: dayData.legs,
+            driveHours: dayData.driveHours,
+            dutyHours: dayData.dutyHours,
+            miles: dayData.miles ?? 0,
+            deadheadMiles: dayData.deadheadMiles ?? 0,
+            startTime: dayData.startTime,
+            endTime: dayData.endTime,
+          },
+        ]),
+      ),
+    }));
+
+    await ctx.runMutation(internal.laneAnalyzerActions.storeSolverResults, {
+      sessionId: args.sessionId,
+      driverCount: result.driverCount,
+      weeklySchedule: trimmedSchedule ?? [],
+      hosCompliant: result.hosCompliant ?? true,
+      constraints: result.constraints ?? null,
+    });
+  },
+});
+
+export const getSessionConfig = internalQuery({
+  args: { sessionId: v.id('laneAnalysisSessions') },
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.sessionId);
+  },
+});
+
+export const storeSolverResults = internalMutation({
+  args: {
+    sessionId: v.id('laneAnalysisSessions'),
+    driverCount: v.number(),
+    weeklySchedule: v.array(v.any()),
+    hosCompliant: v.boolean(),
+    constraints: v.any(),
+  },
+  handler: async (ctx, args) => {
+    const aggregateResult = await ctx.db
+      .query('laneAnalysisResults')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .filter((q) => q.eq(q.field('resultType'), 'AGGREGATE'))
+      .first();
+
+    if (aggregateResult) {
+      const existing = aggregateResult.hosAnalysis ? JSON.parse(aggregateResult.hosAnalysis) : {};
+
+      existing.solver = {
+        status: 'success' as const,
+        driverCount: args.driverCount,
+        weeklySchedule: args.weeklySchedule,
+        hosCompliant: args.hosCompliant,
+        constraints: args.constraints,
+        source: 'weekly_solver_v4',
+        solvedAt: Date.now(),
+      };
+
+      await ctx.db.patch(aggregateResult._id, {
+        minDriverCount: args.driverCount,
+        hosAnalysis: JSON.stringify(existing),
+      });
+    }
+  },
+});
+
+export const storeSolverStatus = internalMutation({
+  args: {
+    sessionId: v.id('laneAnalysisSessions'),
+    status: v.string(),
+    error: v.string(),
+    source: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const aggregateResult = await ctx.db
+      .query('laneAnalysisResults')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .filter((q) => q.eq(q.field('resultType'), 'AGGREGATE'))
+      .first();
+
+    if (aggregateResult) {
+      const existing = aggregateResult.hosAnalysis ? JSON.parse(aggregateResult.hosAnalysis) : {};
+
+      existing.solver = {
+        status: args.status,
+        error: args.error,
+        source: args.source,
+        solvedAt: Date.now(),
+      };
+
+      await ctx.db.patch(aggregateResult._id, {
+        hosAnalysis: JSON.stringify(existing),
+      });
+    }
+  },
+});

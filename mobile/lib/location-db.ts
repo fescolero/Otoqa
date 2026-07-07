@@ -96,6 +96,24 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
 }
 
 /**
+ * Run a DB operation with one automatic retry if the native handle is stale.
+ * Android can invalidate the native SQLite handle between the SELECT 1
+ * health-check in getDb() and the actual SQL execution (race condition).
+ */
+async function withDbRetry<T>(operation: (database: SQLite.SQLiteDatabase) => Promise<T>): Promise<T> {
+  const database = await getDb();
+  try {
+    return await operation(database);
+  } catch (error) {
+    if (!isRecoverableDbError(error)) throw error;
+    console.warn('[LocationDB] Operation failed with stale handle, reopening and retrying once');
+    await resetDbHandle();
+    const freshDb = await getDb();
+    return await operation(freshDb);
+  }
+}
+
+/**
  * Force-close and reopen the database connection.
  * Call on foreground resume to proactively replace handles that Android
  * may have invalidated while the app was backgrounded.
@@ -172,36 +190,34 @@ export async function insertLocationBatch(
 ): Promise<number> {
   if (locations.length === 0) return 0;
 
-  const database = await getDb();
   const now = Date.now();
-  let inserted = 0;
-
-  const stmt = await database.prepareAsync(
-    `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
-     VALUES ($driverId, $loadId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`,
-  );
-
-  try {
-    for (const loc of locations) {
-      await stmt.executeAsync({
-        $driverId: loc.driverId,
-        $loadId: loc.loadId,
-        $orgId: loc.organizationId,
-        $lat: loc.latitude,
-        $lng: loc.longitude,
-        $acc: loc.accuracy,
-        $spd: loc.speed,
-        $hdg: loc.heading,
-        $rec: loc.recordedAt,
-        $cre: now,
-      });
-      inserted++;
+  return withDbRetry(async (database) => {
+    let inserted = 0;
+    const stmt = await database.prepareAsync(
+      `INSERT INTO locations (driverId, loadId, organizationId, latitude, longitude, accuracy, speed, heading, recordedAt, createdAt, synced)
+       VALUES ($driverId, $loadId, $orgId, $lat, $lng, $acc, $spd, $hdg, $rec, $cre, 0)`,
+    );
+    try {
+      for (const loc of locations) {
+        await stmt.executeAsync({
+          $driverId: loc.driverId,
+          $loadId: loc.loadId,
+          $orgId: loc.organizationId,
+          $lat: loc.latitude,
+          $lng: loc.longitude,
+          $acc: loc.accuracy,
+          $spd: loc.speed,
+          $hdg: loc.heading,
+          $rec: loc.recordedAt,
+          $cre: now,
+        });
+        inserted++;
+      }
+    } finally {
+      await stmt.finalizeAsync();
     }
-  } finally {
-    await stmt.finalizeAsync();
-  }
-
-  return inserted;
+    return inserted;
+  });
 }
 
 // ============================================
@@ -209,46 +225,51 @@ export async function insertLocationBatch(
 // ============================================
 
 export async function getUnsyncedLocations(limit = 100): Promise<LocationRow[]> {
-  const database = await getDb();
-  return await database.getAllAsync<LocationRow>(
-    'SELECT * FROM locations WHERE synced = 0 ORDER BY recordedAt ASC LIMIT ?',
-    limit,
+  return withDbRetry((database) =>
+    database.getAllAsync<LocationRow>(
+      'SELECT * FROM locations WHERE synced = 0 ORDER BY recordedAt ASC LIMIT ?',
+      limit,
+    ),
   );
 }
 
 export async function getUnsyncedForLoad(loadId: string, limit = 500): Promise<LocationRow[]> {
-  const database = await getDb();
-  return await database.getAllAsync<LocationRow>(
-    'SELECT * FROM locations WHERE loadId = ? AND synced = 0 ORDER BY recordedAt ASC LIMIT ?',
-    loadId,
-    limit,
+  return withDbRetry((database) =>
+    database.getAllAsync<LocationRow>(
+      'SELECT * FROM locations WHERE loadId = ? AND synced = 0 ORDER BY recordedAt ASC LIMIT ?',
+      loadId,
+      limit,
+    ),
   );
 }
 
 export async function getUnsyncedCount(): Promise<number> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM locations WHERE synced = 0',
-  );
-  return row?.count ?? 0;
+  return withDbRetry(async (database) => {
+    const row = await database.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM locations WHERE synced = 0',
+    );
+    return row?.count ?? 0;
+  });
 }
 
 export async function getUnsyncedCountForLoad(loadId: string): Promise<number> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM locations WHERE loadId = ? AND synced = 0',
-    loadId,
-  );
-  return row?.count ?? 0;
+  return withDbRetry(async (database) => {
+    const row = await database.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM locations WHERE loadId = ? AND synced = 0',
+      loadId,
+    );
+    return row?.count ?? 0;
+  });
 }
 
 export async function getTotalCountForLoad(loadId: string): Promise<number> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM locations WHERE loadId = ?',
-    loadId,
-  );
-  return row?.count ?? 0;
+  return withDbRetry(async (database) => {
+    const row = await database.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM locations WHERE loadId = ?',
+      loadId,
+    );
+    return row?.count ?? 0;
+  });
 }
 
 // ============================================
@@ -257,16 +278,18 @@ export async function getTotalCountForLoad(loadId: string): Promise<number> {
 
 export async function markAsSynced(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
-  const database = await getDb();
   const placeholders = ids.map(() => '?').join(',');
-  await database.runAsync(`UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
+  await withDbRetry((database) =>
+    database.runAsync(`UPDATE locations SET synced = 1 WHERE id IN (${placeholders})`, ...ids),
+  );
 }
 
 export async function deleteOldSyncedLocations(olderThanMs: number = 7 * 24 * 60 * 60 * 1000): Promise<number> {
-  const database = await getDb();
   const cutoff = Date.now() - olderThanMs;
-  const result = await database.runAsync('DELETE FROM locations WHERE synced = 1 AND createdAt < ?', cutoff);
-  return result.changes;
+  return withDbRetry(async (database) => {
+    const result = await database.runAsync('DELETE FROM locations WHERE synced = 1 AND createdAt < ?', cutoff);
+    return result.changes;
+  });
 }
 
 // ============================================
@@ -276,13 +299,14 @@ export async function deleteOldSyncedLocations(olderThanMs: number = 7 * 24 * 60
 export async function getLastLocationForLoad(
   loadId: string,
 ): Promise<{ latitude: number; longitude: number; recordedAt: number } | null> {
-  const database = await getDb();
-  const row = await database.getFirstAsync<{
-    latitude: number;
-    longitude: number;
-    recordedAt: number;
-  }>('SELECT latitude, longitude, recordedAt FROM locations WHERE loadId = ? ORDER BY recordedAt DESC LIMIT 1', loadId);
-  return row ?? null;
+  return withDbRetry(async (database) => {
+    const row = await database.getFirstAsync<{
+      latitude: number;
+      longitude: number;
+      recordedAt: number;
+    }>('SELECT latitude, longitude, recordedAt FROM locations WHERE loadId = ? ORDER BY recordedAt DESC LIMIT 1', loadId);
+    return row ?? null;
+  });
 }
 
 // ============================================
@@ -290,9 +314,10 @@ export async function getLastLocationForLoad(
 // ============================================
 
 export async function deleteAllForLoad(loadId: string): Promise<number> {
-  const database = await getDb();
-  const result = await database.runAsync('DELETE FROM locations WHERE loadId = ?', loadId);
-  return result.changes;
+  return withDbRetry(async (database) => {
+    const result = await database.runAsync('DELETE FROM locations WHERE loadId = ?', loadId);
+    return result.changes;
+  });
 }
 
 export async function closeDb(): Promise<void> {
