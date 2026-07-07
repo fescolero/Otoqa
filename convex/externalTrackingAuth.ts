@@ -1,10 +1,86 @@
 import { v } from 'convex/values';
 import { internalMutation, internalQuery } from './_generated/server';
+import { RateLimiter, MINUTE } from '@convex-dev/rate-limiter';
+import { components } from './_generated/api';
 
 // ============================================
 // EXTERNAL TRACKING API - AUTH HELPERS
 // Queries and mutations (V8 runtime, no Node.js)
 // ============================================
+
+// ============================================
+// RATE LIMITER (token bucket per partner key)
+// ============================================
+//
+// Token bucket with sharding so high-tier keys (1000/min) don't pile up on a
+// single document under OCC. Capacity = 2s burst (rate / 30) — partners doing
+// catch-up polls after a brief outage shouldn't get hammered.
+const rateLimiter = new RateLimiter(components.rateLimiter, {
+  partnerApiLow: {
+    kind: 'token bucket',
+    rate: 60,
+    period: MINUTE,
+    capacity: 60,
+    shards: 2,
+  },
+  partnerApiMedium: {
+    kind: 'token bucket',
+    rate: 300,
+    period: MINUTE,
+    capacity: 60,
+    shards: 4,
+  },
+  partnerApiHigh: {
+    kind: 'token bucket',
+    rate: 1000,
+    period: MINUTE,
+    capacity: 100,
+    shards: 10,
+  },
+});
+
+function rateLimitNameForTier(
+  tier: 'low' | 'medium' | 'high' | 'custom',
+): 'partnerApiLow' | 'partnerApiMedium' | 'partnerApiHigh' {
+  // 'custom' routes to 'high' for V1. If a partner needs a different ceiling,
+  // size their tier to low/medium/high or introduce a new named limit.
+  if (tier === 'low') return 'partnerApiLow';
+  if (tier === 'medium') return 'partnerApiMedium';
+  return 'partnerApiHigh';
+}
+
+/**
+ * Consume one token from the partner's rate limit. Called from the
+ * httpAction auth middleware. Token-bucket state lives in the component,
+ * so this is O(1) instead of the previous O(N) audit-log scan.
+ */
+export const consumeRateLimit = internalMutation({
+  args: {
+    keyId: v.id('partnerApiKeys'),
+    tier: v.union(
+      v.literal('low'),
+      v.literal('medium'),
+      v.literal('high'),
+      v.literal('custom'),
+    ),
+  },
+  returns: v.object({
+    ok: v.boolean(),
+    retryAfter: v.number(),
+    limit: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const limitName = rateLimitNameForTier(args.tier);
+    const result = await rateLimiter.limit(ctx, limitName, { key: args.keyId });
+    const limit =
+      limitName === 'partnerApiLow' ? 60 : limitName === 'partnerApiMedium' ? 300 : 1000;
+    return {
+      ok: result.ok,
+      retryAfter: result.retryAfter ?? 0,
+      limit,
+    };
+  },
+});
 
 // ============================================
 // API KEY VALIDATION (called from httpAction)
@@ -112,31 +188,6 @@ export const writeAuditLog = internalMutation({
   },
 });
 
-// ============================================
-// RATE LIMITING (sliding window via audit log)
-// ============================================
-
-/**
- * Count recent requests for a given API key since a timestamp.
- * Uses the by_key_time index for efficient lookups.
- */
-export const countRecentRequests = internalQuery({
-  args: {
-    keyId: v.id('partnerApiKeys'),
-    since: v.number(),
-  },
-  returns: v.number(),
-  handler: async (ctx, args) => {
-    const recentLogs = await ctx.db
-      .query('apiAuditLog')
-      .withIndex('by_key_time', (q) =>
-        q.eq('partnerKeyId', args.keyId).gte('timestamp', args.since)
-      )
-      .collect();
-
-    return recentLogs.length;
-  },
-});
 
 // ============================================
 // AUDIT LOG PRUNING (30-day retention)

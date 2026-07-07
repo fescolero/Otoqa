@@ -1,112 +1,129 @@
 'use client';
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
+/**
+ * Fuel / DEF entry edit page.
+ *
+ * Same shell as the create flow, just seeded with the existing record
+ * and pointed at the `update` mutation. The shell's `mode: 'edit'`
+ * schema flag adjusts the title + breadcrumb; no other UI changes.
+ *
+ * Replaces the legacy `<FuelEntryForm initialData={...}/>` invocation.
+ * Drafts are deliberately NOT enabled for edit — the form is loaded
+ * from a real record, not an in-flight draft. Autosave indicator
+ * runs visually only.
+ */
+
+import * as React from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
+import { toast } from 'sonner';
+import { Loader2 } from 'lucide-react';
 import { api } from '@/convex/_generated/api';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { useState } from 'react';
+import type { Id } from '@/convex/_generated/dataModel';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { useAuthQuery } from '@/hooks/use-auth-query';
-import { FuelEntryForm, FuelEntryFormData } from '@/components/diesel/fuel-entry-form';
-import { toast } from 'sonner';
-import { Id } from '@/convex/_generated/dataModel';
-import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { CreateForm, bindUploaders } from '@/components/web/create-form';
+import {
+  buildFuelEntrySchema,
+  mapRecordToFuelEntryVals,
+  mapValsToFuelEntryUpdateArgs,
+  FUEL_ENTRY_FIELD_IDS,
+  type CarrierRow,
+  type FuelEntryRecord,
+} from '@/lib/forms/schemas/fuel-entry';
 
 export function FuelEntryEditContent({ id }: { id: string }) {
-  const { user } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
   const type = searchParams.get('type') === 'def' ? 'def' : 'fuel';
+  const { user } = useAuth();
   const organizationId = useOrganizationId();
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // ── Record load ─────────────────────────────────────────────────
+  // Same `?type=` partition as the legacy edit page: fuel record from
+  // `fuelEntries`, DEF record from `defEntries`. Only one query is
+  // active at a time via the `'skip'` sentinel.
   const fuelEntry = useAuthQuery(
     api.fuelEntries.get,
-    type === 'fuel' ? { entryId: id as Id<'fuelEntries'> } : 'skip'
+    type === 'fuel' ? { entryId: id as Id<'fuelEntries'> } : 'skip',
   );
   const defEntry = useAuthQuery(
     api.defEntries.get,
-    type === 'def' ? { entryId: id as Id<'defEntries'> } : 'skip'
+    type === 'def' ? { entryId: id as Id<'defEntries'> } : 'skip',
   );
-
   const entry = type === 'def' ? defEntry : fuelEntry;
 
-  const drivers = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
-  const trucks = useAuthQuery(api.trucks.list, organizationId ? { organizationId } : 'skip');
-  const vendors = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId, activeOnly: true } : 'skip');
-  const carriersRaw = useAuthQuery(api.carrierPartnerships.listForBroker, organizationId ? { brokerOrgId: organizationId } : 'skip');
+  // ── Option-source queries (same shape as the create page) ────────
+  const driversQ = useAuthQuery(
+    api.drivers.list,
+    organizationId ? { organizationId } : 'skip',
+  );
+  const trucksQ = useAuthQuery(
+    api.trucks.list,
+    organizationId ? { organizationId } : 'skip',
+  );
+  const vendorsQ = useAuthQuery(
+    api.fuelVendors.list,
+    organizationId ? { organizationId, activeOnly: true } : 'skip',
+  );
+  const carriersQ = useAuthQuery(
+    api.carrierPartnerships.listForBroker,
+    organizationId ? { brokerOrgId: organizationId } : 'skip',
+  );
 
-  const carriers = (carriersRaw ?? []).map((c) => ({
-    _id: c._id,
-    carrierName: c.carrierName,
-    trackFuelConsumption: c.trackFuelConsumption ?? false,
-  }));
+  const carriers = React.useMemo<CarrierRow[]>(
+    () =>
+      (carriersQ ?? []).map((c) => ({
+        _id: c._id,
+        carrierName: c.carrierName,
+        trackFuelConsumption: c.trackFuelConsumption ?? false,
+      })),
+    [carriersQ],
+  );
 
+  // ── Mutations ────────────────────────────────────────────────────
   const updateFuelEntry = useMutation(api.fuelEntries.update);
   const updateDefEntry = useMutation(api.defEntries.update);
   const generateUploadUrl = useMutation(
-    type === 'def' ? api.defEntries.generateUploadUrl : api.fuelEntries.generateUploadUrl
+    type === 'def'
+      ? api.defEntries.generateUploadUrl
+      : api.fuelEntries.generateUploadUrl,
   );
+
+  // ── Schema (factory with mode='edit') + uploader binding ─────────
+  const schema = React.useMemo(
+    () =>
+      bindUploaders(
+        buildFuelEntrySchema({
+          kind: type,
+          mode: 'edit',
+          vendors: vendorsQ ?? [],
+          drivers: driversQ ?? [],
+          trucks: trucksQ ?? [],
+          carriers,
+        }),
+        { [FUEL_ENTRY_FIELD_IDS.attachment]: generateUploadUrl },
+      ),
+    [type, vendorsQ, driversQ, trucksQ, carriers, generateUploadUrl],
+  );
+
+  // ── Seed values from the existing record (only after it loads).
+  // `useFormState` ignores changes to `initialValues` after mount, so
+  // we KEY the <CreateForm> on the entry's id+updatedAt to remount the
+  // form when the record changes — usually only happens once on first
+  // load, but covers the edge case where the record updates server-side
+  // mid-session.
+  const initialValues = React.useMemo(() => {
+    if (!entry) return undefined;
+    return mapRecordToFuelEntryVals(entry as FuelEntryRecord);
+  }, [entry]);
 
   const typeLabel = type === 'def' ? 'DEF' : 'Fuel';
 
-  const handleSubmit = async (data: FuelEntryFormData) => {
-    if (!user) return;
-
-    setIsSubmitting(true);
-    try {
-      const baseArgs = {
-        entryDate: data.entryDate,
-        vendorId: data.vendorId as Id<'fuelVendors'>,
-        gallons: data.gallons,
-        pricePerGallon: data.pricePerGallon,
-        ...(data.driverId && { driverId: data.driverId as Id<'drivers'> }),
-        ...(data.carrierId && { carrierId: data.carrierId as Id<'carrierPartnerships'> }),
-        ...(data.truckId && { truckId: data.truckId as Id<'trucks'> }),
-        ...(data.odometerReading && { odometerReading: data.odometerReading }),
-        ...(data.location && { location: data.location }),
-        ...(data.fuelCardNumber && { fuelCardNumber: data.fuelCardNumber }),
-        ...(data.receiptNumber && { receiptNumber: data.receiptNumber }),
-        ...(data.loadId && { loadId: data.loadId as Id<'loadInformation'> }),
-        ...(data.paymentMethod && { paymentMethod: data.paymentMethod as 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA' }),
-        ...(data.notes && { notes: data.notes }),
-        ...(data.receiptStorageId && { receiptStorageId: data.receiptStorageId as Id<'_storage'> }),
-        updatedBy: user.id,
-      };
-
-      if (type === 'def') {
-        await updateDefEntry({
-          entryId: id as Id<'defEntries'>,
-          ...baseArgs,
-        });
-      } else {
-        await updateFuelEntry({
-          entryId: id as Id<'fuelEntries'>,
-          ...baseArgs,
-        });
-      }
-
-      toast.success(`${typeLabel} entry updated successfully`);
-      router.push(`/operations/diesel/${id}?type=${type}`);
-    } catch (error) {
-      console.error(`Failed to update ${typeLabel} entry:`, error);
-      toast.error(`Failed to update ${typeLabel} entry. Please try again.`);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
+  // ── Render gates — match the legacy edit page's loading and
+  // not-found states so dispatchers see consistent fallbacks.
   if (entry === undefined) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -114,85 +131,59 @@ export function FuelEntryEditContent({ id }: { id: string }) {
       </div>
     );
   }
-
   if (entry === null) {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <p className="text-muted-foreground mb-4">{typeLabel} entry not found</p>
-          <Button onClick={() => router.push('/operations/diesel')}>Back to Diesel</Button>
+          <p className="text-muted-foreground mb-4">
+            {typeLabel} entry not found
+          </p>
+          <Button onClick={() => router.push('/operations/diesel')}>
+            Back to Diesel
+          </Button>
         </div>
       </div>
     );
   }
 
-  const initialData = {
-    entryDate: entry.entryDate,
-    driverId: entry.driverId ?? undefined,
-    carrierId: entry.carrierId ?? undefined,
-    truckId: entry.truckId ?? undefined,
-    vendorId: entry.vendorId,
-    gallons: entry.gallons,
-    pricePerGallon: entry.pricePerGallon,
-    odometerReading: entry.odometerReading ?? undefined,
-    location: entry.location ?? undefined,
-    fuelCardNumber: entry.fuelCardNumber ?? undefined,
-    receiptNumber: entry.receiptNumber ?? undefined,
-    loadId: entry.loadId ?? undefined,
-    paymentMethod: entry.paymentMethod ?? undefined,
-    notes: entry.notes ?? undefined,
-    receiptStorageId: entry.receiptStorageId ?? undefined,
-    receiptUrl: entry.receiptUrl ?? undefined,
-  };
-
   return (
-    <>
-      <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b bg-background">
-        <div className="flex items-center gap-2 px-4">
-          <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/dashboard">Home</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="#">Company Operations</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/operations/diesel">Diesel</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href={`/operations/diesel/${id}?type=${type}`}>
-                  Entry Detail
-                </BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem>
-                <BreadcrumbPage>Edit</BreadcrumbPage>
-              </BreadcrumbItem>
-            </BreadcrumbList>
-          </Breadcrumb>
-        </div>
-      </header>
-
-      <div className="flex flex-1 flex-col gap-6 p-6">
-        <FuelEntryForm
-          entryType={type}
-          initialData={initialData}
-          drivers={drivers ?? []}
-          carriers={carriers}
-          trucks={trucks ?? []}
-          vendors={vendors ?? []}
-          onSubmit={handleSubmit}
-          onCancel={() => router.push(`/operations/diesel/${id}?type=${type}`)}
-          isSubmitting={isSubmitting}
-          generateUploadUrl={generateUploadUrl}
-        />
-      </div>
-    </>
+    <CreateForm
+      // Re-mount the shell when a different record loads (e.g. user
+      // navigates between two edit pages within the same SPA session).
+      // The shell's useFormState seeds vals once on mount; without the
+      // key it would keep the old record's values when the underlying
+      // id changes.
+      key={entry._id}
+      schema={schema}
+      initialValues={initialValues}
+      onCancel={() => router.push(`/operations/diesel/${id}?type=${type}`)}
+      onSaved={async (vals) => {
+        if (!user) {
+          toast.error('Not signed in — please refresh and try again.');
+          return;
+        }
+        try {
+          const args = mapValsToFuelEntryUpdateArgs(vals);
+          if (type === 'def') {
+            await updateDefEntry({
+              entryId: id as Id<'defEntries'>,
+              ...args,
+              updatedBy: user.id,
+            });
+          } else {
+            await updateFuelEntry({
+              entryId: id as Id<'fuelEntries'>,
+              ...args,
+              updatedBy: user.id,
+            });
+          }
+          toast.success(`${typeLabel} entry updated.`);
+          router.push(`/operations/diesel/${id}?type=${type}`);
+        } catch (err) {
+          console.error(`Failed to update ${typeLabel} entry:`, err);
+          toast.error(`Failed to update ${typeLabel} entry. Please try again.`);
+        }
+      }}
+    />
   );
 }

@@ -39,6 +39,7 @@ import {
 } from '@/components/web';
 import { api } from '@/convex/_generated/api';
 import { useUserPreferences } from '@/components/web/shell/use-user-preferences';
+import { DraftListPill } from '@/components/web/create-form';
 import {
   buildDriverDetails,
   countAttention,
@@ -365,6 +366,13 @@ export function DriversList({ drivers, loading, onCreate, onImport, onExport, on
             <SavedViewsAddButton />
           </SavedViewCreatePopover>
         )}
+        actions={
+          <DraftListPill
+            entity="driver"
+            draftKey="driver-create-v1"
+            createHref="/fleet/drivers/create"
+          />
+        }
       />
       <TableToolbar
         searchPlaceholder="Search drivers…"

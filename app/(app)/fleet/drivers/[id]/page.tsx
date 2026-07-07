@@ -13,6 +13,7 @@ import { useOrganizationId } from '@/contexts/organization-context';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
 
 import {
+  type AddressData,
   AttentionBand,
   type AttentionItem,
   Avatar,
@@ -26,6 +27,7 @@ import {
   DSPropsEditable,
   type DSPropsEditableItem,
   DetailsFullPage,
+  EditableAddress,
   type FPSection,
   NowDriverAvailable,
   NowDriverInTransit,
@@ -247,6 +249,29 @@ export default function DriverDetailPage() {
     }
   };
 
+  // Multi-field commit for the address autocomplete — writes street /
+  // city / state / zip / country in a single mutation so the audit log
+  // shows one entry instead of five.
+  const commitAddress = async (data: AddressData) => {
+    if (!user) return;
+    try {
+      await updateDriver({
+        id: driverId,
+        userId: user.id,
+        userName,
+        address: data.address,
+        city: data.city,
+        state: data.state,
+        zipCode: data.postalCode,
+        country: data.country,
+      });
+      toast.success('Address saved');
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to save address');
+    }
+  };
+
   // ─── Sections ───────────────────────────────────────────────────────
   const licenseItems: Array<DSPropsEditableItem | null> = [
     {
@@ -285,8 +310,13 @@ export default function DriverDetailPage() {
       key: 'licenseNumber',
       label: 'Number',
       value: driver.licenseNumber ?? '',
-      display: <span className="num">{driver.licenseNumber || '—'}</span>,
-      readOnly: true,
+      display: driver.licenseNumber
+        ? <span className="num">{driver.licenseNumber}</span>
+        : undefined,
+      // Convex update routes licenseNumber through drivers_sensitive_info
+      // and audit-logs the change, so inline edit is safe.
+      editor: { type: 'text' },
+      placeholder: 'Add license number',
     },
   ];
 
@@ -334,17 +364,19 @@ export default function DriverDetailPage() {
   ];
 
   const personalItems: Array<DSPropsEditableItem | null> = [
-    driver.dateOfBirth
-      ? {
-          key: 'dateOfBirth',
-          label: 'DOB',
-          value: driver.dateOfBirth,
-          display: <span className="num">{formatDate(driver.dateOfBirth)}</span>,
-          // DOB is sensitive — the mutation routes it via a separate path,
-          // so keep it read-only on the page for now.
-          readOnly: true,
-        }
-      : null,
+    {
+      key: 'dateOfBirth',
+      label: 'DOB',
+      value: driver.dateOfBirth ?? '',
+      display: driver.dateOfBirth
+        ? <span className="num">{formatDate(driver.dateOfBirth)}</span>
+        : undefined,
+      // The Convex update mutation already routes dateOfBirth through the
+      // sensitive-info table — inline edit is safe; the audit log captures
+      // the change.
+      editor: { type: 'date' },
+      placeholder: 'Pick date of birth',
+    },
     driver.ssn
       ? {
           key: 'ssn',
@@ -354,12 +386,39 @@ export default function DriverDetailPage() {
           readOnly: true,
         }
       : null,
+    // Address row uses <EditableAddress> via the `custom` slot —
+    // Google Places autocomplete fills street/city/state/zip/country in
+    // one mutation (commitAddress). The remaining rows below are
+    // individually inline-editable so users can override any single
+    // field manually without re-running the autocomplete.
     {
       key: 'address',
-      label: 'Street',
-      value: driver.address ?? '',
+      label: 'Address',
+      custom: (
+        <EditableAddress
+          value={{
+            address: driver.address,
+            city: driver.city,
+            state: driver.state,
+            postalCode: driver.zipCode,
+            country: driver.country,
+          }}
+          display={
+            driver.address || (
+              <span className="text-[var(--text-tertiary)]">Add address</span>
+            )
+          }
+          onCommit={commitAddress}
+          placeholder="Add address"
+        />
+      ),
+    },
+    {
+      key: 'address2',
+      label: 'Address 2',
+      value: driver.address2 ?? '',
       editor: { type: 'text' },
-      placeholder: 'Street',
+      placeholder: 'Apt, suite, unit',
     },
     {
       key: 'city',

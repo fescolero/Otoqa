@@ -22,9 +22,9 @@
 
 import * as React from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
-import { DayPicker } from 'react-day-picker';
 import { format as formatDate } from 'date-fns';
 import { cn } from '@/lib/utils';
+import { Calendar } from '@/components/ui/calendar';
 import { WIcon } from './icons';
 
 type EditableType = 'text' | 'email' | 'phone' | 'textarea' | 'date' | 'select' | 'multiselect';
@@ -311,20 +311,21 @@ function DateField({ value, onCommit, placeholder, readOnly, className, display,
         <PopoverPrimitive.Content
           align="start"
           sideOffset={4}
-          className="z-50 rounded-lg border border-[var(--border-hairline-strong)] bg-card shadow-[var(--shadow-popover)] p-2"
+          className="z-50 rounded-lg border border-[var(--border-hairline-strong)] bg-popover shadow-[var(--shadow-popover)] p-0"
         >
-          <DayPicker
+          <Calendar
             mode="single"
             selected={date}
+            defaultMonth={date}
+            captionLayout="dropdown"
+            startMonth={new Date(1920, 0)}
+            endMonth={new Date(2050, 11)}
             onSelect={(d) => {
               if (!d) return;
               const iso = d.toISOString().slice(0, 10);
               onCommit(iso);
               flash();
               setOpen(false);
-            }}
-            classNames={{
-              months: 'text-[13px]',
             }}
           />
         </PopoverPrimitive.Content>

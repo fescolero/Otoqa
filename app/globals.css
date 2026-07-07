@@ -350,6 +350,13 @@
   background-clip: padding-box;
 }
 
+/* Hide the scrollbar entirely while keeping the element scrollable
+   via wheel / touch / programmatic scrollTop. Used by create-form's
+   inner main column — the rail provides the spatial cue, so the
+   scrollbar is visual noise. */
+.scroll-hidden { scrollbar-width: none; }
+.scroll-hidden::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
 /* === Animations === */
 @keyframes badge-pop {
   from { transform: scale(0.7);  opacity: 0; }

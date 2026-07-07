@@ -4,30 +4,43 @@ import { useState, useMemo, useEffect } from 'react';
 import { useMutation, useQuery, usePaginatedQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthQuery } from '@/hooks/use-auth-query';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { Id } from '@/convex/_generated/dataModel';
 import { trackError } from '@/lib/posthog';
-import { Plus, Package, Clock, Truck, CheckCircle2, Ban, TimerOff, Columns3 } from 'lucide-react';
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
+  DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { LoadFilterBar, LoadFilterState } from './loads/load-filter-bar';
-import { VirtualizedLoadsTable, ColumnVisibility, DEFAULT_COLUMN_VISIBILITY } from './loads/virtualized-loads-table';
-import { FloatingActionBar } from './loads/floating-action-bar';
+import { SavedViews, type SavedView, WBtn } from '@/components/web';
+import { DraftListPill } from '@/components/web/create-form';
+import { LoadFilterState } from './loads/load-filter-bar';
+import type { ColumnVisibility } from './loads/column-visibility';
+import { DEFAULT_COLUMN_VISIBILITY } from './loads/column-visibility';
 import { BulkActionResolutionModal } from './loads/bulk-action-resolution-modal';
 import { CancellationReasonModal, CancellationReasonCode } from './loads/cancellation-reason-modal';
 import { toast } from 'sonner';
 import { formatDateOnly } from '@/lib/format-date-timezone';
 import { useDebounce } from '@/hooks/use-debounce';
+import {
+  BulkAction,
+  BulkBar,
+  Chip,
+  type ChipStatus,
+  type ColumnDef,
+  FilterBar,
+  type FilterChipValue,
+  type FilterProperty,
+  formatDateRangeValue,
+  InfiniteFooter,
+  parseDateRangeValue,
+  Table,
+  type TableColumn,
+  TableToolbar,
+  WIcon,
+} from '@/components/web';
+import Link from 'next/link';
 
 interface LoadsTableProps {
   organizationId: string;
@@ -37,7 +50,6 @@ interface LoadsTableProps {
 export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   const [activeTab, setActiveTab] = useState<string>('all');
   const [selectedLoadIds, setSelectedLoadIds] = useState<Set<Id<'loadInformation'>>>(new Set());
-  const [focusedRowIndex, setFocusedRowIndex] = useState<number | null>(null);
   const [filters, setFilters] = useState<LoadFilterState>({
     search: '',
   });
@@ -95,6 +107,7 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
           tripNumber: filters.trip,
           search: debouncedSearch || undefined,
           mileRange: filters.mileRange,
+          trackingStatus: filters.trackingStatus,
           startDate: formatDateForQuery(filters.dateRange?.start),
           endDate: formatDateForQuery(filters.dateRange?.end),
         },
@@ -139,7 +152,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   const handleTabChange = (value: string) => {
     setActiveTab(value);
     setSelectedLoadIds(new Set());
-    setFocusedRowIndex(null);
   };
 
   // Selection handlers
@@ -414,189 +426,291 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
     }
   };
 
-  // Map load status for display in table
-  const loadsWithMappedStatus = currentLoads.map((load) => ({
+  // Map load status for display in table.
+  type LoadTableRow = (typeof currentLoads)[number] & { id: string };
+  const loadRows: LoadTableRow[] = currentLoads.map((load) => ({
     ...load,
+    id: load._id as unknown as string,
     status: load.status === 'Completed' ? 'Delivered' : load.status,
   }));
+  const selectedRowIds = Array.from(selectedLoadIds) as unknown as string[];
+
+  // Server tells us how many rows match the current view; for "all" we
+  // sum the per-status counts. Used by InfiniteFooter.
+  const totalForCurrentView =
+    activeTab === 'all'
+      ? Object.values(loadCounts ?? {}).reduce<number>((acc, n) => acc + (n ?? 0), 0)
+      : (loadCounts?.[activeTab as keyof typeof loadCounts] ?? loadRows.length);
+  const infiniteTotal = paginationStatus === 'CanLoadMore' || paginationStatus === 'LoadingMore'
+    ? Math.max(loadRows.length, totalForCurrentView)
+    : loadRows.length;
+
+  // FilterBar properties — mirrors the design's HCR / Type / Miles /
+  // Tracking / Load date set, but only HCR / Trip / Miles / Date map to
+  // backing data today. Type and Tracking are deferred (no schema).
+  const filterProps: FilterProperty[] = [
+    {
+      id: 'hcr', label: 'HCR', icon: 'doc-dollar', kind: 'enum', operator: 'is',
+      options: availableHCRs.map((h) => ({ value: h, label: h })),
+    },
+    {
+      id: 'trip', label: 'Trip', icon: 'truck', kind: 'enum', operator: 'is',
+      options: availableTrips.map((t) => ({ value: t, label: t })),
+    },
+    {
+      id: 'miles', label: 'Miles', icon: 'route', kind: 'enum', operator: 'is',
+      options: [
+        { value: 'short',  label: '0–50 mi' },
+        { value: 'medium', label: '50–150 mi' },
+        { value: 'long',   label: '150–300 mi' },
+        { value: 'xlong',  label: '300+ mi' },
+      ],
+    },
+    {
+      id: 'tracking', label: 'Tracking', icon: 'compass', kind: 'enum', operator: 'is',
+      options: [
+        { value: 'Pending',    label: 'Pending' },
+        { value: 'In Transit', label: 'In Transit' },
+        { value: 'Completed',  label: 'Completed' },
+        { value: 'Delayed',    label: 'Delayed' },
+        { value: 'Canceled',   label: 'Canceled' },
+      ],
+    },
+    {
+      id: 'date', label: 'Load date', icon: 'calendar', kind: 'date',
+      operator: 'is',
+      presets: ['Today', 'Tomorrow', 'Next 7 days', 'Last 7 days', 'This month'],
+    },
+  ];
+
+  // Bridge LoadFilterState ↔ FilterChipValue[].
+  // Bridge LoadFilterState ↔ FilterChipValue[]. The Load date chip stores
+  // its preset name as the chip value; on commit we translate it to a
+  // concrete {start, end} timestamp pair the Convex query understands.
+  const datePresetLabel = filters.dateRange
+    ? labelForDateRange(filters.dateRange)
+    : undefined;
+  const chipFilters: FilterChipValue[] = [
+    filters.hcr ? { propId: 'hcr', op: 'is' as const, values: [filters.hcr] } : null,
+    filters.trip ? { propId: 'trip', op: 'is' as const, values: [filters.trip] } : null,
+    filters.mileRange ? { propId: 'miles', op: 'is' as const, values: [filters.mileRange] } : null,
+    filters.trackingStatus ? { propId: 'tracking', op: 'is' as const, values: [filters.trackingStatus] } : null,
+    datePresetLabel ? { propId: 'date', op: 'is' as const, values: [datePresetLabel] } : null,
+  ].filter(Boolean) as FilterChipValue[];
+
+  const onChipFiltersChange = (next: FilterChipValue[]) => {
+    const byId = new Map(next.map((c) => [c.propId, c.values[0]]));
+    const datePreset = byId.get('date');
+    const range = datePreset ? rangeForDatePreset(datePreset) : undefined;
+    setFilters((prev) => ({
+      ...prev,
+      hcr: byId.get('hcr') ?? undefined,
+      trip: byId.get('trip') ?? undefined,
+      mileRange: byId.get('miles') ?? undefined,
+      trackingStatus: byId.get('tracking') ?? undefined,
+      dateRange: range,
+    }));
+  };
+
+  // Table columns — render once, filter visible at render-time.
+  const STATUS_TO_CHIP: Record<string, ChipStatus> = {
+    Open: 'open',
+    Assigned: 'assigned',
+    Delivered: 'delivered',
+    Completed: 'delivered',
+    Canceled: 'cancelled',
+    Cancelled: 'cancelled',
+    Expired: 'expired',
+  };
+  const TRACKING_TO_CHIP: Record<string, ChipStatus> = {
+    Pending: 'pending',
+    'In Transit': 'active',
+    Completed: 'delivered',
+    Delayed: 'danger',
+    Canceled: 'cancelled',
+  };
+
+  const allColumns: Array<{ key: keyof ColumnVisibility; col: TableColumn<LoadTableRow> }> = [
+    {
+      key: 'orderNumber',
+      col: {
+        key: 'orderNumber', label: 'Order #', width: '120px',
+        render: (r) => (
+          <Link
+            href={`/loads/${r._id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="num text-[var(--accent)] font-medium hover:underline"
+          >
+            {r.orderNumber}
+          </Link>
+        ),
+      },
+    },
+    { key: 'customer', col: { key: 'customer', label: 'Customer', width: '1fr', render: (r) => r.customerName ?? '—' } },
+    { key: 'hcr',        col: { key: 'hcr',        label: 'HCR',     width: '90px',  render: (r) => r.parsedHcr        || '—' } },
+    { key: 'tripNumber', col: { key: 'tripNumber', label: 'Trip #',  width: '90px',  render: (r) => r.parsedTripNumber || '—' } },
+    {
+      key: 'route',
+      col: {
+        key: 'route', label: 'Route', width: '2.4fr',
+        render: (r) => (
+          <span className="inline-flex items-center gap-2 truncate uppercase">
+            <span>{[r.origin?.city, r.origin?.state].filter(Boolean).join(', ') || '—'}</span>
+            <WIcon name="arrow-right" size={11} color="var(--text-tertiary)" />
+            <span>{[r.destination?.city, r.destination?.state].filter(Boolean).join(', ') || '—'}</span>
+          </span>
+        ),
+      },
+    },
+    { key: 'stops', col: { key: 'stops', label: 'Stops', width: '70px', align: 'center', tnum: true, render: (r) => r.stopsCount } },
+    {
+      key: 'status',
+      col: {
+        key: 'status', label: 'Status', width: '110px',
+        render: (r) => <Chip status={STATUS_TO_CHIP[r.status] ?? 'inactive'} />,
+      },
+    },
+    {
+      key: 'tracking',
+      col: {
+        key: 'tracking', label: 'Tracking', width: '110px',
+        render: (r) => <Chip status={TRACKING_TO_CHIP[r.trackingStatus] ?? 'inactive'} label={r.trackingStatus} />,
+      },
+    },
+    {
+      key: 'loadDate',
+      col: {
+        key: 'loadDate', label: 'Load date', width: '110px', tnum: true,
+        render: (r) => (
+          <span className="num">{r.firstStopDate ? formatDate(r.firstStopDate) : '—'}</span>
+        ),
+      },
+    },
+  ];
+  const visibleTableColumns = allColumns.filter(({ key }) => columnVisibility[key]).map(({ col }) => col);
+
+  // ColumnsButton inside TableToolbar uses Set<string>.
+  const visibleColumnKeys = new Set(allColumns.filter(({ key }) => columnVisibility[key]).map(({ col }) => col.key));
+  const columnDefs: ColumnDef[] = allColumns.map(({ col }) => ({ key: col.key, label: typeof col.label === 'string' ? col.label : col.key }));
+  const onColumnsChange = (next: Set<string>) => {
+    setColumnVisibility((prev) => {
+      const updated = { ...prev } as ColumnVisibility;
+      allColumns.forEach(({ key, col }) => {
+        updated[key] = next.has(col.key);
+      });
+      return updated;
+    });
+  };
+
+  // SavedViews-driven tab strip — replaces the old shadcn Tabs row. The
+  // status filter still flows through `activeTab` ('all' | DB status), but
+  // the chrome (top header h1, Create Load button) is gone — actions live
+  // in the SavedViews actions slot per the new design.
+  const router = useRouter();
+  const views: SavedView[] = [
+    { id: 'all',      label: 'All' },
+    { id: 'Open',     label: 'Open',      count: loadCounts?.Open      ?? 0, tone: 'warn' },
+    { id: 'Assigned', label: 'Assigned',  count: loadCounts?.Assigned  ?? 0, tone: 'accent' },
+    { id: 'Delivered',label: 'Delivered', count: loadCounts?.Delivered ?? 0, tone: 'neutral' },
+    { id: 'Canceled', label: 'Cancelled', count: loadCounts?.Canceled  ?? 0, tone: 'neutral' },
+    { id: 'Expired',  label: 'Expired',   count: loadCounts?.Expired   ?? 0, tone: 'neutral' },
+  ];
 
   return (
-    <div className="h-full flex flex-col gap-4 p-6">
-      {/* Header */}
-      <div className="flex-shrink-0 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Loads</h1>
-          <p className="text-sm text-muted-foreground">Track and manage freight shipments</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm">
-                <Columns3 className="mr-2 h-4 w-4" />
-                Columns
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Toggle columns</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {(
-                [
-                  { key: 'orderNumber', label: 'Order #' },
-                  { key: 'customer', label: 'Customer' },
-                  { key: 'route', label: 'Route' },
-                  { key: 'stops', label: 'Stops' },
-                  { key: 'status', label: 'Status' },
-                  { key: 'tracking', label: 'Tracking' },
-                  { key: 'hcr', label: 'HCR' },
-                  { key: 'tripNumber', label: 'Trip #' },
-                  { key: 'loadDate', label: 'Load Date' },
-                ] as { key: keyof ColumnVisibility; label: string }[]
-              ).map(({ key, label }) => (
-                <DropdownMenuCheckboxItem
-                  key={key}
-                  checked={columnVisibility[key]}
-                  onCheckedChange={(checked) => setColumnVisibility((prev) => ({ ...prev, [key]: !!checked }))}
-                >
-                  {label}
-                </DropdownMenuCheckboxItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <Link href="/loads/new">
-            <Button size="sm">
-              <Plus className="mr-2 h-4 w-4" />
-              Create Load
-            </Button>
-          </Link>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <Card className="flex-1 flex flex-col p-0 gap-0 overflow-hidden min-h-0">
-        <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full flex-1 flex flex-col gap-0 min-h-0">
-          <div className="flex-shrink-0 px-4">
-            <TabsList className="h-auto p-0 bg-transparent border-0">
-              <TabsTrigger
-                value="all"
-                className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
-              >
-                <Package className="mr-2 h-4 w-4" />
-                All
-              </TabsTrigger>
-              <TabsTrigger
-                value="Open"
-                className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
-              >
-                <Clock className="mr-2 h-4 w-4" />
-                Open
-                {(loadCounts?.Open || 0) > 0 && (
-                  <Badge variant="secondary" className="ml-2 bg-yellow-100 text-yellow-800">
-                    {loadCounts?.Open}
-                  </Badge>
-                )}
-              </TabsTrigger>
-              <TabsTrigger
-                value="Assigned"
-                className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
-              >
-                <Truck className="mr-2 h-4 w-4" />
-                Assigned
-                {(loadCounts?.Assigned || 0) > 0 && (
-                  <Badge variant="secondary" className="ml-2 bg-blue-100 text-blue-800">
-                    {loadCounts?.Assigned}
-                  </Badge>
-                )}
-              </TabsTrigger>
-              <TabsTrigger
-                value="Delivered"
-                className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
-              >
-                <CheckCircle2 className="mr-2 h-4 w-4" />
-                Delivered
-                {(loadCounts?.Delivered || 0) > 0 && (
-                  <Badge variant="secondary" className="ml-2 bg-green-100 text-green-800">
-                    {loadCounts?.Delivered}
-                  </Badge>
-                )}
-              </TabsTrigger>
-              <TabsTrigger
-                value="Canceled"
-                className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
-              >
-                <Ban className="mr-2 h-4 w-4" />
-                Cancelled
-                {(loadCounts?.Canceled || 0) > 0 && (
-                  <Badge variant="secondary" className="ml-2">
-                    {loadCounts?.Canceled}
-                  </Badge>
-                )}
-              </TabsTrigger>
-              <TabsTrigger
-                value="Expired"
-                className="data-[state=active]:border-b-2 data-[state=active]:border-primary data-[state=active]:!bg-transparent data-[state=active]:!shadow-none data-[state=active]:border-l-0 data-[state=active]:border-r-0 data-[state=active]:border-t-0 rounded-none px-4 py-3 !bg-transparent !shadow-none border-0"
-              >
-                <TimerOff className="mr-2 h-4 w-4" />
-                Expired
-                {(loadCounts?.Expired || 0) > 0 && (
-                  <Badge variant="secondary" className="ml-2 bg-orange-100 text-orange-800">
-                    {loadCounts?.Expired}
-                  </Badge>
-                )}
-              </TabsTrigger>
-            </TabsList>
-          </div>
-
-          {/* Tab Content */}
-          <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-            {/* Filter Bar */}
-            <LoadFilterBar
-              filters={filters}
-              onFiltersChange={setFilters}
-              availableHCRs={availableHCRs}
-              availableTrips={availableTrips}
+    <div className="h-full flex flex-col">
+      <SavedViews
+        views={views}
+        activeId={activeTab}
+        onChange={handleTabChange}
+        actions={
+          <>
+            <DraftListPill
+              entity="load"
+              draftKey="load-create-v1"
+              createHref="/loads/new"
             />
+            <WBtn size="sm" leading="export">Export</WBtn>
+            <WBtn size="sm" variant="primary" leading="plus" onClick={() => router.push('/loads/new')}>
+              New load
+            </WBtn>
+          </>
+        }
+      />
 
-            <div className="flex-1 p-4 overflow-hidden min-h-0 flex flex-col">
-              <div className="border rounded-lg flex-1 min-h-0 overflow-hidden flex flex-col">
-                {/* Floating Action Bar */}
-                {selectedLoadIds.size > 0 && (
-                  <FloatingActionBar
-                    selectedCount={selectedLoadIds.size}
-                    onBulkDownload={handleBulkDownload}
-                    onUpdateStatus={handleUpdateStatus}
-                    onExport={handleExport}
-                    onDelete={handleDelete}
-                    onClearSelection={() => setSelectedLoadIds(new Set())}
-                  />
-                )}
+      <TableToolbar
+        searchPlaceholder="Search order #, customer, city…"
+        searchValue={filters.search}
+        onSearchChange={(v) => setFilters((f) => ({ ...f, search: v }))}
+        columns={columnDefs}
+        visibleColumns={visibleColumnKeys}
+        onVisibleColumnsChange={onColumnsChange}
+        filterTrigger={chipFilters.length === 0 ? (
+          <FilterBar
+            properties={filterProps}
+            value={chipFilters}
+            onChange={onChipFiltersChange}
+            slot="trigger"
+          />
+        ) : null}
+      >
+        {chipFilters.length > 0 && (
+          <>
+            <FilterBar
+              properties={filterProps}
+              value={chipFilters}
+              onChange={onChipFiltersChange}
+              slot="chips"
+            />
+            <FilterBar
+              properties={filterProps}
+              value={chipFilters}
+              onChange={onChipFiltersChange}
+              slot="trigger"
+            />
+          </>
+        )}
+      </TableToolbar>
 
-                {/* Virtualized Table */}
-                <VirtualizedLoadsTable
-                  loads={loadsWithMappedStatus as any}
-                  selectedIds={selectedLoadIds}
-                  focusedRowIndex={focusedRowIndex}
-                  isAllSelected={isAllSelected}
-                  onSelectAll={handleSelectAll}
-                  onSelectRow={handleSelectRow}
-                  onRowClick={(loadId) => {
-                    // TODO: Open load detail modal or navigate
-                    console.log('Open load:', loadId);
-                  }}
-                  formatDate={formatDate}
-                  getStatusColor={getStatusColor}
-                  getTrackingColor={getTrackingColor}
-                  columnVisibility={columnVisibility}
-                  emptyMessage={`No ${activeTab === 'all' ? '' : activeTab.toLowerCase() + ' '}loads${filters.search ? ' matching your search' : ''}`}
-                  isLoadingFirstPage={paginationStatus === 'LoadingFirstPage'}
-                  onLoadMore={() => loadMore(50)}
-                  hasMore={paginationStatus === 'CanLoadMore'}
-                  isLoadingMore={paginationStatus === 'LoadingMore'}
-                />
-              </div>
-            </div>
+      <div className="flex-1 min-h-0 flex flex-col relative bg-card">
+        <Table<LoadTableRow>
+          columns={visibleTableColumns}
+          rows={loadRows}
+          density="compact"
+          selected={selectedRowIds}
+          onSelect={(id) => handleSelectRow(id as Id<'loadInformation'>, !selectedLoadIds.has(id as Id<'loadInformation'>))}
+          onSelectAll={() => handleSelectAll(!isAllSelected)}
+          onRowClick={(row) => router.push(`/loads/${row._id}`)}
+          getRowId={(row) => row._id as unknown as string}
+          onEndReached={paginationStatus === 'CanLoadMore' ? () => loadMore(50) : undefined}
+        />
+        {paginationStatus === 'LoadingFirstPage' && loadRows.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-[12.5px] text-[var(--text-tertiary)]">
+            Loading loads…
           </div>
-        </Tabs>
-      </Card>
+        )}
+        {paginationStatus !== 'LoadingFirstPage' && loadRows.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-[12.5px] text-[var(--text-tertiary)]">
+            {`No ${activeTab === 'all' ? '' : activeTab.toLowerCase() + ' '}loads${filters.search ? ' matching your search' : ''}`}
+          </div>
+        )}
+        <InfiniteFooter
+          loaded={loadRows.length}
+          total={infiniteTotal}
+          loading={paginationStatus === 'LoadingMore'}
+        />
+        <BulkBar
+          count={selectedLoadIds.size}
+          onClear={() => setSelectedLoadIds(new Set())}
+          actions={
+            <>
+              <BulkAction icon="download" label="Manifests" onClick={handleBulkDownload} />
+              <UpdateStatusBulkMenu onUpdateStatus={handleUpdateStatus} />
+              <BulkAction icon="export" label="Export" onClick={handleExport} />
+              <BulkAction icon="close" label="Delete" danger onClick={handleDelete} />
+            </>
+          }
+        />
+      </div>
 
       {/* Bulk Action Resolution Modal */}
       <BulkActionResolutionModal
@@ -625,5 +739,95 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
         onConfirm={handleCancellationConfirm}
       />
     </div>
+  );
+}
+
+// ─── Date preset bridge ─────────────────────────────────────────────────
+// FilterBar's date kind commits a preset string (e.g. "Last 7 days"). The
+// Convex `getLoads` query takes concrete YYYY-MM-DD bounds; we keep both
+// in sync via these helpers. Range is inclusive on both ends.
+
+const DAY_MS = 86_400_000;
+
+function startOfDay(t: number): number {
+  const d = new Date(t);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+function endOfDay(t: number): number {
+  const d = new Date(t);
+  d.setHours(23, 59, 59, 999);
+  return d.getTime();
+}
+
+function rangeForDatePreset(preset: string | undefined): { start: number; end: number } | undefined {
+  if (!preset) return undefined;
+  // Custom range — `YYYY-MM-DD..YYYY-MM-DD` from FilterBar's calendar.
+  const custom = parseDateRangeValue(preset);
+  if (custom) {
+    return { start: startOfDay(custom.from.getTime()), end: endOfDay(custom.to.getTime()) };
+  }
+  const now = Date.now();
+  const todayStart = startOfDay(now);
+  const todayEnd = endOfDay(now);
+  switch (preset) {
+    case 'Today':
+      return { start: todayStart, end: todayEnd };
+    case 'Tomorrow':
+      return { start: todayStart + DAY_MS, end: todayEnd + DAY_MS };
+    case 'Next 7 days':
+      return { start: todayStart, end: todayEnd + 6 * DAY_MS };
+    case 'Last 7 days':
+      return { start: todayStart - 6 * DAY_MS, end: todayEnd };
+    case 'This month': {
+      const d = new Date(now);
+      const first = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+      const last = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+      return { start: startOfDay(first), end: endOfDay(last.getTime()) };
+    }
+    default:
+      return undefined;
+  }
+}
+
+// Reverse-map a saved {start, end} back to a preset label so the chip
+// keeps the friendly name across remounts. Falls back to a serialized
+// custom range string for ranges that don't match a named preset.
+function labelForDateRange(range: { start: number; end: number }): string | undefined {
+  const presets = ['Today', 'Tomorrow', 'Next 7 days', 'Last 7 days', 'This month'];
+  for (const p of presets) {
+    const r = rangeForDatePreset(p);
+    if (r && r.start === range.start && r.end === range.end) return p;
+  }
+  return formatDateRangeValue({ from: new Date(range.start), to: new Date(range.end) });
+}
+
+// ─── BulkBar dropdown — Update Status ────────────────────────────────────
+// BulkAction is a single-click button. The Update Status affordance needs
+// a popover with four target states, so we render a Radix popover trigger
+// styled to match the BulkAction pill.
+function UpdateStatusBulkMenu({
+  onUpdateStatus,
+}: {
+  onUpdateStatus: (status: 'Open' | 'Assigned' | 'Delivered' | 'Canceled' | 'Expired') => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="focus-ring h-9 px-3 rounded-lg inline-flex items-center gap-1.5 text-[12.5px] font-medium text-white bg-transparent cursor-pointer transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)] hover:bg-white/10"
+        >
+          <span>Update status</span>
+          <span className="opacity-70 text-[10px]">▾</span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        <DropdownMenuItem onClick={() => onUpdateStatus('Open')}>Mark as Open</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onUpdateStatus('Assigned')}>Mark as Assigned</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onUpdateStatus('Delivered')}>Mark as Delivered</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => onUpdateStatus('Canceled')}>Mark as Canceled</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

@@ -1075,10 +1075,16 @@ export const getByIdWithRange = query({
     const firstPickup = sortedStops.find((s) => s.stopType === 'PICKUP');
     const lastDelivery = sortedStops.filter((s) => s.stopType === 'DELIVERY').pop();
 
+    // HCR / TRIP from facet tags (the columns were dropped in Phase 5b, so
+    // we always have to read these through the facet helper).
+    const facets = await getLoadFacets(ctx, load._id);
+
     return {
       ...load,
       startTime,
       endTime,
+      parsedHcr: facets.hcr,
+      parsedTripNumber: facets.trip,
       origin: firstPickup
         ? {
             city: firstPickup.city,
@@ -2104,6 +2110,173 @@ export const getByDriver = query({
 });
 
 /**
+ * Get the N most recent loads for a driver, regardless of status.
+ *
+ * Used by Driver Detail's Overview "Recent trips" card so it stays
+ * independent of the Loads tab's status filter. Same multi-source
+ * dedup as `getByDriver`, but no status constraints — just sort by
+ * createdAt desc and slice.
+ */
+export const getRecentByDriver = query({
+  args: {
+    driverId: v.id('drivers'),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
+
+    const limit = args.limit ?? 4;
+    const seenLoadIds = new Set<string>();
+    const enrichedLoads: Array<Record<string, any>> = [];
+
+    const allLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
+      .order('desc')
+      .collect();
+
+    for (const leg of allLegs) {
+      if (seenLoadIds.has(leg.loadId)) continue;
+      seenLoadIds.add(leg.loadId);
+      if (leg.driverId !== args.driverId) continue;
+      const enriched = await enrichLoadFromLeg(ctx, leg);
+      if (enriched) enrichedLoads.push(enriched);
+    }
+
+    const loadStatuses = ['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const;
+    for (const status of loadStatuses) {
+      const fallbackLoads = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_primary_driver_status', (q) => q.eq('primaryDriverId', args.driverId).eq('status', status))
+        .collect();
+      for (const load of fallbackLoads) {
+        if (seenLoadIds.has(load._id)) continue;
+        seenLoadIds.add(load._id);
+        const enrichedFallback = await enrichLoadDirectly(ctx, load);
+        if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+      }
+    }
+
+    const assignmentStatuses = ['OFFERED', 'ACCEPTED', 'AWARDED', 'DECLINED', 'WITHDRAWN', 'IN_PROGRESS', 'COMPLETED', 'CANCELED'] as const;
+    for (const aStatus of assignmentStatuses) {
+      const assignments = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_assigned_driver', (q) => q.eq('assignedDriverId', args.driverId).eq('status', aStatus))
+        .collect();
+      for (const assignment of assignments) {
+        if (seenLoadIds.has(assignment.loadId)) continue;
+        seenLoadIds.add(assignment.loadId);
+        const load = await ctx.db.get(assignment.loadId);
+        if (!load) continue;
+        const enrichedFallback = await enrichLoadDirectly(ctx, load);
+        if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+      }
+    }
+
+    enrichedLoads.sort((a, b) => b.createdAt - a.createdAt);
+    return enrichedLoads.slice(0, limit);
+  },
+});
+
+/**
+ * Suggested drivers for a load awaiting assignment.
+ *
+ * Score-rank active in-org drivers, with a busy check via the
+ * `dispatchLegs.by_driver(driverId, status)` index so only drivers
+ * with no PENDING/ACTIVE leg are returned. Trimmed to the K-best
+ * candidates BEFORE the busy check so the index walk stays bounded
+ * (default 12 candidates → at most 24 indexed lookups).
+ *
+ * Scoring (lightweight, no I/O):
+ *   • +10 driver.state === origin.state
+ *   • +5  Class A license (typical for tractor-trailer)
+ *   • alpha tiebreak by firstName
+ */
+export const getSuggestedDriversForLoad = query({
+  args: {
+    loadId: v.id('loadInformation'),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+    const limit = args.limit ?? 5;
+
+    // Origin stop drives the proximity boost.
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    const originStop = stops.find((s) => s.stopType === 'PICKUP');
+    const originState = originStop?.state?.toUpperCase();
+
+    // Pull org drivers and pre-filter cheaply.
+    const orgDrivers = await ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
+      .collect();
+
+    type Candidate = (typeof orgDrivers)[number] & { score: number };
+    const candidates: Candidate[] = orgDrivers
+      .filter(
+        (d) =>
+          d.employmentStatus === 'Active' &&
+          !d.isDeleted &&
+          d._id !== load.primaryDriverId,
+      )
+      .map((d) => {
+        let score = 0;
+        if (originState && d.state && d.state.toUpperCase() === originState) score += 10;
+        if (d.licenseClass === 'A') score += 5;
+        return { ...d, score };
+      })
+      .sort((a, b) => b.score - a.score || a.firstName.localeCompare(b.firstName))
+      .slice(0, Math.max(limit * 3, 12)); // Take 3× limit (or 12) as the busy-check pool.
+
+    // Busy check — at most 2 indexed lookups per candidate (PENDING + ACTIVE).
+    const busyChecks = await Promise.all(
+      candidates.map(async (d) => {
+        const pending = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_driver', (q) => q.eq('driverId', d._id).eq('status', 'PENDING'))
+          .first();
+        if (pending) return true;
+        const active = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_driver', (q) => q.eq('driverId', d._id).eq('status', 'ACTIVE'))
+          .first();
+        return !!active;
+      }),
+    );
+
+    const eligible = candidates
+      .filter((_, i) => !busyChecks[i])
+      .slice(0, limit)
+      .map((d) => {
+        const reasons: string[] = [];
+        if (originState && d.state && d.state.toUpperCase() === originState) reasons.push('In origin state');
+        if (d.licenseClass === 'A') reasons.push('CDL-A');
+        return {
+          _id: d._id,
+          firstName: d.firstName,
+          middleName: d.middleName,
+          lastName: d.lastName,
+          licenseClass: d.licenseClass,
+          state: d.state,
+          city: d.city,
+          score: d.score,
+          reasons,
+        };
+      });
+
+    return eligible;
+  },
+});
+
+/**
  * Get loads assigned to a specific carrier partnership.
  * Primary source: dispatchLegs with carrierPartnershipId.
  * Fallback: loadCarrierAssignments for loads where the dispatch leg
@@ -2274,7 +2447,19 @@ export const autoExpireStaleLoads = internalMutation({
 
     // Dispatch phase: fan out to all orgs
     if (!args.orgId) {
-      const orgs = await ctx.db.query('organizations').take(500);
+      // 1000 is 2× the previous (500) cap, comfortably under Convex's
+      // per-mutation scheduled-job and document-write ceilings. If we
+      // ever hit this cap we'll see it in the warn below and can
+      // graduate to paginate-and-reschedule.
+      const ORG_FAN_OUT_CAP = 1000;
+      const orgs = await ctx.db.query('organizations').take(ORG_FAN_OUT_CAP);
+      if (orgs.length >= ORG_FAN_OUT_CAP) {
+        console.warn(
+          `[autoExpireStaleLoads] ORG_FAN_OUT_CAP hit (${ORG_FAN_OUT_CAP}). ` +
+            `Some orgs may not be processed this run — switch this dispatch ` +
+            `to paginate-and-reschedule.`,
+        );
+      }
       for (const org of orgs) {
         if (!org.workosOrgId) continue;
         await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {

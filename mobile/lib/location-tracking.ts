@@ -798,9 +798,27 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
   // Step 6: Sync to Convex via the HTTP endpoint (no Clerk JWT needed).
   // Uses a static API key that works regardless of auth state.
+  //
+  // Retry policy: bounded retries with short backoff (1s, 3s) inside the
+  // headless task. Absorbs transient blips (brief dead zones, 5xx, DNS
+  // hiccups) without waiting for the next LOCATION_TASK invocation —
+  // empirically the gap between fires can be 15-40 min when Android Doze
+  // is batching FGS callbacks, so the cost of waiting for the next fire
+  // is high.
+  //
+  // Total worst-case retry budget: ~4s, well under the headless context's
+  // ~20-30s runtime ceiling (Firebase Messaging SDK 23.2.1 caps background
+  // broadcasts at 20s; expo-task-manager TASKMANAGER_BG_TIME_LIMIT_MS
+  // gives ~30s on Android). Terminal HTTP errors (auth, 400s) skip retry
+  // because they won't resolve on a re-attempt with identical payload +
+  // API key.
+  //
+  // Mirrors the foreground `forceFlush` retry pattern intentionally — same
+  // strategy, tighter delays appropriate for the BG runtime budget.
   let syncAttempted = false;
   let syncSuccess = false;
   let syncCount = 0;
+  let syncRetries = 0;
   if (sqliteAvailable && MOBILE_LOCATION_API_KEY) {
     try {
       const unsynced = await getUnsyncedLocations(SYNC_BATCH_SIZE);
@@ -820,15 +838,60 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
           recordedAt: loc.recordedAt,
         }));
 
-        const result = await syncViaHttpEndpoint(payload, state.organizationId);
-        syncSuccess = true;
-        syncCount = result.inserted;
+        // Attempt 1 fires immediately; subsequent attempts wait the
+        // corresponding delay before re-firing. Total attempts = delays + 1.
+        const BG_RETRY_DELAYS_MS = [1000, 3000];
+        let result: IngestResponse | null = null;
+        let lastErr: unknown = null;
 
-        await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+        for (let attempt = 0; attempt <= BG_RETRY_DELAYS_MS.length; attempt++) {
+          if (attempt > 0) {
+            await new Promise((r) => setTimeout(r, BG_RETRY_DELAYS_MS[attempt - 1]));
+            syncRetries++;
+          }
+          try {
+            result = await syncViaHttpEndpoint(payload, state.organizationId);
+            break; // success
+          } catch (err) {
+            lastErr = err;
+            const msg = err instanceof Error ? err.message : String(err);
+            // Terminal errors won't resolve on retry — don't burn budget.
+            // 4xx (except 408/429) indicates a client-side problem; auth
+            // won't change between attempts. 5xx, timeouts, and TypeError
+            // (network) fall through and get retried.
+            if (
+              msg.includes('HTTP 401') ||
+              msg.includes('HTTP 403') ||
+              msg.includes('HTTP 400')
+            ) {
+              lg.warn(`BG HTTP sync terminal error (no retry): ${msg}`);
+              break;
+            }
+            if (attempt < BG_RETRY_DELAYS_MS.length) {
+              lg.warn(
+                `BG HTTP sync attempt ${attempt + 1}/${BG_RETRY_DELAYS_MS.length + 1} failed: ${msg} — retrying`,
+              );
+            }
+          }
+        }
+
+        if (result) {
+          syncSuccess = true;
+          syncCount = result.inserted;
+          await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+        } else {
+          const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+          lg.warn(
+            `BG HTTP sync failed after ${BG_RETRY_DELAYS_MS.length + 1} attempts (points safe in local queue): ${errMsg}`,
+          );
+          trackBGTaskError({ step: 'sync', error: errMsg });
+        }
       }
     } catch (flushError) {
+      // Catches errors from getUnsyncedLocations / payload prep — not the
+      // HTTP call (that's handled inside the retry loop).
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
-      lg.warn(`BG HTTP sync failed (points safe in local queue): ${errMsg}`);
+      lg.warn(`BG sync prep failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
       trackBGTaskError({ step: 'sync', error: errMsg });
     }

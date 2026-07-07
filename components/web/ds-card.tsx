@@ -77,7 +77,7 @@ export interface DSPropsEditableItem {
   key: string;
   label: React.ReactNode;
   /** Current raw value (string for most types, string[] for `multiselect`). */
-  value: string | string[];
+  value?: string | string[];
   /** Optional rich display override — chips, highlights, formatted spans. */
   display?: React.ReactNode;
   editor?: DSPropsEditableEditor;
@@ -85,6 +85,11 @@ export interface DSPropsEditableItem {
   readOnly?: boolean;
   placeholder?: string;
   ariaLabel?: string;
+  /** Custom value cell. When provided, replaces the entire EditableField
+   *  for this row — used for fields that need a non-string editor (e.g.
+   *  `<EditableAddress>` with a structured AddressData payload). The row
+   *  still gets the same hairline + label-column treatment as the rest. */
+  custom?: React.ReactNode;
 }
 
 interface DSPropsProps {
@@ -156,7 +161,7 @@ export function DSPropsEditable({
               i > 0 && 'border-t border-[var(--border-hairline)]',
             )}
           >
-            <DSPropsEditableField item={it} onCommit={onCommit} />
+            {it.custom !== undefined ? it.custom : <DSPropsEditableField item={it} onCommit={onCommit} />}
           </dd>
         </React.Fragment>
       ))}
@@ -175,8 +180,10 @@ function DSPropsEditableField({
   const type = editor.type ?? 'text';
   const commit = (next: string | string[]) => onCommit?.(item.key, next);
 
+  const itemValue = item.value ?? '';
+
   if (type === 'multiselect') {
-    const value = Array.isArray(item.value) ? item.value : item.value ? item.value.split(' · ').map((s) => s.trim()).filter(Boolean) : [];
+    const value = Array.isArray(itemValue) ? itemValue : itemValue ? itemValue.split(' · ').map((s) => s.trim()).filter(Boolean) : [];
     return (
       <EditableField
         type="multiselect"
@@ -191,7 +198,7 @@ function DSPropsEditableField({
     );
   }
 
-  const value = Array.isArray(item.value) ? item.value.join(', ') : item.value ?? '';
+  const value = Array.isArray(itemValue) ? itemValue.join(', ') : itemValue;
 
   if (type === 'date') {
     return (

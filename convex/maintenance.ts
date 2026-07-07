@@ -96,15 +96,22 @@ export const reconcileFirstStopDateBatch = internalMutation({
 export const runFirstStopDateReconciliation = internalAction({
   args: {},
   handler: async (ctx) => {
+    // Safety cap matching pruneOrphanedFacetValues. Bounds the loop so a
+    // stuck pagination cursor or unexpected table growth can't burn the
+    // entire 10-min action budget. Next nightly cron will continue from
+    // where this run left off.
+    const MAX_ITERATIONS = 20_000;
+
     let cursor: string | null = null;
     let totalChecked = 0;
     let totalDriftFound = 0;
     let totalFixed = 0;
     let batchCount = 0;
+    let hitCap = false;
 
     console.log("Starting firstStopDate reconciliation...");
 
-    while (true) {
+    while (batchCount < MAX_ITERATIONS) {
       const result: {
         continueCursor: string | null;
         checked: number;
@@ -128,14 +135,24 @@ export const runFirstStopDateReconciliation = internalAction({
       cursor = result.continueCursor;
     }
 
+    if (batchCount >= MAX_ITERATIONS) {
+      hitCap = true;
+      console.warn(
+        `[maintenance.runFirstStopDateReconciliation] iteration cap hit: ` +
+        `batchCount=${batchCount} totalChecked=${totalChecked} ` +
+        `(remaining rows will be processed on tomorrow's cron run)`
+      );
+    }
+
     const summary = {
       success: true,
       totalChecked,
       totalDriftFound,
       totalFixed,
       batchCount,
-      driftRate: totalChecked > 0 
-        ? `${((totalDriftFound / totalChecked) * 100).toFixed(2)}%` 
+      hitCap,
+      driftRate: totalChecked > 0
+        ? `${((totalDriftFound / totalChecked) * 100).toFixed(2)}%`
         : "0%",
     };
 

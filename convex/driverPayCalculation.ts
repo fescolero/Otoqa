@@ -435,6 +435,27 @@ export const calculateDriverPay = internalMutation({
       await ctx.db.patch(leg.loadId, { primaryDriverId: driverId });
     }
 
+    // 10. Cascade to the new pay engine. Every legacy pay calc — assignment,
+    //     stop-time edit, manual recalc — needs to fan out a fresh payItems
+    //     calculation against the same leg. Without this, payItems stays
+    //     empty until someone manually clicks Recalculate, which is why the
+    //     load-detail Pay plan card was reading "No plan assigned" right
+    //     after driver assignment. Scheduled (not awaited) so a missing
+    //     payProfileAssignment on the new engine can't break legacy pay.
+    //
+    //     Latest-wins coalesce: patch leg.latestRecalcRequestedAt to the
+    //     same timestamp we pass to the scheduled job. If carrier pay
+    //     cascade fires immediately after this one (assignment flow),
+    //     the newer requestedAt wins and the older scheduled job exits
+    //     early instead of racing on payItems. See schema.ts:dispatchLegs.
+    const recalcRequestedAt = Date.now();
+    await ctx.db.patch(args.legId, { latestRecalcRequestedAt: recalcRequestedAt });
+    await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForLeg.calculatePayForLeg, {
+      legId: args.legId,
+      userId: args.userId,
+      requestedAt: recalcRequestedAt,
+    });
+
     return {
       success: true,
       total: totalPay,
