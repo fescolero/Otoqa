@@ -125,16 +125,23 @@ function ReadOnlyValue({
   );
 }
 
-function EditAffordance({ icon, onClick, label }: { icon: 'edit' | 'calendar' | 'chevron-down'; onClick: () => void; label?: string }) {
+/**
+ * Decorative-only edit affordance. The wrapping editor (date / select /
+ * text field) already owns the click target — this icon exists purely as
+ * a visual cue that the value is editable. Making it `pointer-events-none`
+ * avoids a second tap target alongside the value, which confused users
+ * (e.g. the calendar icon next to a status chip looked like a separate
+ * action distinct from clicking the date itself).
+ */
+function EditAffordance({ icon, label }: { icon: 'edit' | 'calendar' | 'chevron-down'; label?: string }) {
   return (
-    <button
-      type="button"
+    <span
+      aria-hidden
       title={label ?? 'Edit'}
-      onClick={onClick}
-      className="opacity-0 group-hover:opacity-100 transition-opacity inline-flex items-center justify-center h-5 w-5 rounded text-[var(--text-tertiary)] hover:bg-[var(--bg-row-hover)] hover:text-foreground"
+      className="pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity inline-flex items-center justify-center h-5 w-5 rounded text-[var(--text-tertiary)]"
     >
       <WIcon name={icon} size={11} />
-    </button>
+    </span>
   );
 }
 
@@ -206,7 +213,7 @@ function TextField({ type = 'text', value, onCommit, placeholder, readOnly, clas
       >
         {display ?? value ?? <span className="text-[var(--text-tertiary)]">{placeholder ?? '—'}</span>}
       </button>
-      <EditAffordance icon="edit" onClick={() => setEditing(true)} />
+      <EditAffordance icon="edit" />
       <SavedHint ago={ago} />
     </span>
   );
@@ -269,7 +276,7 @@ function TextareaField({ value, onCommit, rows = 3, placeholder, readOnly, class
       >
         {display ?? value ?? <span className="text-[var(--text-tertiary)]">{placeholder ?? '—'}</span>}
       </button>
-      <EditAffordance icon="edit" onClick={() => setEditing(true)} />
+      <EditAffordance icon="edit" />
       <SavedHint ago={ago} />
     </span>
   );
@@ -304,13 +311,16 @@ function DateField({ value, onCommit, placeholder, readOnly, className, display,
             {display_}
           </button>
         </PopoverPrimitive.Trigger>
-        <EditAffordance icon="calendar" onClick={() => setOpen(true)} />
+        <EditAffordance icon="calendar" />
         <SavedHint ago={ago} />
       </span>
       <PopoverPrimitive.Portal>
         <PopoverPrimitive.Content
           align="start"
+          side="bottom"
           sideOffset={4}
+          avoidCollisions
+          collisionPadding={8}
           className="z-50 rounded-lg border border-[var(--border-hairline-strong)] bg-popover shadow-[var(--shadow-popover)] p-0"
         >
           <Calendar
@@ -365,7 +375,7 @@ function SelectField({ value, onCommit, options, placeholder, readOnly, classNam
             {display_}
           </button>
         </PopoverPrimitive.Trigger>
-        <EditAffordance icon="chevron-down" onClick={() => setOpen(true)} />
+        <EditAffordance icon="chevron-down" />
         <SavedHint ago={ago} />
       </span>
       <PopoverPrimitive.Portal>
@@ -459,7 +469,7 @@ function MultiselectField({ value, onCommit, options, placeholder, readOnly, cla
             {display_}
           </button>
         </PopoverPrimitive.Trigger>
-        <EditAffordance icon="chevron-down" onClick={() => setOpen(true)} />
+        <EditAffordance icon="chevron-down" />
         <SavedHint ago={ago} />
       </span>
       <PopoverPrimitive.Portal>

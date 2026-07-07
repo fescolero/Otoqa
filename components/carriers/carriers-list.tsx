@@ -37,6 +37,7 @@ import {
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { toast } from 'sonner';
+import { runChunkedBulk } from '@/lib/chunked-bulk';
 import { useUserPreferences } from '@/components/web/shell/use-user-preferences';
 import { DraftListPill } from '@/components/web/create-form';
 
@@ -443,15 +444,20 @@ export function CarriersList({ workosOrgId, onCreate, onImport, onExport }: Carr
     const ids = [...selected];
     if (ids.length === 0) return;
     try {
-      const result = await bulkTerminate({
-        partnershipIds: ids as Id<'carrierPartnerships'>[],
-        userId: 'system',
-        userName: 'System',
-      });
+      // Terminate cascades across the linked carrier org (assignments, drivers,
+      // identity links), so keep chunks small to stay under the ~1s budget.
+      const result = await runChunkedBulk(
+        ids as Id<'carrierPartnerships'>[],
+        async (chunk) => {
+          const r = await bulkTerminate({ partnershipIds: chunk, userId: 'system', userName: 'System' });
+          return { success: r.succeeded, failed: r.failed };
+        },
+        { chunkSize: 10 },
+      );
       if (result.failed > 0) {
-        toast.error(`Terminated ${result.succeeded}, ${result.failed} failed`);
+        toast.error(`Terminated ${result.success}, ${result.failed} failed`);
       } else {
-        toast.success(`Terminated ${result.succeeded} partnership${result.succeeded !== 1 ? 's' : ''}`);
+        toast.success(`Terminated ${result.success} partnership${result.success !== 1 ? 's' : ''}`);
       }
       setSelected(new Set());
     } catch (e) {
@@ -464,15 +470,18 @@ export function CarriersList({ workosOrgId, onCreate, onImport, onExport }: Carr
     const ids = [...selected];
     if (ids.length === 0) return;
     try {
-      const result = await bulkReactivate({
-        partnershipIds: ids as Id<'carrierPartnerships'>[],
-        userId: 'system',
-        userName: 'System',
-      });
+      const result = await runChunkedBulk(
+        ids as Id<'carrierPartnerships'>[],
+        async (chunk) => {
+          const r = await bulkReactivate({ partnershipIds: chunk, userId: 'system', userName: 'System' });
+          return { success: r.succeeded, failed: r.failed };
+        },
+        { chunkSize: 10 },
+      );
       if (result.failed > 0) {
-        toast.error(`Reactivated ${result.succeeded}, ${result.failed} failed`);
+        toast.error(`Reactivated ${result.success}, ${result.failed} failed`);
       } else {
-        toast.success(`Reactivated ${result.succeeded} partnership${result.succeeded !== 1 ? 's' : ''}`);
+        toast.success(`Reactivated ${result.success} partnership${result.success !== 1 ? 's' : ''}`);
       }
       setSelected(new Set());
     } catch (e) {
@@ -486,15 +495,20 @@ export function CarriersList({ workosOrgId, onCreate, onImport, onExport }: Carr
     if (ids.length === 0) return;
     if (!window.confirm(`Permanently delete ${ids.length} partnership${ids.length !== 1 ? 's' : ''}? This cannot be undone.`)) return;
     try {
-      const result = await permanentlyDelete({
-        partnershipIds: ids as Id<'carrierPartnerships'>[],
-        userId: 'system',
-        userName: 'System',
-      });
+      // The most expensive path — deletes drivers, identity links, assignments
+      // and the org itself per partnership. Small chunks.
+      const result = await runChunkedBulk(
+        ids as Id<'carrierPartnerships'>[],
+        async (chunk) => {
+          const r = await permanentlyDelete({ partnershipIds: chunk, userId: 'system', userName: 'System' });
+          return { success: r.succeeded, failed: r.failed };
+        },
+        { chunkSize: 8 },
+      );
       if (result.failed > 0) {
-        toast.error(`Deleted ${result.succeeded}, ${result.failed} failed`);
+        toast.error(`Deleted ${result.success}, ${result.failed} failed`);
       } else {
-        toast.success(`Permanently deleted ${result.succeeded} partnership${result.succeeded !== 1 ? 's' : ''}`);
+        toast.success(`Permanently deleted ${result.success} partnership${result.success !== 1 ? 's' : ''}`);
       }
       setSelected(new Set());
     } catch (e) {

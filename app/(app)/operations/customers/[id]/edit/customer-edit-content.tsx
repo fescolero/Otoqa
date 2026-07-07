@@ -1,20 +1,10 @@
 'use client';
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Textarea } from '@/components/ui/textarea';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation, useQuery } from 'convex/react';
@@ -142,6 +132,7 @@ export function CustomerEditContent({ customerId }: { customerId: string }) {
         secondaryContactPhone: (formData.get('secondaryContactPhone') as string) || undefined,
         loadingType: (formData.get('loadingType') as any) || undefined,
         locationScheduleType: (formData.get('locationScheduleType') as any) || undefined,
+        paymentTerms: (formData.get('paymentTerms') as any) || undefined,
         instructions: (formData.get('instructions') as string) || undefined,
         internalNotes: (formData.get('internalNotes') as string) || undefined,
       });
@@ -157,32 +148,6 @@ export function CustomerEditContent({ customerId }: { customerId: string }) {
 
   return (
     <>
-        <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b bg-background">
-          <div className="flex items-center gap-2 px-4">
-            <SidebarTrigger className="-ml-1" />
-            <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-            <Breadcrumb>
-              <BreadcrumbList>
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="#">Company Operations</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/operations/customers">Customers</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem>
-                  <BreadcrumbPage>Edit Customer</BreadcrumbPage>
-                </BreadcrumbItem>
-              </BreadcrumbList>
-            </Breadcrumb>
-          </div>
-        </header>
-
         <div className="flex flex-1 flex-col gap-6 p-6 pb-24">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Edit Customer</h1>
@@ -382,6 +347,23 @@ export function CustomerEditContent({ customerId }: { customerId: string }) {
                       <SelectItem value="Specific Hours">Specific Hours</SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="paymentTerms">Payment Terms</Label>
+                  <Select name="paymentTerms" defaultValue={customer.paymentTerms || undefined}>
+                    <SelectTrigger id="paymentTerms" className="w-full">
+                      <SelectValue placeholder="Net 30 (default)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="DUE_ON_RECEIPT">Due on receipt</SelectItem>
+                      <SelectItem value="NET_15">Net 15</SelectItem>
+                      <SelectItem value="NET_30">Net 30</SelectItem>
+                      <SelectItem value="NET_45">Net 45</SelectItem>
+                      <SelectItem value="NET_60">Net 60</SelectItem>
+                      <SelectItem value="NET_90">Net 90</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">Sets invoice due dates: invoice date + terms.</p>
                 </div>
                 <div className="space-y-2 md:col-span-2">
                   <Label htmlFor="instructions">Special Instructions</Label>

@@ -17,6 +17,11 @@ export {
 export type { DriverActiveLoad, DriverMatchedLoad } from './now-card';
 export { QuickStats } from './quick-stats';
 export type { QuickStat, DeltaTone } from './quick-stats';
+export { RouteProgressBar } from './route-progress-bar';
+export type { ProgressMarker, ProgressMarkerTone } from './route-progress-bar';
+export { FPCommentsPeek } from './fp-comments-peek';
+export { RecordActionsMenu } from './record-actions-menu';
+export type { RecordActionGroup, RecordActionItem } from './record-actions-menu';
 export { CommentsThread } from './comments-thread';
 export { BulkAction, BulkBar } from './bulk-bar';
 export { WBtn } from './btn';
@@ -50,9 +55,10 @@ export type {
 } from './ds-mini-table';
 export { EditableAddress } from './editable-address';
 export type { AddressData, EditableAddressValue } from './editable-address';
+export { EditableSSN } from './editable-ssn';
 export { EditableField } from './editable-field';
 export type { EditableSelectOption } from './editable-field';
-export { FilterBar } from './filter-bar';
+export { FilterBar, parseDateRangeValue, formatDateRangeValue } from './filter-bar';
 export type {
   FilterChipValue,
   FilterOperator,
@@ -66,9 +72,11 @@ export { InfiniteFooter } from './infinite-footer';
 export { Kbd } from './kbd';
 export { PageHeader } from './page-header';
 export type { PageHeaderStat } from './page-header';
+export { QRPlacardCard } from './qr-placard-card';
 export { SavedViews, SavedViewsAddButton } from './saved-views';
 export type { SavedView } from './saved-views';
 export { SavedViewCreatePopover } from './saved-view-create';
+export { SettingsHeader } from './settings-header';
 export {
   CATEGORY_TONES,
   REASONS_BY_TARGET,
@@ -85,6 +93,8 @@ export { StatusHistoryCard } from './status-history-card';
 export type { StatusHistoryEntry } from './status-history-card';
 export { StatusPicker } from './status-picker';
 export type { StatusChangePayload } from './status-picker';
+export { StatusChipPopover } from './status-chip-popover';
+export type { StatusChipOption } from './status-chip-popover';
 export { Table } from './table';
 export type { Density, SortDir, TableColumn } from './table';
 export { TableToolbar } from './table-toolbar';

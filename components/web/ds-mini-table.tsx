@@ -71,6 +71,18 @@ interface DSMiniTableProps<R extends { id: string | number }> {
   editable?: boolean;
   /** Called when a per-cell editor commits a new value. */
   onCellCommit?: (row: R, key: string, next: string | string[]) => void;
+  /** Max-height for the rows section. When set, only the rows scroll;
+   *  column header and view-all footer stay pinned. Accepts any CSS
+   *  height value (e.g. `'400px'`, `'60vh'`, `'calc(100vh - 320px)'`). */
+  bodyMaxHeight?: string | number;
+  /** When true, the table fills its parent's height (parent must impose
+   *  a bounded height). Column header / view-all footer stay pinned and
+   *  only the rows scroll. Use this with a parent `<DSCard>` whose
+   *  `className` caps the height (e.g. `max-h-[calc(100vh-180px)]`). */
+  fillHeight?: boolean;
+  /** Called when a row is clicked anywhere outside the editor / row-action
+   *  surfaces. The row gets a pointer cursor when this is set. */
+  onRowClick?: (row: R) => void;
 }
 
 export function DSMiniTable<R extends { id: string | number }>({
@@ -83,15 +95,28 @@ export function DSMiniTable<R extends { id: string | number }>({
   className,
   editable,
   onCellCommit,
+  bodyMaxHeight,
+  fillHeight,
+  onRowClick,
 }: DSMiniTableProps<R>) {
   const showViewAll = onViewAll && total != null && total > rows.length;
   const grid = columns.map((c) => c.width ?? '1fr').join(' ') + (rowActions ? ' 32px' : '');
+  const scrolling = bodyMaxHeight != null || fillHeight;
 
   return (
-    <div className={cn('rounded-lg border border-[var(--border-hairline)] bg-card overflow-hidden', className)}>
+    <div
+      className={cn(
+        'rounded-lg border border-[var(--border-hairline)] bg-card overflow-hidden',
+        scrolling && 'flex flex-col min-h-0',
+        className,
+      )}
+    >
       {/* header */}
       <div
-        className="grid items-center text-[var(--text-tertiary)] tw-label py-2 px-3 bg-[var(--bg-surface-2)] border-b border-[var(--border-hairline)]"
+        className={cn(
+          'grid items-center text-[var(--text-tertiary)] tw-label py-2 px-3 bg-[var(--bg-surface-2)] border-b border-[var(--border-hairline)]',
+          scrolling && 'shrink-0',
+        )}
         style={{ gridTemplateColumns: grid }}
       >
         {columns.map((c) => (
@@ -106,7 +131,13 @@ export function DSMiniTable<R extends { id: string | number }>({
       {uploadRow}
 
       {/* rows */}
-      <div>
+      <div
+        className={cn(
+          scrolling && 'overflow-y-auto scroll-thin min-h-0',
+          fillHeight && 'flex-1',
+        )}
+        style={bodyMaxHeight != null ? { maxHeight: bodyMaxHeight } : undefined}
+      >
         {rows.map((row) => (
           <DSRow
             key={row.id}
@@ -116,6 +147,7 @@ export function DSMiniTable<R extends { id: string | number }>({
             rowActions={rowActions?.(row)}
             editable={editable}
             onCellCommit={onCellCommit}
+            onRowClick={onRowClick}
           />
         ))}
       </div>
@@ -146,6 +178,7 @@ function DSRow<R extends { id: string | number }>({
   rowActions,
   editable,
   onCellCommit,
+  onRowClick,
 }: {
   columns: DSMiniColumn<R>[];
   row: R;
@@ -153,16 +186,32 @@ function DSRow<R extends { id: string | number }>({
   rowActions?: DSRowAction[];
   editable?: boolean;
   onCellCommit?: (row: R, key: string, next: string | string[]) => void;
+  onRowClick?: (row: R) => void;
 }) {
   const [hover, setHover] = React.useState(false);
+  const isClickable = !!onRowClick && !editable;
   return (
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onClick={isClickable ? () => onRowClick?.(row) : undefined}
+      role={isClickable ? 'button' : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      onKeyDown={
+        isClickable
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onRowClick?.(row);
+              }
+            }
+          : undefined
+      }
       className={cn(
         'grid items-center px-3 transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]',
         'border-b last:border-b-0 border-[var(--border-hairline)]',
         'hover:bg-[var(--bg-row-hover)]',
+        isClickable && 'cursor-pointer',
       )}
       style={{ gridTemplateColumns: grid, minHeight: 36 }}
     >

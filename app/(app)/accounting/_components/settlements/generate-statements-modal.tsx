@@ -77,29 +77,22 @@ export function GenerateStatementsModal({
 
     setIsGenerating(true);
     try {
+      // Generation fans out one transaction per driver (the monolithic run
+      // hit Convex's operation limit) — statements stream into the list
+      // reactively as each driver commits.
       const result = await bulkGenerateByPlan({
         planId: selectedPlanId as Id<'payPlans'>,
         workosOrgId: organizationId,
         userId,
       });
 
-      if (result.success > 0) {
+      if (result.scheduled > 0) {
         toast.success(
-          `Generated ${result.success} statement${result.success > 1 ? 's' : ''} for "${currentPeriod.planName}"`
+          `Generating statements for ${result.scheduled} driver${result.scheduled > 1 ? 's' : ''} on "${currentPeriod.planName}"`,
+          { description: 'They appear in the list as each one completes. Drivers with nothing new to settle are skipped.' }
         );
-      }
-      if (result.failed > 0) {
-        const skippedExisting = result.settlements.filter(
-          (s) => s.error === 'Settlement already exists for this period'
-        ).length;
-        const otherErrors = result.failed - skippedExisting;
-
-        if (skippedExisting > 0) {
-          toast.info(`${skippedExisting} driver${skippedExisting > 1 ? 's' : ''} already had statements for this period`);
-        }
-        if (otherErrors > 0) {
-          toast.error(`Failed to generate ${otherErrors} statement${otherErrors > 1 ? 's' : ''}`);
-        }
+      } else {
+        toast.info('No drivers are assigned to this pay plan');
       }
 
       onOpenChange(false);

@@ -26,12 +26,18 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   const organizationId = memberships.data[0].organizationId;
 
-  // Fetch organization settings from Convex with auth
+  // Fetch organization settings from Convex with auth. Guarded: a transient
+  // Convex blip (e.g. mid-deploy or a network hiccup) must not 500 every page —
+  // the shell renders fine with null (default org name), and the client-side
+  // Convex provider fills in live data after hydration.
   const orgSettings = await fetchQuery(
     api.settings.getOrgSettings,
     { workosOrgId: organizationId },
-    { token: accessToken }
-  );
+    { token: accessToken },
+  ).catch((error) => {
+    console.error('AppLayout: getOrgSettings fetch failed; rendering with defaults', error);
+    return null;
+  });
 
   // Get user initials
   const getUserInitials = (name?: string, email?: string) => {

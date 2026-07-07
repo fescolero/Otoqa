@@ -64,14 +64,8 @@ export const NAV: NavSection[] = [
       { id: 'loads',    label: 'Loads',                  href: '/loads' },
       { id: 'planner',  label: 'Dispatch Planner',       href: '/dispatch/planner' },
       { id: 'schedule', label: 'Schedule',               href: '/dispatch/schedule' },
-      { id: 'sessions', label: 'Active Driver Sessions', href: '/dispatch/sessions' },
+      { id: 'sessions', label: 'Active sessions',         href: '/dispatch/sessions' },
     ],
-  },
-  {
-    id: 'route-assignments',
-    label: 'Route Assignments',
-    icon: 'route',
-    href: '/route-assignments',
   },
   {
     id: 'lane-analyzer',
@@ -85,47 +79,51 @@ export const NAV: NavSection[] = [
     icon: 'calculator',
     items: [
       { id: 'invoices',            label: 'Invoices',            href: '/invoices' },
-      { id: 'driver-settlements',  label: 'Driver Settlements',  href: '/settlements' },
+      { id: 'driver-settlements',  label: 'Driver Settlements',  href: '/accounting/driver-settlements' },
       { id: 'carrier-settlements', label: 'Carrier Settlements', href: '/accounting/carrier-settlements' },
       { id: 'reports',             label: 'Reports',             href: '/accounting/reports' },
     ],
   },
+  {
+    id: 'settings',
+    label: 'Settings',
+    icon: 'settings',
+    items: [
+      { id: 'pay-profiles', label: 'Pay profiles', href: '/org-settings/pay-profiles' },
+      { id: 'pay-plans',    label: 'Pay plans',    href: '/org-settings/pay-plans' },
+      { id: 'integrations', label: 'Integrations', href: '/settings/integrations' },
+    ],
+  },
 ];
 
-/** Resolve the breadcrumb trail for a given pathname. */
+/** Resolve the breadcrumb trail for a given pathname. Uses the same
+ *  longest-match logic as `findActive` so a deeply-nested route
+ *  (`/operations/diesel/vendors/<id>`) breadcrumbs to
+ *  `Dashboard › Company Operations › Fuel Vendors`, not Diesel. */
 export function deriveBreadcrumb(pathname: string): string[] {
   const trail: string[] = ['Dashboard'];
-  // Exact match on a section href first.
-  for (const sec of NAV) {
-    if (sec.href === pathname) {
-      if (sec.id !== 'dashboard') trail.push(sec.label);
-      return trail;
-    }
-    if (sec.items) {
-      const item = sec.items.find((i) => pathname === i.href || pathname.startsWith(i.href + '/'));
-      if (item) {
-        trail.push(sec.label);
-        trail.push(item.label);
-        return trail;
-      }
-    } else if (sec.href && pathname.startsWith(sec.href + '/')) {
-      trail.push(sec.label);
-      return trail;
-    }
-  }
+  const { section, item } = findActive(pathname);
+  if (!section) return trail;
+  if (section.id !== 'dashboard') trail.push(section.label);
+  if (item) trail.push(item.label);
   return trail;
 }
 
-/** Find the active (section, item) pair for a pathname. */
+/** Find the active (section, item) pair for a pathname.
+ *  Prefers the LONGEST matching href so nested routes like
+ *  `/operations/diesel/vendors` highlight `Fuel Vendors` instead of the
+ *  shorter `/operations/diesel` (Diesel) prefix sibling. */
 export function findActive(pathname: string): { section?: NavSection; item?: NavItem } {
+  let best: { section?: NavSection; item?: NavItem; len: number } = { len: -1 };
+  const consider = (sec: NavSection, item: NavItem | undefined, href: string) => {
+    if (pathname !== href && !pathname.startsWith(href + '/')) return;
+    if (href.length > best.len) best = { section: sec, item, len: href.length };
+  };
   for (const sec of NAV) {
-    if (sec.href === pathname) return { section: sec };
+    if (sec.href) consider(sec, undefined, sec.href);
     if (sec.items) {
-      const item = sec.items.find((i) => pathname === i.href || pathname.startsWith(i.href + '/'));
-      if (item) return { section: sec, item };
-    } else if (sec.href && pathname.startsWith(sec.href + '/')) {
-      return { section: sec };
+      for (const item of sec.items) consider(sec, item, item.href);
     }
   }
-  return {};
+  return { section: best.section, item: best.item };
 }

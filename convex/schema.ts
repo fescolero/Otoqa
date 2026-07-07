@@ -2363,6 +2363,11 @@ export default defineSchema({
     updatedAt: v.optional(v.float64()),
     approvedAt: v.optional(v.float64()),
     approvedBy: v.optional(v.string()),
+    // Reopen audit — set when an APPROVED statement is unlocked back to DRAFT
+    // to correct a mistake (cleared again on the next approval).
+    reopenedAt: v.optional(v.float64()),
+    reopenedBy: v.optional(v.string()),
+    reopenReason: v.optional(v.string()),
   })
     .index('by_carrier_partnership', ['carrierPartnershipId'])
     .index('by_org', ['workosOrgId'])
@@ -2409,6 +2414,12 @@ export default defineSchema({
     // Approval Workflow
     approvedBy: v.optional(v.string()),
     approvedAt: v.optional(v.float64()),
+
+    // Reopen audit — set when an APPROVED settlement is unlocked back to DRAFT
+    // to correct a mistake (cleared again on the next approval).
+    reopenedAt: v.optional(v.float64()),
+    reopenedBy: v.optional(v.string()),
+    reopenReason: v.optional(v.string()),
 
     // Payment Tracking
     paidAt: v.optional(v.float64()),

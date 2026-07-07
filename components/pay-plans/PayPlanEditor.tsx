@@ -55,10 +55,14 @@ const FREQUENCIES: { value: Frequency; label: string; description: string }[] = 
   { value: 'MONTHLY', label: 'Monthly', description: 'Once per month' },
 ];
 
+// DELIVERY_DATE and COMPLETION_DATE both resolve by the load's WORK START
+// (first pickup) — work belongs to the period it was driven in, not the
+// period it happened to deliver, calculate, or get entered in. The two values
+// are kept for stored-plan compatibility; only APPROVAL_DATE behaves
+// differently (explicit approval gate).
 const TRIGGERS: { value: PayableTrigger; label: string; description: string }[] = [
-  { value: 'DELIVERY_DATE', label: 'Delivery Date', description: 'When the load is physically delivered' },
-  { value: 'COMPLETION_DATE', label: 'Completion Date', description: 'When the load status is marked complete' },
-  { value: 'APPROVAL_DATE', label: 'Approval Date', description: 'When the settlement is approved' },
+  { value: 'DELIVERY_DATE', label: 'Work Start Date', description: 'When the load was picked up — work counts in the period it was driven' },
+  { value: 'APPROVAL_DATE', label: 'Approval Date', description: 'When the settlement line is approved' },
 ];
 
 const TIMEZONES = [

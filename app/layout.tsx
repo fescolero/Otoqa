@@ -4,6 +4,7 @@ import './globals.css';
 import { ConvexClientProvider } from '@/components/ConvexClientProvider';
 import { PostHogProvider } from '@/components/PostHogProvider';
 import { ThemeProvider } from '@/components/theme-provider';
+import { Toaster } from '@/components/ui/sonner';
 import Script from 'next/script';
 
 const saira = Saira({
@@ -58,6 +59,7 @@ export default function RootLayout({
           <PostHogProvider>
             <ConvexClientProvider>{children}</ConvexClientProvider>
           </PostHogProvider>
+          <Toaster />
         </ThemeProvider>
       </body>
     </html>

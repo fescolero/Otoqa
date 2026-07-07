@@ -141,6 +141,50 @@ export const reversePayment = mutation({
   },
 });
 
+/**
+ * Reopen a VERIFIED settlement back to OPEN to correct a mistake (new-ledger
+ * equivalent of legacy reopenSettlement). Unlocks pristine engine payItems so
+ * the recalc + review tools own them again; manual adjustments and
+ * reviewer-edited items stay locked. Clears the verify stamps, records the
+ * reopen for audit. PAID settlements must be payment-reversed first.
+ */
+export const reopenSettlement = mutation({
+  args: { settlementId: v.id('settlements'), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { orgId, userId } = await requireCallerIdentity(ctx);
+    const s = await getOwnedSettlement(ctx, args.settlementId, orgId);
+    if (s.status !== 'VERIFIED') {
+      throw new Error(
+        s.status === 'PAID'
+          ? 'Reverse the payment before reopening a paid settlement'
+          : 'Only an approved settlement can be reopened',
+      );
+    }
+    const reason = args.reason.trim();
+    if (!reason) throw new Error('A reason is required to reopen a settlement');
+    const now = Date.now();
+
+    for (const it of await periodItems(ctx, s)) {
+      const keepLocked = it.kind === 'MANUAL_ADJUSTMENT' || it.reviewerEdit != null;
+      if (it.isLocked && !keepLocked) {
+        await ctx.db.patch(it._id, { isLocked: false, updatedAt: now });
+      }
+    }
+
+    await ctx.db.patch(args.settlementId, {
+      status: STATUS_MAP.DRAFT, // 'OPEN'
+      verifiedAt: undefined,
+      verifiedBy: undefined,
+      reopenedAt: now,
+      reopenedBy: userId,
+      reopenReason: reason,
+      updatedAt: now,
+    });
+    return null;
+  },
+});
+
 // ── manual adjustments ──────────────────────────────────────────────────────
 
 export const addManualAdjustment = mutation({

@@ -228,7 +228,7 @@ export const countPartnershipsByStatus = query({
     await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const partnerships = await ctx.db
       .query('carrierPartnerships')
-      .filter((q) => q.eq(q.field('brokerOrgId'), args.brokerOrgId))
+      .withIndex('by_broker', (q) => q.eq('brokerOrgId', args.brokerOrgId))
       .collect();
 
     const counts = {

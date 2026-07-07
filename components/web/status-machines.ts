@@ -13,7 +13,7 @@
  */
 import type { ChipStatus } from './chip';
 
-export type StatusEntity = 'driver' | 'truck' | 'trailer' | 'customer' | 'carrier';
+export type StatusEntity = 'driver' | 'truck' | 'trailer' | 'customer' | 'carrier' | 'load';
 export type StatusCategory = 'Active' | 'Paused' | 'Terminal';
 
 export interface StatusState {
@@ -101,6 +101,28 @@ export const STATE_MACHINES: Record<StatusEntity, StatusMachine> = {
     },
     initial: 'approved',
   },
+  // Load lifecycle. The friendlier labels match the design's status chip
+  // ("Open · waiting for assignment", etc.); the chip kind drives the
+  // colour. Database stores the state ID capitalised (Open / Assigned /
+  // Completed / Canceled / Expired) — `resolveStatusId` lowercases on
+  // ingest so existing rows match a state.
+  load: {
+    states: {
+      open:      { id: 'open',      label: 'Open',       kind: 'open',      category: 'Active'                    },
+      assigned:  { id: 'assigned',  label: 'Assigned',   kind: 'assigned',  category: 'Active'                    },
+      completed: { id: 'completed', label: 'Delivered',  kind: 'delivered', category: 'Terminal', terminal: true  },
+      canceled:  { id: 'canceled',  label: 'Cancelled',  kind: 'cancelled', category: 'Terminal', terminal: true  },
+      expired:   { id: 'expired',   label: 'Expired',    kind: 'expired',   category: 'Terminal', terminal: true  },
+    },
+    initial: 'open',
+    transitions: {
+      open:      ['assigned', 'canceled', 'expired'],
+      assigned:  ['open', 'completed', 'canceled'],
+      completed: [],
+      canceled:  ['open'],
+      expired:   ['open'],
+    },
+  },
 };
 
 /** Reason chips offered in the confirmation modal, keyed by *target* state. */
@@ -154,6 +176,10 @@ const LEGACY_ALIASES: Record<StatusEntity, Record<string, string>> = {
   trailer: {},
   customer: {},
   carrier: {},
+  load: {
+    delivered: 'completed', // design label maps to DB state
+    cancelled: 'canceled',
+  },
 };
 
 /**

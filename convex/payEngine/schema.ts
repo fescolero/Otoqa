@@ -827,6 +827,11 @@ export const settlements = defineTable({
   reviewedBy: v.optional(v.string()),
   verifiedAt: v.optional(v.number()),
   verifiedBy: v.optional(v.string()),
+  // Reopen audit — set when a VERIFIED settlement is unlocked back to OPEN to
+  // correct a mistake (cleared again on the next verification/approval).
+  reopenedAt: v.optional(v.number()),
+  reopenedBy: v.optional(v.string()),
+  reopenReason: v.optional(v.string()),
   sentAt: v.optional(v.number()),
   sentTo: v.optional(v.string()),
   statementPdfStorageId: v.optional(v.string()),

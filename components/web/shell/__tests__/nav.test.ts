@@ -8,9 +8,9 @@ describe('NAV', () => {
       'fleet',
       'operations',
       'load-ops',
-      'route-assignments',
       'lane-analyzer',
       'accounting',
+      'settings',
     ]);
   });
 
@@ -53,9 +53,9 @@ describe('deriveBreadcrumb()', () => {
   });
 
   it('matches descendants of a section href when there are no items', () => {
-    expect(deriveBreadcrumb('/route-assignments/new')).toEqual([
+    expect(deriveBreadcrumb('/lane-analyzer/abc')).toEqual([
       'Dashboard',
-      'Route Assignments',
+      'Lane Analyzer',
     ]);
   });
 });

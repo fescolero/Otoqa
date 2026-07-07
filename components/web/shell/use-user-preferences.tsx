@@ -97,10 +97,23 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
     }));
   }, []);
 
-  // When Convex hydrates, prefer its value over local cache.
+  // When Convex hydrates, prefer its value over local cache — but only ONCE.
+  // After the initial hydration, local state is the source of truth: every
+  // user action calls `persist` which writes localStorage AND fires
+  // updateUi, so we push to the server, not pull from it.
+  //
+  // Without this guard, theme toggles flicker: a click updates local state +
+  // theme → mutation fires → convex re-emits remote (initially still the
+  // old value until the mutation lands) → effect runs → setPrefs overwrites
+  // local back to the old value → page paints old theme briefly → mutation
+  // lands → remote re-emits new value → effect runs again → setPrefs to new
+  // → page paints new theme. Net: 3 paints instead of 1, hence the flicker.
+  const hasHydratedFromRemote = React.useRef(false);
   React.useEffect(() => {
     if (remote === undefined) return;
     setIsHydrating(false);
+    if (hasHydratedFromRemote.current) return;
+    hasHydratedFromRemote.current = true;
     if (remote === null) return;
     const next: UiPreferences = {
       theme: (remote.theme as UiTheme) ?? prefs.theme,
@@ -112,13 +125,27 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remote]);
 
-  // Apply theme via next-themes; apply density via document attribute.
+  // Apply density via a document attribute on every prefs change. Theme is
+  // intentionally NOT in this effect — see the theme-application reasoning
+  // in setTheme below.
   React.useEffect(() => {
-    setNextTheme(prefs.theme);
     if (typeof document !== 'undefined') {
       document.documentElement.dataset.density = prefs.density;
     }
-  }, [prefs.theme, prefs.density, setNextTheme]);
+  }, [prefs.density]);
+
+  // One-time theme bootstrap: when prefs hydrates from localStorage/remote,
+  // push the value into next-themes. This effect intentionally runs only
+  // until both sources have settled, so it can't fire mid-toggle and
+  // re-trigger an attribute swap that would race the click-handler path.
+  const themeBootstrapped = React.useRef(false);
+  React.useEffect(() => {
+    if (themeBootstrapped.current) return;
+    if (remote === undefined) return;
+    themeBootstrapped.current = true;
+    setNextTheme(prefs.theme);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remote, prefs.theme]);
 
   const persist = React.useCallback(
     (next: UiPreferences, partial: Partial<UiPreferences>) => {
@@ -133,9 +160,20 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
     [workosOrgId, updateUi],
   );
 
+  // setTheme flips next-themes' attribute SYNCHRONOUSLY before queuing the
+  // React state update + server persist. Order matters: if we let `persist`
+  // run first, React commits the new toggle-icon render and the browser
+  // paints with the OLD data-theme attribute (the effect that would have
+  // flipped the attribute hasn't fired yet — effects run after paint). The
+  // user sees a one-frame flash of the old theme. Calling setNextTheme
+  // first means the data-theme swap happens before React's commit + paint,
+  // so the new theme lands in the same frame as the icon swap.
   const setTheme = React.useCallback(
-    (theme: UiTheme) => persist({ ...prefs, theme }, { theme }),
-    [prefs, persist],
+    (theme: UiTheme) => {
+      setNextTheme(theme);
+      persist({ ...prefs, theme }, { theme });
+    },
+    [prefs, persist, setNextTheme],
   );
   const setDensity = React.useCallback(
     (density: UiDensity) => persist({ ...prefs, density }, { density }),

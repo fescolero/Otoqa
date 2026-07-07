@@ -62,6 +62,14 @@ export const WBtn = React.forwardRef<HTMLButtonElement, WBtnProps>(function WBtn
       className={cn(
         'focus-ring inline-flex items-center justify-center gap-1.5 rounded-lg leading-none whitespace-nowrap',
         'font-medium transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)] active:translate-y-[0.5px]',
+        // Disabled state — native `disabled` already blocks clicks, but
+        // visually the button needs to read as inactive. Mute opacity, drop
+        // the press-effect, and switch cursor. We deliberately do NOT clobber
+        // the variant's hover background — `disabled:hover:bg-inherit` made
+        // the primary/accent button turn white on hover-while-loading, which
+        // hides the in-progress signal. Opacity-50 alone is enough to read
+        // as inactive while preserving the variant's own color.
+        'disabled:opacity-50 disabled:cursor-not-allowed disabled:active:translate-y-0',
         full && 'w-full',
         VARIANT[v],
         className,

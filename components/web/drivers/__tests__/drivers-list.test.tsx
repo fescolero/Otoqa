@@ -30,6 +30,15 @@ vi.mock('convex/react', () => ({
   useMutation: () => vi.fn(),
 }));
 
+// DraftListPill is a create-form "drafts" chip that reaches next/navigation's
+// router and the organization context — unrelated to the drivers list under
+// test. Stub it (preserving the rest of the create-form barrel) so the list
+// renders without an app-router/provider in the test harness.
+vi.mock('@/components/web/create-form', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  DraftListPill: () => null,
+}));
+
 const driver = (over: Partial<DriverRow>): DriverRow => ({
   _id: over._id ?? Math.random().toString(36).slice(2),
   firstName: 'Sergio',

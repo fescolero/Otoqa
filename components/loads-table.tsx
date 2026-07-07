@@ -7,6 +7,7 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useRouter } from 'next/navigation';
 import { Id } from '@/convex/_generated/dataModel';
 import { trackError } from '@/lib/posthog';
+import { runChunkedBulk, runChunkedEach } from '@/lib/chunked-bulk';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -284,10 +285,11 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
 
     try {
       const dbStatus = pendingTargetStatus === 'Delivered' ? 'Completed' : pendingTargetStatus;
-      const result = await bulkUpdateLoadStatus({
-        loadIds: loadIds as Id<'loadInformation'>[],
-        status: dbStatus as any,
-      });
+      const result = await runChunkedBulk(
+        loadIds as Id<'loadInformation'>[],
+        (chunk) => bulkUpdateLoadStatus({ loadIds: chunk, status: dbStatus as any }),
+        { chunkSize: 25 },
+      );
 
       if (result.failed > 0) {
         toast.warning(
@@ -321,10 +323,11 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       setPendingTargetStatus(status);
       const dbStatus = status;
       try {
-        const result = await bulkUpdateLoadStatus({
-          loadIds: Array.from(selectedLoadIds),
-          status: dbStatus as any,
-        });
+        const result = await runChunkedBulk(
+          Array.from(selectedLoadIds),
+          (chunk) => bulkUpdateLoadStatus({ loadIds: chunk, status: dbStatus as any }),
+          { chunkSize: 25 },
+        );
 
         if (result.failed > 0) {
           toast.warning(
@@ -350,13 +353,18 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // Handle cancellation with reason code
   const handleCancellationConfirm = async (reasonCode: CancellationReasonCode, notes?: string) => {
     try {
-      const result = await bulkUpdateLoadStatus({
-        loadIds: cancellationLoads.map((load) => load.id as Id<'loadInformation'>),
-        status: 'Canceled',
-        cancellationReason: reasonCode,
-        cancellationNotes: notes,
-        canceledBy: userId,
-      });
+      const result = await runChunkedBulk(
+        cancellationLoads.map((load) => load.id as Id<'loadInformation'>),
+        (chunk) =>
+          bulkUpdateLoadStatus({
+            loadIds: chunk,
+            status: 'Canceled',
+            cancellationReason: reasonCode,
+            cancellationNotes: notes,
+            canceledBy: userId,
+          }),
+        { chunkSize: 25 },
+      );
 
       if (result.failed > 0) {
         toast.warning(`Canceled ${result.success} load${result.success !== 1 ? 's' : ''}. ${result.failed} failed.`);
@@ -416,8 +424,18 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
       return;
     }
     try {
-      await Promise.all(Array.from(selectedLoadIds).map((loadId) => deleteLoad({ loadId })));
-      toast.success(`Deleted ${selectedLoadIds.size} load${selectedLoadIds.size !== 1 ? 's' : ''}`);
+      // deleteLoad is heavy per-item (stops + legs + tags + payables cascade),
+      // so run in bounded sequential batches instead of firing all at once.
+      const result = await runChunkedEach(
+        Array.from(selectedLoadIds),
+        (loadId) => deleteLoad({ loadId }),
+        { chunkSize: 10 },
+      );
+      if (result.failed > 0) {
+        toast.warning(`Deleted ${result.success} load${result.success !== 1 ? 's' : ''}. ${result.failed} failed.`);
+      } else {
+        toast.success(`Deleted ${result.success} load${result.success !== 1 ? 's' : ''}`);
+      }
       setSelectedLoadIds(new Set());
     } catch (error) {
       trackError('loads_delete', error, { count: selectedLoadIds.size });

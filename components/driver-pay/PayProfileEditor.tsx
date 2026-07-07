@@ -67,6 +67,7 @@ type TriggerEvent =
   | 'MILE_LOADED'
   | 'MILE_EMPTY'
   | 'TIME_DURATION'
+  | 'SESSION_DURATION'
   | 'TIME_WAITING'
   | 'COUNT_STOPS'
   | 'FLAT_LOAD'
@@ -104,7 +105,9 @@ const EQUIPMENT_TYPES = [
 // Map pay basis to default base trigger
 const PAY_BASIS_TRIGGERS: Record<PayBasis, TriggerEvent> = {
   MILEAGE: 'MILE_LOADED',
-  HOURLY: 'TIME_DURATION',
+  // Shift check-in → check-out is the default hourly source; per-leg
+  // TIME_DURATION remains selectable for leg-scoped hourly pay.
+  HOURLY: 'SESSION_DURATION',
   PERCENTAGE: 'PCT_OF_LOAD',
   FLAT: 'FLAT_LOAD',
 };
@@ -113,7 +116,8 @@ const PAY_BASIS_TRIGGERS: Record<PayBasis, TriggerEvent> = {
 const TRIGGER_LABELS: Record<TriggerEvent, string> = {
   MILE_LOADED: 'Loaded Miles',
   MILE_EMPTY: 'Empty Miles',
-  TIME_DURATION: 'Hours Worked',
+  TIME_DURATION: 'Hours Worked (per leg)',
+  SESSION_DURATION: 'Shift Hours (check-in to check-out)',
   TIME_WAITING: 'Waiting/Detention Time',
   COUNT_STOPS: 'Number of Stops',
   FLAT_LOAD: 'Flat Rate per Load',
@@ -128,6 +132,7 @@ const TRIGGER_UNITS: Record<TriggerEvent, string> = {
   MILE_LOADED: 'per mile',
   MILE_EMPTY: 'per mile',
   TIME_DURATION: 'per hour',
+  SESSION_DURATION: 'per hour',
   TIME_WAITING: 'per hour',
   COUNT_STOPS: 'per stop',
   FLAT_LOAD: 'per load',
@@ -140,7 +145,7 @@ const TRIGGER_UNITS: Record<TriggerEvent, string> = {
 // Valid triggers for BASE rules per pay basis
 const BASE_TRIGGERS_BY_BASIS: Record<PayBasis, TriggerEvent[]> = {
   MILEAGE: ['MILE_LOADED', 'MILE_EMPTY'],
-  HOURLY: ['TIME_DURATION'],
+  HOURLY: ['SESSION_DURATION', 'TIME_DURATION'],
   PERCENTAGE: ['PCT_OF_LOAD'],
   FLAT: ['FLAT_LOAD'],
 };
@@ -148,7 +153,7 @@ const BASE_TRIGGERS_BY_BASIS: Record<PayBasis, TriggerEvent[]> = {
 // Available triggers for accessorial rules per pay basis
 const TRIGGERS_BY_BASIS: Record<PayBasis, TriggerEvent[]> = {
   MILEAGE: ['MILE_LOADED', 'MILE_EMPTY', 'COUNT_STOPS', 'FLAT_LEG', 'ATTR_HAZMAT', 'ATTR_TARP', 'TIME_WAITING'],
-  HOURLY: ['TIME_DURATION', 'TIME_WAITING', 'COUNT_STOPS', 'FLAT_LEG', 'ATTR_HAZMAT', 'ATTR_TARP'],
+  HOURLY: ['SESSION_DURATION', 'TIME_DURATION', 'TIME_WAITING', 'COUNT_STOPS', 'FLAT_LEG', 'ATTR_HAZMAT', 'ATTR_TARP'],
   PERCENTAGE: ['PCT_OF_LOAD', 'COUNT_STOPS', 'FLAT_LEG', 'ATTR_HAZMAT', 'ATTR_TARP', 'TIME_WAITING'],
   FLAT: ['FLAT_LOAD', 'COUNT_STOPS', 'FLAT_LEG', 'ATTR_HAZMAT', 'ATTR_TARP', 'TIME_WAITING'],
 };

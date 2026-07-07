@@ -29,6 +29,8 @@ export interface AttentionItem {
   icon?: IconName;
   /** Section id to navigate to when clicked (passed to `onJump`). */
   tab?: string;
+  /** Custom click handler. Takes precedence over `tab`/`onJump`. */
+  onClick?: () => void;
   title: React.ReactNode;
   detail?: React.ReactNode;
 }
@@ -82,20 +84,23 @@ export function AttentionBand({ headline, items, onJump, className }: AttentionB
       {items && items.length > 0 && (
         <div
           className="flex items-stretch flex-wrap"
-          style={{ borderTop: `1px solid ${t.bd}`, background: 'rgba(255,255,255,0.55)' }}
+          style={{ borderTop: `1px solid ${t.bd}`, background: 'var(--bg-surface)' }}
         >
           {items.map((it, i) => {
             const tone = TONES[it.tone ?? 'info'];
-            const clickable = Boolean(it.tab && onJump);
+            const clickable = Boolean(it.onClick || (it.tab && onJump));
             return (
               <button
                 key={i}
                 type="button"
-                onClick={() => clickable && onJump!(it.tab!)}
+                onClick={() => {
+                  if (it.onClick) it.onClick();
+                  else if (it.tab && onJump) onJump(it.tab);
+                }}
                 className={cn(
                   'focus-ring flex items-center gap-2.5 px-4 py-3 border-0 text-left text-foreground',
                   'transition-colors duration-100',
-                  clickable && 'hover:bg-white/70 cursor-pointer',
+                  clickable && 'hover:bg-[var(--bg-surface-2)] cursor-pointer',
                 )}
                 style={{
                   flex: '1 1 220px',

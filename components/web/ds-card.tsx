@@ -90,6 +90,11 @@ export interface DSPropsEditableItem {
    *  `<EditableAddress>` with a structured AddressData payload). The row
    *  still gets the same hairline + label-column treatment as the rest. */
   custom?: React.ReactNode;
+  /** Decorative content rendered AFTER the editable value but OUTSIDE the
+   *  editor's click target — use this for status chips, badges, etc. so the
+   *  editor's hover/focus background doesn't extend over the decoration and
+   *  visually suggest it's interactive. */
+  trailing?: React.ReactNode;
 }
 
 interface DSPropsProps {
@@ -157,11 +162,12 @@ export function DSPropsEditable({
           </dt>
           <dd
             className={cn(
-              'py-2.5 m-0 text-[13px] text-foreground inline-flex items-center min-w-0',
+              'py-2.5 m-0 text-[13px] text-foreground inline-flex items-center gap-2 min-w-0',
               i > 0 && 'border-t border-[var(--border-hairline)]',
             )}
           >
             {it.custom !== undefined ? it.custom : <DSPropsEditableField item={it} onCommit={onCommit} />}
+            {it.trailing != null && <span className="inline-flex items-center shrink-0">{it.trailing}</span>}
           </dd>
         </React.Fragment>
       ))}

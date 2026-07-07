@@ -11,6 +11,9 @@
  *   row count exceeds `virtualizeThreshold` (default 200) so small lists
  *   stay simple. Heights are deterministic from density tokens, so we use
  *   a fixed `estimateSize` and skip `measureElement`.
+ * - Optional row grouping via `groupBy` — full-width group header bands
+ *   interleave with data rows in first-seen key order. Grouping disables
+ *   virtualization (grouped lists are small).
  *
  * Render columns either by `key` (uses `row[key]`) or by `render(row)`.
  * Right-aligned numeric columns set `tnum: true` for tabular nums.
@@ -33,7 +36,7 @@ export interface TableColumn<R> {
   key: string;
   label: React.ReactNode;
   width?: string;
-  align?: 'left' | 'right';
+  align?: 'left' | 'right' | 'center';
   sortable?: boolean;
   tnum?: boolean;
   render?: (row: R) => React.ReactNode;
@@ -56,6 +59,20 @@ interface TableProps<R> {
   /** Force virtualization on/off; default = auto (rows.length >= virtualizeThreshold). */
   virtualize?: boolean;
   virtualizeThreshold?: number;
+  /** Fires when the user scrolls within `endReachedOffset` px of the bottom.
+   *  Caller is responsible for guarding against duplicate invocations while
+   *  a fetch is already in flight. */
+  onEndReached?: () => void;
+  /** Distance from the bottom (in px) at which `onEndReached` fires. Default 320. */
+  endReachedOffset?: number;
+  /** Group rows by key. Groups render in the order their keys first appear
+   *  in `rows`, so the caller's sort order is preserved both across and
+   *  within groups. Disables virtualization. */
+  groupBy?: (row: R) => string;
+  /** Left side of the group header band. Default: the group key text. */
+  groupLabel?: (groupKey: string, groupRows: R[]) => React.ReactNode;
+  /** Right side of the group header band (counts, totals, an action…). */
+  groupSummary?: (groupKey: string, groupRows: R[]) => React.ReactNode;
   className?: string;
 }
 
@@ -80,15 +97,46 @@ export function Table<R>({
   getRowId = defaultGetRowId,
   virtualize,
   virtualizeThreshold = 200,
+  onEndReached,
+  endReachedOffset = 320,
+  groupBy,
+  groupLabel,
+  groupSummary,
   className,
 }: TableProps<R>) {
   const grid = ['28px', ...columns.map((c) => c.width ?? '1fr')].join(' ');
   const allChecked = rows.length > 0 && selected.length === rows.length;
   const indeterminate = selected.length > 0 && !allChecked;
-  const shouldVirtualize = virtualize ?? rows.length >= virtualizeThreshold;
+  const shouldVirtualize = !groupBy && (virtualize ?? rows.length >= virtualizeThreshold);
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const selectedSet = React.useMemo(() => new Set(selected), [selected]);
+
+  // Infinite-scroll trigger. Fires `onEndReached` once per scroll-into-zone
+  // crossing, so the caller can `loadMore()` without de-bouncing themselves.
+  // A `firedRef` latch resets only when the user scrolls back above the
+  // threshold — that way arrivals of new rows (which extend the scroll
+  // height) re-arm the trigger automatically.
+  const firedRef = React.useRef(false);
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !onEndReached) return;
+    const onScroll = () => {
+      const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (remaining <= endReachedOffset) {
+        if (!firedRef.current) {
+          firedRef.current = true;
+          onEndReached();
+        }
+      } else {
+        firedRef.current = false;
+      }
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    // Fire once on mount if already short enough that the bottom is in view.
+    onScroll();
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [onEndReached, endReachedOffset, rows.length]);
 
   return (
     <div ref={scrollRef} className={cn('scroll-thin flex-1 overflow-auto bg-card', className)}>
@@ -103,7 +151,22 @@ export function Table<R>({
         indeterminate={indeterminate}
         onSelectAll={onSelectAll}
       />
-      {shouldVirtualize ? (
+      {groupBy ? (
+        <GroupedBody
+          columns={columns}
+          rows={rows}
+          grid={grid}
+          density={density}
+          selected={selectedSet}
+          getRowId={getRowId}
+          onSelect={onSelect}
+          onRowClick={onRowClick}
+          activeRowId={activeRowId ?? null}
+          groupBy={groupBy}
+          groupLabel={groupLabel}
+          groupSummary={groupSummary}
+        />
+      ) : shouldVirtualize ? (
         <VirtualBody
           scrollRef={scrollRef}
           columns={columns}
@@ -186,7 +249,11 @@ function Header<R>({
             className={cn(
               'flex items-center gap-1 bg-transparent border-0 transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]',
               'tw-label',
-              c.align === 'right' ? 'justify-end text-right' : 'justify-start text-left',
+              c.align === 'right'
+                ? 'justify-end text-right'
+                : c.align === 'center'
+                  ? 'justify-center text-center'
+                  : 'justify-start text-left',
               sortable ? 'cursor-pointer hover:text-foreground' : 'cursor-default',
               sorting ? 'text-foreground' : 'text-[var(--text-tertiary)]',
             )}
@@ -248,6 +315,89 @@ function PlainBody<R>(p: BodyProps<R>) {
           />
         );
       })}
+    </div>
+  );
+}
+
+// ─── Grouped body ───────────────────────────────────────────────────────
+
+interface GroupedBodyProps<R> extends BodyProps<R> {
+  groupBy: (row: R) => string;
+  groupLabel?: (groupKey: string, groupRows: R[]) => React.ReactNode;
+  groupSummary?: (groupKey: string, groupRows: R[]) => React.ReactNode;
+}
+
+function GroupedBody<R>(p: GroupedBodyProps<R>) {
+  // Bucket rows by group key in first-seen order so the caller's sort order
+  // is preserved both across groups and within each group.
+  const groups = React.useMemo(() => {
+    const order: { key: string; rows: R[] }[] = [];
+    const byKey = new Map<string, R[]>();
+    for (const row of p.rows) {
+      const key = p.groupBy(row);
+      let bucket = byKey.get(key);
+      if (!bucket) {
+        bucket = [];
+        byKey.set(key, bucket);
+        order.push({ key, rows: bucket });
+      }
+      bucket.push(row);
+    }
+    return order;
+  }, [p.rows, p.groupBy]);
+
+  return (
+    <div>
+      {groups.map(({ key, rows: groupRows }) => (
+        <React.Fragment key={key}>
+          <GroupHeader
+            density={p.density}
+            label={p.groupLabel ? p.groupLabel(key, groupRows) : key}
+            summary={p.groupSummary?.(key, groupRows)}
+          />
+          {groupRows.map((row) => {
+            const id = p.getRowId(row);
+            return (
+              <Row
+                key={String(id)}
+                row={row}
+                id={id}
+                columns={p.columns}
+                grid={p.grid}
+                density={p.density}
+                isSelected={p.selected.has(id)}
+                onSelect={p.onSelect}
+                onRowClick={p.onRowClick}
+                isActive={p.activeRowId === id}
+                virtualHeight={undefined}
+                translateY={undefined}
+              />
+            );
+          })}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+interface GroupHeaderProps {
+  density: Density;
+  label: React.ReactNode;
+  summary?: React.ReactNode;
+}
+
+/** Full-width band above each group — spans the checkbox column too. */
+function GroupHeader({ density, label, summary }: GroupHeaderProps) {
+  return (
+    <div
+      className={cn(
+        'flex items-center justify-between gap-2 bg-[var(--bg-surface-2)]',
+        'border-b border-[var(--border-hairline)]',
+      )}
+      style={{ minHeight: ROW_H[density], padding: `${CELL_PY[density]}px var(--tbl-cell-px)` }}
+    >
+      <div className="min-w-0 text-[13px] font-semibold text-foreground">{label}</div>
+      {summary != null && <div className="flex shrink-0 items-center gap-2">{summary}</div>}
     </div>
   );
 }
@@ -368,7 +518,11 @@ function Row<R>({
           className={cn(
             'flex items-center min-w-0 gap-1.5 text-[13px] text-foreground',
             c.tnum && 'num',
-            c.align === 'right' ? 'justify-end' : 'justify-start',
+            c.align === 'right'
+              ? 'justify-end'
+              : c.align === 'center'
+                ? 'justify-center'
+                : 'justify-start',
           )}
           style={{ padding: `${cellPy}px var(--tbl-cell-px)` }}
         >

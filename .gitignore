@@ -61,3 +61,7 @@ scripts/entries.json
 /*_SETUP.md
 /*_ENGINE.md
 /*_MIGRATION.md
+
+# Claude Code session worktrees (local only)
+.claude/worktrees/
+mobile/.claude/

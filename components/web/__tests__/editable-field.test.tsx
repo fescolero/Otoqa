@@ -6,8 +6,8 @@ import { EditableField } from '../editable-field';
 describe('<EditableField type="text">', () => {
   it('renders the value as a clickable display', () => {
     render(<EditableField type="text" value="(916) 824-3871" onCommit={() => {}} />);
-    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
-    expect(screen.getByText('(916) 824-3871')).toBeInTheDocument();
+    // The value itself is the clickable affordance (no separate "Edit" button).
+    expect(screen.getByRole('button', { name: '(916) 824-3871' })).toBeInTheDocument();
   });
 
   it('enters edit mode on click and commits the new value on Enter', async () => {

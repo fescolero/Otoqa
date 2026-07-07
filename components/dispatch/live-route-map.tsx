@@ -14,7 +14,8 @@ import {
 } from '@vis.gl/react-google-maps';
 import { cn } from '@/lib/utils';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
-import { MapPin, Clock, Route, Navigation, CheckCircle2 } from 'lucide-react';
+import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
+import { MapPin, Route, CheckCircle2 } from 'lucide-react';
 import { format } from 'date-fns';
 
 // ============================================
@@ -101,6 +102,17 @@ interface StopData {
   scheduledTime?: string;
 }
 
+/**
+ * Summary returned by `onRouteResolved`. Sourced from the Google Directions
+ * response that's already needed to draw the planned-route polyline — no
+ * extra API call. `null` is emitted when Directions fails (the polyline
+ * falls back to straight lines and we don't have authoritative numbers).
+ */
+export interface RouteSummary {
+  totalMeters: number;
+  totalSeconds: number;
+}
+
 interface LiveRouteMapProps {
   loadId: Id<'loadInformation'>;
   organizationId: string;
@@ -109,6 +121,33 @@ interface LiveRouteMapProps {
   stops?: StopData[];
   selectedStopId?: string | null;
   onStopSelect?: (stopId: string | null) => void;
+  /**
+   * Fires once Google Directions returns a route for the planned-route
+   * polyline. Used by callers (e.g. the live-tracking modal) that need
+   * authoritative distance/duration without making a second API call.
+   */
+  onRouteResolved?: (summary: RouteSummary | null) => void;
+  /**
+   * When true, the map renders raw GPS pings as dots instead of the
+   * snap-to-roads polyline. The live-tracking modal flips this to true
+   * while the rail is on the "GPS pings" tab.
+   */
+  pingsMode?: boolean;
+  /**
+   * When true, "live unit" affordances render: the polyline extends to
+   * the driver's current GPS position, the LiveDriverMarker pin shows
+   * where the truck is right now, and geofence circles highlight when
+   * the driver is inside a stop's radius. When false (Open / Assigned /
+   * Completed / Canceled / Delivered) only the historical polyline
+   * built from load-specific pings renders, so the user still sees the
+   * trip history but the map doesn't pretend the truck is "live" on
+   * this load when it isn't.
+   *
+   * The ping history itself is always filtered by `loadId` via
+   * `api.driverLocations.getRouteHistoryForLoad`, so each load owns
+   * its own trail regardless of this flag.
+   */
+  isInTransit?: boolean;
 }
 
 interface LocationPoint {
@@ -331,10 +370,62 @@ function GpsBreadcrumbs({ points }: { points: LocationPoint[] }) {
 }
 
 // ============================================
+// GPS PINGS SCATTER - Plots every ping as a dot, with the freshest one
+// emphasized. Used when the rail is on the "GPS pings" tab so the map
+// shows raw telemetry points instead of the smoothed snap-to-roads line.
+// ============================================
+function GpsPingsScatter({ points }: { points: LocationPoint[] }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map || points.length === 0 || !google?.maps?.Marker) return;
+
+    const markers: google.maps.Marker[] = [];
+    const lastIdx = points.length - 1;
+
+    points.forEach((point, i) => {
+      const isLast = i === lastIdx;
+      const marker = new google.maps.Marker({
+        position: { lat: point.latitude, lng: point.longitude },
+        map,
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          // Latest ping is bigger + accent-colored; older pings stay slate
+          // and slightly transparent so the time direction reads at a glance.
+          scale: isLast ? 7 : 4,
+          fillColor: isLast ? '#2E5CFF' : '#64748b',
+          fillOpacity: isLast ? 1 : 0.65,
+          strokeColor: '#ffffff',
+          strokeWeight: isLast ? 2 : 1,
+          strokeOpacity: 1,
+        },
+        title: `${new Date(point.recordedAt).toLocaleTimeString()}${
+          point.speed != null ? ` · ${Math.round((point.speed > 200 ? point.speed : point.speed * 2.23694))} mph` : ''
+        }`,
+        zIndex: isLast ? 20 : 10,
+      });
+      markers.push(marker);
+    });
+
+    return () => {
+      markers.forEach((m) => m.setMap(null));
+    };
+  }, [map, points]);
+
+  return null;
+}
+
+// ============================================
 // PLANNED ROUTE POLYLINE - Draws route between stops via Directions API
 // Used as fallback when no GPS history is available
 // ============================================
-function PlannedRoutePolyline({ stops }: { stops: StopData[] }) {
+function PlannedRoutePolyline({
+  stops,
+  onRouteResolved,
+}: {
+  stops: StopData[];
+  onRouteResolved?: (summary: RouteSummary | null) => void;
+}) {
   const map = useMap();
   const routesLibrary = useMapsLibrary('routes');
   const mapsLibrary = useMapsLibrary('maps');
@@ -344,6 +435,14 @@ function PlannedRoutePolyline({ stops }: { stops: StopData[] }) {
     () => stops.map((s) => `${s.sequenceNumber}:${s.lat}:${s.lng}`).join('|'),
     [stops]
   );
+
+  // Keep the latest callback in a ref so the Directions effect doesn't re-fire
+  // when the parent passes a fresh function reference each render. The callback
+  // doesn't need to drive the request; it's a sink for the response.
+  const onRouteResolvedRef = useRef(onRouteResolved);
+  useEffect(() => {
+    onRouteResolvedRef.current = onRouteResolved;
+  }, [onRouteResolved]);
 
   useEffect(() => {
     if (!map || !routesLibrary || !mapsLibrary || stops.length < 2) return;
@@ -382,8 +481,27 @@ function PlannedRoutePolyline({ stops }: { stops: StopData[] }) {
         if (cancelled) return;
         if (status === google.maps.DirectionsStatus.OK && result) {
           directionsRenderer.setDirections(result);
+
+          // Sum legs for the authoritative trip distance + duration. We use
+          // `duration_in_traffic` when present (the request would need
+          // `drivingOptions` to surface it; with the basic request we get
+          // `duration`, which is the no-traffic estimate). Either way, this
+          // is real data from the same call we already need to draw the
+          // route — adds no extra API spend.
+          const legs = result.routes?.[0]?.legs ?? [];
+          const totalMeters = legs.reduce((sum, l) => sum + (l.distance?.value ?? 0), 0);
+          const totalSeconds = legs.reduce(
+            (sum, l) => sum + (l.duration_in_traffic?.value ?? l.duration?.value ?? 0),
+            0,
+          );
+          onRouteResolvedRef.current?.(
+            totalMeters > 0 || totalSeconds > 0 ? { totalMeters, totalSeconds } : null,
+          );
         } else {
           console.warn('[PlannedRoutePolyline] Directions request failed:', status);
+          // Tell the caller we couldn't resolve a route so it can fall back
+          // to its own derived value rather than showing stale data.
+          onRouteResolvedRef.current?.(null);
           const path = sortedStops.map((s) => ({ lat: s.lat, lng: s.lng }));
           fallbackLine = new mapsLibrary.Polyline({
             path,
@@ -483,10 +601,32 @@ function MapBoundsFitter({
 }) {
   const map = useMap();
 
+  // Fingerprint the geometry so the effect only re-fits when the point set
+  // actually changes, not when the parent passes a new array/object reference
+  // on every render. This is what was making the map snap back every time
+  // the modal re-rendered (tab switch, query tick, callback ref change).
+  const routePointsKey = useMemo(() => {
+    if (!routePoints || routePoints.length === 0) return '';
+    const first = routePoints[0];
+    const last = routePoints[routePoints.length - 1];
+    return `${routePoints.length}:${first.latitude},${first.longitude}:${last.latitude},${last.longitude}`;
+  }, [routePoints]);
+
+  const stopsKey = useMemo(() => {
+    if (!stops || stops.length === 0) return '';
+    return stops.map((s) => `${s.id}:${s.lat},${s.lng}`).join('|');
+  }, [stops]);
+
+  const liveLocationKey = useMemo(
+    () => (liveLocation ? `${liveLocation.latitude},${liveLocation.longitude}` : ''),
+    [liveLocation],
+  );
+
   useEffect(() => {
     if (!map) return;
 
-    // If a stop is selected, zoom to it
+    // If a stop is selected, zoom to it. Resolve via the latest `stops` ref
+    // each time the effect runs — we only depend on the fingerprint above.
     if (selectedStopId && stops) {
       const selectedStop = stops.find((s) => s.id === selectedStopId);
       if (selectedStop) {
@@ -517,7 +657,11 @@ function MapBoundsFitter({
     if (hasPoints) {
       map.fitBounds(bounds, { top: 60, right: 40, bottom: 80, left: 40 });
     }
-  }, [map, routePoints, liveLocation, stops, selectedStopId]);
+    // Deps are intentionally fingerprints, not the raw arrays/objects — see
+    // the useMemos above. `routePoints`/`liveLocation`/`stops` are read fresh
+    // inside the effect via closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, routePointsKey, liveLocationKey, stopsKey, selectedStopId]);
 
   return null;
 }
@@ -712,103 +856,15 @@ function StopMarker({
           )}
         </div>
 
-        {/* Label */}
-        <div
-          className={cn(
-            'absolute left-1/2 -translate-x-1/2 top-full mt-1',
-            'px-1.5 py-0.5 rounded text-[10px] font-medium whitespace-nowrap',
-            'bg-white/95 border shadow-sm',
-            isSelected && 'bg-blue-50 border-blue-200'
-          )}
-        >
-          {isPickup ? 'P' : 'D'}{stop.sequenceNumber}
-          {stop.city && <span className="text-muted-foreground ml-1">{stop.city}</span>}
-        </div>
       </div>
     </AdvancedMarker>
   );
 }
 
 // ============================================
-// METRICS PILL - Bottom center overlay
-// ============================================
-function MetricsPill({
-  routePoints,
-  isLive,
-  driverName,
-}: {
-  routePoints: LocationPoint[];
-  isLive: boolean;
-  driverName?: string;
-}) {
-  if (routePoints.length === 0 && !isLive) return null;
-
-  // Calculate metrics
-  let distanceMiles = 0;
-  let durationHours = 0;
-
-  if (routePoints.length > 1) {
-    for (let i = 1; i < routePoints.length; i++) {
-      const prev = routePoints[i - 1];
-      const curr = routePoints[i];
-      distanceMiles += haversineDistance(
-        prev.latitude,
-        prev.longitude,
-        curr.latitude,
-        curr.longitude
-      ) * 0.621371;
-    }
-    const startTime = routePoints[0].recordedAt;
-    const endTime = routePoints[routePoints.length - 1].recordedAt;
-    durationHours = (endTime - startTime) / (1000 * 60 * 60);
-  }
-
-  return (
-    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
-      <div className="flex items-center gap-3 bg-white/95 backdrop-blur border rounded-full px-4 py-2 shadow-lg">
-        {/* Live indicator */}
-        {isLive && (
-          <div className="flex items-center gap-1.5 pr-3 border-r">
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-            <span className="text-xs font-medium text-green-700">Live</span>
-          </div>
-        )}
-
-        {/* Driver name */}
-        {driverName && (
-          <div className="flex items-center gap-1.5 text-sm">
-            <Navigation className="w-3.5 h-3.5 text-muted-foreground" />
-            <span className="font-medium">{driverName.split(' ')[0]}</span>
-          </div>
-        )}
-
-        {/* Distance */}
-        {distanceMiles > 0 && (
-          <div className="flex items-center gap-1 text-sm">
-            <Route className="w-3.5 h-3.5 text-muted-foreground" />
-            <span className="font-medium">{distanceMiles.toFixed(1)}</span>
-            <span className="text-muted-foreground text-xs">mi</span>
-          </div>
-        )}
-
-        {/* Duration */}
-        {durationHours > 0 && (
-          <div className="flex items-center gap-1 text-sm">
-            <Clock className="w-3.5 h-3.5 text-muted-foreground" />
-            <span className="font-medium">
-              {durationHours < 1
-                ? `${Math.round(durationHours * 60)}m`
-                : `${durationHours.toFixed(1)}h`}
-            </span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ============================================
-// TIME RANGE INDICATOR - Top right
+// TIME RANGE INDICATOR - rendered inside the top-left overlay stack
+// (below "Matched X%" / alongside "Planned Route") so all map chrome
+// shares one anchor and doesn't fight the modal's right-rail edge.
 // ============================================
 function TimeRangeIndicator({
   routePoints,
@@ -820,17 +876,15 @@ function TimeRangeIndicator({
   if (routePoints.length === 0) return null;
 
   return (
-    <div className="absolute top-3 right-3 z-10">
-      <div className="bg-white/95 backdrop-blur border rounded-lg px-2.5 py-1.5 shadow-sm">
-        <div className="text-[10px] text-muted-foreground flex items-center gap-1.5">
-          <span>{format(new Date(routePoints[0].recordedAt), 'h:mm a')}</span>
-          <span>→</span>
-          {isLive ? (
-            <span className="text-green-600 font-medium">Now</span>
-          ) : (
-            <span>{format(new Date(routePoints[routePoints.length - 1].recordedAt), 'h:mm a')}</span>
-          )}
-        </div>
+    <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
+      <div className="text-[10px] text-foreground flex items-center gap-1.5 tabular-nums">
+        <span>{format(new Date(routePoints[0].recordedAt), 'h:mm a')}</span>
+        <span className="text-muted-foreground">→</span>
+        {isLive ? (
+          <span className="text-green-600 dark:text-green-400 font-medium">Now</span>
+        ) : (
+          <span>{format(new Date(routePoints[routePoints.length - 1].recordedAt), 'h:mm a')}</span>
+        )}
       </div>
     </div>
   );
@@ -869,8 +923,13 @@ export function LiveRouteMap({
   stops: stopsProp,
   selectedStopId,
   onStopSelect,
+  onRouteResolved,
+  pingsMode = false,
+  isInTransit = false,
 }: LiveRouteMapProps) {
   const apiKey = useGoogleMapsKey();
+  const mapId = useThemedMapId();
+  const colorScheme = useMapColorScheme();
 
   // Stabilize stops reference so child effects don't re-fire on every parent render.
   // The parent creates a new stops array on every render via .filter().map(),
@@ -927,7 +986,14 @@ export function LiveRouteMap({
     return liveLocations.find((loc) => loc.driverId === driverId) ?? null;
   }, [driverId, liveLocations]);
 
-  const isLiveTracking = !!driverLiveLocation;
+  // Live-unit affordances (current driver marker, polyline extension to
+  // current position, geofence-proximity highlight) only apply when this
+  // load is actively in transit. For Completed / Delivered loads we still
+  // want to show the historical polyline (so the user sees where the trip
+  // went) but not pretend the truck's current position belongs to this load.
+  const effectiveLiveLocation = isInTransit ? driverLiveLocation : null;
+
+  const isLiveTracking = !!effectiveLiveLocation;
 
   // Get road-following path using Mapbox Map Matching when route history changes
   useEffect(() => {
@@ -1093,7 +1159,8 @@ export function LiveRouteMap({
         <Map
           defaultCenter={center}
           defaultZoom={hasRouteData || hasLiveData ? 12 : 6}
-          mapId={process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || 'live-route-map'}
+          mapId={mapId}
+          colorScheme={colorScheme}
           gestureHandling="cooperative"
           disableDefaultUI
           zoomControl
@@ -1105,38 +1172,55 @@ export function LiveRouteMap({
           {/* Fit bounds */}
           <MapBoundsFitter
             routePoints={routeHistory}
-            liveLocation={driverLiveLocation}
+            liveLocation={effectiveLiveLocation}
             stops={stops}
             selectedStopId={selectedStopId}
           />
 
-          {/* Geofence circles around stops */}
+          {/* Geofence circles around stops — driver-inside highlight only
+              while the load is in transit. */}
           {hasStops && (
             <GeofenceCircles
               stops={stops!}
-              driverLocation={driverLiveLocation}
+              driverLocation={effectiveLiveLocation}
             />
           )}
 
-          {/* GPS trail polyline - uses snapped points when available */}
-          {hasRouteData && (
-            <RoutePolylineRenderer 
-              points={routeHistory} 
+          {/* GPS trail polyline - uses snapped points when available.
+              Suppressed in pings mode: the rail's "GPS pings" tab swaps
+              the smoothed line for raw dots so dispatchers can see exact
+              capture points.
+
+              The polyline draws from the load-specific ping history
+              (filtered server-side by loadId), and only extends to the
+              driver's live position when the load is in transit. */}
+          {hasRouteData && !pingsMode && (
+            <RoutePolylineRenderer
+              points={routeHistory}
               snappedPoints={routePath.length > 0 ? routePath : undefined}
-              liveLocation={driverLiveLocation ? {
-                latitude: driverLiveLocation.latitude,
-                longitude: driverLiveLocation.longitude,
+              liveLocation={effectiveLiveLocation ? {
+                latitude: effectiveLiveLocation.latitude,
+                longitude: effectiveLiveLocation.longitude,
               } : null}
             />
           )}
 
-          {/* Planned route between stops when no GPS data yet */}
-          {!hasRouteData && hasStops && stops!.length >= 2 && (
-            <PlannedRoutePolyline stops={stops!} />
+          {/* Planned route between stops when no GPS data yet. Also
+              suppressed in pings mode (no pings → nothing to scatter). */}
+          {!hasRouteData && hasStops && stops!.length >= 2 && !pingsMode && (
+            <PlannedRoutePolyline stops={stops!} onRouteResolved={onRouteResolved} />
           )}
 
-          {/* GPS breadcrumb dots - shows actual data capture points */}
-          {hasRouteData && isUsingFallback && <GpsBreadcrumbs points={routeHistory} />}
+          {/* GPS breadcrumb dots — fallback when snap-to-roads couldn't
+              resolve. Only relevant in route-view mode. */}
+          {hasRouteData && isUsingFallback && !pingsMode && (
+            <GpsBreadcrumbs points={routeHistory} />
+          )}
+
+          {/* Pings-mode scatter: every captured ping as a dot, freshest
+              one accent-coloured. Replaces the polyline for the entire
+              tab session. */}
+          {pingsMode && hasRouteData && <GpsPingsScatter points={routeHistory} />}
 
           {/* Stop markers */}
           {stops?.map((stop) => (
@@ -1148,16 +1232,18 @@ export function LiveRouteMap({
             />
           ))}
 
-          {/* Live driver location */}
-          {driverLiveLocation && (
+          {/* Live driver location — only shown when this load is in
+              transit. For Completed / Delivered loads the truck's current
+              position isn't this load anymore. */}
+          {effectiveLiveLocation && (
             <LiveDriverMarker
               location={{
-                latitude: driverLiveLocation.latitude,
-                longitude: driverLiveLocation.longitude,
+                latitude: effectiveLiveLocation.latitude,
+                longitude: effectiveLiveLocation.longitude,
               }}
-              heading={driverLiveLocation.heading}
-              speed={driverLiveLocation.speed}
-              recordedAt={driverLiveLocation.recordedAt}
+              heading={effectiveLiveLocation.heading}
+              speed={effectiveLiveLocation.speed}
+              recordedAt={effectiveLiveLocation.recordedAt}
               now={now}
             />
           )}
@@ -1167,8 +1253,8 @@ export function LiveRouteMap({
       <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
         {/* Snapping indicator */}
         {isLoadingPath && (
-          <div className="bg-white/95 backdrop-blur border rounded-lg px-2.5 py-1.5 shadow-sm">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
+            <div className="flex items-center gap-2 text-xs text-foreground">
               <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
               Loading route...
             </div>
@@ -1177,34 +1263,29 @@ export function LiveRouteMap({
 
         {/* Match confidence */}
         {matchConfidence > 0 && routePath.length > 0 && (
-          <div className="bg-white/95 backdrop-blur border rounded-lg px-2.5 py-1.5 shadow-sm">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
+          <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
+            <div className="flex items-center gap-1.5 text-xs text-foreground">
+              <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
               <span>Matched {Math.round(matchConfidence * 100)}%</span>
             </div>
           </div>
         )}
 
+        {/* Time range indicator — sits directly under the Match-confidence
+            pill so all GPS-quality chrome is in one corner. Pure rail card
+            now (no absolute positioning of its own). */}
+        <TimeRangeIndicator routePoints={routeHistory} isLive={isLiveTracking} />
+
         {/* Planned route indicator when no GPS data */}
         {!hasRouteData && !hasLiveData && hasStops && (
-          <div className="bg-white/95 backdrop-blur border rounded-lg px-2.5 py-1.5 shadow-sm">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Route className="w-3.5 h-3.5 text-indigo-500" />
+          <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
+            <div className="flex items-center gap-1.5 text-xs text-foreground">
+              <Route className="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400" />
               <span>Planned Route</span>
             </div>
           </div>
         )}
       </div>
-
-      {/* Time range indicator */}
-      <TimeRangeIndicator routePoints={routeHistory} isLive={isLiveTracking} />
-
-      {/* Bottom metrics pill */}
-      <MetricsPill
-        routePoints={routeHistory}
-        isLive={isLiveTracking}
-        driverName={driverLiveLocation?.driverName}
-      />
     </div>
   );
 }

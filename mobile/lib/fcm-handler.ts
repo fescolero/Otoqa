@@ -1,32 +1,31 @@
 /**
- * fcm-handler.ts — Phase 1c wake-push receive + FGS resume
+ * fcm-handler.ts — server-dispatched push receive handlers
  *
- * Consumes the server-dispatched wake pushes from `convex/fcmWake.ts`
- * (§ 6.2 in the architecture doc). The payload shape is intentionally
- * tiny (4KB FCM ceiling):
- *     { type: 'wake_tracking', sessionId: Id<'driverSessions'> }
+ * Consumes data-only FCM pushes from `convex/fcmWake.ts`. Two payload
+ * families flow through the same delivery pipe (foreground listener +
+ * background task), dispatched by their `type` field:
+ *
+ *   ┌────────────────────┬────────────────────────────────────────────┐
+ *   │ type='wake_tracking' │ Server sweep noticed the device went quiet  │
+ *   │                    │ during an active shift. Wake the FGS and    │
+ *   │                    │ flush queued pings. Source: fcmWake.sweep   │
+ *   │                    │ → sendWake (§ 6.2).                         │
+ *   ├────────────────────┼────────────────────────────────────────────┤
+ *   │ type='session_ended' │ A session ended server-side (dispatch       │
+ *   │                    │ override, auto-timeout, handoff, another    │
+ *   │                    │ device). Tear down the FGS so we stop        │
+ *   │                    │ emitting doomed pings. Source: fcmWake      │
+ *   │                    │ ::sendSessionEnded, fired from              │
+ *   │                    │ endSessionInternal.                          │
+ *   └────────────────────┴────────────────────────────────────────────┘
  *
  * Receive paths (both wired at root init):
  *   1. Foreground: `Notifications.addNotificationReceivedListener`
- *      fires while the app is in the foreground. Rare for wake
- *      pushes — if the app is already open, FGS is almost certainly
- *      still running — but we handle it defensively (idempotent).
+ *      fires while the app is in the foreground.
  *   2. Background: `TaskManager.defineTask` + `Notifications.registerTaskAsync`
- *      fires when the app is backgrounded or killed. This is the
- *      point of the whole path: a high-priority data message gives
- *      us a foreground-service-start exemption (§ 4.1 #3).
- *
- * Gating, in order:
- *   1. `type === 'wake_tracking'` — filter out non-wake messages that
- *      might flow through the same delivery pipe in the future.
- *   2. `fcm_wake_enabled` feature flag — kill-switch. Checked locally
- *      (cached flag); real-time refresh is wired in feature-flags.ts.
- *   3. Session-active guard — the sweep dispatches based on a
- *      potentially-stale `driverSessions.lastPingAt`; between dispatch
- *      and delivery the driver may have clocked out. We query
- *      `getActiveSession` and verify the returned `_id` matches the
- *      payload `sessionId`. Emits `fcm_wake_session_inactive` and
- *      returns without touching FGS on mismatch.
+ *      fires when the app is backgrounded or killed. High-priority
+ *      data delivery gives us a foreground-service-start exemption
+ *      on Android (§ 4.1 #3).
  *
  * Path B: `expo-notifications` + `expo-task-manager` only — no
  * `@react-native-firebase/messaging`. The background task hook is
@@ -41,13 +40,22 @@ import { api } from '../../convex/_generated/api';
 import { log } from './log';
 import { getFlagBool, FLAG_FCM_WAKE_ENABLED } from './feature-flags';
 import { getFreshToken } from './auth-token-store';
-import { resumeTracking, getBufferedLocationCount } from './location-tracking';
+import {
+  resumeTracking,
+  getBufferedLocationCount,
+  stopSessionTracking,
+  getTrackingState,
+  forceFlush,
+} from './location-tracking';
 import {
   trackFcmWakeReceived,
   trackFcmWakeResumeSuccess,
   trackFcmWakeSessionInactive,
   trackFcmWakeIgnored,
   trackFcmWakeAuthFallback,
+  trackFcmSessionEndedReceived,
+  trackFcmSessionEndedStopped,
+  trackFcmSessionEndedIgnored,
 } from './analytics';
 
 const lg = log('FcmHandler');
@@ -56,16 +64,44 @@ const BACKGROUND_NOTIFICATION_TASK_NAME = 'otoqa-fcm-wake-task';
 
 // Match the payload shape dispatched by convex/fcmWake.ts:sendWake.
 const WAKE_PAYLOAD_TYPE = 'wake_tracking';
+// Match the payload shape dispatched by convex/fcmWake.ts::sendSessionEnded.
+const SESSION_ENDED_PAYLOAD_TYPE = 'session_ended';
 
 type WakePayload = {
   type: string;
   sessionId: string;
 };
 
+type SessionEndedPayload = {
+  type: string;
+  sessionId: string;
+  endedAt?: string;
+  endReason?: string;
+};
+
 function isWakePayload(data: unknown): data is WakePayload {
   if (!data || typeof data !== 'object') return false;
   const d = data as Record<string, unknown>;
   return d.type === WAKE_PAYLOAD_TYPE && typeof d.sessionId === 'string';
+}
+
+function isSessionEndedPayload(data: unknown): data is SessionEndedPayload {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Record<string, unknown>;
+  return (
+    d.type === SESSION_ENDED_PAYLOAD_TYPE && typeof d.sessionId === 'string'
+  );
+}
+
+/**
+ * Read the `type` field defensively. Used by the top-level routers to
+ * decide which handler to dispatch to without committing to a typed
+ * payload until inside that handler.
+ */
+function readPayloadType(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
+  const t = (data as Record<string, unknown>).type;
+  return typeof t === 'string' ? t : null;
 }
 
 /**
@@ -199,6 +235,114 @@ async function handleWakePayload(
 }
 
 /**
+ * Core handler for a session_ended payload. Tears down the foreground
+ * location service so we stop emitting GPS pings that the server is
+ * going to reject anyway (see convex/driverLocations.ts::ingestBatch
+ * skippedSessionEnded counter).
+ *
+ * Always stops on receipt — no auth-gated guard like the wake path
+ * needs. The "false stop" risk (push for the wrong session) is small:
+ *   • If the local TrackingState is for a DIFFERENT session, stopping
+ *     it on a stale payload would be a bug. We guard against this by
+ *     comparing payload.sessionId to the local state's sessionId. If
+ *     they mismatch, we skip the stop and emit an ignore event.
+ *   • If TrackingState is already inactive (driver hit End Shift on
+ *     this device + the push raced), stop is a harmless no-op.
+ *
+ * Idempotent — `stopSessionTracking()` already checks `isActive` and
+ * no-ops if there's nothing to tear down. Safe to call from both
+ * foreground + background delivery paths.
+ */
+async function handleSessionEndedPayload(
+  data: unknown,
+  deliveryPath: 'foreground' | 'background',
+): Promise<void> {
+  if (!isSessionEndedPayload(data)) {
+    trackFcmSessionEndedIgnored({ reason: 'invalid_payload' });
+    return;
+  }
+
+  trackFcmSessionEndedReceived({
+    sessionId: data.sessionId,
+    endReason: data.endReason ?? 'unknown',
+    deliveryPath,
+  });
+
+  // Same kill-switch as the wake path. If FCM features are off
+  // org-wide, we don't touch local state. The driver can still end
+  // their shift manually via the UI; this push is a UX accelerator
+  // for the remote-end case.
+  const enabled = await getFlagBool(FLAG_FCM_WAKE_ENABLED, false);
+  if (!enabled) {
+    trackFcmSessionEndedIgnored({ reason: 'flag_disabled' });
+    return;
+  }
+
+  // Mismatch guard. Local TrackingState carries the sessionId mobile
+  // is actively pinging against. If the push refers to a *different*
+  // session than what we're tracking, the local session is either:
+  //   1. A newer session the driver started (push is stale) → keep
+  //      tracking the new one
+  //   2. Already cleared (driver hit End Shift here) → no-op
+  // Both cases: don't stop. Emit an ignore event so we can see the
+  // rate; if it climbs, the server is over-pushing.
+  let wasActive = false;
+  let preFlushCount = 0;
+  try {
+    const state = await getTrackingState();
+    wasActive = !!state?.isActive;
+    if (state?.sessionId && state.sessionId !== data.sessionId) {
+      trackFcmSessionEndedIgnored({
+        reason: 'session_mismatch',
+        detail: `payload=${data.sessionId} local=${state.sessionId}`,
+      });
+      return;
+    }
+    preFlushCount = await getBufferedLocationCount().catch(() => 0);
+  } catch (err) {
+    // getTrackingState shouldn't throw in normal operation; if it
+    // does, fall through to the stop. Better to over-stop than leave
+    // a stale tracker running.
+    lg.warn(
+      `getTrackingState threw before session-ended stop: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // Drain the outbound queue BEFORE tearing down so any in-flight
+  // valid pings (recorded before session.endedAt) make it to the
+  // server. After stopSessionTracking the foreground service is
+  // gone; flushing afterward still works (the queue persists in
+  // SQLite) but cleaner to flush first.
+  try {
+    await forceFlush();
+  } catch (err) {
+    lg.warn(
+      `forceFlush threw before session-ended stop: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  try {
+    const result = await stopSessionTracking();
+    lg.debug(
+      `session_ended stop result: success=${result.success} msg=${result.message}`,
+    );
+    trackFcmSessionEndedStopped({
+      sessionId: data.sessionId,
+      wasActive,
+      drainedQueueSize: preFlushCount,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    lg.error(`stopSessionTracking threw: ${msg}`);
+    trackFcmSessionEndedIgnored({ reason: 'stop_error', detail: msg });
+  }
+}
+
+/**
  * Define + register the background notification task. Must be called
  * at module top level (before React mounts) so TaskManager picks it
  * up on cold-start wake. `registerTaskAsync` is idempotent — calling
@@ -223,20 +367,48 @@ export async function registerBackgroundWakeTask(): Promise<void> {
 }
 
 /**
- * Subscribe to foreground notifications for the same wake payload.
+ * Subscribe to foreground notifications and dispatch by payload type.
  * Returns the subscription's remove() function so callers can clean
  * up (the root layout does, on unmount).
+ *
+ * Kept named `registerForegroundWakeListener` for backward-compat with
+ * the root layout that already imports it; it now handles all
+ * server-dispatched data-only message types, not just wakes.
  */
 export function registerForegroundWakeListener(): () => void {
   const sub = Notifications.addNotificationReceivedListener((notification) => {
     const data = notification.request?.content?.data;
-    handleWakePayload(data, 'foreground').catch((err) => {
+    routePayload(data, 'foreground').catch((err) => {
       lg.warn(
-        `foreground handleWakePayload threw: ${err instanceof Error ? err.message : err}`,
+        `foreground routePayload threw: ${err instanceof Error ? err.message : err}`,
       );
     });
   });
   return () => sub.remove();
+}
+
+/**
+ * Dispatch a received payload to the right handler based on its
+ * `type` field. Both delivery paths (foreground listener + background
+ * task) funnel through here so the routing rules stay in one place.
+ */
+async function routePayload(
+  data: unknown,
+  deliveryPath: 'foreground' | 'background',
+): Promise<void> {
+  const type = readPayloadType(data);
+  switch (type) {
+    case WAKE_PAYLOAD_TYPE:
+      await handleWakePayload(data, deliveryPath);
+      return;
+    case SESSION_ENDED_PAYLOAD_TYPE:
+      await handleSessionEndedPayload(data, deliveryPath);
+      return;
+    default:
+      // Not one of ours — could be a driver-facing dispatch message,
+      // a future payload type, etc. Silently ignore.
+      return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +430,10 @@ export function registerForegroundWakeListener(): () => void {
 Notifications.setNotificationHandler({
   handleNotification: async (notification) => {
     const data = notification.request?.content?.data;
-    if ((data as { type?: string } | null)?.type === WAKE_PAYLOAD_TYPE) {
+    const type = (data as { type?: string } | null)?.type;
+    // Silent data-only messages: wake_tracking + session_ended. Both
+    // are infrastructure pushes the driver shouldn't see as banners.
+    if (type === WAKE_PAYLOAD_TYPE || type === SESSION_ENDED_PAYLOAD_TYPE) {
       return {
         shouldShowAlert: false,
         shouldShowBanner: false,
@@ -304,9 +479,9 @@ TaskManager.defineTask(
     } | null | undefined;
     const payload =
       rawData?.notification?.data ?? rawData?.data ?? rawData ?? null;
-    await handleWakePayload(payload, 'background').catch((err) => {
+    await routePayload(payload, 'background').catch((err) => {
       lg.warn(
-        `background handleWakePayload threw: ${err instanceof Error ? err.message : err}`,
+        `background routePayload threw: ${err instanceof Error ? err.message : err}`,
       );
     });
   },

@@ -18,6 +18,8 @@ import {
   type AttentionItem,
   Avatar,
   Chip,
+  ColumnsButton,
+  type ColumnDef,
   CommentsThread,
   ComplianceMicroBars,
   type ComplianceItem,
@@ -28,6 +30,10 @@ import {
   type DSPropsEditableItem,
   DetailsFullPage,
   EditableAddress,
+  EditableSSN,
+  FilterBar,
+  type FilterChipValue,
+  type FilterProperty,
   type FPSection,
   NowDriverAvailable,
   NowDriverInTransit,
@@ -40,20 +46,15 @@ import {
   WBtn,
   resolveStatusId,
 } from '@/components/web';
-import {
-  buildDriverDetails,
-  type DriverRow,
-} from '@/components/web/drivers/build-driver-details';
+import { PayeeProfilesCard } from '@/components/web/pay-profiles/payee-profiles-card';
+import { DriverDocumentsTab } from '@/components/web/drivers/driver-documents-tab';
 
 import { DeleteConfirmationDialog } from '@/components/drivers/delete-confirmation-dialog';
-import { DriverPaySettingsSection } from '@/components/driver-pay';
 import {
-  AssignedLoadsTable,
   type AssignedLoad,
   type AssignedLoadStatus,
 } from '@/components/loads/assigned-loads-table';
 import { DriverSessionsHistory } from '@/components/sessions/driver-sessions-history';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 import {
   countAttention,
@@ -69,6 +70,46 @@ const formatDate = (s?: string): string => {
   return `${months[parseInt(m[2], 10) - 1]} ${parseInt(m[3], 10)}, ${m[1]}`;
 };
 
+// Translate FilterBar date presets to inclusive YYYY-MM-DD ranges. The
+// filter compares against `firstStopDate` (also a YYYY-MM-DD string), so
+// lexicographic compare is correct.
+function toYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+function addDays(d: Date, n: number): Date {
+  const out = new Date(d);
+  out.setDate(out.getDate() + n);
+  return out;
+}
+function datePresetToRange(preset: string | undefined): { start: string; end: string } | null {
+  if (!preset) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const ymd = toYmd(today);
+  switch (preset) {
+    case 'Today':         return { start: ymd, end: ymd };
+    case 'Tomorrow':      { const t = toYmd(addDays(today, 1)); return { start: t, end: t }; }
+    case 'Yesterday':     { const y = toYmd(addDays(today, -1)); return { start: y, end: y }; }
+    case 'Next 7 days':   return { start: ymd, end: toYmd(addDays(today, 6)) };
+    case 'Last 7 days':   return { start: toYmd(addDays(today, -6)), end: ymd };
+    case 'Last 30 days':  return { start: toYmd(addDays(today, -29)), end: ymd };
+    case 'This month':    {
+      const first = new Date(today.getFullYear(), today.getMonth(), 1);
+      const last  = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+      return { start: toYmd(first), end: toYmd(last) };
+    }
+    case 'Last month':    {
+      const first = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const last  = new Date(today.getFullYear(), today.getMonth(), 0);
+      return { start: toYmd(first), end: toYmd(last) };
+    }
+    default: return null;
+  }
+}
+
 
 export default function DriverDetailPage() {
   const router = useRouter();
@@ -79,19 +120,17 @@ export default function DriverDetailPage() {
 
   const driver = useQuery(api.drivers.get, { id: driverId, includeSensitive: true });
   const allDrivers = useQuery(api.drivers.list, organizationId ? { organizationId, includeDeleted: true } : 'skip');
-  const payPlans = useQuery(api.payPlans.list, organizationId ? { workosOrgId: organizationId } : 'skip');
   const [loadStatusFilter, setLoadStatusFilter] = React.useState<AssignedLoadStatus>('Assigned');
   const driverLoadsData = useQuery(api.loads.getByDriver, { driverId, status: loadStatusFilter });
+  const recentDriverLoads = useQuery(api.loads.getRecentByDriver, { driverId, limit: 4 });
 
   const deactivateDriver = useMutation(api.drivers.deactivate);
   const restoreDriver = useMutation(api.drivers.restore);
   const permanentDeleteDriver = useMutation(api.drivers.permanentDelete);
-  const assignPayPlan = useMutation(api.payPlans.assignToDriver);
   const updateDriver = useMutation(api.drivers.update);
 
   const [showDeleteDialog, setShowDeleteDialog] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
-  const [isAssigningPayPlan, setIsAssigningPayPlan] = React.useState(false);
   // Controlled active section id so the AttentionBand can navigate.
   const [activeSection, setActiveSection] = React.useState('overview');
 
@@ -181,13 +220,16 @@ export default function DriverDetailPage() {
     }
   };
 
-  const eyebrow = (
+  const eyebrow = driver.terminationDate && new Date(driver.terminationDate) > new Date() ? (
     <span className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
-      <Avatar name={fullName} size={28} />
+      <Chip status="warning" label="Pending Termination" />
+    </span>
+  ) : undefined;
+
+  const titleNode = (
+    <span className="inline-flex items-center gap-3">
+      <span>{fullName}</span>
       <StatusPicker entity="driver" currentId={statusId} onChange={onChangeStatus} />
-      {driver.terminationDate && new Date(driver.terminationDate) > new Date() && (
-        <Chip status="warning" label="Pending Termination" />
-      )}
     </span>
   );
 
@@ -228,8 +270,8 @@ export default function DriverDetailPage() {
   // map known field keys here and skip unknown ones.
   type DriverField =
     | 'firstName' | 'middleName' | 'lastName'
-    | 'email' | 'phone'
-    | 'licenseClass' | 'licenseState' | 'licenseExpiration'
+    | 'email' | 'phone' | 'ssn' | 'citizenship'
+    | 'licenseClass' | 'licenseState' | 'licenseExpiration' | 'licenseNumber' | 'gender'
     | 'employmentType' | 'employmentStatus' | 'hireDate'
     | 'preEmploymentCheckDate' | 'terminationDate'
     | 'address' | 'address2' | 'city' | 'state' | 'zipCode'
@@ -318,6 +360,20 @@ export default function DriverDetailPage() {
       editor: { type: 'text' },
       placeholder: 'Add license number',
     },
+    {
+      key: 'gender',
+      label: 'Gender',
+      value: driver.gender ?? '',
+      editor: {
+        type: 'select',
+        options: [
+          { value: 'M', label: 'Male' },
+          { value: 'F', label: 'Female' },
+          { value: 'X', label: 'Non-binary' },
+        ],
+      },
+      placeholder: 'Pick gender',
+    },
   ];
 
   const employmentItems: Array<DSPropsEditableItem | null> = [
@@ -352,18 +408,55 @@ export default function DriverDetailPage() {
           editor: { type: 'date' },
         }
       : null,
-    driver.terminationDate
-      ? {
-          key: 'terminationDate',
-          label: 'Termination',
-          value: driver.terminationDate,
-          display: <span className="num">{formatDate(driver.terminationDate)}</span>,
-          editor: { type: 'date' },
-        }
-      : null,
+    {
+      key: 'terminationDate',
+      label: 'Termination',
+      value: driver.terminationDate ?? '',
+      display: driver.terminationDate
+        ? <span className="num">{formatDate(driver.terminationDate)}</span>
+        : <span className="text-[var(--text-tertiary)]">N/A</span>,
+      editor: { type: 'date' },
+      placeholder: 'Pick date',
+    },
   ];
 
   const personalItems: Array<DSPropsEditableItem | null> = [
+    {
+      key: 'firstName',
+      label: 'First name',
+      value: driver.firstName ?? '',
+      editor: { type: 'text' },
+      placeholder: 'Add first name',
+    },
+    {
+      key: 'middleName',
+      label: 'Middle',
+      value: driver.middleName ?? '',
+      editor: { type: 'text' },
+      placeholder: 'Add middle name',
+    },
+    {
+      key: 'lastName',
+      label: 'Last name',
+      value: driver.lastName ?? '',
+      editor: { type: 'text' },
+      placeholder: 'Add last name',
+    },
+    {
+      key: 'phone',
+      label: 'Phone',
+      value: driver.phone ?? '',
+      display: driver.phone ? formatPhoneNumber(driver.phone) : undefined,
+      editor: { type: 'phone' },
+      placeholder: 'Add phone',
+    },
+    {
+      key: 'email',
+      label: 'Email',
+      value: driver.email ?? '',
+      editor: { type: 'email' },
+      placeholder: 'Add email',
+    },
     {
       key: 'dateOfBirth',
       label: 'DOB',
@@ -377,15 +470,37 @@ export default function DriverDetailPage() {
       editor: { type: 'date' },
       placeholder: 'Pick date of birth',
     },
-    driver.ssn
-      ? {
-          key: 'ssn',
-          label: 'SSN',
-          value: driver.ssn,
-          display: <span className="num">***-**-{driver.ssn.slice(-4)}</span>,
-          readOnly: true,
-        }
-      : null,
+    {
+      key: 'ssn',
+      label: 'SSN',
+      // Sensitive: <EditableSSN> keeps the value masked (***-**-XXXX) at
+      // rest and inside the edit input (type="password"); an eye toggle
+      // beside the pencil reveals it on demand. Convex routes ssn through
+      // drivers_sensitive_info with audit logging.
+      custom: (
+        <EditableSSN
+          value={driver.ssn ?? ''}
+          onCommit={(next) => commitField('ssn', next)}
+          placeholder="Add SSN"
+        />
+      ),
+    },
+    {
+      key: 'citizenship',
+      label: 'Citizenship',
+      value: driver.citizenship ?? '',
+      editor: {
+        type: 'select',
+        options: [
+          { value: 'US Citizen', label: 'US Citizen' },
+          { value: 'Non-Citizen National', label: 'Non-Citizen National' },
+          { value: 'Permanent Resident', label: 'Permanent Resident' },
+          { value: 'Work Authorized', label: 'Work Authorized' },
+          { value: 'Other', label: 'Other' },
+        ],
+      },
+      placeholder: 'Pick citizenship',
+    },
     // Address row uses <EditableAddress> via the `custom` slot —
     // Google Places autocomplete fills street/city/state/zip/country in
     // one mutation (commitAddress). The remaining rows below are
@@ -455,23 +570,25 @@ export default function DriverDetailPage() {
       key: 'emergencyContactRelationship',
       label: 'Relationship',
       value: driver.emergencyContactRelationship ?? '',
-      editor: { type: 'text' },
-      placeholder: 'Spouse, Parent…',
+      editor: {
+        type: 'select',
+        options: [
+          { value: 'Spouse', label: 'Spouse' },
+          { value: 'Parent', label: 'Parent' },
+          { value: 'Sibling', label: 'Sibling' },
+          { value: 'Child', label: 'Child' },
+          { value: 'Partner', label: 'Partner' },
+          { value: 'Friend', label: 'Friend' },
+          { value: 'Other', label: 'Other' },
+        ],
+      },
+      placeholder: 'Pick relationship',
     },
     {
       key: 'emergencyContactPhone',
       label: 'Phone',
       value: driver.emergencyContactPhone ?? '',
-      display: driver.emergencyContactPhone
-        ? (
-          <a
-            href={`tel:${getPhoneLink(driver.emergencyContactPhone)}`}
-            className="text-[var(--accent)] hover:underline"
-          >
-            {formatPhoneNumber(driver.emergencyContactPhone)}
-          </a>
-        )
-        : undefined,
+      display: driver.emergencyContactPhone ? formatPhoneNumber(driver.emergencyContactPhone) : undefined,
       editor: { type: 'phone' },
       placeholder: 'Add phone',
     },
@@ -542,7 +659,7 @@ export default function DriverDetailPage() {
     attentionItems.push({
       tone: 'info',
       icon: 'truck',
-      tab: 'loads',
+      onClick: () => router.push(`/loads/${inTransitLoad._id}`),
       title: <>On <span className="num text-[var(--accent)] font-medium">{inTransitLoad.orderNumber}</span></>,
       detail: inTransitLoad.firstStopDate ? `Pickup ${inTransitLoad.firstStopDate}` : undefined,
     });
@@ -586,7 +703,13 @@ export default function DriverDetailPage() {
   const headline = onLoad ? (
     <span>
       <strong className="text-foreground">{firstName}</strong> is in transit on{' '}
-      <span className="num text-[var(--accent)] font-medium">{inTransitLoad?.orderNumber}</span>
+      <button
+        type="button"
+        onClick={() => inTransitLoad && router.push(`/loads/${inTransitLoad._id}`)}
+        className="num text-[var(--accent)] font-medium hover:underline focus-ring rounded-sm cursor-pointer bg-transparent border-0 p-0"
+      >
+        {inTransitLoad?.orderNumber}
+      </button>
       {cdlStatus === 'valid' && medicalStatus === 'valid'
         ? <>, all compliance current.</>
         : <>, with compliance items needing attention before next dispatch.</>}
@@ -601,6 +724,37 @@ export default function DriverDetailPage() {
     </span>
   );
 
+  // Recent expenses placeholder — design wants a 3-col mini-table on the
+  // Pay & expenses tab. Real data will come from payItems where
+  // kind='TRIP_EXPENSE' once trip-expense entry/approval flows exist.
+  type RecentExpenseRow = {
+    id: string;
+    date: string;
+    category: string;
+    description: string;
+    amount: string;
+  };
+  const recentExpenseCols: DSMiniColumn<RecentExpenseRow>[] = [
+    {
+      key: 'date',
+      label: 'Date',
+      width: '90px',
+      render: (r) => <span className="num">{r.date}</span>,
+    },
+    { key: 'category', label: 'Category', width: '120px' },
+    { key: 'description', label: 'Description', width: '1.4fr' },
+    {
+      key: 'amount',
+      label: 'Amount',
+      width: '90px',
+      align: 'right',
+      render: (r) => <span className="num">{r.amount}</span>,
+    },
+  ];
+  const recentExpensePlaceholderRows: RecentExpenseRow[] = [
+    { id: 'p1', date: '—', category: '—', description: 'No expenses recorded yet', amount: '—' },
+  ];
+
   type RecentTripRow = AssignedLoad & { id: string };
   const recentTripsCols: DSMiniColumn<RecentTripRow>[] = [
     { key: 'orderNumber', label: 'Trip', width: '1fr',
@@ -613,8 +767,7 @@ export default function DriverDetailPage() {
     { key: 'status', label: 'Status', width: '110px',
       render: (r) => <Chip status={r.status === 'In Transit' ? 'active' : r.status === 'Delivered' ? 'delivered' : 'assigned'} label={r.status} /> },
   ];
-  const recentTrips: RecentTripRow[] = ((driverLoadsData ?? []) as AssignedLoad[])
-    .slice(0, 4)
+  const recentTrips: RecentTripRow[] = ((recentDriverLoads ?? []) as AssignedLoad[])
     .map((l) => ({ ...l, id: l._id as unknown as string }));
 
   const overviewContent = (
@@ -639,7 +792,7 @@ export default function DriverDetailPage() {
         {onLoad && inTransitLoad ? (
           <DSCard
             title="Now"
-            action={<WBtn size="sm" leading="arrow-up-right" onClick={() => setActiveSection('loads')}>Open trip</WBtn>}
+            action={<WBtn size="sm" leading="arrow-up-right" onClick={() => router.push(`/loads/${inTransitLoad._id}`)}>Open trip</WBtn>}
           >
             <NowDriverInTransit
               load={{
@@ -671,8 +824,12 @@ export default function DriverDetailPage() {
       <DSCard title="Recent trips" bodyClassName="p-0"
         action={<WBtn size="sm" leading="arrow-up-right" onClick={() => setActiveSection('loads')}>View all</WBtn>}>
         {recentTrips.length > 0 ? (
-          <DSMiniTable columns={recentTripsCols} rows={recentTrips}
-            total={driverLoadsData?.length}/>
+          <DSMiniTable
+            columns={recentTripsCols}
+            rows={recentTrips}
+            onRowClick={(r) => router.push(`/loads/${r._id}`)}
+            className="rounded-t-none border-0 border-t"
+          />
         ) : (
           <p className="m-0 px-4 py-3 text-[12.5px] text-[var(--text-tertiary)]">No trips on file.</p>
         )}
@@ -701,104 +858,48 @@ export default function DriverDetailPage() {
     </div>
   );
 
-  // Documents tab — for now, the same compact view the slide-over uses
-  // (a 4-row mini-preview of CDL / Medical / Badge / TWIC). The backend
-  // for a real per-doc table lands in a separate phase.
-  const driverRow: DriverRow = {
-    _id: driver._id,
-    firstName: driver.firstName,
-    lastName: driver.lastName,
-    email: driver.email,
-    phone: driver.phone,
-    licenseExpiration: driver.licenseExpiration,
-    medicalExpiration: driver.medicalExpiration,
-    badgeExpiration: driver.badgeExpiration,
-    twicExpiration: driver.twicExpiration,
-    licenseClass: driver.licenseClass,
-    licenseState: driver.licenseState,
-    licenseNumber: driver.licenseNumber,
-    employmentStatus: driver.employmentStatus,
-    employmentType: driver.employmentType,
-    hireDate: driver.hireDate,
-    city: driver.city,
-    state: driver.state,
-    emergencyContactName: driver.emergencyContactName,
-    emergencyContactRelationship: driver.emergencyContactRelationship,
-    emergencyContactPhone: driver.emergencyContactPhone,
-    isDeleted: driver.isDeleted,
-  };
-  const docsSection = buildDriverDetails(driverRow).sections.find((s) => s.id === 'documents');
+  // Documents tab — full-page layout: 4-stat strip + Active card with
+  // FilterBar + DSMiniTable. Editable Expires cells write back via
+  // api.drivers.update.
   const documentsContent = (
-    <DSCard title={`Documents (${4})`} bodyClassName="p-4">
-      {docsSection?.content}
-    </DSCard>
+    <DriverDocumentsTab
+      driver={{
+        _id: driver._id,
+        licenseExpiration: driver.licenseExpiration,
+        medicalExpiration: driver.medicalExpiration,
+        badgeExpiration: driver.badgeExpiration,
+        twicExpiration: driver.twicExpiration,
+      }}
+    />
   );
 
-  // Pay tab. The chassis treatment matches the design's "Default profile +
-  // template picker" intent: a single card titled "Compensation" wraps the
-  // pay-plan picker on top of the assigned-profile list. Templates are
-  // edited at /org-settings/pay-plans (link below); this surface stays a
-  // picker, never an in-place value editor.
+  // Pay & expenses tab — new pay engine. Reads from payeeProfileAssignments
+  // → payProfiles → payRules. "Manage pay profiles" opens an assignment
+  // editor modal. The Recent expenses card below is a placeholder until
+  // the payItems-backed trip-expense ledger UI lands.
   const payrollContent = (
     <div className="flex flex-col gap-3">
-      <DSCard
-        title="Compensation"
-        action={
-          <WBtn size="xs" variant="ghost" leading="arrow-up-right" onClick={() => router.push('/org-settings/pay-plans')}>
-            Manage templates
-          </WBtn>
-        }
-        bodyClassName="flex flex-col gap-3"
-      >
-        <PayPlanBar
-          currentPlanId={driver.payPlanId ?? null}
-          plans={payPlans ?? []}
-          loading={isAssigningPayPlan}
-          onChange={async (planId) => {
-            if (!user) return;
-            setIsAssigningPayPlan(true);
-            try {
-              await assignPayPlan({
-                driverId,
-                planId: planId as Id<'payPlans'> | undefined,
-              });
-              toast.success(planId ? 'Pay plan assigned' : 'Pay plan removed');
-            } catch (e) {
-              console.error(e);
-              toast.error('Failed to update pay plan');
-            } finally {
-              setIsAssigningPayPlan(false);
-            }
-          }}
-          onManage={() => router.push('/org-settings/pay-plans')}
+      <PayeeProfilesCard payeeType="DRIVER" payeeId={driverId} />
+      <DSCard title="Recent expenses" bodyClassName="p-0">
+        <DSMiniTable<RecentExpenseRow>
+          columns={recentExpenseCols}
+          rows={recentExpensePlaceholderRows}
+          total={recentExpensePlaceholderRows.length}
         />
-        {organizationId && user ? (
-          <DriverPaySettingsSection
-            driverId={driverId}
-            organizationId={organizationId}
-            userId={user.id}
-          />
-        ) : (
-          <p className="m-0 text-[12.5px] text-[var(--text-tertiary)]">Loading payroll settings…</p>
-        )}
       </DSCard>
     </div>
   );
 
-  // Loads tab — wrap the legacy AssignedLoadsTable so it picks up the same
-  // card chrome as the Overview cards. The table itself stays on its own
-  // chassis until Loads gets its full Phase-4-style migration.
+  // Loads tab — design v4 "DvTrips" pattern: DSCard with FilterBar in the
+  // action slot, switching to a chip header when filters are present, and a
+  // DSMiniTable underneath. Status drives the Convex query; Distance and
+  // Origin filter the returned set client-side.
   const loadsContent = (
-    <DSCard title="Assigned loads" bodyClassName="p-0">
-      <div className="p-4">
-        <AssignedLoadsTable
-          loads={(driverLoadsData ?? []) as AssignedLoad[]}
-          isLoading={driverLoadsData === undefined}
-          statusFilter={loadStatusFilter}
-          onStatusFilterChange={setLoadStatusFilter}
-        />
-      </div>
-    </DSCard>
+    <DriverLoadsTab
+      loads={(driverLoadsData ?? []) as AssignedLoad[]}
+      statusFilter={loadStatusFilter}
+      onStatusFilterChange={setLoadStatusFilter}
+    />
   );
 
   // Sessions tab — same pattern: chassis card chrome around the legacy
@@ -815,7 +916,7 @@ export default function DriverDetailPage() {
     { id: 'overview',  label: 'Overview',  icon: 'home',       content: overviewContent },
     { id: 'profile',   label: 'Profile',   icon: 'users',      content: profileContent },
     { id: 'documents', label: 'Documents', icon: 'file-text',  count: 4, content: documentsContent },
-    { id: 'payroll',   label: 'Payroll',   icon: 'doc-dollar', content: payrollContent },
+    { id: 'pay-expenses', label: 'Pay & expenses', icon: 'calculator', content: payrollContent },
     {
       id: 'loads',
       label: 'Loads',
@@ -866,23 +967,18 @@ export default function DriverDetailPage() {
         onNext={next ? () => router.push(`/fleet/drivers/${next._id}`) : null}
         toolbarActions={
           <>
-            <WBtn size="sm" variant="ghost" leading="edit" onClick={() => router.push(`/fleet/drivers/${driverId}/edit`)}>
-              Edit
-            </WBtn>
             <WBtn size="sm" variant="ghost" leading="export">
               Export
             </WBtn>
-            {driver.isDeleted ? (
+            {driver.isDeleted && (
               <>
                 <WBtn size="sm" variant="secondary" onClick={onRestore}>Restore</WBtn>
                 <WBtn size="sm" danger onClick={() => setShowDeleteDialog(true)}>Delete</WBtn>
               </>
-            ) : (
-              <WBtn size="sm" danger onClick={onDeactivate}>Deactivate</WBtn>
             )}
           </>
         }
-        title={fullName}
+        title={titleNode}
         eyebrow={eyebrow}
         subtitle={subtitle}
         sections={sections}
@@ -901,50 +997,225 @@ export default function DriverDetailPage() {
   );
 }
 
-function PayPlanBar({
-  currentPlanId,
-  plans,
-  loading,
-  onChange,
-  onManage,
+
+/**
+ * Loads tab — Driver-detail v4 design.
+ * - DSCard wraps a DSMiniTable of trips (Trip · Route · Distance · Date · Status).
+ * - FilterBar lives in the action slot when no filters are applied; once a
+ *   filter chip is added, it moves into a chip header bar above the table.
+ * - The Status filter drives the Convex query (single-value, fetched
+ *   server-side). Distance and Origin are pure client-side reductions over
+ *   the returned rows.
+ */
+type DriverLoadRow = AssignedLoad & { id: string };
+
+function DriverLoadsTab({
+  loads,
+  statusFilter,
+  onStatusFilterChange,
 }: {
-  currentPlanId: string | null;
-  plans: Array<{ _id: string; name: string; isActive?: boolean }>;
-  loading: boolean;
-  onChange: (planId: string | undefined) => void | Promise<void>;
-  onManage: () => void;
+  loads: AssignedLoad[];
+  statusFilter: AssignedLoadStatus;
+  onStatusFilterChange: (s: AssignedLoadStatus) => void;
 }) {
+  const router = useRouter();
+  const properties: FilterProperty[] = [
+    {
+      id: 'status',
+      label: 'Status',
+      icon: 'shield',
+      kind: 'enum',
+      operator: 'is',
+      options: [
+        { value: 'Assigned', label: 'Assigned' },
+        { value: 'Completed', label: 'Completed' },
+        { value: 'Canceled', label: 'Canceled' },
+        { value: 'Expired', label: 'Expired' },
+      ],
+    },
+    {
+      id: 'distance',
+      label: 'Distance',
+      icon: 'truck',
+      kind: 'enum',
+      operator: 'is',
+      options: [
+        { value: 'short', label: '< 500 mi' },
+        { value: 'medium', label: '500–700 mi' },
+        { value: 'long', label: '> 700 mi' },
+      ],
+    },
+    {
+      id: 'origin',
+      label: 'Origin',
+      icon: 'pin',
+      kind: 'enum',
+      operator: 'is any of',
+      options: Array.from(
+        new Set(loads.map((l) => l.origin?.city).filter((c): c is string => !!c)),
+      )
+        .sort()
+        .map((city) => ({ value: city.toLowerCase(), label: city })),
+    },
+    {
+      id: 'date',
+      label: 'Date',
+      icon: 'calendar',
+      kind: 'date',
+      operator: 'is',
+      presets: ['Today', 'Tomorrow', 'Yesterday', 'Next 7 days', 'Last 7 days', 'This month', 'Last month'],
+    },
+  ];
+
+  // Status defaults to whatever drives the Convex query so it shows up as a
+  // chip immediately — keeps the user oriented about which slice they're
+  // viewing.
+  const [filters, setFilters] = React.useState<FilterChipValue[]>([
+    { propId: 'status', op: 'is', values: [statusFilter] },
+  ]);
+
+  // When the FilterBar's status chip changes, push it into the parent so
+  // the Convex query refetches the right slice. Distance / origin filters
+  // reduce client-side.
+  const handleFiltersChange = (next: FilterChipValue[]) => {
+    setFilters(next);
+    const statusChip = next.find((c) => c.propId === 'status');
+    const nextStatus = (statusChip?.values[0] as AssignedLoadStatus | undefined) ?? 'Assigned';
+    if (nextStatus !== statusFilter) onStatusFilterChange(nextStatus);
+  };
+
+  const rows: DriverLoadRow[] = React.useMemo(() => {
+    return loads
+      .filter((l) => {
+        for (const f of filters) {
+          if (!f.values || f.values.length === 0) continue;
+          if (f.propId === 'distance') {
+            const v = f.values[0];
+            const miles = l.legLoadedMiles ?? 0;
+            if (v === 'short' && !(miles < 500)) return false;
+            if (v === 'medium' && !(miles >= 500 && miles <= 700)) return false;
+            if (v === 'long' && !(miles > 700)) return false;
+          }
+          if (f.propId === 'origin') {
+            const city = (l.origin?.city ?? '').toLowerCase();
+            if (!f.values.includes(city)) return false;
+          }
+          if (f.propId === 'date') {
+            const range = datePresetToRange(f.values[0]);
+            if (range) {
+              const d = l.firstStopDate;
+              if (!d || d < range.start || d > range.end) return false;
+            }
+          }
+        }
+        return true;
+      })
+      .map((l) => ({ ...l, id: l._id as unknown as string }));
+  }, [loads, filters]);
+
+  const allCols: DSMiniColumn<DriverLoadRow>[] = [
+    {
+      key: 'orderNumber',
+      label: 'Order #',
+      width: '1fr',
+      render: (r) => <span className="num text-[var(--accent)] font-medium">{r.orderNumber}</span>,
+    },
+    {
+      key: 'hcr',
+      label: 'HCR',
+      width: '90px',
+      render: (r) => <span className="num">{r.parsedHcr ?? '—'}</span>,
+    },
+    {
+      key: 'tripNumber',
+      label: 'Trip',
+      width: '90px',
+      render: (r) => <span className="num">{r.parsedTripNumber ?? '—'}</span>,
+    },
+    {
+      key: 'route',
+      label: 'Route',
+      width: '1.6fr',
+      render: (r) =>
+        [r.origin?.city, r.destination?.city].filter(Boolean).join(' → ') || '—',
+    },
+    {
+      key: 'distance',
+      label: 'Distance',
+      width: '90px',
+      align: 'right',
+      render: (r) =>
+        r.legLoadedMiles ? <span className="num">{r.legLoadedMiles} mi</span> : '—',
+    },
+    {
+      key: 'firstStopDate',
+      label: 'Date',
+      width: '110px',
+      render: (r) => <span className="num">{r.firstStopDate ?? '—'}</span>,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      width: '110px',
+      render: (r) => (
+        <Chip
+          status={
+            r.status === 'In Transit'
+              ? 'active'
+              : r.status === 'Delivered' || r.status === 'Completed'
+                ? 'delivered'
+                : r.status === 'Canceled' || r.status === 'Expired'
+                  ? 'expired'
+                  : 'assigned'
+          }
+          label={r.status}
+        />
+      ),
+    },
+  ];
+
+  // Column-visibility state. Defaults: all columns visible — HCR + Trip
+  // start checked per the design ask.
+  const [visibleCols, setVisibleCols] = React.useState<Set<string>>(
+    () => new Set(allCols.map((c) => c.key)),
+  );
+  const cols = allCols.filter((c) => visibleCols.has(c.key));
+  const columnDefs: ColumnDef[] = allCols.map((c) => ({
+    key: c.key,
+    label: typeof c.label === 'string' ? c.label : c.key,
+  }));
+
+  const hasNonStatusFilter = filters.some((f) => f.propId !== 'status');
+  const showChipBar = filters.length > 0;
+
   return (
-    <div className="flex items-center justify-between rounded-lg border border-[var(--border-hairline)] bg-card px-3 py-2">
-      <div className="flex items-center gap-3">
-        <span className="text-[12.5px] font-medium text-[var(--text-tertiary)]">Pay plan</span>
-        <Select
-          value={currentPlanId ?? 'none'}
-          onValueChange={(v) => onChange(v === 'none' ? undefined : v)}
-          disabled={loading}
-        >
-          <SelectTrigger className="w-56 h-8 text-[12.5px]">
-            {loading ? (
-              <span className="inline-flex items-center gap-2">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Updating…
-              </span>
-            ) : (
-              <SelectValue placeholder="Select pay plan…" />
-            )}
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="none"><span className="text-muted-foreground">No pay plan</span></SelectItem>
-            {plans.filter((p) => p.isActive !== false).map((p) => (
-              <SelectItem key={p._id} value={p._id}>{p.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <WBtn size="xs" variant="ghost" onClick={onManage}>
-        Manage plans
-      </WBtn>
-    </div>
+    <DSCard
+      title={`All loads (${rows.length})`}
+      bodyClassName="p-0 flex-1 min-h-0 flex flex-col"
+      className="flex flex-col max-h-[calc(100vh-320px)]"
+      action={
+        !hasNonStatusFilter ? (
+          <FilterBar properties={properties} value={filters} onChange={handleFiltersChange} slot="trigger" />
+        ) : null
+      }
+    >
+      {showChipBar && (
+        <div className="shrink-0 flex items-center gap-2 flex-wrap px-3.5 py-2 border-b border-[var(--border-hairline)] bg-[var(--bg-surface-2)]">
+          <FilterBar properties={properties} value={filters} onChange={handleFiltersChange} slot="chips" />
+          <div className="flex-1" />
+          <FilterBar properties={properties} value={filters} onChange={handleFiltersChange} slot="trigger" />
+          <ColumnsButton columns={columnDefs} visible={visibleCols} onChange={setVisibleCols} />
+        </div>
+      )}
+      <DSMiniTable
+        columns={cols}
+        rows={rows}
+        total={rows.length}
+        onRowClick={(r) => router.push(`/loads/${r._id}`)}
+        className="rounded-t-none border-0 border-t flex-1 min-h-0"
+        fillHeight
+      />
+    </DSCard>
   );
 }
 

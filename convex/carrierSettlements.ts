@@ -957,6 +957,61 @@ export const reversePayment = mutation({
 });
 
 /**
+ * Reopen an APPROVED carrier statement back to DRAFT to correct a mistake.
+ * Mirrors driverSettlements.reopenSettlement: clears approval stamps, unlocks
+ * pristine SYSTEM lines (reviewer-edited + manual stay locked), records the
+ * reopen for audit. PAID statements must be payment-reversed first.
+ */
+export const reopenSettlement = mutation({
+  args: {
+    settlementId: v.id('carrierSettlements'),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const settlement = await ctx.db.get(args.settlementId);
+    if (!settlement || settlement.workosOrgId !== callerOrgId) {
+      throw new Error('Settlement not found');
+    }
+    if (settlement.status !== 'APPROVED') {
+      throw new Error(
+        settlement.status === 'PAID'
+          ? 'Reverse the payment before reopening a paid statement'
+          : 'Only an approved statement can be reopened',
+      );
+    }
+    const reason = args.reason.trim();
+    if (!reason) throw new Error('A reason is required to reopen a statement');
+
+    const now = Date.now();
+    const payables = await ctx.db
+      .query('loadCarrierPayables')
+      .withIndex('by_settlement', (q) => q.eq('settlementId', args.settlementId))
+      .collect();
+    for (const p of payables) {
+      await ctx.db.patch(p._id, {
+        approvedAt: undefined,
+        isLocked: p.sourceType === 'MANUAL' || p.editedAt != null,
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.patch(args.settlementId, {
+      status: 'DRAFT',
+      approvedBy: undefined,
+      approvedAt: undefined,
+      reopenedBy: userId,
+      reopenedAt: now,
+      reopenReason: reason,
+      updatedAt: now,
+    });
+
+    return null;
+  },
+});
+
+/**
  * Add a manual adjustment to a settlement
  * This is the "Quick Add" feature for accountants
  */

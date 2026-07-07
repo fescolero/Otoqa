@@ -48,9 +48,14 @@ interface StatusPickerProps {
   /** Hides the chevron and the click handler — used while the underlying
    *  mutation is in flight. */
   disabled?: boolean;
+  /** Optional override for the chip label only (the picker menu still
+   *  shows the canonical state machine labels). Use this to surface a
+   *  derived label like `"Assigned · in transit"` while keeping the
+   *  underlying state writable to one of the 5 DB enum values. */
+  label?: React.ReactNode;
 }
 
-export function StatusPicker({ entity, currentId, onChange, disabled }: StatusPickerProps) {
+export function StatusPicker({ entity, currentId, onChange, disabled, label }: StatusPickerProps) {
   const [popoverOpen, setPopoverOpen] = React.useState(false);
   const [modalState, setModalState] = React.useState<{ from: StatusState; to: StatusState } | null>(null);
   const machine = STATE_MACHINES[entity];
@@ -103,7 +108,7 @@ export function StatusPicker({ entity, currentId, onChange, disabled }: StatusPi
                 boxShadow: `0 0 0 2px ${STATUS_PRESETS[cur.kind].bg}`,
               }}
             />
-            {cur.label}
+            {label ?? cur.label}
             {!disabled && <WIcon name="chevron-down" size={11} color={STATUS_PRESETS[cur.kind].fg} />}
           </button>
         </PopoverPrimitive.Trigger>

@@ -1535,6 +1535,22 @@ export async function detachLoadFromSession(): Promise<{
 /**
  * End session-mode tracking. Alias for stopLocationTracking — both tear
  * down the same OS-level resources and flush any unsynced points.
+ *
+ * TODO(mobile-fcm): Server now fires an FCM data push with
+ * `data: { type: 'session_ended', sessionId, endedAt, endReason }`
+ * whenever a session is ended *server-side* (dispatch override,
+ * auto-timeout, handoff, another device). The mobile FCM message
+ * handler should match on `type === 'session_ended'` and call
+ * `stopSessionTracking()` to drain the queue and shut the foreground
+ * tracker down.
+ *
+ * Without this handler, mobile keeps the foreground location service
+ * running until the user manually taps "End Shift" — and during that
+ * window, the server rejects every ping (see
+ * convex/driverLocations.ts::ingestBatch skippedSessionEnded +
+ * skippedLegInactive counters). Battery + bandwidth get burned for no
+ * useful data. Source of truth on the contract:
+ * convex/fcmWake.ts::sendSessionEnded.
  */
 export async function stopSessionTracking(): Promise<{ success: boolean; message: string }> {
   return stopLocationTracking();

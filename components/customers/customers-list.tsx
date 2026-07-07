@@ -36,6 +36,7 @@ import type { Id } from '@/convex/_generated/dataModel';
 import { useUserPreferences } from '@/components/web/shell/use-user-preferences';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { toast } from 'sonner';
+import { runChunkedBulk, runChunkedEach } from '@/lib/chunked-bulk';
 import { DraftListPill } from '@/components/web/create-form';
 
 interface CustomerRow {
@@ -301,12 +302,14 @@ export function CustomersList({ workosOrgId, onCreate, onImport, onExport }: Cus
     const userName =
       user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.email ?? 'User';
     try {
-      await bulkDeactivate({
-        customerIds: ids as Id<'customers'>[],
-        userId: user.id,
-        userName,
-      });
-      toast.success(`Deactivated ${ids.length} customer${ids.length !== 1 ? 's' : ''}`);
+      const result = await runChunkedBulk(
+        ids as Id<'customers'>[],
+        async (chunk) => {
+          await bulkDeactivate({ customerIds: chunk, userId: user.id, userName });
+        },
+      );
+      const done = result.success || ids.length;
+      toast.success(`Deactivated ${done} customer${done !== 1 ? 's' : ''}`);
       setSelected(new Set());
     } catch (e) {
       console.error(e);
@@ -319,10 +322,15 @@ export function CustomersList({ workosOrgId, onCreate, onImport, onExport }: Cus
     if (ids.length === 0) return;
     if (!window.confirm(`Permanently delete ${ids.length} customer${ids.length !== 1 ? 's' : ''}? This cannot be undone.`)) return;
     try {
-      await Promise.all(
-        ids.map((id) => permanentDelete({ id: id as Id<'customers'> })),
+      const result = await runChunkedEach(
+        ids,
+        (id) => permanentDelete({ id: id as Id<'customers'> }),
       );
-      toast.success(`Permanently deleted ${ids.length} customer${ids.length !== 1 ? 's' : ''}`);
+      if (result.failed > 0) {
+        toast.warning(`Deleted ${result.success} customer${result.success !== 1 ? 's' : ''}. ${result.failed} failed.`);
+      } else {
+        toast.success(`Permanently deleted ${result.success} customer${result.success !== 1 ? 's' : ''}`);
+      }
       setSelected(new Set());
     } catch (e) {
       console.error(e);

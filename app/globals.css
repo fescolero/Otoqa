@@ -539,6 +539,12 @@
     -webkit-print-color-adjust: exact;
   }
 
+  /* The slide-over preview scales the invoice down to fit the screen; never
+     carry that zoom into print/PDF — always render at full size. */
+  .invoice-container {
+    zoom: 1 !important;
+  }
+
   /* Hide sidebar and navigation */
   [data-sidebar],
   nav,

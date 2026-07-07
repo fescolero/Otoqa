@@ -528,6 +528,13 @@ export const getReceivablesDetail = query({
 // PAYMENT DISCREPANCY QUERIES
 // ============================================
 
+// Minimum dollar gap between invoiced and paid for an invoice to count as a
+// payment discrepancy. Sub-dollar gaps are per-mile rounding artifacts (paid
+// vs effective miles differ by fractions), not real over/underpayments — and
+// they render as a misleading "$0" difference in the whole-dollar table. A $1
+// floor keeps the over/underpaid views to genuine, recoverable discrepancies.
+const DISCREPANCY_MIN_USD = 1;
+
 /**
  * Internal paginated discrepancy scan for accurate sidebar intelligence.
  * Returns raw invoice docs for one cursor page after applying discrepancy filters.
@@ -556,7 +563,7 @@ export const getDiscrepancySummaryPage = internalQuery({
       .paginate(args.paginationOpts);
 
     const discrepantBase = results.page.filter(
-      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) >= DISCREPANCY_MIN_USD,
     );
 
     let filtered = args.customerId
@@ -599,7 +606,10 @@ export const getDiscrepancyIntelligence = action({
     let largestUnderpayment = 0;
     let underpaidTotal = 0; // signed sum of underpaid diffs (negative); recover amount = |underpaidTotal|
     let totalDiscrepantInvoices = 0;
-    const byHcr: Record<string, { netDiscrepancy: number; count: number }> = {};
+    const byHcr: Record<
+      string,
+      { netDiscrepancy: number; count: number; underpaidSum: number; underpaidCount: number }
+    > = {};
 
     while (!isDone) {
       const pageResult: {
@@ -634,21 +644,36 @@ export const getDiscrepancyIntelligence = action({
         }
 
         const key = loadHcrMap[inv.loadId.toString()] ?? 'Unknown HCR';
-        if (!byHcr[key]) byHcr[key] = { netDiscrepancy: 0, count: 0 };
+        if (!byHcr[key]) byHcr[key] = { netDiscrepancy: 0, count: 0, underpaidSum: 0, underpaidCount: 0 };
         byHcr[key].netDiscrepancy += diff;
         byHcr[key].count += 1;
+        // Track the underpaid shortfall per route SEPARATELY from the net so
+        // routes with real recoverable underpayments still surface even when
+        // overpayments on the same route (or book-wide) net them out.
+        if (diff < 0) {
+          byHcr[key].underpaidSum += -diff;
+          byHcr[key].underpaidCount += 1;
+        }
       }
 
       cursor = pageResult.continueCursor;
       isDone = pageResult.isDone;
     }
 
-    const byHcrRows = [] as Array<{ name: string; netDiscrepancy: number; count: number }>;
+    const byHcrRows = [] as Array<{
+      name: string;
+      netDiscrepancy: number;
+      count: number;
+      underpaidSum: number;
+      underpaidCount: number;
+    }>;
     for (const [hcr, data] of Object.entries(byHcr)) {
       byHcrRows.push({
         name: hcr,
         netDiscrepancy: Math.round(data.netDiscrepancy * 100) / 100,
         count: data.count,
+        underpaidSum: Math.round(data.underpaidSum * 100) / 100,
+        underpaidCount: data.underpaidCount,
       });
     }
 
@@ -661,7 +686,7 @@ export const getDiscrepancyIntelligence = action({
         underpaidSum: Math.round(Math.abs(underpaidTotal) * 100) / 100,
         totalDiscrepantInvoices,
       },
-      byHcr: byHcrRows.sort((a, b) => a.netDiscrepancy - b.netDiscrepancy),
+      byHcr: byHcrRows.sort((a, b) => b.underpaidSum - a.underpaidSum),
     };
   },
 });
@@ -706,6 +731,7 @@ export const getLoadDetailsMap = internalQuery({
             orderNumber: load?.orderNumber ?? 'N/A',
             hcr: facets.hcr ?? 'Unknown HCR',
             effectiveMiles: load?.effectiveMiles,
+            firstStopDate: load?.firstStopDate,
           },
         ] as const;
       }),
@@ -727,6 +753,8 @@ type DiscrepancyDetailRow = {
   paidAmount: number;
   difference: number;
   percentDiff: number;
+  serviceDate: string | null; // load firstStopDate — when the load ran / was planned
+  invoiceDate: number | null; // invoiceDateNumeric — the invoice's issued date
   paymentDate: string | undefined;
   paymentReference: string | undefined;
 };
@@ -835,18 +863,19 @@ export const getDiscrepancyDetailSorted = action({
     const customerNameMap: Record<string, string> = await ctx.runQuery(internal.accountingReports.getCustomerNameMap, {
       customerIds: [...new Set(visibleInvoices.map((inv) => inv.customerId))],
     });
-    const loadDetailsMap: Record<string, { orderNumber: string; hcr: string; effectiveMiles?: number }> =
-      await ctx.runQuery(internal.accountingReports.getLoadDetailsMap, {
-        loadIds: [...new Set(visibleInvoices.map((inv) => inv.loadId))],
-      });
+    const loadDetailsMap: Record<
+      string,
+      { orderNumber: string; hcr: string; effectiveMiles?: number; firstStopDate?: string }
+    > = await ctx.runQuery(internal.accountingReports.getLoadDetailsMap, {
+      loadIds: [...new Set(visibleInvoices.map((inv) => inv.loadId))],
+    });
 
     const rows: DiscrepancyDetailRow[] = visibleInvoices.map((inv) => {
-      const loadDetails: { orderNumber: string; hcr: string; effectiveMiles?: number } = loadDetailsMap[
-        inv.loadId.toString()
-      ] ?? {
-        orderNumber: 'N/A',
-        hcr: 'Unknown HCR',
-      };
+      const loadDetails: { orderNumber: string; hcr: string; effectiveMiles?: number; firstStopDate?: string } =
+        loadDetailsMap[inv.loadId.toString()] ?? {
+          orderNumber: 'N/A',
+          hcr: 'Unknown HCR',
+        };
       const effectiveMiles = typeof loadDetails.effectiveMiles === 'number' ? loadDetails.effectiveMiles : null;
       const paymentMiles = typeof inv.paymentMiles === 'number' ? inv.paymentMiles : null;
       const milesDifference =
@@ -869,6 +898,8 @@ export const getDiscrepancyDetailSorted = action({
           (inv.totalAmount ?? 0) > 0
             ? Math.round(((inv.paymentDifference ?? 0) / (inv.totalAmount ?? 1)) * 10000) / 100
             : 0,
+        serviceDate: loadDetails.firstStopDate ?? null,
+        invoiceDate: inv.invoiceDateNumeric ?? null,
         paymentDate: inv.paymentDate,
         paymentReference: inv.paymentReference,
       };
@@ -913,7 +944,7 @@ export const getDiscrepancyDetail = query({
 
     // Filter page to only discrepancies
     const discrepantPage = results.page.filter(
-      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) >= DISCREPANCY_MIN_USD,
     );
 
     // Apply customer filter
