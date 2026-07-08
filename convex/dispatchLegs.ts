@@ -20,6 +20,7 @@ import {
 } from './_helpers/timeUtils';
 import type { OverlapInfo } from './_helpers/timeUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { transferFrontierToDriver } from './loadTrackingState';
 
 /**
  * Dispatch Legs - The atomic unit of work
@@ -1720,13 +1721,16 @@ export const handoffLoad = mutation({
 
     let newLegStartStopId: Id<'loadStops'> = oldLeg.startStopId;
     if (trackingState) {
+      // Prefer the arrival watch (next unarrived stop); after a final-stop
+      // check-in only the departure watch remains, so fall back to it.
+      const frontierSeq =
+        trackingState.currentStopSequenceNumber ??
+        trackingState.departureStopSequenceNumber;
       const frontierStop = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
         .collect()
-        .then((stops) =>
-          stops.find((s) => s.sequenceNumber === trackingState.currentStopSequenceNumber)
-        );
+        .then((stops) => stops.find((s) => s.sequenceNumber === frontierSeq));
       if (frontierStop) newLegStartStopId = frontierStop._id;
     }
 
@@ -1769,17 +1773,9 @@ export const handoffLoad = mutation({
       updatedAt: now,
     });
 
-    // Transfer tracking state, if present. The new driver's session will
-    // be stamped on the tracking state when they check in at the new leg's
-    // first stop. For now, clear the tracking state's sessionId binding
-    // to the old session by setting driverId — sessionId stays as the old
-    // value until the relay driver's session activates on check-in.
-    if (trackingState) {
-      await ctx.db.patch(trackingState._id, {
-        driverId: args.toDriverId,
-        updatedAt: now,
-      });
-    }
+    // Transfer tracking state, if present. sessionId stays the old value
+    // until the relay driver's first check-in re-stamps it.
+    await transferFrontierToDriver(ctx, args.loadId, args.toDriverId, now);
 
     // Maintain the primaryDriverId denorm cache if we just handed off leg 1.
     if (oldLeg.sequence === 1 && load.primaryDriverId === args.fromDriverId) {

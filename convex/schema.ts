@@ -2155,20 +2155,46 @@ export default defineSchema({
     driverId: v.id('drivers'),
     organizationId: v.string(),
 
-    currentStopSequenceNumber: v.float64(), // next unarrived stop
-    currentStopLat: v.float64(),
-    currentStopLng: v.float64(),
+    // Arrival watch — the next unarrived stop. Absent once the driver has
+    // checked in at the final stop (nothing left to approach).
+    currentStopSequenceNumber: v.optional(v.float64()),
+    currentStopLat: v.optional(v.float64()),
+    currentStopLng: v.optional(v.float64()),
 
     approachingFired: v.boolean(), // 5mi outer-ring event fired
     arrivedFired: v.boolean(), // 0.5mi inner-ring event fired
 
+    // Departure watch — the most recently checked-in stop, watched for a
+    // confirmed geofence exit (DEPARTED event). Set on check-in, cleared
+    // when DEPARTED fires. departureCandidateAt holds the recordedAt of the
+    // first qualifying ping outside the exit ring; a second consecutive
+    // outside ping confirms the departure (GPS-jitter debounce), and the
+    // candidate timestamp — not the confirming one — becomes the event time.
+    departureStopSequenceNumber: v.optional(v.float64()),
+    departureStopLat: v.optional(v.float64()),
+    departureStopLng: v.optional(v.float64()),
+    departureCandidateAt: v.optional(v.float64()),
+
+    // Set on last-stop checkout when a departure watch is still pending:
+    // the row is kept alive solely to timestamp the final facility exit,
+    // then deleted by the evaluator (or by session-end cleanup).
+    loadCompleted: v.optional(v.boolean()),
+
     updatedAt: v.float64(),
-  }).index('by_load', ['loadId']),
+  })
+    .index('by_load', ['loadId'])
+    // Post-checkout pings are SESSION_ROUTE (no loadId); this index lets
+    // ingestBatch find pending departure watches for the sessions in a
+    // batch. Also powers session-end cleanup of loadCompleted rows.
+    .index('by_session', ['sessionId']),
 
   /**
-   * geofenceEvents — internal log of auto-generated APPROACHING/ARRIVED
-   * events from GPS pings. NOT exposed to external partners (they pull raw
-   * GPS positions and compute their own geofences).
+   * geofenceEvents — immutable log of auto-generated APPROACHING/ARRIVED/
+   * DEPARTED events from GPS pings. Append-only: these are the audit-grade
+   * "detected" timestamps shown alongside the driver's manual check-in/out
+   * "reported" times (loadStops.checkedInAt/checkedOutAt) — never edited.
+   * NOT exposed to external partners (they pull raw GPS positions and
+   * compute their own geofences).
    */
   geofenceEvents: defineTable({
     sessionId: v.id('driverSessions'),
@@ -2177,15 +2203,18 @@ export default defineSchema({
     driverId: v.id('drivers'),
     organizationId: v.string(),
 
-    eventType: v.union(v.literal('APPROACHING'), v.literal('ARRIVED')),
+    eventType: v.union(v.literal('APPROACHING'), v.literal('ARRIVED'), v.literal('DEPARTED')),
 
     triggeredAt: v.float64(),
     latitude: v.float64(),
     longitude: v.float64(),
     distanceMeters: v.float64(),
+    accuracy: v.optional(v.float64()), // GPS horizontal accuracy of the triggering ping (m)
   })
     .index('by_load_stop_event', ['loadId', 'stopSequenceNumber', 'eventType'])
-    .index('by_load', ['loadId', 'triggeredAt']),
+    .index('by_load', ['loadId', 'triggeredAt'])
+    // Session stop-timeline query (driver-detail Sessions tab).
+    .index('by_session', ['sessionId', 'triggeredAt']),
 
   /**
    * gpsArchiveLog — audit table for the nightly GPS archive cron.

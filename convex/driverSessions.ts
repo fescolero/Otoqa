@@ -4,6 +4,7 @@ import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { resolveAuthenticatedDriver } from './driverMobile';
+import { deleteCompletedRowsForSession } from './loadTrackingState';
 
 /**
  * Driver Session System — Phase 1 foundation.
@@ -100,6 +101,11 @@ async function endSessionInternal(
     endedByReasonCode: args.endedByReasonCode,
     totalActiveMinutes,
   });
+
+  // Drop tracking rows kept alive only to timestamp a final facility exit
+  // (loadCompleted): the session is over, so no more pings will resolve
+  // them. Session timelines fall back to the manual checkout time.
+  await deleteCompletedRowsForSession(ctx, session._id);
 
   // Clear the driver's current truck pairing on session end. This forces
   // a fresh QR scan to start the next shift — the driver might be on a
@@ -400,6 +406,191 @@ export const listForDriver = query({
         };
       })
     );
+  },
+});
+
+/**
+ * One row of a session's stop timeline: geofence-detected timestamps next
+ * to the driver's manual taps, all as ms epoch (manual ISO strings parsed).
+ */
+export type SessionStopTimelineRow = {
+  loadId: Id<'loadInformation'>;
+  sequenceNumber: number;
+  stopId: Id<'loadStops'> | null;
+  stopType: 'PICKUP' | 'DELIVERY' | 'DETOUR' | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  loadInternalId: string | null;
+  approachingAt: number | null;
+  arrivedAt: number | null;
+  departedAt: number | null;
+  checkedInAt: number | null;
+  checkedOutAt: number | null;
+  dwellMinutes: number | null;
+};
+
+/**
+ * Core of getSessionStopTimeline, exported as a plain function so tests can
+ * drive it through convex-test's ctx. Caller owns auth.
+ *
+ * Dwell prefers geofence bounds and falls back to the manual taps:
+ * (departedAt ?? checkedOutAt) − (arrivedAt ?? checkedInAt).
+ */
+export async function buildSessionStopTimeline(
+  ctx: QueryCtx,
+  session: Doc<'driverSessions'>
+): Promise<SessionStopTimelineRow[]> {
+  const events = await ctx.db
+    .query('geofenceEvents')
+    .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+    .collect();
+
+  // Loads this session touched: geofence events plus legs stamped with the
+  // sessionId on first check-in (covers stops with manual taps but no GPS
+  // coverage).
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_driver', (q) => q.eq('driverId', session.driverId))
+    .collect();
+  const loadIds = new Set<Id<'loadInformation'>>([
+    ...events.map((e) => e.loadId),
+    ...legs.filter((l) => l.sessionId === session._id).map((l) => l.loadId),
+  ]);
+
+  // Geofence timestamps keyed by (loadId, stopSequenceNumber).
+  type StopTimes = { approachingAt?: number; arrivedAt?: number; departedAt?: number };
+  const eventTimes = new Map<string, StopTimes>();
+  for (const event of events) {
+    const key = `${event.loadId}|${event.stopSequenceNumber}`;
+    const times = eventTimes.get(key) ?? {};
+    if (event.eventType === 'APPROACHING') times.approachingAt = event.triggeredAt;
+    else if (event.eventType === 'ARRIVED') times.arrivedAt = event.triggeredAt;
+    else times.departedAt = event.triggeredAt;
+    eventTimes.set(key, times);
+  }
+
+  const parseMs = (iso: string | undefined): number | null => {
+    if (!iso) return null;
+    const ms = new Date(iso).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const sessionEnd = session.endedAt ?? Number.POSITIVE_INFINITY;
+  const inWindow = (ms: number | null) =>
+    ms !== null && ms >= session.startedAt && ms <= sessionEnd;
+
+  const rows: SessionStopTimelineRow[] = [];
+  for (const loadId of loadIds) {
+    const [load, stops] = await Promise.all([
+      ctx.db.get(loadId),
+      ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', loadId))
+        .collect(),
+    ]);
+    const stopsBySeq = new Map(stops.map((s) => [s.sequenceNumber, s]));
+
+    // Every stop sequence that has geofence events OR manual taps inside
+    // the session window gets a row.
+    const sequences = new Set<number>();
+    for (const key of eventTimes.keys()) {
+      const [keyLoadId, seq] = key.split('|');
+      if (keyLoadId === loadId) sequences.add(Number(seq));
+    }
+    for (const stop of stops) {
+      if (inWindow(parseMs(stop.checkedInAt)) || inWindow(parseMs(stop.checkedOutAt))) {
+        sequences.add(stop.sequenceNumber);
+      }
+    }
+
+    for (const sequenceNumber of sequences) {
+      const stop = stopsBySeq.get(sequenceNumber);
+      const times = eventTimes.get(`${loadId}|${sequenceNumber}`) ?? {};
+      const checkedInAt = parseMs(stop?.checkedInAt);
+      const checkedOutAt = parseMs(stop?.checkedOutAt);
+
+      const dwellStart = times.arrivedAt ?? checkedInAt;
+      const dwellEnd = times.departedAt ?? checkedOutAt;
+      const dwellMinutes =
+        dwellStart != null && dwellEnd != null && dwellEnd >= dwellStart
+          ? Math.round((dwellEnd - dwellStart) / 60_000)
+          : null;
+
+      rows.push({
+        loadId,
+        sequenceNumber,
+        stopId: stop?._id ?? null,
+        stopType: stop?.stopType ?? null,
+        address: stop?.address ?? null,
+        city: stop?.city ?? null,
+        state: stop?.state ?? null,
+        loadInternalId: load?.internalId ?? null,
+        approachingAt: times.approachingAt ?? null,
+        arrivedAt: times.arrivedAt ?? null,
+        departedAt: times.departedAt ?? null,
+        checkedInAt,
+        checkedOutAt,
+        dwellMinutes,
+      });
+    }
+  }
+
+  // Chronological by the earliest timestamp each stop has (every row has at
+  // least one by construction).
+  const firstTime = (r: SessionStopTimelineRow) =>
+    Math.min(
+      ...[r.approachingAt, r.arrivedAt, r.checkedInAt, r.checkedOutAt, r.departedAt].filter(
+        (t): t is number => t !== null
+      )
+    );
+  rows.sort((a, b) => firstTime(a) - firstTime(b));
+  return rows;
+}
+
+/**
+ * Per-stop timestamp timeline for one session: geofence-detected
+ * APPROACHING/ARRIVED/DEPARTED times (immutable, from geofenceEvents) next
+ * to the driver's manual check-in/check-out taps (from loadStops), plus
+ * dwell minutes. The detected-vs-reported pairing is the audit record
+ * detention disputes need — neither source overwrites the other.
+ *
+ * Reads are bounded: ≤3 events per stop via by_session, plus the session's
+ * legs and their stops. Subscribing to it does NOT invalidate on GPS ping
+ * writes (geofenceEvents gains at most 3 rows per stop per shift).
+ * Auth: caller must be a dispatcher in the session's org.
+ */
+export const getSessionStopTimeline = query({
+  args: {
+    sessionId: v.id('driverSessions'),
+  },
+  returns: v.array(
+    v.object({
+      loadId: v.id('loadInformation'),
+      sequenceNumber: v.number(),
+      stopId: v.union(v.id('loadStops'), v.null()),
+      stopType: v.union(
+        v.literal('PICKUP'),
+        v.literal('DELIVERY'),
+        v.literal('DETOUR'),
+        v.null()
+      ),
+      address: v.union(v.string(), v.null()),
+      city: v.union(v.string(), v.null()),
+      state: v.union(v.string(), v.null()),
+      loadInternalId: v.union(v.string(), v.null()),
+      approachingAt: v.union(v.number(), v.null()),
+      arrivedAt: v.union(v.number(), v.null()),
+      departedAt: v.union(v.number(), v.null()),
+      checkedInAt: v.union(v.number(), v.null()),
+      checkedOutAt: v.union(v.number(), v.null()),
+      dwellMinutes: v.union(v.number(), v.null()),
+    })
+  ),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.organizationId !== callerOrgId) return [];
+    return buildSessionStopTimeline(ctx, session);
   },
 });
 

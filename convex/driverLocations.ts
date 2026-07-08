@@ -444,37 +444,71 @@ async function ingestBatch(
     }
   }
 
-  // Schedule geofence evaluation for each unique (sessionId, loadId) pair
-  // whose driver currently has an ACTIVE leg for that load. Only the latest
-  // ping per pair is evaluated — earlier pings are history that the frontier
-  // flags would no-op on anyway.
-  const evaluatorTargets = new Map<string, PingInput>(); // key: sessionId|loadId
+  // Schedule geofence evaluation — at most once per load, with the latest
+  // ping that targets it (earlier pings are history that the frontier flags
+  // would no-op on anyway). A load qualifies two ways:
+  //   1. LOAD_ROUTE pings from a driver with an ACTIVE leg for that load
+  //      (the arrival + departure watches while driving it), or
+  //   2. a pending loadTrackingState row found via the session — after
+  //      last-stop checkout the leg is COMPLETED and pings revert to
+  //      SESSION_ROUTE (no loadId), but a loadCompleted row may still be
+  //      waiting to confirm the final DEPARTED.
+  const evaluatorTargets = new Map<Id<'loadInformation'>, PingInput>();
+  const considerTarget = (loadId: Id<'loadInformation'>, loc: PingInput) => {
+    const prev = evaluatorTargets.get(loadId);
+    if (!prev || prev.recordedAt < loc.recordedAt) {
+      evaluatorTargets.set(loadId, loc);
+    }
+  };
+
+  // Path 1: unique (sessionId, loadId) pairs gated on an ACTIVE leg. This
+  // prevents evaluator fanout for legs that are PENDING/COMPLETED or for
+  // sessions that lost their leg mid-batch.
+  const loadPingCandidates = new Map<string, PingInput>(); // key: sessionId|loadId
   for (const loc of valid) {
     if (!loc.sessionId || !loc.loadId) continue;
     const key = `${loc.sessionId}|${loc.loadId}`;
-    const prev = evaluatorTargets.get(key);
+    const prev = loadPingCandidates.get(key);
     if (!prev || prev.recordedAt < loc.recordedAt) {
-      evaluatorTargets.set(key, loc);
+      loadPingCandidates.set(key, loc);
     }
   }
-
-  for (const loc of evaluatorTargets.values()) {
-    // Only schedule if the driver has an ACTIVE leg for this load. This
-    // prevents evaluator fanout for legs that are PENDING/COMPLETED or
-    // for sessions that lost their leg mid-batch.
+  for (const loc of loadPingCandidates.values()) {
     const activeLeg = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_driver', (q) => q.eq('driverId', loc.driverId).eq('status', 'ACTIVE'))
       .filter((q) => q.eq(q.field('loadId'), loc.loadId!))
       .first();
     if (!activeLeg) continue;
+    considerTarget(loc.loadId!, loc);
+  }
 
+  // Path 2: pending watch rows for the batch's ACTIVE sessions (ended
+  // sessions keep the existing behavior: late syncs are stored but never
+  // trigger the evaluator). One cheap indexed read per session per batch;
+  // typically 0–1 rows.
+  for (const [sessionId, group] of sessionGroups) {
+    const session = sessionCache.get(sessionId);
+    if (!session || session.status !== 'active') continue;
+    const watchRows = await ctx.db
+      .query('loadTrackingState')
+      .withIndex('by_session', (q) => q.eq('sessionId', sessionId))
+      .collect();
+    if (watchRows.length === 0) continue;
+    const latest = group.reduce((a, b) => (a.recordedAt >= b.recordedAt ? a : b));
+    for (const row of watchRows) {
+      considerTarget(row.loadId, latest);
+    }
+  }
+
+  for (const [loadId, loc] of evaluatorTargets) {
     await ctx.scheduler.runAfter(0, internal.geofenceEvaluator.evaluateLatestPing, {
-      loadId: loc.loadId!,
+      loadId,
       ping: {
         latitude: loc.latitude,
         longitude: loc.longitude,
         recordedAt: loc.recordedAt,
+        accuracy: loc.accuracy,
       },
     });
   }
