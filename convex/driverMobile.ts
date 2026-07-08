@@ -1131,8 +1131,17 @@ export const checkOutFromStop = mutation({
 
       // Release the geofence frontier. Historical geofenceEvents stay; if a
       // departure watch is still pending the row survives (loadCompleted)
-      // so the final facility exit gets its DEPARTED timestamp.
-      await releaseFrontierOnLoadComplete(ctx, stop.loadId, Date.now());
+      // so the final facility exit gets its DEPARTED timestamp. The row is
+      // re-bound to the driver's CURRENT session — check-in may have
+      // happened under an earlier one (overnight dwell + auto-timeout), and
+      // the by_session ping lookup only sees the session on the row.
+      const activeSession = await ctx.db
+        .query('driverSessions')
+        .withIndex('by_driver_status', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'active')
+        )
+        .first();
+      await releaseFrontierOnLoadComplete(ctx, stop.loadId, Date.now(), activeSession?._id);
     }
 
     return { success: true, message: 'Checked out successfully' };

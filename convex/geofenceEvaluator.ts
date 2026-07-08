@@ -19,19 +19,27 @@ import {
  *   APPROACHING (outer ring, ~5 mi) and ARRIVED (inner ring, ~0.5 mi)
  *   exactly once per (load, stop, event), gated by the *Fired flags.
  *
- *   Departure watch (departureStop*): the most recently checked-in stop is
+ *   Departure watch (departureWatch): the most recently checked-in stop is
  *   watched for a confirmed exit. A ping beyond DEPARTURE_RING_METERS
  *   (~0.75 mi — deliberately wider than the arrival ring for hysteresis)
- *   marks a candidate; the next consecutive outside ping confirms and fires
- *   DEPARTED with the *candidate's* timestamp, so the debounce doesn't shave
- *   minutes off dwell/detention clocks. A ping back inside resets the
- *   candidate. Low-accuracy pings (> GEOFENCE_MAX_ACCURACY_METERS) are
- *   ignored for departure decisions.
+ *   marks a candidate; the next, strictly newer outside ping confirms and
+ *   fires DEPARTED with the *candidate's* timestamp, so the debounce doesn't
+ *   shave minutes off dwell/detention clocks. A newer ping back inside the
+ *   ring resets the candidate. Two guards keep offline backlogs honest:
+ *   pings recorded at/before the watch's armedAt (the check-in time) are
+ *   historical en-route fixes and are ignored entirely, and a stale inside
+ *   ping older than the current candidate cannot reset it. Low-accuracy
+ *   pings (> GEOFENCE_MAX_ACCURACY_METERS) are ignored for departure
+ *   decisions. Timestamp granularity is the mobile sync cadence: only the
+ *   latest ping per batch is evaluated, so the recorded exit time is the
+ *   first post-exit *synced* fix, not the physical boundary crossing.
  *
  * Events are deduped against by_load_stop_event before insert, so frontier
  * re-inits (handoffs, repeated check-ins) can't double-fire an event type
- * for a stop. geofenceEvents is append-only — the audit-grade "detected"
- * record next to the driver's manual check-in/out taps.
+ * for a stop. Events attribute to the session of the triggering ping (the
+ * shift whose GPS produced them), falling back to the row's sessionId for
+ * legacy loadId-only pings. geofenceEvents is append-only — the audit-grade
+ * "detected" record next to the driver's manual check-in/out taps.
  *
  * Why frontier state lives in loadTrackingState (not the session doc):
  *   Session docs are read by dispatcher dashboards and mobile home. Writing
@@ -51,6 +59,7 @@ import {
 async function insertEventOnce(
   ctx: MutationCtx,
   state: Doc<'loadTrackingState'>,
+  sessionId: Id<'driverSessions'>,
   args: {
     stopSequenceNumber: number;
     eventType: 'APPROACHING' | 'ARRIVED' | 'DEPARTED';
@@ -59,18 +68,21 @@ async function insertEventOnce(
     longitude: number;
     distanceMeters: number;
     accuracy?: number;
-  },
+  }
 ): Promise<void> {
   const existing = await ctx.db
     .query('geofenceEvents')
     .withIndex('by_load_stop_event', (q) =>
-      q.eq('loadId', state.loadId).eq('stopSequenceNumber', args.stopSequenceNumber).eq('eventType', args.eventType),
+      q
+        .eq('loadId', state.loadId)
+        .eq('stopSequenceNumber', args.stopSequenceNumber)
+        .eq('eventType', args.eventType)
     )
     .first();
   if (existing) return;
 
   await ctx.db.insert('geofenceEvents', {
-    sessionId: state.sessionId,
+    sessionId,
     loadId: state.loadId,
     driverId: state.driverId,
     organizationId: state.organizationId,
@@ -78,7 +90,7 @@ async function insertEventOnce(
   });
 }
 
-export type GeofencePing = {
+type GeofencePing = {
   latitude: number;
   longitude: number;
   recordedAt: number;
@@ -88,11 +100,16 @@ export type GeofencePing = {
 /**
  * Core evaluation, exported as a plain function so tests can drive it
  * directly through convex-test's ctx (the internalMutation below is a thin
- * scheduling wrapper).
+ * scheduling wrapper). `sessionId` is the session of the triggering ping;
+ * events attribute to it (falls back to the row's sessionId when absent).
  */
 export async function evaluatePing(
   ctx: MutationCtx,
-  args: { loadId: Id<'loadInformation'>; ping: GeofencePing },
+  args: {
+    loadId: Id<'loadInformation'>;
+    sessionId?: Id<'driverSessions'>;
+    ping: GeofencePing;
+  }
 ): Promise<null> {
   const state = await ctx.db
     .query('loadTrackingState')
@@ -103,6 +120,7 @@ export async function evaluatePing(
   // are valid telemetry (they go to driverLocations) but don't fire events.
   if (!state) return null;
 
+  const eventSessionId = args.sessionId ?? state.sessionId;
   const patch: Partial<Doc<'loadTrackingState'>> = {};
 
   // ---- Arrival watch: APPROACHING / ARRIVED toward the next stop ----
@@ -111,11 +129,11 @@ export async function evaluatePing(
       args.ping.latitude,
       args.ping.longitude,
       state.currentStopLat,
-      state.currentStopLng,
+      state.currentStopLng
     );
 
     if (distance < OUTER_RING_METERS && !state.approachingFired) {
-      await insertEventOnce(ctx, state, {
+      await insertEventOnce(ctx, state, eventSessionId, {
         stopSequenceNumber: state.currentStopSequenceNumber!,
         eventType: 'APPROACHING',
         triggeredAt: args.ping.recordedAt,
@@ -128,7 +146,7 @@ export async function evaluatePing(
     }
 
     if (distance < INNER_RING_METERS && !state.arrivedFired) {
-      await insertEventOnce(ctx, state, {
+      await insertEventOnce(ctx, state, eventSessionId, {
         stopSequenceNumber: state.currentStopSequenceNumber!,
         eventType: 'ARRIVED',
         triggeredAt: args.ping.recordedAt,
@@ -142,25 +160,29 @@ export async function evaluatePing(
   }
 
   // ---- Departure watch: confirmed exit from the checked-in stop ----
-  const accuracyOk = args.ping.accuracy === undefined || args.ping.accuracy <= GEOFENCE_MAX_ACCURACY_METERS;
-  if (state.departureStopLat !== undefined && state.departureStopLng !== undefined && accuracyOk) {
+  const watch = state.departureWatch;
+  const accuracyOk =
+    args.ping.accuracy === undefined || args.ping.accuracy <= GEOFENCE_MAX_ACCURACY_METERS;
+  // Pings recorded at/before check-in are offline-backlog en-route fixes;
+  // letting them through would fire DEPARTED with a pre-arrival timestamp.
+  if (watch !== undefined && accuracyOk && args.ping.recordedAt > watch.armedAt) {
     const distance = calculateDistanceMeters(
       args.ping.latitude,
       args.ping.longitude,
-      state.departureStopLat,
-      state.departureStopLng,
+      watch.lat,
+      watch.lng
     );
 
     if (distance > DEPARTURE_RING_METERS) {
-      if (state.departureCandidateAt === undefined) {
+      if (watch.candidateAt === undefined) {
         // First ping outside the exit ring — remember when.
-        patch.departureCandidateAt = args.ping.recordedAt;
-      } else if (args.ping.recordedAt > state.departureCandidateAt) {
-        // Second consecutive outside ping — departure confirmed.
-        await insertEventOnce(ctx, state, {
-          stopSequenceNumber: state.departureStopSequenceNumber!,
+        patch.departureWatch = { ...watch, candidateAt: args.ping.recordedAt };
+      } else if (args.ping.recordedAt > watch.candidateAt) {
+        // Second, newer outside ping — departure confirmed.
+        await insertEventOnce(ctx, state, eventSessionId, {
+          stopSequenceNumber: watch.stopSequenceNumber,
           eventType: 'DEPARTED',
-          triggeredAt: state.departureCandidateAt,
+          triggeredAt: watch.candidateAt,
           latitude: args.ping.latitude,
           longitude: args.ping.longitude,
           distanceMeters: distance,
@@ -173,14 +195,12 @@ export async function evaluatePing(
           await ctx.db.delete(state._id);
           return null;
         }
-        patch.departureStopSequenceNumber = undefined;
-        patch.departureStopLat = undefined;
-        patch.departureStopLng = undefined;
-        patch.departureCandidateAt = undefined;
+        patch.departureWatch = undefined;
       }
-    } else if (state.departureCandidateAt !== undefined) {
-      // Back inside the ring — the excursion was jitter, not a departure.
-      patch.departureCandidateAt = undefined;
+    } else if (watch.candidateAt !== undefined && args.ping.recordedAt > watch.candidateAt) {
+      // A newer ping back inside the ring — the excursion was jitter, not a
+      // departure. (An older ping proves nothing about the candidate.)
+      patch.departureWatch = { ...watch, candidateAt: undefined };
     }
   }
 
@@ -196,6 +216,7 @@ export async function evaluatePing(
 export const evaluateLatestPing = internalMutation({
   args: {
     loadId: v.id('loadInformation'),
+    sessionId: v.optional(v.id('driverSessions')),
     ping: v.object({
       latitude: v.float64(),
       longitude: v.float64(),

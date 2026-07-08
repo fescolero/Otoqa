@@ -444,34 +444,39 @@ async function ingestBatch(
     }
   }
 
-  // Schedule geofence evaluation — at most once per load, with the latest
-  // ping that targets it (earlier pings are history that the frontier flags
-  // would no-op on anyway). A load qualifies two ways:
+  // Schedule geofence evaluation — at most once per (sessionId, loadId)
+  // pair, with the latest ping that targets it (earlier pings are history
+  // that the frontier flags would no-op on anyway). A pair qualifies two
+  // ways:
   //   1. LOAD_ROUTE pings from a driver with an ACTIVE leg for that load
   //      (the arrival + departure watches while driving it), or
   //   2. a pending loadTrackingState row found via the session — after
   //      last-stop checkout the leg is COMPLETED and pings revert to
   //      SESSION_ROUTE (no loadId), but a loadCompleted row may still be
   //      waiting to confirm the final DEPARTED.
-  const evaluatorTargets = new Map<Id<'loadInformation'>, PingInput>();
-  const considerTarget = (loadId: Id<'loadInformation'>, loc: PingInput) => {
-    const prev = evaluatorTargets.get(loadId);
-    if (!prev || prev.recordedAt < loc.recordedAt) {
-      evaluatorTargets.set(loadId, loc);
-    }
+  const newerPing = (a: PingInput, b: PingInput) => (b.recordedAt > a.recordedAt ? b : a);
+  // key: sessionId|loadId — keyed per pair (not per load) so a batch that
+  // spans a session rollover still evaluates both sessions' latest pings.
+  const evaluatorTargets = new Map<string, { loadId: Id<'loadInformation'>; loc: PingInput }>();
+  const considerTarget = (
+    sessionId: Id<'driverSessions'>,
+    loadId: Id<'loadInformation'>,
+    loc: PingInput
+  ) => {
+    const key = `${sessionId}|${loadId}`;
+    const prev = evaluatorTargets.get(key);
+    evaluatorTargets.set(key, { loadId, loc: prev ? newerPing(prev.loc, loc) : loc });
   };
 
-  // Path 1: unique (sessionId, loadId) pairs gated on an ACTIVE leg. This
-  // prevents evaluator fanout for legs that are PENDING/COMPLETED or for
-  // sessions that lost their leg mid-batch.
+  // Path 1: loadId pings gated on an ACTIVE leg. This prevents evaluator
+  // fanout for legs that are PENDING/COMPLETED or for sessions that lost
+  // their leg mid-batch.
   const loadPingCandidates = new Map<string, PingInput>(); // key: sessionId|loadId
   for (const loc of valid) {
     if (!loc.sessionId || !loc.loadId) continue;
     const key = `${loc.sessionId}|${loc.loadId}`;
     const prev = loadPingCandidates.get(key);
-    if (!prev || prev.recordedAt < loc.recordedAt) {
-      loadPingCandidates.set(key, loc);
-    }
+    loadPingCandidates.set(key, prev ? newerPing(prev, loc) : loc);
   }
   for (const loc of loadPingCandidates.values()) {
     const activeLeg = await ctx.db
@@ -480,14 +485,18 @@ async function ingestBatch(
       .filter((q) => q.eq(q.field('loadId'), loc.loadId!))
       .first();
     if (!activeLeg) continue;
-    considerTarget(loc.loadId!, loc);
+    considerTarget(loc.sessionId!, loc.loadId!, loc);
   }
 
   // Path 2: pending watch rows for the batch's ACTIVE sessions (ended
   // sessions keep the existing behavior: late syncs are stored but never
-  // trigger the evaluator). One cheap indexed read per session per batch;
-  // typically 0–1 rows.
+  // trigger the evaluator). Only runs for groups containing SESSION_ROUTE
+  // pings — that's the post-checkout window this path exists for — so the
+  // common all-LOAD_ROUTE batch skips the read entirely. The driverId guard
+  // skips rows handed off to another driver whose row still points at this
+  // session (transferFrontierToDriver re-binds lazily).
   for (const [sessionId, group] of sessionGroups) {
+    if (!group.some((p) => !p.loadId)) continue;
     const session = sessionCache.get(sessionId);
     if (!session || session.status !== 'active') continue;
     const watchRows = await ctx.db
@@ -495,15 +504,17 @@ async function ingestBatch(
       .withIndex('by_session', (q) => q.eq('sessionId', sessionId))
       .collect();
     if (watchRows.length === 0) continue;
-    const latest = group.reduce((a, b) => (a.recordedAt >= b.recordedAt ? a : b));
+    const latest = group.reduce(newerPing);
     for (const row of watchRows) {
-      considerTarget(row.loadId, latest);
+      if (row.driverId !== session.driverId) continue;
+      considerTarget(sessionId, row.loadId, latest);
     }
   }
 
-  for (const [loadId, loc] of evaluatorTargets) {
+  for (const { loadId, loc } of evaluatorTargets.values()) {
     await ctx.scheduler.runAfter(0, internal.geofenceEvaluator.evaluateLatestPing, {
       loadId,
+      sessionId: loc.sessionId,
       ping: {
         latitude: loc.latitude,
         longitude: loc.longitude,

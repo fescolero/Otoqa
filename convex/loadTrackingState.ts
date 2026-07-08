@@ -9,14 +9,14 @@ import { Doc, Id } from './_generated/dataModel';
  * On last-stop checkout the row is deleted — unless a departure watch is
  * still pending, in which case it's kept (loadCompleted=true) purely so the
  * driver's actual facility exit gets timestamped, then deleted by the
- * evaluator (or session-end cleanup).
+ * evaluator (or session-end cleanup / same-driver rollover, see below).
  *
  * The row carries two independent watches for the geofence evaluator:
  *   - Arrival watch (currentStop*): the next unarrived stop. APPROACHING /
  *     ARRIVED fire against it, gated by the *Fired flags.
- *   - Departure watch (departureStop*): the most recently checked-in stop,
- *     watched for a confirmed exit (DEPARTED). departureCandidateAt is the
- *     first-outside-ping debounce marker.
+ *   - Departure watch (departureWatch): the most recently checked-in stop,
+ *     watched for a confirmed exit (DEPARTED). Its armedAt/candidateAt
+ *     fields drive the offline-backlog and GPS-jitter debounce guards.
  *
  * This table is deliberately hot and narrow: only the geofence evaluator,
  * check-in/out mutations, and handoff mutations write to it. Dispatcher
@@ -29,11 +29,21 @@ import { Doc, Id } from './_generated/dataModel';
 
 export async function getByLoadId(
   ctx: QueryCtx | MutationCtx,
-  loadId: Id<'loadInformation'>,
+  loadId: Id<'loadInformation'>
 ): Promise<Doc<'loadTrackingState'> | null> {
   return ctx.db
     .query('loadTrackingState')
     .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .first();
+}
+
+async function getActiveSessionForDriver(
+  ctx: QueryCtx | MutationCtx,
+  driverId: Id<'drivers'>
+): Promise<Doc<'driverSessions'> | null> {
+  return ctx.db
+    .query('driverSessions')
+    .withIndex('by_driver_status', (q) => q.eq('driverId', driverId).eq('status', 'active'))
     .first();
 }
 
@@ -43,9 +53,12 @@ export async function getByLoadId(
  *   - arrival watch → the next non-detour, non-canceled stop with
  *     coordinates after this one (absent when this was the final stop);
  *   - departure watch → the checked-in stop itself (when it has
- *     coordinates), with the debounce candidate reset;
+ *     coordinates), freshly armed;
  *   - sessionId/driverId re-stamped, so events after a handoff attribute to
- *     the relay driver's session.
+ *     the relay driver's session;
+ *   - loadCompleted cleared — a post-completion re-check-in (possible via
+ *     the legacy primaryDriverId access path) revives the row as a normal
+ *     mid-load frontier instead of leaving it flagged for deletion.
  */
 export async function setFrontierOnCheckIn(
   ctx: MutationCtx,
@@ -55,7 +68,7 @@ export async function setFrontierOnCheckIn(
     driverId: Id<'drivers'>;
     organizationId: string;
     now: number;
-  },
+  }
 ): Promise<void> {
   const { stop } = args;
 
@@ -70,11 +83,10 @@ export async function setFrontierOnCheckIn(
         s.stopType !== 'DETOUR' &&
         s.status !== 'Canceled' &&
         s.latitude !== undefined &&
-        s.longitude !== undefined,
+        s.longitude !== undefined
     )
     .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
 
-  const hasStopCoords = stop.latitude !== undefined && stop.longitude !== undefined;
   const watches = {
     currentStopSequenceNumber: upcoming?.sequenceNumber,
     currentStopLat: upcoming?.latitude,
@@ -83,10 +95,16 @@ export async function setFrontierOnCheckIn(
     arrivedFired: false,
     // A coordinate-less stop (possible on detours) clears the departure
     // watch rather than leaving it aimed at the previous stop.
-    departureStopSequenceNumber: hasStopCoords ? stop.sequenceNumber : undefined,
-    departureStopLat: hasStopCoords ? stop.latitude : undefined,
-    departureStopLng: hasStopCoords ? stop.longitude : undefined,
-    departureCandidateAt: undefined,
+    departureWatch:
+      stop.latitude !== undefined && stop.longitude !== undefined
+        ? {
+            stopSequenceNumber: stop.sequenceNumber,
+            lat: stop.latitude,
+            lng: stop.longitude,
+            armedAt: args.now,
+          }
+        : undefined,
+    loadCompleted: undefined,
     updatedAt: args.now,
   };
 
@@ -115,18 +133,26 @@ export async function setFrontierOnCheckIn(
  * fence when the driver taps checkout), the row survives with
  * loadCompleted=true so the final DEPARTED can still fire; the evaluator
  * deletes it once the exit confirms.
+ *
+ * currentSessionId (the driver's active session at checkout time, when one
+ * exists) re-binds the kept row: check-in may have happened under an
+ * earlier session (overnight dwell + auto-timeout), and the by_session
+ * lookups in ingestBatch and session-end cleanup only see the session the
+ * row points at.
  */
 export async function releaseFrontierOnLoadComplete(
   ctx: MutationCtx,
   loadId: Id<'loadInformation'>,
   now: number,
+  currentSessionId?: Id<'driverSessions'>
 ): Promise<void> {
   const state = await getByLoadId(ctx, loadId);
   if (!state) return;
 
-  if (state.departureStopLat !== undefined) {
+  if (state.departureWatch !== undefined) {
     await ctx.db.patch(state._id, {
       loadCompleted: true,
+      ...(currentSessionId ? { sessionId: currentSessionId } : {}),
       currentStopSequenceNumber: undefined,
       currentStopLat: undefined,
       currentStopLng: undefined,
@@ -138,38 +164,76 @@ export async function releaseFrontierOnLoadComplete(
 }
 
 /**
- * Handoff: point the frontier at the relay driver. Watches are preserved so
- * the relay resumes exactly where the primary left off; sessionId stays the
- * old session until the relay driver's first check-in re-stamps it (see
- * setFrontierOnCheckIn).
+ * Handoff: point the frontier at the relay driver. The arrival watch is
+ * preserved so the relay resumes exactly where the primary left off; the
+ * departure watch is cleared — it tracked the from-driver's physical
+ * presence, and evaluating it against either driver's pings after the
+ * handoff would fire a bogus DEPARTED (the from-driver drives away while
+ * the truck/load stays). The relay's own check-in re-arms it.
+ *
+ * sessionId is re-bound to the relay's active session when they have one;
+ * otherwise it stays on the old session until their first check-in
+ * re-stamps it (ingestBatch's driverId guard keeps the from-driver's pings
+ * from being evaluated against the row in the interim).
  */
 export async function transferFrontierToDriver(
   ctx: MutationCtx,
-  loadId: Id<'loadInformation'>,
+  state: Doc<'loadTrackingState'> | null,
   newDriverId: Id<'drivers'>,
-  now: number,
+  now: number
 ): Promise<void> {
-  const state = await getByLoadId(ctx, loadId);
   if (!state) return;
+  const newSession = await getActiveSessionForDriver(ctx, newDriverId);
   await ctx.db.patch(state._id, {
     driverId: newDriverId,
+    ...(newSession ? { sessionId: newSession._id } : {}),
+    departureWatch: undefined,
     updatedAt: now,
   });
 }
 
 /**
  * Session-end cleanup: drop rows that only exist to resolve a final
- * departure (loadCompleted=true) for a session that just ended — the driver
- * ended their shift while still parked at the last stop, so no more pings
- * are coming. The session timeline falls back to the manual checkout time.
- * Mid-load rows (load not completed) are left untouched.
+ * departure (loadCompleted=true) for a session that just ended — no more
+ * pings are coming, so the session timeline falls back to the manual
+ * checkout time. Mid-load rows (load not completed) are left untouched.
+ *
+ * NOT called for next_session_opened ends: the same driver keeps pinging
+ * under the new session, so those rows are re-bound instead — see
+ * transferCompletedRowsToSession.
  */
-export async function deleteCompletedRowsForSession(ctx: MutationCtx, sessionId: Id<'driverSessions'>): Promise<void> {
+export async function deleteCompletedRowsForSession(
+  ctx: MutationCtx,
+  sessionId: Id<'driverSessions'>
+): Promise<void> {
   const rows = await ctx.db
     .query('loadTrackingState')
     .withIndex('by_session', (q) => q.eq('sessionId', sessionId))
     .collect();
   for (const row of rows) {
     if (row.loadCompleted) await ctx.db.delete(row._id);
+  }
+}
+
+/**
+ * Same-driver session rollover ("forgot to end shift" → Start Shift): move
+ * pending final-departure rows from the closed session to the new one so
+ * the still-inbound pings (now tagged with the new session) can resolve the
+ * DEPARTED that would otherwise be lost.
+ */
+export async function transferCompletedRowsToSession(
+  ctx: MutationCtx,
+  fromSessionId: Id<'driverSessions'>,
+  toSessionId: Id<'driverSessions'>,
+  now: number
+): Promise<void> {
+  const rows = await ctx.db
+    .query('loadTrackingState')
+    .withIndex('by_session', (q) => q.eq('sessionId', fromSessionId))
+    .collect();
+  for (const row of rows) {
+    if (row.loadCompleted) {
+      await ctx.db.patch(row._id, { sessionId: toSessionId, updatedAt: now });
+    }
   }
 }

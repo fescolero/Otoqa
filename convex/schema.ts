@@ -1626,7 +1626,10 @@ export default defineSchema({
     .index('by_driver_status_scheduled_start', ['driverId', 'status', 'scheduledStartMs'])
     .index('by_carrier_partnership', ['carrierPartnershipId', 'status'])
     .index('by_org', ['workosOrgId'])
-    .index('by_truck', ['truckId']),
+    .index('by_truck', ['truckId'])
+    // Session stop-timeline query: "which legs were worked in this shift"
+    // without scanning the driver's full leg history.
+    .index('by_session', ['sessionId']),
 
   /**
    * Load Payables - Calculated pay line items
@@ -2166,14 +2169,26 @@ export default defineSchema({
 
     // Departure watch — the most recently checked-in stop, watched for a
     // confirmed geofence exit (DEPARTED event). Set on check-in, cleared
-    // when DEPARTED fires. departureCandidateAt holds the recordedAt of the
-    // first qualifying ping outside the exit ring; a second consecutive
-    // outside ping confirms the departure (GPS-jitter debounce), and the
-    // candidate timestamp — not the confirming one — becomes the event time.
-    departureStopSequenceNumber: v.optional(v.float64()),
-    departureStopLat: v.optional(v.float64()),
-    departureStopLng: v.optional(v.float64()),
-    departureCandidateAt: v.optional(v.float64()),
+    // when DEPARTED fires. A single optional object (unlike the flat legacy
+    // currentStop* trio above, which has pre-existing rows) so partial
+    // states are unrepresentable.
+    //   armedAt      — check-in server time; pings recorded at/before it are
+    //                  historical (offline backlog) and must never drive
+    //                  exit decisions.
+    //   candidateAt  — recordedAt of the first qualifying ping outside the
+    //                  exit ring; a second, newer outside ping confirms the
+    //                  departure (GPS-jitter debounce), and the candidate
+    //                  timestamp — not the confirming one — becomes the
+    //                  event time.
+    departureWatch: v.optional(
+      v.object({
+        stopSequenceNumber: v.float64(),
+        lat: v.float64(),
+        lng: v.float64(),
+        armedAt: v.float64(),
+        candidateAt: v.optional(v.float64()),
+      })
+    ),
 
     // Set on last-stop checkout when a departure watch is still pending:
     // the row is kept alive solely to timestamp the final facility exit,

@@ -1725,7 +1725,7 @@ export const handoffLoad = mutation({
       // check-in only the departure watch remains, so fall back to it.
       const frontierSeq =
         trackingState.currentStopSequenceNumber ??
-        trackingState.departureStopSequenceNumber;
+        trackingState.departureWatch?.stopSequenceNumber;
       const frontierStop = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
@@ -1773,9 +1773,10 @@ export const handoffLoad = mutation({
       updatedAt: now,
     });
 
-    // Transfer tracking state, if present. sessionId stays the old value
-    // until the relay driver's first check-in re-stamps it.
-    await transferFrontierToDriver(ctx, args.loadId, args.toDriverId, now);
+    // Transfer tracking state, if present: re-bind to the relay driver (and
+    // their active session when they have one) and clear the departure
+    // watch — it tracked the from-driver's presence at the handoff stop.
+    await transferFrontierToDriver(ctx, trackingState, args.toDriverId, now);
 
     // Maintain the primaryDriverId denorm cache if we just handed off leg 1.
     if (oldLeg.sequence === 1 && load.primaryDriverId === args.fromDriverId) {

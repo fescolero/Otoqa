@@ -4,7 +4,10 @@ import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { resolveAuthenticatedDriver } from './driverMobile';
-import { deleteCompletedRowsForSession } from './loadTrackingState';
+import {
+  deleteCompletedRowsForSession,
+  transferCompletedRowsToSession,
+} from './loadTrackingState';
 
 /**
  * Driver Session System — Phase 1 foundation.
@@ -105,7 +108,13 @@ async function endSessionInternal(
   // Drop tracking rows kept alive only to timestamp a final facility exit
   // (loadCompleted): the session is over, so no more pings will resolve
   // them. Session timelines fall back to the manual checkout time.
-  await deleteCompletedRowsForSession(ctx, session._id);
+  // Exception — next_session_opened means the SAME driver is starting a new
+  // shift and keeps pinging: startSession re-binds those rows to the new
+  // session instead (transferCompletedRowsToSession), so the pending final
+  // DEPARTED can still resolve.
+  if (args.endReason !== 'next_session_opened') {
+    await deleteCompletedRowsForSession(ctx, session._id);
+  }
 
   // Clear the driver's current truck pairing on session end. This forces
   // a fresh QR scan to start the next shift — the driver might be on a
@@ -184,6 +193,13 @@ export const startSession = mutation({
       startedAt: now,
       status: 'active',
     });
+
+    // Same-driver rollover: any tracking row still waiting on a final
+    // facility exit follows the driver to the new session so their
+    // continuing pings can resolve the DEPARTED timestamp.
+    if (existing) {
+      await transferCompletedRowsToSession(ctx, existing._id, sessionId, now);
+    }
 
     // Denormalize current truck on the driver for list views.
     if (driver.currentTruckId !== args.truckId) {
@@ -434,7 +450,11 @@ export type SessionStopTimelineRow = {
  * Core of getSessionStopTimeline, exported as a plain function so tests can
  * drive it through convex-test's ctx. Caller owns auth.
  *
- * Dwell prefers geofence bounds and falls back to the manual taps:
+ * Manual taps are only attributed to this session when they fall inside its
+ * [startedAt, endedAt] window — a stop shared across shifts (handoff,
+ * multi-day load) must not leak another session's taps into this one's
+ * display or dwell math. Dwell prefers geofence bounds and falls back to
+ * the (windowed) manual taps:
  * (departedAt ?? checkedOutAt) − (arrivedAt ?? checkedInAt).
  */
 export async function buildSessionStopTimeline(
@@ -451,33 +471,38 @@ export async function buildSessionStopTimeline(
   // coverage).
   const legs = await ctx.db
     .query('dispatchLegs')
-    .withIndex('by_driver', (q) => q.eq('driverId', session.driverId))
+    .withIndex('by_session', (q) => q.eq('sessionId', session._id))
     .collect();
   const loadIds = new Set<Id<'loadInformation'>>([
     ...events.map((e) => e.loadId),
-    ...legs.filter((l) => l.sessionId === session._id).map((l) => l.loadId),
+    ...legs.map((l) => l.loadId),
   ]);
 
-  // Geofence timestamps keyed by (loadId, stopSequenceNumber).
+  // Geofence timestamps grouped by loadId, then stopSequenceNumber.
   type StopTimes = { approachingAt?: number; arrivedAt?: number; departedAt?: number };
-  const eventTimes = new Map<string, StopTimes>();
+  const eventTimesByLoad = new Map<Id<'loadInformation'>, Map<number, StopTimes>>();
   for (const event of events) {
-    const key = `${event.loadId}|${event.stopSequenceNumber}`;
-    const times = eventTimes.get(key) ?? {};
+    let byStop = eventTimesByLoad.get(event.loadId);
+    if (!byStop) {
+      byStop = new Map();
+      eventTimesByLoad.set(event.loadId, byStop);
+    }
+    const times = byStop.get(event.stopSequenceNumber) ?? {};
     if (event.eventType === 'APPROACHING') times.approachingAt = event.triggeredAt;
     else if (event.eventType === 'ARRIVED') times.arrivedAt = event.triggeredAt;
     else times.departedAt = event.triggeredAt;
-    eventTimes.set(key, times);
+    byStop.set(event.stopSequenceNumber, times);
   }
 
-  const parseMs = (iso: string | undefined): number | null => {
+  const sessionEnd = session.endedAt ?? Number.POSITIVE_INFINITY;
+  // Parse a manual-tap ISO string to ms, attributed to this session only
+  // when inside its window; taps from other shifts read as null here.
+  const parseWindowedMs = (iso: string | undefined): number | null => {
     if (!iso) return null;
     const ms = new Date(iso).getTime();
-    return Number.isFinite(ms) ? ms : null;
+    if (!Number.isFinite(ms)) return null;
+    return ms >= session.startedAt && ms <= sessionEnd ? ms : null;
   };
-  const sessionEnd = session.endedAt ?? Number.POSITIVE_INFINITY;
-  const inWindow = (ms: number | null) =>
-    ms !== null && ms >= session.startedAt && ms <= sessionEnd;
 
   const rows: SessionStopTimelineRow[] = [];
   for (const loadId of loadIds) {
@@ -489,25 +514,22 @@ export async function buildSessionStopTimeline(
         .collect(),
     ]);
     const stopsBySeq = new Map(stops.map((s) => [s.sequenceNumber, s]));
+    const timesByStop = eventTimesByLoad.get(loadId) ?? new Map<number, StopTimes>();
 
     // Every stop sequence that has geofence events OR manual taps inside
     // the session window gets a row.
-    const sequences = new Set<number>();
-    for (const key of eventTimes.keys()) {
-      const [keyLoadId, seq] = key.split('|');
-      if (keyLoadId === loadId) sequences.add(Number(seq));
-    }
+    const sequences = new Set<number>(timesByStop.keys());
     for (const stop of stops) {
-      if (inWindow(parseMs(stop.checkedInAt)) || inWindow(parseMs(stop.checkedOutAt))) {
+      if (parseWindowedMs(stop.checkedInAt) !== null || parseWindowedMs(stop.checkedOutAt) !== null) {
         sequences.add(stop.sequenceNumber);
       }
     }
 
     for (const sequenceNumber of sequences) {
       const stop = stopsBySeq.get(sequenceNumber);
-      const times = eventTimes.get(`${loadId}|${sequenceNumber}`) ?? {};
-      const checkedInAt = parseMs(stop?.checkedInAt);
-      const checkedOutAt = parseMs(stop?.checkedOutAt);
+      const times = timesByStop.get(sequenceNumber) ?? {};
+      const checkedInAt = parseWindowedMs(stop?.checkedInAt);
+      const checkedOutAt = parseWindowedMs(stop?.checkedOutAt);
 
       const dwellStart = times.arrivedAt ?? checkedInAt;
       const dwellEnd = times.departedAt ?? checkedOutAt;

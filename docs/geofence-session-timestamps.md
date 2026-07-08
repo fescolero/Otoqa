@@ -61,17 +61,21 @@ FourKites) converged on:
 ### `loadTrackingState`
 - `currentStopSequenceNumber/Lat/Lng` become **optional**: after check-in at
   the final stop there is no next arrival target. Existing rows stay valid.
-- New **departure watch** fields (all optional):
-  - `departureStopSequenceNumber/Lat/Lng` — the fence being watched for exit
-    (set on check-in, cleared when DEPARTED fires).
-  - `departureCandidateAt` — timestamp of the first qualifying outside ping;
-    a second consecutive outside ping confirms the departure. Reset to
-    undefined if a ping re-enters the ring.
+- New **`departureWatch`** — a single optional object (partial states are
+  unrepresentable) holding the fence being watched for exit:
+  - `stopSequenceNumber/lat/lng` — set on check-in, cleared when DEPARTED
+    fires (and on handoff — see below).
+  - `armedAt` — the check-in time; pings recorded at/before it are
+    offline-backlog en-route fixes and never drive exit decisions.
+  - `candidateAt` — timestamp of the first qualifying outside ping; a
+    second, strictly newer outside ping confirms the departure. Only a
+    newer inside ping can reset it (a stale one proves nothing).
 - `loadCompleted` — set on last-stop checkout when a departure watch is still
   pending; the row is kept alive (instead of deleted) purely to resolve the
-  final departure, then deleted by the evaluator.
+  final departure, then deleted by the evaluator. Cleared again if a
+  post-completion re-check-in revives the row.
 - New index `by_session` for post-completion scheduling and session-end
-  cleanup.
+  cleanup. (`dispatchLegs` also gains `by_session` for the timeline query.)
 
 ## Behavior changes
 
@@ -96,30 +100,49 @@ One unified path (was two divergent branches) via shared helpers in
 - APPROACHING/ARRIVED logic unchanged, except events are **deduped** against
   the `by_load_stop_event` index before insert (flag resets / handoffs can no
   longer double-fire an event type for a stop).
-- New departure state machine per ping (accuracy-gated):
-  `inside → candidate (first ping > 1207 m) → confirmed (second consecutive
-  ping outside)`. `DEPARTED.triggeredAt` = the candidate ping's `recordedAt`.
+- New departure state machine per ping (accuracy-gated, `armedAt`-gated):
+  `inside → candidate (first ping > 1207 m) → confirmed (second, newer ping
+  outside)`. `DEPARTED.triggeredAt` = the candidate ping's `recordedAt`.
+  Timestamp granularity is the mobile sync cadence — the recorded exit time
+  is the first post-exit *synced* fix, not the physical boundary crossing.
+- Events attribute to the **session of the triggering ping** (falling back
+  to the row's sessionId for legacy loadId-only pings), so post-handoff and
+  post-rollover events land on the shift whose GPS produced them.
 - After the final stop's DEPARTED fires on a `loadCompleted` row, the row is
   deleted.
 
 ### Ping ingestion (`convex/driverLocations.ts`)
-- Evaluator targets are now the union of (a) the existing
-  loadId + ACTIVE-leg path and (b) any `loadTrackingState` rows found via
-  `by_session` for sessions in the batch — this is what lets a departure
-  resolve *after* last-stop checkout, when pings have reverted to
-  `SESSION_ROUTE` (no `loadId`, leg already COMPLETED).
-- Pings now carry `accuracy` into the evaluator.
+- Evaluator targets are keyed per (session, load) pair — a batch spanning a
+  session rollover still evaluates both sessions' latest pings — and are the
+  union of (a) the existing loadId + ACTIVE-leg path and (b) any
+  `loadTrackingState` rows found via `by_session` for sessions in the batch.
+  Path (b) is what lets a departure resolve *after* last-stop checkout, when
+  pings have reverted to `SESSION_ROUTE` (no `loadId`, leg COMPLETED); it
+  only runs for batches that actually contain session-route pings, and skips
+  rows whose driverId no longer matches the session (handed-off loads).
+- Pings now carry `accuracy` and their `sessionId` into the evaluator.
 
-### Session end (`driverSessions.endSessionInternal`)
-- Deletes any `loadCompleted` tracking rows for the session (driver ended the
-  shift while still parked at the final stop — the timeline falls back to the
-  manual checkout time). Mid-load rows are left alone, exactly as before.
+### Handoff (`dispatchLegs.handoffLoad`)
+- The frontier transfers to the relay driver **and their active session**
+  (when they have one), and the departure watch is cleared — it tracked the
+  from-driver's physical presence; the relay's own check-in re-arms it.
+
+### Session end (`driverSessions.endSessionInternal` / `startSession`)
+- Terminal ends delete any `loadCompleted` tracking rows for the session
+  (the driver is done pinging — the timeline falls back to the manual
+  checkout time). Mid-load rows are left alone, exactly as before.
+- Same-driver rollover (`next_session_opened`) instead **re-binds** those
+  rows to the new session, so the still-inbound pings resolve the final
+  DEPARTED. Last-stop checkout likewise re-binds the kept row to the
+  driver's current session when check-in happened under an earlier one.
 
 ### Timeline query (`driverSessions.getSessionStopTimeline`)
 Dispatcher-authed query joining `geofenceEvents` (`by_session`) with the
-session's legs → loads → stops. Returns one row per stop:
+session's legs (`by_session`) → loads → stops. Returns one row per stop:
 `approachingAt / arrivedAt / departedAt` (geofence, ms), `checkedInAt /
-checkedOutAt` (manual, ISO→ms), and `dwellMinutes` computed as
+checkedOutAt` (manual, ISO→ms — only when they fall inside the session's
+time window, so shared stops don't leak another shift's taps), and
+`dwellMinutes` computed as
 `(departedAt ?? checkedOutAt) − (arrivedAt ?? checkedInAt)`.
 
 ### UI (`components/sessions/driver-sessions-history.tsx`)

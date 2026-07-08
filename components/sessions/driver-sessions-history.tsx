@@ -13,11 +13,12 @@ import type { Id } from '@/convex/_generated/dataModel';
 // beyond this gets the warning treatment in the timeline.
 const DETENTION_FREE_MINUTES = 120;
 
-function formatTime(ms: number | null): string {
+function formatTime(ms: number | null, withYear = false): string {
   if (ms === null) return '—';
   return new Date(ms).toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
+    ...(withYear ? { year: 'numeric' as const } : {}),
     hour: 'numeric',
     minute: '2-digit',
   });
@@ -171,26 +172,11 @@ export function DriverSessionsHistory({ driverId }: { driverId: Id<'drivers'> })
                         {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                       </Button>
                     </TableCell>
-                    <TableCell className="text-sm">
-                      {new Date(s.startedAt).toLocaleString('en-US', {
-                        month: 'short',
-                        day: 'numeric',
-                        year: 'numeric',
-                        hour: 'numeric',
-                        minute: '2-digit',
-                      })}
-                    </TableCell>
+                    <TableCell className="text-sm">{formatTime(s.startedAt, true)}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">
-                      {s.endedAt
-                        ? new Date(s.endedAt).toLocaleString('en-US', {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: 'numeric',
-                            minute: '2-digit',
-                          })
-                        : '—'}
+                      {formatTime(s.endedAt ?? null)}
                     </TableCell>
-                    <TableCell>{`${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`}</TableCell>
+                    <TableCell>{formatDwell(durationMinutes)}</TableCell>
                     <TableCell>{s.truckUnitId ? `Unit ${s.truckUnitId}` : '—'}</TableCell>
                     <TableCell>{s.legCount}</TableCell>
                     <TableCell>
