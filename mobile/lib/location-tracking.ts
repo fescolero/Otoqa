@@ -821,9 +821,14 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   //     the gap between fires can be 15-40 min when Android Doze is
   //     batching FGS callbacks, so the cost of waiting is high.
   //   - Total worst-case retry budget: ~4s. Headless-context ceiling
-  //     is ~20s (Firebase Messaging SDK 23.2.1 background broadcast
-  //     timeout) to ~30s (expo-task-manager). Terminal HTTP errors
-  //     (401/403/400) skip retry since they won't resolve.
+  //     is ~20s (Firebase Messaging SDK 23.2.1 caps background
+  //     broadcasts at 20s) to ~30s (expo-task-manager
+  //     TASKMANAGER_BG_TIME_LIMIT_MS on Android). Terminal HTTP errors
+  //     (401/403/400) skip retry since they won't resolve on a
+  //     re-attempt with identical payload + API key.
+  //
+  // Mirrors the foreground `forceFlush` retry pattern intentionally — same
+  // strategy, tighter delays appropriate for the BG runtime budget.
   //
   // See PR for the 2026-05-08 sync-latency context (median 8.4 min,
   // p99 58 min — needed to know if BG task is firing at all).
@@ -1590,6 +1595,22 @@ export async function detachLoadFromSession(): Promise<{
 /**
  * End session-mode tracking. Alias for stopLocationTracking — both tear
  * down the same OS-level resources and flush any unsynced points.
+ *
+ * TODO(mobile-fcm): Server now fires an FCM data push with
+ * `data: { type: 'session_ended', sessionId, endedAt, endReason }`
+ * whenever a session is ended *server-side* (dispatch override,
+ * auto-timeout, handoff, another device). The mobile FCM message
+ * handler should match on `type === 'session_ended'` and call
+ * `stopSessionTracking()` to drain the queue and shut the foreground
+ * tracker down.
+ *
+ * Without this handler, mobile keeps the foreground location service
+ * running until the user manually taps "End Shift" — and during that
+ * window, the server rejects every ping (see
+ * convex/driverLocations.ts::ingestBatch skippedSessionEnded +
+ * skippedLegInactive counters). Battery + bandwidth get burned for no
+ * useful data. Source of truth on the contract:
+ * convex/fcmWake.ts::sendSessionEnded.
  */
 export async function stopSessionTracking(): Promise<{ success: boolean; message: string }> {
   return stopLocationTracking();

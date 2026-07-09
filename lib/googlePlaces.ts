@@ -18,7 +18,11 @@ export function setGoogleMapsApiKey(key: string | undefined) {
 }
 
 /**
- * Initialize Google Maps API by loading the script tag
+ * Initialize Google Maps API by loading the script tag.
+ *
+ * Public alias `ensureGoogleMapsLoaded` is exported below — consumers outside
+ * the autocomplete/geocoder code (e.g. the Active Sessions live ops map)
+ * can call it directly to mount a `google.maps.Map` once the SDK is ready.
  */
 async function loadGoogleMaps(): Promise<void> {
   // Return existing promise if already loading
@@ -384,4 +388,20 @@ export function createISOStringWithTimezone(
   // Fallback: use the date/time without offset
   console.warn('Could not determine timezone offset, using UTC');
   return `${dateTimeStr}Z`;
+}
+
+
+/**
+ * Public wrapper around the private `loadGoogleMaps()` initializer.
+ *
+ * Use this when you need to mount a `new google.maps.Map(...)` directly
+ * (e.g. the live ops Active Sessions map). The Google Maps script is loaded
+ * once with `libraries=places&v=weekly`, which also exposes the base map
+ * surface (`google.maps.Map`, markers, etc.) — no second tag needed.
+ *
+ * Returns once `window.google.maps` is ready, or throws if the API key is
+ * missing / the script tag fails to load.
+ */
+export function ensureGoogleMapsLoaded(): Promise<void> {
+  return loadGoogleMaps();
 }

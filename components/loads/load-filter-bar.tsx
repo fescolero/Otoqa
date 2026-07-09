@@ -33,6 +33,7 @@ export interface LoadFilterState {
   hcr?: string;
   trip?: string;
   mileRange?: string;
+  trackingStatus?: string;
   dateRange?: { start: number; end: number };
 }
 

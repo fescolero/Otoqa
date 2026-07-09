@@ -30,6 +30,7 @@ import { FIRST_RUN_STORAGE_KEY } from '../(app)/first-run';
 import { Icon } from '../../lib/design-icons';
 import { useTheme } from '../../lib/ThemeContext';
 import { radii, typeScale, type Palette } from '../../lib/design-tokens';
+import { getSmsAppSignatures, startSmsOtpListener } from '../../lib/sms-otp';
 import {
   trackResendCode,
   trackScreen,
@@ -56,6 +57,23 @@ export default function VerifyScreen() {
 
   useEffect(() => {
     trackScreen('Verify');
+  }, []);
+
+  // Zero-tap OTP (Android w/ SMS Retriever): when the verification SMS
+  // carries our app hash, Play services hands us the message and we fill
+  // + submit without any tap. No-ops on iOS, on binaries without the
+  // native module, and for messages without the hash (one-tap keyboard
+  // autofill remains the fallback everywhere).
+  const handleCodeRef = useRef<(text: string) => void>(() => {});
+  useEffect(() => {
+    const stop = startSmsOtpListener((otp) => handleCodeRef.current(otp));
+    if (__DEV__) {
+      // The 11-char hash the SMS template needs, for THIS build's signature.
+      getSmsAppSignatures().then((sigs) => {
+        if (sigs.length) console.log('[SmsRetriever] app hash(es):', sigs);
+      });
+    }
+    return stop;
   }, []);
 
   // Post-auth gating: hand off to /(app) and let the (app) layout do the
@@ -110,6 +128,7 @@ export default function VerifyScreen() {
       handleVerify(digits);
     }
   };
+  handleCodeRef.current = handleCodeChange;
 
   const focusHiddenInput = () => {
     hiddenInputRef.current?.focus();
@@ -183,11 +202,13 @@ export default function VerifyScreen() {
     if (!isLoaded || resendTimer > 0) return;
 
     try {
+      const phoneFactor = signIn.supportedFirstFactors?.find(
+        (factor): factor is Extract<typeof factor, { strategy: 'phone_code' }> =>
+          factor.strategy === 'phone_code',
+      );
       await signIn.prepareFirstFactor({
         strategy: 'phone_code',
-        phoneNumberId: signIn.supportedFirstFactors?.find(
-          (factor) => factor.strategy === 'phone_code',
-        )?.phoneNumberId as string,
+        phoneNumberId: phoneFactor?.phoneNumberId as string,
       });
 
       trackResendCode(true);
@@ -257,19 +278,25 @@ export default function VerifyScreen() {
                 </View>
               );
             })}
+            {/* The real input, stretched invisibly over the boxes. SMS
+                autofill (iOS QuickType "From Messages", Android keyboard
+                code suggestion) refuses tiny/zero-opacity fields, so the
+                field must occupy real screen area — near-zero opacity +
+                transparent text keeps the boxes as the visible UI. */}
+            <TextInput
+              ref={hiddenInputRef}
+              value={code}
+              onChangeText={handleCodeChange}
+              keyboardType="number-pad"
+              textContentType="oneTimeCode"
+              autoComplete={Platform.OS === 'android' ? 'sms-otp' : 'one-time-code'}
+              maxLength={6}
+              autoFocus
+              caretHidden
+              selectionColor="transparent"
+              style={styles.overlayInput}
+            />
           </Pressable>
-          <TextInput
-            ref={hiddenInputRef}
-            value={code}
-            onChangeText={handleCodeChange}
-            keyboardType="number-pad"
-            textContentType="oneTimeCode"
-            autoComplete="sms-otp"
-            maxLength={6}
-            autoFocus
-            caretHidden
-            style={styles.hiddenInput}
-          />
 
           <View style={styles.resendRow}>
             <Text style={styles.resendLabel}>Didn&apos;t get it?</Text>
@@ -375,11 +402,11 @@ const makeStyles = (palette: Palette) =>
       color: palette.textPrimary,
       fontVariant: ['tabular-nums'],
     },
-    hiddenInput: {
-      position: 'absolute',
-      opacity: 0,
-      height: 1,
-      width: 1,
+    overlayInput: {
+      ...StyleSheet.absoluteFillObject,
+      opacity: 0.02,
+      color: 'transparent',
+      textAlign: 'center',
     },
     resendRow: {
       flexDirection: 'row',

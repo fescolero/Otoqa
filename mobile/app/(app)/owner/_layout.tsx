@@ -15,6 +15,8 @@ export default function OwnerLayout() {
       <Stack.Screen name="tracking" />
       <Stack.Screen name="notifications" />
       <Stack.Screen name="settlements" />
+      <Stack.Screen name="statements/index" />
+      <Stack.Screen name="statements/[id]" />
       <Stack.Screen name="feature-unavailable" />
       <Stack.Screen name="complete-driver-profile" />
     </Stack>

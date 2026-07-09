@@ -43,6 +43,8 @@ export const countAccountingStats = internalMutation({
         totalCollected: number;
         invoiceCount: number;
         paidInvoiceCount: number;
+        totalOutstanding: number;
+        outstandingCount: number;
       }
     > = JSON.parse(args.accumulated);
 
@@ -67,6 +69,8 @@ export const countAccountingStats = internalMutation({
           totalCollected: 0,
           invoiceCount: 0,
           paidInvoiceCount: 0,
+          totalOutstanding: 0,
+          outstandingCount: 0,
         };
       }
 
@@ -77,6 +81,16 @@ export const countAccountingStats = internalMutation({
       if (invoice.paidAmount !== undefined && invoice.paidAmount !== 0) {
         accumulated[periodKey].totalCollected += invoice.paidAmount;
         accumulated[periodKey].paidInvoiceCount += 1;
+      }
+
+      // A/R: unpaid balance owed on this invoice (clamped — overpayments owe $0).
+      // PAID invoices are settled — a short-paid/closed one owes nothing even if
+      // paidAmount < totalAmount — so only BILLED/PENDING carry A/R. (Matches the
+      // per-customer aging snapshot in customerAging.ts.)
+      if (status !== 'PAID') {
+        const balance = Math.max(0, totalAmount - (invoice.paidAmount ?? 0));
+        accumulated[periodKey].totalOutstanding += balance;
+        if (balance > 0.005) accumulated[periodKey].outstandingCount += 1;
       }
     }
 
@@ -163,6 +177,8 @@ export const countAccountingStats = internalMutation({
           totalCollected: 0,
           invoiceCount: 0,
           paidInvoiceCount: 0,
+          totalOutstanding: 0,
+          outstandingCount: 0,
           lastRecalculated: now,
           updatedAt: now,
         });
@@ -189,6 +205,10 @@ export const recalculateOrgAccountingStats = internalMutation({
       statusIndex: 0,
       cursor: null,
       accumulated: JSON.stringify({}),
+    });
+    // Refresh the per-customer A/R aging snapshot alongside the org-level stats.
+    await ctx.scheduler.runAfter(0, internal.customerAging.startCustomerAging, {
+      workosOrgId: args.workosOrgId,
     });
     return null;
   },

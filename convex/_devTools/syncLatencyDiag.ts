@@ -585,6 +585,82 @@ export const recentLoadsForDriver = internalQuery({
   },
 });
 
+/**
+ * Look up a driver by phone (digits-only match, last 10 digits) within an
+ * org. Returns the first match. Used to find driverIds when we only have
+ * a phone number from another system (e.g. PostHog person properties).
+ */
+export const findDriverByPhone = internalQuery({
+  args: { organizationId: v.string(), phoneDigits: v.string() },
+  returns: v.union(
+    v.null(),
+    v.object({
+      driverId: v.id('drivers'),
+      firstName: v.string(),
+      lastName: v.string(),
+      phone: v.string(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const target = args.phoneDigits.replace(/\D/g, '').slice(-10);
+    for await (const d of ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId))) {
+      const candidate = (d.phone ?? '').replace(/\D/g, '').slice(-10);
+      if (candidate === target) {
+        return {
+          driverId: d._id,
+          firstName: d.firstName,
+          lastName: d.lastName,
+          phone: d.phone,
+        };
+      }
+    }
+    return null;
+  },
+});
+
+/**
+ * List a driver's recent sessions (active + completed) from driverSessions
+ * directly — independent of whether any pings have landed. Useful when
+ * pings are absent and we need to know if the driver is even on shift.
+ */
+export const recentSessionsForDriver = internalQuery({
+  args: { driverId: v.id('drivers'), limit: v.optional(v.number()) },
+  returns: v.array(v.object({
+    sessionId: v.id('driverSessions'),
+    startedAt: v.float64(),
+    endedAt: v.optional(v.float64()),
+    endReason: v.optional(v.string()),
+    status: v.string(),
+    lastPingAt: v.optional(v.float64()),
+    fcmLastPushAt: v.optional(v.float64()),
+    fcmConsecutiveFailures: v.optional(v.float64()),
+    pushTokenPlatform: v.optional(v.string()),
+    hasPushToken: v.boolean(),
+  })),
+  handler: async (ctx, args) => {
+    const limit = args.limit ?? 5;
+    const sessions = await ctx.db
+      .query('driverSessions')
+      .withIndex('by_driver_status', (q) => q.eq('driverId', args.driverId))
+      .order('desc')
+      .take(limit);
+    return sessions.map((s) => ({
+      sessionId: s._id,
+      startedAt: s.startedAt,
+      endedAt: s.endedAt,
+      endReason: s.endReason,
+      status: s.status,
+      lastPingAt: s.lastPingAt,
+      fcmLastPushAt: s.fcmLastPushAt,
+      fcmConsecutiveFailures: s.fcmConsecutiveFailures,
+      pushTokenPlatform: s.pushTokenPlatform,
+      hasPushToken: !!s.pushToken,
+    }));
+  },
+});
+
 export const analyzeBySession = internalQuery({
   args: {
     sessionId: v.id('driverSessions'),

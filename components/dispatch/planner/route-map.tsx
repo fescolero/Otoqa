@@ -9,6 +9,7 @@ import {
   useMapsLibrary,
 } from '@vis.gl/react-google-maps';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 
 interface Stop {
   lat: number;
@@ -120,6 +121,8 @@ function StopMarker({ stop }: { stop: Stop }) {
 
 export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
   const apiKey = useGoogleMapsKey();
+  const mapId = useThemedMapId();
+  const colorScheme = useMapColorScheme();
 
   const validStops = useMemo(
     () => stops.filter((s) => s.lat && s.lng && !isNaN(s.lat) && !isNaN(s.lng)),
@@ -166,7 +169,8 @@ export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
         <Map
           defaultCenter={center}
           defaultZoom={validStops.length === 1 ? 12 : 6}
-          mapId="dispatch-route-map"
+          mapId={mapId}
+          colorScheme={colorScheme}
           gestureHandling="cooperative"
           disableDefaultUI={true}
           clickableIcons={false}

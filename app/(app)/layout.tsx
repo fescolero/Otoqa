@@ -1,4 +1,4 @@
-import { AppLayoutClient } from '@/components/app-layout-client';
+import { AppShell } from '@/components/web/shell/app-shell';
 import { withAuth } from '@workos-inc/authkit-nextjs';
 import { redirect } from 'next/navigation';
 import { fetchQuery } from 'convex/nextjs';
@@ -26,12 +26,18 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   const organizationId = memberships.data[0].organizationId;
 
-  // Fetch organization settings from Convex with auth
+  // Fetch organization settings from Convex with auth. Guarded: a transient
+  // Convex blip (e.g. mid-deploy or a network hiccup) must not 500 every page —
+  // the shell renders fine with null (default org name), and the client-side
+  // Convex provider fills in live data after hydration.
   const orgSettings = await fetchQuery(
     api.settings.getOrgSettings,
     { workosOrgId: organizationId },
-    { token: accessToken }
-  );
+    { token: accessToken },
+  ).catch((error) => {
+    console.error('AppLayout: getOrgSettings fetch failed; rendering with defaults', error);
+    return null;
+  });
 
   // Get user initials
   const getUserInitials = (name?: string, email?: string) => {
@@ -61,7 +67,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY;
 
   return (
-    <AppLayoutClient 
+    <AppShell
       user={userData}
       workosUserId={user.id}
       organizationId={organizationId}
@@ -69,6 +75,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       googleMapsApiKey={googleMapsApiKey}
     >
       {children}
-    </AppLayoutClient>
+    </AppShell>
   );
 }

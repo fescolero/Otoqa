@@ -54,7 +54,8 @@ interface ProfileDetailModalProps {
 const TRIGGER_LABELS: Record<string, string> = {
   MILE_LOADED: 'Per Loaded Mile',
   MILE_EMPTY: 'Per Empty Mile',
-  TIME_DURATION: 'Per Hour',
+  TIME_DURATION: 'Per Hour (per leg)',
+  SESSION_DURATION: 'Per Shift Hour',
   TIME_WAITING: 'Waiting Time',
   COUNT_STOPS: 'Per Stop',
   FLAT_LEG: 'Flat Rate per Leg',

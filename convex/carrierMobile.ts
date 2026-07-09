@@ -21,11 +21,11 @@ import { normalizePhoneForMatch } from './_helpers/mobileAuth';
  * Verifies the caller is authenticated and belongs to the claimed organization.
  * Returns the identity or null if unauthorized.
  */
-async function requireCarrierAuth(
+export async function requireCarrierAuth(
   ctx: { auth: { getUserIdentity: () => Promise<any> }; db: any },
   carrierOrgId: string,
   carrierConvexId?: string | null
-): Promise<{ identity: any } | null> {
+): Promise<{ identity: any; org: any } | null> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
     console.log('[carrierAuth] DENIED: no identity (token missing or expired)');
@@ -69,7 +69,7 @@ async function requireCarrierAuth(
     return null;
   }
 
-  return { identity };
+  return { identity, org };
 }
 
 // ==========================================

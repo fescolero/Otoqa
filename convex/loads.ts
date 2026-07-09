@@ -7,6 +7,7 @@ import { Doc, Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
 import { parseStopDateTime, syncLegsAffectedByStop } from './_helpers/timeUtils';
 import { updateLoadCount } from './stats_helpers';
+import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
 import {
   setLoadTag,
   removeAllTagsForLoad,
@@ -239,6 +240,223 @@ export const countLoadsByStatus = query({
       Canceled: stats.loadCounts.Canceled,
       Expired: stats.loadCounts.Expired ?? 0,
     };
+  },
+});
+
+/**
+ * Filter-aware status counts for the Dispatch Planner tab badges.
+ *
+ * Background — why this exists in addition to `countLoadsByStatus`:
+ * The planner's "Open / Assigned" toggle is AND-combined with the
+ * FilterBar's HCR/Trip/Date scope. Showing the unfiltered org-wide
+ * `countLoadsByStatus` numbers next to a scoped result set hides the
+ * fact that the user has just filtered to a status that has zero
+ * matches. (e.g. HCR=95632 had ~17 Assigned and 0 Open — picking it
+ * while on the Open tab gave "No matching trips" with no hint that
+ * Assigned was the right tab.)
+ *
+ * Strategy:
+ *  - No HCR/Trip/Date filter → return the existing org-wide aggregate
+ *    in a single read (cheap).
+ *  - HCR or Trip set → paginate the loadTags facet index, fetch each
+ *    matched load, tally by status. Tag rows for a single HCR are
+ *    typically in the low thousands at most; bounded.
+ *  - Only date range → scan the loadInformation date index. Bounded
+ *    by the user's chosen window.
+ */
+export const countLoadsByStatusFiltered = query({
+  args: {
+    workosOrgId: v.string(),
+    hcr: v.optional(v.string()),
+    tripNumber: v.optional(v.string()),
+    startDate: v.optional(v.string()),
+    endDate: v.optional(v.string()),
+  },
+  returns: v.object({
+    Open: v.number(),
+    Assigned: v.number(),
+    Delivered: v.number(),
+    Canceled: v.number(),
+    Expired: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const canonicalHcr = args.hcr?.trim().toUpperCase();
+    const canonicalTrip = args.tripNumber?.trim().toUpperCase();
+    const hasFacet = !!(canonicalHcr || canonicalTrip);
+    const hasDate = !!(args.startDate || args.endDate);
+
+    // Fast path — no filters → reuse the denormalized org stats.
+    if (!hasFacet && !hasDate) {
+      const stats = await ctx.db
+        .query('organizationStats')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+        .first();
+      if (!stats) {
+        return { Open: 0, Assigned: 0, Delivered: 0, Canceled: 0, Expired: 0 };
+      }
+      return {
+        Open: stats.loadCounts.Open,
+        Assigned: stats.loadCounts.Assigned,
+        Delivered: stats.loadCounts.Completed,
+        Canceled: stats.loadCounts.Canceled,
+        Expired: stats.loadCounts.Expired ?? 0,
+      };
+    }
+
+    // Eventually-exact cache path (facet and/or date filters). Gated per-org by
+    // a feature flag during rollout; returns null when the cache can't serve
+    // this query EXACTLY (not built yet, HCR∧TRIP+date, or a range reaching
+    // before the day-grain window), in which case we fall through to the
+    // bounded scan below. See convex/loadStatusCounts.ts + the design doc.
+    const cacheFlag = await ctx.db
+      .query('featureFlags')
+      .withIndex('by_org_key', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('key', READ_FROM_CACHE_FLAG),
+      )
+      .first();
+    if (cacheFlag?.value === 'true') {
+      const cached = await readScopedCounts(ctx, {
+        workosOrgId: args.workosOrgId,
+        hcr: args.hcr,
+        trip: args.tripNumber,
+        startDate: args.startDate,
+        endDate: args.endDate,
+      });
+      if (cached) return cached;
+    }
+
+    const counts = { Open: 0, Assigned: 0, Delivered: 0, Canceled: 0, Expired: 0 };
+
+    // Convex hard-caps a single function execution at 4096 document reads.
+    // Each branch below reads a bounded number of rows PER matched load, so
+    // we cap the match set to keep the worst branch comfortably under that
+    // ceiling (leaving margin for the auth + stats reads above):
+    //   • single facet  → take(N) tags + get(N) loads      = 2 reads/load
+    //   • HCR ∩ TRIP     → take(N) + unique(N) + get(N)     = 3 reads/load
+    //   • date-only      → take(N) loads (status read direct) = 1 read/load
+    // Counts stay EXACT for every realistic facet/date bucket; a pathological
+    // mega-bucket is truncated (and logged) instead of throwing — the badge
+    // shows a high-but-capped number rather than crashing the planner.
+    const READ_BUDGET = 3500;
+
+    // Collect the candidate loadIds. With a facet filter we use the
+    // loadTags index; with only a date range we scan the load date index.
+    let loadIds: Id<'loadInformation'>[] = [];
+
+    if (hasFacet) {
+      // When both HCR and TRIP are present, use TRIP as the primary key
+      // (per the same heuristic in getLoads: trip values are far more
+      // numerous so an individual trip yields a smaller bucket).
+      const primaryKey = canonicalTrip ? 'TRIP' : 'HCR';
+      const primaryValue = canonicalTrip ?? canonicalHcr!;
+      const isIntersection = !!(canonicalHcr && canonicalTrip);
+      const facetCap = Math.floor(READ_BUDGET / (isIntersection ? 3 : 2));
+
+      const primaryTags = await ctx.db
+        .query('loadTags')
+        .withIndex('by_org_key_canonical_date', (q) => {
+          const base = q
+            .eq('workosOrgId', args.workosOrgId)
+            .eq('facetKey', primaryKey)
+            .eq('canonicalValue', primaryValue);
+          if (args.startDate && args.endDate) {
+            return base
+              .gte('firstStopDate', args.startDate)
+              .lte('firstStopDate', args.endDate);
+          }
+          if (args.startDate) return base.gte('firstStopDate', args.startDate);
+          if (args.endDate) return base.lte('firstStopDate', args.endDate);
+          return base;
+        })
+        .take(facetCap);
+
+      if (primaryTags.length === facetCap) {
+        console.warn(
+          `[countLoadsByStatusFiltered] facet bucket hit read cap (${facetCap}); ` +
+            `status counts may be truncated. org=${args.workosOrgId} ` +
+            `hcr=${canonicalHcr ?? '-'} trip=${canonicalTrip ?? '-'}`,
+        );
+      }
+
+      if (canonicalHcr && canonicalTrip) {
+        // Intersect: keep only tags whose load also carries the other facet.
+        const otherKey = primaryKey === 'TRIP' ? 'HCR' : 'TRIP';
+        const otherValue = primaryKey === 'TRIP' ? canonicalHcr : canonicalTrip;
+        const otherTags = await Promise.all(
+          primaryTags.map((t) =>
+            ctx.db
+              .query('loadTags')
+              .withIndex('by_load_key', (q) =>
+                q.eq('loadId', t.loadId).eq('facetKey', otherKey),
+              )
+              .unique(),
+          ),
+        );
+        loadIds = primaryTags
+          .filter((_, i) => otherTags[i]?.canonicalValue === otherValue)
+          .map((t) => t.loadId);
+      } else {
+        loadIds = primaryTags.map((t) => t.loadId);
+      }
+    } else {
+      // hasDate only — scan loadInformation by the date index.
+      let q;
+      if (args.startDate && args.endDate) {
+        q = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_first_stop_date', (qq) =>
+            qq
+              .eq('workosOrgId', args.workosOrgId)
+              .gte('firstStopDate', args.startDate!)
+              .lte('firstStopDate', args.endDate!),
+          );
+      } else if (args.startDate) {
+        q = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_first_stop_date', (qq) =>
+            qq.eq('workosOrgId', args.workosOrgId).gte('firstStopDate', args.startDate!),
+          );
+      } else {
+        q = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_first_stop_date', (qq) =>
+            qq.eq('workosOrgId', args.workosOrgId).lte('firstStopDate', args.endDate!),
+          );
+      }
+      const rows = await q.take(READ_BUDGET);
+      if (rows.length === READ_BUDGET) {
+        console.warn(
+          `[countLoadsByStatusFiltered] date scan hit read cap (${READ_BUDGET}); ` +
+            `status counts may be truncated. org=${args.workosOrgId}`,
+        );
+      }
+      for (const load of rows) {
+        const key =
+          load.status === 'Completed'
+            ? 'Delivered'
+            : (load.status as 'Open' | 'Assigned' | 'Canceled' | 'Expired');
+        if (key && key in counts) {
+          counts[key as keyof typeof counts]++;
+        }
+      }
+      return counts;
+    }
+
+    // Tally facet-matched loads by status.
+    const loads = await Promise.all(loadIds.map((id) => ctx.db.get(id)));
+    for (const load of loads) {
+      if (!load) continue;
+      const key =
+        load.status === 'Completed'
+          ? 'Delivered'
+          : (load.status as 'Open' | 'Assigned' | 'Canceled' | 'Expired');
+      if (key && key in counts) {
+        counts[key as keyof typeof counts]++;
+      }
+    }
+    return counts;
   },
 });
 
@@ -1075,10 +1293,16 @@ export const getByIdWithRange = query({
     const firstPickup = sortedStops.find((s) => s.stopType === 'PICKUP');
     const lastDelivery = sortedStops.filter((s) => s.stopType === 'DELIVERY').pop();
 
+    // HCR / TRIP from facet tags (the columns were dropped in Phase 5b, so
+    // we always have to read these through the facet helper).
+    const facets = await getLoadFacets(ctx, load._id);
+
     return {
       ...load,
       startTime,
       endTime,
+      parsedHcr: facets.hcr,
+      parsedTripNumber: facets.trip,
       origin: firstPickup
         ? {
             city: firstPickup.city,
@@ -2104,6 +2328,173 @@ export const getByDriver = query({
 });
 
 /**
+ * Get the N most recent loads for a driver, regardless of status.
+ *
+ * Used by Driver Detail's Overview "Recent trips" card so it stays
+ * independent of the Loads tab's status filter. Same multi-source
+ * dedup as `getByDriver`, but no status constraints — just sort by
+ * createdAt desc and slice.
+ */
+export const getRecentByDriver = query({
+  args: {
+    driverId: v.id('drivers'),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
+
+    const limit = args.limit ?? 4;
+    const seenLoadIds = new Set<string>();
+    const enrichedLoads: Array<Record<string, any>> = [];
+
+    const allLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
+      .order('desc')
+      .collect();
+
+    for (const leg of allLegs) {
+      if (seenLoadIds.has(leg.loadId)) continue;
+      seenLoadIds.add(leg.loadId);
+      if (leg.driverId !== args.driverId) continue;
+      const enriched = await enrichLoadFromLeg(ctx, leg);
+      if (enriched) enrichedLoads.push(enriched);
+    }
+
+    const loadStatuses = ['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const;
+    for (const status of loadStatuses) {
+      const fallbackLoads = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_primary_driver_status', (q) => q.eq('primaryDriverId', args.driverId).eq('status', status))
+        .collect();
+      for (const load of fallbackLoads) {
+        if (seenLoadIds.has(load._id)) continue;
+        seenLoadIds.add(load._id);
+        const enrichedFallback = await enrichLoadDirectly(ctx, load);
+        if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+      }
+    }
+
+    const assignmentStatuses = ['OFFERED', 'ACCEPTED', 'AWARDED', 'DECLINED', 'WITHDRAWN', 'IN_PROGRESS', 'COMPLETED', 'CANCELED'] as const;
+    for (const aStatus of assignmentStatuses) {
+      const assignments = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_assigned_driver', (q) => q.eq('assignedDriverId', args.driverId).eq('status', aStatus))
+        .collect();
+      for (const assignment of assignments) {
+        if (seenLoadIds.has(assignment.loadId)) continue;
+        seenLoadIds.add(assignment.loadId);
+        const load = await ctx.db.get(assignment.loadId);
+        if (!load) continue;
+        const enrichedFallback = await enrichLoadDirectly(ctx, load);
+        if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+      }
+    }
+
+    enrichedLoads.sort((a, b) => b.createdAt - a.createdAt);
+    return enrichedLoads.slice(0, limit);
+  },
+});
+
+/**
+ * Suggested drivers for a load awaiting assignment.
+ *
+ * Score-rank active in-org drivers, with a busy check via the
+ * `dispatchLegs.by_driver(driverId, status)` index so only drivers
+ * with no PENDING/ACTIVE leg are returned. Trimmed to the K-best
+ * candidates BEFORE the busy check so the index walk stays bounded
+ * (default 12 candidates → at most 24 indexed lookups).
+ *
+ * Scoring (lightweight, no I/O):
+ *   • +10 driver.state === origin.state
+ *   • +5  Class A license (typical for tractor-trailer)
+ *   • alpha tiebreak by firstName
+ */
+export const getSuggestedDriversForLoad = query({
+  args: {
+    loadId: v.id('loadInformation'),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+    const limit = args.limit ?? 5;
+
+    // Origin stop drives the proximity boost.
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    const originStop = stops.find((s) => s.stopType === 'PICKUP');
+    const originState = originStop?.state?.toUpperCase();
+
+    // Pull org drivers and pre-filter cheaply.
+    const orgDrivers = await ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
+      .collect();
+
+    type Candidate = (typeof orgDrivers)[number] & { score: number };
+    const candidates: Candidate[] = orgDrivers
+      .filter(
+        (d) =>
+          d.employmentStatus === 'Active' &&
+          !d.isDeleted &&
+          d._id !== load.primaryDriverId,
+      )
+      .map((d) => {
+        let score = 0;
+        if (originState && d.state && d.state.toUpperCase() === originState) score += 10;
+        if (d.licenseClass === 'A') score += 5;
+        return { ...d, score };
+      })
+      .sort((a, b) => b.score - a.score || a.firstName.localeCompare(b.firstName))
+      .slice(0, Math.max(limit * 3, 12)); // Take 3× limit (or 12) as the busy-check pool.
+
+    // Busy check — at most 2 indexed lookups per candidate (PENDING + ACTIVE).
+    const busyChecks = await Promise.all(
+      candidates.map(async (d) => {
+        const pending = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_driver', (q) => q.eq('driverId', d._id).eq('status', 'PENDING'))
+          .first();
+        if (pending) return true;
+        const active = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_driver', (q) => q.eq('driverId', d._id).eq('status', 'ACTIVE'))
+          .first();
+        return !!active;
+      }),
+    );
+
+    const eligible = candidates
+      .filter((_, i) => !busyChecks[i])
+      .slice(0, limit)
+      .map((d) => {
+        const reasons: string[] = [];
+        if (originState && d.state && d.state.toUpperCase() === originState) reasons.push('In origin state');
+        if (d.licenseClass === 'A') reasons.push('CDL-A');
+        return {
+          _id: d._id,
+          firstName: d.firstName,
+          middleName: d.middleName,
+          lastName: d.lastName,
+          licenseClass: d.licenseClass,
+          state: d.state,
+          city: d.city,
+          score: d.score,
+          reasons,
+        };
+      });
+
+    return eligible;
+  },
+});
+
+/**
  * Get loads assigned to a specific carrier partnership.
  * Primary source: dispatchLegs with carrierPartnershipId.
  * Fallback: loadCarrierAssignments for loads where the dispatch leg
@@ -2269,12 +2660,25 @@ export const autoExpireStaleLoads = internalMutation({
     const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
     const BATCH_SIZE = 200;
-    const STALE_IN_TRANSIT_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+    const STALE_PENDING_THRESHOLD_MS = 6 * 60 * 60 * 1000; // 6 hours
+    const STALE_IN_TRANSIT_THRESHOLD_MS = 12 * 60 * 60 * 1000; // 12 hours
     const phase = args.phase ?? 'pending';
 
     // Dispatch phase: fan out to all orgs
     if (!args.orgId) {
-      const orgs = await ctx.db.query('organizations').take(500);
+      // 1000 is 2× the previous (500) cap, comfortably under Convex's
+      // per-mutation scheduled-job and document-write ceilings. If we
+      // ever hit this cap we'll see it in the warn below and can
+      // graduate to paginate-and-reschedule.
+      const ORG_FAN_OUT_CAP = 1000;
+      const orgs = await ctx.db.query('organizations').take(ORG_FAN_OUT_CAP);
+      if (orgs.length >= ORG_FAN_OUT_CAP) {
+        console.warn(
+          `[autoExpireStaleLoads] ORG_FAN_OUT_CAP hit (${ORG_FAN_OUT_CAP}). ` +
+            `Some orgs may not be processed this run — switch this dispatch ` +
+            `to paginate-and-reschedule.`,
+        );
+      }
       for (const org of orgs) {
         if (!org.workosOrgId) continue;
         await ctx.scheduler.runAfter(0, internal.loads.autoExpireStaleLoads, {
@@ -2286,7 +2690,20 @@ export const autoExpireStaleLoads = internalMutation({
       return null;
     }
 
-    // Phase 1: Expire Open/Assigned loads with trackingStatus 'Pending' and past firstStopDate
+    // Phase 1: Expire Open/Assigned loads with trackingStatus 'Pending' where
+    // the scheduled pickup time was at LEAST 6 hours ago.
+    //
+    // The 6-hour grace is measured FROM PICKUP TIME, not from updatedAt. An
+    // earlier version anchored it to updatedAt which produced false-positive
+    // expirations: a load created days ago always has a stale updatedAt, so
+    // the moment its pickup time arrived the cron killed it (often within
+    // minutes of pickup). Anchoring the window to pickup time means we
+    // actually give the driver 6 hours to check in.
+    //
+    // Source of truth for pickup time is loadStops where sequenceNumber=1
+    // (windowBeginDate + windowBeginTime). The denormalized load.firstStopDate
+    // is date-only and used only as a fallback when the time component is
+    // missing or unparseable.
     if (phase === 'pending') {
       const statusesToCheck = ['Open', 'Assigned'] as const;
       const statusIdx = args.statusIndex ?? 0;
@@ -2308,8 +2725,29 @@ export const autoExpireStaleLoads = internalMutation({
         .take(BATCH_SIZE * 5);
 
       for (const load of loads) {
-        if (!load.firstStopDate || load.firstStopDate >= todayStr) continue;
         if (load.trackingStatus !== 'Pending') continue;
+
+        // Look up the pickup stop to read the scheduled appointment time.
+        const firstStop = await ctx.db
+          .query('loadStops')
+          .withIndex('by_sequence', (q) => q.eq('loadId', load._id).eq('sequenceNumber', 1))
+          .first();
+        if (!firstStop) continue; // no pickup stop on record — don't expire
+
+        const pickupTs = parseStopDateTime(firstStop.windowBeginDate, firstStop.windowBeginTime);
+        if (pickupTs === null) {
+          // Time component missing / unparseable. Fall back to a date-only
+          // check: only consider the load eligible once its firstStopDate is
+          // strictly before yesterday (UTC). This ensures we give at least a
+          // full calendar day of grace when we can't read the exact time.
+          if (!load.firstStopDate) continue;
+          const yesterday = new Date(now - 24 * 60 * 60 * 1000);
+          const yesterdayStr = `${yesterday.getUTCFullYear()}-${String(yesterday.getUTCMonth() + 1).padStart(2, '0')}-${String(yesterday.getUTCDate()).padStart(2, '0')}`;
+          if (load.firstStopDate >= yesterdayStr) continue;
+        } else if (now < pickupTs + STALE_PENDING_THRESHOLD_MS) {
+          // Less than 6h past scheduled pickup — keep the load alive.
+          continue;
+        }
 
         // Route through applyLoadStatusUpdate so the Expired branch's leg
         // cascade fires. Direct ctx.db.patch here previously bypassed the
@@ -2345,7 +2783,13 @@ export const autoExpireStaleLoads = internalMutation({
       return null;
     }
 
-    // Phase 2: Expire In Transit loads with no activity for 3+ days
+    // Phase 2: Expire In Transit loads where:
+    //   - pickup time was >=12h ago (the load has had time to be active), AND
+    //   - no recorded activity in the last 12h, where "activity" is the
+    //     latest of load.updatedAt OR the most recent FourKites push
+    //     (fourKitesPushState.lastPushedRecordedAt) — GPS pings do NOT bump
+    //     load.updatedAt, they only update fourKitesPushState, so using
+    //     updatedAt alone would mis-flag actively-tracking trucks as idle.
     if (phase === 'in-transit') {
       let expired = 0;
       const cutoff = now - STALE_IN_TRANSIT_THRESHOLD_MS;
@@ -2356,7 +2800,29 @@ export const autoExpireStaleLoads = internalMutation({
         .take(BATCH_SIZE * 5);
 
       for (const load of loads) {
-        if (!load.updatedAt || load.updatedAt >= cutoff) continue;
+        // Pickup-time gate: don't expire In Transit loads until at least
+        // 12h after their scheduled pickup. Otherwise a load with a stale
+        // updatedAt and a recent pickup gets killed within minutes of going
+        // In Transit.
+        const firstStop = await ctx.db
+          .query('loadStops')
+          .withIndex('by_sequence', (q) => q.eq('loadId', load._id).eq('sequenceNumber', 1))
+          .first();
+        if (!firstStop) continue;
+        const pickupTs = parseStopDateTime(firstStop.windowBeginDate, firstStop.windowBeginTime);
+        if (pickupTs === null) continue; // can't reason about freshness
+        if (now < pickupTs + STALE_IN_TRANSIT_THRESHOLD_MS) continue;
+
+        // Activity gate: use the freshest signal available.
+        let lastActivityAt = load.updatedAt ?? 0;
+        const pushState = await ctx.db
+          .query('fourKitesPushState')
+          .withIndex('by_load', (q) => q.eq('loadId', load._id))
+          .first();
+        if (pushState?.lastPushedRecordedAt && pushState.lastPushedRecordedAt > lastActivityAt) {
+          lastActivityAt = pushState.lastPushedRecordedAt;
+        }
+        if (lastActivityAt >= cutoff) continue;
 
         // Route through applyLoadStatusUpdate so the Expired branch's leg
         // cascade fires. Same reasoning as the pending-phase loop above.

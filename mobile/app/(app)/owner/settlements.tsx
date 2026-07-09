@@ -109,6 +109,24 @@ export default function SettlementsScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
       }
     >
+      {/* Broker settlement statements — the actual pay-run statements
+          (CST-…) each broker cuts, with itemized lines. */}
+      <Pressable
+        onPress={() => router.push('/owner/statements')}
+        style={({ pressed }) => [styles.statementsLink, pressed && { opacity: 0.85 }]}
+      >
+        <View style={styles.statementsLinkIcon}>
+          <Ionicons name="document-text" size={20} color={colors.primary} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.statementsLinkTitle}>Broker statements</Text>
+          <Text style={styles.statementsLinkMeta}>
+            Pay-run statements & itemized lines
+          </Text>
+        </View>
+        <Ionicons name="chevron-forward" size={18} color={colors.foregroundMuted} />
+      </Pressable>
+
       {/* Period Selector */}
       <View style={styles.periodSelector}>
         {([7, 30, 90] as PeriodType[]).map((p) => (
@@ -240,6 +258,34 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: spacing.lg,
+  },
+  statementsLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.lg,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
+    ...shadows.sm,
+  },
+  statementsLinkIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.primary + '20',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statementsLinkTitle: {
+    fontSize: typography.base,
+    fontWeight: '600',
+    color: colors.foreground,
+  },
+  statementsLinkMeta: {
+    fontSize: typography.xs,
+    color: colors.foregroundMuted,
+    marginTop: 2,
   },
   periodSelector: {
     flexDirection: 'row',

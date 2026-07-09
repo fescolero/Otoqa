@@ -116,6 +116,21 @@ async function endSessionInternal(
     await deleteCompletedRowsForSession(ctx, session._id);
   }
 
+  // Session-based hourly pay: one payable per completed shift for drivers
+  // whose profile has a SESSION_DURATION rule. Scheduled (not inline) so
+  // shift end stays fast; idempotent; daily backstop cron catches misses.
+  await ctx.scheduler.runAfter(0, internal.sessionPay.paySession, {
+    sessionId: session._id,
+  });
+
+  // NEW PAY ENGINE (shadow): the same shift through the new engine — emits
+  // payItems per `session.*`-triggered rule, keyed by sessionId. Runs in
+  // parallel with legacy paySession during migration; not yet the source of
+  // truth. Idempotent via payItems.by_session.
+  await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForSession.calculatePayForSession, {
+    sessionId: session._id,
+  });
+
   // Clear the driver's current truck pairing on session end. This forces
   // a fresh QR scan to start the next shift — the driver might be on a
   // different unit tomorrow, and we never want to silently bind a stale
@@ -145,6 +160,29 @@ async function endSessionInternal(
       endReason: args.endReason ?? 'unknown',
       affectedLegIds,
     });
+  }
+
+  // Notify the driver's mobile app that the session is over so the
+  // foreground location tracker stops emitting pings. Without this, a
+  // server-side end (dispatch override, auto-timeout, handoff, another
+  // device closing the session) leaves the mobile app's local
+  // TrackingState.isActive=true and it keeps streaming GPS for hours.
+  //
+  // Scheduled (not awaited) so the end-shift mutation returns quickly
+  // even if FCM is slow. The push is best-effort — the strict ping
+  // rejection in driverLocations.ts::ingestBatch is the actual data
+  // correctness guarantee.
+  //
+  // Skip when the driver themselves ended the shift via the mobile UI
+  // (`driver_manual` / `role_switch`) — in those cases mobile already
+  // called stopSessionTracking() locally before invoking the mutation,
+  // so the push would be redundant and just churn FCM quota.
+  if (!INTENTIONAL_DRIVER_END_REASONS.includes(args.endReason)) {
+    await ctx.scheduler.runAfter(
+      0,
+      internal.fcmWake.sendSessionEnded,
+      { sessionId: session._id },
+    );
   }
 }
 
@@ -753,9 +791,22 @@ export const endSessionAutoTimeout = internalMutation({
  */
 const SESSION_AUTO_TIMEOUT_MS = 18 * 60 * 60 * 1000;
 
+// Batch ceiling for one sweep mutation. Sized small so the mutation
+// stays well under Convex's per-mutation read+schedule budgets even in
+// pile-up scenarios (FCM outage → many sessions go stale together).
+const SWEEP_BATCH_SIZE = 200;
+
+// Delay before rescheduling the next sweep batch. CANNOT be 0: the
+// scheduled endSessionAutoTimeout actions need time to actually flip
+// status from 'active' to 'auto_timeout' before the next sweep picks up
+// the next page; otherwise the next sweep sees the same 200 stale
+// sessions and re-schedules them. 60s is generous — the end-action
+// itself takes ~100ms.
+const SWEEP_RESCHEDULE_DELAY_MS = 60_000;
+
 export const sweepStaleSessionsForAutoTimeout = internalMutation({
   args: {},
-  returns: v.object({ scheduled: v.number() }),
+  returns: v.object({ scheduled: v.number(), batchCapHit: v.boolean() }),
   handler: async (ctx) => {
     const cutoff = Date.now() - SESSION_AUTO_TIMEOUT_MS;
     const stale = await ctx.db
@@ -763,7 +814,7 @@ export const sweepStaleSessionsForAutoTimeout = internalMutation({
       .withIndex('by_status_started', (q) =>
         q.eq('status', 'active').lt('startedAt', cutoff)
       )
-      .collect();
+      .take(SWEEP_BATCH_SIZE);
 
     for (const session of stale) {
       await ctx.scheduler.runAfter(0, internal.driverSessions.endSessionAutoTimeout, {
@@ -771,12 +822,27 @@ export const sweepStaleSessionsForAutoTimeout = internalMutation({
       });
     }
 
+    const batchCapHit = stale.length >= SWEEP_BATCH_SIZE;
+
     if (stale.length > 0) {
       console.log(
-        `[driverSessions.sweepStaleSessions] Scheduled ${stale.length} auto-timeout endings`
+        `[driverSessions.sweepStaleSessions] Scheduled ${stale.length} auto-timeout endings` +
+          (batchCapHit ? ' (batch cap hit — rescheduling for next page)' : ''),
       );
     }
-    return { scheduled: stale.length };
+
+    // If we hit the cap there are likely more stale sessions waiting.
+    // Wait 60s so the scheduled end-actions can flip status before
+    // running the next page — otherwise we'd see the same 200 again.
+    if (batchCapHit) {
+      await ctx.scheduler.runAfter(
+        SWEEP_RESCHEDULE_DELAY_MS,
+        internal.driverSessions.sweepStaleSessionsForAutoTimeout,
+        {},
+      );
+    }
+
+    return { scheduled: stale.length, batchCapHit };
   },
 });
 

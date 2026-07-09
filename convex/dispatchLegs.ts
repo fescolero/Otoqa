@@ -21,6 +21,7 @@ import {
 import type { OverlapInfo } from './_helpers/timeUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { transferFrontierToDriver } from './loadTrackingState';
+import { getLoadFacets } from './lib/loadFacets';
 
 /**
  * Dispatch Legs - The atomic unit of work
@@ -1436,6 +1437,85 @@ export const getDriverSchedule = query({
       if (!b.startTime) return -1;
       return a.startTime - b.startTime;
     });
+  },
+});
+
+// Powers the /dispatch/schedule Gantt page. One round-trip returns every
+// leg in an org whose time range intersects [startMs, endMs], enriched
+// with the order number and start/end stop city we need to render each
+// bar. The caller groups the result by driverId / carrierPartnershipId.
+export const getOrgSchedule = query({
+  args: {
+    workosOrgId: v.string(),
+    startMs: v.number(),
+    endMs: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+
+    const enriched = await Promise.all(
+      legs.map(async (leg) => {
+        // Skip canceled — they shouldn't render on a forward-looking schedule.
+        if (leg.status === 'CANCELED') return null;
+
+        // Prefer the denormalized window; fall back to live stop reads for
+        // legs that haven't been backfilled yet.
+        let start = leg.scheduledStartMs ?? null;
+        let end = leg.scheduledEndMs ?? null;
+        if (start === null || end === null) {
+          const range = await getLegTimeRange(ctx, leg);
+          if (!range) return null;
+          start = range.start;
+          end = range.end;
+        }
+
+        // Overlap test against the requested window.
+        if (end < args.startMs || start > args.endMs) return null;
+
+        const [load, startStop, endStop, facets] = await Promise.all([
+          ctx.db.get(leg.loadId),
+          ctx.db.get(leg.startStopId),
+          ctx.db.get(leg.endStopId),
+          getLoadFacets(ctx, leg.loadId),
+        ]);
+
+        return {
+          _id: leg._id,
+          driverId: leg.driverId ?? null,
+          carrierPartnershipId: leg.carrierPartnershipId ?? null,
+          status: leg.status,
+          startMs: start,
+          endMs: end,
+          startedAt: leg.startedAt ?? null,
+          endedAt: leg.endedAt ?? null,
+          load: load
+            ? {
+                _id: load._id,
+                orderNumber: load.orderNumber,
+                internalId: load.internalId,
+                status: load.status,
+              }
+            : null,
+          hcr: facets.hcr ?? null,
+          tripNumber: facets.trip ?? null,
+          startCity: startStop?.city ?? null,
+          startState: startStop?.state ?? null,
+          startCheckedInAt: startStop?.checkedInAt ?? null,
+          startCheckedOutAt: startStop?.checkedOutAt ?? null,
+          endCity: endStop?.city ?? null,
+          endState: endStop?.state ?? null,
+          endCheckedInAt: endStop?.checkedInAt ?? null,
+          endCheckedOutAt: endStop?.checkedOutAt ?? null,
+        };
+      })
+    );
+
+    return enriched.filter((x): x is NonNullable<typeof x> => x !== null);
   },
 });
 

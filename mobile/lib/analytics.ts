@@ -704,6 +704,46 @@ export function trackFcmWakeResumeSuccess(context: {
 }
 
 // ============================================
+// SESSION-ENDED PUSH EVENTS
+// Companion to the fcm_wake_* family. Fired by mobile/lib/fcm-handler.ts
+// when the server tells us a driver session has been closed remotely.
+// ============================================
+
+export function trackFcmSessionEndedReceived(context: {
+  sessionId: string;
+  endReason: string;
+  deliveryPath: 'foreground' | 'background';
+}) {
+  capture('fcm_session_ended_received', context);
+}
+
+/**
+ * Fired after the local foreground location service has been torn
+ * down in response to a session_ended push. `wasActive` distinguishes
+ * the productive case (mobile was still tracking → we stopped it
+ * before more wasted pings landed) from the idempotent case (mobile
+ * already stopped → push was redundant but harmless).
+ */
+export function trackFcmSessionEndedStopped(context: {
+  sessionId: string;
+  wasActive: boolean;
+  drainedQueueSize: number;
+}) {
+  capture('fcm_session_ended_stopped', context);
+}
+
+export function trackFcmSessionEndedIgnored(context: {
+  reason:
+    | 'invalid_payload'
+    | 'flag_disabled'
+    | 'stop_error'
+    | 'session_mismatch';
+  detail?: string;
+}) {
+  capture('fcm_session_ended_ignored', context);
+}
+
+// ============================================
 // PHASE 1D — ACTIVITY RECOGNITION EVENTS
 // ============================================
 

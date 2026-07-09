@@ -1,503 +1,695 @@
 'use client';
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+/**
+ * TrailerDetailPage — full-page record landing built on `DetailsFullPage`.
+ *
+ * Mirrors the design's `buildTrailerDetails` section vocabulary:
+ *   Overview · Inspections · Loads carried · Maintenance · Activity
+ *
+ * Inspections / Loads carried / Maintenance tabs render the design's
+ * mini-tables with MOCK rows — clearly flagged in the UI — until the
+ * corresponding backend tables exist. Overview cards support inline edits
+ * via `DSPropsEditable` wired to `api.trailers.update`.
+ *
+ * Toolbar: Back / prev-next / Deactivate. Edit button removed — every field
+ * is editable inline.
+ */
+
+import * as React from 'react';
+import { useRouter, useParams } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
+import { Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
+
 import { api } from '@/convex/_generated/api';
-import { useRouter } from 'next/navigation';
-import { AlertCircle, Download, Pencil, Truck, Trash2 } from 'lucide-react';
-import { Id } from '@/convex/_generated/dataModel';
-import { use } from 'react';
+import type { Id } from '@/convex/_generated/dataModel';
+import { useOrganizationId } from '@/contexts/organization-context';
 
-export default function TrailerDetailsPage({ params }: { params: Promise<{ id: string }> }) {
-  const { user } = useAuth();
+import {
+  AttentionBand,
+  type AttentionItem,
+  Avatar,
+  Chip,
+  type ChipStatus,
+  DSActivity,
+  DSCard,
+  DSMiniTable,
+  type DSMiniColumn,
+  DSPropsEditable,
+  type DSPropsEditableItem,
+  DetailsFullPage,
+  type FPSection,
+  QRPlacardCard,
+  StatusChipPopover,
+  type StatusChipOption,
+  WBtn,
+  WIcon,
+} from '@/components/web';
+
+// ─── helpers ─────────────────────────────────────────────────────────────
+
+function getDocStatus(date?: string): 'expired' | 'expiring' | 'valid' | 'na' {
+  if (!date) return 'na';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return 'na';
+  const target = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getTime();
+  const now = Date.now();
+  const day = 86_400_000;
+  if (target < now) return 'expired';
+  if (target - now < 30 * day) return 'expiring';
+  return 'valid';
+}
+
+function chipForDoc(date?: string): ChipStatus {
+  const s = getDocStatus(date);
+  return s === 'expired' ? 'expired' : s === 'expiring' ? 'expiring' : s === 'na' ? 'na' : 'valid';
+}
+
+function fmtDate(date?: string): string {
+  if (!date) return '—';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return date;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+function fmtMoney(cents?: number): string {
+  if (cents == null) return '—';
+  return `$${cents.toLocaleString()}`;
+}
+
+const STATUS_TO_CHIP: Record<string, ChipStatus> = {
+  Active: 'active',
+  'Out of Service': 'inactive',
+  'In Repair': 'pending',
+  Maintenance: 'pending',
+  Sold: 'cancelled',
+  Lost: 'expired',
+};
+
+// Options shown in the header status chip — schema-matched labels.
+const STATUS_CHIP_OPTIONS: StatusChipOption[] = [
+  { value: 'Active',         label: 'Active',         chip: 'active' },
+  { value: 'In Repair',      label: 'In Repair',      chip: 'pending' },
+  { value: 'Maintenance',    label: 'Maintenance',    chip: 'pending' },
+  { value: 'Out of Service', label: 'Out of Service', chip: 'inactive' },
+  { value: 'Sold',           label: 'Sold',           chip: 'cancelled' },
+  { value: 'Lost',           label: 'Lost',           chip: 'expired' },
+];
+
+// Year picker — current year + 1 down 35 years.
+const YEAR_OPTIONS = (() => {
+  const now = new Date().getFullYear();
+  const opts: Array<{ value: string; label: string }> = [{ value: '', label: '—' }];
+  for (let y = now + 1; y >= now - 35; y--) opts.push({ value: String(y), label: String(y) });
+  return opts;
+})();
+
+// Common trailer makes.
+const TRAILER_MAKE_OPTIONS = [
+  { value: '', label: '—' },
+  { value: 'Wabash',           label: 'Wabash' },
+  { value: 'Great Dane',       label: 'Great Dane' },
+  { value: 'Utility',          label: 'Utility' },
+  { value: 'Hyundai Translead',label: 'Hyundai Translead' },
+  { value: 'Stoughton',        label: 'Stoughton' },
+  { value: 'Vanguard',         label: 'Vanguard' },
+  { value: 'Strick',           label: 'Strick' },
+  { value: 'Manac',            label: 'Manac' },
+  { value: 'Fontaine',         label: 'Fontaine' },
+  { value: 'Other',            label: 'Other' },
+];
+
+const BODY_TYPE_OPTIONS = [
+  { value: '', label: '—' },
+  { value: 'Dry Van', label: 'Dry Van' },
+  { value: 'Refrigerated', label: 'Refrigerated' },
+  { value: 'Flatbed', label: 'Flatbed' },
+  { value: 'Tanker', label: 'Tanker' },
+  { value: 'Step Deck', label: 'Step Deck' },
+  { value: 'Lowboy', label: 'Lowboy' },
+];
+
+const OWNERSHIP_OPTIONS = [
+  { value: '', label: '—' },
+  { value: 'Owned', label: 'Owned' },
+  { value: 'Leased', label: 'Leased' },
+  { value: 'Financed', label: 'Financed' },
+  { value: 'Renting', label: 'Renting' },
+];
+
+export default function TrailerDetailPage() {
   const router = useRouter();
-  const { id } = use(params);
-  const trailer = useQuery(api.trailers.get, { id: id as Id<'trailers'> });
-  const deactivateTrailer = useMutation(api.trailers.deactivate);
+  const params = useParams();
+  const { user } = useAuth();
+  const organizationId = useOrganizationId();
+  const trailerId = params.id as Id<'trailers'>;
 
-  const getUserInitials = (name?: string, email?: string) => {
-    if (name) {
-      const names = name.split(' ');
-      if (names.length >= 2) {
-        return `${names[0][0]}${names[1][0]}`.toUpperCase();
-      }
-      return name.slice(0, 2).toUpperCase();
-    }
-    if (email) {
-      return email.slice(0, 2).toUpperCase();
-    }
-    return 'U';
-  };
+  const trailer = useQuery(api.trailers.get, { id: trailerId });
+  const allTrailers = useQuery(
+    api.trailers.list,
+    organizationId ? { organizationId, includeDeleted: true } : 'skip',
+  );
 
-  const userData = user
-    ? {
-        name: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.email,
-        email: user.email,
-        avatar: user.profilePictureUrl || '',
-        initials: getUserInitials(
-          user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : undefined,
-          user.email,
-        ),
-      }
-    : {
-        name: 'Guest',
-        email: 'guest@example.com',
-        avatar: '',
-        initials: 'GU',
-      };
+  const updateTrailer = useMutation(api.trailers.update);
+  const deactivate = useMutation(api.trailers.deactivate);
 
-  const getDaysAgo = (date: string | undefined): number => {
-    if (!date) return -1;
-    const now = new Date();
-    const targetDate = new Date(date);
-    const diffMs = now.getTime() - targetDate.getTime();
-    return Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  };
-
-  const getExpirationStatus = (expiration: string | undefined) => {
-    if (!expiration) return { text: 'Not Set', variant: 'secondary' as const, days: null };
-
-    const m = expiration.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    const expirationDate = m
-      ? new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]))
-      : new Date(expiration);
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    const daysUntilExpiration = Math.ceil((expirationDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-
-    if (daysUntilExpiration < 0) {
-      return { text: 'Expired', variant: 'destructive' as const, days: Math.abs(daysUntilExpiration) };
-    } else if (daysUntilExpiration <= 30) {
-      return { text: 'Expiring Soon', variant: 'warning' as const, days: daysUntilExpiration };
-    } else {
-      return { text: 'Valid', variant: 'success' as const, days: daysUntilExpiration };
-    }
-  };
-
-  const getComplianceStatus = (
-    registrationExpiration: string | undefined,
-    insuranceExpiration: string | undefined,
-  ) => {
-    const regStatus = getExpirationStatus(registrationExpiration);
-    const insStatus = getExpirationStatus(insuranceExpiration);
-
-    if (regStatus.variant === 'destructive' || insStatus.variant === 'destructive') {
-      return { text: 'Non-Compliant', variant: 'destructive' as const };
-    }
-    if (regStatus.variant === 'warning' || insStatus.variant === 'warning') {
-      return { text: 'Expiring Soon', variant: 'warning' as const };
-    }
-    return { text: 'Compliant', variant: 'success' as const };
-  };
-
-  const handleDeactivate = async () => {
-    if (!user || !trailer) return;
-
-    const confirmed = confirm(`Are you sure you want to deactivate trailer ${trailer.unitId}?`);
-    if (!confirmed) return;
-
-    const userName = user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.email;
-
-    try {
-      await deactivateTrailer({
-        id: trailer._id,
-        userId: user.id,
-        userName,
-      });
-      router.push('/fleet/trailers');
-    } catch (error) {
-      console.error('Failed to deactivate trailer:', error);
-      alert('Failed to deactivate trailer. Please try again.');
-    }
-  };
+  const [activeSection, setActiveSection] = React.useState('overview');
 
   if (trailer === undefined) {
     return (
-      <>
-          <div className="flex items-center justify-center h-screen">
-            <p className="text-muted-foreground">Loading trailer...</p>
-          </div>
-        </>
+      <div className="flex-1 flex items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-[var(--text-tertiary)]" />
+      </div>
     );
   }
-
   if (trailer === null) {
     return (
-      <>
-          <div className="flex items-center justify-center h-screen">
-            <p className="text-muted-foreground">Trailer not found</p>
-          </div>
-        </>
+      <div className="flex-1 flex items-center justify-center text-[12.5px] text-[var(--text-tertiary)]">
+        Trailer not found.
+      </div>
     );
   }
 
-  const registrationStatus = getExpirationStatus(trailer.registrationExpiration);
-  const insuranceStatus = getExpirationStatus(trailer.insuranceExpiration);
-  const complianceStatus = getComplianceStatus(trailer.registrationExpiration, trailer.insuranceExpiration);
+  // Prev / next nav (skip deleted)
+  const list = (allTrailers ?? []).filter((t) => !t.isDeleted);
+  const idx = list.findIndex((t) => t._id === trailerId);
+  const prev = idx > 0 ? list[idx - 1] : null;
+  const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
+
+  const userName =
+    user?.firstName && user?.lastName ? `${user.firstName} ${user.lastName}` : user?.email ?? '';
+
+  const onDeactivate = async () => {
+    if (!user) return;
+    if (!window.confirm(`Deactivate trailer ${trailer.unitId}?`)) return;
+    try {
+      await deactivate({ id: trailerId, userId: user.id, userName });
+      toast.success('Trailer deactivated');
+      router.push('/fleet/trailers');
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to deactivate trailer');
+    }
+  };
+
+  // ── Inline edit commit ──
+  type UpdateArgs = Parameters<typeof updateTrailer>[0];
+  type WritableField = Exclude<keyof UpdateArgs, 'id' | 'userId' | 'userName' | 'organizationId'>;
+
+  const NUMBER_FIELDS = new Set<WritableField>(['year', 'gvwr', 'purchasePrice']);
+  const DATE_FIELDS = new Set<WritableField>([
+    'registrationExpiration',
+    'insuranceExpiration',
+    'purchaseDate',
+  ]);
+
+  const commitField = async (key: string, next: string | string[]) => {
+    if (!user) return;
+    if (Array.isArray(next)) return;
+    const field = key as WritableField;
+    const trimmed = next.trim();
+    const payload: Record<string, unknown> = {};
+    if (NUMBER_FIELDS.has(field)) {
+      if (trimmed === '') payload[field] = undefined;
+      else {
+        const n = Number(trimmed);
+        if (Number.isNaN(n)) {
+          toast.error(`${field} must be a number`);
+          return;
+        }
+        payload[field] = n;
+      }
+    } else if (DATE_FIELDS.has(field)) {
+      payload[field] = trimmed === '' ? undefined : trimmed;
+    } else {
+      payload[field] = trimmed === '' ? undefined : trimmed;
+    }
+    try {
+      await updateTrailer({ id: trailerId, userId: user.id, userName, ...payload });
+    } catch (e) {
+      console.error(e);
+      toast.error(`Failed to update ${field}`);
+    }
+  };
+
+  // ── Hero pieces ──
+  const headline = [trailer.size, trailer.bodyType].filter(Boolean).join(' ');
+  const ym = [trailer.year, trailer.make].filter(Boolean).join(' ');
+  const titleNode = (
+    <span className="inline-flex items-center gap-3">
+      <span className="num">{trailer.unitId}</span>
+      {headline && (
+        <span className="text-[var(--text-tertiary)] font-normal">· {headline}</span>
+      )}
+      {trailer.isDeleted ? (
+        <Chip status="cancelled" label="Deleted" />
+      ) : (
+        <StatusChipPopover
+          current={trailer.status}
+          options={STATUS_CHIP_OPTIONS}
+          onChange={(next) => commitField('status', next)}
+        />
+      )}
+    </span>
+  );
+
+  const subtitle = (
+    <span className="flex items-center flex-wrap gap-x-4 gap-y-1 text-[13px] text-[var(--text-secondary)]">
+      <span className="inline-flex items-center gap-1.5 num">
+        <WIcon name="shield" size={13} /> VIN {trailer.vin}
+      </span>
+      {trailer.plate && (
+        <span className="inline-flex items-center gap-1.5 num">
+          <WIcon name="id-card" size={13} /> Plate {trailer.plate}
+        </span>
+      )}
+      {ym && (
+        <span className="inline-flex items-center gap-1.5">
+          <WIcon name="package" size={13} /> {ym}
+        </span>
+      )}
+      {trailer.bodyType && (
+        <span className="inline-flex items-center gap-1.5">
+          <WIcon name="box-trailer" size={13} /> {trailer.bodyType}
+        </span>
+      )}
+    </span>
+  );
+
+  // ── Compliance ──
+  const regStatus = getDocStatus(trailer.registrationExpiration);
+  const insStatus = getDocStatus(trailer.insuranceExpiration);
+  const needsAttention = regStatus !== 'valid' || insStatus !== 'valid';
+
+  const attentionItems: AttentionItem[] = [];
+  if (!needsAttention && trailer.status === 'Active') {
+    attentionItems.push({ tone: 'ok', icon: 'check', title: 'In service', detail: 'All compliance current' });
+  }
+  if (regStatus === 'expired') {
+    attentionItems.push({ tone: 'crit', icon: 'id-card', title: 'Registration expired', detail: fmtDate(trailer.registrationExpiration) });
+  } else if (regStatus === 'expiring') {
+    attentionItems.push({ tone: 'warn', icon: 'id-card', title: 'Registration expiring soon', detail: fmtDate(trailer.registrationExpiration) });
+  }
+  if (insStatus === 'expired') {
+    attentionItems.push({ tone: 'crit', icon: 'shield', title: 'Insurance expired', detail: fmtDate(trailer.insuranceExpiration) });
+  } else if (insStatus === 'expiring') {
+    attentionItems.push({ tone: 'warn', icon: 'shield', title: 'Insurance expiring soon', detail: fmtDate(trailer.insuranceExpiration) });
+  }
+
+  const bandHeadline = (
+    <span>
+      <strong className="text-foreground">Trailer {trailer.unitId}</strong>{' '}
+      {needsAttention ? (
+        <>has compliance items that need attention.</>
+      ) : trailer.status === 'Active' ? (
+        <>is <span style={{ color: '#0F8C5F', fontWeight: 500 }}>in service</span> with all compliance current.</>
+      ) : (
+        <>is currently {trailer.status.toLowerCase()}.</>
+      )}
+    </span>
+  );
+
+  // ── Editable cards ──
+  // Status lives in the hero (click the chip to change) — intentionally
+  // excluded from the Trailer card so it isn't shown twice.
+  const trailerItems: Array<DSPropsEditableItem | null> = [
+    { key: 'unitId',   label: 'Unit #', value: trailer.unitId, editor: { type: 'text' } },
+    { key: 'vin',      label: 'VIN',    value: trailer.vin,    editor: { type: 'text' } },
+    { key: 'year',     label: 'Year',
+      value: trailer.year != null ? String(trailer.year) : '',
+      editor: { type: 'select', options: YEAR_OPTIONS },
+      placeholder: 'Pick a year',
+    },
+    { key: 'make',     label: 'Make',
+      value: trailer.make ?? '',
+      editor: { type: 'select', options: TRAILER_MAKE_OPTIONS },
+      placeholder: 'Pick a make',
+    },
+    { key: 'model',    label: 'Model',  value: trailer.model ?? '', editor: { type: 'text' } },
+    { key: 'bodyType', label: 'Type',   value: trailer.bodyType ?? '', editor: { type: 'select', options: BODY_TYPE_OPTIONS } },
+    { key: 'size',     label: 'Length', value: trailer.size ?? '',     editor: { type: 'text' }, placeholder: 'e.g. 53ft' },
+    { key: 'gvwr',     label: 'GVWR (lb)', value: trailer.gvwr != null ? String(trailer.gvwr) : '', editor: { type: 'text' } },
+  ];
+
+  const regInsItems: Array<DSPropsEditableItem | null> = [
+    { key: 'plate', label: 'Plate', value: trailer.plate ?? '', editor: { type: 'text' } },
+    {
+      key: 'registrationExpiration',
+      label: 'Reg. expires',
+      value: trailer.registrationExpiration ?? '',
+      editor: { type: 'date' },
+      display: (
+        <span className="inline-flex items-center gap-2">
+          <span className="num">{fmtDate(trailer.registrationExpiration)}</span>
+          <Chip status={chipForDoc(trailer.registrationExpiration)} />
+        </span>
+      ),
+    },
+    { key: 'insuranceFirm',         label: 'Insurance carrier', value: trailer.insuranceFirm ?? '',         editor: { type: 'text' } },
+    { key: 'insurancePolicyNumber', label: 'Policy #',          value: trailer.insurancePolicyNumber ?? '', editor: { type: 'text' } },
+    {
+      key: 'insuranceExpiration',
+      label: 'Ins. expires',
+      value: trailer.insuranceExpiration ?? '',
+      editor: { type: 'date' },
+      display: (
+        <span className="inline-flex items-center gap-2">
+          <span className="num">{fmtDate(trailer.insuranceExpiration)}</span>
+          <Chip status={chipForDoc(trailer.insuranceExpiration)} />
+        </span>
+      ),
+    },
+  ];
+
+  const financialItems: Array<DSPropsEditableItem | null> = [
+    { key: 'ownershipType', label: 'Ownership',  value: trailer.ownershipType ?? '', editor: { type: 'select', options: OWNERSHIP_OPTIONS } },
+    {
+      key: 'purchaseDate',  label: 'Purchased',
+      value: trailer.purchaseDate ?? '',
+      editor: { type: 'date' },
+      display: trailer.purchaseDate ? <span className="num">{fmtDate(trailer.purchaseDate)}</span> : undefined,
+    },
+    {
+      key: 'purchasePrice', label: 'Price',
+      value: trailer.purchasePrice != null ? String(trailer.purchasePrice) : '',
+      editor: { type: 'text' },
+      display: trailer.purchasePrice ? <span className="num">{fmtMoney(trailer.purchasePrice)}</span> : undefined,
+    },
+    { key: 'lienholder', label: 'Lienholder', value: trailer.lienholder ?? '', editor: { type: 'text' } },
+  ];
+
+  // ── Sections ──
+  const overviewContent = (
+    <div className="flex flex-col gap-3.5">
+      <AttentionBand
+        headline={bandHeadline}
+        items={attentionItems}
+        onJump={(id) => setActiveSection(id)}
+      />
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+        <DSCard title="Trailer">
+          <DSPropsEditable items={trailerItems} onCommit={commitField} />
+        </DSCard>
+        <DSCard title="Registration & insurance">
+          <DSPropsEditable items={regInsItems} onCommit={commitField} />
+        </DSCard>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+        <DSCard title="Financial">
+          <DSPropsEditable items={financialItems} onCommit={commitField} />
+        </DSCard>
+        <CurrentlyMatedCard />
+      </div>
+    </div>
+  );
+
+  const inspectionsContent = (
+    <DSCard
+      title="Inspections"
+      bodyClassName="p-0"
+      action={
+        <span className="inline-flex items-center gap-2">
+          <MockDataBadge />
+          <WBtn size="sm" leading="plus">New DVIR</WBtn>
+        </span>
+      }
+    >
+      <DSMiniTable
+        columns={inspectionCols}
+        rows={MOCK_INSPECTIONS}
+        total={MOCK_INSPECTIONS.length}
+      />
+    </DSCard>
+  );
+
+  const loadsContent = (
+    <DSCard
+      title="Loads carried"
+      bodyClassName="p-0"
+      action={<MockDataBadge />}
+    >
+      <DSMiniTable
+        columns={loadsCols}
+        rows={MOCK_LOADS}
+        total={MOCK_LOADS.length}
+      />
+    </DSCard>
+  );
+
+  const maintenanceContent = (
+    <DSCard
+      title="Maintenance"
+      bodyClassName="p-0"
+      action={
+        <span className="inline-flex items-center gap-2">
+          <MockDataBadge />
+          <WBtn size="sm" leading="plus">New work order</WBtn>
+        </span>
+      }
+    >
+      <DSMiniTable
+        columns={maintenanceCols}
+        rows={MOCK_MAINTENANCE}
+        total={MOCK_MAINTENANCE.length}
+      />
+    </DSCard>
+  );
+
+  const activityContent = (
+    <DSCard title="Recent activity">
+      <DSActivity
+        items={[
+          ...(trailer.isDeleted && trailer.deletedAt
+            ? [{ icon: 'trash' as const, text: `Deactivated · ${fmtDate(new Date(trailer.deletedAt).toISOString().slice(0, 10))}`, when: '' }]
+            : []),
+          ...(trailer.updatedAt !== trailer.createdAt
+            ? [{ icon: 'edit-pen' as const, text: `Last updated · ${fmtDate(new Date(trailer.updatedAt).toISOString().slice(0, 10))}`, when: '' }]
+            : []),
+          { icon: 'package' as const, text: `Trailer created · ${fmtDate(new Date(trailer.createdAt).toISOString().slice(0, 10))}`, when: '' },
+        ]}
+      />
+    </DSCard>
+  );
+
+  const sections: FPSection[] = [
+    { id: 'overview',    label: 'Overview',     icon: 'home',      content: overviewContent },
+    { id: 'inspections', label: 'Inspections',  icon: 'list-tree', count: MOCK_INSPECTIONS.length, content: inspectionsContent },
+    { id: 'loads',       label: 'Loads carried', icon: 'truck',    count: MOCK_LOADS.length, content: loadsContent },
+    { id: 'maintenance', label: 'Maintenance',  icon: 'settings',  count: MOCK_MAINTENANCE.length, content: maintenanceContent },
+    { id: 'activity',    label: 'Activity',     icon: 'pulse',     content: activityContent },
+  ];
+
+  const rightRail = (
+    <div className="flex flex-col gap-3">
+      <DSCard title="Compliance">
+        <div className="flex flex-col gap-2.5">
+          <ComplianceRow label="Registration" date={trailer.registrationExpiration} status={chipForDoc(trailer.registrationExpiration)} />
+          <ComplianceRow label="Insurance"    date={trailer.insuranceExpiration}    status={chipForDoc(trailer.insuranceExpiration)} />
+        </div>
+      </DSCard>
+      <QRPlacardCard
+        kind="trailer"
+        unit={trailer.unitId}
+        recordId={String(trailerId)}
+        subtitle={[trailer.size, trailer.bodyType].filter(Boolean).join(' ')}
+      />
+      <DSCard title="Upcoming" action={<MockDataBadge />}>
+        <DSActivity
+          items={[
+            { icon: 'circle-dot', text: 'Annual inspection due', when: '~Aug 14' },
+            { icon: 'shield',     text: 'Registration renewal',  when: fmtDate(trailer.registrationExpiration) },
+          ]}
+        />
+      </DSCard>
+    </div>
+  );
 
   return (
-    <>
-        <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b bg-background">
-          <div className="flex items-center gap-2 px-4">
-            <SidebarTrigger className="-ml-1" />
-            <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-            <Breadcrumb>
-              <BreadcrumbList>
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="#">Fleet Management</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/fleet/trailers">Trailers</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem>
-                  <BreadcrumbPage>{trailer.unitId}</BreadcrumbPage>
-                </BreadcrumbItem>
-              </BreadcrumbList>
-            </Breadcrumb>
-          </div>
-        </header>
+    <DetailsFullPage
+      breadcrumb={
+        <span className="inline-flex items-center gap-1.5 text-[var(--text-secondary)]">
+          <button type="button" onClick={() => router.push('/fleet/trailers')} className="hover:text-foreground">
+            Trailers
+          </button>
+          <span className="text-[var(--text-tertiary)]">/</span>
+          <span className="num text-foreground font-medium truncate max-w-[280px]">{trailer.unitId}</span>
+        </span>
+      }
+      onBack={() => router.push('/fleet/trailers')}
+      prevLabel={prev ? prev.unitId : undefined}
+      onPrev={prev ? () => router.push(`/fleet/trailers/${prev._id}`) : null}
+      nextLabel={next ? next.unitId : undefined}
+      onNext={next ? () => router.push(`/fleet/trailers/${next._id}`) : null}
+      toolbarActions={
+        <>
+          {!trailer.isDeleted && (
+            <WBtn size="sm" danger onClick={onDeactivate}>
+              Deactivate
+            </WBtn>
+          )}
+        </>
+      }
+      title={titleNode}
+      subtitle={subtitle}
+      sections={sections}
+      activeId={activeSection}
+      onActiveChange={setActiveSection}
+      rightRail={rightRail}
+    />
+  );
+}
 
-        <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
-          {/* Header */}
-          <div className="flex items-start justify-between">
-            <div className="space-y-1">
-              <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-lg border bg-muted/50">
-                  <Truck className="h-6 w-6" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-3">
-                    <h1 className="text-3xl font-bold tracking-tight">{trailer.unitId}</h1>
-                    <Badge
-                      className={
-                        complianceStatus.variant === 'success'
-                          ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300'
-                          : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'
-                      }
-                    >
-                      {complianceStatus.text}
-                    </Badge>
-                  </div>
-                  <p className="text-gray-600 dark:text-gray-400">
-                    {trailer.year} {trailer.make} {trailer.model}
-                  </p>
-                </div>
-              </div>
+// ─── Mock data + columns ─────────────────────────────────────────────────
+
+interface InspectionRow {
+  id: number;
+  date: string;
+  type: string;
+  who: string;
+  defects: number;
+  status: ChipStatus;
+}
+const MOCK_INSPECTIONS: InspectionRow[] = [
+  { id: 1, date: 'Apr 24', type: 'Pre-trip',  who: 'Andres Cuellar',   defects: 0, status: 'valid' },
+  { id: 2, date: 'Apr 18', type: 'Post-trip', who: 'Andres Cuellar',   defects: 1, status: 'expiring' },
+  { id: 3, date: 'Mar 02', type: 'Annual',    who: 'WestState Diesel', defects: 1, status: 'valid' },
+  { id: 4, date: 'Feb 11', type: 'Roadside',  who: 'CHP — I-5',        defects: 0, status: 'valid' },
+  { id: 5, date: 'Jan 28', type: 'Pre-trip',  who: 'Jorge Romero',     defects: 0, status: 'valid' },
+];
+const inspectionCols: DSMiniColumn<InspectionRow>[] = [
+  { key: 'date',    label: 'Date',    width: '100px', render: (r) => <span className="num">{r.date}</span> },
+  { key: 'type',    label: 'Type',    width: '120px' },
+  { key: 'who',     label: 'By',      width: '1fr',
+    render: (r) => (
+      <span className="inline-flex items-center gap-2 min-w-0">
+        <Avatar name={r.who} size={20} />
+        <span className="truncate">{r.who}</span>
+      </span>
+    ),
+  },
+  { key: 'defects', label: 'Defects', width: '80px', align: 'right', render: (r) => <span className="num">{r.defects}</span> },
+  { key: 'status',  label: 'Status',  width: '100px', render: (r) => <Chip status={r.status} /> },
+];
+
+interface LoadRow {
+  id: number;
+  order: string;
+  route: string;
+  driver: string;
+  date: string;
+  status: ChipStatus;
+}
+const MOCK_LOADS: LoadRow[] = [
+  { id: 1, order: 'OT-2026-0418', route: 'Sacramento → Salt Lake City', driver: 'Andres Cuellar', date: 'Apr 30', status: 'active' },
+  { id: 2, order: 'OT-2026-0411', route: 'Reno → Phoenix',              driver: 'Andres Cuellar', date: 'Apr 27', status: 'valid' },
+  { id: 3, order: 'OT-2026-0408', route: 'Sacramento → Portland',       driver: 'Andres Cuellar', date: 'Apr 24', status: 'valid' },
+  { id: 4, order: 'OT-2026-0402', route: 'Bakersfield → Las Vegas',     driver: 'Sergio Barba',   date: 'Apr 20', status: 'valid' },
+  { id: 5, order: 'OT-2026-0397', route: 'Stockton → Boise',            driver: 'Andres Cuellar', date: 'Apr 16', status: 'valid' },
+];
+const loadsCols: DSMiniColumn<LoadRow>[] = [
+  { key: 'order',  label: 'Trip',   width: '1fr',   render: (r) => <span className="num text-[var(--accent)] font-medium">{r.order}</span> },
+  { key: 'route',  label: 'Route',  width: '1.6fr' },
+  { key: 'driver', label: 'Driver', width: '1fr',
+    render: (r) => (
+      <span className="inline-flex items-center gap-2 min-w-0">
+        <Avatar name={r.driver} size={20} />
+        <span className="truncate">{r.driver}</span>
+      </span>
+    ),
+  },
+  { key: 'date',   label: 'Date',   width: '100px', render: (r) => <span className="num">{r.date}</span> },
+  { key: 'status', label: 'Status', width: '100px', render: (r) => <Chip status={r.status} /> },
+];
+
+interface MaintenanceRow {
+  id: number;
+  wo: string;
+  desc: string;
+  date: string;
+  cost: string;
+}
+const MOCK_MAINTENANCE: MaintenanceRow[] = [
+  { id: 1, wo: 'WO-1188', desc: 'ABS sensor — left rear',        date: 'Mar 02', cost: '$420'   },
+  { id: 2, wo: 'WO-1162', desc: 'Reefer thermostat replacement', date: 'Feb 14', cost: '$890'   },
+  { id: 3, wo: 'WO-1141', desc: 'Tires — outer drive (4)',       date: 'Jan 18', cost: '$2,140' },
+];
+const maintenanceCols: DSMiniColumn<MaintenanceRow>[] = [
+  { key: 'wo',   label: 'WO #',        width: '100px', render: (r) => <span className="num text-[var(--accent)] font-medium">{r.wo}</span> },
+  { key: 'desc', label: 'Description', width: '1.4fr' },
+  { key: 'date', label: 'Closed',      width: '100px', render: (r) => <span className="num">{r.date}</span> },
+  { key: 'cost', label: 'Cost',        width: '100px', align: 'right', render: (r) => <span className="num">{r.cost}</span> },
+];
+
+// ─── Inline helpers ──────────────────────────────────────────────────────
+
+function MockDataBadge() {
+  return (
+    <span
+      className="inline-flex items-center gap-1 font-medium uppercase tracking-wide"
+      style={{
+        height: 18,
+        padding: '0 8px',
+        borderRadius: 9,
+        background: 'rgba(245,158,11,0.10)',
+        color: '#A66800',
+        fontSize: 10,
+        letterSpacing: 0.04,
+      }}
+      title="This data isn't wired to a backend yet — the design's section is preserved with sample rows."
+    >
+      <WIcon name="alert" size={10} /> Mock data
+    </span>
+  );
+}
+
+function CurrentlyMatedCard() {
+  return (
+    <DSCard title="Currently" action={<MockDataBadge />}>
+      <div className="grid gap-0" style={{ gridTemplateColumns: '120px 1fr' }}>
+        {[
+          { label: 'Truck',    value: <span className="num text-[var(--accent)]">T-204 · Volvo VNL 760</span> },
+          { label: 'Driver',   value: <span className="inline-flex items-center gap-2"><Avatar name="Andres Cuellar Ortega" size={20} /><span>Andres Cuellar Ortega</span></span> },
+          { label: 'Trip',     value: <span className="num text-[var(--accent)]">OT-2026-0418</span> },
+          { label: 'Location', value: 'I-80 EB · Wells, NV' },
+        ].map((it, i) => (
+          <React.Fragment key={i}>
+            <div className={`py-2.5 pr-3 text-[12.5px] text-[var(--text-tertiary)] ${i > 0 ? 'border-t border-[var(--border-hairline)]' : ''}`}>
+              {it.label}
             </div>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm">
-                <Download className="mr-2 h-4 w-4" />
-                Export
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => router.push(`/fleet/trailers/${id}/edit`)}>
-                <Pencil className="mr-2 h-4 w-4" />
-                Edit
-              </Button>
-              {!trailer.isDeleted && (
-                <Button variant="destructive" size="sm" onClick={handleDeactivate}>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Deactivate
-                </Button>
-              )}
+            <div className={`py-2.5 m-0 text-[13px] text-foreground inline-flex items-center gap-2 ${i > 0 ? 'border-t border-[var(--border-hairline)]' : ''}`}>
+              {it.value}
             </div>
-          </div>
+          </React.Fragment>
+        ))}
+      </div>
+    </DSCard>
+  );
+}
 
-          {/* 2-Column Grid */}
-          <div className="grid gap-6 lg:grid-cols-3">
-            {/* Left Column (66%) */}
-            <div className="space-y-6 lg:col-span-2">
-              {/* Vehicle Identification */}
-              <Card>
-                <CardHeader>
-                  <CardTitle>Vehicle Identification</CardTitle>
-                  <CardDescription>Basic trailer information and identifiers</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Unit ID</dt>
-                      <dd className="mt-1 text-sm font-semibold">{trailer.unitId}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">VIN</dt>
-                      <dd className="mt-1 text-sm font-mono font-semibold">{trailer.vin}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">License Plate</dt>
-                      <dd className="mt-1 text-sm font-semibold">{trailer.plate || 'N/A'}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Status</dt>
-                      <dd className="mt-1">
-                        <Badge
-                          variant={
-                            trailer.status === 'Active'
-                              ? 'success'
-                              : trailer.status === 'Out of Service'
-                                ? 'destructive'
-                                : 'secondary'
-                          }
-                        >
-                          {trailer.status}
-                        </Badge>
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Year</dt>
-                      <dd className="mt-1 text-sm">{trailer.year || 'N/A'}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Make</dt>
-                      <dd className="mt-1 text-sm">{trailer.make || 'N/A'}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Model</dt>
-                      <dd className="mt-1 text-sm">{trailer.model || 'N/A'}</dd>
-                    </div>
-                  </dl>
-                </CardContent>
-              </Card>
-
-              {/* Compliance & Insurance */}
-              <Card>
-                <CardHeader>
-                  <CardTitle>Compliance & Insurance</CardTitle>
-                  <CardDescription>Registration and insurance status</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  {/* Registration */}
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-sm font-semibold">Registration</h4>
-                    </div>
-                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <dt className="text-sm font-medium text-muted-foreground">Expiration Date</dt>
-                        <dd
-                          className={
-                            `mt-1 text-sm font-semibold ${
-                              registrationStatus.variant === 'success'
-                                ? 'text-green-600 dark:text-green-400'
-                                : registrationStatus.variant === 'warning'
-                                  ? 'text-yellow-600 dark:text-yellow-400'
-                                  : registrationStatus.variant === 'destructive'
-                                    ? 'text-red-600 dark:text-red-400'
-                                    : ''
-                            }`
-                          }
-                        >
-                          {trailer.registrationExpiration
-                            ? (() => { const m = trailer.registrationExpiration.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${parseInt(m[2])}/${parseInt(m[3])}/${m[1]}` : trailer.registrationExpiration; })()
-                            : 'Not Set'}
-                        </dd>
-                      </div>
-                      {registrationStatus.days !== null && (
-                        <div>
-                          <dt className="text-sm font-medium text-muted-foreground">
-                            {registrationStatus.variant === 'destructive' ? 'Days Expired' : 'Days Until Expiration'}
-                          </dt>
-                          <dd className="mt-1 text-sm">{registrationStatus.days}</dd>
-                        </div>
-                      )}
-                    </dl>
-                    {trailer.comments && (
-                      <div>
-                        <dt className="text-sm font-medium text-muted-foreground">Comments</dt>
-                        <dd className="mt-1 text-sm">{trailer.comments}</dd>
-                      </div>
-                    )}
-                  </div>
-
-                  <Separator />
-
-                  {/* Insurance */}
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-sm font-semibold">Insurance</h4>
-                    </div>
-                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <dt className="text-sm font-medium text-muted-foreground">Insurance Firm</dt>
-                        <dd className="mt-1 text-sm">{trailer.insuranceFirm || 'N/A'}</dd>
-                      </div>
-                      <div>
-                        <dt className="text-sm font-medium text-muted-foreground">Policy Number</dt>
-                        <dd className="mt-1 text-sm font-mono">{trailer.insurancePolicyNumber || 'N/A'}</dd>
-                      </div>
-                      <div>
-                        <dt className="text-sm font-medium text-muted-foreground">Expiration Date</dt>
-                        <dd
-                          className={
-                            `mt-1 text-sm font-semibold ${
-                              insuranceStatus.variant === 'success'
-                                ? 'text-green-600 dark:text-green-400'
-                                : insuranceStatus.variant === 'warning'
-                                  ? 'text-yellow-600 dark:text-yellow-400'
-                                  : insuranceStatus.variant === 'destructive'
-                                    ? 'text-red-600 dark:text-red-400'
-                                    : ''
-                            }`
-                          }
-                        >
-                          {trailer.insuranceExpiration
-                            ? (() => { const m = trailer.insuranceExpiration.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${parseInt(m[2])}/${parseInt(m[3])}/${m[1]}` : trailer.insuranceExpiration; })()
-                            : 'Not Set'}
-                        </dd>
-                      </div>
-                      {insuranceStatus.days !== null && (
-                        <div>
-                          <dt className="text-sm font-medium text-muted-foreground">
-                            {insuranceStatus.variant === 'destructive' ? 'Days Expired' : 'Days Until Expiration'}
-                          </dt>
-                          <dd className="mt-1 text-sm">{insuranceStatus.days}</dd>
-                        </div>
-                      )}
-                    </dl>
-                    {trailer.insuranceComments && (
-                      <div className="col-span-2">
-                        <dt className="text-sm font-medium text-muted-foreground">Insurance Comments</dt>
-                        <dd className="mt-1 text-sm">{trailer.insuranceComments}</dd>
-                      </div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Right Column (33%) */}
-            <div className="space-y-6 lg:col-span-1">
-              {/* Technical Specifications */}
-              <Card>
-                <CardHeader>
-                  <CardTitle>Specifications</CardTitle>
-                  <CardDescription>Technical details</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <dl className="space-y-4">
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Size</dt>
-                      <dd className="mt-1 text-sm font-semibold">{trailer.size || 'N/A'}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Body Type</dt>
-                      <dd className="mt-1 text-sm">{trailer.bodyType || 'N/A'}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">GVWR</dt>
-                      <dd className="mt-1 text-sm">{trailer.gvwr ? `${trailer.gvwr.toLocaleString()} lbs` : 'N/A'}</dd>
-                    </div>
-                  </dl>
-                </CardContent>
-              </Card>
-
-              {/* Asset Details */}
-              <Card>
-                <CardHeader>
-                  <CardTitle>Asset Details</CardTitle>
-                  <CardDescription>Financial and ownership information</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <dl className="space-y-4">
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Purchase Date</dt>
-                      <dd className="mt-1 text-sm">
-                        {trailer.purchaseDate ? (() => { const m = trailer.purchaseDate.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${parseInt(m[2])}/${parseInt(m[3])}/${m[1]}` : trailer.purchaseDate; })() : 'N/A'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Purchase Price</dt>
-                      <dd className="mt-1 text-sm">
-                        {trailer.purchasePrice ? `$${trailer.purchasePrice.toLocaleString()}` : 'N/A'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Ownership Type</dt>
-                      <dd className="mt-1 text-sm">{trailer.ownershipType || 'N/A'}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Lienholder</dt>
-                      <dd className="mt-1 text-sm">{trailer.lienholder || 'N/A'}</dd>
-                    </div>
-                    <Separator />
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Created</dt>
-                      <dd className="mt-1 text-sm">
-                        {new Date(trailer._creationTime).toLocaleDateString()} by {trailer.createdBy}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
-                      <dd className="mt-1 text-sm">
-                        {trailer.updatedAt ? new Date(trailer.updatedAt).toLocaleDateString() : 'Never'}
-                      </dd>
-                    </div>
-                  </dl>
-                </CardContent>
-              </Card>
-            </div>
-          </div>
-
-          {/* Full Width History Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle>History</CardTitle>
-              <CardDescription>Maintenance logs, trip history, and audit trail</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Tabs defaultValue="maintenance" className="w-full">
-                <TabsList className="grid w-full grid-cols-3">
-                  <TabsTrigger value="maintenance">Maintenance Logs</TabsTrigger>
-                  <TabsTrigger value="trips">Trip History</TabsTrigger>
-                  <TabsTrigger value="audit">Audit Log</TabsTrigger>
-                </TabsList>
-                <TabsContent value="maintenance" className="space-y-4">
-                  <div className="flex items-center justify-center py-12 text-muted-foreground">
-                    <div className="text-center space-y-2">
-                      <AlertCircle className="mx-auto h-8 w-8" />
-                      <p>No maintenance logs available</p>
-                    </div>
-                  </div>
-                </TabsContent>
-                <TabsContent value="trips" className="space-y-4">
-                  <div className="flex items-center justify-center py-12 text-muted-foreground">
-                    <div className="text-center space-y-2">
-                      <AlertCircle className="mx-auto h-8 w-8" />
-                      <p>No trip history available</p>
-                    </div>
-                  </div>
-                </TabsContent>
-                <TabsContent value="audit" className="space-y-4">
-                  <div className="flex items-center justify-center py-12 text-muted-foreground">
-                    <div className="text-center space-y-2">
-                      <AlertCircle className="mx-auto h-8 w-8" />
-                      <p>No audit logs available</p>
-                    </div>
-                  </div>
-                </TabsContent>
-              </Tabs>
-            </CardContent>
-          </Card>
-        </div>
-      </>
+function ComplianceRow({
+  label,
+  date,
+  status,
+  chip,
+}: {
+  label: string;
+  date?: string;
+  status?: ChipStatus;
+  chip?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col leading-tight min-w-0">
+        <span className="text-[12px] text-[var(--text-tertiary)]">{label}</span>
+        {date != null && (
+          <span className="num text-[12.5px] text-foreground truncate">{fmtDate(date)}</span>
+        )}
+      </div>
+      {chip ?? (status && <Chip status={status} />)}
+    </div>
   );
 }

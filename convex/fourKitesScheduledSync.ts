@@ -6,16 +6,17 @@ export const dispatch = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
 
-    // 1. Query: Get ONLY enabled FourKites integrations
-    const allIntegrations = await ctx.db
+    // 1. Query: Get ONLY enabled FourKites integrations.
+    // Filter on `provider` at the index level via by_provider_only;
+    // `isEnabled` is a nested field (syncSettings.isEnabled) that Convex
+    // indexes can't reference, so it stays in the JS filter.
+    const fourkitesIntegrations = await ctx.db
       .query("orgIntegrations")
+      .withIndex("by_provider_only", (q) => q.eq("provider", "fourkites"))
       .collect();
-    
-    // Filter for FourKites with sync enabled
-    const configs = allIntegrations.filter(
-      (config) => 
-        config.provider === "fourkites" && 
-        config.syncSettings.isEnabled === true
+
+    const configs = fourkitesIntegrations.filter(
+      (config) => config.syncSettings.isEnabled === true
     );
 
     let dispatchedCount = 0;
