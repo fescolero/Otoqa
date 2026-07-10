@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 /**
  * Carrier Profile Assignments
@@ -78,7 +79,7 @@ export const assign = mutation({
     workosOrgId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // Verify carrier partnership and profile exist
     const [partnership, profile] = await Promise.all([
       ctx.db.get(args.carrierPartnershipId),
@@ -141,6 +142,19 @@ export const assign = mutation({
       effectiveDate: args.effectiveDate,
     });
 
+    // Log the assignment
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'carrierProfileAssignment',
+      entityId: assignmentId,
+      entityName: `${partnership.carrierName} - ${profile.name}`,
+      action: 'created',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Assigned profile "${profile.name}" to carrier ${partnership.carrierName}${shouldBeDefault ? ' (default)' : ''}`,
+    });
+
     return { assignmentId, isDefault: shouldBeDefault };
   },
 });
@@ -155,7 +169,7 @@ export const update = mutation({
     effectiveDate: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
@@ -194,6 +208,23 @@ export const update = mutation({
 
     await ctx.db.patch(args.assignmentId, updates);
 
+    // Log the update
+    const changedFields = Object.keys(updates);
+    if (changedFields.length > 0) {
+      await logAudit(ctx, {
+        organizationId: assignment.workosOrgId,
+        entityType: 'carrierProfileAssignment',
+        entityId: args.assignmentId,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: 'Updated carrier profile assignment',
+        changedFields,
+        changesAfter: JSON.stringify(updates),
+      });
+    }
+
     return { success: true };
   },
 });
@@ -204,7 +235,7 @@ export const remove = mutation({
     assignmentId: v.id('carrierProfileAssignments'),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
@@ -228,6 +259,19 @@ export const remove = mutation({
       }
     }
 
+    // Log the removal
+    await logAudit(ctx, {
+      organizationId: assignment.workosOrgId,
+      entityType: 'carrierProfileAssignment',
+      entityId: args.assignmentId,
+      action: 'deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Removed profile assignment from carrier',
+      changesBefore: JSON.stringify(assignment),
+    });
+
     return { success: true };
   },
 });
@@ -238,7 +282,7 @@ export const setDefault = mutation({
     assignmentId: v.id('carrierProfileAssignments'),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) throw new Error('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
@@ -263,6 +307,18 @@ export const setDefault = mutation({
 
     // Set this one as default
     await ctx.db.patch(args.assignmentId, { isDefault: true });
+
+    // Log the default change
+    await logAudit(ctx, {
+      organizationId: assignment.workosOrgId,
+      entityType: 'carrierProfileAssignment',
+      entityId: args.assignmentId,
+      action: 'set_default',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Set profile assignment as default for carrier',
+    });
 
     return { success: true };
   },
