@@ -296,7 +296,7 @@ export const recalculate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
     if (leg.workosOrgId !== callerOrgId) throw new Error('Leg not found');
@@ -309,6 +309,17 @@ export const recalculate = mutation({
     await ctx.runMutation(internal.driverPayCalculation.calculateDriverPay, {
       legId: args.legId,
       userId,
+    });
+
+    await logAudit(ctx, {
+      organizationId: leg.workosOrgId,
+      entityType: 'loadPayable',
+      entityId: leg.loadId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Recalculated payables for load',
     });
 
     return args.legId;

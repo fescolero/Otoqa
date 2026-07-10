@@ -302,7 +302,7 @@ export const recalculate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
     if (!leg) throw new Error('Leg not found');
     if (leg.workosOrgId !== callerOrgId) throw new Error('Leg not found');
@@ -315,6 +315,17 @@ export const recalculate = mutation({
     await ctx.runMutation(internal.carrierPayCalculation.calculateCarrierPay, {
       legId: args.legId,
       userId,
+    });
+
+    await logAudit(ctx, {
+      organizationId: leg.workosOrgId,
+      entityType: 'loadCarrierPayable',
+      entityId: leg.loadId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Recalculated carrier payables for load',
     });
 
     return args.legId;
@@ -418,7 +429,7 @@ export const assignToSettlement = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) throw new Error('Settlement not found');
@@ -459,6 +470,18 @@ export const assignToSettlement = mutation({
       updatedAt: now,
     });
 
+    await logAudit(ctx, {
+      organizationId: settlement.workosOrgId,
+      entityType: 'loadCarrierPayable',
+      entityId: 'bulk',
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Assigned payable to settlement',
+      metadata: JSON.stringify({ count: args.payableIds.length, settlementId: args.settlementId }),
+    });
+
     return {
       assignedCount: args.payableIds.length,
       totalAdded,
@@ -473,7 +496,7 @@ export const removeFromSettlement = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const now = Date.now();
     let totalRemoved = 0;
     let settlementId: Id<'carrierSettlements'> | null = null;
@@ -513,6 +536,18 @@ export const removeFromSettlement = mutation({
           updatedAt: now,
         });
       }
+
+      await logAudit(ctx, {
+        organizationId: callerOrgId,
+        entityType: 'loadCarrierPayable',
+        entityId: 'bulk',
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: 'Removed payable from settlement',
+        metadata: JSON.stringify({ count: args.payableIds.length, settlementId }),
+      });
     }
 
     return {

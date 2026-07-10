@@ -21,6 +21,7 @@ import {
   reversePaymentAndInvoice,
 } from './accountingStatsHelpers';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 /**
  * Helper: Calculate invoice amounts dynamically
@@ -573,7 +574,7 @@ export const bulkUpdateStatus = mutation({
     updatedBy: v.string(), // WorkOS user ID
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = { success: 0, failed: 0, errors: [] as string[] };
     const finalized = ['BILLED', 'PENDING_PAYMENT', 'PAID'];
@@ -689,6 +690,20 @@ export const bulkUpdateStatus = mutation({
       }
     }
 
+    if (results.success > 0) {
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'invoice',
+        entityId: 'bulk',
+        action: 'bulk_updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated status to ${args.newStatus} for ${results.success} invoices`,
+        metadata: JSON.stringify({ count: results.success, status: args.newStatus }),
+      });
+    }
+
     return results;
   },
 });
@@ -705,7 +720,7 @@ export const bulkVoidInvoices = mutation({
     updatedBy: v.string(), // WorkOS user ID
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = { success: 0, failed: 0, errors: [] as string[] };
 
@@ -750,6 +765,20 @@ export const bulkVoidInvoices = mutation({
         results.failed++;
         results.errors.push(`Failed to void ${invoiceId}: ${error}`);
       }
+    }
+
+    if (results.success > 0) {
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'invoice',
+        entityId: 'bulk',
+        action: 'voided',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Voided ${results.success} invoices`,
+        metadata: JSON.stringify({ count: results.success }),
+      });
     }
 
     return results;
@@ -893,7 +922,7 @@ export const processPaymentChunk = internalMutation({
 export const confirmPaymentChunk = mutation({
   args: paymentBatchArgs,
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = {
       success: 0,
@@ -1107,6 +1136,20 @@ export const confirmPaymentChunk = mutation({
       }
     }
 
+    if (results.success > 0) {
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'invoice',
+        entityId: 'bulk',
+        action: 'bulk_updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Confirmed payment for ${results.success} invoices`,
+        metadata: JSON.stringify({ count: results.success }),
+      });
+    }
+
     return results;
   },
 });
@@ -1123,7 +1166,7 @@ export const bulkUpdateLoadType = mutation({
     updatedBy: v.string(), // WorkOS user ID
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     const results = { success: 0, failed: 0, errors: [] as string[] };
 
@@ -1157,6 +1200,20 @@ export const bulkUpdateLoadType = mutation({
         results.failed++;
         results.errors.push(`Failed to update load type for ${invoiceId}: ${error}`);
       }
+    }
+
+    if (results.success > 0) {
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'invoice',
+        entityId: 'bulk',
+        action: 'bulk_updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated load type to ${args.newLoadType} for ${results.success} invoices`,
+        metadata: JSON.stringify({ count: results.success, loadType: args.newLoadType }),
+      });
     }
 
     return results;
@@ -1289,7 +1346,7 @@ export const resetPaidToDraft = mutation({
     batchSize: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const limit = args.batchSize ?? 100;
     const now = Date.now();
 
@@ -1342,6 +1399,20 @@ export const resetPaidToDraft = mutation({
       }
 
       reset++;
+    }
+
+    if (reset > 0) {
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'invoice',
+        entityId: 'bulk',
+        action: 'bulk_updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Reset ${reset} paid invoices to draft`,
+        metadata: JSON.stringify({ count: reset }),
+      });
     }
 
     const remaining = await ctx.db
