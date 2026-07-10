@@ -390,6 +390,18 @@ export default defineSchema({
     .index('by_org', ['organizationId'])
     .index('by_phone', ['phone']),
 
+  // WorkOS org member directory, synced from WorkOS on login (see
+  // app/callback/route.ts). Used to resolve raw WorkOS user IDs to display
+  // names server-side (audit log performers, record created-by fields).
+  orgMembers: defineTable({
+    organizationId: v.string(), // WorkOS organization ID
+    workosUserId: v.string(),
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+    email: v.optional(v.string()),
+    updatedAt: v.number(),
+  }).index('by_org_user', ['organizationId', 'workosUserId']),
+
   // Notification preferences for organizations
   notificationPreferences: defineTable({
     organizationId: v.id('organizations'),

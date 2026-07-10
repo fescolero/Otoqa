@@ -1,7 +1,10 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
+import type { QueryCtx } from './_generated/server';
+import type { Doc } from './_generated/dataModel';
 import { requireCallerOrgId } from './lib/auth';
 import { queryByOrg } from './_helpers/queryByOrg';
+import { getMemberDisplayMap } from './orgMembers';
 
 /**
  * Universal audit log read API.
@@ -14,6 +17,36 @@ import { queryByOrg } from './_helpers/queryByOrg';
  * via `requireCallerOrgId` — clients cannot supply an `organizationId` arg.
  */
 
+/**
+ * Fill in `performedByName`/`performedByEmail` from the synced org member
+ * directory (`orgMembers`) for rows that only carry a raw WorkOS user ID —
+ * rows written before performer names were denormalized onto the log.
+ * Resolving here means clients get names in the same payload as the logs,
+ * with no follow-up lookup or re-render.
+ */
+async function withPerformerNames(
+  ctx: QueryCtx,
+  organizationId: string,
+  logs: Doc<'auditLog'>[],
+): Promise<Doc<'auditLog'>[]> {
+  const unresolved = logs.filter((log) => !log.performedByName).map((log) => log.performedBy);
+  if (unresolved.length === 0) return logs;
+
+  const display = await getMemberDisplayMap(ctx, organizationId, unresolved);
+  if (display.size === 0) return logs;
+
+  return logs.map((log) => {
+    if (log.performedByName) return log;
+    const info = display.get(log.performedBy);
+    if (!info) return log;
+    return {
+      ...log,
+      performedByName: info.name,
+      performedByEmail: log.performedByEmail ?? info.email,
+    };
+  });
+}
+
 // Get audit logs for a specific entity (scoped to caller's org)
 export const getEntityAuditLog = query({
   args: {
@@ -25,13 +58,15 @@ export const getEntityAuditLog = query({
     const callerOrgId = await requireCallerOrgId(ctx);
     const limit = args.limit || 50;
 
-    return await ctx.db
+    const logs = await ctx.db
       .query('auditLog')
       .withIndex('by_org_entity', (q) =>
         q.eq('organizationId', callerOrgId).eq('entityType', args.entityType).eq('entityId', args.entityId),
       )
       .order('desc')
       .take(limit);
+
+    return await withPerformerNames(ctx, callerOrgId, logs);
   },
 });
 
@@ -53,7 +88,7 @@ export const getOrganizationAuditLog = query({
         .withIndex('by_entity_type', (q) => q.eq('organizationId', callerOrgId).eq('entityType', args.entityType!))
         .order('desc')
         .take(limit);
-      return logs;
+      return await withPerformerNames(ctx, callerOrgId, logs);
     }
 
     // Filter by action if provided
@@ -63,7 +98,7 @@ export const getOrganizationAuditLog = query({
         .withIndex('by_action', (q) => q.eq('organizationId', callerOrgId).eq('action', args.action!))
         .order('desc')
         .take(limit);
-      return logs;
+      return await withPerformerNames(ctx, callerOrgId, logs);
     }
 
     // Get all logs for organization
@@ -71,7 +106,7 @@ export const getOrganizationAuditLog = query({
       .order('desc')
       .take(limit);
 
-    return logs;
+    return await withPerformerNames(ctx, callerOrgId, logs);
   },
 });
 
@@ -91,7 +126,7 @@ export const getUserAuditLog = query({
       .order('desc')
       .take(limit);
 
-    return logs;
+    return await withPerformerNames(ctx, callerOrgId, logs);
   },
 });
 
@@ -115,6 +150,6 @@ export const getRecentActivity = query({
       .order('desc')
       .take(100);
 
-    return logs;
+    return await withPerformerNames(ctx, callerOrgId, logs);
   },
 });

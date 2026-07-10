@@ -3,7 +3,7 @@
 import { api } from '@/convex/_generated/api';
 import type { AuditAction, AuditEntityType } from '@/convex/lib/audit';
 import { useAuthQuery } from '@/hooks/use-auth-query';
-import { useOrgMemberNames } from '@/hooks/use-org-member-names';
+import { useOrgMemberSync } from '@/hooks/use-org-member-sync';
 import { format } from 'date-fns';
 import { CheckCircle2, Edit, Trash2, RotateCcw, UserPlus, UserMinus, Loader2, History } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -115,16 +115,36 @@ function TimelineEntry({
  * record-level facts in `recordFallback` so the timeline is never blank
  * for entities that do carry created/updated timestamps.
  */
+const isRawUserId = (value: string | undefined): boolean => !!value?.startsWith('user_');
+
 export function EntityAuditTimeline({ entityType, entityId, limit, recordFallback }: EntityAuditTimelineProps) {
   const logs = useAuthQuery(api.auditLog.getEntityAuditLog, { entityType, entityId, limit });
-  const memberNames = useOrgMemberNames();
 
-  // Rows written before performer names were denormalized (and the
-  // recordFallback path) only carry a raw WorkOS user ID.
-  const resolvePerformer = (raw: string | undefined): string | undefined =>
-    raw ? (memberNames?.get(raw) ?? raw) : undefined;
+  // Audit rows arrive with performer names resolved server-side, but the
+  // recordFallback fields are raw WorkOS user IDs from the entity record —
+  // resolve those through the same org member directory. Only queried when
+  // the fallback will actually render (no audit rows).
+  const fallbackIds = [recordFallback?.createdBy, recordFallback?.deactivatedBy].filter(isRawUserId) as string[];
+  const needsFallbackNames = logs !== undefined && logs.length === 0 && fallbackIds.length > 0;
+  const fallbackNames = useAuthQuery(
+    api.orgMembers.resolveMemberNames,
+    needsFallbackNames ? { userIds: fallbackIds } : 'skip',
+  );
 
-  if (logs === undefined) {
+  // If the org's member directory hasn't been synced yet (session predates
+  // it), IDs come back unresolved — trigger a one-time sync; reactivity
+  // then re-delivers both queries with names filled in.
+  const hasUnresolvedIds =
+    (logs ?? []).some((log) => !log.performedByName && !log.performedByEmail) ||
+    (needsFallbackNames && fallbackNames !== undefined && fallbackIds.some((id) => !fallbackNames[id]));
+  useOrgMemberSync(hasUnresolvedIds);
+
+  const resolveFallback = (raw: string | undefined): string | undefined =>
+    raw ? (fallbackNames?.[raw] ?? raw) : undefined;
+
+  // Wait for fallback names alongside the logs so entries never render
+  // with a raw ID and then swap to a name.
+  if (logs === undefined || (needsFallbackNames && fallbackNames === undefined)) {
     return (
       <div className="flex items-center justify-center py-8 text-muted-foreground">
         <Loader2 className="h-5 w-5 animate-spin" />
@@ -141,7 +161,7 @@ export function EntityAuditTimeline({ entityType, entityId, limit, recordFallbac
               style={ACTION_STYLES.deactivated ?? DEFAULT_STYLE}
               title="Deactivated"
               timestamp={recordFallback.deactivatedAt}
-              performer={resolvePerformer(recordFallback.deactivatedBy)}
+              performer={resolveFallback(recordFallback.deactivatedBy)}
             />
           )}
           {recordFallback.updatedAt && recordFallback.updatedAt !== recordFallback.createdAt && (
@@ -155,7 +175,7 @@ export function EntityAuditTimeline({ entityType, entityId, limit, recordFallbac
             style={ACTION_STYLES.created ?? DEFAULT_STYLE}
             title="Created"
             timestamp={recordFallback.createdAt}
-            performer={resolvePerformer(recordFallback.createdBy)}
+            performer={resolveFallback(recordFallback.createdBy)}
           />
         </div>
       );
@@ -175,7 +195,7 @@ export function EntityAuditTimeline({ entityType, entityId, limit, recordFallbac
       {logs.map((log) => {
         const canonical = LEGACY_ACTION_MAP[log.action] ?? log.action;
         const style = ACTION_STYLES[canonical as AuditAction] ?? DEFAULT_STYLE;
-        const performer = log.performedByName || log.performedByEmail || resolvePerformer(log.performedBy);
+        const performer = log.performedByName || log.performedByEmail || log.performedBy;
 
         return (
           <TimelineEntry

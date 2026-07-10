@@ -134,6 +134,7 @@ import type * as migrations_backfillOrgType from "../migrations/backfillOrgType.
 import type * as migrations_initializeOrgStats from "../migrations/initializeOrgStats.js";
 import type * as migrations_unlinkFalselyLinkedCarriers from "../migrations/unlinkFalselyLinkedCarriers.js";
 import type * as mobileSettlements from "../mobileSettlements.js";
+import type * as orgMembers from "../orgMembers.js";
 import type * as payEngine_aggregateSettlement from "../payEngine/aggregateSettlement.js";
 import type * as payEngine_applyPostCalcRules from "../payEngine/applyPostCalcRules.js";
 import type * as payEngine_assembleInput from "../payEngine/assembleInput.js";
@@ -318,6 +319,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/initializeOrgStats": typeof migrations_initializeOrgStats;
   "migrations/unlinkFalselyLinkedCarriers": typeof migrations_unlinkFalselyLinkedCarriers;
   mobileSettlements: typeof mobileSettlements;
+  orgMembers: typeof orgMembers;
   "payEngine/aggregateSettlement": typeof payEngine_aggregateSettlement;
   "payEngine/applyPostCalcRules": typeof payEngine_applyPostCalcRules;
   "payEngine/assembleInput": typeof payEngine_assembleInput;
