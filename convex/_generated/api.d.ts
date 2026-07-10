@@ -18,6 +18,7 @@ import type * as accountingStats from "../accountingStats.js";
 import type * as accountingStatsHelpers from "../accountingStatsHelpers.js";
 import type * as analytics from "../analytics.js";
 import type * as auditLog from "../auditLog.js";
+import type * as auditLogMigration from "../auditLogMigration.js";
 import type * as autoAssignment from "../autoAssignment.js";
 import type * as autoAssignmentCron from "../autoAssignmentCron.js";
 import type * as carrierMobile from "../carrierMobile.js";
@@ -145,6 +146,7 @@ declare const fullApi: ApiFromModules<{
   accountingStatsHelpers: typeof accountingStatsHelpers;
   analytics: typeof analytics;
   auditLog: typeof auditLog;
+  auditLogMigration: typeof auditLogMigration;
   autoAssignment: typeof autoAssignment;
   autoAssignmentCron: typeof autoAssignmentCron;
   carrierMobile: typeof carrierMobile;

@@ -522,7 +522,17 @@ export default function TruckDetailPage({ params }: { params: Promise<{ id: stri
                   <CardDescription>Timeline of changes and updates</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <EntityAuditTimeline entityType="truck" entityId={id} />
+                  <EntityAuditTimeline
+                    entityType="truck"
+                    entityId={id}
+                    recordFallback={{
+                      createdAt: truck.createdAt,
+                      createdBy: truck.createdBy,
+                      updatedAt: truck.updatedAt,
+                      deactivatedAt: truck.isDeleted ? truck.deletedAt : undefined,
+                      deactivatedBy: truck.isDeleted ? truck.deletedBy : undefined,
+                    }}
+                  />
                 </CardContent>
               </Card>
             </TabsContent>

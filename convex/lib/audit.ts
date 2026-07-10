@@ -1,3 +1,5 @@
+import type { WithoutSystemFields } from 'convex/server';
+import type { Doc } from '../_generated/dataModel';
 import type { MutationCtx } from '../_generated/server';
 
 /**
@@ -51,24 +53,13 @@ export type AuditAction =
   | 'carrier_assigned'
   | 'resource_unassigned';
 
-export interface AuditEntry {
-  organizationId: string;
+// Derived from the schema so a new auditLog column can't silently drift out
+// of the write path; only the closed-union fields and the helper-supplied
+// timestamp are overridden.
+export type AuditEntry = Omit<WithoutSystemFields<Doc<'auditLog'>>, 'timestamp' | 'entityType' | 'action'> & {
   entityType: AuditEntityType;
-  entityId: string;
   action: AuditAction;
-  performedBy: string;
-
-  entityName?: string;
-  description?: string;
-  performedByName?: string;
-  performedByEmail?: string;
-  changesBefore?: string;
-  changesAfter?: string;
-  changedFields?: string[];
-  ipAddress?: string;
-  userAgent?: string;
-  metadata?: string;
-}
+};
 
 export async function logAudit(ctx: MutationCtx, entry: AuditEntry): Promise<void> {
   await ctx.db.insert('auditLog', {

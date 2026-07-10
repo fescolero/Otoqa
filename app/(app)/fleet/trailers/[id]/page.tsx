@@ -488,7 +488,17 @@ export default function TrailerDetailsPage({ params }: { params: Promise<{ id: s
                   </div>
                 </TabsContent>
                 <TabsContent value="audit" className="space-y-4">
-                  <EntityAuditTimeline entityType="trailer" entityId={id} />
+                  <EntityAuditTimeline
+                    entityType="trailer"
+                    entityId={id}
+                    recordFallback={{
+                      createdAt: trailer.createdAt,
+                      createdBy: trailer.createdBy,
+                      updatedAt: trailer.updatedAt,
+                      deactivatedAt: trailer.isDeleted ? trailer.deletedAt : undefined,
+                      deactivatedBy: trailer.isDeleted ? trailer.deletedBy : undefined,
+                    }}
+                  />
                 </TabsContent>
               </Tabs>
             </CardContent>
