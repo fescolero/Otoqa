@@ -26,6 +26,7 @@ import { EvidencePanel } from './evidence-panel';
 import { SettlementStatusBadge } from './settlement-status-badge';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 
 interface SettlementWorksheetSheetProps {
   settlementId: Id<'driverSettlements'> | null;
@@ -615,6 +616,16 @@ export function SettlementWorksheetSheet({
                 isUploadingExtraDocs={isUploadingExtraDocs}
                 isLocked={settlement?.settlement.status === 'PAID'}
               />
+              {settlement && (
+                <div className="border-t p-4 max-h-64 overflow-y-auto shrink-0 bg-background">
+                  <h3 className="text-sm font-semibold mb-3">Audit Trail</h3>
+                  <EntityAuditTimeline
+                    entityType="driverSettlement"
+                    entityId={settlement.settlement._id}
+                    limit={25}
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>

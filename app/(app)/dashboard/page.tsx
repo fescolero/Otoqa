@@ -8,6 +8,7 @@ import {
 } from '@/components/ui/breadcrumb';
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
+import { RecentActivityFeed } from '@/components/audit/recent-activity-feed';
 
 export default function Page() {
   return (
@@ -41,12 +42,7 @@ export default function Page() {
             <p className="text-muted-foreground">Chart 3</p>
           </div>
         </div>
-        <div className="bg-muted/50 min-h-[100vh] flex-1 rounded-xl md:min-h-min flex items-center justify-center">
-          <div className="text-center">
-            <h2 className="text-2xl font-bold mb-2">Welcome!</h2>
-            <p className="text-muted-foreground">Your dashboard is ready to be customized.</p>
-          </div>
-        </div>
+        <RecentActivityFeed hours={24} />
       </div>
     </>
   );

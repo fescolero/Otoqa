@@ -34,7 +34,14 @@ export type AuditEntityType =
   | 'organization'
   | 'driverSettlement'
   | 'invoice'
-  | 'loadCarrierAssignment';
+  | 'loadCarrierAssignment'
+  | 'customer'
+  | 'payPlan'
+  | 'contractLane'
+  | 'routeAssignment'
+  | 'recurringLoad'
+  | 'integration'
+  | 'carrierProfileAssignment';
 
 export type AuditAction =
   | 'created'
@@ -66,7 +73,8 @@ export type AuditAction =
   | 'started'
   | 'completed'
   | 'held'
-  | 'released';
+  | 'released'
+  | 'archived';
 
 // Derived from the schema so a new auditLog column can't silently drift out
 // of the write path; only the closed-union fields and the helper-supplied

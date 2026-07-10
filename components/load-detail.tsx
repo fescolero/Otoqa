@@ -64,6 +64,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 
 interface LoadDetailProps {
   loadId: string;
@@ -905,6 +906,14 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
               />
             )}
           </div>
+
+          {/* ============================================================
+              HISTORY - Audit trail of changes, assignments, and holds
+              ============================================================ */}
+          <Card className="p-4">
+            <h3 className="text-sm font-semibold mb-3">History</h3>
+            <EntityAuditTimeline entityType="load" entityId={loadId} limit={25} />
+          </Card>
         </div>
 
         {/* ----------------------------------------------------------------
