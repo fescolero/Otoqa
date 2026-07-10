@@ -19,7 +19,7 @@
  * Read side: getBillingOverview powers Settings → Billing & usage.
  */
 
-import { internalMutation, query } from './_generated/server';
+import { internalAction, internalMutation, internalQuery, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { v } from 'convex/values';
 import { getPeriodKey } from './accountingStatsHelpers';
@@ -150,6 +150,93 @@ export const recalculateAllOrgsPlatformUsage = internalMutation({
 
     console.log(`Scheduled platform usage recalculation for ${scheduled} organizations`);
     return null;
+  },
+});
+
+// ─── Diagnostics ───────────────────────────────────────────────────────────
+
+/**
+ * One page of the attribution diagnostic: tallies this batch of loads by
+ * creation month (what billing uses) and by service month (firstStopDate).
+ */
+export const diagnoseUsageAttributionPage = internalQuery({
+  args: {
+    workosOrgId: v.string(),
+    cursor: v.union(v.string(), v.null()),
+  },
+  handler: async (ctx, args) => {
+    const results = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .paginate({ numItems: BATCH_SIZE, cursor: args.cursor });
+
+    const byCreatedMonth: Record<string, number> = {};
+    const byServiceMonth: Record<string, number> = {};
+    for (const load of results.page) {
+      const createdKey = getPeriodKey(load.createdAt ?? load._creationTime);
+      byCreatedMonth[createdKey] = (byCreatedMonth[createdKey] ?? 0) + 1;
+      // firstStopDate is 'YYYY-MM-DD'; loads without one bucket as 'no-date'.
+      const serviceKey = load.firstStopDate ? load.firstStopDate.slice(0, 7) : 'no-date';
+      byServiceMonth[serviceKey] = (byServiceMonth[serviceKey] ?? 0) + 1;
+    }
+
+    return {
+      byCreatedMonth,
+      byServiceMonth,
+      continueCursor: results.continueCursor,
+      isDone: results.isDone,
+    };
+  },
+});
+
+/**
+ * Dashboard diagnostic — run with { workosOrgId } from the Convex dashboard.
+ *
+ * Answers "why does cycle X show so few/many loads?": returns each month's
+ * load count attributed two ways —
+ *   byCreatedMonth: month the record was written into Otoqa (createdAt).
+ *     THIS is what platform billing uses.
+ *   byServiceMonth: month of the load's firstStopDate (when the route ran).
+ * Bulk imports / sync backfills show up as spikes in byCreatedMonth on the
+ * import month while byServiceMonth stays smooth.
+ */
+export const diagnoseUsageAttribution = internalAction({
+  args: { workosOrgId: v.string() },
+  handler: async (ctx, args) => {
+    const byCreatedMonth: Record<string, number> = {};
+    const byServiceMonth: Record<string, number> = {};
+    let cursor: string | null = null;
+    let scanned = 0;
+
+    for (;;) {
+      const page: {
+        byCreatedMonth: Record<string, number>;
+        byServiceMonth: Record<string, number>;
+        continueCursor: string;
+        isDone: boolean;
+      } = await ctx.runQuery(internal.platformUsage.diagnoseUsageAttributionPage, {
+        workosOrgId: args.workosOrgId,
+        cursor,
+      });
+      for (const [k, n] of Object.entries(page.byCreatedMonth)) {
+        byCreatedMonth[k] = (byCreatedMonth[k] ?? 0) + n;
+        scanned += n;
+      }
+      for (const [k, n] of Object.entries(page.byServiceMonth)) {
+        byServiceMonth[k] = (byServiceMonth[k] ?? 0) + n;
+      }
+      if (page.isDone) break;
+      cursor = page.continueCursor;
+    }
+
+    const sortObj = (o: Record<string, number>) =>
+      Object.fromEntries(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
+
+    return {
+      totalLoads: scanned,
+      byCreatedMonth: sortObj(byCreatedMonth),
+      byServiceMonth: sortObj(byServiceMonth),
+    };
   },
 });
 
