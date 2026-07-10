@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
 import { queryByOrg } from './_helpers/queryByOrg';
+import { auditEntityTypeValidator, auditActionValidator } from './lib/audit';
 
 /**
  * Universal audit log read API.
@@ -17,7 +18,7 @@ import { queryByOrg } from './_helpers/queryByOrg';
 // Get audit logs for a specific entity (scoped to caller's org)
 export const getEntityAuditLog = query({
   args: {
-    entityType: v.string(),
+    entityType: auditEntityTypeValidator,
     entityId: v.string(),
     limit: v.optional(v.number()),
   },
@@ -39,8 +40,8 @@ export const getEntityAuditLog = query({
 export const getOrganizationAuditLog = query({
   args: {
     limit: v.optional(v.number()),
-    entityType: v.optional(v.string()),
-    action: v.optional(v.string()),
+    entityType: v.optional(auditEntityTypeValidator),
+    action: v.optional(auditActionValidator),
   },
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);

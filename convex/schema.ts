@@ -1,6 +1,9 @@
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { scheduleRuleValidator } from './lib/validators';
+// Closed audit vocabulary from lib/audit.ts, enforced at the document layer
+// so no write path (helper or direct insert) can introduce a new spelling.
+import { auditEntityTypeValidator, auditActionValidator } from './lib/audit';
 
 export default defineSchema({
   // Organization settings for multi-tenant configuration
@@ -407,12 +410,12 @@ export default defineSchema({
     organizationId: v.string(), // WorkOS organization ID for multi-tenant isolation
 
     // Entity Information
-    entityType: v.string(), // 'driver', 'vehicle', 'trip', 'load', 'company', 'user', etc.
+    entityType: auditEntityTypeValidator, // Closed union — see lib/audit.ts AUDIT_ENTITY_TYPES
     entityId: v.string(), // ID of the entity being acted upon
     entityName: v.optional(v.string()), // Display name for UI (e.g., "Carlos Gonzalez", "Truck #402")
 
     // Action Details
-    action: v.string(), // 'created', 'updated', 'deleted', 'deactivated', 'restored', 'assigned', 'approved', etc.
+    action: auditActionValidator, // Closed union — see lib/audit.ts AUDIT_ACTIONS
     description: v.optional(v.string()), // Human-readable description of what happened
 
     // User Information (WorkOS User)

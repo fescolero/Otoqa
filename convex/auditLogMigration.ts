@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
+import type { AuditEntityType, AuditAction } from './lib/audit';
 
 /**
  * One-time backfill: normalize legacy audit-log spellings to the canonical
@@ -16,11 +17,11 @@ import { internal } from './_generated/api';
  * Re-running is safe (already-normalized rows are left untouched).
  */
 
-const ENTITY_TYPE_MAP: Record<string, string> = {
+const ENTITY_TYPE_MAP: Record<string, AuditEntityType> = {
   LOAD: 'load',
 };
 
-const ACTION_MAP: Record<string, string> = {
+const ACTION_MAP: Record<string, AuditAction> = {
   CREATE: 'created',
   UPDATE: 'updated',
   DELETE: 'deleted',
