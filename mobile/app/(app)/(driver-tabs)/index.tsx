@@ -6,16 +6,17 @@ import {
   StyleSheet,
   RefreshControl,
   Pressable,
+  Animated,
+  Easing,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import * as Location from 'expo-location';
+import { useQuery } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
 import { useMyLoads } from '../../../lib/hooks/useMyLoads';
-import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
-import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
 import { useDriver } from '../_layout';
 import { useLanguage } from '../../../lib/LanguageContext';
-import { trackWeatherFetchFailed, trackScreen } from '../../../lib/analytics';
+import { trackScreen } from '../../../lib/analytics';
 import { Icon, type IconName } from '../../../lib/design-icons';
 import {
   typeScale,
@@ -62,27 +63,6 @@ function useDesignStyles() {
   );
   return { palette, styles, sp, comp };
 }
-
-// Weather tooling
-interface WeatherData {
-  temperature: number;
-  description: string;
-}
-
-// Map WMO weather codes to a plain description. Icons come from the design icon set.
-const weatherDescription = (code: number): string => {
-  if (code === 0 || code === 1) return 'Clear';
-  if (code === 2) return 'Partly cloudy';
-  if (code === 3) return 'Overcast';
-  if (code >= 45 && code <= 48) return 'Foggy';
-  if (code >= 51 && code <= 57) return 'Drizzle';
-  if (code >= 61 && code <= 67) return 'Rain';
-  if (code >= 71 && code <= 77) return 'Snow';
-  if (code >= 80 && code <= 82) return 'Rain showers';
-  if (code >= 85 && code <= 86) return 'Snow showers';
-  if (code >= 95) return 'Thunderstorm';
-  return '';
-};
 
 type DayTab = 'yesterday' | 'today' | 'tomorrow';
 
@@ -133,6 +113,17 @@ const greet = (): string => {
   return 'Good evening';
 };
 
+// On-duty pill — green vocabulary mirrors the More-tab ShiftCard.
+const ON_DUTY_GREEN = '#10B981';
+
+function formatElapsed(startedAtMs?: number): string {
+  if (!startedAtMs) return '0h 00m';
+  const diffMs = Date.now() - startedAtMs;
+  const hours = Math.floor(diffMs / 3_600_000);
+  const mins = Math.floor((diffMs % 3_600_000) / 60_000);
+  return `${hours}h ${mins.toString().padStart(2, '0')}m`;
+}
+
 // ============================================================================
 // SCREEN
 // ============================================================================
@@ -146,61 +137,24 @@ export default function HomeScreen() {
   // so this screen never needs to branch on session status. An active
   // load is detected from the load's own status fields below.
   const { loads, isLoading, refetch, isRefetching } = useMyLoads(driverId);
-  const { connectionQuality } = useNetworkStatus();
-  const { pendingCount } = useOfflineQueue();
   const { locale } = useLanguage();
 
   const [selectedDay, setSelectedDay] = useState<DayTab>('today');
 
-  // Weather state
-  const [weather, setWeather] = useState<WeatherData | null>(null);
-
-  const fetchWeather = useCallback(async (signal?: { cancelled: boolean }) => {
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (signal?.cancelled) return;
-      if (status !== 'granted') return;
-
-      const location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-      if (signal?.cancelled) return;
-
-      const { latitude, longitude } = location.coords;
-      const response = await fetch(
-        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`
-      );
-      if (signal?.cancelled) return;
-      if (!response.ok) throw new Error('Weather fetch failed');
-
-      const data = await response.json();
-      if (signal?.cancelled) return;
-
-      if (data.current) {
-        setWeather({
-          temperature: Math.round(data.current.temperature_2m),
-          description: weatherDescription(data.current.weather_code),
-        });
-      }
-    } catch (error) {
-      if (signal?.cancelled) return;
-      const msg = error instanceof Error ? error.message : String(error);
-      trackWeatherFetchFailed(msg);
-    }
-  }, []);
+  // Active shift — drives the always-visible "On duty" pill in the header.
+  // Tapping it routes to the More tab where the End-shift control lives.
+  const activeSession = useQuery(
+    api.driverSessions.getActiveSession,
+    driverId ? { driverId } : 'skip',
+  );
 
   useEffect(() => {
-    const signal = { cancelled: false };
     trackScreen('Home');
-    fetchWeather(signal);
-    return () => {
-      signal.cancelled = true;
-    };
-  }, [fetchWeather]);
+  }, []);
 
   const handleRefresh = useCallback(async () => {
-    await Promise.all([refetch(), fetchWeather()]);
-  }, [refetch, fetchWeather]);
+    await refetch();
+  }, [refetch]);
 
   const selectedDateStr = useMemo(() => getDateStringForDay(selectedDay), [selectedDay]);
 
@@ -270,35 +224,14 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
-      {connectionQuality === 'offline' && (
-        <ConnectionBanner
-          label={
-            locale === 'es'
-              ? 'Sin conexión — Mostrando datos en caché'
-              : 'Offline — Showing cached data'
-          }
-          pending={pendingCount}
-          pendingLabel={locale === 'es' ? 'pendientes' : 'pending'}
-          tone="danger"
-        />
-      )}
-      {connectionQuality === 'poor' && (
-        <ConnectionBanner
-          label={
-            locale === 'es'
-              ? 'Señal débil — Usando datos en caché'
-              : 'Weak signal — Using cached data'
-          }
-          pending={pendingCount}
-          pendingLabel={locale === 'es' ? 'pendientes' : 'pending'}
-          tone="warning"
-        />
-      )}
-
+      {/* Connection state (offline AND weak signal) is surfaced globally by
+          the OfflineIndicator pill — see (app)/_layout.tsx. */}
       <TopHeader
         greeting={greet()}
         driverFirstName={firstName}
-        weather={weather}
+        onDuty={!!activeSession}
+        startedAt={activeSession?.startedAt}
+        onPressShift={() => router.push('/(app)/(driver-tabs)/more')}
       />
 
       <DayTabs tab={selectedDay} setTab={setSelectedDay} />
@@ -358,15 +291,19 @@ export default function HomeScreen() {
 interface TopHeaderProps {
   greeting: string;
   driverFirstName: string;
-  weather: WeatherData | null;
+  onDuty: boolean;
+  startedAt?: number;
+  onPressShift: () => void;
 }
 
 const TopHeader: React.FC<TopHeaderProps> = ({
   greeting,
   driverFirstName,
-  weather,
+  onDuty,
+  startedAt,
+  onPressShift,
 }) => {
-  const { palette, styles } = useDesignStyles();
+  const { styles } = useDesignStyles();
   return (
     <View style={styles.header}>
       <View style={{ flex: 1, minWidth: 0 }}>
@@ -376,24 +313,62 @@ const TopHeader: React.FC<TopHeaderProps> = ({
         </Text>
       </View>
 
-      <View style={styles.headerActions}>
-        {weather && (
-          <View style={styles.headerWeatherChip}>
-            <Icon name="cloud" size={18} color={palette.textPrimary} />
-            <Text style={styles.headerWeatherTemp}>{weather.temperature}°</Text>
-          </View>
-        )}
-        <Pressable
-          accessibilityLabel="Search"
-          style={({ pressed }) => [
-            styles.headerIconBtn,
-            pressed && { opacity: 0.7 },
-          ]}
-        >
-          <Icon name="search" size={22} color={palette.textPrimary} />
-        </Pressable>
-      </View>
+      {onDuty && <OnDutyPill startedAt={startedAt} onPress={onPressShift} />}
     </View>
+  );
+};
+
+// Always-visible "On duty" status chip — a passive reminder to clock out
+// (forgetting is the #1 driver mistake). Mirrors the green-dot + pulse
+// vocabulary of the More-tab ShiftCard; tapping routes there to end the
+// shift. Elapsed re-renders each minute while this screen is mounted.
+const OnDutyPill: React.FC<{ startedAt?: number; onPress: () => void }> = ({
+  startedAt,
+  onPress,
+}) => {
+  const { palette, styles } = useDesignStyles();
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const [pulse] = useState(() => new Animated.Value(0));
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(pulse, {
+        toValue: 1,
+        duration: 2200,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+  const ringScale = pulse.interpolate({ inputRange: [0, 0.7, 1], outputRange: [0.9, 2.2, 2.2] });
+  const ringOpacity = pulse.interpolate({ inputRange: [0, 0.7, 1], outputRange: [0.8, 0, 0] });
+
+  const elapsed = formatElapsed(startedAt);
+
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`On duty, ${elapsed} elapsed. Tap to open your shift.`}
+      style={({ pressed }) => [styles.onDutyPill, pressed && { opacity: 0.7 }]}
+    >
+      <View style={styles.onDutyDotWrap}>
+        <Animated.View
+          style={[styles.onDutyDotRing, { transform: [{ scale: ringScale }], opacity: ringOpacity }]}
+        />
+        <View style={styles.onDutyDot} />
+      </View>
+      <Text style={styles.onDutyLabel}>On duty</Text>
+      <View style={styles.onDutyDivider} />
+      <Text style={styles.onDutyElapsed}>{elapsed}</Text>
+      <Icon name="chevron-right" size={14} color={palette.textTertiary} />
+    </Pressable>
   );
 };
 
@@ -813,40 +788,6 @@ const EmptyState: React.FC<{
   );
 };
 
-const ConnectionBanner: React.FC<{
-  label: string;
-  pending: number;
-  pendingLabel: string;
-  tone: 'danger' | 'warning';
-}> = ({ label, pending, pendingLabel, tone }) => {
-  const { palette, styles } = useDesignStyles();
-  return (
-  <View
-    style={[
-      styles.connBanner,
-      {
-        backgroundColor:
-          tone === 'danger'
-            ? 'rgba(239,68,68,0.16)'
-            : 'rgba(245,158,11,0.16)',
-      },
-    ]}
-  >
-    <Text
-      style={[
-        styles.connBannerText,
-        {
-          color: tone === 'danger' ? palette.danger : palette.warning,
-        },
-      ]}
-    >
-      {label}
-      {pending > 0 ? ` · ${pending} ${pendingLabel}` : ''}
-    </Text>
-  </View>
-  );
-};
-
 const LoadingSkeleton: React.FC = () => {
   const { styles, sp } = useDesignStyles();
   return (
@@ -900,44 +841,55 @@ const makeStyles = (
     color: palette.textPrimary,
     marginTop: 2,
   },
-  headerActions: {
+  onDutyPill: {
+    height: 28,
+    paddingLeft: 8,
+    paddingRight: 10,
+    borderRadius: radii.full,
+    backgroundColor: 'rgba(16,185,129,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16,185,129,0.28)',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 7,
   },
-  headerIconBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: radii.full,
+  onDutyDotWrap: {
+    width: 8,
+    height: 8,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerWeatherChip: {
-    height: 44,
-    paddingHorizontal: 10,
-    borderRadius: radii.full,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
+  onDutyDotRing: {
+    position: 'absolute',
+    width: 8,
+    height: 8,
+    borderRadius: 99,
+    borderWidth: 2,
+    borderColor: ON_DUTY_GREEN,
   },
-  headerWeatherTemp: {
-    fontSize: 13,
+  onDutyDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 99,
+    backgroundColor: ON_DUTY_GREEN,
+  },
+  onDutyLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    color: ON_DUTY_GREEN,
+  },
+  onDutyDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: 'rgba(16,185,129,0.3)',
+  },
+  onDutyElapsed: {
+    fontSize: 12,
     fontWeight: '600',
-    color: palette.textPrimary,
-  },
-  endShiftPill: {
-    height: 36,
-    paddingHorizontal: 14,
-    borderRadius: radii.full,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: palette.danger,
-  },
-  endShiftPillText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#fff',
+    color: palette.textSecondary,
+    fontVariant: ['tabular-nums'],
   },
 
   // Tabs

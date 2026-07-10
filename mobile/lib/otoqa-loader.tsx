@@ -224,8 +224,13 @@ export function LoadingRingScreen({
         <Svg width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
           <Defs>
             <RadialGradient id="ambientWash" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
-              <Stop offset="0%" stopColor={palette.accentTint} stopOpacity={1} />
-              <Stop offset="100%" stopColor={palette.accentTint} stopOpacity={0} />
+              {/* Solid accent + low stopOpacity. Passing an rgba() string as
+                  stopColor makes react-native-svg drop the alpha and render a
+                  near-opaque blue — which blew the wash out to a bright glow
+                  (and killed the mark's contrast). Keep the color solid and
+                  own the alpha here so it matches the design's faint tint. */}
+              <Stop offset="0%" stopColor={palette.accent} stopOpacity={0.12} />
+              <Stop offset="100%" stopColor={palette.accent} stopOpacity={0} />
             </RadialGradient>
           </Defs>
           <Rect x={0} y={0} width="100%" height="100%" fill="url(#ambientWash)" />

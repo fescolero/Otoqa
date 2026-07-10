@@ -30,7 +30,6 @@ import { useUploadDocument } from '../../../lib/hooks/useUploadDocument';
 import { enqueueMutation } from '../../../lib/offline-queue';
 import { useDriver } from '../_layout';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
-import { useOfflineQueue } from '../../../lib/hooks/useOfflineQueue';
 import { Id } from '../../../../convex/_generated/dataModel';
 import { usePostHog } from 'posthog-react-native';
 import {
@@ -112,7 +111,6 @@ export default function TripDetailScreen() {
   const { isWarming: isGPSWarming, getFreshLocation } = useGPSLocation();
   const { checkIn, checkOut } = useCheckIn(getFreshLocation);
   const { uploadDocument } = useUploadDocument(getFreshLocation);
-  const { pendingCount } = useOfflineQueue();
   const posthog = usePostHog();
 
   const { load, stops, isLoading, hasNoData } = useLoadDetail(id as Id<'loadInformation'>, driverId);
@@ -834,25 +832,9 @@ export default function TripDetailScreen() {
           contentContainerStyle={[styles.scrollContent, { paddingBottom: spacing.md }]}
           showsVerticalScrollIndicator={false}
         >
-          {/* Connection Quality Banner */}
-          {connectionQuality === 'offline' && (
-            <View style={styles.offlineBanner}>
-              <Ionicons name="cloud-offline" size={16} color={colors.foreground} />
-              <Text style={styles.offlineText}>
-                Offline - Changes will sync when connected
-                {pendingCount > 0 ? ` (${pendingCount} pending)` : ''}
-              </Text>
-            </View>
-          )}
-          {connectionQuality === 'poor' && (
-            <View style={styles.weakSignalBanner}>
-              <Ionicons name="cellular" size={16} color={colors.background} />
-              <Text style={styles.weakSignalText}>
-                Weak signal - Actions will be queued
-                {pendingCount > 0 ? ` (${pendingCount} pending)` : ''}
-              </Text>
-            </View>
-          )}
+          {/* Connection state (offline + weak signal) is surfaced globally by
+              the OfflineIndicator pill — see (app)/_layout.tsx — so there are
+              no per-screen connection banners here. */}
 
           {/* GPS Tracking Debug Banner */}
           {trackingDebug && (

@@ -341,7 +341,12 @@ export function trackConvexAuthEvent(
     | 'auth_timeout'
     | 'debouncing_false'
     | 'auth_false_propagated'
-    | 'foreground_return',
+    | 'foreground_return'
+    // User tapped Retry on a stuck loading/error gate.
+    | 'manual_reauth'
+    // Recovery fired without user action — network came back, or the
+    // periodic backstop tripped while the app was stuck booting.
+    | 'auto_recovery',
   context?: PostHogEventProperties,
 ) {
   capture(`convex_auth_${event}`, context);
