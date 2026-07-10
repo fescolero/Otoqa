@@ -5,6 +5,7 @@ import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
 import { updateLoadCount } from './stats_helpers';
+import { recordLoadWritten } from './platformUsageHelpers';
 import { setLoadTag, getLoadFacets } from './lib/loadFacets';
 import {
   addDaysToUtcDateString,
@@ -480,6 +481,9 @@ export const generateLoadFromTemplate = internalMutation({
 
     // 5. Update organization stats
     await updateLoadCount(ctx, template.workosOrgId, undefined, 'Open');
+
+    // ✅ Platform billing: every load written into the system is billable
+    await recordLoadWritten(ctx, template.workosOrgId, now);
 
     // 6. Update template with last generated info
     await ctx.db.patch(args.templateId, {

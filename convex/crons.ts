@@ -24,6 +24,16 @@ crons.interval(
   {},
 );
 
+// ✅ Recalculate platform usage metering daily (drift protection)
+// Loads-written-per-cycle counts rebuilt from source loads; the first run
+// doubles as the historical backfill. Powers Settings → Billing & usage.
+crons.interval(
+  'recalculate-platform-usage',
+  { hours: 24 },
+  internal.platformUsage.recalculateAllOrgsPlatformUsage,
+  {},
+);
+
 // ✅ Reconcile firstStopDate denormalized field daily
 // Ensures the cached firstStopDate on loads matches the actual first stop data
 // Self-healing mechanism for any edge cases or bugs that cause drift

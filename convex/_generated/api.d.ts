@@ -158,6 +158,8 @@ import type * as payPlans from "../payPlans.js";
 import type * as payProfiles from "../payProfiles.js";
 import type * as payRules from "../payRules.js";
 import type * as payeeProfileAssignments from "../payeeProfileAssignments.js";
+import type * as platformUsage from "../platformUsage.js";
+import type * as platformUsageHelpers from "../platformUsageHelpers.js";
 import type * as pushTokens from "../pushTokens.js";
 import type * as rateProfiles from "../rateProfiles.js";
 import type * as rateRules from "../rateRules.js";
@@ -343,6 +345,8 @@ declare const fullApi: ApiFromModules<{
   payProfiles: typeof payProfiles;
   payRules: typeof payRules;
   payeeProfileAssignments: typeof payeeProfileAssignments;
+  platformUsage: typeof platformUsage;
+  platformUsageHelpers: typeof platformUsageHelpers;
   pushTokens: typeof pushTokens;
   rateProfiles: typeof rateProfiles;
   rateRules: typeof rateRules;
