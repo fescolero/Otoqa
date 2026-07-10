@@ -520,7 +520,9 @@ export function trackBGTaskError(context: { step: string; error: string }) {
  *
  * Outcomes:
  *   - 'success' — HTTP call succeeded, pings synced
- *   - 'failure' — HTTP call threw or returned non-OK
+ *   - 'failure' — HTTP call threw or returned non-OK after retries, or
+ *     sync prep (getUnsyncedLocations / payload build) threw before the
+ *     HTTP call; the two are distinguishable by `error` message
  *   - 'skipped_no_pings' — BG task ran but queue was empty (sync caught up)
  *   - 'skipped_no_key' — MOBILE_LOCATION_API_KEY env var missing
  *   - 'skipped_no_sqlite' — local SQLite unavailable (rare init issue)
@@ -538,11 +540,20 @@ export function trackBgSyncOutcome(context: {
   syncDurationMs?: number;
   /**
    * Number of retries fired inside the bounded retry loop in LOCATION_TASK
-   * Step 6. 0 = success on the first attempt (no retry needed); 1-2 =
-   * transient blip absorbed by the inline retry instead of waiting for
-   * the next BG fire. Only meaningful when outcome is 'success' or
-   * 'failure'; absent on the 'skipped_*' branches (the retry loop only
-   * runs once we have pings to send).
+   * Step 6 before the loop exited (success, terminal 4xx, or budget
+   * exhausted). 0 = no retry fired: first attempt succeeded, first
+   * attempt hit a terminal 4xx, or sync prep failed before the loop.
+   * On 'success', >0 means a transient blip was absorbed inline instead
+   * of waiting for the next BG fire. On 'failure', the max value means
+   * the retry budget was exhausted; an intermediate value means retries
+   * were consumed and then a terminal 4xx ended the loop early (e.g.
+   * 503 then 401 → 1). Present on every 'success'/'failure' event;
+   * absent on the 'skipped_*' branches (the retry loop only runs once
+   * we have pings to send).
+   *
+   * Named before the retryCount convention (offline_queue_item_* above)
+   * was noticed; keep as-is — ~2 months of PostHog data exists under
+   * this name, so renaming would break saved insights.
    */
   syncRetries?: number;
   error?: string;
