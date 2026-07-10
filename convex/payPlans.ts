@@ -1,7 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 // ============================================
 // HELPER FUNCTIONS - Period Calculations
@@ -761,7 +762,7 @@ export const create = mutation({
   },
   returns: v.id('payPlans'),
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Validate frequency-specific fields
     if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !args.periodStartDayOfWeek) {
@@ -801,6 +802,19 @@ export const create = mutation({
       createdBy: userId,
     });
 
+    // Log the creation
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'payPlan',
+      entityId: planId,
+      entityName: args.name,
+      action: 'created',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Created pay plan "${args.name}"`,
+    });
+
     return planId;
   },
 });
@@ -838,7 +852,7 @@ export const update = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
@@ -874,6 +888,24 @@ export const update = mutation({
     }
 
     await ctx.db.patch(args.planId, updates);
+
+    // Log the update
+    {
+      const changedFields = Object.keys(updates).filter((key) => key !== 'updatedAt');
+      await logAudit(ctx, {
+        organizationId: plan.workosOrgId,
+        entityType: 'payPlan',
+        entityId: args.planId,
+        entityName: args.name ?? plan.name,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated pay plan "${args.name ?? plan.name}"`,
+        changedFields,
+      });
+    }
+
     return null;
   },
 });
@@ -887,7 +919,7 @@ export const archive = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
@@ -910,6 +942,19 @@ export const archive = mutation({
       updatedAt: Date.now(),
     });
 
+    // Log the archival
+    await logAudit(ctx, {
+      organizationId: plan.workosOrgId,
+      entityType: 'payPlan',
+      entityId: args.planId,
+      entityName: plan.name,
+      action: 'archived',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Archived pay plan "${plan.name}"`,
+    });
+
     return null;
   },
 });
@@ -923,7 +968,7 @@ export const restore = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
@@ -932,6 +977,19 @@ export const restore = mutation({
     await ctx.db.patch(args.planId, {
       isActive: true,
       updatedAt: Date.now(),
+    });
+
+    // Log the restoration
+    await logAudit(ctx, {
+      organizationId: plan.workosOrgId,
+      entityType: 'payPlan',
+      entityId: args.planId,
+      entityName: plan.name,
+      action: 'restored',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Restored pay plan "${plan.name}"`,
     });
 
     return null;
@@ -948,22 +1006,44 @@ export const assignToDriver = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const driver = await ctx.db.get(args.driverId);
     if (!driver) throw new Error('Driver not found');
     if (driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
 
+    let plan: Doc<'payPlans'> | null = null;
     if (args.planId) {
-      const plan = await ctx.db.get(args.planId);
+      plan = await ctx.db.get(args.planId);
       if (!plan) throw new Error('Pay plan not found');
       if (!plan.isActive) throw new Error('Cannot assign inactive pay plan');
     }
+
+    const previousPlanId = driver.payPlanId;
 
     await ctx.db.patch(args.driverId, {
       payPlanId: args.planId,
       updatedAt: Date.now(),
     });
+
+    // Log the assignment (or unassignment against the previous plan)
+    const auditPlanId = args.planId ?? previousPlanId;
+    if (auditPlanId) {
+      await logAudit(ctx, {
+        organizationId: driver.organizationId,
+        entityType: 'payPlan',
+        entityId: auditPlanId,
+        entityName: plan?.name,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: plan
+          ? `Assigned pay plan "${plan.name}" to driver ${driver.firstName} ${driver.lastName}`
+          : `Unassigned pay plan from driver ${driver.firstName} ${driver.lastName}`,
+        metadata: JSON.stringify({ driverId: args.driverId }),
+      });
+    }
 
     return null;
   },
@@ -982,7 +1062,7 @@ export const bulkAssignToDrivers = mutation({
     failed: v.number(),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
@@ -1007,6 +1087,22 @@ export const bulkAssignToDrivers = mutation({
       } catch {
         failed++;
       }
+    }
+
+    // Log the bulk assignment
+    if (success > 0) {
+      await logAudit(ctx, {
+        organizationId: plan.workosOrgId,
+        entityType: 'payPlan',
+        entityId: args.planId,
+        entityName: plan.name,
+        action: 'bulk_assigned',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Assigned pay plan "${plan.name}" to ${success} driver(s)`,
+        metadata: JSON.stringify({ success, failed }),
+      });
     }
 
     return { success, failed };

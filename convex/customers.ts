@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 // Count customers by status
 export const countCustomersByStatus = query({
@@ -165,7 +166,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
 
     const customerId = await ctx.db.insert('customers', {
@@ -214,6 +215,19 @@ export const create = mutation({
       isDeleted: false,
     });
 
+    // Log the creation
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'customer',
+      entityId: customerId,
+      entityName: args.name,
+      action: 'created',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Created customer ${args.name}`,
+    });
+
     return customerId;
   },
 });
@@ -257,15 +271,33 @@ export const update = mutation({
     internalNotes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
     if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     const { id, ...updates } = args;
-    
+
     await ctx.db.patch(id, {
       ...updates,
       updatedAt: Date.now(),
     });
+
+    // Log the update
+    {
+      const changedFields = Object.keys(updates);
+      await logAudit(ctx, {
+        organizationId: callerOrgId,
+        entityType: 'customer',
+        entityId: id,
+        entityName: existing.name,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated customer ${existing.name}`,
+        changedFields,
+        changesAfter: JSON.stringify(updates),
+      });
+    }
 
     return id;
   },
@@ -279,7 +311,7 @@ export const deactivate = mutation({
     userName: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
     if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     await ctx.db.patch(args.id, {
@@ -287,6 +319,19 @@ export const deactivate = mutation({
       deletedAt: Date.now(),
       deletedBy: userId,
       updatedAt: Date.now(),
+    });
+
+    // Log the deactivation
+    await logAudit(ctx, {
+      organizationId: existing.workosOrgId,
+      entityType: 'customer',
+      entityId: args.id,
+      entityName: existing.name,
+      action: 'deactivated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deactivated customer ${existing.name}`,
     });
 
     return args.id;
@@ -299,7 +344,7 @@ export const restore = mutation({
     id: v.id('customers'),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
     if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     await ctx.db.patch(args.id, {
@@ -307,6 +352,19 @@ export const restore = mutation({
       deletedAt: undefined,
       deletedBy: undefined,
       updatedAt: Date.now(),
+    });
+
+    // Log the restoration
+    await logAudit(ctx, {
+      organizationId: existing.workosOrgId,
+      entityType: 'customer',
+      entityId: args.id,
+      entityName: existing.name,
+      action: 'restored',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Restored customer ${existing.name}`,
     });
 
     return args.id;
@@ -319,10 +377,25 @@ export const permanentDelete = mutation({
     id: v.id('customers'),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
     if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
     await ctx.db.delete(args.id);
+
+    // Log the permanent deletion
+    await logAudit(ctx, {
+      organizationId: existing.workosOrgId,
+      entityType: 'customer',
+      entityId: args.id,
+      entityName: existing.name,
+      action: 'permanently_deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Permanently deleted customer ${existing.name}`,
+      changesBefore: JSON.stringify(existing),
+    });
+
     return args.id;
   },
 });
@@ -335,7 +408,7 @@ export const bulkDeactivate = mutation({
     userName: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const now = Date.now();
 
     for (const customerId of args.customerIds) {
@@ -346,6 +419,19 @@ export const bulkDeactivate = mutation({
         deletedAt: now,
         deletedBy: userId,
         updatedAt: now,
+      });
+
+      // Log the deactivation
+      await logAudit(ctx, {
+        organizationId: customer.workosOrgId,
+        entityType: 'customer',
+        entityId: customerId,
+        entityName: customer.name,
+        action: 'deactivated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Deactivated customer ${customer.name}`,
       });
     }
 
