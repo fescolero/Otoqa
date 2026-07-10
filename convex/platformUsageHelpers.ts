@@ -23,7 +23,7 @@ import { getPeriodKey } from './accountingStatsHelpers';
  * Kept here (not in the UI) so backend and frontend read one source of truth
  * through the getBillingOverview query.
  */
-export const DEFAULT_BILLING_RATE_PER_LOAD = 2.5;
+export const DEFAULT_BILLING_RATE_PER_LOAD = 2.65;
 
 /**
  * When platform metering went live — the start of the first cycle billed on

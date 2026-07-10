@@ -309,7 +309,7 @@ describe('platform usage metering', () => {
     const t = makeT();
     await t.run(async (ctx) => seedOrg(ctx));
     const overview = await t.query(api.platformUsage.getBillingOverview, { workosOrgId: ORG });
-    expect(overview.rate).toBe(2.5);
+    expect(overview.rate).toBe(2.65);
     expect(overview.closedCycles).toEqual([]);
     expect(overview.currentCycle.loadsWritten).toBe(0);
   });
