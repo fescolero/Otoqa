@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useMemo } from 'react';
+import { useConvexAuth, useQueries } from 'convex/react';
+import type { FunctionReturnType } from 'convex/server';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -91,18 +93,44 @@ export function LaneAnalysisTab({ organizationId }: LaneAnalysisTabProps) {
 
   const totalPages = Math.ceil(allLaneIds.length / PAGE_SIZE);
 
-  // Run performance analysis for current page of lanes
-  const performanceData = useAuthQuery(
-    api.laneAnalyzerOptimization.analyzeLanePerformance,
-    pagedLaneIds.length > 0
-      ? {
-          workosOrgId: organizationId,
-          contractLaneIds: pagedLaneIds as Id<'contractLanes'>[],
-          dateRangeStart: dateRange.start,
-          dateRangeEnd: dateRange.end,
-        }
-      : 'skip',
-  );
+  // Run performance analysis for the current page of lanes, one query per
+  // lane. Analyzing a lane costs hundreds of Convex reads (per-load invoice/
+  // payable/fuel lookups), so batching a whole page into one query execution
+  // blows the per-execution read limit — separate executions each get their
+  // own budget, and results stream in per lane.
+  const { isAuthenticated } = useConvexAuth();
+  const laneQueries = useMemo(() => {
+    if (!isAuthenticated) return {};
+    return Object.fromEntries(
+      pagedLaneIds.map((laneId) => [
+        laneId,
+        {
+          query: api.laneAnalyzerOptimization.analyzeLanePerformance,
+          args: {
+            workosOrgId: organizationId,
+            contractLaneIds: [laneId as Id<'contractLanes'>],
+            dateRangeStart: dateRange.start,
+            dateRangeEnd: dateRange.end,
+          },
+        },
+      ]),
+    );
+  }, [isAuthenticated, pagedLaneIds, organizationId, dateRange]);
+  const laneResults = useQueries(laneQueries);
+
+  const performanceData = useMemo(() => {
+    if (!contractLanes) return undefined;
+    const results: FunctionReturnType<
+      typeof api.laneAnalyzerOptimization.analyzeLanePerformance
+    > = [];
+    for (const laneId of pagedLaneIds) {
+      const result = laneResults[laneId];
+      if (result instanceof Error) throw result;
+      if (result === undefined) return undefined; // still loading
+      results.push(...result);
+    }
+    return results;
+  }, [contractLanes, pagedLaneIds, laneResults]);
 
   // Filter by search
   const filteredData = useMemo(() => {
