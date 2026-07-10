@@ -30,7 +30,9 @@ import type { FunctionReturnType } from 'convex/server';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';
 
-import { SettingsHeader, WBtn, WIcon } from '@/components/web';
+import { Chip, SettingsHeader, WBtn, WIcon, type ChipStatus } from '@/components/web';
+import { exportToCSV } from '@/lib/csv-export';
+import { formatCurrency, formatNumber } from '@/lib/utils/format';
 
 type BillingOverview = NonNullable<
   FunctionReturnType<typeof api.platformUsage.getBillingOverview>
@@ -41,11 +43,17 @@ type ClosedCycle = BillingOverview['closedCycles'][number];
 const BILL_PANEL_W = 320;
 
 // ─── formatters ──────────────────────────────────────────────────────────
+// Thin aliases over the shared lib formatters (design-vocabulary names);
+// only the whole-dollar variant has no shared equivalent.
 
-const fmtNum = (n: number) => Math.round(n).toLocaleString('en-US');
-const fmtMoney = (n: number) =>
-  '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtMoney0 = (n: number) => '$' + Math.round(n).toLocaleString('en-US');
+const fmtNum = (n: number) => formatNumber(n);
+const fmtMoney = (n: number) => formatCurrency(n);
+const fmtMoney0 = (n: number) =>
+  new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  }).format(n);
 
 /** "2026-07" → "Jul 2026" */
 const monthLabel = (periodKey: string) => {
@@ -110,17 +118,8 @@ const PAYMENT_METHODS: PaymentMethod[] = [
   },
 ];
 
-/** Payment-issue scenario (surfaced when PAYMENT_STATE === 'action-needed'). */
-const PAYMENT_ISSUE = {
-  amount: 0, // populated from the due cycle at render time
-  invoice: '',
-  cycle: '',
-  method: PAYMENT_METHODS[0].name,
-  reason: 'ACH payment returned — insufficient funds (R01)',
-  failedOn: '—',
-  nextRetry: '—',
-  pauseOn: '—',
-};
+/** Placeholder failure reason for the PAYMENT_STATE === 'action-needed' scenario. */
+const PAYMENT_ISSUE_REASON = 'ACH payment returned — insufficient funds (R01)';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Status pill — Paid / Due / Accruing / Verified / Past due / Failed
@@ -128,48 +127,20 @@ const PAYMENT_ISSUE = {
 
 type BillStatusKind = 'paid' | 'due' | 'accruing' | 'verified' | 'pastdue' | 'failed';
 
-const BILL_STATUS_MAP: Record<
-  BillStatusKind,
-  { bg: string; fg: string; dot: string; label: string }
-> = {
-  paid: { bg: 'rgba(16,185,129,0.10)', fg: '#0F8C5F', dot: '#10B981', label: 'Paid' },
-  due: { bg: 'rgba(245,158,11,0.12)', fg: '#A66800', dot: '#F59E0B', label: 'Due' },
-  accruing: { bg: 'rgba(46,92,255,0.10)', fg: '#1A47E6', dot: '#2E5CFF', label: 'Accruing' },
-  verified: { bg: 'rgba(16,185,129,0.10)', fg: '#0F8C5F', dot: '#10B981', label: 'Verified' },
-  pastdue: { bg: 'rgba(239,68,68,0.10)', fg: '#B43030', dot: '#EF4444', label: 'Past due' },
-  failed: { bg: 'rgba(239,68,68,0.10)', fg: '#B43030', dot: '#EF4444', label: 'Failed' },
+// Billing labels over the shared Chip presets so the tints stay in sync
+// with the rest of the design system.
+const BILL_STATUS_CHIP: Record<BillStatusKind, { status: ChipStatus; label: string }> = {
+  paid: { status: 'valid', label: 'Paid' },
+  due: { status: 'pending', label: 'Due' },
+  accruing: { status: 'assigned', label: 'Accruing' },
+  verified: { status: 'valid', label: 'Verified' },
+  pastdue: { status: 'danger', label: 'Past due' },
+  failed: { status: 'danger', label: 'Failed' },
 };
 
 function BillStatus({ status }: { status: BillStatusKind }) {
-  const p = BILL_STATUS_MAP[status] ?? BILL_STATUS_MAP.paid;
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        background: p.bg,
-        color: p.fg,
-        padding: '2px 10px 2px 8px',
-        borderRadius: 999,
-        fontSize: 11.5,
-        fontWeight: 600,
-        lineHeight: '18px',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      <span
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: 999,
-          background: p.dot,
-          boxShadow: status === 'accruing' ? 'none' : `0 0 0 2px ${p.bg}`,
-        }}
-      />
-      {p.label}
-    </span>
-  );
+  const m = BILL_STATUS_CHIP[status] ?? BILL_STATUS_CHIP.paid;
+  return <Chip status={m.status} label={m.label} />;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -822,67 +793,83 @@ function BillPlanCard({ rate, nextInvoice }: { rate: number; nextInvoice: string
 
 // ─── Right-rail: payment methods (bank / ACH + card) ─────────────────────
 
+// Shared bank/card tile + Default badge — used by the rail rows and the
+// manage-page rows (same art, two sizes).
+function MethodTile({ kind, size = 'sm' }: { kind: 'bank' | 'card'; size?: 'sm' | 'lg' }) {
+  const d =
+    size === 'lg'
+      ? { w: 52, h: 34, r: 7, icon: 17, fs: 11 }
+      : { w: 44, h: 30, r: 6, icon: 15, fs: 10 };
+  if (kind === 'bank') {
+    return (
+      <div
+        style={{
+          width: d.w,
+          height: d.h,
+          borderRadius: d.r,
+          flexShrink: 0,
+          background: 'var(--bg-surface-2)',
+          border: '1px solid var(--border-hairline)',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: 'var(--text-secondary)',
+        }}
+      >
+        <WIcon name="building" size={d.icon} />
+      </div>
+    );
+  }
+  return (
+    <div
+      style={{
+        width: d.w,
+        height: d.h,
+        borderRadius: d.r,
+        flexShrink: 0,
+        background: 'linear-gradient(135deg, #1A47E6, #2E5CFF)',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: '#fff',
+        fontSize: d.fs,
+        fontWeight: 700,
+        letterSpacing: 0.06,
+      }}
+    >
+      VISA
+    </div>
+  );
+}
+
+function DefaultBadge() {
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: 0.02,
+        padding: '1px 6px',
+        borderRadius: 9,
+        background: 'rgba(46,92,255,0.10)',
+        color: 'var(--accent)',
+      }}
+    >
+      Default
+    </span>
+  );
+}
+
 function BillMethodRow({ method, failed }: { method: PaymentMethod; failed?: boolean }) {
-  const isBank = method.kind === 'bank';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-      {isBank ? (
-        <div
-          style={{
-            width: 44,
-            height: 30,
-            borderRadius: 6,
-            flexShrink: 0,
-            background: 'var(--bg-surface-2)',
-            border: '1px solid var(--border-hairline)',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-secondary)',
-          }}
-        >
-          <WIcon name="building" size={15} />
-        </div>
-      ) : (
-        <div
-          style={{
-            width: 44,
-            height: 30,
-            borderRadius: 6,
-            flexShrink: 0,
-            background: 'linear-gradient(135deg, #1A47E6, #2E5CFF)',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#fff',
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: 0.06,
-          }}
-        >
-          VISA
-        </div>
-      )}
+      <MethodTile kind={method.kind} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="num" style={{ fontSize: 13, fontWeight: 600 }}>
             {method.name}
           </span>
-          {method.isDefault && (
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 600,
-                letterSpacing: 0.02,
-                padding: '1px 6px',
-                borderRadius: 9,
-                background: 'rgba(46,92,255,0.10)',
-                color: 'var(--accent)',
-              }}
-            >
-              Default
-            </span>
-          )}
+          {method.isDefault && <DefaultBadge />}
         </div>
         <div
           style={{
@@ -1183,7 +1170,6 @@ function BillMethodManageRow({
   failedReason?: string;
   last?: boolean;
 }) {
-  const isBank = method.kind === 'bank';
   return (
     <div
       style={{
@@ -1195,62 +1181,13 @@ function BillMethodManageRow({
         background: failed ? 'rgba(239,68,68,0.04)' : 'transparent',
       }}
     >
-      {isBank ? (
-        <div
-          style={{
-            width: 52,
-            height: 34,
-            borderRadius: 7,
-            flexShrink: 0,
-            background: 'var(--bg-surface-2)',
-            border: '1px solid var(--border-hairline)',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-secondary)',
-          }}
-        >
-          <WIcon name="building" size={17} />
-        </div>
-      ) : (
-        <div
-          style={{
-            width: 52,
-            height: 34,
-            borderRadius: 7,
-            flexShrink: 0,
-            background: 'linear-gradient(135deg, #1A47E6, #2E5CFF)',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#fff',
-            fontSize: 11,
-            fontWeight: 700,
-            letterSpacing: 0.06,
-          }}
-        >
-          VISA
-        </div>
-      )}
+      <MethodTile kind={method.kind} size="lg" />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="num" style={{ fontSize: 13.5, fontWeight: 600, whiteSpace: 'nowrap' }}>
             {method.name}
           </span>
-          {method.isDefault && (
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 600,
-                padding: '1px 6px',
-                borderRadius: 9,
-                background: 'rgba(46,92,255,0.10)',
-                color: 'var(--accent)',
-              }}
-            >
-              Default
-            </span>
-          )}
+          {method.isDefault && <DefaultBadge />}
           {failed ? <BillStatus status="failed" /> : <BillStatus status="verified" />}
         </div>
         <div
@@ -1574,13 +1511,12 @@ function BillHero({
   current,
   rate,
   projected,
-  projectedAmount,
 }: {
   current: CurrentCycle;
   rate: number;
   projected: number;
-  projectedAmount: number;
 }) {
+  const projectedAmount = projected * rate;
   const pct = Math.round((current.dayOfCycle / current.daysInCycle) * 100);
   return (
     <BillCard padded={false}>
@@ -1734,7 +1670,6 @@ export default function BillingPage() {
   const projected = current
     ? Math.round((current.loadsWritten / Math.max(1, current.dayOfCycle)) * current.daysInCycle)
     : 0;
-  const projectedAmount = projected * rate;
 
   // History rows — newest first, open cycle pinned on top.
   const historyRows = useMemo<HistoryRow[]>(() => {
@@ -1773,14 +1708,14 @@ export default function BillingPage() {
     return { loads, amount: loads * rate };
   }, [cycles, current, rate]);
 
+  // The server marks at most one closed cycle 'due' (the latest).
   const dueCycle = useMemo(() => cycles.find((c) => c.status === 'due'), [cycles]);
-  const outstanding = cycles
-    .filter((c) => c.status === 'due')
-    .reduce((s, c) => s + c.amount, 0);
+  const outstanding = dueCycle?.amount ?? 0;
 
   const issue: IssueDetail = useMemo(
     () => ({
-      ...PAYMENT_ISSUE,
+      method: PAYMENT_METHODS[0].name,
+      reason: PAYMENT_ISSUE_REASON,
       amount: dueCycle?.amount ?? 0,
       invoice: dueCycle ? invoiceNo(dueCycle.periodKey) : '—',
       cycle: dueCycle ? monthLabel(dueCycle.periodKey) : '—',
@@ -1792,40 +1727,29 @@ export default function BillingPage() {
   );
   const hasIssue = PAYMENT_STATE === 'action-needed';
 
-  // Usage CSV — one row per cycle, open cycle first (mirrors the table).
+  // Usage CSV — built from the same rows the table renders so the export
+  // can never diverge from the on-screen history.
   const exportCsv = () => {
-    if (!overview || !current) return;
-    const lines = [
-      ['Billing cycle', 'Loads entered', 'Rate', 'Amount', 'Status', 'Invoice'],
+    if (!current || historyRows.length === 0) return;
+    exportToCSV(
+      historyRows,
       [
-        monthLabel(current.periodKey),
-        String(current.loadsWritten),
-        rate.toFixed(2),
-        (current.loadsWritten * rate).toFixed(2),
-        'Accruing',
-        'Not yet invoiced',
+        { header: 'Billing cycle', accessor: (r) => r.label },
+        { header: 'Loads entered', accessor: (r) => r.loads },
+        { header: 'Rate', accessor: () => rate.toFixed(2) },
+        { header: 'Amount', accessor: (r) => r.amount.toFixed(2) },
+        {
+          header: 'Status',
+          accessor: (r) =>
+            r.kind === 'current' ? 'Accruing' : r.status === 'due' ? 'Due' : 'Paid',
+        },
+        {
+          header: 'Invoice',
+          accessor: (r) => (r.kind === 'current' ? 'Not yet invoiced' : invoiceNo(r.key)),
+        },
       ],
-      ...[...cycles]
-        .reverse()
-        .map((c) => [
-          monthLabel(c.periodKey),
-          String(c.loadsWritten),
-          rate.toFixed(2),
-          c.amount.toFixed(2),
-          c.status === 'due' ? 'Due' : 'Paid',
-          invoiceNo(c.periodKey),
-        ]),
-    ];
-    const csv = lines
-      .map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(','))
-      .join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `otoqa-usage-${current.periodKey}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+      `otoqa-usage-${current.periodKey}`,
+    );
   };
 
   if (view === 'methods') {
@@ -1880,12 +1804,7 @@ export default function BillingPage() {
               {hasIssue && (
                 <BillIssueAlert issue={issue} onFix={() => setView('methods')} big />
               )}
-              <BillHero
-                current={current}
-                rate={rate}
-                projected={projected}
-                projectedAmount={projectedAmount}
-              />
+              <BillHero current={current} rate={rate} projected={projected} />
               <BillCard
                 title={
                   <SectionTitle sub="Loads written into the system each billing cycle. Hover any bar for detail.">

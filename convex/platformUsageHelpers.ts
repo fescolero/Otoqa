@@ -32,14 +32,18 @@ export const DEFAULT_BILLING_RATE_PER_LOAD = 2.5;
  *
  * @param ctx - Mutation context
  * @param orgId - WorkOS org ID the load belongs to
- * @param timestamp - The load's createdAt (defaults to now) — determines the cycle
+ * @param timestamp - The createdAt written to the loadInformation row —
+ *   determines the cycle. Required so every insert site states the coupling
+ *   explicitly (the nightly recalc attributes by load.createdAt, and the two
+ *   must agree). Non-finite values fall back to now rather than minting a
+ *   garbage periodKey.
  */
 export async function recordLoadWritten(
   ctx: MutationCtx,
   orgId: string,
-  timestamp: number = Date.now(),
+  timestamp: number,
 ): Promise<void> {
-  const periodKey = getPeriodKey(timestamp);
+  const periodKey = getPeriodKey(Number.isFinite(timestamp) ? timestamp : Date.now());
 
   const existing = await ctx.db
     .query('platformUsageStats')

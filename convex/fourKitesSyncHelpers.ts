@@ -164,8 +164,13 @@ export const createLoad = internalMutation({
     // ✅ Update organization stats (aggregate table pattern)
     await updateLoadCount(ctx, args.data.workosOrgId, undefined, args.data.status);
 
-    // ✅ Platform billing: every load written into the system is billable
-    await recordLoadWritten(ctx, args.data.workosOrgId, args.data.createdAt);
+    // ✅ Platform billing: every load written into the system is billable.
+    // args.data is v.any() — only trust createdAt when it's a real number.
+    await recordLoadWritten(
+      ctx,
+      args.data.workosOrgId,
+      typeof args.data.createdAt === "number" ? args.data.createdAt : Date.now(),
+    );
     
     // ✅ Trigger auto-assignment for FourKites loads
     // FourKites loads come in with parsedHcr already set
@@ -309,7 +314,7 @@ export const importLoadFromShipment = internalMutation({
     await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
     // ✅ Platform billing: every load written into the system is billable
-    await recordLoadWritten(ctx, workosOrgId);
+    await recordLoadWritten(ctx, workosOrgId, Date.now());
 
     const internalId = buildLoadInternalId(shipment);
     for (const stop of shipment.stops || []) {
@@ -501,7 +506,7 @@ export const importUnmappedLoad = internalMutation({
     await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
     // ✅ Platform billing: every load written into the system is billable
-    await recordLoadWritten(ctx, workosOrgId);
+    await recordLoadWritten(ctx, workosOrgId, Date.now());
 
     const internalId = buildLoadInternalId(shipment);
     for (const stop of shipment.stops || []) {

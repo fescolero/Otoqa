@@ -1,13 +1,20 @@
 /**
- * Platform Usage Metering — recalculation (drift protection) + read API.
+ * Platform Usage Metering — recalculation (undercount correction) + read API.
  *
  * Otoqa bills each org a flat rate per load written into the system,
  * invoiced monthly. platformUsageStats rows are maintained event-driven by
  * platformUsageHelpers.recordLoadWritten on every loadInformation insert;
- * this module rebuilds them from source nightly (same self-scheduling chain
- * pattern as stats.ts / accountingStats.ts) so drift from bugs or historical
- * loads created before metering existed is corrected automatically. The
- * first cron run doubles as the backfill.
+ * this module recounts from source nightly (same self-scheduling chain
+ * pattern as stats.ts / accountingStats.ts) so undercounts — bugs, missed
+ * insert paths, historical loads created before metering existed — are
+ * corrected automatically. The first cron run doubles as the backfill.
+ *
+ * IMPORTANT: the recalc only ever RAISES a period's count (max of recorded
+ * vs recounted) and never zeroes recorded periods. Loads are billed for the
+ * cycle they were written in, and loads.deleteLoad hard-deletes rows — a
+ * recount from surviving rows must not retroactively erase charges on
+ * closed (already invoiced) cycles, and must not clobber increments that
+ * land while a multi-batch scan is in flight.
  *
  * Read side: getBillingOverview powers Settings → Billing & usage.
  */
@@ -24,8 +31,8 @@ const BATCH_SIZE = 2000;
 
 /**
  * Scan an org's loads in batches and accumulate created-per-period counts.
- * Self-schedules for pagination; the final batch writes the results and
- * zeroes stale periods.
+ * Self-schedules for pagination; the final batch writes the results
+ * (raise-only — see module docstring).
  */
 export const countPlatformUsage = internalMutation({
   args: {
@@ -58,26 +65,30 @@ export const countPlatformUsage = internalMutation({
       return null;
     }
 
-    // All loads scanned — write final results
+    // All loads scanned — write final results. Raise-only: charges are
+    // permanent (see module docstring), so a recount below the recorded
+    // value (hard-deleted loads, or increments racing this scan) keeps the
+    // recorded value. Periods absent from the recount are left untouched
+    // for the same reason.
     const now = Date.now();
-    let driftDetected = false;
+    let undercountCorrected = false;
 
-    for (const [periodKey, loadsWritten] of Object.entries(accumulated)) {
+    for (const [periodKey, counted] of Object.entries(accumulated)) {
       const existing = await ctx.db
         .query('platformUsageStats')
         .withIndex('by_org_period', (q) => q.eq('workosOrgId', workosOrgId).eq('periodKey', periodKey))
         .first();
 
       if (existing) {
-        if (existing.loadsWritten !== loadsWritten) {
-          driftDetected = true;
+        if (counted > existing.loadsWritten) {
+          undercountCorrected = true;
           console.log(
-            `Platform usage drift detected for org ${workosOrgId} period ${periodKey}: ` +
-              `${existing.loadsWritten} -> ${loadsWritten}`,
+            `Platform usage undercount corrected for org ${workosOrgId} period ${periodKey}: ` +
+              `${existing.loadsWritten} -> ${counted}`,
           );
         }
         await ctx.db.patch(existing._id, {
-          loadsWritten,
+          loadsWritten: Math.max(existing.loadsWritten, counted),
           lastRecalculated: now,
           updatedAt: now,
         });
@@ -85,35 +96,15 @@ export const countPlatformUsage = internalMutation({
         await ctx.db.insert('platformUsageStats', {
           workosOrgId,
           periodKey,
-          loadsWritten,
+          loadsWritten: counted,
           lastRecalculated: now,
           updatedAt: now,
         });
       }
     }
 
-    // Zero out stale periods that no longer have any loads
-    const allExisting = await ctx.db
-      .query('platformUsageStats')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', workosOrgId))
-      .collect();
-
-    for (const existing of allExisting) {
-      if (accumulated[existing.periodKey] === undefined) {
-        if (existing.loadsWritten !== 0) {
-          driftDetected = true;
-          console.log(`Platform usage stale period zeroed for org ${workosOrgId} period ${existing.periodKey}`);
-        }
-        await ctx.db.patch(existing._id, {
-          loadsWritten: 0,
-          lastRecalculated: now,
-          updatedAt: now,
-        });
-      }
-    }
-
-    if (driftDetected) {
-      console.log(`Platform usage drift corrected for org ${workosOrgId}`);
+    if (undercountCorrected) {
+      console.log(`Platform usage undercounts corrected for org ${workosOrgId}`);
     }
     console.log(`Platform usage recalculated for org ${workosOrgId}: ${Object.keys(accumulated).length} periods`);
     return null;
@@ -210,7 +201,10 @@ export const getBillingOverview = query({
     // docstring); amounts are loads × rate so table/chart/KPIs reconcile.
     // Months with no usage between the first recorded cycle and now are
     // filled with zero-load cycles so the timeline reads continuously.
-    // Bounded to the most recent 24 closed cycles.
+    // Bounded to the most recent 24 closed cycles — the window bound also
+    // caps the fill loop, so one row with a corrupt ancient periodKey
+    // (e.g. "1970-01" from a bad createdAt) can't blow up the query.
+    const MAX_CLOSED_CYCLES = 24;
     const recordedKeys = usageRows
       .map((r) => r.periodKey)
       .filter((k) => k < currentPeriodKey)
@@ -219,13 +213,15 @@ export const getBillingOverview = query({
     const closedKeys: string[] = [];
     if (recordedKeys.length > 0) {
       const [firstY, firstM] = recordedKeys[0].split('-').map(Number);
-      for (let d = new Date(Date.UTC(firstY, firstM - 1, 1)); ; d.setUTCMonth(d.getUTCMonth() + 1)) {
-        const key = getPeriodKey(d.getTime());
-        if (key >= currentPeriodKey) break;
-        closedKeys.push(key);
+      // Months (0-based index from year 0) of the earliest recorded cycle
+      // and the current cycle; start no earlier than the window allows.
+      const firstMonthIdx = firstY * 12 + (firstM - 1);
+      const currentMonthIdx = year * 12 + month;
+      const startIdx = Math.max(firstMonthIdx, currentMonthIdx - MAX_CLOSED_CYCLES);
+      for (let idx = startIdx; idx < currentMonthIdx; idx++) {
+        closedKeys.push(getPeriodKey(Date.UTC(Math.floor(idx / 12), idx % 12, 1)));
       }
     }
-    while (closedKeys.length > 24) closedKeys.shift();
 
     const closedCycles = closedKeys.map((key, i) => {
       const [y, m] = key.split('-').map(Number); // m is 1-based

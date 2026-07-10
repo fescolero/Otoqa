@@ -124,7 +124,7 @@ describe('platform usage metering', () => {
     expect(rows[0].loadsWritten).toBe(1);
   });
 
-  it('countPlatformUsage rebuilds per-period counts from source and zeroes stale periods', async () => {
+  it('countPlatformUsage raises undercounts from source but never reduces recorded charges', async () => {
     const t = makeT();
     await t.run(async (ctx) => {
       const customerId = await seedCustomer(ctx);
@@ -134,13 +134,15 @@ describe('platform usage metering', () => {
       await seedLoad(ctx, customerId, midMonth(0));
       await seedLoad(ctx, customerId, midMonth(0) + 1000);
       await seedLoad(ctx, customerId, midMonth(0) + 2000);
-      // Drifted row for last month + stale row for a month with no loads
+      // Undercounted row for last month (missed increment) — must be raised.
       await ctx.db.insert('platformUsageStats', {
         workosOrgId: ORG,
         periodKey: getPeriodKey(midMonth(1)),
-        loadsWritten: 99,
+        loadsWritten: 1,
         updatedAt: Date.now(),
       });
+      // Recorded charges for a month whose loads were since hard-deleted —
+      // billing is per load WRITTEN, so the charge must survive the recount.
       await ctx.db.insert('platformUsageStats', {
         workosOrgId: ORG,
         periodKey: getPeriodKey(midMonth(5)),
@@ -162,9 +164,9 @@ describe('platform usage metering', () => {
         .collect(),
     );
     const byKey = Object.fromEntries(rows.map((r) => [r.periodKey, r.loadsWritten]));
-    expect(byKey[getPeriodKey(midMonth(1))]).toBe(2);
-    expect(byKey[getPeriodKey(midMonth(0))]).toBe(3);
-    expect(byKey[getPeriodKey(midMonth(5))]).toBe(0); // stale period zeroed
+    expect(byKey[getPeriodKey(midMonth(1))]).toBe(2); // undercount corrected up
+    expect(byKey[getPeriodKey(midMonth(0))]).toBe(3); // backfilled from source
+    expect(byKey[getPeriodKey(midMonth(5))]).toBe(7); // deleted loads keep their charge
   });
 
   it('getBillingOverview derives cycles, statuses, and amounts from the org rate', async () => {
@@ -206,6 +208,25 @@ describe('platform usage metering', () => {
     expect(overview.closedCycles.map((c) => c.amount)).toEqual([30, 0, 60]);
     // Placeholder statuses: latest closed cycle is due, older ones paid
     expect(overview.closedCycles.map((c) => c.status)).toEqual(['paid', 'paid', 'due']);
+  });
+
+  it('getBillingOverview bounds history to the most recent 24 closed cycles', async () => {
+    const t = makeT();
+    await t.run(async (ctx) => {
+      await seedOrg(ctx);
+      // One ancient recorded cycle — the gap fill must clamp to the window
+      // instead of materializing every month since.
+      await ctx.db.insert('platformUsageStats', {
+        workosOrgId: ORG,
+        periodKey: getPeriodKey(midMonth(30)),
+        loadsWritten: 4,
+        updatedAt: Date.now(),
+      });
+    });
+    const overview = await t.query(api.platformUsage.getBillingOverview, { workosOrgId: ORG });
+    expect(overview.closedCycles).toHaveLength(24);
+    expect(overview.closedCycles[0].periodKey).toBe(getPeriodKey(midMonth(24)));
+    expect(overview.closedCycles[23].periodKey).toBe(getPeriodKey(midMonth(1)));
   });
 
   it('getBillingOverview uses the default rate when the org has no override', async () => {

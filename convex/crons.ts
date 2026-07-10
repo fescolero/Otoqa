@@ -24,12 +24,14 @@ crons.interval(
   {},
 );
 
-// ✅ Recalculate platform usage metering daily (drift protection)
-// Loads-written-per-cycle counts rebuilt from source loads; the first run
+// ✅ Recalculate platform usage metering daily (undercount correction)
+// Loads-written-per-cycle counts raised from source loads; the first run
 // doubles as the historical backfill. Powers Settings → Billing & usage.
-crons.interval(
+// Fixed off-peak time (like the other heavy scans below) so its full
+// loadInformation pass doesn't stack on the interval-based recalc burst.
+crons.cron(
   'recalculate-platform-usage',
-  { hours: 24 },
+  '30 4 * * *',
   internal.platformUsage.recalculateAllOrgsPlatformUsage,
   {},
 );
