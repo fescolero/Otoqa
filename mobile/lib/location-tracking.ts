@@ -886,10 +886,12 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             // 4xx (except 408/429) indicates a client-side problem; auth
             // won't change between attempts. 5xx, timeouts, and TypeError
             // (network) fall through and get retried.
+            // syncViaHttpEndpoint throws `HTTP ${status}: ${body}`.
+            const httpStatus = /^HTTP (\d{3})/.exec(msg)?.[1];
             if (
-              msg.includes('HTTP 401') ||
-              msg.includes('HTTP 403') ||
-              msg.includes('HTTP 400')
+              httpStatus?.startsWith('4') &&
+              httpStatus !== '408' &&
+              httpStatus !== '429'
             ) {
               lg.warn(`BG HTTP sync terminal error (no retry): ${msg}`);
               break;
@@ -905,7 +907,11 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         if (result) {
           syncSuccess = true;
           syncCount = result.inserted;
-          await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+          // Record success before the SQLite bookkeeping: the server has
+          // the pings at this point, and a markAsSynced failure must not
+          // relabel a successful sync as outcome=failure. Safe to re-send
+          // on the next fire if marking fails — the ingest endpoint dedups
+          // by (sessionId|loadId, recordedAt).
           trackBgSyncOutcome({
             outcome: 'success',
             queueDepthBefore,
@@ -914,6 +920,15 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             syncDurationMs: Date.now() - syncStart,
             syncRetries,
           });
+          try {
+            await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+          } catch (markErr) {
+            const msg = markErr instanceof Error ? markErr.message : String(markErr);
+            lg.warn(
+              `BG sync succeeded but marking rows synced failed (will re-send next fire): ${msg}`,
+            );
+            trackBGTaskError({ step: 'mark_synced', error: msg });
+          }
         } else {
           const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
           lg.warn(
@@ -932,7 +947,8 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       }
     } catch (flushError) {
       // Catches errors from getUnsyncedLocations / payload prep — not the
-      // HTTP call (that's handled inside the retry loop).
+      // HTTP call (handled inside the retry loop) nor marking rows synced
+      // (handled in its own try/catch above).
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
       lg.warn(`BG sync prep failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
@@ -942,6 +958,10 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         queueDepthBefore,
         syncDurationMs: Date.now() - syncStart,
         error: errMsg,
+        // Always 0 here (prep failed before the retry loop); passed so
+        // every 'failure' event carries the field per the analytics.ts
+        // contract.
+        syncRetries,
       });
     }
   }

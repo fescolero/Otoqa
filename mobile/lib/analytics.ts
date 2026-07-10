@@ -538,11 +538,17 @@ export function trackBgSyncOutcome(context: {
   syncDurationMs?: number;
   /**
    * Number of retries fired inside the bounded retry loop in LOCATION_TASK
-   * Step 6. 0 = success on the first attempt (no retry needed); 1-2 =
-   * transient blip absorbed by the inline retry instead of waiting for
-   * the next BG fire. Only meaningful when outcome is 'success' or
-   * 'failure'; absent on the 'skipped_*' branches (the retry loop only
-   * runs once we have pings to send).
+   * Step 6. 0 = no retry fired (first attempt succeeded, hit a terminal
+   * 4xx, or sync prep failed before the loop); 1-2 = retries consumed.
+   * On 'success', >0 means a transient blip was absorbed inline instead
+   * of waiting for the next BG fire; on 'failure', the max value means
+   * the retry budget was exhausted. Present on every 'success'/'failure'
+   * event; absent on the 'skipped_*' branches (the retry loop only runs
+   * once we have pings to send).
+   *
+   * Named before the retryCount convention (offline_queue_item_* above)
+   * was noticed; keep as-is — ~2 months of PostHog data exists under
+   * this name, so renaming would break saved insights.
    */
   syncRetries?: number;
   error?: string;
