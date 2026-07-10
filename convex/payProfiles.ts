@@ -103,8 +103,8 @@ export const getProfileHistory = query({
     // 1. Profile-level entries
     const profileEntries = await ctx.db
       .query('auditLog')
-      .withIndex('by_entity', q =>
-        q.eq('entityType', 'payProfile').eq('entityId', profileId))
+      .withIndex('by_org_entity', q =>
+        q.eq('organizationId', callerOrgId).eq('entityType', 'payProfile').eq('entityId', profileId))
       .collect();
 
     // 2. Rule-level entries — every rule that belongs to this profile,
@@ -117,8 +117,8 @@ export const getProfileHistory = query({
     for (const r of rules) {
       const entries = await ctx.db
         .query('auditLog')
-        .withIndex('by_entity', q =>
-          q.eq('entityType', 'payRule').eq('entityId', r._id))
+        .withIndex('by_org_entity', q =>
+          q.eq('organizationId', callerOrgId).eq('entityType', 'payRule').eq('entityId', r._id))
         .collect();
       ruleEntries.push(...entries);
     }

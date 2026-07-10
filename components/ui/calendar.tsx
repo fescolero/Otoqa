@@ -248,7 +248,7 @@ function CalendarDropdown({
   }
 
   return (
-    <Select value={value?.toString()} onValueChange={handleValueChange} modal={false}>
+    <Select value={value?.toString()} onValueChange={handleValueChange}>
       <SelectTrigger
         size="sm"
         aria-label={ariaLabel}

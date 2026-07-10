@@ -500,7 +500,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     {
       label: 'Weight',
       value: loadData.weight ? (
-        <span className="num">{`${loadData.weight} ${loadData.weightUnit ?? loadData.units ?? 'lbs'}`}</span>
+        <span className="num">{`${loadData.weight} ${loadData.units ?? 'lbs'}`}</span>
       ) : (
         '—'
       ),

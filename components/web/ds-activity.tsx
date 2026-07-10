@@ -13,10 +13,17 @@ import { WIcon, type IconName } from './icons';
 export interface DSActivityItem {
   id?: string | number;
   icon?: IconName;
+  /** Colors the icon dot: 'ok' green, 'warn' amber. Default neutral. */
+  tone?: 'ok' | 'warn';
   text: React.ReactNode;
   when: React.ReactNode;
   who?: React.ReactNode;
 }
+
+const TONE_CLASSES: Record<NonNullable<DSActivityItem['tone']>, string> = {
+  ok: 'text-emerald-600 dark:text-emerald-400',
+  warn: 'text-amber-600 dark:text-amber-400',
+};
 
 interface DSActivityProps {
   items: DSActivityItem[];
@@ -51,7 +58,10 @@ export function DSActivity({ items, className, emptyText = 'No activity yet.' }:
                 line of text (both are 18px tall). The previous `top-1.5`
                 shifted the dot ~6px below the text baseline. */}
             <span
-              className="absolute left-1 top-0 h-[18px] w-[18px] rounded-full flex items-center justify-center bg-card text-[var(--text-tertiary)]"
+              className={cn(
+                'absolute left-1 top-0 h-[18px] w-[18px] rounded-full flex items-center justify-center bg-card',
+                it.tone ? TONE_CLASSES[it.tone] : 'text-[var(--text-tertiary)]',
+              )}
               style={{ border: '1px solid var(--border-hairline)' }}
             >
               <WIcon name={it.icon ?? 'circle-dot'} size={10} />

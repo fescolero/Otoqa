@@ -37,15 +37,15 @@ export const auditByOrderNumber = internalQuery({
     const [aLoad, aLoadInfo] = await Promise.all([
       ctx.db
         .query('auditLog')
-        .withIndex('by_entity', (q: any) =>
-          q.eq('entityType', 'load').eq('entityId', load._id),
+        .withIndex('by_org_entity', (q: any) =>
+          q.eq('organizationId', args.workosOrgId).eq('entityType', 'load').eq('entityId', load._id),
         )
         .order('desc')
         .take(50),
       ctx.db
         .query('auditLog')
-        .withIndex('by_entity', (q: any) =>
-          q.eq('entityType', 'loadInformation').eq('entityId', load._id),
+        .withIndex('by_org_entity', (q: any) =>
+          q.eq('organizationId', args.workosOrgId).eq('entityType', 'loadInformation').eq('entityId', load._id),
         )
         .order('desc')
         .take(50),
