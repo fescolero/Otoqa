@@ -1,8 +1,8 @@
 import { v } from 'convex/values';
-import { internalMutation, internalQuery, query } from './_generated/server';
+import { internalMutation, internalQuery, query, QueryCtx } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { Doc, Id } from './_generated/dataModel';
-import { findLoadIdsByFacets } from './lib/loadFacets';
+import { canonicalizeFacetValue } from './lib/loadFacets';
 import {
   haversineDistance,
   calculateScheduleForYear,
@@ -463,8 +463,72 @@ export const getOptimizationResults = query({
 
 // ---- HISTORICAL LANE PERFORMANCE ANALYSIS ----
 
-const MAX_LOADS_PER_LANE = 200; // Keep reads manageable per lane
-const MAX_LANES_PER_QUERY = 10; // Process max 10 lanes per call to stay under 16MB read limit
+// Convex caps a single function execution at 4096 read operations. Each load
+// costs ~5 reads (1 get + 4 indexed collects) and matching a lane's loads
+// costs up to 1 read per candidate, so a lane's worst case is roughly
+// MAX_LOADS_PER_LANE * 6 reads. Keep lanes-per-call low enough that the
+// worst case stays under the limit; callers paginate lane IDs across calls.
+const MAX_LOADS_PER_LANE = 200;
+const MAX_LANES_PER_QUERY = 3;
+
+/**
+ * Find loadIds for a lane's (hcr, trip) within a date range.
+ *
+ * Unlike the generic findLoadIdsByFacets, this bounds reads for the 4096
+ * read-op execution limit: one ranged scan on the date-bounded facet index
+ * capped at MAX_LOADS_PER_LANE, plus (when a specific trip is set) one O(1)
+ * by_load_key lookup per candidate to verify the HCR tag. The generic helper
+ * scans every tag for the value across all dates, which blows the limit for
+ * high-volume lanes.
+ */
+async function findLaneLoadIdsInRange(
+  ctx: QueryCtx,
+  args: {
+    workosOrgId: string;
+    hcr: string;
+    trip?: string;
+    dateRangeStart: string;
+    dateRangeEnd: string;
+  },
+): Promise<Array<Id<'loadInformation'>>> {
+  const canonicalHcr = canonicalizeFacetValue(args.hcr);
+  const canonicalTrip = args.trip ? canonicalizeFacetValue(args.trip) : undefined;
+
+  // A specific trip is more selective than an HCR (many trips per HCR), so
+  // scan by trip when we have one and verify the HCR tag per candidate.
+  const primaryKey = canonicalTrip ? 'TRIP' : 'HCR';
+  const primaryValue = canonicalTrip ?? canonicalHcr;
+
+  const primaryTags = await ctx.db
+    .query('loadTags')
+    .withIndex('by_org_key_canonical_date', (q) =>
+      q
+        .eq('workosOrgId', args.workosOrgId)
+        .eq('facetKey', primaryKey)
+        .eq('canonicalValue', primaryValue)
+        .gte('firstStopDate', args.dateRangeStart)
+        .lte('firstStopDate', args.dateRangeEnd),
+    )
+    .take(MAX_LOADS_PER_LANE);
+
+  if (!canonicalTrip) {
+    return primaryTags.map((t) => t.loadId);
+  }
+
+  const hcrTags = await Promise.all(
+    primaryTags.map((t) =>
+      ctx.db
+        .query('loadTags')
+        .withIndex('by_load_key', (q) =>
+          q.eq('loadId', t.loadId).eq('facetKey', 'HCR'),
+        )
+        .unique(),
+    ),
+  );
+  return primaryTags
+    .filter((_, i) => hcrTags[i]?.canonicalValue === canonicalHcr)
+    .map((t) => t.loadId);
+}
 
 interface LanePerformanceResult {
   contractLaneId: string;
@@ -514,12 +578,12 @@ export const analyzeLanePerformance = query({
       const lane = await ctx.db.get(laneId);
       if (!lane || lane.isDeleted) continue;
 
-      // Fetch loads matching this lane by HCR + Trip via the facet system.
-      // findLoadIdsByFacets handles the (HCR, optional TRIP) intersection;
-      // we then post-filter for date range + status in app code.
+      // Fetch loads matching this lane by HCR + Trip via the facet system,
+      // scanning only the requested date window; status is post-filtered in
+      // app code.
       let loads: Doc<'loadInformation'>[] = [];
       if (lane.hcr) {
-        const matchedIds = await findLoadIdsByFacets(ctx, {
+        const matchedIds = await findLaneLoadIdsInRange(ctx, {
           workosOrgId: args.workosOrgId,
           hcr: lane.hcr,
           // Wildcard tripNumber means "any trip" — pass undefined.
@@ -527,10 +591,12 @@ export const analyzeLanePerformance = query({
             lane.tripNumber && lane.tripNumber !== '*'
               ? lane.tripNumber
               : undefined,
+          dateRangeStart: args.dateRangeStart,
+          dateRangeEnd: args.dateRangeEnd,
         });
 
         const fetched = await Promise.all(
-          matchedIds.slice(0, MAX_LOADS_PER_LANE).map((id) => ctx.db.get(id)),
+          matchedIds.map((id) => ctx.db.get(id)),
         );
         loads = fetched.filter((l): l is Doc<'loadInformation'> => {
           if (!l) return false;
