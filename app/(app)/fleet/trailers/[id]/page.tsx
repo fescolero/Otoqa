@@ -462,7 +462,17 @@ export default function TrailerDetailPage() {
 
   const activityContent = (
     <DSCard title="Recent activity">
-      <EntityAuditTimeline entityType="trailer" entityId={String(trailerId)} />
+      <EntityAuditTimeline
+        entityType="trailer"
+        entityId={String(trailerId)}
+        recordFallback={{
+          createdAt: trailer.createdAt,
+          createdBy: trailer.createdBy,
+          updatedAt: trailer.updatedAt,
+          deactivatedAt: trailer.isDeleted ? trailer.deletedAt : undefined,
+          deactivatedBy: trailer.isDeleted ? trailer.deletedBy : undefined,
+        }}
+      />
     </DSCard>
   );
 

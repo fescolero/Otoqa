@@ -9,6 +9,7 @@ import {
   scheduleDeleteClerkUser,
 } from './clerkSyncScheduler';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
+import { logAudit } from './lib/audit';
 
 /**
  * Carrier Mobile API
@@ -1277,6 +1278,19 @@ export const createDriver = mutation({
       isDeleted: false,
     });
 
+    // Log the creation
+    await logAudit(ctx, {
+      organizationId: args.carrierOrgId,
+      entityType: 'driver',
+      entityId: driverId,
+      entityName: `${args.firstName} ${args.lastName}`,
+      action: 'created',
+      performedBy: auth.identity.subject,
+      performedByName: auth.identity.name ?? undefined,
+      performedByEmail: auth.identity.email ?? undefined,
+      description: `Created driver ${args.firstName} ${args.lastName}`,
+    });
+
     // Create Clerk user for mobile app authentication (async, non-blocking)
     // This allows the driver to log in via phone number
     scheduleCreateClerkUserForDriver(ctx, {
@@ -1350,6 +1364,24 @@ export const updateDriver = mutation({
     }
 
     await ctx.db.patch(driverId, cleanUpdates);
+
+    // Log the update
+    {
+      const changedFields = Object.keys(cleanUpdates).filter((key) => key !== 'updatedAt');
+      await logAudit(ctx, {
+        organizationId: driver.organizationId,
+        entityType: 'driver',
+        entityId: driverId,
+        entityName: `${driver.firstName} ${driver.lastName}`,
+        action: 'updated',
+        performedBy: auth.identity.subject,
+        performedByName: auth.identity.name ?? undefined,
+        performedByEmail: auth.identity.email ?? undefined,
+        description: `Updated driver ${driver.firstName} ${driver.lastName}`,
+        changedFields,
+        changesAfter: JSON.stringify(cleanUpdates),
+      });
+    }
 
     // If phone number changed, update Clerk user
     if (updates.phone && updates.phone !== driver.phone) {
@@ -1442,6 +1474,19 @@ export const deleteDriver = mutation({
       deletedAt: Date.now(),
       deletedBy: 'mobile_app',
       updatedAt: Date.now(),
+    });
+
+    // Log the deactivation
+    await logAudit(ctx, {
+      organizationId: driver.organizationId,
+      entityType: 'driver',
+      entityId: args.driverId,
+      entityName: `${driver.firstName} ${driver.lastName}`,
+      action: 'deactivated',
+      performedBy: auth.identity.subject,
+      performedByName: auth.identity.name ?? undefined,
+      performedByEmail: auth.identity.email ?? undefined,
+      description: `Deactivated driver ${driver.firstName} ${driver.lastName}`,
     });
 
     // Delete Clerk user to prevent login
@@ -1605,6 +1650,19 @@ export const createOwnerDriver = mutation({
       ownerDriverId: driverId,
       isOwnerOperator: true,
       updatedAt: now,
+    });
+
+    // Log the creation
+    await logAudit(ctx, {
+      organizationId: args.carrierOrgId,
+      entityType: 'driver',
+      entityId: driverId,
+      entityName: `${args.firstName} ${args.lastName}`,
+      action: 'created',
+      performedBy: auth.identity.subject,
+      performedByName: auth.identity.name ?? undefined,
+      performedByEmail: auth.identity.email ?? undefined,
+      description: `Created driver ${args.firstName} ${args.lastName}`,
     });
 
     // Create Clerk user for mobile app authentication

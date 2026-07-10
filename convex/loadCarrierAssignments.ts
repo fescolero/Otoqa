@@ -6,6 +6,7 @@ import { updateLoadCount } from './stats_helpers';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { getLoadFacets } from './lib/loadFacets';
 import { computeLegScheduledTimes } from './_helpers/timeUtils';
+import { logAudit } from './lib/audit';
 
 /**
  * Load Carrier Assignments API
@@ -398,7 +399,7 @@ export const offerLoad = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId: createdBy, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     // Verify load exists
@@ -473,6 +474,19 @@ export const offerLoad = mutation({
       createdBy: createdBy,
     });
 
+    // Log offer
+    await logAudit(ctx, {
+      organizationId: load.workosOrgId,
+      entityType: 'loadCarrierAssignment',
+      entityId: assignmentId,
+      entityName: `Load ${load.internalId}`,
+      action: 'offered',
+      performedBy: createdBy,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Offered load ${load.internalId} to carrier ${carrierName ?? 'unknown'}`,
+    });
+
     return {
       assignmentId,
       carrierTotalAmount,
@@ -502,7 +516,7 @@ export const directAssign = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId: createdBy, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     // Verify load exists and is assignable
@@ -709,6 +723,19 @@ export const directAssign = mutation({
       }
     }
 
+    // Log direct assignment
+    await logAudit(ctx, {
+      organizationId: load.workosOrgId,
+      entityType: 'loadCarrierAssignment',
+      entityId: assignmentId,
+      entityName: `Load ${load.internalId}`,
+      action: 'carrier_assigned',
+      performedBy: createdBy,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Directly assigned carrier ${partnership.carrierName} to load ${load.internalId}`,
+    });
+
     return {
       assignmentId,
       carrierTotalAmount,
@@ -788,7 +815,7 @@ export const awardToCarrier = mutation({
     brokerOrgId: v.string(), // For verification
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const now = Date.now();
 
     const assignment = await ctx.db.get(args.assignmentId);
@@ -830,6 +857,19 @@ export const awardToCarrier = mutation({
       updatedAt: now,
     });
 
+    // Log award
+    await logAudit(ctx, {
+      organizationId: assignment.brokerOrgId,
+      entityType: 'loadCarrierAssignment',
+      entityId: args.assignmentId,
+      entityName: assignment.carrierName,
+      action: 'awarded',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Awarded load to carrier ${assignment.carrierName ?? 'unknown'}`,
+    });
+
     return { success: true };
   },
 });
@@ -843,7 +883,7 @@ export const withdrawOffer = mutation({
     brokerOrgId: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
       throw new Error('Assignment not found');
@@ -859,6 +899,19 @@ export const withdrawOffer = mutation({
 
     await ctx.db.patch(args.assignmentId, {
       status: 'WITHDRAWN',
+    });
+
+    // Log withdrawal
+    await logAudit(ctx, {
+      organizationId: assignment.brokerOrgId,
+      entityType: 'loadCarrierAssignment',
+      entityId: args.assignmentId,
+      entityName: assignment.carrierName,
+      action: 'withdrawn',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Withdrew offer to carrier ${assignment.carrierName ?? 'unknown'}`,
     });
 
     return { success: true };
@@ -1039,7 +1092,7 @@ export const cancelAssignment = mutation({
     cancellationNotes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const now = Date.now();
 
     const assignment = await ctx.db.get(args.assignmentId);
@@ -1073,6 +1126,19 @@ export const cancelAssignment = mutation({
       updatedAt: now,
     });
 
+    // Log cancellation
+    await logAudit(ctx, {
+      organizationId: assignment.brokerOrgId,
+      entityType: 'loadCarrierAssignment',
+      entityId: args.assignmentId,
+      entityName: assignment.carrierName,
+      action: 'cancelled',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Canceled assignment for carrier ${assignment.carrierName ?? 'unknown'} by ${args.canceledByParty} (reason: ${args.cancellationReason})`,
+    });
+
     return { success: true };
   },
 });
@@ -1104,7 +1170,7 @@ export const updatePaymentStatus = mutation({
     paymentNotes: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.brokerOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
       throw new Error('Assignment not found');
@@ -1135,6 +1201,22 @@ export const updatePaymentStatus = mutation({
     }
 
     await ctx.db.patch(args.assignmentId, updates);
+
+    // Log payment status update
+    await logAudit(ctx, {
+      organizationId: assignment.brokerOrgId,
+      entityType: 'loadCarrierAssignment',
+      entityId: args.assignmentId,
+      entityName: assignment.carrierName,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Changed payment status from ${assignment.paymentStatus ?? 'none'} to ${args.paymentStatus}`,
+      changesBefore: JSON.stringify({ paymentStatus: assignment.paymentStatus }),
+      changesAfter: JSON.stringify({ paymentStatus: args.paymentStatus }),
+      changedFields: ['paymentStatus'],
+    });
 
     return { success: true };
   },

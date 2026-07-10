@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 /**
  * Route Assignments - Maps recurring routes (HCR+Trip) to drivers/carriers
@@ -293,7 +294,7 @@ export const create = mutation({
   },
   returns: v.id('routeAssignments'),
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Validate that either driver or carrier is set (not both, not neither)
     if (!args.driverId && !args.carrierPartnershipId) {
@@ -347,7 +348,7 @@ export const create = mutation({
 
     const now = Date.now();
 
-    return await ctx.db.insert('routeAssignments', {
+    const assignmentId = await ctx.db.insert('routeAssignments', {
       workosOrgId: args.workosOrgId,
       hcr: args.hcr,
       tripNumber: args.tripNumber,
@@ -361,6 +362,20 @@ export const create = mutation({
       createdAt: now,
       updatedAt: now,
     });
+
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'routeAssignment',
+      entityId: assignmentId,
+      entityName: args.name,
+      action: 'created',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Created route assignment for HCR ${args.hcr}${args.tripNumber ? ` / Trip ${args.tripNumber}` : ''}`,
+    });
+
+    return assignmentId;
   },
 });
 
@@ -379,7 +394,7 @@ export const update = mutation({
   },
   returns: v.id('routeAssignments'),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const { id, ...updates } = args;
 
@@ -432,6 +447,23 @@ export const update = mutation({
 
     await ctx.db.patch(id, updateData);
 
+    const changedFields = Object.keys(updateData).filter((key) => key !== 'updatedAt');
+    if (changedFields.length > 0) {
+      await logAudit(ctx, {
+        organizationId: existing.workosOrgId,
+        entityType: 'routeAssignment',
+        entityId: id,
+        entityName: existing.name,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated route assignment for HCR ${existing.hcr}${existing.tripNumber ? ` / Trip ${existing.tripNumber}` : ''}`,
+        changedFields,
+        changesAfter: JSON.stringify(updateData),
+      });
+    }
+
     return id;
   },
 });
@@ -443,7 +475,7 @@ export const toggleActive = mutation({
   },
   returns: v.boolean(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const assignment = await ctx.db.get(args.id);
     if (!assignment) {
@@ -460,6 +492,18 @@ export const toggleActive = mutation({
       updatedAt: Date.now(),
     });
 
+    await logAudit(ctx, {
+      organizationId: assignment.workosOrgId,
+      entityType: 'routeAssignment',
+      entityId: args.id,
+      entityName: assignment.name,
+      action: newStatus ? 'reactivated' : 'deactivated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `${newStatus ? 'Activated' : 'Deactivated'} route assignment for HCR ${assignment.hcr}${assignment.tripNumber ? ` / Trip ${assignment.tripNumber}` : ''}`,
+    });
+
     return newStatus;
   },
 });
@@ -471,7 +515,7 @@ export const remove = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const assignment = await ctx.db.get(args.id);
     if (!assignment) {
@@ -482,6 +526,19 @@ export const remove = mutation({
     }
 
     await ctx.db.delete(args.id);
+
+    await logAudit(ctx, {
+      organizationId: assignment.workosOrgId,
+      entityType: 'routeAssignment',
+      entityId: args.id,
+      entityName: assignment.name,
+      action: 'deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deleted route assignment for HCR ${assignment.hcr}${assignment.tripNumber ? ` / Trip ${assignment.tripNumber}` : ''}`,
+      changesBefore: JSON.stringify(assignment),
+    });
 
     return null;
   },
@@ -529,7 +586,7 @@ export const updateSettings = mutation({
   },
   returns: v.id('autoAssignmentSettings'),
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const existing = await ctx.db
       .query('autoAssignmentSettings')
@@ -538,6 +595,7 @@ export const updateSettings = mutation({
 
     const now = Date.now();
 
+    let settingsId;
     if (existing) {
       // Update existing
       const updateData: Record<string, unknown> = {
@@ -552,10 +610,10 @@ export const updateSettings = mutation({
         updateData.scheduleIntervalMinutes = args.scheduleIntervalMinutes;
 
       await ctx.db.patch(existing._id, updateData);
-      return existing._id;
+      settingsId = existing._id;
     } else {
       // Create new with defaults
-      return await ctx.db.insert('autoAssignmentSettings', {
+      settingsId = await ctx.db.insert('autoAssignmentSettings', {
         workosOrgId: args.workosOrgId,
         enabled: args.enabled ?? false,
         triggerOnCreate: args.triggerOnCreate ?? false,
@@ -565,5 +623,18 @@ export const updateSettings = mutation({
         updatedAt: now,
       });
     }
+
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'routeAssignment',
+      entityId: settingsId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Updated route assignment settings',
+    });
+
+    return settingsId;
   },
 });

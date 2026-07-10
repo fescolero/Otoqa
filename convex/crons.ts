@@ -56,6 +56,18 @@ crons.cron(
   {},
 );
 
+// ✅ Archive old audit log entries monthly
+// Moves auditLog rows older than 12 months to S3 cold storage as JSONL,
+// grouped by calendar month, then deletes them. Self-reschedules within a
+// run if the backlog exceeds the per-tick batch cap.
+// See convex/auditLogArchive.ts for the orchestrator and DB helpers.
+crons.cron(
+  'archive-old-audit-logs',
+  '45 3 1 * *', // Monthly on the 1st at 3:45 AM UTC (staggered after the daily location jobs)
+  internal.auditLogArchive.archiveOldAuditLogs,
+  {},
+);
+
 // ==========================================
 // AUTO-ASSIGNMENT & RECURRING LOADS
 // ==========================================

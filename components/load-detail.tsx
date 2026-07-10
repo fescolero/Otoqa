@@ -55,6 +55,7 @@ import {
   resolveStatusId,
 } from '@/components/web';
 import { toast } from 'sonner';
+import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 
 interface LoadDetailProps {
   loadId: string;
@@ -1182,9 +1183,15 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   }
 
   const activityContent = (
-    <DSCard title="Trip activity">
-      <DSActivity items={activityItems} emptyText="No activity yet." />
-    </DSCard>
+    <div className="flex flex-col gap-3.5">
+      <DSCard title="Trip activity">
+        <DSActivity items={activityItems} emptyText="No activity yet." />
+      </DSCard>
+      {/* Audit trail — status changes, holds, assignments, POD uploads. */}
+      <DSCard title="History">
+        <EntityAuditTimeline entityType="load" entityId={loadId} limit={25} />
+      </DSCard>
+    </div>
   );
 
   // Pay-plan card now lives inline in the Overview tab — no dedicated Pay

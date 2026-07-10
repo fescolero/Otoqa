@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 /**
  * Driver Settlement Engine
@@ -762,7 +763,7 @@ export const updateManualPayable = mutation({
     isRebillable: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
 
     if (!payable) {
@@ -795,7 +796,19 @@ export const updateManualPayable = mutation({
       isRebillable: args.isRebillable,
       updatedAt: Date.now(),
     });
-    
+
+    await logAudit(ctx, {
+      organizationId: payable.workosOrgId,
+      entityType: 'loadPayable',
+      entityId: args.payableId,
+      entityName: args.description,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Updated manual adjustment "${args.description}" to $${totalAmount.toFixed(2)}`,
+    });
+
     return { success: true, message: 'Manual adjustment updated' };
   },
 });
@@ -809,7 +822,7 @@ export const deleteManualPayable = mutation({
     payableId: v.id('loadPayables'),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
 
     if (!payable) {
@@ -818,7 +831,7 @@ export const deleteManualPayable = mutation({
     if (payable.workosOrgId !== callerOrgId) {
       throw new Error('Payable not found');
     }
-    
+
     if (payable.sourceType !== 'MANUAL') {
       throw new Error('Can only delete manual adjustments');
     }
@@ -832,7 +845,19 @@ export const deleteManualPayable = mutation({
     }
     
     await ctx.db.delete(args.payableId);
-    
+
+    await logAudit(ctx, {
+      organizationId: payable.workosOrgId,
+      entityType: 'loadPayable',
+      entityId: args.payableId,
+      entityName: payable.description,
+      action: 'deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deleted manual adjustment "${payable.description}" ($${payable.totalAmount.toFixed(2)})`,
+    });
+
     return { success: true, message: 'Manual adjustment deleted' };
   },
 });
@@ -968,7 +993,7 @@ export const generateStatement = mutation({
     grossTotal: v.float64(),
   }),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.organizationId !== callerOrgId) {
       throw new Error('Driver not found');
@@ -1043,6 +1068,18 @@ export const generateStatement = mutation({
         updatedAt: now,
       });
     }
+
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'driverSettlement',
+      entityId: settlementId,
+      entityName: statementNumber,
+      action: 'created',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Generated settlement ${statementNumber} for ${driver.firstName} ${driver.lastName} (${new Date(args.periodStart).toLocaleDateString('en-US')} - ${new Date(args.periodEnd).toLocaleDateString('en-US')})`,
+    });
 
     return {
       settlementId,
@@ -1122,7 +1159,7 @@ export const updateSettlementStatus = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
@@ -1190,6 +1227,21 @@ export const updateSettlementStatus = mutation({
     }
 
     await ctx.db.patch(args.settlementId, updates);
+
+    await logAudit(ctx, {
+      organizationId: settlement.workosOrgId,
+      entityType: 'driverSettlement',
+      entityId: args.settlementId,
+      entityName: settlement.statementNumber,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Changed settlement status from ${settlement.status} to ${args.newStatus}`,
+      changesBefore: JSON.stringify({ status: settlement.status }),
+      changesAfter: JSON.stringify({ status: args.newStatus }),
+      changedFields: ['status'],
+    });
 
     return null;
   },
@@ -1317,7 +1369,7 @@ export const addManualAdjustment = mutation({
   },
   returns: v.id('loadPayables'),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
@@ -1350,6 +1402,18 @@ export const addManualAdjustment = mutation({
       createdAt: now,
       createdBy: userId,
       updatedAt: now,
+    });
+
+    await logAudit(ctx, {
+      organizationId: settlement.workosOrgId,
+      entityType: 'driverSettlement',
+      entityId: args.settlementId,
+      entityName: settlement.statementNumber,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Added manual adjustment "${args.description}" ($${args.amount.toFixed(2)}) to settlement ${settlement.statementNumber}`,
     });
 
     return payableId;
@@ -1524,7 +1588,7 @@ export const removePayableFromSettlement = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (payable && payable.workosOrgId !== callerOrgId) {
       throw new Error('Payable not found');
@@ -1548,6 +1612,18 @@ export const removePayableFromSettlement = mutation({
       updatedAt: Date.now(),
     });
 
+    await logAudit(ctx, {
+      organizationId: settlement.workosOrgId,
+      entityType: 'driverSettlement',
+      entityId: settlement._id,
+      entityName: settlement.statementNumber,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Removed payable "${payable.description}" from settlement ${settlement.statementNumber}`,
+    });
+
     return null;
   },
 });
@@ -1563,7 +1639,7 @@ export const deleteSettlement = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
@@ -1599,6 +1675,19 @@ export const deleteSettlement = mutation({
     // Delete the settlement
     await ctx.db.delete(args.settlementId);
 
+    await logAudit(ctx, {
+      organizationId: settlement.workosOrgId,
+      entityType: 'driverSettlement',
+      entityId: args.settlementId,
+      entityName: settlement.statementNumber,
+      action: 'deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deleted settlement ${settlement.statementNumber}`,
+      changesBefore: JSON.stringify(settlement),
+    });
+
     return null;
   },
 });
@@ -1620,7 +1709,7 @@ export const refreshDraftSettlement = mutation({
     grossTotal: v.float64(),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement) throw new Error('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
@@ -1776,6 +1865,18 @@ export const refreshDraftSettlement = mutation({
       updatedAt: Date.now(),
     });
 
+    await logAudit(ctx, {
+      organizationId: settlement.workosOrgId,
+      entityType: 'driverSettlement',
+      entityId: args.settlementId,
+      entityName: settlement.statementNumber,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Refreshed draft settlement ${settlement.statementNumber} (${payablesToAssign.length} payables, $${grossTotal.toFixed(2)})`,
+    });
+
     return {
       payablesAdded: payablesToAssign.length,
       payablesRemoved: previousCount,
@@ -1810,7 +1911,7 @@ export const generateStatementFromPlan = mutation({
     planName: v.string(),
   }),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const driver = await ctx.db.get(args.driverId);
     if (!driver) throw new Error('Driver not found');
     if (driver.organizationId !== callerOrgId) {
@@ -1965,6 +2066,18 @@ export const generateStatementFromPlan = mutation({
         updatedAt: now,
       });
     }
+
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'driverSettlement',
+      entityId: settlementId,
+      entityName: statementNumber,
+      action: 'created',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Generated settlement ${statementNumber} for ${driver.firstName} ${driver.lastName} from plan "${plan.name}" (${periodStart.toLocaleDateString('en-US')} - ${periodEnd.toLocaleDateString('en-US')})`,
+    });
 
     return {
       settlementId,
@@ -2261,7 +2374,7 @@ export const bulkGenerateByPlan = mutation({
   },
   returns: v.object({ scheduled: v.number() }),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay Plan not found');
     if (plan.workosOrgId !== callerOrgId) throw new Error('Pay Plan not found');
@@ -2296,6 +2409,23 @@ export const bulkGenerateByPlan = mutation({
     }
 
     console.log(`[BULK_SETTLE] v4 fan-out | Plan: ${args.planId} | Scheduled: ${scheduled}`);
+
+    // Per-driver generation runs async in internal mutations (no user
+    // identity there), so the bulk action is logged here at dispatch.
+    if (scheduled > 0) {
+      await logAudit(ctx, {
+        organizationId: callerOrgId,
+        entityType: 'driverSettlement',
+        entityId: 'bulk',
+        entityName: plan.name,
+        action: 'bulk_created',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Triggered settlement generation for ${scheduled} driver${scheduled === 1 ? '' : 's'} on plan "${plan.name}"`,
+        metadata: JSON.stringify({ scheduled, planId: args.planId, planName: plan.name }),
+      });
+    }
     return { scheduled };
   },
 });

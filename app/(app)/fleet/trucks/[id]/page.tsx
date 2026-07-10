@@ -550,7 +550,17 @@ export default function TruckDetailPage() {
   // ── Section: Activity ────────────────────────────────────────────────
   const activityContent = (
     <DSCard title="Recent activity">
-      <EntityAuditTimeline entityType="truck" entityId={String(truckId)} />
+      <EntityAuditTimeline
+        entityType="truck"
+        entityId={String(truckId)}
+        recordFallback={{
+          createdAt: truck.createdAt,
+          createdBy: truck.createdBy,
+          updatedAt: truck.updatedAt,
+          deactivatedAt: truck.isDeleted ? truck.deletedAt : undefined,
+          deactivatedBy: truck.isDeleted ? truck.deletedBy : undefined,
+        }}
+      />
     </DSCard>
   );
 

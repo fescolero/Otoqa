@@ -1,7 +1,10 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
+
+type CallerIdentity = Awaited<ReturnType<typeof requireCallerIdentity>>;
 
 /**
  * Load Hold Workflow
@@ -183,6 +186,146 @@ export const canHoldLoad = query({
 // ============================================
 
 /**
+ * Single-load hold core, shared by holdLoad and bulkHoldLoads so the bulk
+ * path runs in the same transaction instead of dispatching per-load
+ * mutations. Writes the load's audit row on success.
+ */
+async function holdLoadCore(
+  ctx: MutationCtx,
+  caller: CallerIdentity,
+  loadId: Id<'loadInformation'>,
+  reason: string,
+): Promise<{ success: boolean; message: string; payablesUnassigned?: number }> {
+  const load = await ctx.db.get(loadId);
+  if (!load || load.workosOrgId !== caller.orgId) {
+    return {
+      success: false,
+      message: 'Load not found',
+    };
+  }
+
+  // Check if already held
+  if (load.isHeld) {
+    return {
+      success: false,
+      message: 'Load is already held',
+    };
+  }
+
+  const now = Date.now();
+
+  // Find all payables for this load
+  const payables = await ctx.db
+    .query('loadPayables')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+
+  // Check if any are in non-DRAFT settlements
+  for (const payable of payables) {
+    if (payable.settlementId) {
+      const settlement = await ctx.db.get(payable.settlementId);
+      if (settlement && settlement.status !== 'DRAFT') {
+        return {
+          success: false,
+          message: `Cannot hold - payables are in ${settlement.status} settlement ${settlement.statementNumber}`,
+        };
+      }
+    }
+  }
+
+  // Unassign all payables from their settlements
+  let unassignedCount = 0;
+  for (const payable of payables) {
+    if (payable.settlementId) {
+      await ctx.db.patch(payable._id, {
+        settlementId: undefined,
+        updatedAt: now,
+      });
+      unassignedCount++;
+    }
+  }
+
+  // Mark load as held
+  await ctx.db.patch(loadId, {
+    isHeld: true,
+    heldReason: reason,
+    heldAt: now,
+    heldBy: caller.userId,
+    updatedAt: now,
+  });
+
+  await logAudit(ctx, {
+    organizationId: caller.orgId,
+    entityType: 'load',
+    entityId: loadId,
+    entityName: load.internalId,
+    action: 'held',
+    performedBy: caller.userId,
+    performedByName: caller.userName,
+    performedByEmail: caller.userEmail,
+    description: `Held load ${load.internalId} from settlement: ${reason}`,
+  });
+
+  return {
+    success: true,
+    message: `Load ${load.internalId} held successfully`,
+    payablesUnassigned: unassignedCount,
+  };
+}
+
+/**
+ * Single-load release core, shared by releaseLoad and bulkReleaseLoads.
+ * Writes the load's audit row on success.
+ */
+async function releaseLoadCore(
+  ctx: MutationCtx,
+  caller: CallerIdentity,
+  loadId: Id<'loadInformation'>,
+): Promise<{ success: boolean; message: string }> {
+  const load = await ctx.db.get(loadId);
+  if (!load || load.workosOrgId !== caller.orgId) {
+    return {
+      success: false,
+      message: 'Load not found',
+    };
+  }
+
+  // Check if actually held
+  if (!load.isHeld) {
+    return {
+      success: false,
+      message: 'Load is not currently held',
+    };
+  }
+
+  // Release the hold
+  await ctx.db.patch(loadId, {
+    isHeld: false,
+    heldReason: undefined,
+    heldAt: undefined,
+    heldBy: undefined,
+    updatedAt: Date.now(),
+  });
+
+  await logAudit(ctx, {
+    organizationId: caller.orgId,
+    entityType: 'load',
+    entityId: loadId,
+    entityName: load.internalId,
+    action: 'released',
+    performedBy: caller.userId,
+    performedByName: caller.userName,
+    performedByEmail: caller.userEmail,
+    description: `Released hold on load ${load.internalId}`,
+  });
+
+  return {
+    success: true,
+    message: `Load ${load.internalId} released successfully`,
+  };
+}
+
+/**
  * Hold a load (exclude from settlement)
  * This is the #1 Power User feature for accountants
  */
@@ -198,70 +341,8 @@ export const holdLoad = mutation({
     payablesUnassigned: v.optional(v.number()),
   }),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
-    const load = await ctx.db.get(args.loadId);
-    if (!load || load.workosOrgId !== callerOrgId) {
-      return {
-        success: false,
-        message: 'Load not found',
-      };
-    }
-
-    // Check if already held
-    if (load.isHeld) {
-      return {
-        success: false,
-        message: 'Load is already held',
-      };
-    }
-
-    const now = Date.now();
-
-    // Find all payables for this load
-    const payables = await ctx.db
-      .query('loadPayables')
-      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
-      .collect();
-
-    // Check if any are in non-DRAFT settlements
-    for (const payable of payables) {
-      if (payable.settlementId) {
-        const settlement = await ctx.db.get(payable.settlementId);
-        if (settlement && settlement.status !== 'DRAFT') {
-          return {
-            success: false,
-            message: `Cannot hold - payables are in ${settlement.status} settlement ${settlement.statementNumber}`,
-          };
-        }
-      }
-    }
-
-    // Unassign all payables from their settlements
-    let unassignedCount = 0;
-    for (const payable of payables) {
-      if (payable.settlementId) {
-        await ctx.db.patch(payable._id, {
-          settlementId: undefined,
-          updatedAt: now,
-        });
-        unassignedCount++;
-      }
-    }
-
-    // Mark load as held
-    await ctx.db.patch(args.loadId, {
-      isHeld: true,
-      heldReason: args.reason,
-      heldAt: now,
-      heldBy: userId,
-      updatedAt: now,
-    });
-
-    return {
-      success: true,
-      message: `Load ${load.internalId} held successfully`,
-      payablesUnassigned: unassignedCount,
-    };
+    const caller = await requireCallerIdentity(ctx);
+    return await holdLoadCore(ctx, caller, args.loadId, args.reason);
   },
 });
 
@@ -278,38 +359,8 @@ export const releaseLoad = mutation({
     message: v.string(),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
-    const load = await ctx.db.get(args.loadId);
-    if (!load || load.workosOrgId !== callerOrgId) {
-      return {
-        success: false,
-        message: 'Load not found',
-      };
-    }
-
-    // Check if actually held
-    if (!load.isHeld) {
-      return {
-        success: false,
-        message: 'Load is not currently held',
-      };
-    }
-
-    const now = Date.now();
-
-    // Release the hold
-    await ctx.db.patch(args.loadId, {
-      isHeld: false,
-      heldReason: undefined,
-      heldAt: undefined,
-      heldBy: undefined,
-      updatedAt: now,
-    });
-
-    return {
-      success: true,
-      message: `Load ${load.internalId} released successfully`,
-    };
+    const caller = await requireCallerIdentity(ctx);
+    return await releaseLoadCore(ctx, caller, args.loadId);
   },
 });
 
@@ -333,21 +384,13 @@ export const bulkHoldLoads = mutation({
     ),
   }),
   handler: async (ctx, args) => {
-    await requireCallerOrgId(ctx);
+    const caller = await requireCallerIdentity(ctx);
     let successful = 0;
     let failed = 0;
     const errors: Array<{ loadId: Id<'loadInformation'>; error: string }> = [];
 
     for (const loadId of args.loadIds) {
-      const result = await ctx.runMutation(
-        // @ts-ignore - internal call
-        ctx.mutation('loadHoldWorkflow:holdLoad'),
-        {
-          loadId,
-          reason: args.reason,
-          userId: args.userId,
-        }
-      );
+      const result = await holdLoadCore(ctx, caller, loadId, args.reason);
 
       if (result.success) {
         successful++;
@@ -387,20 +430,13 @@ export const bulkReleaseLoads = mutation({
     ),
   }),
   handler: async (ctx, args) => {
-    await requireCallerOrgId(ctx);
+    const caller = await requireCallerIdentity(ctx);
     let successful = 0;
     let failed = 0;
     const errors: Array<{ loadId: Id<'loadInformation'>; error: string }> = [];
 
     for (const loadId of args.loadIds) {
-      const result = await ctx.runMutation(
-        // @ts-ignore - internal call
-        ctx.mutation('loadHoldWorkflow:releaseLoad'),
-        {
-          loadId,
-          userId: args.userId,
-        }
-      );
+      const result = await releaseLoadCore(ctx, caller, loadId);
 
       if (result.success) {
         successful++;
@@ -437,7 +473,7 @@ export const uploadPod = mutation({
     wasReleased: v.boolean(),
   }),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load || load.workosOrgId !== callerOrgId) {
       return {
@@ -472,6 +508,20 @@ export const uploadPod = mutation({
       });
       wasReleased = true;
     }
+
+    await logAudit(ctx, {
+      organizationId: callerOrgId,
+      entityType: 'load',
+      entityId: args.loadId,
+      entityName: load.internalId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: wasReleased
+        ? `Uploaded POD document for load ${load.internalId} and released hold`
+        : `Uploaded POD document for load ${load.internalId}`,
+    });
 
     return {
       success: true,

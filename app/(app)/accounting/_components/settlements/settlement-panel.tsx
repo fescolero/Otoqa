@@ -23,6 +23,7 @@ import { api } from '@/convex/_generated/api';
 import { classifyPayable, type PayableCategory } from '@/convex/lib/settlementShared';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useSettlementsLedger } from './use-settlements-ledger';
+import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 import { Avatar, WBtn, WIcon, type IconName } from '@/components/web';
 import {
   blockersFor,
@@ -1628,6 +1629,17 @@ export function SettlementPanel({
                 >
                   Held — excluded from this statement
                 </div>
+              </div>
+            </>
+          )}
+
+          {/* Audit trail — driver settlements write audit rows; the carrier
+              ledger doesn't yet, so the panel stays clean for that party. */}
+          {party === 'driver' && (
+            <>
+              <StSectionLabel>Audit trail</StSectionLabel>
+              <div style={{ ...CARD_STYLE, padding: '10px 14px', maxHeight: 256, overflowY: 'auto' }}>
+                <EntityAuditTimeline entityType="driverSettlement" entityId={String(row._id)} limit={25} />
               </div>
             </>
           )}

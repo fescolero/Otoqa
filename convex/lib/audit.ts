@@ -1,3 +1,5 @@
+import type { WithoutSystemFields } from 'convex/server';
+import type { Doc } from '../_generated/dataModel';
 import type { MutationCtx } from '../_generated/server';
 
 /**
@@ -29,7 +31,17 @@ export type AuditEntityType =
   | 'carrierPartnership'
   | 'dispatchLeg'
   | 'load'
-  | 'organization';
+  | 'organization'
+  | 'driverSettlement'
+  | 'invoice'
+  | 'loadCarrierAssignment'
+  | 'customer'
+  | 'payPlan'
+  | 'contractLane'
+  | 'routeAssignment'
+  | 'recurringLoad'
+  | 'integration'
+  | 'carrierProfileAssignment';
 
 export type AuditAction =
   | 'created'
@@ -43,33 +55,35 @@ export type AuditAction =
   | 'permanently_deleted'
   | 'unlocked'
   | 'bulk_created'
+  | 'bulk_updated'
   | 'bulk_assigned'
+  | 'voided'
   | 'set_default'
   | 'unset_default'
   | 'split'
   | 'driver_assigned'
   | 'driver_removed'
   | 'carrier_assigned'
-  | 'resource_unassigned';
+  | 'resource_unassigned'
+  | 'offered'
+  | 'accepted'
+  | 'declined'
+  | 'awarded'
+  | 'withdrawn'
+  | 'cancelled'
+  | 'started'
+  | 'completed'
+  | 'held'
+  | 'released'
+  | 'archived';
 
-export interface AuditEntry {
-  organizationId: string;
+// Derived from the schema so a new auditLog column can't silently drift out
+// of the write path; only the closed-union fields and the helper-supplied
+// timestamp are overridden.
+export type AuditEntry = Omit<WithoutSystemFields<Doc<'auditLog'>>, 'timestamp' | 'entityType' | 'action'> & {
   entityType: AuditEntityType;
-  entityId: string;
   action: AuditAction;
-  performedBy: string;
-
-  entityName?: string;
-  description?: string;
-  performedByName?: string;
-  performedByEmail?: string;
-  changesBefore?: string;
-  changesAfter?: string;
-  changedFields?: string[];
-  ipAddress?: string;
-  userAgent?: string;
-  metadata?: string;
-}
+};
 
 export async function logAudit(ctx: MutationCtx, entry: AuditEntry): Promise<void> {
   await ctx.db.insert('auditLog', {

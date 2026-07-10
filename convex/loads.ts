@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import type { MutationCtx } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
@@ -1438,7 +1439,11 @@ export const createLoad = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { userId: createdBy, userName: createdByName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const {
+      userId: createdBy,
+      userName: createdByName,
+      userEmail: createdByEmail,
+    } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     if (args.stops.length === 0) throw new Error('At least one stop is required');
 
@@ -1614,6 +1619,19 @@ export const createLoad = mutation({
       }
     }
 
+    // Log the creation
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'load',
+      entityId: loadId,
+      entityName: args.internalId,
+      action: 'created',
+      performedBy: createdBy,
+      performedByName: createdByName,
+      performedByEmail: createdByEmail,
+      description: `Created load ${args.orderNumber}`,
+    });
+
     return loadId;
   },
 });
@@ -1631,13 +1649,29 @@ export const updateLoadStatus = mutation({
     canceledBy: v.optional(v.string()), // WorkOS user ID
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
     const result = await applyLoadStatusUpdate(ctx, args);
 
     await updateLoadCount(ctx, result.load.workosOrgId, result.previousStatus, result.nextStatus);
+
+    // Log the status change
+    await logAudit(ctx, {
+      organizationId: callerOrgId,
+      entityType: 'load',
+      entityId: args.loadId,
+      entityName: load.internalId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Changed load status from ${result.previousStatus} to ${result.nextStatus}`,
+      changedFields: ['status'],
+      changesBefore: JSON.stringify({ status: result.previousStatus }),
+      changesAfter: JSON.stringify({ status: result.nextStatus }),
+    });
   },
 });
 
@@ -1666,7 +1700,7 @@ export const bulkUpdateLoadStatus = mutation({
     canceledBy: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     if (args.loadIds.length === 0) return { success: 0, failed: 0 };
 
     const now = Date.now();
@@ -1754,6 +1788,21 @@ export const bulkUpdateLoadStatus = mutation({
       }
     }
 
+    // Log the bulk update (one row for the whole batch)
+    if (success > 0) {
+      await logAudit(ctx, {
+        organizationId: callerOrgId,
+        entityType: 'load',
+        entityId: 'bulk',
+        action: 'bulk_updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated status to ${args.status} for ${success} load${success === 1 ? '' : 's'}`,
+        metadata: JSON.stringify({ count: success, status: args.status }),
+      });
+    }
+
     return { success, failed };
   },
 });
@@ -1768,7 +1817,7 @@ export const updateLoadMiles = mutation({
     manualMiles: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
@@ -1794,6 +1843,25 @@ export const updateLoadMiles = mutation({
       lastMilesUpdate: new Date().toISOString(),
       updatedAt: Date.now(),
     });
+
+    // Log the miles update
+    {
+      const changedFields = (['contractMiles', 'importedMiles', 'googleMiles', 'manualMiles'] as const).filter(
+        (field) => args[field] !== undefined && args[field] !== load[field],
+      );
+      await logAudit(ctx, {
+        organizationId: callerOrgId,
+        entityType: 'load',
+        entityId: args.loadId,
+        entityName: load.internalId,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: 'Updated load miles',
+        changedFields,
+      });
+    }
   },
 });
 
@@ -1801,7 +1869,7 @@ export const updateLoadMiles = mutation({
 export const deleteLoad = mutation({
   args: { loadId: v.id('loadInformation') },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const loadToDelete = await ctx.db.get(args.loadId);
     if (!loadToDelete) throw new Error('Load not found');
     if (loadToDelete.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
@@ -1839,6 +1907,20 @@ export const deleteLoad = mutation({
     // touched here — they're pruned by the nightly cleanup cron.
     await removeAllTagsForLoad(ctx, args.loadId);
     await ctx.db.delete(args.loadId);
+
+    // Log the deletion
+    await logAudit(ctx, {
+      organizationId: callerOrgId,
+      entityType: 'load',
+      entityId: args.loadId,
+      entityName: loadToDelete.internalId,
+      action: 'deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deleted load ${loadToDelete.orderNumber}`,
+      changesBefore: JSON.stringify(loadToDelete),
+    });
   },
 });
 
@@ -1855,7 +1937,7 @@ export const updateStopTimes = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const stop = await ctx.db.get(args.stopId);
     if (!stop) throw new Error('Stop not found');
     const stopLoad = await ctx.db.get(stop.loadId);
@@ -1901,6 +1983,19 @@ export const updateStopTimes = mutation({
         });
       }
     }
+
+    // Log the stop time update
+    await logAudit(ctx, {
+      organizationId: callerOrgId,
+      entityType: 'load',
+      entityId: stop.loadId,
+      entityName: stopLoad.internalId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Updated stop times for load ${stopLoad.orderNumber}`,
+    });
 
     return stopId;
   },
@@ -2078,7 +2173,7 @@ export const updateLoadAttributes = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) throw new Error('Load not found');
     if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
@@ -2101,6 +2196,20 @@ export const updateLoadAttributes = mutation({
     await ctx.runMutation(internal.carrierPayCalculation.recalculateForLoad, {
       loadId,
       userId,
+    });
+
+    // Log the attribute update
+    await logAudit(ctx, {
+      organizationId: callerOrgId,
+      entityType: 'load',
+      entityId: loadId,
+      entityName: load.internalId,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: 'Updated load attributes',
+      changedFields: Object.keys(updateData).filter((key) => key !== 'updatedAt'),
     });
 
     return loadId;

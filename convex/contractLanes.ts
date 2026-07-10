@@ -4,6 +4,7 @@ import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { scheduleRuleValidator } from './lib/validators';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 import { registerContractLaneFacet } from './lib/loadFacets';
 
 // List unique HCR/Trip combinations for route assignments
@@ -151,7 +152,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId: createdBy } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId: createdBy, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
 
     const laneId = await ctx.db.insert('contractLanes', {
@@ -211,6 +212,19 @@ export const create = mutation({
       'TRIP',
       args.tripNumber,
     );
+
+    // Log the creation
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'contractLane',
+      entityId: laneId,
+      entityName: args.contractName,
+      action: 'created',
+      performedBy: createdBy,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Created contract lane ${args.contractName}`,
+    });
 
     return laneId;
   },
@@ -275,7 +289,7 @@ export const update = mutation({
     isActive: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
       throw new Error('Not authorized for this lane');
@@ -302,6 +316,24 @@ export const update = mutation({
       );
     }
 
+    // Log the update
+    {
+      const changedFields = Object.keys(updates);
+      await logAudit(ctx, {
+        organizationId: lane.workosOrgId,
+        entityType: 'contractLane',
+        entityId: id,
+        entityName: updates.contractName ?? lane.contractName,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated contract lane ${updates.contractName ?? lane.contractName}`,
+        changedFields,
+        changesAfter: JSON.stringify(updates),
+      });
+    }
+
     return id;
   },
 });
@@ -313,7 +345,7 @@ export const deactivate = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
       throw new Error('Not authorized for this lane');
@@ -323,6 +355,19 @@ export const deactivate = mutation({
       deletedAt: Date.now(),
       deletedBy: userId,
       updatedAt: Date.now(),
+    });
+
+    // Log the deactivation
+    await logAudit(ctx, {
+      organizationId: lane.workosOrgId,
+      entityType: 'contractLane',
+      entityId: args.id,
+      entityName: lane.contractName,
+      action: 'deactivated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deactivated contract lane ${lane.contractName}`,
     });
 
     return args.id;
@@ -335,7 +380,7 @@ export const restore = mutation({
     id: v.id('contractLanes'),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
       throw new Error('Not authorized for this lane');
@@ -345,6 +390,19 @@ export const restore = mutation({
       deletedAt: undefined,
       deletedBy: undefined,
       updatedAt: Date.now(),
+    });
+
+    // Log the restoration
+    await logAudit(ctx, {
+      organizationId: lane.workosOrgId,
+      entityType: 'contractLane',
+      entityId: args.id,
+      entityName: lane.contractName,
+      action: 'restored',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Restored contract lane ${lane.contractName}`,
     });
 
     return args.id;
@@ -357,12 +415,27 @@ export const permanentDelete = mutation({
     id: v.id('contractLanes'),
   },
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
       throw new Error('Not authorized for this lane');
     }
     await ctx.db.delete(args.id);
+
+    // Log the permanent deletion
+    await logAudit(ctx, {
+      organizationId: lane.workosOrgId,
+      entityType: 'contractLane',
+      entityId: args.id,
+      entityName: lane.contractName,
+      action: 'permanently_deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Permanently deleted contract lane ${lane.contractName}`,
+      changesBefore: JSON.stringify(lane),
+    });
+
     return args.id;
   },
 });
@@ -521,7 +594,7 @@ export const bulkUpsert = mutation({
     restoreLaneIds: v.array(v.id('contractLanes')),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     let created = 0;
     let updated = 0;
@@ -575,6 +648,21 @@ export const bulkUpsert = mutation({
       restored++;
     }
 
+    // Log the bulk upsert as a single row
+    if (created + updated + restored > 0) {
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'contractLane',
+        entityId: 'bulk',
+        action: 'bulk_created',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Bulk upserted contract lanes (${created} created, ${updated} updated, ${restored} restored)`,
+        metadata: JSON.stringify({ created, updated, restored }),
+      });
+    }
+
     return { created, updated, restored, skipped: 0 };
   },
 });
@@ -598,7 +686,7 @@ export const bulkImport = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
     let imported = 0;
     let skipped = 0;
@@ -663,7 +751,22 @@ export const bulkImport = mutation({
 
     // ✅ REMOVED: periodicCleanup was causing excessive reads (15GB+/day)
     // Promotion is now event-driven via createLaneAndBackfill
-    
+
+    // Log the bulk import as a single row
+    if (imported > 0) {
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'contractLane',
+        entityId: 'bulk',
+        action: 'bulk_created',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Bulk imported ${imported} contract lane(s) (${skipped} skipped)`,
+        metadata: JSON.stringify({ imported, skipped }),
+      });
+    }
+
     return { imported, skipped };
   },
 });
