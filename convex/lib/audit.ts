@@ -31,7 +31,9 @@ export type AuditEntityType =
   | 'carrierPartnership'
   | 'dispatchLeg'
   | 'load'
-  | 'organization';
+  | 'organization'
+  | 'driverSettlement'
+  | 'invoice';
 
 export type AuditAction =
   | 'created'
@@ -44,7 +46,9 @@ export type AuditAction =
   | 'permanently_deleted'
   | 'unlocked'
   | 'bulk_created'
+  | 'bulk_updated'
   | 'bulk_assigned'
+  | 'voided'
   | 'set_default'
   | 'unset_default'
   | 'split'
