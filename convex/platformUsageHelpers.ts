@@ -26,6 +26,19 @@ import { getPeriodKey } from './accountingStatsHelpers';
 export const DEFAULT_BILLING_RATE_PER_LOAD = 2.5;
 
 /**
+ * When platform metering went live — the start of the first cycle billed on
+ * entry date (July 2026).
+ *
+ * Loads created BEFORE this moment predate metering: their createdAt reflects
+ * whenever the record happened to enter Otoqa (bulk imports, sync backfills),
+ * not real usage, so the recalc attributes them to their SERVICE month
+ * (firstStopDate) to keep historical cycles truthful. Loads created at or
+ * after this moment are attributed to their entry month (createdAt) — the
+ * auditable, immutable billing basis.
+ */
+export const METERING_CUTOVER_MS = Date.UTC(2026, 6, 1); // Jul 1, 2026 UTC
+
+/**
  * Record that a load was written into the system for an org.
  * Call from EVERY code path that inserts into loadInformation
  * (manual create, FourKites sync, recurring-load generator, ...).

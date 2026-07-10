@@ -2607,11 +2607,13 @@ export default defineSchema({
   // Platform-billing usage metering (aggregate table pattern, like
   // accountingPeriodStats). Otoqa bills each org a flat rate for every load
   // written into the system, invoiced monthly. One row per org × period
-  // ("YYYY-MM", UTC month of the load's createdAt). Incremented on every
-  // loadInformation insert (see platformUsageHelpers.recordLoadWritten) and
-  // drift-corrected nightly from source (see platformUsage.ts). Loads count
-  // for the cycle they were created in — later edits/cancellations do not
-  // remove the charge, so this counter is never decremented.
+  // ("YYYY-MM", UTC). Loads created after the metering cutover count for the
+  // month they were ENTERED (createdAt); pre-cutover history is attributed
+  // to the SERVICE month (firstStopDate) — see platformUsage.ts. Incremented
+  // on every loadInformation insert (platformUsageHelpers.recordLoadWritten)
+  // and undercount-corrected nightly from source. Loads count for the cycle
+  // they were created in — later edits/cancellations do not remove the
+  // charge, so this counter is never decremented.
   platformUsageStats: defineTable({
     workosOrgId: v.string(),
     periodKey: v.string(), // "2026-07" (monthly granularity, UTC)

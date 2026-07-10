@@ -1,5 +1,5 @@
 import { convexTest } from 'convex-test';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import schema from './schema';
 import type { Id } from './_generated/dataModel';
 import { api, internal } from './_generated/api';
@@ -35,8 +35,13 @@ async function seedCustomer(ctx: any): Promise<Id<'customers'>> {
   });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function seedLoad(ctx: any, customerId: Id<'customers'>, createdAt: number): Promise<void> {
+async function seedLoad(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  customerId: Id<'customers'>,
+  createdAt: number,
+  firstStopDate?: string,
+): Promise<void> {
   await ctx.db.insert('loadInformation', {
     internalId: `LD-${createdAt}-${Math.floor(Math.random() * 1e6)}`,
     orderNumber: 'ORD',
@@ -49,6 +54,7 @@ async function seedLoad(ctx: any, customerId: Id<'customers'>, createdAt: number
     createdBy: USER,
     createdAt,
     updatedAt: createdAt,
+    firstStopDate,
   });
 }
 
@@ -208,6 +214,76 @@ describe('platform usage metering', () => {
     expect(overview.closedCycles.map((c) => c.amount)).toEqual([30, 0, 60]);
     // Placeholder statuses: latest closed cycle is due, older ones paid
     expect(overview.closedCycles.map((c) => c.status)).toEqual(['paid', 'paid', 'due']);
+  });
+
+  it('attributes pre-cutover history by service month and metered loads by entry month', async () => {
+    const t = makeT();
+    // Fixed pre-cutover timestamps (metering cutover = Jul 1, 2026 UTC).
+    const IMPORT_DAY = Date.UTC(2026, 1, 10); // created Feb 10, 2026 (bulk import)
+    await t.run(async (ctx) => {
+      const customerId = await seedCustomer(ctx);
+      // Two pre-cutover loads imported in Feb but SERVICED in January —
+      // must land in 2026-01, not the Feb import month.
+      await seedLoad(ctx, customerId, IMPORT_DAY, '2026-01-08');
+      await seedLoad(ctx, customerId, IMPORT_DAY + 1000, '2026-01-22');
+      // Pre-cutover load with no service date — falls back to entry month.
+      await seedLoad(ctx, customerId, IMPORT_DAY + 2000);
+      // Metered (post-cutover) load — entry month wins even though its
+      // service date is elsewhere.
+      const now = Date.now();
+      await seedLoad(ctx, customerId, now, '2026-01-15');
+    });
+
+    await t.mutation(internal.platformUsage.countPlatformUsage, {
+      workosOrgId: ORG,
+      cursor: null,
+      accumulated: JSON.stringify({}),
+    });
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query('platformUsageStats')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', ORG))
+        .collect(),
+    );
+    const byKey = Object.fromEntries(rows.map((r) => [r.periodKey, r.loadsWritten]));
+    expect(byKey['2026-01']).toBe(2); // serviced Jan, imported Feb
+    expect(byKey['2026-02']).toBe(1); // no service date → entry month
+    expect(byKey[getPeriodKey(Date.now())]).toBe(1); // metered → entry month
+  });
+
+  it('rebaselineOrgPlatformUsage clears recorded rows and rebuilds from source', async () => {
+    const t = makeT();
+    await t.run(async (ctx) => {
+      const customerId = await seedCustomer(ctx);
+      await seedLoad(ctx, customerId, Date.now());
+      // Inflated row from an older attribution scheme — raise-only recalc
+      // could never lower it; rebaseline must.
+      await ctx.db.insert('platformUsageStats', {
+        workosOrgId: ORG,
+        periodKey: '2026-02',
+        loadsWritten: 7000,
+        updatedAt: Date.now(),
+      });
+    });
+
+    vi.useFakeTimers();
+    try {
+      await t.mutation(internal.platformUsage.rebaselineOrgPlatformUsage, { workosOrgId: ORG });
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query('platformUsageStats')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', ORG))
+        .collect(),
+    );
+    const byKey = Object.fromEntries(rows.map((r) => [r.periodKey, r.loadsWritten]));
+    expect(byKey['2026-02']).toBeUndefined(); // inflated row gone
+    expect(byKey[getPeriodKey(Date.now())]).toBe(1); // rebuilt from source
   });
 
   it('getBillingOverview bounds history to the most recent 24 closed cycles', async () => {

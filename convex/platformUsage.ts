@@ -9,12 +9,22 @@
  * insert paths, historical loads created before metering existed — are
  * corrected automatically. The first cron run doubles as the backfill.
  *
+ * Cycle attribution (see METERING_CUTOVER_MS):
+ *   - Loads created ON/AFTER the metering cutover → entry month (createdAt).
+ *     Immutable and auditable — the contractual billing basis.
+ *   - Loads created BEFORE the cutover (pre-metering history) → service
+ *     month (firstStopDate, falling back to createdAt). Their createdAt is
+ *     bulk-import/sync noise, so entry-month attribution would show fake
+ *     spikes on import months and near-empty months in between.
+ *
  * IMPORTANT: the recalc only ever RAISES a period's count (max of recorded
  * vs recounted) and never zeroes recorded periods. Loads are billed for the
  * cycle they were written in, and loads.deleteLoad hard-deletes rows — a
  * recount from surviving rows must not retroactively erase charges on
  * closed (already invoiced) cycles, and must not clobber increments that
- * land while a multi-batch scan is in flight.
+ * land while a multi-batch scan is in flight. To rebuild history from
+ * scratch (e.g. after an attribution change), run rebaselinePlatformUsage
+ * from the dashboard — safe only while no cycle has actually been invoiced.
  *
  * Read side: getBillingOverview powers Settings → Billing & usage.
  */
@@ -23,7 +33,7 @@ import { internalAction, internalMutation, internalQuery, query } from './_gener
 import { internal } from './_generated/api';
 import { v } from 'convex/values';
 import { getPeriodKey } from './accountingStatsHelpers';
-import { DEFAULT_BILLING_RATE_PER_LOAD } from './platformUsageHelpers';
+import { DEFAULT_BILLING_RATE_PER_LOAD, METERING_CUTOVER_MS } from './platformUsageHelpers';
 import { assertCallerOwnsOrg } from './lib/auth';
 import { queryByOrg } from './_helpers/queryByOrg';
 
@@ -52,7 +62,18 @@ export const countPlatformUsage = internalMutation({
 
     for (const load of results.page) {
       // Loads written before createdAt existed fall back to _creationTime.
-      const periodKey = getPeriodKey(load.createdAt ?? load._creationTime);
+      const created = load.createdAt ?? load._creationTime;
+      let periodKey: string;
+      if (created >= METERING_CUTOVER_MS) {
+        // Metered load — billed for the month it was entered.
+        periodKey = getPeriodKey(created);
+      } else {
+        // Pre-metering history — attribute to the service month so import
+        // batches don't masquerade as usage spikes. firstStopDate is
+        // 'YYYY-MM-DD'; malformed/missing values fall back to entry month.
+        const serviceKey = load.firstStopDate?.slice(0, 7);
+        periodKey = serviceKey && /^\d{4}-\d{2}$/.test(serviceKey) ? serviceKey : getPeriodKey(created);
+      }
       accumulated[periodKey] = (accumulated[periodKey] ?? 0) + 1;
     }
 
@@ -149,6 +170,60 @@ export const recalculateAllOrgsPlatformUsage = internalMutation({
     }
 
     console.log(`Scheduled platform usage recalculation for ${scheduled} organizations`);
+    return null;
+  },
+});
+
+// ─── Rebaseline (one-time history rebuild) ─────────────────────────────────
+
+/**
+ * Delete an org's platformUsageStats rows and rebuild them from source.
+ *
+ * The nightly recalc is raise-only, so it can never LOWER counts — after an
+ * attribution change (e.g. the pre-cutover service-month fix) the old
+ * inflated rows would stick. This clears the slate and lets the recount
+ * write fresh values. ONLY safe while no cycle has actually been invoiced:
+ * it discards recorded charges for hard-deleted loads.
+ */
+export const rebaselineOrgPlatformUsage = internalMutation({
+  args: { workosOrgId: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query('platformUsageStats')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+    for (const row of rows) {
+      await ctx.db.delete(row._id);
+    }
+    console.log(`Platform usage rebaseline: cleared ${rows.length} periods for org ${args.workosOrgId}`);
+    await ctx.scheduler.runAfter(0, internal.platformUsage.countPlatformUsage, {
+      workosOrgId: args.workosOrgId,
+      cursor: null,
+      accumulated: JSON.stringify({}),
+    });
+    return null;
+  },
+});
+
+/**
+ * Rebaseline every org. Run once from the dashboard after deploying an
+ * attribution change; the nightly cron stays raise-only afterwards.
+ */
+export const rebaselinePlatformUsage = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const orgs = await ctx.db.query('organizations').collect();
+    let scheduled = 0;
+    for (const org of orgs) {
+      if (!org.workosOrgId) continue;
+      await ctx.scheduler.runAfter(0, internal.platformUsage.rebaselineOrgPlatformUsage, {
+        workosOrgId: org.workosOrgId,
+      });
+      scheduled++;
+    }
+    console.log(`Scheduled platform usage rebaseline for ${scheduled} organizations`);
     return null;
   },
 });
