@@ -435,7 +435,7 @@ export default defineSchema({
   })
     // Primary indices for common queries
     .index('by_organization', ['organizationId', 'timestamp']) // List all org activity
-    .index('by_entity', ['entityType', 'entityId', 'timestamp']) // Get history for specific entity
+    .index('by_org_entity', ['organizationId', 'entityType', 'entityId', 'timestamp']) // Org-scoped history for a specific entity
     .index('by_user', ['organizationId', 'performedBy', 'timestamp']) // User activity within org
     .index('by_action', ['organizationId', 'action', 'timestamp']) // Filter by action type
     .index('by_entity_type', ['organizationId', 'entityType', 'timestamp']), // All drivers, vehicles, etc.

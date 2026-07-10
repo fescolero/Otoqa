@@ -1,8 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 import {
   scheduleSyncCarrierOwnerToClerk,
   scheduleUpdateClerkUserPhone,
@@ -1551,7 +1551,7 @@ export const bulkTerminate = mutation({
     let totalReleasedAssignments = 0;
     let totalLoadsReopened = 0;
 
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     for (const partnershipId of args.partnershipIds) {
       try {
@@ -1663,7 +1663,7 @@ export const bulkTerminate = mutation({
         }
 
         // Log to audit
-        await ctx.runMutation(internal.auditLog.logAction, {
+        await logAudit(ctx, {
           organizationId: partnership.brokerOrgId,
           entityType: 'carrierPartnership',
           entityId: partnershipId,
@@ -1671,6 +1671,7 @@ export const bulkTerminate = mutation({
           action: 'terminated',
           performedBy: userId,
           performedByName: userName,
+          performedByEmail: userEmail,
           description: `Terminated partnership with ${partnership.carrierName} (MC# ${partnership.mcNumber}). Released ${releasedCount} assignments, reopened ${loadsReopened} loads. ${orgDeactivated ? `Deactivated carrier org and ${driversDeactivated} drivers. Clerk user deleted.` : ''}`,
         });
 
@@ -1702,7 +1703,7 @@ export const bulkReactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const now = Date.now();
     const results: {
       id: string;
@@ -1922,7 +1923,7 @@ export const bulkReactivate = mutation({
         });
 
         // Log to audit
-        await ctx.runMutation(internal.auditLog.logAction, {
+        await logAudit(ctx, {
           organizationId: partnership.brokerOrgId,
           entityType: 'carrierPartnership',
           entityId: partnershipId,
@@ -1930,6 +1931,7 @@ export const bulkReactivate = mutation({
           action: 'reactivated',
           performedBy: userId,
           performedByName: userName,
+          performedByEmail: userEmail,
           description: `Reactivated partnership with ${partnership.carrierName} (MC# ${partnership.mcNumber})`,
         });
 
@@ -1969,7 +1971,7 @@ export const permanentlyDelete = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const results: {
       id: string;
       success: boolean;
@@ -2121,7 +2123,7 @@ export const permanentlyDelete = mutation({
         }
 
         // Log to audit
-        await ctx.runMutation(internal.auditLog.logAction, {
+        await logAudit(ctx, {
           organizationId: partnership.brokerOrgId,
           entityType: 'carrierPartnership',
           entityId: partnershipId,
@@ -2129,6 +2131,7 @@ export const permanentlyDelete = mutation({
           action: 'permanently_deleted',
           performedBy: userId,
           performedByName: userName,
+          performedByEmail: userEmail,
           description: `Permanently deleted carrier ${partnership.carrierName} (MC# ${partnership.mcNumber}). Deleted: org=${deletedOrg}, drivers=${deletedDrivers}, assignments=${deletedAssignments}, clerkUser=${clerkUserDeleted}`,
         });
 

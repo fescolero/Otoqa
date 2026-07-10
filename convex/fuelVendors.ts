@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 export const list = query({
   args: {
@@ -58,7 +58,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
     const vendorId = await ctx.db.insert('fuelVendors', {
       organizationId: args.organizationId,
@@ -81,12 +81,14 @@ export const create = mutation({
       createdBy: userId,
     });
 
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.organizationId,
       entityType: 'fuelVendor',
       entityId: vendorId,
-      action: 'CREATE',
+      action: 'created',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Created fuel vendor "${args.name}"`,
     });
 
@@ -113,7 +115,7 @@ export const update = mutation({
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.vendorId);
     if (!existing || existing.organizationId !== callerOrgId) throw new Error('Vendor not found');
 
@@ -136,12 +138,14 @@ export const update = mutation({
     });
 
     if (changedFields.length > 0) {
-      await ctx.runMutation(internal.auditLog.logAction, {
+      await logAudit(ctx, {
         organizationId: existing.organizationId,
         entityType: 'fuelVendor',
         entityId: args.vendorId,
-        action: 'UPDATE',
+        action: 'updated',
         performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
         description: `Updated fuel vendor "${existing.name}"`,
         changesBefore: JSON.stringify(before),
         changesAfter: JSON.stringify(after),
@@ -159,7 +163,7 @@ export const toggleActive = mutation({
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.vendorId);
     if (!existing || existing.organizationId !== callerOrgId) throw new Error('Vendor not found');
 
@@ -169,12 +173,15 @@ export const toggleActive = mutation({
       updatedAt: Date.now(),
     });
 
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: existing.organizationId,
       entityType: 'fuelVendor',
       entityId: args.vendorId,
-      action: newStatus ? 'ACTIVATE' : 'DEACTIVATE',
+      entityName: existing.name,
+      action: newStatus ? 'reactivated' : 'deactivated',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `${newStatus ? 'Activated' : 'Deactivated'} fuel vendor "${existing.name}"`,
     });
 

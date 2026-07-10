@@ -1,9 +1,9 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { internal } from './_generated/api';
 import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 const paymentMethodValidator = v.optional(
   v.union(
@@ -213,7 +213,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
     const totalCost = Math.round(args.gallons * args.pricePerGallon * 100) / 100;
 
@@ -240,12 +240,14 @@ export const create = mutation({
       createdBy: userId,
     });
 
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.organizationId,
       entityType: 'defEntry',
       entityId: entryId,
-      action: 'CREATE',
+      action: 'created',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Created DEF entry: ${args.gallons} gal @ $${args.pricePerGallon}/gal = $${totalCost}`,
     });
 
@@ -274,7 +276,7 @@ export const update = mutation({
     updatedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.entryId);
     if (!existing || existing.organizationId !== callerOrgId) throw new Error('DEF entry not found');
 
@@ -302,12 +304,14 @@ export const update = mutation({
     });
 
     if (changedFields.length > 0) {
-      await ctx.runMutation(internal.auditLog.logAction, {
+      await logAudit(ctx, {
         organizationId: existing.organizationId,
         entityType: 'defEntry',
         entityId: args.entryId,
-        action: 'UPDATE',
+        action: 'updated',
         performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
         description: `Updated DEF entry`,
         changesBefore: JSON.stringify(before),
         changesAfter: JSON.stringify(after),
@@ -325,18 +329,20 @@ export const remove = mutation({
     deletedBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.entryId);
     if (!existing || existing.organizationId !== callerOrgId) throw new Error('DEF entry not found');
 
     await ctx.db.delete(args.entryId);
 
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: existing.organizationId,
       entityType: 'defEntry',
       entityId: args.entryId,
-      action: 'DELETE',
+      action: 'deleted',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Deleted DEF entry: ${existing.gallons} gal @ $${existing.pricePerGallon}/gal`,
       changesBefore: JSON.stringify({
         entryDate: existing.entryDate,
@@ -372,7 +378,7 @@ export const bulkCreate = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
     const ids: Array<string> = [];
 
@@ -389,12 +395,14 @@ export const bulkCreate = mutation({
       ids.push(entryId);
     }
 
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.organizationId,
       entityType: 'defEntry',
       entityId: 'bulk',
-      action: 'BULK_CREATE',
+      action: 'bulk_created',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Bulk imported ${args.entries.length} DEF entries`,
     });
 

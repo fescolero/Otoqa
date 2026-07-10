@@ -1,9 +1,9 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
-import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { getDateStatus } from './_helpers/dateUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 import {
   scheduleCreateClerkUserForDriver,
   scheduleUpdateClerkUserPhone,
@@ -213,7 +213,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.organizationId);
 
     const now = Date.now();
 
@@ -276,13 +276,15 @@ export const create = mutation({
     }
 
     // Log the creation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.organizationId,
       entityType: 'driver',
       entityId: driverId,
       entityName: `${args.firstName} ${args.lastName}`,
       action: 'created',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Created driver ${args.firstName} ${args.lastName}`,
     });
 
@@ -344,7 +346,7 @@ export const update = mutation({
     emergencyContactPhone: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const { id, userId: _argUserId, userName: _argUserName, organizationId, ssn, licenseNumber, dateOfBirth, payPlanId, ...updates } = args;
 
     // Get current driver data for audit log
@@ -393,7 +395,7 @@ export const update = mutation({
     {
       const allUpdates = { ...updates, ...sensitiveUpdates };
       const changedFields = Object.keys(allUpdates).filter((key) => key !== 'updatedAt');
-      await ctx.runMutation(internal.auditLog.logAction, {
+      await logAudit(ctx, {
         organizationId: callerOrgId,
         entityType: 'driver',
         entityId: id,
@@ -401,6 +403,7 @@ export const update = mutation({
         action: 'updated',
         performedBy: userId,
         performedByName: userName,
+        performedByEmail: userEmail,
         description: `Updated driver ${driver.firstName} ${driver.lastName}`,
         changedFields,
         changesAfter: JSON.stringify(allUpdates),
@@ -478,7 +481,7 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get driver data before deactivation
     const driver = await ctx.db.get(args.id);
     if (!driver) throw new Error('Driver not found');
@@ -495,7 +498,7 @@ export const deactivate = mutation({
     });
 
     // Log the deactivation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: driver.organizationId,
       entityType: 'driver',
       entityId: args.id,
@@ -503,6 +506,7 @@ export const deactivate = mutation({
       action: 'deactivated',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Deactivated driver ${driver.firstName} ${driver.lastName}`,
     });
 
@@ -518,7 +522,7 @@ export const restore = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get driver data before restoration
     const driver = await ctx.db.get(args.id);
     if (!driver) throw new Error('Driver not found');
@@ -535,7 +539,7 @@ export const restore = mutation({
     });
 
     // Log the restoration
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: driver.organizationId,
       entityType: 'driver',
       entityId: args.id,
@@ -543,6 +547,7 @@ export const restore = mutation({
       action: 'restored',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Restored driver ${driver.firstName} ${driver.lastName}`,
     });
 
@@ -560,7 +565,7 @@ export const updateCurrentTruck = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const driver = await ctx.db.get(args.driverId);
     if (!driver) throw new Error('Driver not found');
@@ -581,7 +586,7 @@ export const updateCurrentTruck = mutation({
     });
 
     // Log the assignment
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.workosOrgId,
       entityType: 'driver',
       entityId: args.driverId,
@@ -589,6 +594,7 @@ export const updateCurrentTruck = mutation({
       action: 'updated',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Assigned truck ${truck.unitId} to driver ${driver.firstName} ${driver.lastName}`,
       changedFields: ['currentTruckId'],
       changesAfter: JSON.stringify({ currentTruckId: args.truckId }),
@@ -606,7 +612,7 @@ export const permanentDelete = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get driver data before deletion
     const driver = await ctx.db.get(args.id);
     if (!driver) throw new Error('Driver not found');
@@ -625,7 +631,7 @@ export const permanentDelete = mutation({
     }
 
     // Log the deletion BEFORE removing from database
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: driver.organizationId,
       entityType: 'driver',
       entityId: args.id,
@@ -633,6 +639,7 @@ export const permanentDelete = mutation({
       action: 'deleted',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Permanently deleted driver ${driver.firstName} ${driver.lastName}`,
       changesBefore: JSON.stringify(driver),
     });

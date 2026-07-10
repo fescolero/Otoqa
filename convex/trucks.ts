@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 // Helper function to determine expiration status
 const getExpirationStatus = (dateString?: string) => {
@@ -186,7 +186,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
 
     const truckId = await ctx.db.insert('trucks', {
@@ -197,13 +197,15 @@ export const create = mutation({
     });
 
     // Log the creation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.organizationId,
       entityType: 'truck',
       entityId: truckId,
       entityName: `${args.unitId}`,
       action: 'created',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Created truck ${args.unitId}`,
     });
 
@@ -250,7 +252,7 @@ export const update = mutation({
     engineManufacturer: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const { id, userId: _argUserId, userName: _argUserName, organizationId, ...updates } = args;
 
     // Get current truck data for audit log
@@ -265,7 +267,7 @@ export const update = mutation({
     // Log the update
     {
       const changedFields = Object.keys(updates).filter((key) => key !== 'updatedAt');
-      await ctx.runMutation(internal.auditLog.logAction, {
+      await logAudit(ctx, {
         organizationId: callerOrgId,
         entityType: 'truck',
         entityId: id,
@@ -273,6 +275,7 @@ export const update = mutation({
         action: 'updated',
         performedBy: userId,
         performedByName: userName,
+        performedByEmail: userEmail,
         description: `Updated truck ${truck.unitId}`,
         changedFields,
         changesAfter: JSON.stringify(updates),
@@ -291,7 +294,7 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get truck data before deactivation
     const truck = await ctx.db.get(args.id);
     if (!truck || truck.organizationId !== callerOrgId) throw new Error('Truck not found');
@@ -305,7 +308,7 @@ export const deactivate = mutation({
     });
 
     // Log the deactivation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: truck.organizationId,
       entityType: 'truck',
       entityId: args.id,
@@ -313,6 +316,7 @@ export const deactivate = mutation({
       action: 'deactivated',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Deactivated truck ${truck.unitId}`,
     });
 
@@ -357,7 +361,7 @@ export const bulkDeactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const results = [];
     for (const id of args.ids) {
       try {
@@ -377,7 +381,7 @@ export const bulkDeactivate = mutation({
         });
 
         // Log the deactivation
-        await ctx.runMutation(internal.auditLog.logAction, {
+        await logAudit(ctx, {
           organizationId: truck.organizationId,
           entityType: 'truck',
           entityId: id,
@@ -385,6 +389,7 @@ export const bulkDeactivate = mutation({
           action: 'deactivated',
           performedBy: userId,
           performedByName: userName,
+          performedByEmail: userEmail,
           description: `Deactivated truck ${truck.unitId}`,
         });
 

@@ -1,45 +1,18 @@
 import { v } from 'convex/values';
-import { query, internalMutation } from './_generated/server';
+import { query } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
 import { queryByOrg } from './_helpers/queryByOrg';
 
 /**
- * Universal audit logging utility for tracking all actions across the project
+ * Universal audit log read API.
  * Supports multi-tenant isolation via WorkOS organization IDs.
+ *
+ * Writes go through `logAudit` in `lib/audit.ts` (a plain helper that inserts
+ * inside the calling mutation's transaction — no extra function invocation).
  *
  * All read queries derive the caller's org from the authenticated identity
  * via `requireCallerOrgId` — clients cannot supply an `organizationId` arg.
  */
-
-// Helper function to create an audit log entry (internal use only)
-export const logAction = internalMutation({
-  args: {
-    // Required fields
-    organizationId: v.string(),
-    entityType: v.string(),
-    entityId: v.string(),
-    action: v.string(),
-    performedBy: v.string(),
-
-    // Optional fields
-    entityName: v.optional(v.string()),
-    description: v.optional(v.string()),
-    performedByName: v.optional(v.string()),
-    performedByEmail: v.optional(v.string()),
-    changesBefore: v.optional(v.string()),
-    changesAfter: v.optional(v.string()),
-    changedFields: v.optional(v.array(v.string())),
-    ipAddress: v.optional(v.string()),
-    userAgent: v.optional(v.string()),
-    metadata: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    await ctx.db.insert('auditLog', {
-      ...args,
-      timestamp: Date.now(),
-    });
-  },
-});
 
 // Get audit logs for a specific entity (scoped to caller's org)
 export const getEntityAuditLog = query({
@@ -52,16 +25,13 @@ export const getEntityAuditLog = query({
     const callerOrgId = await requireCallerOrgId(ctx);
     const limit = args.limit || 50;
 
-    // by_entity index is not org-scoped, so filter results to the caller's org.
-    // Over-fetch a small buffer to reduce the chance of returning fewer rows
-    // than requested after the org filter.
-    const raw = await ctx.db
+    return await ctx.db
       .query('auditLog')
-      .withIndex('by_entity', (q) => q.eq('entityType', args.entityType).eq('entityId', args.entityId))
+      .withIndex('by_org_entity', (q) =>
+        q.eq('organizationId', callerOrgId).eq('entityType', args.entityType).eq('entityId', args.entityId),
+      )
       .order('desc')
-      .take(limit * 4);
-
-    return raw.filter((log) => log.organizationId === callerOrgId).slice(0, limit);
+      .take(limit);
   },
 });
 
@@ -136,9 +106,13 @@ export const getRecentActivity = query({
     const hoursAgo = args.hours || 24;
     const cutoffTime = args.nowMs - hoursAgo * 60 * 60 * 1000;
 
-    const logs = await queryByOrg(ctx, 'auditLog', callerOrgId)
+    // Range on the index key (organizationId, timestamp) — a post-hoc
+    // .filter() here would scan the org's entire history when fewer than
+    // 100 rows fall inside the window.
+    const logs = await ctx.db
+      .query('auditLog')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId).gte('timestamp', cutoffTime))
       .order('desc')
-      .filter((q) => q.gte(q.field('timestamp'), cutoffTime))
       .take(100);
 
     return logs;

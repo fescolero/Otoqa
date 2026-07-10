@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 /**
  * Settings Management for Multi-Tenant Organizations
@@ -116,7 +117,7 @@ export const updateOrgSettings = mutation({
       });
 
       // Audit Log Entry
-      await ctx.db.insert('auditLog', {
+      await logAudit(ctx, {
         organizationId: args.workosOrgId,
         entityType: 'organization',
         entityId: orgId,
@@ -125,7 +126,6 @@ export const updateOrgSettings = mutation({
         performedBy: identity.subject,
         performedByEmail: identity.email ?? undefined,
         performedByName: identity.name ?? undefined,
-        timestamp: Date.now(),
       });
 
       return orgId;
@@ -138,7 +138,7 @@ export const updateOrgSettings = mutation({
     });
 
     // Audit Log Entry
-    await ctx.db.insert('auditLog', {
+    await logAudit(ctx, {
       organizationId: args.workosOrgId,
       entityType: 'organization',
       entityId: existing._id,
@@ -148,7 +148,6 @@ export const updateOrgSettings = mutation({
       performedByEmail: identity.email ?? undefined,
       performedByName: identity.name ?? undefined,
       changedFields: Object.keys(args.updates),
-      timestamp: Date.now(),
     });
 
     return existing._id;

@@ -1,8 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { internal } from './_generated/api';
 import { getExpirationStatus } from './_helpers/dateUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 // Count trailers by status for tab badges
 export const countTrailersByStatus = query({
@@ -167,7 +167,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.organizationId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.organizationId);
     const now = Date.now();
 
     const trailerId = await ctx.db.insert('trailers', {
@@ -178,13 +178,15 @@ export const create = mutation({
     });
 
     // Log the creation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.organizationId,
       entityType: 'trailer',
       entityId: trailerId,
       entityName: `${args.unitId}`,
       action: 'created',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Created trailer ${args.unitId}`,
     });
 
@@ -223,7 +225,7 @@ export const update = mutation({
     lienholder: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const { id, userId: _argUserId, userName: _argUserName, organizationId, ...updates } = args;
 
     // Get current trailer data for audit log
@@ -238,7 +240,7 @@ export const update = mutation({
     // Log the update
     {
       const changedFields = Object.keys(updates).filter((key) => key !== 'updatedAt');
-      await ctx.runMutation(internal.auditLog.logAction, {
+      await logAudit(ctx, {
         organizationId: callerOrgId,
         entityType: 'trailer',
         entityId: id,
@@ -246,6 +248,7 @@ export const update = mutation({
         action: 'updated',
         performedBy: userId,
         performedByName: userName,
+        performedByEmail: userEmail,
         description: `Updated trailer ${trailer.unitId}`,
         changedFields,
         changesAfter: JSON.stringify(updates),
@@ -264,7 +267,7 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get trailer data before deactivation
     const trailer = await ctx.db.get(args.id);
     if (!trailer || trailer.organizationId !== callerOrgId) throw new Error('Trailer not found');
@@ -278,7 +281,7 @@ export const deactivate = mutation({
     });
 
     // Log the deactivation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: trailer.organizationId,
       entityType: 'trailer',
       entityId: args.id,
@@ -286,6 +289,7 @@ export const deactivate = mutation({
       action: 'deactivated',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Deactivated trailer ${trailer.unitId}`,
     });
 
@@ -301,7 +305,7 @@ export const bulkDeactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const results = [];
     for (const id of args.ids) {
       try {
@@ -321,7 +325,7 @@ export const bulkDeactivate = mutation({
         });
 
         // Log the deactivation
-        await ctx.runMutation(internal.auditLog.logAction, {
+        await logAudit(ctx, {
           organizationId: trailer.organizationId,
           entityType: 'trailer',
           entityId: id,
@@ -329,6 +333,7 @@ export const bulkDeactivate = mutation({
           action: 'deactivated',
           performedBy: userId,
           performedByName: userName,
+          performedByEmail: userEmail,
           description: `Deactivated trailer ${trailer.unitId}`,
         });
 
