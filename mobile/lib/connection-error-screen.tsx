@@ -246,7 +246,9 @@ export function ConnectionErrorScreen({
 }: {
   reason?: ConnErrorReason;
   autoRetrySeconds?: number;
-  onRetry?: () => void;
+  /** `auto` distinguishes the countdown's automatic retries from taps —
+   *  callers use it to keep manual_reauth telemetry honest. */
+  onRetry?: (opts?: { auto?: boolean }) => void;
   onSignOut?: () => void;
   onContinueOffline?: () => void;
 }) {
@@ -261,25 +263,29 @@ export function ConnectionErrorScreen({
     onRetryRef.current = onRetry;
   }, [onRetry]);
 
-  const triggerRetry = () => {
+  const triggerRetry = (auto = false) => {
     setSpinning(true);
     setLeft(autoRetrySeconds);
     setTimeout(() => setSpinning(false), 900);
-    onRetryRef.current?.();
+    onRetryRef.current?.({ auto });
   };
 
-  // Visible auto-retry countdown — connectivity states only.
+  // Visible auto-retry countdown — connectivity states only. The remaining
+  // count lives in a local variable so the retry fires from the interval
+  // callback, not inside the setLeft updater (updaters must stay pure —
+  // StrictMode double-invokes them, which double-fired the retry).
   useEffect(() => {
     if (!v.autoRetry) return;
-    setLeft(autoRetrySeconds);
+    let remaining = autoRetrySeconds;
+    setLeft(remaining);
     const id = setInterval(() => {
-      setLeft((s) => {
-        if (s <= 1) {
-          triggerRetry();
-          return autoRetrySeconds;
-        }
-        return s - 1;
-      });
+      if (remaining <= 1) {
+        remaining = autoRetrySeconds;
+        triggerRetry(true);
+      } else {
+        remaining -= 1;
+        setLeft(remaining);
+      }
     }, 1000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps

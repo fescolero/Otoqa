@@ -44,6 +44,10 @@ function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<str
   const resolvedRef = useRef(false);
   const [isTimedOut, setIsTimedOut] = useState(false);
   const retryCountRef = useRef(0);
+  // Bumped by retry() so the timeout effect re-arms even when isWaiting
+  // never toggles (profile/carrier gates during a forceReauth cycle) —
+  // otherwise a gate could only ever time out once.
+  const [armNonce, setArmNonce] = useState(0);
 
   useEffect(() => {
     if (isWaiting) {
@@ -76,7 +80,7 @@ function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<str
       timedOutRef.current = false;
       setIsTimedOut(false);
     }
-  }, [isWaiting]);
+  }, [isWaiting, armNonce]);
 
   const retry = useCallback(() => {
     retryCountRef.current += 1;
@@ -85,6 +89,7 @@ function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<str
     timedOutRef.current = false;
     resolvedRef.current = false;
     setIsTimedOut(false);
+    setArmNonce((n) => n + 1);
   }, [gate]);
 
   return { isTimedOut, retry, retryCount: retryCountRef.current };
@@ -282,9 +287,9 @@ export default function AppLayout() {
   // Manual Retry handler for the gate error screens. Resets the tapped
   // gate's visual timer and fires a real reauth — previously these buttons
   // only reset the timer, so a genuinely stuck client never recovered.
-  const handleRetry = useCallback((gate?: { retry: () => void }) => {
+  const handleRetry = useCallback((gate?: { retry: () => void }, opts?: { auto?: boolean }) => {
     gate?.retry();
-    trackConvexAuthEvent('manual_reauth', {});
+    trackConvexAuthEvent(opts?.auto ? 'auto_recovery' : 'manual_reauth', {});
     convexAuth.forceReauth();
   }, [convexAuth]);
 
@@ -414,7 +419,7 @@ export default function AppLayout() {
       return (
         <ConnectionErrorScreen
           reason={connReason}
-          onRetry={() => handleRetry(convexAuthGate)}
+          onRetry={(opts) => handleRetry(convexAuthGate, opts)}
           onSignOut={handleSignOut}
           onContinueOffline={handleContinueOffline}
         />
@@ -433,7 +438,7 @@ export default function AppLayout() {
     return (
       <ConnectionErrorScreen
         reason={connReason}
-        onRetry={() => handleRetry()}
+        onRetry={(opts) => handleRetry(undefined, opts)}
         onSignOut={handleSignOut}
         onContinueOffline={handleContinueOffline}
       />
