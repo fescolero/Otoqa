@@ -69,6 +69,18 @@ const MAX_INVOICES_PER_STATUS = 1500;
  * Get receivables summary: total invoiced, collected, outstanding, overdue, avg days to pay.
  * Also returns aging buckets (0-30, 31-60, 61-90, 90+ days).
  */
+const AR_DAY_MS = 86_400_000;
+
+/** UTC bounds + midpoint (ms) for a "YYYY-MM" period key. */
+function periodKeyBounds(periodKey: string): { start: number; mid: number; end: number } | null {
+  const [y, m] = periodKey.split('-').map(Number);
+  if (!y || !m) return null;
+  const start = Date.UTC(y, m - 1, 1);
+  const end = Date.UTC(y, m, 1) - 1;
+  const mid = Date.UTC(y, m - 1, 15);
+  return { start, mid, end };
+}
+
 export const getReceivablesSummary = query({
   args: {
     workosOrgId: v.string(),
@@ -79,24 +91,120 @@ export const getReceivablesSummary = query({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
+    const round = (n: number) => Math.round(n * 100) / 100;
 
-    // Fetch outstanding invoices with date range on index
-    const billedQuery = ctx.db.query('loadInvoices').withIndex('by_org_status_created', (q) => {
+    // ── Org-wide A/R: derive from the materialized accountingPeriodStats so we
+    // never cap at MAX_INVOICES_PER_STATUS (the org has 20k+ finalized invoices,
+    // which a .take() sample badly misrepresents). Everything is scoped to the
+    // invoice months INSIDE the selected range (same period-key window as
+    // getRevenueSummary) so the whole Overview responds consistently to the
+    // filter. Aging is month-granular: each period's outstanding balance is aged
+    // by the month's midpoint (capped at now so the current partial month lands
+    // in "current"). The per-customer case falls through to the bounded
+    // per-invoice scan below.
+    if (!args.customerId) {
+      const periods = await ctx.db
+        .query('accountingPeriodStats')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+        .collect();
+
+      const startKey = args.dateRangeStart !== undefined ? getPeriodKey(args.dateRangeStart) : undefined;
+      const endKey = args.dateRangeEnd !== undefined ? getPeriodKey(args.dateRangeEnd) : undefined;
+
+      let totalInvoiced = 0;
+      let totalCollected = 0;
+      let totalOutstanding = 0;
+      let totalOverdue = 0;
+      let overdueCount = 0;
+      let outstandingCount = 0;
+      let invoiceCount = 0;
+      const agingBuckets = { current: 0, days31to60: 0, days61to90: 0, days90plus: 0 };
+
+      for (const s of periods) {
+        const bounds = periodKeyBounds(s.periodKey);
+        if (!bounds) continue;
+
+        // Only the invoice months within the selected range.
+        if (startKey !== undefined && s.periodKey < startKey) continue;
+        if (endKey !== undefined && s.periodKey > endKey) continue;
+
+        totalInvoiced += s.totalInvoiced;
+        totalCollected += s.totalCollected;
+        invoiceCount += s.invoiceCount;
+
+        const outstanding = s.totalOutstanding ?? 0;
+        const count = s.outstandingCount ?? 0;
+        totalOutstanding += outstanding;
+        outstandingCount += count;
+
+        const rep = Math.min(bounds.mid, now);
+        const daysOut = Math.max(0, Math.floor((now - rep) / AR_DAY_MS));
+        if (daysOut <= 30) {
+          agingBuckets.current += outstanding;
+        } else {
+          totalOverdue += outstanding;
+          overdueCount += count;
+          if (daysOut <= 60) agingBuckets.days31to60 += outstanding;
+          else if (daysOut <= 90) agingBuckets.days61to90 += outstanding;
+          else agingBuckets.days90plus += outstanding;
+        }
+      }
+
+      // Avg days-to-pay from a bounded PAID sample — an average is robust to
+      // sampling, so the cap here doesn't distort the metric the way it does A/R.
+      const paidSample = await ctx.db
+        .query('loadInvoices')
+        .withIndex('by_org_status_created', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID'))
+        .order('desc')
+        .take(MAX_INVOICES_PER_STATUS);
+      let totalDays = 0;
+      let paymentCount = 0;
+      for (const inv of paidSample) {
+        const days = getDaysToPayment(inv.invoiceDateNumeric ?? inv.createdAt, inv.paymentDate, inv.updatedAt);
+        if (days !== null) {
+          totalDays += days;
+          paymentCount++;
+        }
+      }
+
+      return {
+        totalInvoiced: round(totalInvoiced),
+        totalCollected: round(totalCollected),
+        totalOutstanding: round(totalOutstanding),
+        totalOverdue: round(totalOverdue),
+        avgDaysToPay: paymentCount > 0 ? Math.round(totalDays / paymentCount) : null,
+        avgDaysToPaySampleSize: paymentCount,
+        overdueCount,
+        invoiceCount,
+        outstandingCount,
+        agingBuckets: {
+          current: round(agingBuckets.current),
+          days31to60: round(agingBuckets.days31to60),
+          days61to90: round(agingBuckets.days61to90),
+          days90plus: round(agingBuckets.days90plus),
+        },
+      };
+    }
+
+    // Fetch outstanding invoices by SERVICE month (invoiceDateNumeric) — same
+    // basis as the org-wide period stats above, so a customer-scoped A/R agrees
+    // with the org-wide figure.
+    const billedQuery = ctx.db.query('loadInvoices').withIndex('by_org_status_invoice_date', (q) => {
       const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'BILLED');
-      if (args.dateRangeStart && args.dateRangeEnd)
-        return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-      if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
-      if (args.dateRangeEnd) return base.lte('createdAt', args.dateRangeEnd);
+      if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+        return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+      if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+      if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
       return base;
     });
     const billedInvoices = await billedQuery.take(MAX_INVOICES_PER_STATUS);
 
-    const pendingQuery = ctx.db.query('loadInvoices').withIndex('by_org_status_created', (q) => {
+    const pendingQuery = ctx.db.query('loadInvoices').withIndex('by_org_status_invoice_date', (q) => {
       const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'PENDING_PAYMENT');
-      if (args.dateRangeStart && args.dateRangeEnd)
-        return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-      if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
-      if (args.dateRangeEnd) return base.lte('createdAt', args.dateRangeEnd);
+      if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+        return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+      if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+      if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
       return base;
     });
     const pendingInvoices = await pendingQuery.take(MAX_INVOICES_PER_STATUS);
@@ -107,12 +215,12 @@ export const getReceivablesSummary = query({
     }
 
     // Fetch PAID invoices for avg days calculation
-    const paidQuery = ctx.db.query('loadInvoices').withIndex('by_org_status_created', (q) => {
+    const paidQuery = ctx.db.query('loadInvoices').withIndex('by_org_status_invoice_date', (q) => {
       const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID');
-      if (args.dateRangeStart && args.dateRangeEnd)
-        return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-      if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
-      if (args.dateRangeEnd) return base.lte('createdAt', args.dateRangeEnd);
+      if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+        return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+      if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+      if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
       return base;
     });
     let paidInvoices = await paidQuery.take(MAX_INVOICES_PER_STATUS);
@@ -127,6 +235,7 @@ export const getReceivablesSummary = query({
     // Calculate totals and aging buckets
     let totalOutstanding = 0;
     let totalOverdue = 0;
+    let overdueCount = 0;
     const agingBuckets = { current: 0, days31to60: 0, days61to90: 0, days90plus: 0 };
 
     for (const inv of outstanding) {
@@ -138,7 +247,10 @@ export const getReceivablesSummary = query({
       const invoiceDate = inv.invoiceDateNumeric ?? inv.createdAt;
       const daysOut = getDaysOutstanding(invoiceDate);
 
-      if (now > dueDate) totalOverdue += amount;
+      if (now > dueDate) {
+        totalOverdue += amount;
+        overdueCount++;
+      }
 
       if (daysOut <= 30) agingBuckets.current += amount;
       else if (daysOut <= 60) agingBuckets.days31to60 += amount;
@@ -169,6 +281,7 @@ export const getReceivablesSummary = query({
       totalOverdue: Math.round(totalOverdue * 100) / 100,
       avgDaysToPay,
       avgDaysToPaySampleSize: paymentCount,
+      overdueCount,
       invoiceCount: outstanding.length + paidInvoices.length,
       outstandingCount: outstanding.length,
       agingBuckets: {
@@ -178,6 +291,144 @@ export const getReceivablesSummary = query({
         days90plus: Math.round(agingBuckets.days90plus * 100) / 100,
       },
     };
+  },
+});
+
+/**
+ * Per-customer A/R aging roll-up. Powers the A/R aging view table so the client
+ * never has to fetch every invoice row just to bucket by customer. Buckets are
+ * measured from days outstanding; totals reconcile with getReceivablesSummary.
+ */
+export const getAgingByCustomer = query({
+  args: {
+    workosOrgId: v.string(),
+    dateRangeStart: v.optional(v.number()),
+    dateRangeEnd: v.optional(v.number()),
+    customerId: v.optional(v.id('customers')),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const now = Date.now();
+    const round = (n: number) => Math.round(n * 100) / 100;
+
+    // Org-wide (no single-customer filter): read the materialized snapshot so we
+    // never cap at MAX_INVOICES_PER_STATUS. Buckets are computed live from each
+    // customer's per-month balances; A/R is a balance "as of" the range end
+    // (older unpaid periods still count), mirroring getReceivablesSummary.
+    if (!args.customerId) {
+      const snapshot = await ctx.db
+        .query('customerAgingSnapshots')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+        .first();
+      const map: Record<string, Record<string, [number, number]>> = snapshot ? JSON.parse(snapshot.data) : {};
+
+      // Scope to the invoice months within the selected range (same window as
+      // getReceivablesSummary / getRevenueSummary) so the tab tracks the filter.
+      const startKey = args.dateRangeStart !== undefined ? getPeriodKey(args.dateRangeStart) : undefined;
+      const endKey = args.dateRangeEnd !== undefined ? getPeriodKey(args.dateRangeEnd) : undefined;
+
+      const rows: Array<{
+        customerId: string;
+        current: number;
+        days31to60: number;
+        days61to90: number;
+        days90plus: number;
+        total: number;
+        invoiceCount: number;
+      }> = [];
+      for (const [customerId, byPeriod] of Object.entries(map)) {
+        const b = { current: 0, days31to60: 0, days61to90: 0, days90plus: 0, total: 0, invoiceCount: 0 };
+        for (const [periodKey, cell] of Object.entries(byPeriod)) {
+          const bounds = periodKeyBounds(periodKey);
+          if (!bounds) continue;
+          if (startKey !== undefined && periodKey < startKey) continue;
+          if (endKey !== undefined && periodKey > endKey) continue;
+          const [outstanding, count] = cell;
+          const daysOut = Math.max(0, Math.floor((now - Math.min(bounds.mid, now)) / AR_DAY_MS));
+          if (daysOut <= 30) b.current += outstanding;
+          else if (daysOut <= 60) b.days31to60 += outstanding;
+          else if (daysOut <= 90) b.days61to90 += outstanding;
+          else b.days90plus += outstanding;
+          b.total += outstanding;
+          b.invoiceCount += count;
+        }
+        if (b.total > 0) rows.push({ customerId, ...b });
+      }
+
+      const customerMap = await batchFetchCustomers(
+        ctx,
+        rows.map((r) => r.customerId as Id<'customers'>),
+      );
+      return rows
+        .map((r) => ({
+          customerId: r.customerId,
+          name: customerMap.get(r.customerId)?.name ?? 'Unknown',
+          current: round(r.current),
+          days31to60: round(r.days31to60),
+          days61to90: round(r.days61to90),
+          days90plus: round(r.days90plus),
+          total: round(r.total),
+          invoiceCount: r.invoiceCount,
+        }))
+        .sort((a, b) => b.total - a.total);
+    }
+
+    const statuses = ['BILLED', 'PENDING_PAYMENT'] as const;
+    const all = [];
+    for (const status of statuses) {
+      const rows = await ctx.db
+        .query('loadInvoices')
+        .withIndex('by_org_status_invoice_date', (q) => {
+          const base = q.eq('workosOrgId', args.workosOrgId).eq('status', status);
+          if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+            return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+          if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+          if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
+          return base;
+        })
+        .take(MAX_INVOICES_PER_STATUS);
+      all.push(...rows);
+    }
+    const outstanding = args.customerId ? all.filter((inv) => inv.customerId === args.customerId) : all;
+
+    // Group by customer with a per-bucket accumulator.
+    type Bucket = { current: number; days31to60: number; days61to90: number; days90plus: number; total: number; invoiceCount: number };
+    const byCustomer = new Map<string, Bucket>();
+    for (const inv of outstanding) {
+      const key = inv.customerId.toString();
+      const amount = inv.totalAmount ?? 0;
+      const invoiceDate = inv.invoiceDateNumeric ?? inv.createdAt;
+      const daysOut = getDaysOutstanding(invoiceDate);
+      const b =
+        byCustomer.get(key) ??
+        { current: 0, days31to60: 0, days61to90: 0, days90plus: 0, total: 0, invoiceCount: 0 };
+      if (daysOut <= 30) b.current += amount;
+      else if (daysOut <= 60) b.days31to60 += amount;
+      else if (daysOut <= 90) b.days61to90 += amount;
+      else b.days90plus += amount;
+      b.total += amount;
+      b.invoiceCount++;
+      byCustomer.set(key, b);
+    }
+
+    const customerMap = await batchFetchCustomers(
+      ctx,
+      [...byCustomer.keys()].map((k) => k as Id<'customers'>),
+    );
+
+    return [...byCustomer.entries()]
+      .map(([customerId, b]) => ({
+        customerId,
+        name: customerMap.get(customerId)?.name ?? 'Unknown',
+        current: round(b.current),
+        days31to60: round(b.days31to60),
+        days61to90: round(b.days61to90),
+        days90plus: round(b.days90plus),
+        total: round(b.total),
+        invoiceCount: b.invoiceCount,
+      }))
+      .filter((c) => c.total > 0)
+      .sort((a, b) => b.total - a.total);
   },
 });
 
@@ -198,25 +449,25 @@ export const getReceivablesDetail = query({
     const now = Date.now();
     const MAX_DETAIL = 200;
 
-    // Use date range on index
+    // Use the SERVICE-date range on index (consistent with the A/R summary).
     const billedInvoices = await ctx.db
       .query('loadInvoices')
-      .withIndex('by_org_status_created', (q) => {
+      .withIndex('by_org_status_invoice_date', (q) => {
         const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'BILLED');
-        if (args.dateRangeStart && args.dateRangeEnd)
-          return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-        if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
+        if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+          return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+        if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
         return base;
       })
       .take(MAX_INVOICES_PER_STATUS);
 
     const pendingInvoices = await ctx.db
       .query('loadInvoices')
-      .withIndex('by_org_status_created', (q) => {
+      .withIndex('by_org_status_invoice_date', (q) => {
         const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'PENDING_PAYMENT');
-        if (args.dateRangeStart && args.dateRangeEnd)
-          return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-        if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
+        if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+          return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+        if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
         return base;
       })
       .take(MAX_INVOICES_PER_STATUS);
@@ -277,6 +528,13 @@ export const getReceivablesDetail = query({
 // PAYMENT DISCREPANCY QUERIES
 // ============================================
 
+// Minimum dollar gap between invoiced and paid for an invoice to count as a
+// payment discrepancy. Sub-dollar gaps are per-mile rounding artifacts (paid
+// vs effective miles differ by fractions), not real over/underpayments — and
+// they render as a misleading "$0" difference in the whole-dollar table. A $1
+// floor keeps the over/underpaid views to genuine, recoverable discrepancies.
+const DISCREPANCY_MIN_USD = 1;
+
 /**
  * Internal paginated discrepancy scan for accurate sidebar intelligence.
  * Returns raw invoice docs for one cursor page after applying discrepancy filters.
@@ -293,19 +551,19 @@ export const getDiscrepancySummaryPage = internalQuery({
   handler: async (ctx, args) => {
     const results = await ctx.db
       .query('loadInvoices')
-      .withIndex('by_org_status_created', (q) => {
+      .withIndex('by_org_status_invoice_date', (q) => {
         const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID');
-        if (args.dateRangeStart && args.dateRangeEnd)
-          return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-        if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
-        if (args.dateRangeEnd) return base.lte('createdAt', args.dateRangeEnd);
+        if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+          return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+        if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+        if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
         return base;
       })
       .order('desc')
       .paginate(args.paginationOpts);
 
     const discrepantBase = results.page.filter(
-      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) >= DISCREPANCY_MIN_USD,
     );
 
     let filtered = args.customerId
@@ -346,8 +604,12 @@ export const getDiscrepancyIntelligence = action({
     let underpaidCount = 0;
     let overpaidCount = 0;
     let largestUnderpayment = 0;
+    let underpaidTotal = 0; // signed sum of underpaid diffs (negative); recover amount = |underpaidTotal|
     let totalDiscrepantInvoices = 0;
-    const byHcr: Record<string, { netDiscrepancy: number; count: number }> = {};
+    const byHcr: Record<
+      string,
+      { netDiscrepancy: number; count: number; underpaidSum: number; underpaidCount: number }
+    > = {};
 
     while (!isDone) {
       const pageResult: {
@@ -375,27 +637,43 @@ export const getDiscrepancyIntelligence = action({
 
         if (diff < 0) {
           underpaidCount += 1;
+          underpaidTotal += diff;
           if (diff < largestUnderpayment) largestUnderpayment = diff;
         } else {
           overpaidCount += 1;
         }
 
         const key = loadHcrMap[inv.loadId.toString()] ?? 'Unknown HCR';
-        if (!byHcr[key]) byHcr[key] = { netDiscrepancy: 0, count: 0 };
+        if (!byHcr[key]) byHcr[key] = { netDiscrepancy: 0, count: 0, underpaidSum: 0, underpaidCount: 0 };
         byHcr[key].netDiscrepancy += diff;
         byHcr[key].count += 1;
+        // Track the underpaid shortfall per route SEPARATELY from the net so
+        // routes with real recoverable underpayments still surface even when
+        // overpayments on the same route (or book-wide) net them out.
+        if (diff < 0) {
+          byHcr[key].underpaidSum += -diff;
+          byHcr[key].underpaidCount += 1;
+        }
       }
 
       cursor = pageResult.continueCursor;
       isDone = pageResult.isDone;
     }
 
-    const byHcrRows = [] as Array<{ name: string; netDiscrepancy: number; count: number }>;
+    const byHcrRows = [] as Array<{
+      name: string;
+      netDiscrepancy: number;
+      count: number;
+      underpaidSum: number;
+      underpaidCount: number;
+    }>;
     for (const [hcr, data] of Object.entries(byHcr)) {
       byHcrRows.push({
         name: hcr,
         netDiscrepancy: Math.round(data.netDiscrepancy * 100) / 100,
         count: data.count,
+        underpaidSum: Math.round(data.underpaidSum * 100) / 100,
+        underpaidCount: data.underpaidCount,
       });
     }
 
@@ -405,9 +683,10 @@ export const getDiscrepancyIntelligence = action({
         underpaidCount,
         overpaidCount,
         largestUnderpayment: Math.round(largestUnderpayment * 100) / 100,
+        underpaidSum: Math.round(Math.abs(underpaidTotal) * 100) / 100,
         totalDiscrepantInvoices,
       },
-      byHcr: byHcrRows.sort((a, b) => a.netDiscrepancy - b.netDiscrepancy),
+      byHcr: byHcrRows.sort((a, b) => b.underpaidSum - a.underpaidSum),
     };
   },
 });
@@ -452,6 +731,7 @@ export const getLoadDetailsMap = internalQuery({
             orderNumber: load?.orderNumber ?? 'N/A',
             hcr: facets.hcr ?? 'Unknown HCR',
             effectiveMiles: load?.effectiveMiles,
+            firstStopDate: load?.firstStopDate,
           },
         ] as const;
       }),
@@ -473,6 +753,8 @@ type DiscrepancyDetailRow = {
   paidAmount: number;
   difference: number;
   percentDiff: number;
+  serviceDate: string | null; // load firstStopDate — when the load ran / was planned
+  invoiceDate: number | null; // invoiceDateNumeric — the invoice's issued date
   paymentDate: string | undefined;
   paymentReference: string | undefined;
 };
@@ -581,18 +863,19 @@ export const getDiscrepancyDetailSorted = action({
     const customerNameMap: Record<string, string> = await ctx.runQuery(internal.accountingReports.getCustomerNameMap, {
       customerIds: [...new Set(visibleInvoices.map((inv) => inv.customerId))],
     });
-    const loadDetailsMap: Record<string, { orderNumber: string; hcr: string; effectiveMiles?: number }> =
-      await ctx.runQuery(internal.accountingReports.getLoadDetailsMap, {
-        loadIds: [...new Set(visibleInvoices.map((inv) => inv.loadId))],
-      });
+    const loadDetailsMap: Record<
+      string,
+      { orderNumber: string; hcr: string; effectiveMiles?: number; firstStopDate?: string }
+    > = await ctx.runQuery(internal.accountingReports.getLoadDetailsMap, {
+      loadIds: [...new Set(visibleInvoices.map((inv) => inv.loadId))],
+    });
 
     const rows: DiscrepancyDetailRow[] = visibleInvoices.map((inv) => {
-      const loadDetails: { orderNumber: string; hcr: string; effectiveMiles?: number } = loadDetailsMap[
-        inv.loadId.toString()
-      ] ?? {
-        orderNumber: 'N/A',
-        hcr: 'Unknown HCR',
-      };
+      const loadDetails: { orderNumber: string; hcr: string; effectiveMiles?: number; firstStopDate?: string } =
+        loadDetailsMap[inv.loadId.toString()] ?? {
+          orderNumber: 'N/A',
+          hcr: 'Unknown HCR',
+        };
       const effectiveMiles = typeof loadDetails.effectiveMiles === 'number' ? loadDetails.effectiveMiles : null;
       const paymentMiles = typeof inv.paymentMiles === 'number' ? inv.paymentMiles : null;
       const milesDifference =
@@ -615,6 +898,8 @@ export const getDiscrepancyDetailSorted = action({
           (inv.totalAmount ?? 0) > 0
             ? Math.round(((inv.paymentDifference ?? 0) / (inv.totalAmount ?? 1)) * 10000) / 100
             : 0,
+        serviceDate: loadDetails.firstStopDate ?? null,
+        invoiceDate: inv.invoiceDateNumeric ?? null,
         paymentDate: inv.paymentDate,
         paymentReference: inv.paymentReference,
       };
@@ -646,12 +931,12 @@ export const getDiscrepancyDetail = query({
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const results = await ctx.db
       .query('loadInvoices')
-      .withIndex('by_org_status_created', (q) => {
+      .withIndex('by_org_status_invoice_date', (q) => {
         const base = q.eq('workosOrgId', args.workosOrgId).eq('status', 'PAID');
-        if (args.dateRangeStart && args.dateRangeEnd)
-          return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-        if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
-        if (args.dateRangeEnd) return base.lte('createdAt', args.dateRangeEnd);
+        if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+          return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+        if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+        if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
         return base;
       })
       .order('desc')
@@ -659,7 +944,7 @@ export const getDiscrepancyDetail = query({
 
     // Filter page to only discrepancies
     const discrepantPage = results.page.filter(
-      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) > 0.005,
+      (inv) => inv.paymentDifference !== undefined && Math.abs(inv.paymentDifference) >= DISCREPANCY_MIN_USD,
     );
 
     // Apply customer filter
@@ -805,22 +1090,27 @@ export const getRevenueByCustomer = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // Fetch finalized invoices with date range filtering
+    // Fetch finalized invoices by SERVICE month (invoiceDateNumeric) so the
+    // per-customer split agrees with the Revenue KPI / period stats (which are
+    // service-date based). Take up to the cap with a running read budget.
     const statuses = ['BILLED', 'PENDING_PAYMENT', 'PAID'] as const;
     const allInvoices = [];
 
     for (const status of statuses) {
+      const remaining = PROFIT_INVOICE_CAP - allInvoices.length;
+      if (remaining <= 0) break;
       const invoices = await ctx.db
         .query('loadInvoices')
-        .withIndex('by_org_status_created', (q) => {
+        .withIndex('by_org_status_invoice_date', (q) => {
           const base = q.eq('workosOrgId', args.workosOrgId).eq('status', status);
-          if (args.dateRangeStart && args.dateRangeEnd)
-            return base.gte('createdAt', args.dateRangeStart).lte('createdAt', args.dateRangeEnd);
-          if (args.dateRangeStart) return base.gte('createdAt', args.dateRangeStart);
-          if (args.dateRangeEnd) return base.lte('createdAt', args.dateRangeEnd);
+          if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+            return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+          if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+          if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
           return base;
         })
-        .take(MAX_INVOICES_PER_STATUS);
+        .order('desc')
+        .take(remaining);
       allInvoices.push(...invoices);
     }
 
@@ -1288,5 +1578,280 @@ export const getProfitabilityByLoad = query({
       showing: limited.length,
       hasMore: totalLoads > maxResults,
     };
+  },
+});
+
+// ============================================
+// PROFITABILITY BREAKDOWN (by customer / by lane)
+// ============================================
+
+const PROFIT_INVOICE_CAP = 2000; // finalized invoices scanned per breakdown
+const PROFIT_BATCH = 100; // loadIds per internal cost batch
+
+/**
+ * Finalized invoices in range — the revenue source (matches Overview / A/R).
+ * Profitability is invoice-driven: revenue lives on invoices whose loads have
+ * moved past 'Completed', so scanning completed loads would miss nearly all of
+ * it. Returns the fields needed to group by customer/lane + join cost per load.
+ */
+export const getFinalizedInvoicesForProfit = internalQuery({
+  args: {
+    workosOrgId: v.string(),
+    dateRangeStart: v.optional(v.number()),
+    dateRangeEnd: v.optional(v.number()),
+    customerId: v.optional(v.id('customers')),
+  },
+  handler: async (ctx, args) => {
+    const statuses = ['BILLED', 'PENDING_PAYMENT', 'PAID'] as const;
+    const all: Array<Doc<'loadInvoices'>> = [];
+    // Filter by the invoice's SERVICE month (invoiceDateNumeric) — the same
+    // basis as getRevenueSummary / the period stats that power Overview & P&L —
+    // so all tabs report the same invoices for a given range. (The old query
+    // filtered by createdAt, which diverged from the reporting basis once
+    // invoices were anchored to their service date.) Take up to the cap across
+    // statuses with a running budget so total reads stay well under the limit.
+    for (const status of statuses) {
+      const remaining = PROFIT_INVOICE_CAP - all.length;
+      if (remaining <= 0) break;
+      const rows = await ctx.db
+        .query('loadInvoices')
+        .withIndex('by_org_status_invoice_date', (q) => {
+          const base = q.eq('workosOrgId', args.workosOrgId).eq('status', status);
+          if (args.dateRangeStart !== undefined && args.dateRangeEnd !== undefined)
+            return base.gte('invoiceDateNumeric', args.dateRangeStart).lte('invoiceDateNumeric', args.dateRangeEnd);
+          if (args.dateRangeStart !== undefined) return base.gte('invoiceDateNumeric', args.dateRangeStart);
+          if (args.dateRangeEnd !== undefined) return base.lte('invoiceDateNumeric', args.dateRangeEnd);
+          return base;
+        })
+        .order('desc')
+        .take(remaining);
+      all.push(...rows);
+    }
+    const scoped = args.customerId ? all.filter((inv) => inv.customerId === args.customerId) : all;
+    return {
+      invoices: scoped.map((inv) => ({
+        loadId: inv.loadId,
+        customerId: inv.customerId,
+        contractLaneId: inv.contractLaneId ?? null,
+        revenue: inv.totalAmount ?? 0,
+      })),
+      truncated: all.length >= PROFIT_INVOICE_CAP,
+      total: scoped.length,
+    };
+  },
+});
+
+/** Directly-attributable pay (driver + carrier) per load. */
+export const getLoadCostBatch = internalQuery({
+  args: { loadIds: v.array(v.id('loadInformation')) },
+  handler: async (ctx, args) => {
+    const out: Record<string, number> = {};
+    for (const loadId of args.loadIds) {
+      const driverPay = (
+        await ctx.db
+          .query('loadPayables')
+          .withIndex('by_load', (q) => q.eq('loadId', loadId))
+          .collect()
+      ).reduce((s, p) => s + p.totalAmount, 0);
+      const carrierPay = (
+        await ctx.db
+          .query('loadCarrierPayables')
+          .withIndex('by_load', (q) => q.eq('loadId', loadId))
+          .collect()
+      ).reduce((s, p) => s + p.totalAmount, 0);
+      out[loadId.toString()] = driverPay + carrierPay;
+    }
+    return out;
+  },
+});
+
+/** Resolve contract-lane labels for a set of lane ids. */
+export const getLaneLabelBatch = internalQuery({
+  args: { laneIds: v.array(v.id('contractLanes')) },
+  handler: async (ctx, args) => {
+    const out: Record<string, string> = {};
+    for (const laneId of args.laneIds) {
+      const lane = await ctx.db.get(laneId);
+      out[laneId.toString()] = extractLaneLabel(lane);
+    }
+    return out;
+  },
+});
+
+type ProfitGroup = { key: string; name: string; loads: number; revenue: number; cost: number };
+type ProfitRow = ProfitGroup & { profit: number; margin: number };
+
+/**
+ * Profitability by customer AND by lane, invoice-driven. Revenue is summed from
+ * finalized invoices (same source as Overview / A/R); cost is the
+ * directly-attributable pay (driver + carrier) joined per unique load — so
+ * margin is a contribution margin (fuel/DEF are fleet-level — see P&L).
+ * Read-safe: one invoice scan, then per-load cost fanned across batch queries.
+ */
+export const getProfitabilityBreakdown = action({
+  args: {
+    workosOrgId: v.string(),
+    dateRangeStart: v.optional(v.number()),
+    dateRangeEnd: v.optional(v.number()),
+    customerId: v.optional(v.id('customers')),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    byCustomer: ProfitRow[];
+    byLane: ProfitRow[];
+    fleet: ProfitRow;
+    processed: number;
+    total: number;
+    truncated: boolean;
+  }> => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const { invoices, truncated, total }: {
+      invoices: { loadId: Id<'loadInformation'>; customerId: Id<'customers'>; contractLaneId: Id<'contractLanes'> | null; revenue: number }[];
+      truncated: boolean;
+      total: number;
+    } = await ctx.runQuery(internal.accountingReports.getFinalizedInvoicesForProfit, {
+      workosOrgId: args.workosOrgId,
+      dateRangeStart: args.dateRangeStart,
+      dateRangeEnd: args.dateRangeEnd,
+      customerId: args.customerId,
+    });
+
+    const byCustomer = new Map<string, ProfitGroup>();
+    const byLane = new Map<string, ProfitGroup>();
+    const customerIds = new Set<string>();
+    const laneIds = new Set<string>();
+    // One representative (customer, lane) per load so cost is attributed once.
+    const loadMeta = new Map<string, { ck: string; lk: string }>();
+    const loadIdByKey = new Map<string, Id<'loadInformation'>>();
+
+    // Revenue pass (no extra reads).
+    for (const inv of invoices) {
+      const ck = inv.customerId.toString();
+      const lk = inv.contractLaneId ? inv.contractLaneId.toString() : 'unmapped';
+      customerIds.add(ck);
+      if (inv.contractLaneId) laneIds.add(lk);
+
+      const cg = byCustomer.get(ck) ?? { key: ck, name: '', loads: 0, revenue: 0, cost: 0 };
+      cg.loads += 1;
+      cg.revenue += inv.revenue;
+      byCustomer.set(ck, cg);
+
+      const lg = byLane.get(lk) ?? { key: lk, name: lk === 'unmapped' ? 'Unmapped lane' : '', loads: 0, revenue: 0, cost: 0 };
+      lg.loads += 1;
+      lg.revenue += inv.revenue;
+      byLane.set(lk, lg);
+
+      const loadKey = inv.loadId.toString();
+      if (!loadMeta.has(loadKey)) {
+        loadMeta.set(loadKey, { ck, lk });
+        loadIdByKey.set(loadKey, inv.loadId);
+      }
+    }
+
+    // Cost pass — batch per unique load, attributed once.
+    const loadIds = [...loadIdByKey.values()];
+    const costByLoad: Record<string, number> = {};
+    for (let i = 0; i < loadIds.length; i += PROFIT_BATCH) {
+      const batch: Record<string, number> = await ctx.runQuery(internal.accountingReports.getLoadCostBatch, {
+        loadIds: loadIds.slice(i, i + PROFIT_BATCH),
+      });
+      Object.assign(costByLoad, batch);
+    }
+    for (const [loadKey, meta] of loadMeta) {
+      const c = costByLoad[loadKey] ?? 0;
+      const cg = byCustomer.get(meta.ck);
+      if (cg) cg.cost += c;
+      const lg = byLane.get(meta.lk);
+      if (lg) lg.cost += c;
+    }
+
+    // Resolve display names.
+    const nameMap: Record<string, string> = await ctx.runQuery(internal.accountingReports.getCustomerNameMap, {
+      customerIds: [...customerIds].map((id) => id as Id<'customers'>),
+    });
+    const laneLabelMap: Record<string, string> = await ctx.runQuery(internal.accountingReports.getLaneLabelBatch, {
+      laneIds: [...laneIds].map((id) => id as Id<'contractLanes'>),
+    });
+
+    const finalize = (g: ProfitGroup): ProfitRow => {
+      const profit = g.revenue - g.cost;
+      return {
+        ...g,
+        revenue: Math.round(g.revenue * 100) / 100,
+        cost: Math.round(g.cost * 100) / 100,
+        profit: Math.round(profit * 100) / 100,
+        margin: g.revenue > 0 ? Math.round((profit / g.revenue) * 1000) / 10 : 0,
+      };
+    };
+
+    const customerRows = [...byCustomer.values()]
+      .map((g) => finalize({ ...g, name: nameMap[g.key] ?? 'Unknown' }))
+      .sort((a, b) => b.profit - a.profit);
+    const laneRows = [...byLane.values()]
+      .map((g) => finalize({ ...g, name: g.key === 'unmapped' ? 'Unmapped lane' : laneLabelMap[g.key] ?? 'Lane' }))
+      .sort((a, b) => b.profit - a.profit);
+
+    const fleetAgg = [...byCustomer.values()].reduce(
+      (a, g) => ({ key: 'fleet', name: 'Fleet', loads: a.loads + g.loads, revenue: a.revenue + g.revenue, cost: a.cost + g.cost }),
+      { key: 'fleet', name: 'Fleet', loads: 0, revenue: 0, cost: 0 } as ProfitGroup,
+    );
+
+    return {
+      byCustomer: customerRows,
+      byLane: laneRows,
+      fleet: finalize(fleetAgg),
+      processed: invoices.length,
+      total,
+      truncated,
+    };
+  },
+});
+
+/**
+ * Per-customer revenue trend (monthly), invoice-driven. Powers the Overview
+ * trend chart when the page is scoped to one customer. Same row shape as
+ * getRevenueOverTime so the chart component is reused unchanged.
+ */
+export const getCustomerRevenueTrend = query({
+  args: {
+    workosOrgId: v.string(),
+    customerId: v.id('customers'),
+    dateRangeStart: v.number(),
+    dateRangeEnd: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const statuses = ['BILLED', 'PENDING_PAYMENT', 'PAID'] as const;
+    const byPeriod = new Map<string, { totalInvoiced: number; totalCollected: number }>();
+    for (const status of statuses) {
+      const rows = await ctx.db
+        .query('loadInvoices')
+        .withIndex('by_org_status_invoice_date', (q) =>
+          q
+            .eq('workosOrgId', args.workosOrgId)
+            .eq('status', status)
+            .gte('invoiceDateNumeric', args.dateRangeStart)
+            .lte('invoiceDateNumeric', args.dateRangeEnd),
+        )
+        .take(MAX_INVOICES_PER_STATUS);
+      for (const inv of rows) {
+        if (inv.customerId !== args.customerId) continue;
+        const key = getPeriodKey(inv.invoiceDateNumeric ?? inv.createdAt);
+        const e = byPeriod.get(key) ?? { totalInvoiced: 0, totalCollected: 0 };
+        e.totalInvoiced += inv.totalAmount ?? 0;
+        e.totalCollected += inv.paidAmount ?? 0;
+        byPeriod.set(key, e);
+      }
+    }
+    return [...byPeriod.entries()]
+      .map(([period, v2]) => ({
+        period,
+        totalInvoiced: Math.round(v2.totalInvoiced * 100) / 100,
+        totalCollected: Math.round(v2.totalCollected * 100) / 100,
+      }))
+      .sort((a, b) => a.period.localeCompare(b.period));
   },
 });

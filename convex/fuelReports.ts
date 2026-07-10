@@ -235,37 +235,56 @@ export const costPerMile = query({
       }
     }
 
+    // Odometer-derived miles per truck (the preferred source). Computed up
+    // front so we can tell whether ANY truck needs the loads-based fallback
+    // before deciding to read loadInformation at all.
+    const odometerMilesByTruck: Record<string, number> = {};
+    for (const [truckId, data] of Object.entries(byTruck)) {
+      if (data.odometerReadings.length >= 2) {
+        const sorted = data.odometerReadings.sort((a, b) => a.date - b.date);
+        odometerMilesByTruck[truckId] = sorted[sorted.length - 1].reading - sorted[0].reading;
+      } else {
+        odometerMilesByTruck[truckId] = 0;
+      }
+    }
+
+    // Loads-based fallback miles per truck. Previously this scanned the FULL
+    // loadInformation table once PER truck inside the result loop — O(trucks ×
+    // org loads) reads, which is what neared the per-query bytes/documents
+    // read limit. Now it's a single date-bounded scan (the by_organization
+    // index implicitly orders by _creationTime, so the range trims the read to
+    // the report window) grouped by truck, and only when a truck actually
+    // lacks usable odometer data.
+    const loadMilesByTruck: Record<string, number> = {};
+    const needsLoadFallback = Object.values(odometerMilesByTruck).some((m) => m <= 0);
+    if (needsLoadFallback) {
+      const loads = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_organization', (q) =>
+          q
+            .eq('workosOrgId', args.organizationId)
+            .gte('_creationTime', args.dateRangeStart)
+            .lte('_creationTime', args.dateRangeEnd)
+        )
+        .collect();
+
+      for (const load of loads) {
+        const loadTruckId = (load as Record<string, unknown>).truckId as string | undefined;
+        if (!loadTruckId || !load.effectiveMiles) continue;
+        loadMilesByTruck[loadTruckId] = (loadMilesByTruck[loadTruckId] ?? 0) + load.effectiveMiles;
+      }
+    }
+
     const results = await Promise.all(
       Object.entries(byTruck).map(async ([truckId, data]) => {
         const truck = await ctx.db.get(truckId as Id<'trucks'>);
 
-        let totalMiles = 0;
-        let milesSource: 'odometer' | 'loads' | 'none' = 'none';
-
-        if (data.odometerReadings.length >= 2) {
-          const sorted = data.odometerReadings.sort((a, b) => a.date - b.date);
-          totalMiles = sorted[sorted.length - 1].reading - sorted[0].reading;
-          milesSource = 'odometer';
-        }
+        let totalMiles = odometerMilesByTruck[truckId] ?? 0;
+        let milesSource: 'odometer' | 'loads' | 'none' =
+          data.odometerReadings.length >= 2 ? 'odometer' : 'none';
 
         if (totalMiles <= 0) {
-          const loads = await ctx.db
-            .query('loadInformation')
-            .withIndex('by_organization', (q) => q.eq('workosOrgId', args.organizationId))
-            .collect();
-
-          const truckLoads = loads.filter(
-            (l) =>
-              (l as Record<string, unknown>).truckId === truckId &&
-              l._creationTime >= args.dateRangeStart &&
-              l._creationTime <= args.dateRangeEnd
-          );
-
-          for (const load of truckLoads) {
-            if (load.effectiveMiles) {
-              totalMiles += load.effectiveMiles;
-            }
-          }
+          totalMiles += loadMilesByTruck[truckId] ?? 0;
           if (totalMiles > 0) milesSource = 'loads';
         }
 

@@ -109,11 +109,13 @@ export default function SignInScreen() {
 
     try {
       const result = await signIn.create({ identifier: fullPhoneNumber });
+      const phoneFactor = result.supportedFirstFactors?.find(
+        (factor): factor is Extract<typeof factor, { strategy: 'phone_code' }> =>
+          factor.strategy === 'phone_code',
+      );
       await signIn.prepareFirstFactor({
         strategy: 'phone_code',
-        phoneNumberId: result.supportedFirstFactors?.find(
-          (factor) => factor.strategy === 'phone_code',
-        )?.phoneNumberId as string,
+        phoneNumberId: phoneFactor?.phoneNumberId as string,
       });
 
       clearTimeout(timeoutId);
@@ -200,6 +202,17 @@ export default function SignInScreen() {
                 style={styles.numberFieldInput}
               />
             </Pressable>
+          </View>
+
+          {/* Invite-only notice — accounts are provisioned by the carrier;
+              heads off "how do I sign up?" from store-installers and makes
+              the no-signup model explicit for app review. */}
+          <View style={styles.inviteNote}>
+            <Icon name="building" size={15} color={palette.textTertiary} />
+            <Text style={styles.inviteNoteText}>
+              Accounts are set up by your carrier. No account? Ask your
+              dispatcher.
+            </Text>
           </View>
 
           <View style={{ flex: 1, minHeight: 24 }} />
@@ -352,6 +365,22 @@ const makeStyles = (palette: Palette) =>
       color: palette.textPrimary,
       fontVariant: ['tabular-nums'],
       padding: 0,
+    },
+    inviteNote: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 8,
+      marginTop: 16,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderRadius: radii.md,
+      backgroundColor: palette.bgMuted,
+    },
+    inviteNoteText: {
+      flex: 1,
+      fontSize: 12,
+      lineHeight: 17,
+      color: palette.textTertiary,
     },
     legal: {
       fontSize: 12,

@@ -13,6 +13,7 @@ import {
   AdvancedMarker,
 } from '@vis.gl/react-google-maps';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -528,6 +529,8 @@ function DiagnosticTable({
 
 export function GpsLogsView({ loadId, organizationId }: GpsLogsViewProps) {
   const apiKey = useGoogleMapsKey();
+  const mapId = useThemedMapId();
+  const colorScheme = useMapColorScheme();
   const tableRef = useRef<HTMLDivElement>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [diagnosticsResult, setDiagnosticsResult] = useState<{
@@ -711,7 +714,8 @@ export function GpsLogsView({ loadId, organizationId }: GpsLogsViewProps) {
               <Map
                 defaultCenter={{ lat: diagnosticPoints[0].latitude, lng: diagnosticPoints[0].longitude }}
                 defaultZoom={12}
-                mapId={process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || 'gps-diag-map'}
+                mapId={mapId}
+                colorScheme={colorScheme}
                 gestureHandling="cooperative"
                 disableDefaultUI
                 zoomControl

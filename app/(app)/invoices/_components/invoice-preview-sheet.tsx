@@ -1,15 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import { InvoiceTemplate } from "./preview/invoice-template";
-import { InvoicePDFTemplate } from "./preview/invoice-pdf-template";
-import { Download, Printer, ExternalLink, Loader2, X, ChevronLeft, ChevronRight } from "lucide-react";
-import { pdf } from "@react-pdf/renderer";
+import { RecordPaymentDialog } from "./record-payment-dialog";
+import { Download, Printer, ExternalLink, Loader2, X, ChevronLeft, ChevronRight, Receipt, DollarSign } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 
@@ -21,6 +20,11 @@ interface InvoicePreviewSheetProps {
   onNavigate?: (invoiceId: Id<"loadInvoices">) => void;
   autoAction?: 'print' | 'download' | null;
   onAutoActionHandled?: () => void;
+  /** When set, DRAFT invoices show a "Mark as billed" action in the toolbar. */
+  onMarkBilled?: (invoiceId: Id<"loadInvoices">) => void;
+  /** Required to enable the "Record payment" action on open invoices. */
+  workosOrgId?: string;
+  userId?: string;
 }
 
 export function InvoicePreviewSheet({
@@ -31,7 +35,11 @@ export function InvoicePreviewSheet({
   onNavigate,
   autoAction = null,
   onAutoActionHandled,
+  onMarkBilled,
+  workosOrgId,
+  userId,
 }: InvoicePreviewSheetProps) {
+  const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
   // Calculate current position and navigation availability
   const currentIndex = invoiceId ? allInvoiceIds.findIndex(id => id === invoiceId) : -1;
   const hasPrevious = currentIndex > 0;
@@ -67,10 +75,15 @@ export function InvoicePreviewSheet({
   
   // Fetch line items
   const lineItems = useQuery(
-    api.invoices.getLineItems, 
+    api.invoices.getLineItems,
     invoiceId ? { invoiceId } : "skip"
   );
-  
+
+  const payments = useQuery(
+    api.invoices.listInvoicePayments,
+    invoiceId ? { invoiceId } : "skip"
+  );
+
   // Fetch customer
   const customer = useQuery(
     api.customers.getById, 
@@ -121,12 +134,15 @@ export function InvoicePreviewSheet({
     try {
       toast.loading("Generating PDF for printing...");
       
+      const { pdf } = await import("@react-pdf/renderer");
+      const { InvoicePDFTemplate } = await import("./preview/invoice-pdf-template");
       const blob = await pdf(
         <InvoicePDFTemplate
           invoice={invoice}
           customer={customer}
           lineItems={lineItems as any}
           companyDetails={companyDetails}
+          payments={payments ?? undefined}
         />
       ).toBlob();
       
@@ -154,12 +170,15 @@ export function InvoicePreviewSheet({
     try {
       toast.loading("Generating PDF...");
       
+      const { pdf } = await import("@react-pdf/renderer");
+      const { InvoicePDFTemplate } = await import("./preview/invoice-pdf-template");
       const blob = await pdf(
         <InvoicePDFTemplate
           invoice={invoice}
           customer={customer}
           lineItems={lineItems as any}
           companyDetails={companyDetails}
+          payments={payments ?? undefined}
         />
       ).toBlob();
       
@@ -213,27 +232,23 @@ export function InvoicePreviewSheet({
   }, [autoAction, customer, handleDownloadPDF, handlePrint, invoice, invoiceId, lineItems, onAutoActionHandled]);
 
   return (
+    <>
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent 
+      <SheetContent
         className="w-full sm:max-w-3xl p-0 print:max-w-full print:border-0 print:shadow-none"
         onKeyDown={handleKeyDown}
       >
         <div className="h-full flex flex-col">
           {/* Toolbar */}
           <div className="h-14 border-b bg-background flex items-center justify-between px-6 shrink-0 print:hidden">
-            <div className="flex items-center gap-3">
-              <SheetTitle className="text-sm font-medium">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <SheetTitle className="text-sm font-medium truncate">
                 Invoice Preview
-                {invoice?.invoiceNumber && (
-                  <span className="text-muted-foreground ml-2 font-mono">
-                    {invoice.invoiceNumber}
-                  </span>
-                )}
               </SheetTitle>
               
               {/* Navigation arrows */}
               {allInvoiceIds.length > 1 && (
-                <div className="flex items-center gap-1 ml-4">
+                <div className="flex items-center gap-1 ml-4 shrink-0">
                   <Button
                     variant="ghost"
                     size="sm"
@@ -261,19 +276,26 @@ export function InvoicePreviewSheet({
               )}
             </div>
             
-            <div className="flex items-center gap-2">
-              {invoiceId && (
-                <Button variant="outline" size="sm" asChild>
-                  <Link href={`/invoices/${invoiceId}/preview`} target="_blank">
-                    <ExternalLink className="w-4 h-4 mr-2" />
-                    Full Page
-                  </Link>
+            <div className="flex items-center gap-2 shrink-0">
+              {invoiceId && invoice?.status === 'DRAFT' && onMarkBilled && (
+                <Button size="sm" onClick={() => onMarkBilled(invoiceId)}>
+                  <Receipt className="w-4 h-4 mr-2" />
+                  Mark as billed
                 </Button>
               )}
-              
-              <Button 
-                variant="outline" 
-                size="sm" 
+              {invoiceId &&
+                invoice &&
+                (invoice.status === 'BILLED' || invoice.status === 'PENDING_PAYMENT') &&
+                workosOrgId &&
+                userId && (
+                  <Button size="sm" onClick={() => setPaymentDialogOpen(true)}>
+                    <DollarSign className="w-4 h-4 mr-2" />
+                    Record payment
+                  </Button>
+                )}
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={handlePrint}
                 disabled={!invoice}
               >
@@ -290,8 +312,16 @@ export function InvoicePreviewSheet({
                 PDF
               </Button>
               
-              <Button 
-                variant="ghost" 
+              {invoiceId && (
+                <Button variant="outline" size="icon" asChild className="h-8 w-8" title="Open full page">
+                  <Link href={`/invoices/${invoiceId}/preview`} target="_blank" aria-label="Open full page">
+                    <ExternalLink className="w-4 h-4" />
+                  </Link>
+                </Button>
+              )}
+
+              <Button
+                variant="ghost"
                 size="icon"
                 onClick={onClose}
                 className="h-8 w-8 ml-2"
@@ -311,16 +341,31 @@ export function InvoicePreviewSheet({
                 </div>
               </div>
             ) : (
-              <InvoiceTemplate 
+              <InvoiceTemplate
                 invoice={invoice}
                 customer={customer}
                 lineItems={lineItems as any}
                 companyDetails={companyDetails}
+                payments={payments ?? undefined}
+                fitToHeight
               />
             )}
           </div>
         </div>
       </SheetContent>
     </Sheet>
+    {invoiceId && invoice && workosOrgId && userId && (
+      <RecordPaymentDialog
+        open={paymentDialogOpen}
+        onOpenChange={setPaymentDialogOpen}
+        invoiceId={invoiceId}
+        workosOrgId={workosOrgId}
+        userId={userId}
+        invoiceNumber={invoice.invoiceNumber}
+        totalAmount={invoice.totalAmount ?? 0}
+        paidAmount={invoice.paidAmount ?? 0}
+      />
+    )}
+    </>
   );
 }

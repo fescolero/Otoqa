@@ -348,9 +348,9 @@ export const list = query({
       plans.map(async (plan) => {
         const drivers = await ctx.db
           .query('drivers')
+          .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
           .filter((q) =>
             q.and(
-              q.eq(q.field('organizationId'), args.workosOrgId),
               q.eq(q.field('payPlanId'), plan._id),
               // isDeleted is optional, so check for both false and undefined
               q.neq(q.field('isDeleted'), true)
@@ -609,9 +609,9 @@ export const getDriversForPlan = query({
 
     const drivers = await ctx.db
       .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
       .filter((q) =>
         q.and(
-          q.eq(q.field('organizationId'), args.workosOrgId),
           q.eq(q.field('payPlanId'), args.planId),
           // isDeleted is optional, so check for NOT true (includes undefined and false)
           q.neq(q.field('isDeleted'), true)
@@ -896,6 +896,7 @@ export const archive = mutation({
     // Check if any drivers are using this plan
     const driversUsingPlan = await ctx.db
       .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
       .filter((q) => q.eq(q.field('payPlanId'), args.planId))
       .collect();
 
@@ -1036,6 +1037,7 @@ export const getDriversOnPlan = query({
 
     const drivers = await ctx.db
       .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
       .filter((q) => q.eq(q.field('payPlanId'), args.planId))
       .collect();
 

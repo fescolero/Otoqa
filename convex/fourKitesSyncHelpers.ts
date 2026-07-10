@@ -10,6 +10,7 @@ import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
 import { setLoadTag, getLoadFacets } from "./lib/loadFacets";
+import { refreshInvoiceSearchText } from "./invoiceSearchText";
 import { syncLegsAffectedByStop } from "./_helpers/timeUtils";
 import {
   buildLoadInternalId,
@@ -90,10 +91,13 @@ export const createInvoice = internalMutation({
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
-    
+
+    // Seed the search haystack (order # + customer; no number until billed).
+    await refreshInvoiceSearchText(ctx, invoiceId);
+
     // ✅ Update organization stats (aggregate table pattern)
     await updateInvoiceCount(ctx, args.workosOrgId, undefined, args.status);
-    
+
     return invoiceId;
   },
 });
@@ -341,7 +345,7 @@ export const importLoadFromShipment = internalMutation({
 
     // Create invoice with DRAFT status (lane matched)
     // Store contract lane reference - amounts will be calculated dynamically
-    await ctx.db.insert("loadInvoices", {
+    const draftInvoiceId = await ctx.db.insert("loadInvoices", {
       loadId,
       customerId: contractLane.customerCompanyId,
       contractLaneId: contractLane._id, // Reference for dynamic calculation
@@ -353,6 +357,9 @@ export const importLoadFromShipment = internalMutation({
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+
+    // Seed the search haystack (order # + customer; no number until billed).
+    await refreshInvoiceSearchText(ctx, draftInvoiceId);
 
     // ✅ Update organization stats for invoice creation
     await updateInvoiceCount(ctx, workosOrgId, undefined, "DRAFT");
@@ -526,7 +533,7 @@ export const importUnmappedLoad = internalMutation({
 
     // Create invoice with MISSING_DATA status (no lane match)
     // No contractLaneId - amounts will be $0 when calculated
-    await ctx.db.insert("loadInvoices", {
+    const missingInvoiceId = await ctx.db.insert("loadInvoices", {
       loadId,
       customerId,
       contractLaneId: undefined, // No contract lane
@@ -539,6 +546,9 @@ export const importUnmappedLoad = internalMutation({
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+
+    // Seed the search haystack (order # + customer; no number until billed).
+    await refreshInvoiceSearchText(ctx, missingInvoiceId);
 
     // ✅ Update organization stats for unmapped invoice creation
     await updateInvoiceCount(ctx, workosOrgId, undefined, "MISSING_DATA");

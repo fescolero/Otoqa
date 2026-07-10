@@ -1,131 +1,126 @@
 'use client';
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
+/**
+ * Diesel (fuel entry) create page.
+ *
+ * Thin wrapper around `<CreateForm>` + the shared fuel-entry schema.
+ * The page is responsible for:
+ *   1. Loading option data (vendors / drivers / trucks / carriers).
+ *   2. Binding the `generateUploadUrl` mutation to the schema's
+ *      `attachment` field.
+ *   3. Translating shell `vals` → the typed mutation arg shape via
+ *      `mapValsToFuelEntryArgs`.
+ *   4. Auth ambient context (`organizationId`, `createdBy`) that the
+ *      mutation expects but isn't a form field.
+ *
+ * Replaces the 562-line `components/diesel/fuel-entry-form.tsx` that
+ * was retired in the Phase 4 cleanup. Both create routes (diesel +
+ * DEF) and the edit page (operations/diesel/[id]/edit) now run on
+ * the schema-driven shell. `git log` has the historical diff if
+ * behavior comparison is ever needed.
+ */
+
+import * as React from 'react';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
+import { toast } from 'sonner';
 import { api } from '@/convex/_generated/api';
-import { useRouter } from 'next/navigation';
-import { useState } from 'react';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { useAuthQuery } from '@/hooks/use-auth-query';
-import { FuelEntryForm, FuelEntryFormData } from '@/components/diesel/fuel-entry-form';
-import { toast } from 'sonner';
-import { Id } from '@/convex/_generated/dataModel';
+import { CreateForm, bindUploaders } from '@/components/web/create-form';
+import {
+  buildFuelEntrySchema,
+  mapValsToFuelEntryArgs,
+  FUEL_ENTRY_FIELD_IDS,
+  type CarrierRow,
+} from '@/lib/forms/schemas/fuel-entry';
 
 export default function CreateFuelEntryPage() {
-  const { user } = useAuth();
   const router = useRouter();
+  const { user } = useAuth();
   const organizationId = useOrganizationId();
+
   const createFuelEntry = useMutation(api.fuelEntries.create);
   const generateUploadUrl = useMutation(api.fuelEntries.generateUploadUrl);
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const drivers = useAuthQuery(api.drivers.list, organizationId ? { organizationId } : 'skip');
-  const trucks = useAuthQuery(api.trucks.list, organizationId ? { organizationId } : 'skip');
-  const vendors = useAuthQuery(api.fuelVendors.list, organizationId ? { organizationId, activeOnly: true } : 'skip');
-  const carriersRaw = useAuthQuery(
+  // Option-source queries. `'skip'` until org id resolves — useAuthQuery
+  // returns `undefined` in that state and we fall back to empty arrays.
+  const driversQ = useAuthQuery(
+    api.drivers.list,
+    organizationId ? { organizationId } : 'skip',
+  );
+  const trucksQ = useAuthQuery(
+    api.trucks.list,
+    organizationId ? { organizationId } : 'skip',
+  );
+  const vendorsQ = useAuthQuery(
+    api.fuelVendors.list,
+    organizationId ? { organizationId, activeOnly: true } : 'skip',
+  );
+  const carriersQ = useAuthQuery(
     api.carrierPartnerships.listForBroker,
     organizationId ? { brokerOrgId: organizationId } : 'skip',
   );
 
-  const carriers = (carriersRaw ?? []).map((c) => ({
-    _id: c._id,
-    carrierName: c.carrierName,
-    trackFuelConsumption: c.trackFuelConsumption ?? false,
-  }));
+  // Narrow the carrier list to fields the schema needs. The Convex
+  // query returns a wider row shape; pick the three keys the dropdown
+  // actually consumes so the schema's TS type stays tight.
+  const carriers = React.useMemo<CarrierRow[]>(
+    () =>
+      (carriersQ ?? []).map((c) => ({
+        _id: c._id,
+        carrierName: c.carrierName,
+        trackFuelConsumption: c.trackFuelConsumption ?? false,
+      })),
+    [carriersQ],
+  );
 
-  const handleSubmit = async (data: FuelEntryFormData, options?: { continueAdding?: boolean }) => {
-    if (!organizationId || !user) return;
-
-    setIsSubmitting(true);
-    try {
-      await createFuelEntry({
-        organizationId,
-        entryDate: data.entryDate,
-        vendorId: data.vendorId as Id<'fuelVendors'>,
-        gallons: data.gallons,
-        pricePerGallon: data.pricePerGallon,
-        ...(data.driverId && { driverId: data.driverId as Id<'drivers'> }),
-        ...(data.carrierId && { carrierId: data.carrierId as Id<'carrierPartnerships'> }),
-        ...(data.truckId && { truckId: data.truckId as Id<'trucks'> }),
-        ...(data.odometerReading && { odometerReading: data.odometerReading }),
-        ...(data.location && { location: data.location }),
-        ...(data.fuelCardNumber && { fuelCardNumber: data.fuelCardNumber }),
-        ...(data.receiptNumber && { receiptNumber: data.receiptNumber }),
-        ...(data.loadId && { loadId: data.loadId as Id<'loadInformation'> }),
-        ...(data.paymentMethod && {
-          paymentMethod: data.paymentMethod as 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA',
+  // Schema is recomputed when any option array changes — `useMemo`
+  // gates the rebuild so `<CreateForm>` doesn't see a new schema ref
+  // every render and reset its scroll-spy / focus state.
+  const schema = React.useMemo(
+    () =>
+      bindUploaders(
+        buildFuelEntrySchema({
+          kind: 'fuel',
+          vendors: vendorsQ ?? [],
+          drivers: driversQ ?? [],
+          trucks: trucksQ ?? [],
+          carriers,
         }),
-        ...(data.notes && { notes: data.notes }),
-        ...(data.receiptStorageId && { receiptStorageId: data.receiptStorageId as Id<'_storage'> }),
-        createdBy: user.id,
-      });
-
-      toast.success(
-        options?.continueAdding ? 'Fuel entry created. Ready for the next one.' : 'Fuel entry created successfully',
-      );
-
-      if (!options?.continueAdding) {
-        router.push('/operations/diesel');
-      }
-    } catch (error) {
-      console.error('Failed to create fuel entry:', error);
-      toast.error('Failed to create fuel entry. Please try again.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+        { [FUEL_ENTRY_FIELD_IDS.attachment]: generateUploadUrl },
+      ),
+    [vendorsQ, driversQ, trucksQ, carriers, generateUploadUrl],
+  );
 
   return (
-    <>
-      <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b bg-background">
-        <div className="flex items-center gap-2 px-4">
-          <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/dashboard">Home</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="#">Company Operations</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/operations/diesel">Diesel</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem>
-                <BreadcrumbPage>New Fuel Entry</BreadcrumbPage>
-              </BreadcrumbItem>
-            </BreadcrumbList>
-          </Breadcrumb>
-        </div>
-      </header>
-
-      <div className="flex flex-1 flex-col gap-6 p-6">
-        <FuelEntryForm
-          entryType="fuel"
-          drivers={drivers ?? []}
-          carriers={carriers}
-          trucks={trucks ?? []}
-          vendors={vendors ?? []}
-          onSubmit={handleSubmit}
-          onCancel={() => router.push('/operations/diesel')}
-          isSubmitting={isSubmitting}
-          generateUploadUrl={generateUploadUrl}
-        />
-      </div>
-    </>
+    <CreateForm
+      schema={schema}
+      onCancel={() => router.push('/operations/diesel')}
+      onSaved={async (vals, andNew) => {
+        if (!organizationId || !user) {
+          toast.error('Not signed in — please refresh and try again.');
+          return;
+        }
+        try {
+          const args = mapValsToFuelEntryArgs(vals);
+          const id = await createFuelEntry({
+            ...args,
+            organizationId,
+            createdBy: user.id,
+          });
+          toast.success(
+            andNew
+              ? 'Fuel entry saved. Ready for the next one.'
+              : 'Fuel entry saved.',
+          );
+          if (!andNew) router.push(`/operations/diesel/${id}`);
+        } catch (err) {
+          console.error('Failed to create fuel entry:', err);
+          toast.error('Failed to create fuel entry. Please try again.');
+        }
+      }}
+    />
   );
 }

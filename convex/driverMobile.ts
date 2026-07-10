@@ -4,6 +4,7 @@ import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
 import { calculateDistanceMeters } from './lib/geo';
+import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrackingState';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
 // ============================================
@@ -931,60 +932,16 @@ export const checkInAtStop = mutation({
       });
     }
 
-    // Frontier state for the geofence evaluator. Stop 1 initializes; later
-    // stops advance the pointer and reset the APPROACHING/ARRIVED flags so
-    // the next stop's events can fire fresh.
-    if (stop.sequenceNumber === 1) {
-      const existingState = await ctx.db
-        .query('loadTrackingState')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-        .first();
-      if (!existingState && stop.latitude !== undefined && stop.longitude !== undefined) {
-        await ctx.db.insert('loadTrackingState', {
-          loadId: stop.loadId,
-          sessionId: session!._id,
-          driverId: driver._id,
-          organizationId: driver.organizationId,
-          currentStopSequenceNumber: stop.sequenceNumber,
-          currentStopLat: stop.latitude,
-          currentStopLng: stop.longitude,
-          approachingFired: false,
-          arrivedFired: false,
-          updatedAt: serverNow,
-        });
-      }
-    } else {
-      // Advance frontier to the next non-detour, non-canceled stop after this one.
-      const siblingStops = await ctx.db
-        .query('loadStops')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-        .collect();
-      const upcoming = siblingStops
-        .filter(
-          (s) =>
-            s.sequenceNumber > stop.sequenceNumber &&
-            s.stopType !== 'DETOUR' &&
-            s.status !== 'Canceled'
-        )
-        .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
-
-      if (upcoming && upcoming.latitude !== undefined && upcoming.longitude !== undefined) {
-        const state = await ctx.db
-          .query('loadTrackingState')
-          .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-          .first();
-        if (state) {
-          await ctx.db.patch(state._id, {
-            currentStopSequenceNumber: upcoming.sequenceNumber,
-            currentStopLat: upcoming.latitude,
-            currentStopLng: upcoming.longitude,
-            approachingFired: false,
-            arrivedFired: false,
-            updatedAt: serverNow,
-          });
-        }
-      }
-    }
+    // Frontier state for the geofence evaluator: arrival watch advances to
+    // the next upcoming stop, departure watch locks onto the stop just
+    // checked into. First check-in creates the row.
+    await setFrontierOnCheckIn(ctx, {
+      stop,
+      sessionId: session!._id,
+      driverId: driver._id,
+      organizationId: driver.organizationId,
+      now: serverNow,
+    });
 
     // Update load tracking status if this is the first stop.
     // trackingStatus is partner-visible; leg.status is internal dispatch
@@ -1172,15 +1129,19 @@ export const checkOutFromStop = mutation({
         });
       }
 
-      // Release the geofence frontier. Historical geofenceEvents stay —
-      // only the current-pointer state is removed.
-      const trackingState = await ctx.db
-        .query('loadTrackingState')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+      // Release the geofence frontier. Historical geofenceEvents stay; if a
+      // departure watch is still pending the row survives (loadCompleted)
+      // so the final facility exit gets its DEPARTED timestamp. The row is
+      // re-bound to the driver's CURRENT session — check-in may have
+      // happened under an earlier one (overnight dwell + auto-timeout), and
+      // the by_session ping lookup only sees the session on the row.
+      const activeSession = await ctx.db
+        .query('driverSessions')
+        .withIndex('by_driver_status', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'active')
+        )
         .first();
-      if (trackingState) {
-        await ctx.db.delete(trackingState._id);
-      }
+      await releaseFrontierOnLoadComplete(ctx, stop.loadId, Date.now(), activeSession?._id);
     }
 
     return { success: true, message: 'Checked out successfully' };

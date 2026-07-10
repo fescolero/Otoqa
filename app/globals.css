@@ -1,42 +1,53 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
-@custom-variant dark (&:is(.dark *));
+/* Otoqa Web — design system tokens.
+   Light is the default; dark mode flips via [data-theme="dark"] on <html>.
+   Density default is compact; [data-density="comfortable"] expands rows.   */
+
+@custom-variant dark (&:is([data-theme="dark"] *));
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-noto-sans);
-  --font-mono: var(--font-geist-mono);
-  --color-sidebar-ring: var(--sidebar-ring);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar: var(--sidebar);
-  --color-chart-5: var(--chart-5);
-  --color-chart-4: var(--chart-4);
-  --color-chart-3: var(--chart-3);
-  --color-chart-2: var(--chart-2);
-  --color-chart-1: var(--chart-1);
-  --color-ring: var(--ring);
-  --color-input: var(--input);
-  --color-border: var(--border);
-  --color-destructive: var(--destructive);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-accent: var(--accent);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-secondary: var(--secondary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-primary: var(--primary);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-popover: var(--popover);
-  --color-card-foreground: var(--card-foreground);
-  --color-card: var(--card);
+  /* Tailwind's color names mapped to Otoqa semantic tokens.
+     Every existing components/ui/* component automatically inherits the
+     design palette through these aliases. */
+  --color-background: var(--bg-canvas);
+  --color-foreground: var(--text-primary);
+  --color-card: var(--bg-surface);
+  --color-card-foreground: var(--text-primary);
+  --color-popover: var(--bg-surface);
+  --color-popover-foreground: var(--text-primary);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--text-on-action);
+  --color-secondary: var(--bg-surface-2);
+  --color-secondary-foreground: var(--text-primary);
+  --color-muted: var(--bg-muted);
+  --color-muted-foreground: var(--text-tertiary);
+  --color-accent: var(--bg-muted);
+  --color-accent-foreground: var(--text-primary);
+  --color-destructive: var(--danger-500);
+  --color-border: var(--border-subtle);
+  --color-input: var(--border-subtle);
+  --color-ring: var(--accent);
+
+  --color-sidebar: var(--bg-sidebar);
+  --color-sidebar-foreground: var(--text-primary);
+  --color-sidebar-primary: var(--accent);
+  --color-sidebar-primary-foreground: var(--text-on-action);
+  --color-sidebar-accent: var(--bg-sidebar-active);
+  --color-sidebar-accent-foreground: var(--accent);
+  --color-sidebar-border: var(--border-hairline);
+  --color-sidebar-ring: var(--accent);
+
+  --color-chart-1: var(--blue-500);
+  --color-chart-2: var(--success-500);
+  --color-chart-3: var(--warning-500);
+  --color-chart-4: var(--danger-500);
+  --color-chart-5: var(--blue-300);
+
+  --font-sans: var(--font-saira), 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -44,88 +55,363 @@
 }
 
 :root {
-  --font-noto-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-geist-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  /* === Color primitives === */
+  --blue-50:  #EEF2FF;
+  --blue-100: #DEE5FF;
+  --blue-200: #BFCCFF;
+  --blue-300: #8BA3FF;
+  --blue-400: #5C82FF;
+  --blue-500: #2E5CFF;
+  --blue-600: #1A47E6;
+  --blue-700: #1539BF;
+
+  --n-0:   #FFFFFF;
+  --n-50:  #F7F8FC;
+  --n-100: #EEF0F5;
+  --n-200: #DFE3EB;
+  --n-300: #C8CED9;
+  --n-400: #9BA3B4;
+  --n-500: #6B7385;
+  --n-600: #4B5260;
+  --n-700: #363B48;
+  --n-800: #242934;
+  --n-900: #171A22;
+  --n-950: #0E1017;
+
+  --success-300: #6EE7B7;
+  --success-400: #34D399;
+  --success-500: #10B981;
+  --success-600: #059669;
+  --success-700: #047857;
+
+  --warning-300: #FCD34D;
+  --warning-400: #FBBF24;
+  --warning-500: #F59E0B;
+  --warning-700: #B45309;
+
+  --danger-300: #FCA5A5;
+  --danger-400: #F87171;
+  --danger-500: #EF4444;
+  --danger-700: #B91C1C;
+
+  /* === Brand accent (single accent — Otoqa blue) === */
+  --accent: var(--blue-500);
+  --accent-hover: var(--blue-600);
+  --accent-pressed: var(--blue-700);
+  --accent-tint: var(--blue-50);
+  --accent-tint-strong: var(--blue-100);
+
+  /* === Light surfaces === */
+  --bg-canvas: #F6F7F9;
+  --bg-surface: #FFFFFF;
+  --bg-surface-2: #FAFBFC;
+  --bg-surface-elevated: #FFFFFF;
+  --bg-sidebar: #FBFBFD;
+  --bg-sidebar-active: rgba(46, 92, 255, 0.08);
+  --bg-row-hover: #F6F8FB;
+  --bg-muted: var(--n-50);
+  --bg-subtle: var(--n-100);
+  --bg-inverse: var(--n-900);
+  --bg-overlay: rgba(23, 26, 34, 0.5);
+
+  --text-primary: var(--n-900);
+  --text-secondary: var(--n-600);
+  --text-tertiary: var(--n-500);
+  --text-disabled: var(--n-400);
+  --text-placeholder: var(--n-400);
+  --text-on-action: #FFFFFF;
+  --text-link: var(--blue-600);
+
+  --border-hairline: rgba(15, 22, 36, 0.08);
+  --border-hairline-strong: rgba(15, 22, 36, 0.14);
+  --border-subtle: var(--n-200);
+  --border-default: var(--n-300);
+  --border-strong: var(--n-400);
+  --border-focus: var(--accent);
+
+  --action-secondary-hover: var(--n-50);
+  --action-secondary-pressed: var(--n-100);
+  --action-tertiary-hover: var(--accent-tint);
+  --action-tertiary-pressed: var(--accent-tint-strong);
+
+  /* === Schedule trip-bar status tokens (light) === */
+  --bar-completed-bg:  #DBEFE3;
+  --bar-completed-bd:  #82C29F;
+  --bar-completed-fg:  #0F8C5F;
+  --bar-intransit-bg:  #D6E1FF;
+  --bar-intransit-bd:  #8AA4F6;
+  --bar-intransit-fg:  #1A47E6;
+  --bar-assigned-bg:   #ECEEF2;
+  --bar-assigned-bd:   #C2C7D2;
+  --bar-assigned-fg:   #3B4254;
+  --bar-open-bg:       #FBE7C2;
+  --bar-open-bd:       #E8B665;
+  --bar-open-fg:       #8C5200;
+
+  /* === Density (compact default) === */
+  --row-h-compact: 36px;
+  --row-h-comfortable: 52px;
+  --row-h: var(--row-h-compact);
+  --tbl-cell-px: 14px;
+  --tbl-cell-py: 8px;
+
+  /* === Shell dimensions === */
+  --rail-w: 56px;
+  --rail-w-expanded: 248px;
+  --topbar-h: 48px;
+  --pageheader-h: 64px;
+  --toolbar-h: 56px;
+
+  /* === Component sizing === */
+  --btn-md-h: 36px;
+  --btn-md-px: 14px;
+  --btn-md-radius: 8px;
+  --btn-lg-h: 44px;
+  --btn-lg-radius: 10px;
+  --input-md-h: 36px;
+  --input-md-px: 12px;
+  --input-md-radius: 8px;
+  --card-padding: 16px;
+  --card-gap: 12px;
+  --card-radius: 12px;
+  --list-py: 10px;
+  --list-px: 12px;
+  --list-gap: 8px;
+
+  /* === Shadows === */
+  --shadow-xs: 0 1px 2px rgba(20, 23, 31, 0.06);
+  --shadow-sm: 0 2px 4px rgba(20, 23, 31, 0.06), 0 1px 2px rgba(20, 23, 31, 0.04);
+  --shadow-md: 0 4px 8px rgba(20, 23, 31, 0.08), 0 2px 4px rgba(20, 23, 31, 0.04);
+  --shadow-lg: 0 12px 24px rgba(20, 23, 31, 0.10), 0 4px 8px rgba(20, 23, 31, 0.06);
+  --shadow-popover: 0 10px 28px -8px rgba(15, 22, 36, 0.18), 0 2px 6px -2px rgba(15, 22, 36, 0.10);
+  --shadow-cmd: 0 24px 48px -12px rgba(15, 22, 36, 0.22), 0 4px 12px -4px rgba(15, 22, 36, 0.10);
+
+  /* === Animation === */
+  --dur-fast: 120ms;
+  --dur: 160ms;
+  --dur-slow: 220ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* === Spacing scale === */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px;
+  --s-12: 48px; --s-16: 64px;
+
+  /* === Radii === */
   --radius: 0.5rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.141 0.005 285.823);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.141 0.005 285.823);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.488 0.243 264.376);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.552 0.016 285.938);
-  --accent: oklch(0.967 0.001 286.375);
-  --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.92 0.004 286.32);
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.488 0.243 264.376);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.967 0.001 286.375);
-  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.488 0.243 264.376);
+  --r-xs: 4px; --r-sm: 6px; --r-md: 8px; --r-lg: 12px;
+  --r-xl: 16px; --r-2xl: 20px; --r-3xl: 24px; --r-full: 9999px;
 }
 
-.dark {
-  --background: oklch(0.141 0.005 285.823);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 285.885);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.21 0.006 285.885);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.92 0.004 286.32);
-  --primary-foreground: oklch(0.21 0.006 285.885);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.033);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.552 0.016 285.938);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.21 0.006 285.885);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.274 0.006 286.033);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.552 0.016 285.938);
+[data-theme="dark"] {
+  --bg-canvas: #0B0D12;
+  --bg-surface: #12151C;
+  --bg-surface-2: #161A22;
+  --bg-surface-elevated: #1F232D;
+  --bg-sidebar: #0F1219;
+  --bg-sidebar-active: rgba(92, 130, 255, 0.16);
+  --bg-row-hover: rgba(255, 255, 255, 0.03);
+  --bg-muted: var(--n-800);
+  --bg-subtle: #2E3340;
+  --bg-inverse: var(--n-50);
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+
+  --text-primary: #E8EBF2;
+  --text-secondary: #B0B6C3;
+  --text-tertiary: #858B99;
+  --text-disabled: #4E5463;
+  --text-placeholder: #4E5463;
+  --text-link: var(--blue-300);
+
+  --border-hairline: rgba(255, 255, 255, 0.06);
+  --border-hairline-strong: rgba(255, 255, 255, 0.12);
+  --border-subtle: #2E3340;
+  --border-default: #3B414F;
+  --border-strong: #4E5463;
+  --border-focus: var(--blue-400);
+
+  --action-secondary-hover: rgba(255, 255, 255, 0.06);
+  --action-secondary-pressed: rgba(255, 255, 255, 0.10);
+  --action-tertiary-hover: rgba(46, 92, 255, 0.12);
+  --action-tertiary-pressed: rgba(46, 92, 255, 0.20);
+
+  --accent-hover: var(--blue-400);
+  --accent-pressed: var(--blue-300);
+  --accent-tint: rgba(46, 92, 255, 0.12);
+  --accent-tint-strong: rgba(46, 92, 255, 0.20);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 24px rgba(0, 0, 0, 0.45);
+
+  --bar-completed-bg:  #1F3028;
+  --bar-completed-bd:  rgba(120, 200, 160, 0.55);
+  --bar-completed-fg:  #8FDBB6;
+  --bar-intransit-bg:  #1E2840;
+  --bar-intransit-bd:  rgba(140, 170, 240, 0.55);
+  --bar-intransit-fg:  #B6C9FF;
+  --bar-assigned-bg:   #262A35;
+  --bar-assigned-bd:   rgba(255, 255, 255, 0.22);
+  --bar-assigned-fg:   #C2C8D6;
+  --bar-open-bg:       #362A1A;
+  --bar-open-bd:       rgba(220, 180, 100, 0.55);
+  --bar-open-fg:       #F0C684;
+}
+
+/* Comfortable density — taller rows, larger controls */
+[data-density="comfortable"] {
+  --row-h: var(--row-h-comfortable);
+  --tbl-cell-py: 14px;
+  --btn-md-h: 40px;
+  --btn-md-px: 16px;
+  --input-md-h: 40px;
+  --input-md-px: 14px;
+  --card-padding: 20px;
+  --card-gap: 16px;
+  --list-py: 14px;
+  --list-px: 16px;
 }
 
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  html,
+  * { @apply border-border outline-ring/50; }
+  html, body { height: 100%; }
   body {
-    height: 100%;
+    background: var(--bg-canvas);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
-  body {
-    @apply bg-background text-foreground;
-  }
+  button { font-family: inherit; }
 }
+
+/* === Tabular numerics === */
+.tnum, .num { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
+
+/* === Web type scale (slightly tighter than mobile) === */
+.tw-display { font-size: 28px;   line-height: 34px; font-weight: 600; letter-spacing: -0.015em; }
+.tw-h1      { font-size: 22px;   line-height: 28px; font-weight: 600; letter-spacing: -0.012em; }
+.tw-h2      { font-size: 17px;   line-height: 24px; font-weight: 600; letter-spacing: -0.005em; }
+.tw-h3      { font-size: 14px;   line-height: 20px; font-weight: 600; letter-spacing:  0.002em; }
+.tw-body    { font-size: 13.5px; line-height: 20px; font-weight: 400; }
+.tw-body-sm { font-size: 12.5px; line-height: 18px; font-weight: 400; }
+.tw-label   { font-size: 11.5px; line-height: 16px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-tertiary); }
+.tw-meta    { font-size: 12px;   line-height: 16px; font-weight: 400; color: var(--text-tertiary); }
+.tw-mono    { font-family: var(--font-mono); font-feature-settings: 'tnum'; }
+
+/* === Mobile-shared type scale helpers === */
+.t-display-md { font-size: 32px; line-height: 40px; font-weight: 700; letter-spacing: -0.015em; }
+.t-display-sm { font-size: 28px; line-height: 36px; font-weight: 700; letter-spacing: -0.01em; }
+.t-heading-lg { font-size: 24px; line-height: 32px; font-weight: 700; letter-spacing: -0.01em; }
+.t-heading-md { font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -0.005em; }
+.t-heading-sm { font-size: 18px; line-height: 26px; font-weight: 600; }
+.t-body-lg    { font-size: 17px; line-height: 24px; font-weight: 400; }
+.t-body-md    { font-size: 15px; line-height: 22px; font-weight: 400; }
+.t-body-sm    { font-size: 14px; line-height: 20px; font-weight: 400; }
+.t-label-lg   { font-size: 15px; line-height: 20px; font-weight: 500; }
+.t-label-md   { font-size: 13px; line-height: 18px; font-weight: 500; letter-spacing: 0.01em; }
+.t-label-sm   { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.02em; }
+.t-caption    { font-size: 12px; line-height: 16px; font-weight: 400; letter-spacing: 0.01em; }
+.t-micro      { font-size: 11px; line-height: 14px; font-weight: 500; letter-spacing: 0.03em; }
+
+/* === Hairline utilities === */
+.hairline   { border: 1px solid var(--border-hairline); }
+.hairline-b { border-bottom: 1px solid var(--border-hairline); }
+.hairline-t { border-top: 1px solid var(--border-hairline); }
+
+/* === Focus ring === */
+.focus-ring:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* === Scrollbar polish === */
+.scroll-thin::-webkit-scrollbar { width: 10px; height: 10px; }
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: rgba(15, 22, 36, 0.14);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 22, 36, 0.22);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+[data-theme="dark"] .scroll-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.10);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Hide the scrollbar entirely while keeping the element scrollable
+   via wheel / touch / programmatic scrollTop. Used by create-form's
+   inner main column — the rail provides the spatial cue, so the
+   scrollbar is visual noise. */
+.scroll-hidden { scrollbar-width: none; }
+.scroll-hidden::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+/* === Animations === */
+@keyframes badge-pop {
+  from { transform: scale(0.7);  opacity: 0; }
+  60%  { transform: scale(1.08); opacity: 1; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+.badge-pop { animation: badge-pop 240ms var(--ease-spring); }
+
+@keyframes slide-up {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+.slide-up { animation: slide-up 180ms var(--ease-out); }
+
+@keyframes slideInRight {
+  from { transform: translateX(16px); opacity: 0; }
+  to   { transform: translateX(0);     opacity: 1; }
+}
+.slide-in-right { animation: slideInRight 180ms var(--ease-out); }
+
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to   { background-position:  200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg,
+    rgba(15, 22, 36, 0.05) 0%,
+    rgba(15, 22, 36, 0.10) 50%,
+    rgba(15, 22, 36, 0.05) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 4px;
+}
+[data-theme="dark"] .skeleton {
+  background: linear-gradient(90deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0.10) 50%,
+    rgba(255, 255, 255, 0.04) 100%);
+  background-size: 200% 100%;
+}
+
+@keyframes inf-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40%           { opacity: 1;    transform: translateY(-2px); }
+}
+.inf-dots { display: inline-flex; align-items: center; gap: 3px; }
+.inf-dots > span {
+  width: 4px; height: 4px; border-radius: 2px;
+  background: var(--accent);
+  animation: inf-dot 1.2s infinite ease-in-out;
+}
+.inf-dots > span:nth-child(2) { animation-delay: 0.15s; }
+.inf-dots > span:nth-child(3) { animation-delay: 0.30s; }
+
+/* === WorkOS Widgets — modal + UserProfile overrides === */
 
 /* WorkOS Widgets Modal Overlay - Ensure it covers the entire page including sidebar */
 .rt-DialogOverlay[data-state='open'] {
@@ -239,46 +525,52 @@
   margin-bottom: 0 !important;
 }
 
-/* Print styles for invoices */
+/* === Print styles for invoices === */
 @media print {
   @page {
     size: letter;
     margin: 0.4in 0.5in;
   }
-  
+
   html, body {
     height: auto !important;
     overflow: visible !important;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
-  
+
+  /* The slide-over preview scales the invoice down to fit the screen; never
+     carry that zoom into print/PDF — always render at full size. */
+  .invoice-container {
+    zoom: 1 !important;
+  }
+
   /* Hide sidebar and navigation */
   [data-sidebar],
   nav,
   header:not(.invoice-header) {
     display: none !important;
   }
-  
+
   /* Ensure dialog/sheet content is visible */
   [data-radix-dialog-overlay] {
     display: none !important;
   }
-  
+
   [data-radix-dialog-content] {
     position: static !important;
     max-width: 100% !important;
     height: auto !important;
     overflow: visible !important;
   }
-  
+
   /* Remove page breaks - allow natural flow */
   * {
     page-break-inside: auto !important;
     page-break-before: auto !important;
     page-break-after: auto !important;
   }
-  
+
   /* Scale content to fit on one page */
   .invoice-container {
     transform: scale(0.95);

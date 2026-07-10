@@ -5,7 +5,8 @@
       "name": "Next.js Dev Server",
       "runtimeExecutable": "npx",
       "runtimeArgs": ["next", "dev"],
-      "port": 3000
+      "port": 3000,
+      "autoPort": true
     },
     {
       "name": "Convex Dev Sync",

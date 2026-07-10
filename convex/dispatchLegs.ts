@@ -21,6 +21,8 @@ import {
 import type { OverlapInfo } from './_helpers/timeUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { transferFrontierToDriver } from './loadTrackingState';
+import { getLoadFacets } from './lib/loadFacets';
 
 /**
  * Dispatch Legs - The atomic unit of work
@@ -1446,6 +1448,85 @@ export const getDriverSchedule = query({
   },
 });
 
+// Powers the /dispatch/schedule Gantt page. One round-trip returns every
+// leg in an org whose time range intersects [startMs, endMs], enriched
+// with the order number and start/end stop city we need to render each
+// bar. The caller groups the result by driverId / carrierPartnershipId.
+export const getOrgSchedule = query({
+  args: {
+    workosOrgId: v.string(),
+    startMs: v.number(),
+    endMs: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+
+    const enriched = await Promise.all(
+      legs.map(async (leg) => {
+        // Skip canceled — they shouldn't render on a forward-looking schedule.
+        if (leg.status === 'CANCELED') return null;
+
+        // Prefer the denormalized window; fall back to live stop reads for
+        // legs that haven't been backfilled yet.
+        let start = leg.scheduledStartMs ?? null;
+        let end = leg.scheduledEndMs ?? null;
+        if (start === null || end === null) {
+          const range = await getLegTimeRange(ctx, leg);
+          if (!range) return null;
+          start = range.start;
+          end = range.end;
+        }
+
+        // Overlap test against the requested window.
+        if (end < args.startMs || start > args.endMs) return null;
+
+        const [load, startStop, endStop, facets] = await Promise.all([
+          ctx.db.get(leg.loadId),
+          ctx.db.get(leg.startStopId),
+          ctx.db.get(leg.endStopId),
+          getLoadFacets(ctx, leg.loadId),
+        ]);
+
+        return {
+          _id: leg._id,
+          driverId: leg.driverId ?? null,
+          carrierPartnershipId: leg.carrierPartnershipId ?? null,
+          status: leg.status,
+          startMs: start,
+          endMs: end,
+          startedAt: leg.startedAt ?? null,
+          endedAt: leg.endedAt ?? null,
+          load: load
+            ? {
+                _id: load._id,
+                orderNumber: load.orderNumber,
+                internalId: load.internalId,
+                status: load.status,
+              }
+            : null,
+          hcr: facets.hcr ?? null,
+          tripNumber: facets.trip ?? null,
+          startCity: startStop?.city ?? null,
+          startState: startStop?.state ?? null,
+          startCheckedInAt: startStop?.checkedInAt ?? null,
+          startCheckedOutAt: startStop?.checkedOutAt ?? null,
+          endCity: endStop?.city ?? null,
+          endState: endStop?.state ?? null,
+          endCheckedInAt: endStop?.checkedInAt ?? null,
+          endCheckedOutAt: endStop?.checkedOutAt ?? null,
+        };
+      })
+    );
+
+    return enriched.filter((x): x is NonNullable<typeof x> => x !== null);
+  },
+});
+
 // DIAGNOSTIC: reports leg/stop counts for an org so we can size the read budget
 // of getAvailableDrivers. Safe to call — no writes, returns counts only.
 // Delete after investigation.
@@ -1728,13 +1809,16 @@ export const handoffLoad = mutation({
 
     let newLegStartStopId: Id<'loadStops'> = oldLeg.startStopId;
     if (trackingState) {
+      // Prefer the arrival watch (next unarrived stop); after a final-stop
+      // check-in only the departure watch remains, so fall back to it.
+      const frontierSeq =
+        trackingState.currentStopSequenceNumber ??
+        trackingState.departureWatch?.stopSequenceNumber;
       const frontierStop = await ctx.db
         .query('loadStops')
         .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
         .collect()
-        .then((stops) =>
-          stops.find((s) => s.sequenceNumber === trackingState.currentStopSequenceNumber)
-        );
+        .then((stops) => stops.find((s) => s.sequenceNumber === frontierSeq));
       if (frontierStop) newLegStartStopId = frontierStop._id;
     }
 
@@ -1777,17 +1861,10 @@ export const handoffLoad = mutation({
       updatedAt: now,
     });
 
-    // Transfer tracking state, if present. The new driver's session will
-    // be stamped on the tracking state when they check in at the new leg's
-    // first stop. For now, clear the tracking state's sessionId binding
-    // to the old session by setting driverId — sessionId stays as the old
-    // value until the relay driver's session activates on check-in.
-    if (trackingState) {
-      await ctx.db.patch(trackingState._id, {
-        driverId: args.toDriverId,
-        updatedAt: now,
-      });
-    }
+    // Transfer tracking state, if present: re-bind to the relay driver (and
+    // their active session when they have one) and clear the departure
+    // watch — it tracked the from-driver's presence at the handoff stop.
+    await transferFrontierToDriver(ctx, trackingState, args.toDriverId, now);
 
     // Maintain the primaryDriverId denorm cache if we just handed off leg 1.
     if (oldLeg.sequence === 1 && load.primaryDriverId === args.fromDriverId) {
