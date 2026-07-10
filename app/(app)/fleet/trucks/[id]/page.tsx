@@ -33,6 +33,7 @@ import { Id } from '@/convex/_generated/dataModel';
 import { format, differenceInDays, isPast } from 'date-fns';
 import { use } from 'react';
 import { TruckQRCode } from '@/components/trucks/truck-qr-code';
+import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 
 export default function TruckDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { user } = useAuth();
@@ -521,49 +522,7 @@ export default function TruckDetailPage({ params }: { params: Promise<{ id: stri
                   <CardDescription>Timeline of changes and updates</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="space-y-3">
-                    <div className="flex items-start gap-3">
-                      <div className="rounded-full bg-blue-100 p-2 dark:bg-blue-900">
-                        <CheckCircle2 className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-                      </div>
-                      <div className="flex-1 space-y-1">
-                        <p className="text-sm font-medium">Created</p>
-                        <p className="text-sm text-muted-foreground">
-                          {format(new Date(truck.createdAt), 'MMM d, yyyy h:mm a')}
-                        </p>
-                        <p className="text-xs text-muted-foreground">Created by {truck.createdBy}</p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-start gap-3">
-                      <div className="rounded-full bg-green-100 p-2 dark:bg-green-900">
-                        <Edit className="h-4 w-4 text-green-600 dark:text-green-400" />
-                      </div>
-                      <div className="flex-1 space-y-1">
-                        <p className="text-sm font-medium">Last Updated</p>
-                        <p className="text-sm text-muted-foreground">
-                          {format(new Date(truck.updatedAt), 'MMM d, yyyy h:mm a')}
-                        </p>
-                      </div>
-                    </div>
-
-                    {truck.isDeleted && truck.deletedAt && (
-                      <div className="flex items-start gap-3">
-                        <div className="rounded-full bg-red-100 p-2 dark:bg-red-900">
-                          <Trash2 className="h-4 w-4 text-red-600 dark:text-red-400" />
-                        </div>
-                        <div className="flex-1 space-y-1">
-                          <p className="text-sm font-medium">Deactivated</p>
-                          <p className="text-sm text-muted-foreground">
-                            {format(new Date(truck.deletedAt), 'MMM d, yyyy h:mm a')}
-                          </p>
-                          {truck.deletedBy && (
-                            <p className="text-xs text-muted-foreground">Deleted by {truck.deletedBy}</p>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                  <EntityAuditTimeline entityType="truck" entityId={id} />
                 </CardContent>
               </Card>
             </TabsContent>

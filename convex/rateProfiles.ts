@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 /**
  * Rate Profiles - Pay package definitions
@@ -89,7 +90,7 @@ export const create = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const now = Date.now();
 
@@ -130,13 +131,15 @@ export const create = mutation({
     }
 
     // Log the creation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: args.workosOrgId,
       entityType: 'rateProfile',
       entityId: profileId,
       entityName: args.name,
       action: 'created',
       performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
       description: `Created ${args.profileType.toLowerCase()} rate profile "${args.name}"`,
     });
 
@@ -163,7 +166,7 @@ export const update = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
@@ -211,7 +214,7 @@ export const update = mutation({
       }
 
       // Log the update
-      await ctx.runMutation(internal.auditLog.logAction, {
+      await logAudit(ctx, {
         organizationId: profile.workosOrgId,
         entityType: 'rateProfile',
         entityId: profileId,
@@ -219,6 +222,7 @@ export const update = mutation({
         action: 'updated',
         performedBy: userId,
         performedByName: userName,
+        performedByEmail: userEmail,
         description: `Updated rate profile "${updates.name ?? profile.name}"`,
         changedFields: Object.keys(updateData),
       });
@@ -236,7 +240,7 @@ export const deactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
@@ -248,7 +252,7 @@ export const deactivate = mutation({
     });
 
     // Log the deactivation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: profile.workosOrgId,
       entityType: 'rateProfile',
       entityId: args.profileId,
@@ -256,6 +260,7 @@ export const deactivate = mutation({
       action: 'deactivated',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Deactivated rate profile "${profile.name}"`,
     });
 
@@ -271,7 +276,7 @@ export const reactivate = mutation({
     userName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId, userName } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
     if (!profile) throw new Error('Rate profile not found');
@@ -282,7 +287,7 @@ export const reactivate = mutation({
     });
 
     // Log the reactivation
-    await ctx.runMutation(internal.auditLog.logAction, {
+    await logAudit(ctx, {
       organizationId: profile.workosOrgId,
       entityType: 'rateProfile',
       entityId: args.profileId,
@@ -290,6 +295,7 @@ export const reactivate = mutation({
       action: 'reactivated',
       performedBy: userId,
       performedByName: userName,
+      performedByEmail: userEmail,
       description: `Reactivated rate profile "${profile.name}"`,
     });
 
@@ -370,7 +376,7 @@ export const assignOrgDefaultToAllDrivers = internalMutation({
     // Log the bulk assignment
     if (assignedCount > 0) {
       const profile = await ctx.db.get(args.profileId);
-      await ctx.runMutation(internal.auditLog.logAction, {
+      await logAudit(ctx, {
         organizationId: args.workosOrgId,
         entityType: 'rateProfile',
         entityId: args.profileId,

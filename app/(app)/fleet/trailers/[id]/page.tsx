@@ -21,6 +21,7 @@ import { useRouter } from 'next/navigation';
 import { AlertCircle, Download, Pencil, Truck, Trash2 } from 'lucide-react';
 import { Id } from '@/convex/_generated/dataModel';
 import { use } from 'react';
+import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 
 export default function TrailerDetailsPage({ params }: { params: Promise<{ id: string }> }) {
   const { user } = useAuth();
@@ -487,12 +488,7 @@ export default function TrailerDetailsPage({ params }: { params: Promise<{ id: s
                   </div>
                 </TabsContent>
                 <TabsContent value="audit" className="space-y-4">
-                  <div className="flex items-center justify-center py-12 text-muted-foreground">
-                    <div className="text-center space-y-2">
-                      <AlertCircle className="mx-auto h-8 w-8" />
-                      <p>No audit logs available</p>
-                    </div>
-                  </div>
+                  <EntityAuditTimeline entityType="trailer" entityId={id} />
                 </TabsContent>
               </Tabs>
             </CardContent>
