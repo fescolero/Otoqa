@@ -3,6 +3,7 @@
 import { api } from '@/convex/_generated/api';
 import type { AuditAction, AuditEntityType } from '@/convex/lib/audit';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useOrgMemberNames } from '@/hooks/use-org-member-names';
 import { format } from 'date-fns';
 import { CheckCircle2, Edit, Trash2, RotateCcw, UserPlus, UserMinus, Loader2, History } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -116,6 +117,12 @@ function TimelineEntry({
  */
 export function EntityAuditTimeline({ entityType, entityId, limit, recordFallback }: EntityAuditTimelineProps) {
   const logs = useAuthQuery(api.auditLog.getEntityAuditLog, { entityType, entityId, limit });
+  const memberNames = useOrgMemberNames();
+
+  // Rows written before performer names were denormalized (and the
+  // recordFallback path) only carry a raw WorkOS user ID.
+  const resolvePerformer = (raw: string | undefined): string | undefined =>
+    raw ? (memberNames?.get(raw) ?? raw) : undefined;
 
   if (logs === undefined) {
     return (
@@ -134,7 +141,7 @@ export function EntityAuditTimeline({ entityType, entityId, limit, recordFallbac
               style={ACTION_STYLES.deactivated ?? DEFAULT_STYLE}
               title="Deactivated"
               timestamp={recordFallback.deactivatedAt}
-              performer={recordFallback.deactivatedBy}
+              performer={resolvePerformer(recordFallback.deactivatedBy)}
             />
           )}
           {recordFallback.updatedAt && recordFallback.updatedAt !== recordFallback.createdAt && (
@@ -148,7 +155,7 @@ export function EntityAuditTimeline({ entityType, entityId, limit, recordFallbac
             style={ACTION_STYLES.created ?? DEFAULT_STYLE}
             title="Created"
             timestamp={recordFallback.createdAt}
-            performer={recordFallback.createdBy}
+            performer={resolvePerformer(recordFallback.createdBy)}
           />
         </div>
       );
@@ -168,7 +175,7 @@ export function EntityAuditTimeline({ entityType, entityId, limit, recordFallbac
       {logs.map((log) => {
         const canonical = LEGACY_ACTION_MAP[log.action] ?? log.action;
         const style = ACTION_STYLES[canonical as AuditAction] ?? DEFAULT_STYLE;
-        const performer = log.performedByName || log.performedByEmail || log.performedBy;
+        const performer = log.performedByName || log.performedByEmail || resolvePerformer(log.performedBy);
 
         return (
           <TimelineEntry

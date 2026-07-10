@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { api } from '@/convex/_generated/api';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useOrgMemberNames } from '@/hooks/use-org-member-names';
 import { formatDistanceToNow } from 'date-fns';
 import { Loader2, History } from 'lucide-react';
 import { Card } from '@/components/ui/card';
@@ -49,6 +50,7 @@ export function RecentActivityFeed({ hours = 24 }: RecentActivityFeedProps) {
   // Stable per mount so the query subscription isn't re-created every render.
   const [nowMs] = useState(() => Date.now());
   const logs = useAuthQuery(api.auditLog.getRecentActivity, { hours, nowMs });
+  const memberNames = useOrgMemberNames();
 
   return (
     <Card className="p-4">
@@ -75,7 +77,8 @@ export function RecentActivityFeed({ hours = 24 }: RecentActivityFeedProps) {
       {logs !== undefined && logs.length > 0 && (
         <div className="space-y-3">
           {logs.map((log) => {
-            const performer = log.performedByName || log.performedByEmail || log.performedBy;
+            const performer =
+              log.performedByName || log.performedByEmail || memberNames?.get(log.performedBy) || log.performedBy;
             return (
               <div key={log._id} className="flex items-start gap-3 text-sm">
                 <Badge variant="outline" className="shrink-0 mt-0.5">
