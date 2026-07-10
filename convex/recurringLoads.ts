@@ -3,6 +3,7 @@ import { mutation, query, internalMutation, internalAction, internalQuery } from
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import { logAudit } from './lib/audit';
 import { updateLoadCount } from './stats_helpers';
 import { setLoadTag, getLoadFacets } from './lib/loadFacets';
 import {
@@ -200,7 +201,7 @@ export const createFromLoad = mutation({
   },
   returns: v.id('recurringLoadTemplates'),
   handler: async (ctx, args) => {
-    const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // 1. Get the source load
     const sourceLoad = await ctx.db.get(args.sourceLoadId);
     if (!sourceLoad) {
@@ -273,7 +274,7 @@ export const createFromLoad = mutation({
     const now = Date.now();
 
     // 5. Create the template
-    return await ctx.db.insert('recurringLoadTemplates', {
+    const templateId = await ctx.db.insert('recurringLoadTemplates', {
       workosOrgId: sourceLoad.workosOrgId,
       routeAssignmentId: args.routeAssignmentId,
       // Direct assignment for recurring loads
@@ -302,6 +303,20 @@ export const createFromLoad = mutation({
       createdAt: now,
       updatedAt: now,
     });
+
+    await logAudit(ctx, {
+      organizationId: sourceLoad.workosOrgId,
+      entityType: 'recurringLoad',
+      entityId: templateId,
+      entityName: args.name,
+      action: 'created',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Created recurring load template "${args.name}" from load ${sourceLoad.internalId}`,
+    });
+
+    return templateId;
   },
 });
 
@@ -312,7 +327,7 @@ export const toggleActive = mutation({
   },
   returns: v.boolean(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const template = await ctx.db.get(args.id);
     if (!template) {
       throw new Error('Template not found');
@@ -326,6 +341,18 @@ export const toggleActive = mutation({
       updatedAt: Date.now(),
     });
 
+    await logAudit(ctx, {
+      organizationId: template.workosOrgId,
+      entityType: 'recurringLoad',
+      entityId: args.id,
+      entityName: template.name,
+      action: newStatus ? 'reactivated' : 'deactivated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `${newStatus ? 'Activated' : 'Deactivated'} recurring load template "${template.name}"`,
+    });
+
     return newStatus;
   },
 });
@@ -337,7 +364,7 @@ export const remove = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const callerOrgId = await requireCallerOrgId(ctx);
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const template = await ctx.db.get(args.id);
     if (!template) {
       throw new Error('Template not found');
@@ -345,6 +372,19 @@ export const remove = mutation({
     if (template.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     await ctx.db.delete(args.id);
+
+    await logAudit(ctx, {
+      organizationId: template.workosOrgId,
+      entityType: 'recurringLoad',
+      entityId: args.id,
+      entityName: template.name,
+      action: 'deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deleted recurring load template "${template.name}"`,
+      changesBefore: JSON.stringify(template),
+    });
 
     return null;
   },

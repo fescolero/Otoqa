@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalQuery, internalMutation } from './_generated/server';
 import { assertCallerOwnsOrg } from './lib/auth';
+import { logAudit } from './lib/audit';
 
 // Get all integrations for an organization
 export const getIntegrations = query({
@@ -74,7 +75,7 @@ export const upsertIntegration = mutation({
     createdBy: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     // Check if integration already exists
     const existing = await ctx.db
@@ -91,6 +92,19 @@ export const upsertIntegration = mutation({
         syncSettings: args.syncSettings,
         updatedAt: now,
       });
+
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'integration',
+        entityId: existing._id,
+        entityName: args.provider,
+        action: 'updated',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Updated integration "${args.provider}"`,
+      });
+
       return existing._id;
     } else {
       // Create new integration
@@ -115,6 +129,19 @@ export const upsertIntegration = mutation({
         createdAt: now,
         updatedAt: now,
       });
+
+      await logAudit(ctx, {
+        organizationId: args.workosOrgId,
+        entityType: 'integration',
+        entityId: integrationId,
+        entityName: args.provider,
+        action: 'created',
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        description: `Created integration "${args.provider}"`,
+      });
+
       return integrationId;
     }
   },
@@ -144,7 +171,7 @@ export const updateSyncSettings = mutation({
     }),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const integration = await ctx.db
       .query('orgIntegrations')
@@ -187,6 +214,20 @@ export const updateSyncSettings = mutation({
     }
 
     await ctx.db.patch(integration._id, patchData);
+
+    // Credential values are intentionally excluded from the audit entry.
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'integration',
+      entityId: integration._id,
+      entityName: args.provider,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Updated sync settings for integration "${args.provider}"`,
+      changedFields: Object.keys(patchData).filter((key) => key !== 'updatedAt'),
+    });
   },
 });
 
@@ -197,7 +238,7 @@ export const deleteIntegration = mutation({
     provider: v.string(),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const integration = await ctx.db
       .query('orgIntegrations')
@@ -209,6 +250,19 @@ export const deleteIntegration = mutation({
     }
 
     await ctx.db.delete(integration._id);
+
+    // No changesBefore snapshot: the integration doc contains raw credentials.
+    await logAudit(ctx, {
+      organizationId: args.workosOrgId,
+      entityType: 'integration',
+      entityId: integration._id,
+      entityName: integration.provider,
+      action: 'deleted',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Deleted integration "${integration.provider}"`,
+    });
   },
 });
 
