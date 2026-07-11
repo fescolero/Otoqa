@@ -78,6 +78,10 @@ type LiveProps = {
    *  doesn't match this. null = show all at full opacity. Driven by
    *  the focus pin button on each trip card in the activity panel. */
   focusedTripIndex?: number | null;
+  /** Ping row the dispatcher is hovering in the activity panel's GPS
+   *  list — highlighted on the map so a list row can be eye-matched to
+   *  its spot on the route. null = nothing hovered. */
+  hoveredPing?: { latitude: number; longitude: number } | null;
 };
 
 type PastProps = {
@@ -88,6 +92,7 @@ type PastProps = {
   routeHistory?: MapPing[];
   selectedTrips?: TripInfo[];
   focusedTripIndex?: number | null;
+  hoveredPing?: { latitude: number; longitude: number } | null;
 };
 
 type Props = LiveProps | PastProps;
@@ -1137,6 +1142,12 @@ function MapInner(
             focusedTripIndex={props.focusedTripIndex ?? null}
           />
         )}
+        {props.hoveredPing && selectedSession && (
+          <HoveredPingHighlight
+            latitude={props.hoveredPing.latitude}
+            longitude={props.hoveredPing.longitude}
+          />
+        )}
       </>
     );
   }
@@ -1207,6 +1218,12 @@ function MapInner(
           sessionStartedAt={selectedPast.startedAt}
           sessionEndedAt={selectedPast.endedAt}
           focusedTripIndex={props.focusedTripIndex ?? null}
+        />
+      )}
+      {props.hoveredPing && selectedPast && (
+        <HoveredPingHighlight
+          latitude={props.hoveredPing.latitude}
+          longitude={props.hoveredPing.longitude}
         />
       )}
     </>
@@ -1368,6 +1385,63 @@ function describePing(
         : 'stopped'
       : 'unknown';
   return `${time}\n${where}\n${bucket}\nSpeed: ${speedLabel}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// HoveredPingHighlight — marks the ping whose row the dispatcher is
+// hovering in the activity panel. A solid dot on the exact coordinate
+// plus a pulsing halo so it stands out over the polyline even at fleet
+// zoom. Non-clickable — it's a transient echo of the list hover, not an
+// interaction target.
+// ─────────────────────────────────────────────────────────────────────────
+
+function HoveredPingHighlight({
+  latitude,
+  longitude,
+}: {
+  latitude: number;
+  longitude: number;
+}) {
+  return (
+    <AdvancedMarker
+      position={{ lat: latitude, lng: longitude }}
+      zIndex={1300}
+      clickable={false}
+    >
+      {/* Zero-size wrapper so the marker anchor IS the coordinate;
+          halo + dot center themselves on it via translate. */}
+      <div style={{ position: 'relative', width: 0, height: 0 }}>
+        <span
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: 34,
+            height: 34,
+            borderRadius: '50%',
+            background: '#2E5CFF',
+            opacity: 0.2,
+            transform: 'translate(-50%, -50%)',
+            animation: 'sessionPulse 1.6s ease-out infinite',
+          }}
+        />
+        <span
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: 12,
+            height: 12,
+            borderRadius: '50%',
+            background: '#2E5CFF',
+            border: '2px solid #FFFFFF',
+            transform: 'translate(-50%, -50%)',
+            boxShadow: '0 1px 4px rgba(15,22,36,0.35)',
+          }}
+        />
+      </div>
+    </AdvancedMarker>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1579,16 +1653,35 @@ function sanitizePings(
 
 /**
  * Points the camera is allowed to fit to. Runs the same outlier flagging
- * as the polyline and drops flagged pings, so one bogus GPS jump — which
- * the polyline hides and the outlier badge counts — can't stretch
- * fitBounds to a different region than the pins the dispatcher sees.
- * Falls back to the raw list when flagging would leave fewer than 2
- * points (better a shaky frame than no frame).
+ * as the polyline, then groups pings into the runs the polyline actually
+ * draws (a `breakBefore` flag starts a new run) and drops single-ping
+ * runs — a 1-point path never renders, so those are exactly the outliers
+ * the map hides and the badge counts. Keeping the camera on drawn runs
+ * means one bogus GPS jump can't stretch fitBounds to a different region
+ * than the pins the dispatcher sees.
+ *
+ * This also covers a bogus FIRST ping: the sanitizer can only flag the
+ * ping *after* an impossible jump (the first has no predecessor), but a
+ * bad opening ping strands itself in a singleton run and gets dropped
+ * here all the same.
+ *
+ * Falls back to the raw list when filtering would leave fewer than 2
+ * points — better a shaky frame than no frame.
  */
 function cameraPointsFor(pings: MapPing[]): google.maps.LatLngLiteral[] {
   if (pings.length === 0) return [];
   const flagged = sanitizePings(pings, MAX_PLAUSIBLE_KMH);
-  const kept = flagged.filter((p) => !p.breakBefore);
+  const runs: Array<Array<MapPing & { breakBefore?: boolean }>> = [];
+  let run: Array<MapPing & { breakBefore?: boolean }> = [];
+  for (const p of flagged) {
+    if (p.breakBefore && run.length > 0) {
+      runs.push(run);
+      run = [];
+    }
+    run.push(p);
+  }
+  if (run.length > 0) runs.push(run);
+  const kept = runs.filter((r) => r.length >= 2).flat();
   const source = kept.length >= 2 ? kept : flagged;
   return source.map((p) => ({ lat: p.latitude, lng: p.longitude }));
 }
