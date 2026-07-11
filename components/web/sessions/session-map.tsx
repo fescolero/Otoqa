@@ -489,17 +489,34 @@ function MapInner(
     const here = positionForSession(s, props.mode);
     const bounds = new google.maps.LatLngBounds();
     let added = 0;
-    if (here) {
-      bounds.extend(here);
-      added++;
-    }
     // Fit to the same outlier-filtered pings the polyline draws. Raw
     // routeHistory can contain GPS jumps that the polyline hides (and the
     // outlier badge counts) — letting those into the bounds drags the
     // camera to a different region than the pins.
-    for (const xy of cameraPointsFor(props.routeHistory ?? [])) {
+    const cameraPoints = cameraPointsFor(props.routeHistory ?? []);
+    for (const xy of cameraPoints) {
       bounds.extend(xy);
       added++;
+    }
+    // Include the driver's latest position only when it agrees with the
+    // framed route. When a session carries a second GPS stream (device
+    // pinging from a yard while the load tracks hundreds of km away),
+    // the NEWEST ping — and therefore latestLocation — may be the
+    // phantom; extending bounds to it would center the camera on the
+    // empty land between the two and push every pin off-screen. With no
+    // route yet, `here` is all we have and always wins.
+    if (here) {
+      const agreesWithRoute =
+        cameraPoints.length < 2 ||
+        cameraPoints.some(
+          (p) =>
+            haversineKm(p.lat, p.lng, here.lat, here.lng) <
+            CLUSTER_RADIUS_KM,
+        );
+      if (agreesWithRoute) {
+        bounds.extend(here);
+        added++;
+      }
     }
 
     if (added === 0) return;
@@ -1652,18 +1669,25 @@ function sanitizePings(
 }
 
 /**
- * Points the camera is allowed to fit to. Runs the same outlier flagging
- * as the polyline, then groups pings into the runs the polyline actually
- * draws (a `breakBefore` flag starts a new run) and drops single-ping
- * runs — a 1-point path never renders, so those are exactly the outliers
- * the map hides and the badge counts. Keeping the camera on drawn runs
- * means one bogus GPS jump can't stretch fitBounds to a different region
- * than the pins the dispatcher sees.
+ * Points the camera is allowed to fit to. Three filters, all aimed at
+ * one rule: the camera frames what the map actually shows, nothing else.
  *
- * This also covers a bogus FIRST ping: the sanitizer can only flag the
- * ping *after* an impossible jump (the first has no predecessor), but a
- * bad opening ping strands itself in a singleton run and gets dropped
- * here all the same.
+ *   1. Same outlier flagging as the polyline (>150 mph jumps).
+ *   2. Group pings into the runs the polyline draws (a `breakBefore`
+ *      flag starts a new run) and drop single-ping runs — a 1-point
+ *      path never renders. This also covers a bogus FIRST ping: the
+ *      sanitizer can't flag it (no predecessor), but it strands itself
+ *      in a singleton run and gets dropped here all the same.
+ *   3. Cluster the surviving runs spatially and keep only the DOMINANT
+ *      cluster. This is the defense against a sustained second GPS
+ *      stream on one session — e.g. the load tracking down I-5 while a
+ *      second device pings from a yard 400 km away. Those phantom pings
+ *      arrive in groups, so they survive the singleton filter as "real"
+ *      runs; fitting bounds across both regions centers the camera on
+ *      the empty land between them and puts every pin off-screen.
+ *      Majority of pings wins; the minority cluster still shows in the
+ *      outlier badge + ping-dots debug overlay, it just can't steal
+ *      the frame.
  *
  * Falls back to the raw list when filtering would leave fewer than 2
  * points — better a shaky frame than no frame.
@@ -1671,8 +1695,10 @@ function sanitizePings(
 function cameraPointsFor(pings: MapPing[]): google.maps.LatLngLiteral[] {
   if (pings.length === 0) return [];
   const flagged = sanitizePings(pings, MAX_PLAUSIBLE_KMH);
-  const runs: Array<Array<MapPing & { breakBefore?: boolean }>> = [];
-  let run: Array<MapPing & { breakBefore?: boolean }> = [];
+
+  type Run = Array<MapPing & { breakBefore?: boolean }>;
+  const runs: Run[] = [];
+  let run: Run = [];
   for (const p of flagged) {
     if (p.breakBefore && run.length > 0) {
       runs.push(run);
@@ -1681,9 +1707,69 @@ function cameraPointsFor(pings: MapPing[]): google.maps.LatLngLiteral[] {
     run.push(p);
   }
   if (run.length > 0) runs.push(run);
-  const kept = runs.filter((r) => r.length >= 2).flat();
+
+  const drawn = runs.filter((r) => r.length >= 2);
+  if (drawn.length === 0) {
+    return flagged.map((p) => ({ lat: p.latitude, lng: p.longitude }));
+  }
+
+  const kept = dominantCluster(drawn).flat();
   const source = kept.length >= 2 ? kept : flagged;
   return source.map((p) => ({ lat: p.latitude, lng: p.longitude }));
+}
+
+/**
+ * Union runs that pass within CLUSTER_RADIUS_KM of each other (compared
+ * via run endpoints — runs are split only at implausible jumps, so a
+ * genuine long-haul route stays one run and never gets carved up) and
+ * return the cluster holding the most pings. A tie or a single cluster
+ * degrades gracefully to "everything".
+ */
+const CLUSTER_RADIUS_KM = 100;
+function dominantCluster<T extends MapPing>(runs: T[][]): T[][] {
+  const n = runs.length;
+  if (n <= 1) return runs;
+  const endpoints = (r: T[]): T[] => [r[0], r[r.length - 1]];
+  const near = (a: T[], b: T[]): boolean => {
+    for (const p of endpoints(a))
+      for (const q of endpoints(b))
+        if (
+          haversineKm(p.latitude, p.longitude, q.latitude, q.longitude) <
+          CLUSTER_RADIUS_KM
+        )
+          return true;
+    return false;
+  };
+  // Tiny union-find — run counts are dozens at most.
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  for (let i = 0; i < n; i++)
+    for (let j = i + 1; j < n; j++)
+      if (near(runs[i], runs[j])) parent[find(i)] = find(j);
+
+  const byRoot = new Map<number, T[][]>();
+  runs.forEach((r, i) => {
+    const root = find(i);
+    const list = byRoot.get(root) ?? [];
+    list.push(r);
+    byRoot.set(root, list);
+  });
+  let best: T[][] = [];
+  let bestCount = -1;
+  for (const cluster of byRoot.values()) {
+    const count = cluster.reduce((sum, r) => sum + r.length, 0);
+    if (count > bestCount) {
+      bestCount = count;
+      best = cluster;
+    }
+  }
+  return best;
 }
 
 function haversineKm(
