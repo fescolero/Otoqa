@@ -489,21 +489,23 @@ function MapInner(
     const here = positionForSession(s, props.mode);
     const bounds = new google.maps.LatLngBounds();
     let added = 0;
-    // Fit to the same outlier-filtered pings the polyline draws. Raw
-    // routeHistory can contain GPS jumps that the polyline hides (and the
-    // outlier badge counts) — letting those into the bounds drags the
-    // camera to a different region than the pins.
-    const cameraPoints = cameraPointsFor(props.routeHistory ?? []);
+    // Fit to the same outlier-filtered pings the polyline draws, ANCHORED
+    // on the driver's latest position: selecting a driver means "show me
+    // the driver", so when the session carries a second GPS stream (a
+    // simulated or secondary feed tracking a route hundreds of km from
+    // where the driver's own device pings), the camera frames the
+    // cluster the driver is in — the last pin — not the other stream's
+    // route or its stops.
+    const cameraPoints = cameraPointsFor(props.routeHistory ?? [], here);
     for (const xy of cameraPoints) {
       bounds.extend(xy);
       added++;
     }
     // Include the driver's latest position only when it agrees with the
-    // framed route. When a session carries a second GPS stream (device
-    // pinging from a yard while the load tracks hundreds of km away),
-    // the NEWEST ping — and therefore latestLocation — may be the
-    // phantom; extending bounds to it would center the camera on the
-    // empty land between the two and push every pin off-screen. With no
+    // framed cluster. Normally it does by construction (it's the anchor);
+    // the exception is the majority fall-through, when latestLocation is
+    // far from every drawn run — extending bounds to it there would
+    // center the camera on empty land between the two regions. With no
     // route yet, `here` is all we have and always wins.
     if (here) {
       const agreesWithRoute =
@@ -1678,21 +1680,31 @@ function sanitizePings(
  *      path never renders. This also covers a bogus FIRST ping: the
  *      sanitizer can't flag it (no predecessor), but it strands itself
  *      in a singleton run and gets dropped here all the same.
- *   3. Cluster the surviving runs spatially and keep only the DOMINANT
- *      cluster. This is the defense against a sustained second GPS
- *      stream on one session — e.g. the load tracking down I-5 while a
- *      second device pings from a yard 400 km away. Those phantom pings
- *      arrive in groups, so they survive the singleton filter as "real"
- *      runs; fitting bounds across both regions centers the camera on
- *      the empty land between them and puts every pin off-screen.
- *      Majority of pings wins; the minority cluster still shows in the
- *      outlier badge + ping-dots debug overlay, it just can't steal
- *      the frame.
+ *   3. Cluster the surviving runs spatially and keep only ONE cluster.
+ *      This is the defense against a sustained second GPS stream on one
+ *      session — e.g. a simulated/secondary feed tracking a route while
+ *      the driver's own device pings from 400 km away. Those phantom
+ *      pings arrive in groups, so they survive the singleton filter as
+ *      "real" runs; fitting bounds across both regions centers the
+ *      camera on the empty land between them and puts every pin
+ *      off-screen. Which cluster wins:
+ *        • With an `anchor` (the driver's latest position, passed by
+ *          the selection fit): the cluster the DRIVER is in. Selecting
+ *          a driver means "show me the driver" — the route is context,
+ *          and in the normal case (driver actually driving the load)
+ *          the driver's cluster IS the whole route anyway.
+ *        • Without an anchor, or when the anchor is far from every
+ *          cluster: majority of pings wins.
+ *      The losing cluster still shows in the outlier badge + ping-dots
+ *      debug overlay; it just can't steal the frame.
  *
  * Falls back to the raw list when filtering would leave fewer than 2
  * points — better a shaky frame than no frame.
  */
-function cameraPointsFor(pings: MapPing[]): google.maps.LatLngLiteral[] {
+function cameraPointsFor(
+  pings: MapPing[],
+  anchor?: google.maps.LatLngLiteral | null,
+): google.maps.LatLngLiteral[] {
   if (pings.length === 0) return [];
   const flagged = sanitizePings(pings, MAX_PLAUSIBLE_KMH);
 
@@ -1713,7 +1725,7 @@ function cameraPointsFor(pings: MapPing[]): google.maps.LatLngLiteral[] {
     return flagged.map((p) => ({ lat: p.latitude, lng: p.longitude }));
   }
 
-  const kept = dominantCluster(drawn).flat();
+  const kept = pickCluster(drawn, anchor ?? null).flat();
   const source = kept.length >= 2 ? kept : flagged;
   return source.map((p) => ({ lat: p.latitude, lng: p.longitude }));
 }
@@ -1721,12 +1733,16 @@ function cameraPointsFor(pings: MapPing[]): google.maps.LatLngLiteral[] {
 /**
  * Union runs that pass within CLUSTER_RADIUS_KM of each other (compared
  * via run endpoints — runs are split only at implausible jumps, so a
- * genuine long-haul route stays one run and never gets carved up) and
- * return the cluster holding the most pings. A tie or a single cluster
+ * genuine long-haul route stays one run and never gets carved up), then
+ * pick the winner: the cluster containing the anchor when one does,
+ * otherwise the cluster holding the most pings. A single cluster
  * degrades gracefully to "everything".
  */
 const CLUSTER_RADIUS_KM = 100;
-function dominantCluster<T extends MapPing>(runs: T[][]): T[][] {
+function pickCluster<T extends MapPing>(
+  runs: T[][],
+  anchor: google.maps.LatLngLiteral | null,
+): T[][] {
   const n = runs.length;
   if (n <= 1) return runs;
   const endpoints = (r: T[]): T[] => [r[0], r[r.length - 1]];
@@ -1760,10 +1776,40 @@ function dominantCluster<T extends MapPing>(runs: T[][]): T[][] {
     list.push(r);
     byRoot.set(root, list);
   });
+
+  const pingCount = (cluster: T[][]): number =>
+    cluster.reduce((sum, r) => sum + r.length, 0);
+
+  // Anchor pass: a cluster "contains" the anchor when any of its pings
+  // is within the cluster radius. Largest such cluster wins (the anchor
+  // can sit between two nearby clusters).
+  if (anchor) {
+    let best: T[][] | null = null;
+    let bestCount = -1;
+    for (const cluster of byRoot.values()) {
+      const holdsAnchor = cluster.some((r) =>
+        r.some(
+          (p) =>
+            haversineKm(p.latitude, p.longitude, anchor.lat, anchor.lng) <
+            CLUSTER_RADIUS_KM,
+        ),
+      );
+      if (!holdsAnchor) continue;
+      const count = pingCount(cluster);
+      if (count > bestCount) {
+        bestCount = count;
+        best = cluster;
+      }
+    }
+    if (best) return best;
+    // Anchor is far from every cluster (e.g. stale latestLocation from a
+    // feed that never wrote session pings) — fall through to majority.
+  }
+
   let best: T[][] = [];
   let bestCount = -1;
   for (const cluster of byRoot.values()) {
-    const count = cluster.reduce((sum, r) => sum + r.length, 0);
+    const count = pingCount(cluster);
     if (count > bestCount) {
       bestCount = count;
       best = cluster;
