@@ -47,6 +47,12 @@ const DRIVING_SPEED_THRESHOLD_MPH = 5;
 // Cap legs per session — a driver could theoretically run 20 short loads
 // in a day; in practice this is 2-6. Bound prevents pathological rows.
 const MAX_LEGS_PER_SESSION = 32;
+// How many of the session's newest pings to scan when looking for the
+// latest ping stamped with the ACTIVE leg's load (see the pin-source
+// logic in listLiveSessions). At the mobile app's ping cadence this
+// covers roughly the last half hour; if the load feed has been silent
+// longer than that, the plain latest ping wins — it's fresher truth.
+const ACTIVE_LEG_PIN_SCAN = 50;
 
 type DerivedStatus = 'driving' | 'idle' | 'break' | 'off-duty';
 
@@ -138,7 +144,7 @@ export type LiveSession = {
 };
 
 function deriveStatus(
-  latest: Doc<'driverLatestLocation'> | null,
+  latest: { recordedAt: number; speed?: number } | null,
   nowMs: number
 ): { status: DerivedStatus; statusLoc: string } {
   if (!latest) {
@@ -292,7 +298,42 @@ export const listLiveSessions = query({
         loadTripsForSession(ctx, session._id, callerOrgId),
       ]);
 
-      const { status, statusLoc } = deriveStatus(latest, nowMs);
+      // ── Pin source ──
+      // The pin the dispatcher sees must follow the load being tracked.
+      // A session can receive pings from more than one source (driver
+      // phone + truck telematics + a secondary device), and
+      // driverLatestLocation is simply whichever wrote last. When a leg
+      // is ACTIVE, prefer the newest ping stamped with that leg's load —
+      // an untagged stream (e.g. a device pinging from a yard while the
+      // truck tracks the load elsewhere) must not move the pin. Bounded
+      // to the newest ACTIVE_LEG_PIN_SCAN session pings so a long-dead
+      // load feed falls back to the plain latest ping.
+      let pinSource: {
+        latitude: number;
+        longitude: number;
+        speed?: number;
+        heading?: number;
+        recordedAt: number;
+      } | null = latest;
+      const activeLeg = trips.find((t) => t.status === 'ACTIVE');
+      if (activeLeg) {
+        const recent = await ctx.db
+          .query('driverLocations')
+          .withIndex('by_session_time', (q) =>
+            q.eq('sessionId', session._id),
+          )
+          .order('desc')
+          .take(ACTIVE_LEG_PIN_SCAN);
+        const legPing = recent.find(
+          (p) =>
+            p.loadId === activeLeg.loadId &&
+            (activeLeg.startedAt == null ||
+              p.recordedAt >= activeLeg.startedAt),
+        );
+        if (legPing) pinSource = legPing;
+      }
+
+      const { status, statusLoc } = deriveStatus(pinSource, nowMs);
 
       // Incident count = HOS soft-cap hits today. Will grow as more event
       // streams land (hard-brake from Samsara, geofence violations, etc.).
@@ -318,13 +359,13 @@ export const listLiveSessions = query({
         status,
         statusLoc,
 
-        latestLocation: latest
+        latestLocation: pinSource
           ? {
-              latitude: latest.latitude,
-              longitude: latest.longitude,
-              speed: latest.speed,
-              heading: latest.heading,
-              recordedAt: latest.recordedAt,
+              latitude: pinSource.latitude,
+              longitude: pinSource.longitude,
+              speed: pinSource.speed,
+              heading: pinSource.heading,
+              recordedAt: pinSource.recordedAt,
             }
           : null,
 
