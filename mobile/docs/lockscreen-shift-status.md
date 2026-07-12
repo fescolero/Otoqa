@@ -53,6 +53,26 @@ app ↔ extension by type name + Codable shape. Change one → change both.
      normally, no card (module returns false).
    - Android 13+: deny notification permission → same graceful no-op.
 
+## Update discipline (post-review hardening)
+
+- **Idempotent start.** `startShiftStatus` is called from every resume
+  path (foreground mounts, FCM wakes, motion-transition wakes). The JS
+  wrapper no-ops when the same shift is already showing, and the Swift
+  side leaves an existing same-start activity untouched — never
+  end+re-request, which would flicker the card and LOSE it on background
+  wakes (iOS only allows requesting a Live Activity in the foreground).
+  Net effect: the granular "Stop 3 of 5" line survives app restarts and
+  resumes.
+- **Single owner per line.** useCheckIn owns the stop-level lines;
+  `detachLoadFromSession` owns 'Trip complete — on shift'. No layer
+  writes another's line, so there are no duplicate or racing updates.
+- **Dedupe.** Identical consecutive status lines are dropped in the JS
+  wrapper — protects the iOS Live Activity update budget.
+- **Android base persistence.** The chronometer base is mirrored to
+  SharedPreferences so an update landing right after process death (the
+  notification survives; the process doesn't) still targets the correct
+  start time.
+
 ## Behavior notes / v1 limits
 
 - **Session mode only.** Legacy load-only tracking (no Start Shift)
@@ -67,3 +87,10 @@ app ↔ extension by type name + Codable shape. Change one → change both.
   1.6.0 fences new-runtime updates from old binaries regardless.
 - Android small icon is the app icon for v1; some OEM status bars render
   it muddy. Swap for a dedicated monochrome drawable when design has one.
+- Status strings are hardcoded English, consistent with the trip screen
+  today. When driver-facing i18n lands (lib/i18n.ts ships en+es), the
+  status lines should come from the i18n layer and the native 'On shift'
+  titles (Kotlin + widget Swift) become JS-supplied parameters.
+- The 'Stop N of M' label falls back to a generic 'Stop' for detour
+  stops (fractional sequence numbers) rather than showing 'Stop 3.01 of
+  2'; a shared formatter with the trip screen's label is a follow-up.

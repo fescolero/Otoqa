@@ -38,11 +38,17 @@ class OtoqaShiftStatusModule : Module() {
   companion object {
     const val CHANNEL_ID = "shift-status"
     const val NOTIFICATION_ID = 4207
+    const val PREFS_NAME = "otoqa_shift_status"
+    const val PREF_STARTED_AT = "startedAtMs"
   }
 
   // Chronometer base — kept so status-line updates re-post with the same
-  // start time instead of resetting the timer.
-  private var startedAtMs: Long = 0L
+  // start time instead of resetting the timer. @Volatile because the
+  // AsyncFunctions run on a background dispatcher with no serialization
+  // guarantee. Mirrored to SharedPreferences so an update that lands
+  // right after process death (queue replay / fast check-in before the
+  // resume path re-asserts) still knows the correct base.
+  @Volatile private var startedAtMs: Long = 0L
 
   private val context: Context
     get() = appContext.reactContext ?: throw Exceptions.ReactContextLost()
@@ -55,15 +61,26 @@ class OtoqaShiftStatusModule : Module() {
     // Returns false (no-throw) when notifications are blocked so callers
     // can fire-and-forget.
     AsyncFunction("startShiftStatus") { startedAt: Double, statusLine: String ->
+      val base = startedAt.toLong()
+      // A zero/negative base would anchor the chronometer to 1970 and
+      // permanently no-op every subsequent update — refuse it.
+      if (base <= 0L) return@AsyncFunction false
       if (!canPostNotifications()) return@AsyncFunction false
-      startedAtMs = startedAt.toLong()
+      startedAtMs = base
+      prefs().edit().putLong(PREF_STARTED_AT, base).apply()
       postNotification(statusLine)
       true
     }
 
     AsyncFunction("updateShiftStatus") { statusLine: String ->
-      // No active surface (start never ran or was blocked) → no-op. Never
-      // resurrect a notification with a zero chronometer base.
+      // Recover the chronometer base from prefs after process death so a
+      // check-in that lands before the resume path re-asserts still
+      // updates the (surviving) notification. A zero base after that
+      // means start never ran or the shift ended → no-op, never
+      // resurrect a torn-down surface.
+      if (startedAtMs == 0L) {
+        startedAtMs = prefs().getLong(PREF_STARTED_AT, 0L)
+      }
       if (startedAtMs == 0L || !canPostNotifications()) return@AsyncFunction false
       postNotification(statusLine)
       true
@@ -71,10 +88,14 @@ class OtoqaShiftStatusModule : Module() {
 
     AsyncFunction("endShiftStatus") {
       startedAtMs = 0L
+      prefs().edit().remove(PREF_STARTED_AT).apply()
       NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
       true
     }
   }
+
+  private fun prefs() =
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
   private fun canPostNotifications(): Boolean {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

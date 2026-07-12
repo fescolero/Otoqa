@@ -107,21 +107,33 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * notification / iOS Live Activity). Fire-and-forget from the check-in
  * and check-out paths — queued actions announce too, since the driver
  * physically did the thing regardless of sync state.
+ *
+ * Last-stop checkout announces nothing: detachLoadFromSession owns the
+ * 'Trip complete — on shift' line (single owner, no duplicate updates),
+ * and in legacy mode the surface never existed anyway.
+ *
+ * The 'Stop N of M' form is only used when N is a plausible position:
+ * detour stops carry fractional sequence numbers (3.01) and totalStops
+ * excludes detours, so a raw sequence can read 'Stop 3.01 of 2' — fall
+ * back to a generic label rather than show that.
  */
 function announceStopStatus(options: CheckInOptions, kind: 'in' | 'out') {
-  const position =
-    options.stopSequence && options.totalStops
-      ? `Stop ${options.stopSequence} of ${options.totalStops}`
-      : 'Stop';
+  const seq = options.stopSequence;
+  const total = options.totalStops;
+  const hasPosition =
+    seq != null &&
+    total != null &&
+    Number.isInteger(seq) &&
+    Number.isInteger(total) &&
+    seq >= 1 &&
+    seq <= total;
+  const position = hasPosition ? `Stop ${seq} of ${total}` : 'Stop';
   if (kind === 'in') {
     void updateShiftStatus(`${position} — checked in`);
     return;
   }
-  const isLastStop =
-    options.stopSequence != null && options.stopSequence === options.totalStops;
-  void updateShiftStatus(
-    isLastStop ? 'Trip complete — on shift' : `${position} complete — en route`,
-  );
+  if (seq != null && seq === total) return; // last stop: detach owns the line
+  void updateShiftStatus(`${position} complete — en route`);
 }
 
 interface CheckInOptions {
@@ -174,7 +186,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
 
   const getLocation = getFreshLocation || fallbackGetLocation;
 
-  const checkIn = async (options: CheckInOptions): Promise<CheckInResult> => {
+  const performCheckIn = async (options: CheckInOptions): Promise<CheckInResult> => {
     try {
       const location = await getLocation();
       const driverTimestamp = new Date().toISOString();
@@ -225,7 +237,6 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
-        announceStopStatus(options, 'in');
         return {
           success: true,
           message:
@@ -288,7 +299,6 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
-        if (result.success) announceStopStatus(options, 'in');
         return { ...result, trackingFailed, trackingMessage };
       } catch (onlineError) {
         await enqueueMutation('checkIn', mutationArgs);
@@ -328,7 +338,6 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
-        announceStopStatus(options, 'in');
         return {
           success: true,
           message: 'Connection slow - check-in queued for sync',
@@ -349,7 +358,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
     }
   };
 
-  const checkOut = async (options: CheckInOptions): Promise<CheckInResult> => {
+  const performCheckOut = async (options: CheckInOptions): Promise<CheckInResult> => {
     try {
       const location = await getLocation();
       const driverTimestamp = new Date().toISOString();
@@ -381,7 +390,6 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           connectionQuality,
           action: 'check_out',
         });
-        announceStopStatus(options, 'out');
         return {
           success: true,
           message:
@@ -529,7 +537,6 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
-        if (result.success) announceStopStatus(options, 'out');
         return { ...result, trackingFailed, trackingMessage };
       } catch (onlineError) {
         // Mutation timed out or failed -- queue it (photo already uploaded or will be re-uploaded from queue)
@@ -554,7 +561,6 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           loadId: options.loadId ?? null,
           error: onlineError instanceof Error ? onlineError.message : 'timeout',
         });
-        announceStopStatus(options, 'out');
         return {
           success: true,
           message: 'Connection slow - check-out queued for sync',
@@ -574,6 +580,22 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         message: errorMessage,
       };
     }
+  };
+
+  // Single choke point for the lock-screen status: every check-in/out
+  // path (online, queued, timeout-fallback) returns success:true when the
+  // driver's action was accepted, so announcing on success here replaces
+  // six per-branch call sites and can't miss a future new branch.
+  const checkIn = async (options: CheckInOptions): Promise<CheckInResult> => {
+    const result = await performCheckIn(options);
+    if (result.success) announceStopStatus(options, 'in');
+    return result;
+  };
+
+  const checkOut = async (options: CheckInOptions): Promise<CheckInResult> => {
+    const result = await performCheckOut(options);
+    if (result.success) announceStopStatus(options, 'out');
+    return result;
   };
 
   return {

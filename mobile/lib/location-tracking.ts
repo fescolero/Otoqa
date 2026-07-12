@@ -480,6 +480,15 @@ export async function reconcileTrackingStateWithActiveSession(
   lg.debug(
     `Self-healed tracking state (reason=${reason}): attached session ${active._id.substring(0, 12)}`,
   );
+  // The rescued driver is mid-shift but startSessionTracking never ran
+  // on this device, so no lock-screen surface exists — assert it now
+  // (idempotent: the JS wrapper no-ops if it's already up).
+  if (typeof patched.startedAt === 'number' && patched.startedAt > 0) {
+    void startShiftStatus(
+      patched.startedAt,
+      patched.loadId ? 'On a trip' : 'On shift — no active trip',
+    );
+  }
   return patched;
 }
 
@@ -1260,6 +1269,13 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
   try {
     lg.debug('Stopping tracking...');
 
+    // Tear down the lock-screen shift surface FIRST — before any await
+    // that can throw into the catch block and skip it. Every stop path
+    // (End Shift, legacy last-stop checkout, server-forced stop) lands
+    // here, and a lingering 'On shift' card after the shift ended is
+    // worse than any teardown-ordering nicety.
+    void endShiftStatus();
+
     // Stop sync interval and foreground polling
     stopSyncInterval();
     await stopForegroundPolling();
@@ -1283,11 +1299,6 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
         );
       }
     }
-
-    // Tear down the lock-screen shift surface on every stop path —
-    // stopSessionTracking aliases this function, so End Shift, legacy
-    // last-stop checkout, and server-forced stops all land here.
-    void endShiftStatus();
 
     // Clear tracking state and heartbeat (the queued pings persist for re-upload)
     await storage.set(TRACKING_STATE_KEY, JSON.stringify({ isActive: false }));
@@ -1636,9 +1647,9 @@ export async function attachLoadToSession(loadId: Id<'loadInformation'>): Promis
   lg.debug(
     `Attached load=${(loadId as string).substring(0, 12)}... to session`,
   );
-  // Stop-level detail lands from useCheckIn right after; this covers the
-  // gap between attach and the first check-in announcement.
-  void updateShiftStatus('On a trip');
+  // Deliberately NO surface update here: useCheckIn announces the
+  // specific stop line right after attach, and firing a generic 'On a
+  // trip' first would race it (both are fire-and-forget natives).
   return { success: true, message: 'Load attached to session' };
 }
 
