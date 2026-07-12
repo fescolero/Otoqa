@@ -18,7 +18,58 @@ export function setGoogleMapsApiKey(key: string | undefined) {
 }
 
 /**
- * Initialize Google Maps API by loading the script tag.
+ * Install Google's official dynamic-import bootstrap (readable equivalent of
+ * the minified snippet from the Maps JS docs). It defines a stub
+ * `google.maps.importLibrary` that injects the API script on first use.
+ *
+ * This is the same loader `<APIProvider>` from @vis.gl/react-google-maps
+ * uses, and it only ever injects one script tag: whichever side runs first
+ * installs the stub, and the other side reuses it.
+ */
+function installImportLibraryBootstrap(apiKey: string): void {
+  const g = (window.google ??= {} as typeof google);
+  const maps = (g.maps ??= {} as typeof google.maps);
+  // The type declares importLibrary as always present; at runtime it only
+  // exists once a bootstrap (ours or APIProvider's) has installed it.
+  if ((maps as { importLibrary?: unknown }).importLibrary) return;
+
+  const requested = new Set<string>();
+  let scriptPromise: Promise<void> | null = null;
+
+  const loadScript = () =>
+    (scriptPromise ??= new Promise<void>((resolve, reject) => {
+      const params = new URLSearchParams({
+        key: apiKey,
+        v: 'weekly',
+        libraries: [...requested].join(','),
+        loading: 'async',
+        callback: 'google.maps.__ib__',
+      });
+      const script = document.createElement('script');
+      script.src = `https://maps.googleapis.com/maps/api/js?${params}`;
+      (maps as unknown as Record<string, unknown>).__ib__ = resolve;
+      script.onerror = () => {
+        scriptPromise = null;
+        reject(new Error('Failed to load Google Maps script'));
+      };
+      script.nonce =
+        document.querySelector<HTMLScriptElement>('script[nonce]')?.nonce ?? '';
+      document.head.appendChild(script);
+    }));
+
+  // Stub: queue the library name, load the script once, then delegate to the
+  // real importLibrary the script installs in place of this stub.
+  maps.importLibrary = ((name: string, ...args: unknown[]) => {
+    requested.add(name);
+    return loadScript().then(() =>
+      (maps.importLibrary as (...a: unknown[]) => Promise<unknown>)(name, ...args)
+    );
+  }) as typeof google.maps.importLibrary;
+}
+
+/**
+ * Initialize the Google Maps JS API, cooperating with any loader already on
+ * the page so the API is never included twice.
  *
  * Public alias `ensureGoogleMapsLoaded` is exported below — consumers outside
  * the autocomplete/geocoder code (e.g. the Active Sessions live ops map)
@@ -29,52 +80,40 @@ async function loadGoogleMaps(): Promise<void> {
   if (loadPromise) return loadPromise;
   if (isLoaded) return Promise.resolve();
 
-  const apiKey = storedApiKey;
-  
-  if (!apiKey) {
-    const error = 'Google Maps API key not configured. Ensure GOOGLE_MAPS_API_KEY is set in environment variables.';
-    console.error('❌', error);
-    throw new Error(error);
-  }
-
-  // Check if already loaded
-  if (window.google && window.google.maps && window.google.maps.places) {
-    console.log('✅ Google Maps API already loaded!');
-    isLoaded = true;
-    return Promise.resolve();
-  }
-
-  loadPromise = new Promise<void>((resolve, reject) => {
-    try {
-      console.log('📚 Loading Google Maps script...');
-      
-      // Create and append the script tag
-      const script = document.createElement('script');
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&v=weekly`;
-      script.async = true;
-      script.defer = true;
-      
-      script.onload = () => {
-        isLoaded = true;
-        console.log('✅ Google Maps API loaded successfully!');
-        resolve();
-      };
-      
-      script.onerror = (error) => {
-        console.error('❌ Failed to load Google Maps script:', error);
-        loadPromise = null;
-        reject(new Error('Failed to load Google Maps script'));
-      };
-      
-      document.head.appendChild(script);
-    } catch (error) {
-      console.error('❌ Failed to load Google Maps API:', error);
-      loadPromise = null;
-      reject(error);
+  loadPromise = (async () => {
+    // Fully loaded already (places included).
+    if (window.google?.maps?.places) {
+      isLoaded = true;
+      return;
     }
-  });
 
-  return loadPromise;
+    // If the API bootstrap isn't on the page yet, install it. When a map's
+    // <APIProvider> already bootstrapped the API, we skip this and pull the
+    // places library through the existing loader — injecting our own script
+    // tag here is what triggered "You have included the Google Maps
+    // JavaScript API multiple times on this page".
+    if (!window.google?.maps?.importLibrary) {
+      const apiKey = storedApiKey;
+      if (!apiKey) {
+        const error = 'Google Maps API key not configured. Ensure GOOGLE_MAPS_API_KEY is set in environment variables.';
+        console.error('❌', error);
+        throw new Error(error);
+      }
+      installImportLibraryBootstrap(apiKey);
+    }
+
+    await window.google.maps.importLibrary('places');
+    isLoaded = true;
+  })();
+
+  try {
+    return await loadPromise;
+  } catch (error) {
+    // Allow a retry on failure (e.g. transient network error).
+    loadPromise = null;
+    console.error('❌ Failed to load Google Maps API:', error);
+    throw error;
+  }
 }
 
 /**
@@ -395,9 +434,10 @@ export function createISOStringWithTimezone(
  * Public wrapper around the private `loadGoogleMaps()` initializer.
  *
  * Use this when you need to mount a `new google.maps.Map(...)` directly
- * (e.g. the live ops Active Sessions map). The Google Maps script is loaded
- * once with `libraries=places&v=weekly`, which also exposes the base map
- * surface (`google.maps.Map`, markers, etc.) — no second tag needed.
+ * (e.g. the live ops Active Sessions map). The API is loaded once through
+ * `google.maps.importLibrary` (shared with @vis.gl/react-google-maps'
+ * `<APIProvider>`), which also exposes the base map surface
+ * (`google.maps.Map`, markers, etc.) — no second tag needed.
  *
  * Returns once `window.google.maps` is ready, or throws if the API key is
  * missing / the script tag fails to load.
