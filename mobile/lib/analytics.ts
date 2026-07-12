@@ -566,6 +566,23 @@ export function trackBgSyncOutcome(context: {
   capture('bg_sync_outcome', context);
 }
 
+/**
+ * Fired when sync-stall-alert.ts posts the "GPS sync is stalled" local
+ * notification (consecutive BG sync failures with a growing queue — see
+ * the 2026-07-11 background-data-restriction incident). This event
+ * rides the same blocked upload path it reports on, so it typically
+ * reaches PostHog only after the driver acts and the queue flushes —
+ * treat its ingestion time as flush time, not alert time.
+ */
+export function trackSyncStallAlert(context: {
+  queueDepth: number;
+  consecutiveFailures: number;
+  oldestUnsyncedAgeSec?: number;
+  lastError?: string;
+}) {
+  capture('sync_stall_alert', context);
+}
+
 export function trackBGTaskReregistered(context: {
   source: 'foreground_return' | 'app_resume' | 'heartbeat';
   wasRegistered: boolean;

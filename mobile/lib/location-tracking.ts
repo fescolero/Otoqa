@@ -36,6 +36,7 @@ import {
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
 import { setBootState, clearBootState } from './boot-state';
+import { noteSyncFailure, noteSyncSuccess } from './sync-stall-alert';
 
 // Module-scoped namespaced logger. Debug/info calls are stripped in
 // production by Metro; warn/error pass through so Sentry / native
@@ -925,6 +926,8 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             syncDurationMs: Date.now() - syncStart,
             syncRetries,
           });
+          // Reset the stall-alert failure streak + clear any posted alert.
+          await noteSyncSuccess();
           try {
             await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
           } catch (markErr) {
@@ -948,6 +951,15 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             error: errMsg,
             syncRetries,
           });
+          // Silent-stall detection: capture keeps working while uploads
+          // fail (e.g. Samsung's per-app "Allow background data usage"
+          // off — 2026-07-11 incident), so tell the driver before the
+          // queue grows a whole shift deep.
+          await noteSyncFailure({
+            queueDepth: queueDepthBefore,
+            oldestUnsyncedAgeSec,
+            error: errMsg,
+          });
         }
       }
     } catch (flushError) {
@@ -958,6 +970,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       lg.warn(`BG sync prep failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
       trackBGTaskError({ step: 'sync', error: errMsg });
+      await noteSyncFailure({ queueDepth: queueDepthBefore, error: errMsg });
       trackBgSyncOutcome({
         outcome: 'failure',
         queueDepthBefore,
