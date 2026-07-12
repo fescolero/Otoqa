@@ -263,8 +263,8 @@ export function ActiveSessionsPage() {
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <style>{`
         @keyframes sessionPulse {
-          0%   { transform: translate(-50%, -50%) scale(0.55); opacity: 0.55; }
-          100% { transform: translate(-50%, -50%) scale(1.7);  opacity: 0;    }
+          0%   { transform: scale(0.55); opacity: 0.55; }
+          100% { transform: scale(1.7);  opacity: 0;    }
         }
       `}</style>
 

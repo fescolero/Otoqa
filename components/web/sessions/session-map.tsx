@@ -1428,33 +1428,33 @@ function HoveredPingHighlight({
       clickable={false}
     >
       {/* Zero-size wrapper so the marker anchor IS the coordinate;
-          halo + dot center themselves on it via translate. */}
+          halo + dot center themselves on it via negative offsets, NOT
+          transform — sessionPulse animates transform:scale and would
+          clobber a translate-based centering. */}
       <div style={{ position: 'relative', width: 0, height: 0 }}>
         <span
           style={{
             position: 'absolute',
-            left: 0,
-            top: 0,
+            left: -17,
+            top: -17,
             width: 34,
             height: 34,
             borderRadius: '50%',
             background: '#2E5CFF',
             opacity: 0.2,
-            transform: 'translate(-50%, -50%)',
             animation: 'sessionPulse 1.6s ease-out infinite',
           }}
         />
         <span
           style={{
             position: 'absolute',
-            left: 0,
-            top: 0,
+            left: -8,
+            top: -8,
             width: 12,
             height: 12,
             borderRadius: '50%',
             background: '#2E5CFF',
             border: '2px solid #FFFFFF',
-            transform: 'translate(-50%, -50%)',
             boxShadow: '0 1px 4px rgba(15,22,36,0.35)',
           }}
         />
@@ -1482,18 +1482,35 @@ function SelectedDriverPulse({ sessions, selectedId, mode }: LiveProps) {
       zIndex={900}
       clickable={false}
     >
-      <span
+      {/* Same 40px footprint as the selected LiveDriverPin so the default
+          bottom-center marker anchor stacks this halo dead behind the
+          avatar; the 56px halo centers inside it via negative margins
+          (sessionPulse animates transform:scale, so centering must not
+          live in transform). */}
+      <div
         style={{
-          display: 'block',
-          width: 56,
-          height: 56,
-          borderRadius: '50%',
-          background: color,
-          opacity: 0.18,
-          transform: 'translate(-50%, -50%)',
-          animation: 'sessionPulse 2.4s ease-out infinite',
+          position: 'relative',
+          width: 40,
+          height: 40,
+          pointerEvents: 'none',
         }}
-      />
+      >
+        <span
+          style={{
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            width: 56,
+            height: 56,
+            marginLeft: -28,
+            marginTop: -28,
+            borderRadius: '50%',
+            background: color,
+            opacity: 0.18,
+            animation: 'sessionPulse 2.4s ease-out infinite',
+          }}
+        />
+      </div>
     </AdvancedMarker>
   );
 }
