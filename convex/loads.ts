@@ -8,6 +8,7 @@ import { Doc, Id } from './_generated/dataModel';
 import { paginationOptsValidator } from 'convex/server';
 import { parseStopDateTime, syncLegsAffectedByStop } from './_helpers/timeUtils';
 import { updateLoadCount } from './stats_helpers';
+import { recordLoadWritten } from './platformUsageHelpers';
 import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
 import {
   setLoadTag,
@@ -1505,6 +1506,9 @@ export const createLoad = mutation({
       createdAt: now,
       updatedAt: now,
     });
+
+    // ✅ Platform billing: every load written into the system is billable
+    await recordLoadWritten(ctx, args.workosOrgId, now);
 
     for (const stop of args.stops) {
       await ctx.db.insert('loadStops', {

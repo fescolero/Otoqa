@@ -38,6 +38,7 @@ const ORG_INDEX_BY_TABLE = {
   // Aggregate tables — bounded (1 row per org).
   organizationStats: { index: 'by_org', field: 'workosOrgId' },
   accountingPeriodStats: { index: 'by_org', field: 'workosOrgId' },
+  platformUsageStats: { index: 'by_org', field: 'workosOrgId' },
 
   // Audit log — composite `by_organization` index on (organizationId, timestamp).
   // Convex's index DSL allows `.eq` on any prefix of the key, so we can use

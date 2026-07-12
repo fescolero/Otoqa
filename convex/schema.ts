@@ -85,6 +85,12 @@ export default defineSchema({
     billingCycle: v.string(), // e.g. "Annual"
     nextBillingDate: v.optional(v.string()),
 
+    // PLATFORM BILLING — what Otoqa charges this org per load written into
+    // the system (metered, invoiced monthly). Optional: treat as the default
+    // rate (see convex/platformUsageHelpers.ts DEFAULT_BILLING_RATE_PER_LOAD)
+    // when missing. Set per org from the Convex dashboard.
+    billingRatePerLoad: v.optional(v.number()),
+
     // Default timezone for payroll calculations
     // IANA format: "America/New_York", "America/Los_Angeles", etc.
     defaultTimezone: v.optional(v.string()),
@@ -2593,6 +2599,30 @@ export default defineSchema({
     // backfill: rows written before this field default to 0 until the next recalc.
     totalOutstanding: v.optional(v.number()), // Sum of max(0, totalAmount - paidAmount) for finalized invoices in this period
     outstandingCount: v.optional(v.number()), // Count of finalized invoices in this period still carrying a balance (recalc-maintained)
+
+    // Drift detection
+    lastRecalculated: v.optional(v.number()),
+
+    // Timestamps
+    updatedAt: v.number(),
+  })
+    .index('by_org', ['workosOrgId'])
+    .index('by_org_period', ['workosOrgId', 'periodKey']),
+
+  // Platform-billing usage metering (aggregate table pattern, like
+  // accountingPeriodStats). Otoqa bills each org a flat rate for every load
+  // written into the system, invoiced monthly. One row per org × period
+  // ("YYYY-MM", UTC). Loads created after the metering cutover count for the
+  // month they were ENTERED (createdAt); pre-cutover history is attributed
+  // to the SERVICE month (firstStopDate) — see platformUsage.ts. Incremented
+  // on every loadInformation insert (platformUsageHelpers.recordLoadWritten)
+  // and undercount-corrected nightly from source. Loads count for the cycle
+  // they were created in — later edits/cancellations do not remove the
+  // charge, so this counter is never decremented.
+  platformUsageStats: defineTable({
+    workosOrgId: v.string(),
+    periodKey: v.string(), // "2026-07" (monthly granularity, UTC)
+    loadsWritten: v.number(), // Count of loads created in this period
 
     // Drift detection
     lastRecalculated: v.optional(v.number()),

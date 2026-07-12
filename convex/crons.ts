@@ -24,6 +24,18 @@ crons.interval(
   {},
 );
 
+// ✅ Recalculate platform usage metering daily (undercount correction)
+// Loads-written-per-cycle counts raised from source loads; the first run
+// doubles as the historical backfill. Powers Settings → Billing & usage.
+// Fixed off-peak time (like the other heavy scans below) so its full
+// loadInformation pass doesn't stack on the interval-based recalc burst.
+crons.cron(
+  'recalculate-platform-usage',
+  '30 4 * * *',
+  internal.platformUsage.recalculateAllOrgsPlatformUsage,
+  {},
+);
+
 // ✅ Reconcile firstStopDate denormalized field daily
 // Ensures the cached firstStopDate on loads matches the actual first stop data
 // Self-healing mechanism for any edge cases or bugs that cause drift
