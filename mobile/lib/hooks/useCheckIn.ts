@@ -126,7 +126,9 @@ type LocationGetter = () => Promise<{ latitude: number; longitude: number }>;
 export function useCheckIn(getFreshLocation?: LocationGetter) {
   const checkInMutation = useMutation(api.driverMobile.checkInAtStop);
   const checkOutMutation = useMutation(api.driverMobile.checkOutFromStop);
-  const getUploadUrl = useAction(api.s3Upload.getPODUploadUrl);
+  // POD-on-checkout goes through the unified load-documents presign
+  // (org-prefixed R2 key) — getPODUploadUrl is deprecated.
+  const getUploadUrl = useAction(api.s3Upload.getLoadDocumentUploadUrl);
   const { connectionQuality } = useNetworkStatus();
   const posthog = usePostHog();
 
@@ -355,6 +357,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
 
       // Good connection -- upload photo first if provided
       let podPhotoUrl: string | undefined;
+      let podPhotoKey: string | undefined;
 
       if (options.photoUri) {
         try {
@@ -362,8 +365,9 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           console.log('[CheckOut] Getting presigned URL from Convex...');
 
           const nowMs = Date.now();
-          const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
+          const { uploadUrl, fileUrl, key, metadataHeaders } = await getUploadUrl({
             loadId: options.loadId ? String(options.loadId) : 'unknown',
+            type: 'POD',
             stopId: String(options.stopId),
             filename: `pod_${nowMs}.jpg`,
             // Stamp the R2 object with the same GPS + driverId we're
@@ -382,6 +386,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
 
           if (uploadResult.success) {
             podPhotoUrl = fileUrl;
+            podPhotoKey = key;
             console.log('[CheckOut] Photo uploaded successfully:', podPhotoUrl);
             posthog.capture('photo_upload_success', {
               loadId: options.loadId ?? null,
@@ -417,6 +422,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           checkOutMutation({
             ...baseMutationArgs,
             podPhotoUrl,
+            podPhotoKey,
           }),
           MUTATION_TIMEOUT_MS,
         );
@@ -491,7 +497,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         // Mutation timed out or failed -- queue it (photo already uploaded or will be re-uploaded from queue)
         await enqueueMutation(
           'checkOut',
-          { ...baseMutationArgs, podPhotoUrl },
+          { ...baseMutationArgs, podPhotoUrl, podPhotoKey },
           { photoUri: !podPhotoUrl ? options.photoUri : undefined },
         );
         trackCheckinMutationTimeout({

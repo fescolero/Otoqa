@@ -27,6 +27,7 @@ import { useLoadDetail } from '../../../lib/hooks/useLoadDetail';
 import { useCheckIn } from '../../../lib/hooks/useCheckIn';
 import { useGPSLocation } from '../../../lib/hooks/useGPSLocation';
 import { useUploadDocument } from '../../../lib/hooks/useUploadDocument';
+import { prepareImageForUpload } from '../../../lib/image';
 import { enqueueMutation } from '../../../lib/offline-queue';
 import { useDriver } from '../_layout';
 import { useNetworkStatus } from '../../../lib/hooks/useNetworkStatus';
@@ -409,7 +410,8 @@ export default function TripDetailScreen() {
     });
 
     if (!result.canceled && result.assets?.[0]?.uri) {
-      setPhotoUri(result.assets[0].uri);
+      const asset = result.assets[0];
+      setPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height));
       posthog?.capture('capture_photo_taken', { loadId: id, success: true });
     }
   };
@@ -438,7 +440,12 @@ export default function TripDetailScreen() {
     });
     if (cameraResult.canceled || !cameraResult.assets?.[0]?.uri) return;
 
-    const capturedUri = cameraResult.assets[0].uri;
+    const capturedAsset = cameraResult.assets[0];
+    const capturedUri = await prepareImageForUpload(
+      capturedAsset.uri,
+      capturedAsset.width,
+      capturedAsset.height,
+    );
     setRecentUploads((prev) => [{ type: kind, status: 'uploading' }, ...prev]);
 
     try {
@@ -487,7 +494,8 @@ export default function TripDetailScreen() {
       allowsEditing: false,
     });
     if (!cameraResult.canceled && cameraResult.assets?.[0]?.uri) {
-      setAccidentPhotoUri(cameraResult.assets[0].uri);
+      const asset = cameraResult.assets[0];
+      setAccidentPhotoUri(await prepareImageForUpload(asset.uri, asset.width, asset.height));
     }
   };
 

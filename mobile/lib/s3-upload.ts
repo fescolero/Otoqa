@@ -18,7 +18,8 @@ interface UploadResult {
  * `metadataHeaders` is a map of x-amz-meta-* headers that the presigned
  * URL was signed with. These MUST be sent back verbatim or the signature
  * fails with 403 SignatureDoesNotMatch. See convex/s3Upload.ts —
- * getLoadDocumentUploadUrl + getPODUploadUrl both return this map.
+ * getLoadDocumentUploadUrl returns this map (the single presign path
+ * for all driver uploads, POD-on-checkout included).
  */
 export async function uploadToS3(
   presignedUrl: string,

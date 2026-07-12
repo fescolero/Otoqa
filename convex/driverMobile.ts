@@ -971,6 +971,7 @@ export const checkOutFromStop = mutation({
     driverTimestamp: v.string(), // ISO 8601 string
     notes: v.optional(v.string()),
     podPhotoUrl: v.optional(v.string()), // S3 URL for proof of delivery photo
+    podPhotoKey: v.optional(v.string()), // R2 object key for the same photo
   },
   returns: v.object({
     success: v.boolean(),
@@ -1079,6 +1080,7 @@ export const checkOutFromStop = mutation({
         workosOrgId: load.workosOrgId,
         type: 'POD',
         externalUrl: args.podPhotoUrl,
+        externalKey: args.podPhotoKey,
         uploadedBy: `driver:${driver._id}`,
         driverId: driver._id,
         capturedAt: Date.now(),
@@ -1233,6 +1235,7 @@ export const recordPOD = mutation({
     stopId: v.id('loadStops'),
     driverId: v.id('drivers'),
     photoUrl: v.string(), // S3 URL
+    photoKey: v.optional(v.string()), // R2 object key for the same photo
   },
   returns: v.object({
     success: v.boolean(),
@@ -1287,6 +1290,7 @@ export const recordPOD = mutation({
       workosOrgId: load.workosOrgId,
       type: 'POD',
       externalUrl: args.photoUrl,
+      externalKey: args.photoKey,
       uploadedBy: `driver:${driver._id}`,
       driverId: driver._id,
       capturedAt: Date.now(),
@@ -1433,9 +1437,11 @@ export const uploadLoadDocument = mutation({
     driverId: v.id('drivers'),
     type: driverDocType,
     // Storage: the driver app goes through S3/R2 presigned URLs, so we
-    // store the fileUrl (externalUrl). storageId is present only for
-    // paths that use Convex file storage (ops uploads via the web app).
+    // store the fileUrl (externalUrl) plus the R2 object key. storageId
+    // is present only for paths that use Convex file storage (ops
+    // uploads via the web app).
     externalUrl: v.optional(v.string()),
+    externalKey: v.optional(v.string()),
     storageId: v.optional(v.id('_storage')),
     fileName: v.optional(v.string()),
     contentType: v.optional(v.string()),
@@ -1497,6 +1503,7 @@ export const uploadLoadDocument = mutation({
       type: args.type,
       storageId: args.storageId,
       externalUrl: args.externalUrl,
+      externalKey: args.externalKey,
       fileName: args.fileName,
       contentType: args.contentType,
       // uploadedBy is a synthetic string for driver uploads; the WorkOS
