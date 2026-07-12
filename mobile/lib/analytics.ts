@@ -577,6 +577,10 @@ export function trackBgSyncOutcome(context: {
 export function trackSyncStallAlert(context: {
   queueDepth: number;
   consecutiveFailures: number;
+  /** What tripped the alert: hard sync failures, or "successful" syncs
+   *  that inserted nothing and were all duplicates (marking not
+   *  persisting — the queue re-sends the same rows forever). */
+  trigger: 'failures' | 'zero_progress';
   oldestUnsyncedAgeSec?: number;
   lastError?: string;
 }) {

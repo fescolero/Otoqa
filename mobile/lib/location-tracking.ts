@@ -17,6 +17,7 @@ import {
   purgeStaleUnsynced,
   getLastLocationForLoad,
   getLastLocationForSession,
+  resolveBackend,
   type LocationInput,
 } from './location-storage';
 import { log } from './log';
@@ -600,6 +601,23 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
     return;
   }
 
+  // Ensure the queue backend is resolved IN THIS JS CONTEXT. The root
+  // layout awaits resolveBackend() during React init, but this task can
+  // run headless (Android relaunches the task after process death, before
+  // any React tree mounts) — in that context every location-storage call
+  // would throw "resolveBackend() not called" and the task would silently
+  // drop captures + never mark synced rows. Idempotent when the layout
+  // already resolved.
+  try {
+    await resolveBackend();
+  } catch (resolveErr) {
+    const msg =
+      resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+    lg.error(`BG task: resolveBackend failed: ${msg}`);
+    trackBGTaskError({ step: 'resolve_backend', error: msg });
+    return;
+  }
+
   // Step 1: Read tracking state from AsyncStorage
   let state: TrackingState | null = null;
   try {
@@ -926,16 +944,31 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             syncDurationMs: Date.now() - syncStart,
             syncRetries,
           });
-          // Reset the stall-alert failure streak + clear any posted alert.
-          await noteSyncSuccess();
           try {
             await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+            // Reset the stall-alert streaks — but only after marking
+            // persisted, and let the detector see whether this "success"
+            // made real progress. An HTTP 200 with broken local marking
+            // means the queue re-sends the same rows (all-dup batches)
+            // while new pings pile up behind the batch cap; that IS a
+            // stall even though every request "succeeds" (2026-07-11
+            // incident, second failure mode).
+            await noteSyncSuccess({
+              inserted: result.inserted,
+              duplicates: result.duplicates,
+              queueDepth: queueDepthBefore,
+            });
           } catch (markErr) {
             const msg = markErr instanceof Error ? markErr.message : String(markErr);
             lg.warn(
               `BG sync succeeded but marking rows synced failed (will re-send next fire): ${msg}`,
             );
             trackBGTaskError({ step: 'mark_synced', error: msg });
+            await noteSyncFailure({
+              queueDepth: queueDepthBefore,
+              oldestUnsyncedAgeSec,
+              error: `mark_synced: ${msg}`,
+            });
           }
         } else {
           const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
