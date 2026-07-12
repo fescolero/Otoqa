@@ -73,10 +73,45 @@ app ↔ extension by type name + Codable shape. Change one → change both.
   notification survives; the process doesn't) still targets the correct
   start time.
 
+## One-visible-card policy (Android)
+
+The shift card is the ONLY notification a driver should see while
+working. Enforced by:
+
+- `configureQuietChannels` (called at app startup from `_layout.tsx`):
+  demotes expo-location's mandatory FGS channel
+  (`{appId}:OTOQA_LOCATION_TRACKING`) to IMPORTANCE_MIN +
+  VISIBILITY_SECRET, and pre-creates it that way on fresh installs so
+  expo-location's own LOW-importance creation never runs. The location
+  service keeps running; its notification just stops appearing on the
+  lock screen and collapses to the minimized shade section. This also
+  neutralizes the stale duplicates expo-location strands when the
+  service force-cycles (it uses a new notification id per instance).
+- All five `startLocationUpdatesAsync` sites share one
+  `TRACKING_FGS_NOTIFICATION` config ('Location service') instead of
+  divergent titles.
+- FCM wake pushes: the `otoqa_wake` channel is SECRET on fresh installs,
+  and `dismissInfraNotifications` sweeps already-presented wake /
+  session-ended cards at startup and after every handled push (FCM
+  system-renders their notification block while the app is dead —
+  nothing client-side can prevent that, only clean it up).
+
+## Android 16 pill (Live Updates)
+
+On API 36+ the card requests promoted-ongoing status
+(`requestPromotedOngoing` + `setShortCriticalText("Shift")`), which is
+what surfaces it in the prominent lock-screen slot / status-bar chip /
+Samsung One UI Now Bar — the pill where media players live. It's a hint:
+the system and the user (per-app toggle) decide; unpromoted it renders
+exactly like the normal ongoing notification. Older Android ignores it
+entirely (version-gated in `buildPromotedNotification`).
+
 ## Behavior notes / v1 limits
 
-- **Session mode only.** Legacy load-only tracking (no Start Shift)
-  shows no surface — there's no shift start time to anchor the timer.
+- **Both tracking modes covered.** Session mode (Start Shift) anchors
+  the timer to shift start; legacy load-only tracking (check-in without
+  Start Shift) anchors it to tracking start — effectively trip start —
+  with the 'On a trip' line.
 - Live Activities auto-end after ~8 h of no updates (system policy).
   Check-in/out events reset that window; an 8h+ fully-idle shift may see
   the iOS card end early. Android has no such limit.

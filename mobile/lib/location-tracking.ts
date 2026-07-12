@@ -56,6 +56,19 @@ const lg = log('LocationTracking');
 // ============================================
 
 const LOCATION_TASK_NAME = 'OTOQA_LOCATION_TRACKING';
+
+// Single source of truth for the mandatory location foreground-service
+// notification. Its channel is demoted to minimized/lock-screen-hidden at
+// app startup (configureQuietChannels in otoqa-shift-status) — the
+// driver-facing status lives on the On-shift card instead. Keep every
+// startLocationUpdatesAsync call on this one config: divergent titles
+// made stale duplicates (new notification id per service cycle) look
+// like different notifications.
+const TRACKING_FGS_NOTIFICATION = {
+  notificationTitle: 'Location service',
+  notificationBody: 'Keeps route tracking running',
+  notificationColor: '#22c55e',
+};
 const TRACKING_STATE_KEY = 'location_tracking_state';
 
 // ============================================
@@ -1213,11 +1226,7 @@ export async function startLocationTracking(params: {
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
         showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: 'Route Tracking Active',
-          notificationBody: 'Recording your delivery route',
-          notificationColor: '#22c55e',
-        },
+        foregroundService: TRACKING_FGS_NOTIFICATION,
         // OtherNavigation avoids competing with the driver's active nav app
         // (Apple Maps, Google Maps, Waze) for the AutomotiveNavigation slot.
         activityType: Location.ActivityType.OtherNavigation,
@@ -1237,6 +1246,10 @@ export async function startLocationTracking(params: {
       startForegroundPolling(params.organizationId);
 
       lg.debug('Background + foreground tracking started successfully');
+      // Lock-screen surface for legacy load-mode tracking too (drivers
+      // who check in without the Start Shift flow) — the timer anchors
+      // to tracking start, i.e. effectively trip start.
+      void startShiftStatus(state.startedAt, 'On a trip');
       return { success: true, message: 'Location tracking started' };
     } catch (bgError) {
       // Background tracking failed - fall back to foreground polling
@@ -1249,6 +1262,7 @@ export async function startLocationTracking(params: {
       // Start foreground-only polling as fallback
       startForegroundPolling(params.organizationId);
 
+      void startShiftStatus(state.startedAt, 'On a trip');
       return {
         success: true,
         message: 'Tracking started (foreground only - background not available)',
@@ -1546,11 +1560,7 @@ async function applyOSLevelTrackingResources(state: TrackingState): Promise<{
       timeInterval: TRACKING_INTERVAL_MS,
       distanceInterval: BG_DISTANCE_INTERVAL,
       showsBackgroundLocationIndicator: true,
-      foregroundService: {
-        notificationTitle: 'Shift Active',
-        notificationBody: 'Recording your route while on shift',
-        notificationColor: '#22c55e',
-      },
+      foregroundService: TRACKING_FGS_NOTIFICATION,
       activityType: Location.ActivityType.OtherNavigation,
       pausesUpdatesAutomatically: false,
     });
@@ -1767,11 +1777,7 @@ export async function resumeTracking(): Promise<{
           timeInterval: TRACKING_INTERVAL_MS,
           distanceInterval: BG_DISTANCE_INTERVAL,
           showsBackgroundLocationIndicator: true,
-          foregroundService: {
-            notificationTitle: 'Route Tracking Active',
-            notificationBody: 'Recording your delivery route',
-            notificationColor: '#22c55e',
-          },
+          foregroundService: TRACKING_FGS_NOTIFICATION,
           activityType: Location.ActivityType.OtherNavigation,
           pausesUpdatesAutomatically: false,
         });
@@ -1787,8 +1793,9 @@ export async function resumeTracking(): Promise<{
     startForegroundPolling(state.organizationId);
 
     // Re-assert the lock-screen shift surface after a process restart
-    // mid-shift (start replaces any stale card, so this is idempotent).
-    if (state.sessionId && typeof state.startedAt === 'number') {
+    // mid-shift — both session mode and legacy load mode (idempotent:
+    // the wrapper no-ops when the same shift is already showing).
+    if (typeof state.startedAt === 'number' && state.startedAt > 0) {
       void startShiftStatus(
         state.startedAt,
         state.loadId ? 'On a trip' : 'On shift — no active trip',
@@ -1924,11 +1931,7 @@ async function maybeReregisterBgTaskHeartbeat(
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
         showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: 'Route Tracking Active',
-          notificationBody: 'Recording your delivery route',
-          notificationColor: '#22c55e',
-        },
+        foregroundService: TRACKING_FGS_NOTIFICATION,
         activityType: Location.ActivityType.OtherNavigation,
         pausesUpdatesAutomatically: false,
       });
@@ -2371,11 +2374,7 @@ export async function restartForegroundServices(): Promise<void> {
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
         showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: 'Route Tracking Active',
-          notificationBody: 'Recording your delivery route',
-          notificationColor: '#22c55e',
-        },
+        foregroundService: TRACKING_FGS_NOTIFICATION,
         activityType: Location.ActivityType.OtherNavigation,
         pausesUpdatesAutomatically: false,
       });

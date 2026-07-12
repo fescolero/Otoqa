@@ -15,7 +15,10 @@ android {
   namespace "expo.modules.otoqashiftstatus"
   defaultConfig {
     minSdkVersion safeExtGet("minSdkVersion", 24)
-    compileSdkVersion safeExtGet("compileSdkVersion", 35)
+    // Fallback 36: the module compiles against Android 16 (API 36)
+    // symbols (Live Updates promotion) — Expo SDK 54 / RN 0.81 sets
+    // rootProject compileSdkVersion 36, this only guards a missing ext.
+    compileSdkVersion safeExtGet("compileSdkVersion", 36)
     targetSdkVersion safeExtGet("targetSdkVersion", 35)
     versionCode 1
     versionName "0.1.0"

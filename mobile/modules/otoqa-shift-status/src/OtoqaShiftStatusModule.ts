@@ -11,6 +11,8 @@ interface OtoqaShiftStatusNativeModule {
   startShiftStatus(startedAtMs: number, statusLine: string): Promise<boolean>;
   updateShiftStatus(statusLine: string): Promise<boolean>;
   endShiftStatus(): Promise<boolean>;
+  /** Android-only: demote infra notification channels (location FGS) to minimized. */
+  configureQuietChannels?(): Promise<boolean>;
 }
 
 export default requireOptionalNativeModule<OtoqaShiftStatusNativeModule>('OtoqaShiftStatus');

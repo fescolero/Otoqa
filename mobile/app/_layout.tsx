@@ -2,7 +2,7 @@
 import '../lib/polyfills';
 
 import React, { useEffect } from 'react';
-import { View, Text, ScrollView, StyleSheet, AppState } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, AppState, Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ClerkProvider, ClerkLoaded } from '@clerk/clerk-expo';
@@ -27,6 +27,7 @@ import { useMutation, useAction } from 'convex/react';
 import { api } from '../../convex/_generated/api';
 import type { QueuedMutation } from '../lib/offline-queue';
 import { uploadPODPhoto } from '../lib/s3-upload';
+import { configureQuietChannels } from 'otoqa-shift-status';
 import { LanguageProvider } from '../lib/LanguageContext';
 import { ThemeProvider } from '../lib/ThemeContext';
 import { setPostHogClient, trackErrorBoundary, trackOtaUpdateCheck, getAppVersionContext } from '../lib/analytics';
@@ -334,6 +335,13 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
 
 export default function RootLayout() {
   useEffect(() => {
+    // Demote the location-service + FCM-wake notification channels to
+    // minimized so the On-shift card is the only visible surface on the
+    // lock screen. Idempotent; Android-only (no-op elsewhere).
+    if (Platform.OS === 'android') {
+      void configureQuietChannels();
+    }
+
     // Set up TanStack Query persistence
     setupQueryPersistence().catch(console.error);
 

@@ -67,6 +67,21 @@ export async function updateShiftStatus(statusLine: string): Promise<boolean> {
   }
 }
 
+/**
+ * Android-only: demote the location foreground-service notification
+ * channels (and pre-create them minimized on fresh installs) so the
+ * shift card is the single visible surface on the lock screen. Safe and
+ * idempotent — call once at app startup. No-op on iOS / old binaries.
+ */
+export async function configureQuietChannels(): Promise<boolean> {
+  try {
+    return (await OtoqaShiftStatusModule?.configureQuietChannels?.()) ?? false;
+  } catch (error) {
+    console.warn('[ShiftStatus] configureQuietChannels failed:', error);
+    return false;
+  }
+}
+
 /** Tear the surface down. Safe to call when nothing is showing. */
 export async function endShiftStatus(): Promise<boolean> {
   activeStartedAtMs = null;

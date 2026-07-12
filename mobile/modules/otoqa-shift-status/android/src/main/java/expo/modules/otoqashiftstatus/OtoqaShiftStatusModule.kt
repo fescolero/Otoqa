@@ -1,12 +1,14 @@
 package expo.modules.otoqashiftstatus
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -92,6 +94,46 @@ class OtoqaShiftStatusModule : Module() {
       NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
       true
     }
+
+    // Demote the infrastructure notifications so the shift card is the
+    // ONE visible surface. Two offenders:
+    //   1. expo-location's mandatory FGS notification — its channel id is
+    //      "{appId}:OTOQA_LOCATION_TRACKING", created at IMPORTANCE_LOW,
+    //      and service force-cycling can strand stale copies (new
+    //      notification id per service instance).
+    //   2. Any other pre-existing channel raised above MIN that matches
+    //      the FGS suffix (older builds / Expo Go scoped app ids).
+    // IMPORTANCE_MIN + VISIBILITY_SECRET = alive but invisible on the
+    // lock screen and collapsed to the minimized shade section. Android
+    // permits programmatically LOWERING channel importance, never
+    // raising it, so this is safe to run on every launch. Called from
+    // app startup (_layout.tsx).
+    AsyncFunction("configureQuietChannels") {
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return@AsyncFunction true
+      val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+      val fgsSuffix = ":OTOQA_LOCATION_TRACKING"
+      // Pre-create for fresh installs so expo-location's own
+      // LOW-importance creation never runs (it skips existing channels).
+      quietChannel(nm, "${context.packageName}$fgsSuffix", "Location service")
+      for (channel in nm.notificationChannels) {
+        if (channel.id.endsWith(fgsSuffix) &&
+          channel.importance > NotificationManager.IMPORTANCE_MIN
+        ) {
+          quietChannel(nm, channel.id, channel.name?.toString() ?: "Location service")
+        }
+      }
+      true
+    }
+  }
+
+  private fun quietChannel(nm: NotificationManager, id: String, name: String) {
+    val channel = NotificationChannel(id, name, NotificationManager.IMPORTANCE_MIN)
+    channel.description = "Keeps route tracking running. Status lives on the On-shift card."
+    channel.setShowBadge(false)
+    channel.lockscreenVisibility = Notification.VISIBILITY_SECRET
+    channel.setSound(null, null)
+    channel.enableVibration(false)
+    nm.createNotificationChannel(channel)
   }
 
   private fun prefs() =
@@ -138,10 +180,48 @@ class OtoqaShiftStatusModule : Module() {
       )
     }
 
-    // applicationInfo.icon renders monochrome-flattened in the status bar
-    // on some OEMs; good enough for v1 — swap for a dedicated small icon
-    // resource if it looks muddy in the field.
-    val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+    // Android 16+ (API 36): request Live Update promotion so the card
+    // gets the prominent lock-screen slot / status chip / Samsung Now
+    // Bar treatment (the pill where media players live). Older versions
+    // get the standard ongoing notification via the compat path.
+    val notification = if (Build.VERSION.SDK_INT >= 36) {
+      buildPromotedNotification(statusLine, contentIntent)
+    } else {
+      // applicationInfo.icon renders monochrome-flattened in the status
+      // bar on some OEMs; good enough for v1 — swap for a dedicated
+      // small icon resource if it looks muddy in the field.
+      NotificationCompat.Builder(context, CHANNEL_ID)
+        .setSmallIcon(context.applicationInfo.icon)
+        .setContentTitle("On shift")
+        .setContentText(statusLine)
+        .setUsesChronometer(true)
+        .setWhen(startedAtMs)
+        .setShowWhen(true)
+        .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .setSilent(true)
+        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        .apply { if (contentIntent != null) setContentIntent(contentIntent) }
+        .build()
+    }
+
+    NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
+  }
+
+  /**
+   * Android 16 Live Update build path. requestPromotedOngoing is a hint
+   * — the system (and the user, per-app) decides whether to honor it;
+   * unpromoted it renders exactly like the compat notification. Built
+   * with the platform Builder because the promotion APIs are
+   * platform-level (API 36) and this keeps the version gate in one
+   * function.
+   */
+  @RequiresApi(36)
+  private fun buildPromotedNotification(
+    statusLine: String,
+    contentIntent: PendingIntent?,
+  ): Notification {
+    val builder = Notification.Builder(context, CHANNEL_ID)
       .setSmallIcon(context.applicationInfo.icon)
       .setContentTitle("On shift")
       .setContentText(statusLine)
@@ -150,11 +230,11 @@ class OtoqaShiftStatusModule : Module() {
       .setShowWhen(true)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
-      .setSilent(true)
-      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-      .apply { if (contentIntent != null) setContentIntent(contentIntent) }
-      .build()
-
-    NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
+      .setVisibility(Notification.VISIBILITY_PUBLIC)
+      // Compact text for the status-bar chip when promoted.
+      .setShortCriticalText("Shift")
+      .requestPromotedOngoing(true)
+    if (contentIntent != null) builder.setContentIntent(contentIntent)
+    return builder.build()
   }
 }

@@ -138,6 +138,28 @@ type WakePayload = {
   sessionId: string;
 };
 
+/**
+ * Sweep already-presented infrastructure notifications (wake +
+ * session-ended pushes) out of the shade. FCM system-renders their
+ * notification block whenever the app is backgrounded/dead, and those
+ * cards linger until the driver swipes them — this clears them the next
+ * time our code runs (startup + every handled push).
+ */
+async function dismissInfraNotifications(): Promise<void> {
+  if (Platform.OS !== 'android') return;
+  try {
+    const presented = await Notifications.getPresentedNotificationsAsync();
+    for (const n of presented) {
+      const type = (n.request?.content?.data as { type?: string } | null)?.type;
+      if (type === WAKE_PAYLOAD_TYPE || type === SESSION_ENDED_PAYLOAD_TYPE) {
+        await Notifications.dismissNotificationAsync(n.request.identifier);
+      }
+    }
+  } catch {
+    // Best-effort hygiene — never let cleanup interfere with wake handling.
+  }
+}
+
 type SessionEndedPayload = {
   type: string;
   sessionId: string;
@@ -410,10 +432,16 @@ export async function registerBackgroundWakeTask(): Promise<void> {
         enableVibrate: false,
         enableLights: false,
         showBadge: false,
+        // SECRET: never render on the lock screen at all. (Visibility
+        // can't be changed on channels that already exist from older
+        // installs — those stay PRIVATE — but MIN importance keeps them
+        // out of the way on stock Android; some OEMs still surface
+        // them, which fresh installs won't hit.)
         lockscreenVisibility:
-          Notifications.AndroidNotificationVisibility.PRIVATE,
+          Notifications.AndroidNotificationVisibility.SECRET,
       });
       lg.debug('Wake notification channel ensured');
+      void dismissInfraNotifications();
     } catch (err) {
       lg.warn(
         `setNotificationChannelAsync failed: ${err instanceof Error ? err.message : err}`,
@@ -468,9 +496,11 @@ async function routePayload(
   switch (type) {
     case WAKE_PAYLOAD_TYPE:
       await handleWakePayload(data, deliveryPath);
+      void dismissInfraNotifications();
       return;
     case SESSION_ENDED_PAYLOAD_TYPE:
       await handleSessionEndedPayload(data, deliveryPath);
+      void dismissInfraNotifications();
       return;
     default:
       // Not one of ours — could be a driver-facing dispatch message,
