@@ -52,6 +52,14 @@ function createS3Client() {
       },
       // R2 requires this for presigned URLs
       forcePathStyle: !!r2AccountId,
+      // CRITICAL for R2 + AWS SDK >= 3.729: the SDK's flexible-checksums
+      // default (WHEN_SUPPORTED) bakes an `x-amz-checksum-crc32` of the
+      // EMPTY body into every presigned PUT (the presigner never sees
+      // the file), so R2 rejects every real upload with a checksum
+      // mismatch. WHEN_REQUIRED disables the implicit checksum — this
+      // is Cloudflare's documented R2 compatibility setting.
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED',
     }),
     bucket,
     r2AccountId,
@@ -75,8 +83,9 @@ function buildDocumentKey(
 ): string {
   const timestamp = Date.now();
   const randomSuffix = Math.random().toString(36).substring(2, 8);
-  const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
-  return `orgs/${orgSegment}/loads/${loadId}/${docType}/${timestamp}-${randomSuffix}-${sanitizedFilename}`;
+  const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_') || 'photo.jpg';
+  const loadSegment = loadId || 'unknown';
+  return `orgs/${orgSegment}/loads/${loadSegment}/${docType}/${timestamp}-${randomSuffix}-${sanitizedFilename}`;
 }
 
 function buildFileUrl(key: string, r2AccountId: string | undefined, bucket: string): string {
@@ -259,8 +268,19 @@ export const getLoadDocumentUploadUrl = action({
       Metadata: metadata,
     });
 
+    // Keep the x-amz-meta-* headers in the SIGNED headers instead of
+    // letting the presigner hoist them into the query string. The mobile
+    // client echoes them as request headers on PUT (metadataHeaders
+    // below) — if they're hoisted, the echoed headers are unsigned
+    // x-amz-* headers, which S3/R2 rejects. Signing them restores the
+    // original contract: client must send them verbatim or gets a 403.
+    const unhoistableHeaders = new Set(
+      Object.keys(metadata).map((k) => `x-amz-meta-${k}`),
+    );
+
     const uploadUrl = await getSignedUrl(client, command, {
       expiresIn: 300,
+      unhoistableHeaders,
     });
 
     // Translate the metadata map into the header names the client must
@@ -332,8 +352,14 @@ export const getPODUploadUrl = action({
       Metadata: metadata,
     });
 
+    // Same signed-metadata-headers contract as getLoadDocumentUploadUrl.
+    const unhoistableHeaders = new Set(
+      Object.keys(metadata).map((k) => `x-amz-meta-${k}`),
+    );
+
     const uploadUrl = await getSignedUrl(client, command, {
       expiresIn: 300,
+      unhoistableHeaders,
     });
 
     const metadataHeaders: Record<string, string> = {};
