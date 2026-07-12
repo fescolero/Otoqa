@@ -36,6 +36,7 @@ import {
   flushAnalytics,
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
+import { startShiftStatus, updateShiftStatus, endShiftStatus } from 'otoqa-shift-status';
 import { setBootState, clearBootState } from './boot-state';
 import { noteSyncFailure, noteSyncSuccess } from './sync-stall-alert';
 
@@ -1283,6 +1284,11 @@ export async function stopLocationTracking(): Promise<{ success: boolean; messag
       }
     }
 
+    // Tear down the lock-screen shift surface on every stop path —
+    // stopSessionTracking aliases this function, so End Shift, legacy
+    // last-stop checkout, and server-forced stops all land here.
+    void endShiftStatus();
+
     // Clear tracking state and heartbeat (the queued pings persist for re-upload)
     await storage.set(TRACKING_STATE_KEY, JSON.stringify({ isActive: false }));
     await storage.delete(LAST_HEARTBEAT_KEY);
@@ -1587,7 +1593,14 @@ export async function startSessionTracking(params: {
       startedAt: Date.now(),
     };
 
-    return await applyOSLevelTrackingResources(state);
+    const result = await applyOSLevelTrackingResources(state);
+    if (result.success) {
+      // Lock-screen shift surface (Android chronometer notification /
+      // iOS Live Activity). Fire-and-forget: the surface mirrors shift
+      // state and must never block or fail the shift itself.
+      void startShiftStatus(state.startedAt, 'On shift — no active trip');
+    }
+    return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Failed to start session tracking';
     lg.error('Session start failed:', errorMessage);
@@ -1623,6 +1636,9 @@ export async function attachLoadToSession(loadId: Id<'loadInformation'>): Promis
   lg.debug(
     `Attached load=${(loadId as string).substring(0, 12)}... to session`,
   );
+  // Stop-level detail lands from useCheckIn right after; this covers the
+  // gap between attach and the first check-in announcement.
+  void updateShiftStatus('On a trip');
   return { success: true, message: 'Load attached to session' };
 }
 
@@ -1655,6 +1671,7 @@ export async function detachLoadFromSession(): Promise<{
   };
   await storage.set(TRACKING_STATE_KEY, JSON.stringify(updated));
   lg.debug('Detached load from session');
+  void updateShiftStatus('Trip complete — on shift');
   return { success: true, message: 'Load detached from session' };
 }
 
@@ -1757,6 +1774,15 @@ export async function resumeTracking(): Promise<{
     // This is the primary data source while the app is in the foreground --
     // the background task is throttled by the OS and fires infrequently.
     startForegroundPolling(state.organizationId);
+
+    // Re-assert the lock-screen shift surface after a process restart
+    // mid-shift (start replaces any stale card, so this is idempotent).
+    if (state.sessionId && typeof state.startedAt === 'number') {
+      void startShiftStatus(
+        state.startedAt,
+        state.loadId ? 'On a trip' : 'On shift — no active trip',
+      );
+    }
 
     // Sync any unsynced locations from the queue (survived app restart)
     const unsyncedCount = await getUnsyncedCount();

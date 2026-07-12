@@ -15,6 +15,7 @@ import * as Location from 'expo-location';
 import { useNetworkStatus } from './useNetworkStatus';
 import { usePostHog } from 'posthog-react-native';
 import { trackCheckinOfflineQueued, trackCheckinMutationTimeout } from '../analytics';
+import { updateShiftStatus } from 'otoqa-shift-status';
 
 /**
  * Two tracking modes coexist on mobile during the rollout:
@@ -99,6 +100,28 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     promise,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Request timed out')), ms)),
   ]);
+}
+
+/**
+ * One-line status for the lock-screen shift surface (Android chronometer
+ * notification / iOS Live Activity). Fire-and-forget from the check-in
+ * and check-out paths — queued actions announce too, since the driver
+ * physically did the thing regardless of sync state.
+ */
+function announceStopStatus(options: CheckInOptions, kind: 'in' | 'out') {
+  const position =
+    options.stopSequence && options.totalStops
+      ? `Stop ${options.stopSequence} of ${options.totalStops}`
+      : 'Stop';
+  if (kind === 'in') {
+    void updateShiftStatus(`${position} — checked in`);
+    return;
+  }
+  const isLastStop =
+    options.stopSequence != null && options.stopSequence === options.totalStops;
+  void updateShiftStatus(
+    isLastStop ? 'Trip complete — on shift' : `${position} complete — en route`,
+  );
 }
 
 interface CheckInOptions {
@@ -202,6 +225,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
+        announceStopStatus(options, 'in');
         return {
           success: true,
           message:
@@ -264,6 +288,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
+        if (result.success) announceStopStatus(options, 'in');
         return { ...result, trackingFailed, trackingMessage };
       } catch (onlineError) {
         await enqueueMutation('checkIn', mutationArgs);
@@ -303,6 +328,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
+        announceStopStatus(options, 'in');
         return {
           success: true,
           message: 'Connection slow - check-in queued for sync',
@@ -355,6 +381,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           connectionQuality,
           action: 'check_out',
         });
+        announceStopStatus(options, 'out');
         return {
           success: true,
           message:
@@ -502,6 +529,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           }
         }
 
+        if (result.success) announceStopStatus(options, 'out');
         return { ...result, trackingFailed, trackingMessage };
       } catch (onlineError) {
         // Mutation timed out or failed -- queue it (photo already uploaded or will be re-uploaded from queue)
@@ -526,6 +554,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           loadId: options.loadId ?? null,
           error: onlineError instanceof Error ? onlineError.message : 'timeout',
         });
+        announceStopStatus(options, 'out');
         return {
           success: true,
           message: 'Connection slow - check-out queued for sync',

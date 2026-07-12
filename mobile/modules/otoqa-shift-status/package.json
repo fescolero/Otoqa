@@ -1,0 +1,8 @@
+{
+  "name": "otoqa-shift-status",
+  "version": "0.1.0",
+  "description": "Local Expo module for the driver's lock-screen shift surface — an ongoing chronometer notification on Android and an ActivityKit Live Activity on iOS, both showing elapsed shift time plus a one-line trip/stop status.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "private": true
+}
