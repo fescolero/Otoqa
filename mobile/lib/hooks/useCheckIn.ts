@@ -338,7 +338,17 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
       };
 
       if (shouldQueue) {
-        await enqueueMutation('checkOut', baseMutationArgs, { photoUri: options.photoUri });
+        // loadId rides along for the replay's presign (org-prefixed R2
+        // key resolution) — the processor strips it before the checkout
+        // mutation, whose validator doesn't accept it.
+        await enqueueMutation(
+          'checkOut',
+          {
+            ...baseMutationArgs,
+            loadId: options.loadId ? String(options.loadId) : undefined,
+          },
+          { photoUri: options.photoUri },
+        );
         trackCheckinOfflineQueued({
           stopId: String(options.stopId),
           loadId: options.loadId ? String(options.loadId) : undefined,
@@ -497,7 +507,12 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         // Mutation timed out or failed -- queue it (photo already uploaded or will be re-uploaded from queue)
         await enqueueMutation(
           'checkOut',
-          { ...baseMutationArgs, podPhotoUrl, podPhotoKey },
+          {
+            ...baseMutationArgs,
+            loadId: options.loadId ? String(options.loadId) : undefined,
+            podPhotoUrl,
+            podPhotoKey,
+          },
           { photoUri: !podPhotoUrl ? options.photoUri : undefined },
         );
         trackCheckinMutationTimeout({

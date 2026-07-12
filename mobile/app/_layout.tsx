@@ -155,6 +155,11 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
           let podPhotoUrl: string | undefined;
           let podPhotoKey: string | undefined;
 
+          // loadId is queue-only context for the presign below (org
+          // prefix resolution); checkOutFromStop's validator rejects
+          // undeclared args, so it must not reach the mutation.
+          const { loadId: _queuedLoadId, ...checkOutArgs } = payload as any;
+
           // If there's a photo, upload it first
           if (photoPath) {
             const { uploadUrl, fileUrl, key, metadataHeaders } = await getLoadDocumentUploadUrl({
@@ -182,7 +187,7 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
           }
 
           await checkOutMutation({
-            ...(payload as any),
+            ...checkOutArgs,
             ...(podPhotoUrl ? { podPhotoUrl, podPhotoKey } : {}),
           });
           break;
@@ -221,12 +226,34 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
           // time (accurate GPS at the moment the photo was taken, not at
           // sync time, which may be hours later in a dead zone).
           //
+          // The mutation args are built EXPLICITLY — never spread the
+          // raw payload. Queued payloads carry extra fields the
+          // uploadLoadDocument validator rejects (driverTimestamp is
+          // injected by enqueueMutation on every entry, accidentKind is
+          // presign-only), and Convex fails the whole call on any
+          // undeclared arg, which would permanently strand the entry.
+          const p = payload as any;
+          const mutationArgs = (externalUrl: string, externalKey?: string) => ({
+            loadId: p.loadId,
+            driverId: p.driverId,
+            type: p.type,
+            externalUrl,
+            externalKey,
+            capturedAt: typeof p.capturedAt === 'number' ? p.capturedAt : undefined,
+            capturedLat: typeof p.capturedLat === 'number' ? p.capturedLat : undefined,
+            capturedLng: typeof p.capturedLng === 'number' ? p.capturedLng : undefined,
+            gpsAccuracyM: typeof p.gpsAccuracyM === 'number' ? p.gpsAccuracyM : undefined,
+            note: typeof p.note === 'string' ? p.note : undefined,
+          });
+
           // Record-only entries (payload.externalUrl set, no photoPath)
           // mean the PUT already succeeded but the mutation timed out —
           // just replay the mutation. Re-uploading would orphan the
           // original object in R2 under a fresh key.
-          if (payload.externalUrl) {
-            await uploadLoadDocumentMutation(payload as any);
+          if (typeof p.externalUrl === 'string') {
+            await uploadLoadDocumentMutation(
+              mutationArgs(p.externalUrl, typeof p.externalKey === 'string' ? p.externalKey : undefined),
+            );
             break;
           }
           if (!photoPath) {
@@ -261,11 +288,7 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
             throw new Error(uploadResult.error ?? 'Upload failed');
           }
 
-          await uploadLoadDocumentMutation({
-            ...(payload as any),
-            externalUrl: fileUrl,
-            externalKey: key,
-          });
+          await uploadLoadDocumentMutation(mutationArgs(fileUrl, key));
           break;
         }
 

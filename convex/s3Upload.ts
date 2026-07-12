@@ -5,6 +5,7 @@ import { action, internalAction } from './_generated/server';
 import { internal } from './_generated/api';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { keyFromExternalUrl } from './lib/r2';
 import type { Id } from './_generated/dataModel';
 
 // ============================================
@@ -395,8 +396,7 @@ export const getDocumentDownloadUrl = action({
     }
 
     const key =
-      doc.externalKey ??
-      (doc.externalUrl ? decodeURIComponent(new URL(doc.externalUrl).pathname.slice(1)) : null);
+      doc.externalKey ?? (doc.externalUrl ? keyFromExternalUrl(doc.externalUrl) : null);
     if (!key) {
       return { url: null, expiresAt: null };
     }

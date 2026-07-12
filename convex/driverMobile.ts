@@ -1075,6 +1075,11 @@ export const checkOutFromStop = mutation({
         deliveryPhotos: [...existingPhotos, args.podPhotoUrl],
       });
 
+      // capturedAt uses the driver's checkout time, not Date.now() — an
+      // offline checkout can replay hours later, and sync time would
+      // shove the POD out of chronological order in the doc timeline.
+      const driverCheckoutMs = Date.parse(args.driverTimestamp);
+
       await ctx.db.insert('loadDocuments', {
         loadId: stop.loadId,
         workosOrgId: load.workosOrgId,
@@ -1083,7 +1088,7 @@ export const checkOutFromStop = mutation({
         externalKey: args.podPhotoKey,
         uploadedBy: `driver:${driver._id}`,
         driverId: driver._id,
-        capturedAt: Date.now(),
+        capturedAt: Number.isNaN(driverCheckoutMs) ? Date.now() : driverCheckoutMs,
         uploadedAt: Date.now(),
         capturedLat: args.latitude,
         capturedLng: args.longitude,
@@ -1450,6 +1455,16 @@ export const uploadLoadDocument = mutation({
     capturedLng: v.optional(v.number()),
     gpsAccuracyM: v.optional(v.number()),
     note: v.optional(v.string()),
+    // Accepted-and-ignored compatibility args. App builds in the field
+    // replay offline-queued uploads by spreading the whole queued
+    // payload, which carries driverTimestamp (stamped on every queued
+    // entry by enqueueMutation) and accidentKind (presign-only; lands in
+    // R2 metadata, not on the row). Convex rejects any undeclared arg,
+    // so without these the replay throws ArgumentValidationError and the
+    // queued document is permanently lost after max retries. Keep until
+    // no deployed build spreads queue payloads into this mutation.
+    driverTimestamp: v.optional(v.string()),
+    accidentKind: v.optional(v.string()),
   },
   returns: v.object({
     documentId: v.id('loadDocuments'),

@@ -1,7 +1,8 @@
 import { v } from 'convex/values';
 import { internalQuery, mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
-import { requireCallerIdentity, requireCallerOrgId } from './lib/auth';
+import { getCallerOrgId, requireCallerIdentity, requireCallerOrgId } from './lib/auth';
+import { keyFromExternalUrl } from './lib/r2';
 import { resolveAuthenticatedDriver } from './driverMobile';
 
 /**
@@ -125,8 +126,7 @@ export const getDocForAccess = internalQuery({
     const doc = await ctx.db.get(args.documentId);
     if (!doc) return null;
 
-    const claims = identity as unknown as { org_id?: string; organizationId?: string };
-    const orgId = claims.org_id ?? claims.organizationId;
+    const orgId = await getCallerOrgId(ctx);
 
     if (orgId) {
       if (doc.workosOrgId !== orgId) return null;
@@ -159,18 +159,6 @@ export const getDocForAccess = internalQuery({
     };
   },
 });
-
-/**
- * Derive the R2 object key from a legacy public-URL row. Works for both
- * pub-{account}.r2.dev and custom-domain URLs — the key is the pathname.
- */
-function keyFromExternalUrl(externalUrl: string): string | null {
-  try {
-    return decodeURIComponent(new URL(externalUrl).pathname.slice(1)) || null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Delete a load document: removes the Convex row, the underlying bytes
