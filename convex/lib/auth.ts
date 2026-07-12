@@ -23,6 +23,22 @@ interface IdentityWithOrg {
 }
 
 /**
+ * Non-throwing variant of `requireCallerOrgId` for functions that serve
+ * BOTH org-member (WorkOS) and driver-app (Clerk, no org claim) callers
+ * and branch on which one they got. Returns null when unauthenticated or
+ * when the identity carries no org claim — callers must treat null as
+ * "not an org member", never as "allowed".
+ */
+export async function getCallerOrgId(ctx: AnyCtx): Promise<string | null> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return null;
+
+  const claims = identity as unknown as IdentityWithOrg;
+  const orgId = claims.org_id ?? claims.organizationId;
+  return typeof orgId === 'string' && orgId ? orgId : null;
+}
+
+/**
  * Derive the caller's org ID from the authenticated identity.
  *
  * Fail-closed: throws if the caller is unauthenticated OR if the identity

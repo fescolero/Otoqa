@@ -17,6 +17,7 @@ import {
   purgeStaleUnsynced,
   getLastLocationForLoad,
   getLastLocationForSession,
+  resolveBackend,
   type LocationInput,
 } from './location-storage';
 import { log } from './log';
@@ -35,7 +36,9 @@ import {
   flushAnalytics,
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
+import { startShiftStatus, updateShiftStatus, endShiftStatus } from 'otoqa-shift-status';
 import { setBootState, clearBootState } from './boot-state';
+import { noteSyncFailure, noteSyncSuccess } from './sync-stall-alert';
 
 // Module-scoped namespaced logger. Debug/info calls are stripped in
 // production by Metro; warn/error pass through so Sentry / native
@@ -477,6 +480,15 @@ export async function reconcileTrackingStateWithActiveSession(
   lg.debug(
     `Self-healed tracking state (reason=${reason}): attached session ${active._id.substring(0, 12)}`,
   );
+  // The rescued driver is mid-shift but startSessionTracking never ran
+  // on this device, so no lock-screen surface exists — assert it now
+  // (idempotent: the JS wrapper no-ops if it's already up).
+  if (typeof patched.startedAt === 'number' && patched.startedAt > 0) {
+    void startShiftStatus(
+      patched.startedAt,
+      patched.loadId ? 'On a trip' : 'On shift — no active trip',
+    );
+  }
   return patched;
 }
 
@@ -596,6 +608,23 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error) {
     lg.error('BG task error from OS:', error);
     trackBGTaskError({ step: 'os_error', error: String(error) });
+    return;
+  }
+
+  // Ensure the queue backend is resolved IN THIS JS CONTEXT. The root
+  // layout awaits resolveBackend() during React init, but this task can
+  // run headless (Android relaunches the task after process death, before
+  // any React tree mounts) — in that context every location-storage call
+  // would throw "resolveBackend() not called" and the task would silently
+  // drop captures + never mark synced rows. Idempotent when the layout
+  // already resolved.
+  try {
+    await resolveBackend();
+  } catch (resolveErr) {
+    const msg =
+      resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+    lg.error(`BG task: resolveBackend failed: ${msg}`);
+    trackBGTaskError({ step: 'resolve_backend', error: msg });
     return;
   }
 
@@ -927,12 +956,29 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
           });
           try {
             await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+            // Reset the stall-alert streaks — but only after marking
+            // persisted, and let the detector see whether this "success"
+            // made real progress. An HTTP 200 with broken local marking
+            // means the queue re-sends the same rows (all-dup batches)
+            // while new pings pile up behind the batch cap; that IS a
+            // stall even though every request "succeeds" (2026-07-11
+            // incident, second failure mode).
+            await noteSyncSuccess({
+              inserted: result.inserted,
+              duplicates: result.duplicates,
+              queueDepth: queueDepthBefore,
+            });
           } catch (markErr) {
             const msg = markErr instanceof Error ? markErr.message : String(markErr);
             lg.warn(
               `BG sync succeeded but marking rows synced failed (will re-send next fire): ${msg}`,
             );
             trackBGTaskError({ step: 'mark_synced', error: msg });
+            await noteSyncFailure({
+              queueDepth: queueDepthBefore,
+              oldestUnsyncedAgeSec,
+              error: `mark_synced: ${msg}`,
+            });
           }
         } else {
           const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
@@ -948,6 +994,15 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             error: errMsg,
             syncRetries,
           });
+          // Silent-stall detection: capture keeps working while uploads
+          // fail (e.g. Samsung's per-app "Allow background data usage"
+          // off — 2026-07-11 incident), so tell the driver before the
+          // queue grows a whole shift deep.
+          await noteSyncFailure({
+            queueDepth: queueDepthBefore,
+            oldestUnsyncedAgeSec,
+            error: errMsg,
+          });
         }
       }
     } catch (flushError) {
@@ -958,6 +1013,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
       lg.warn(`BG sync prep failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
       trackBGTaskError({ step: 'sync', error: errMsg });
+      await noteSyncFailure({ queueDepth: queueDepthBefore, error: errMsg });
       trackBgSyncOutcome({
         outcome: 'failure',
         queueDepthBefore,
@@ -1212,6 +1268,13 @@ export async function startLocationTracking(params: {
 export async function stopLocationTracking(): Promise<{ success: boolean; message: string }> {
   try {
     lg.debug('Stopping tracking...');
+
+    // Tear down the lock-screen shift surface FIRST — before any await
+    // that can throw into the catch block and skip it. Every stop path
+    // (End Shift, legacy last-stop checkout, server-forced stop) lands
+    // here, and a lingering 'On shift' card after the shift ended is
+    // worse than any teardown-ordering nicety.
+    void endShiftStatus();
 
     // Stop sync interval and foreground polling
     stopSyncInterval();
@@ -1541,7 +1604,14 @@ export async function startSessionTracking(params: {
       startedAt: Date.now(),
     };
 
-    return await applyOSLevelTrackingResources(state);
+    const result = await applyOSLevelTrackingResources(state);
+    if (result.success) {
+      // Lock-screen shift surface (Android chronometer notification /
+      // iOS Live Activity). Fire-and-forget: the surface mirrors shift
+      // state and must never block or fail the shift itself.
+      void startShiftStatus(state.startedAt, 'On shift — no active trip');
+    }
+    return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Failed to start session tracking';
     lg.error('Session start failed:', errorMessage);
@@ -1577,6 +1647,9 @@ export async function attachLoadToSession(loadId: Id<'loadInformation'>): Promis
   lg.debug(
     `Attached load=${(loadId as string).substring(0, 12)}... to session`,
   );
+  // Deliberately NO surface update here: useCheckIn announces the
+  // specific stop line right after attach, and firing a generic 'On a
+  // trip' first would race it (both are fire-and-forget natives).
   return { success: true, message: 'Load attached to session' };
 }
 
@@ -1609,6 +1682,7 @@ export async function detachLoadFromSession(): Promise<{
   };
   await storage.set(TRACKING_STATE_KEY, JSON.stringify(updated));
   lg.debug('Detached load from session');
+  void updateShiftStatus('Trip complete — on shift');
   return { success: true, message: 'Load detached from session' };
 }
 
@@ -1711,6 +1785,15 @@ export async function resumeTracking(): Promise<{
     // This is the primary data source while the app is in the foreground --
     // the background task is throttled by the OS and fires infrequently.
     startForegroundPolling(state.organizationId);
+
+    // Re-assert the lock-screen shift surface after a process restart
+    // mid-shift (start replaces any stale card, so this is idempotent).
+    if (state.sessionId && typeof state.startedAt === 'number') {
+      void startShiftStatus(
+        state.startedAt,
+        state.loadId ? 'On a trip' : 'On shift — no active trip',
+      );
+    }
 
     // Sync any unsynced locations from the queue (survived app restart)
     const unsyncedCount = await getUnsyncedCount();

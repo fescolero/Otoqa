@@ -15,6 +15,7 @@ import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { trackPhotoCapture, trackPhotoSaved, trackPhotoSaveFailed, trackScreen } from '../../lib/analytics';
+import { prepareImageForUpload } from '../../lib/image';
 
 // Key for storing captured photo URI temporarily
 const CAPTURED_PHOTO_KEY = 'captured_photo_uri';
@@ -133,7 +134,8 @@ export default function CapturePhotoScreen() {
       });
 
       if (photo?.uri) {
-        const uri = photo.uri.startsWith('file://') ? photo.uri : `file://${photo.uri}`;
+        const rawUri = photo.uri.startsWith('file://') ? photo.uri : `file://${photo.uri}`;
+        const uri = await prepareImageForUpload(rawUri, photo.width, photo.height);
         setCapturedPhoto(uri);
         trackPhotoCapture(true, loadId);
       } else {

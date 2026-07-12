@@ -15,6 +15,7 @@ import * as Location from 'expo-location';
 import { useNetworkStatus } from './useNetworkStatus';
 import { usePostHog } from 'posthog-react-native';
 import { trackCheckinOfflineQueued, trackCheckinMutationTimeout } from '../analytics';
+import { updateShiftStatus } from 'otoqa-shift-status';
 
 /**
  * Two tracking modes coexist on mobile during the rollout:
@@ -101,6 +102,40 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+/**
+ * One-line status for the lock-screen shift surface (Android chronometer
+ * notification / iOS Live Activity). Fire-and-forget from the check-in
+ * and check-out paths — queued actions announce too, since the driver
+ * physically did the thing regardless of sync state.
+ *
+ * Last-stop checkout announces nothing: detachLoadFromSession owns the
+ * 'Trip complete — on shift' line (single owner, no duplicate updates),
+ * and in legacy mode the surface never existed anyway.
+ *
+ * The 'Stop N of M' form is only used when N is a plausible position:
+ * detour stops carry fractional sequence numbers (3.01) and totalStops
+ * excludes detours, so a raw sequence can read 'Stop 3.01 of 2' — fall
+ * back to a generic label rather than show that.
+ */
+function announceStopStatus(options: CheckInOptions, kind: 'in' | 'out') {
+  const seq = options.stopSequence;
+  const total = options.totalStops;
+  const hasPosition =
+    seq != null &&
+    total != null &&
+    Number.isInteger(seq) &&
+    Number.isInteger(total) &&
+    seq >= 1 &&
+    seq <= total;
+  const position = hasPosition ? `Stop ${seq} of ${total}` : 'Stop';
+  if (kind === 'in') {
+    void updateShiftStatus(`${position} — checked in`);
+    return;
+  }
+  if (seq != null && seq === total) return; // last stop: detach owns the line
+  void updateShiftStatus(`${position} complete — en route`);
+}
+
 interface CheckInOptions {
   stopId: Id<'loadStops'>;
   driverId: Id<'drivers'>;
@@ -126,7 +161,9 @@ type LocationGetter = () => Promise<{ latitude: number; longitude: number }>;
 export function useCheckIn(getFreshLocation?: LocationGetter) {
   const checkInMutation = useMutation(api.driverMobile.checkInAtStop);
   const checkOutMutation = useMutation(api.driverMobile.checkOutFromStop);
-  const getUploadUrl = useAction(api.s3Upload.getPODUploadUrl);
+  // POD-on-checkout goes through the unified load-documents presign
+  // (org-prefixed R2 key) — getPODUploadUrl is deprecated.
+  const getUploadUrl = useAction(api.s3Upload.getLoadDocumentUploadUrl);
   const { connectionQuality } = useNetworkStatus();
   const posthog = usePostHog();
 
@@ -149,7 +186,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
 
   const getLocation = getFreshLocation || fallbackGetLocation;
 
-  const checkIn = async (options: CheckInOptions): Promise<CheckInResult> => {
+  const performCheckIn = async (options: CheckInOptions): Promise<CheckInResult> => {
     try {
       const location = await getLocation();
       const driverTimestamp = new Date().toISOString();
@@ -321,7 +358,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
     }
   };
 
-  const checkOut = async (options: CheckInOptions): Promise<CheckInResult> => {
+  const performCheckOut = async (options: CheckInOptions): Promise<CheckInResult> => {
     try {
       const location = await getLocation();
       const driverTimestamp = new Date().toISOString();
@@ -336,7 +373,17 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
       };
 
       if (shouldQueue) {
-        await enqueueMutation('checkOut', baseMutationArgs, { photoUri: options.photoUri });
+        // loadId rides along for the replay's presign (org-prefixed R2
+        // key resolution) — the processor strips it before the checkout
+        // mutation, whose validator doesn't accept it.
+        await enqueueMutation(
+          'checkOut',
+          {
+            ...baseMutationArgs,
+            loadId: options.loadId ? String(options.loadId) : undefined,
+          },
+          { photoUri: options.photoUri },
+        );
         trackCheckinOfflineQueued({
           stopId: String(options.stopId),
           loadId: options.loadId ? String(options.loadId) : undefined,
@@ -355,6 +402,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
 
       // Good connection -- upload photo first if provided
       let podPhotoUrl: string | undefined;
+      let podPhotoKey: string | undefined;
 
       if (options.photoUri) {
         try {
@@ -362,8 +410,9 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           console.log('[CheckOut] Getting presigned URL from Convex...');
 
           const nowMs = Date.now();
-          const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
+          const { uploadUrl, fileUrl, key, metadataHeaders } = await getUploadUrl({
             loadId: options.loadId ? String(options.loadId) : 'unknown',
+            type: 'POD',
             stopId: String(options.stopId),
             filename: `pod_${nowMs}.jpg`,
             // Stamp the R2 object with the same GPS + driverId we're
@@ -382,6 +431,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
 
           if (uploadResult.success) {
             podPhotoUrl = fileUrl;
+            podPhotoKey = key;
             console.log('[CheckOut] Photo uploaded successfully:', podPhotoUrl);
             posthog.capture('photo_upload_success', {
               loadId: options.loadId ?? null,
@@ -417,6 +467,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
           checkOutMutation({
             ...baseMutationArgs,
             podPhotoUrl,
+            podPhotoKey,
           }),
           MUTATION_TIMEOUT_MS,
         );
@@ -491,7 +542,12 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         // Mutation timed out or failed -- queue it (photo already uploaded or will be re-uploaded from queue)
         await enqueueMutation(
           'checkOut',
-          { ...baseMutationArgs, podPhotoUrl },
+          {
+            ...baseMutationArgs,
+            loadId: options.loadId ? String(options.loadId) : undefined,
+            podPhotoUrl,
+            podPhotoKey,
+          },
           { photoUri: !podPhotoUrl ? options.photoUri : undefined },
         );
         trackCheckinMutationTimeout({
@@ -524,6 +580,22 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         message: errorMessage,
       };
     }
+  };
+
+  // Single choke point for the lock-screen status: every check-in/out
+  // path (online, queued, timeout-fallback) returns success:true when the
+  // driver's action was accepted, so announcing on success here replaces
+  // six per-branch call sites and can't miss a future new branch.
+  const checkIn = async (options: CheckInOptions): Promise<CheckInResult> => {
+    const result = await performCheckIn(options);
+    if (result.success) announceStopStatus(options, 'in');
+    return result;
+  };
+
+  const checkOut = async (options: CheckInOptions): Promise<CheckInResult> => {
+    const result = await performCheckOut(options);
+    if (result.success) announceStopStatus(options, 'out');
+    return result;
   };
 
   return {

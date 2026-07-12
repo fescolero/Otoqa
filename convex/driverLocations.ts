@@ -682,12 +682,29 @@ export async function ingestBatch(
     skippedDuplicate +
     skippedSkew;
   if (skippedTotal > 0) {
+    // recordedAt range of the incoming batch, so repeated all-dup batches
+    // are diagnosable from server logs alone: a client whose sync queue
+    // is jammed re-sends the SAME window every time, while one draining
+    // a backlog shows the window advancing batch over batch (2026-07-11
+    // incident — 50/50-dup batches every ~2 min with no way to tell
+    // which failure mode we were watching).
+    let minRec = Infinity;
+    let maxRec = -Infinity;
+    for (const p of pings) {
+      if (p.recordedAt < minRec) minRec = p.recordedAt;
+      if (p.recordedAt > maxRec) maxRec = p.recordedAt;
+    }
+    const range =
+      pings.length > 0
+        ? `${new Date(minRec).toISOString()}..${new Date(maxRec).toISOString()}`
+        : 'empty';
     console.warn(
       `[driverLocations.ingestBatch] Skipped ${skippedTotal}/${pings.length}:`,
       `driver=${skippedDriver}, orgMismatch=${skippedOrgMismatch} (passed="${orgId}"),`,
       `load=${skippedLoad}, session=${skippedSession}, sessionEnded=${skippedSessionEnded},`,
       `legInactive=${skippedLegInactive}, shape=${skippedShape},`,
-      `dup=${skippedDuplicate}, skew=${skippedSkew}, internalDup=${internalDupCount}`
+      `dup=${skippedDuplicate}, skew=${skippedSkew}, internalDup=${internalDupCount},`,
+      `recordedAtRange=${range}`
     );
   }
 

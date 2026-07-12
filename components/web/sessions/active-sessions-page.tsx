@@ -92,10 +92,12 @@ export function ActiveSessionsPage() {
     setFocusedTripIndex(null);
   }, [ymdKey]);
 
-  // Reset trip focus when the user switches drivers — focus only makes
-  // sense scoped to the currently selected session.
+  // Reset trip focus + hover highlight when the user switches drivers —
+  // both only make sense scoped to the currently selected session, and
+  // the panel unmounting on deselect never fires its onMouseLeave.
   React.useEffect(() => {
     setFocusedTripIndex(null);
+    setHoveredPing(null);
   }, [selectedId]);
 
   // Ticking "14:23 now" label — refreshed once a minute
@@ -261,8 +263,8 @@ export function ActiveSessionsPage() {
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <style>{`
         @keyframes sessionPulse {
-          0%   { transform: translate(-50%, -50%) scale(0.55); opacity: 0.55; }
-          100% { transform: translate(-50%, -50%) scale(1.7);  opacity: 0;    }
+          0%   { transform: scale(0.55); opacity: 0.55; }
+          100% { transform: scale(1.7);  opacity: 0;    }
         }
       `}</style>
 
@@ -383,6 +385,7 @@ export function ActiveSessionsPage() {
                 routeHistory={routeHistory}
                 selectedTrips={selectedTrips}
                 focusedTripIndex={focusedTripIndex}
+                hoveredPing={hoveredPing}
               />
               {!selectedLive && (
                 <PickDriverHint
@@ -391,7 +394,6 @@ export function ActiveSessionsPage() {
                   isLive
                 />
               )}
-              {hoveredPing && null}
             </>
           ) : (sessions as PastSessionRow[]).length === 0 ? (
             <MapPastEmpty date={date} />
@@ -408,6 +410,7 @@ export function ActiveSessionsPage() {
                 routeHistory={routeHistory}
                 selectedTrips={selectedTrips}
                 focusedTripIndex={focusedTripIndex}
+                hoveredPing={hoveredPing}
               />
               <PastLegend />
               {!selectedPast && (

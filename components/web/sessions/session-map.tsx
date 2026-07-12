@@ -56,6 +56,12 @@ export interface MapPing {
 const US_CENTER = { lat: 39.5, lng: -98.35 } as const;
 const DEFAULT_ZOOM = 5;
 
+// A ping implying a faster-than-this jump from its predecessor is a GPS
+// outlier. One shared threshold so the polyline, the outlier badge, and
+// the camera all agree on which pings are real.
+const MAX_PLAUSIBLE_MPH = 150;
+const MAX_PLAUSIBLE_KMH = MAX_PLAUSIBLE_MPH * 1.60934;
+
 type LiveProps = {
   mode: 'live';
   sessions: LiveSessionRow[];
@@ -72,6 +78,10 @@ type LiveProps = {
    *  doesn't match this. null = show all at full opacity. Driven by
    *  the focus pin button on each trip card in the activity panel. */
   focusedTripIndex?: number | null;
+  /** Ping row the dispatcher is hovering in the activity panel's GPS
+   *  list — highlighted on the map so a list row can be eye-matched to
+   *  its spot on the route. null = nothing hovered. */
+  hoveredPing?: { latitude: number; longitude: number } | null;
 };
 
 type PastProps = {
@@ -82,6 +92,7 @@ type PastProps = {
   routeHistory?: MapPing[];
   selectedTrips?: TripInfo[];
   focusedTripIndex?: number | null;
+  hoveredPing?: { latitude: number; longitude: number } | null;
 };
 
 type Props = LiveProps | PastProps;
@@ -297,6 +308,10 @@ function MapInner(
   // rebuild (selection change, pagination prepended older pings) and
   // an incremental append (live mode, new pings landed at the tail).
   const prevRouteRef = React.useRef<MapPing[] | null>(null);
+  // Signature of the trips array the polylines were last built against —
+  // lets the polyline effect skip rebuilds when a reactive fleet update
+  // handed us fresh-but-identical trips.
+  const prevTripsSigRef = React.useRef<string | null>(null);
   const clustererRef = React.useRef<MarkerClusterer | null>(null);
   const markerNodesRef = React.useRef<Map<string, Marker>>(new Map());
   // Live mirror of `props.focusedTripIndex`. The polyline effect uses
@@ -392,15 +407,34 @@ function MapInner(
   }, [map]);
 
   // ───── Auto-fit to drivers on first render of a non-empty set ─────
+  // One-shot per roster: live queries emit a new `sessions` array every
+  // time any driver pings, and re-fitting on each of those yanks the
+  // camera away from wherever the dispatcher panned. We only re-fit when
+  // the SET of sessions changes (day switch, driver on/off duty) or when
+  // coming back from a driver selection — not when positions move.
+  const overviewFitKeyRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!map) return;
+    if (props.selectedId) {
+      // Reset so deselecting re-frames the fleet overview once.
+      overviewFitKeyRef.current = null;
+      return;
+    }
     const positions: google.maps.LatLngLiteral[] = [];
     for (const s of props.sessions) {
       const xy = positionForSession(s, props.mode);
       if (xy) positions.push(xy);
     }
     if (positions.length === 0) return;
-    if (props.selectedId) return; // skip fit when zooming to a driver
+    const rosterKey =
+      props.mode +
+      ':' +
+      props.sessions
+        .map((s) => s.sessionId)
+        .sort()
+        .join(',');
+    if (overviewFitKeyRef.current === rosterKey) return;
+    overviewFitKeyRef.current = rosterKey;
     if (positions.length === 1) {
       map.setCenter(positions[0]);
       const z = map.getZoom() ?? DEFAULT_ZOOM;
@@ -455,13 +489,36 @@ function MapInner(
     const here = positionForSession(s, props.mode);
     const bounds = new google.maps.LatLngBounds();
     let added = 0;
-    if (here) {
-      bounds.extend(here);
+    // Fit to the same outlier-filtered pings the polyline draws, ANCHORED
+    // on the driver's latest position: selecting a driver means "show me
+    // the driver", so when the session carries a second GPS stream (a
+    // simulated or secondary feed tracking a route hundreds of km from
+    // where the driver's own device pings), the camera frames the
+    // cluster the driver is in — the last pin — not the other stream's
+    // route or its stops.
+    const cameraPoints = cameraPointsFor(props.routeHistory ?? [], here);
+    for (const xy of cameraPoints) {
+      bounds.extend(xy);
       added++;
     }
-    for (const ping of props.routeHistory ?? []) {
-      bounds.extend({ lat: ping.latitude, lng: ping.longitude });
-      added++;
+    // Include the driver's latest position only when it agrees with the
+    // framed cluster. Normally it does by construction (it's the anchor);
+    // the exception is the majority fall-through, when latestLocation is
+    // far from every drawn run — extending bounds to it there would
+    // center the camera on empty land between the two regions. With no
+    // route yet, `here` is all we have and always wins.
+    if (here) {
+      const agreesWithRoute =
+        cameraPoints.length < 2 ||
+        cameraPoints.some(
+          (p) =>
+            haversineKm(p.lat, p.lng, here.lat, here.lng) <
+            CLUSTER_RADIUS_KM,
+        );
+      if (agreesWithRoute) {
+        bounds.extend(here);
+        added++;
+      }
     }
 
     if (added === 0) return;
@@ -501,31 +558,56 @@ function MapInner(
   // unlike live-data updates where it would yank them around. When
   // focus is set: fit to that trip's pings. When focus clears: fit to
   // the whole route again.
+  //
+  // `routeHistory` and `selectedTrips` have to be in the dep array (the
+  // fit reads them), but live queries hand back fresh arrays on every
+  // fleet update — so the effect body must distinguish "focus changed"
+  // from "data changed" itself. We track the last (selection, focus)
+  // pair we fitted for and bail when the focus value is unchanged;
+  // otherwise every live ping re-runs fitBounds and the camera keeps
+  // snapping away from the pins the dispatcher is looking at.
+  const lastFocusFitRef = React.useRef<{
+    sel: string;
+    focus: number | null;
+  } | null>(null);
   React.useEffect(() => {
     if (!map || !props.selectedId) return;
     const focused = props.focusedTripIndex ?? null;
+    const last = lastFocusFitRef.current;
+    if (!last || last.sel !== props.selectedId) {
+      // New selection — record the baseline without moving the camera.
+      // The auto-fit-on-selection effect owns the first framing.
+      lastFocusFitRef.current = { sel: props.selectedId, focus: focused };
+      return;
+    }
+    if (last.focus === focused) return; // data update, not a focus click
+
     const route = props.routeHistory ?? [];
     const trips = props.selectedTrips ?? [];
     if (route.length < 2 || trips.length === 0) return;
 
     // Build the point set for the fit. Focused → only that leg's pings;
-    // unfocused → all pings for the session.
-    const points: google.maps.LatLngLiteral[] = [];
+    // unfocused → all pings for the session. Either way, outlier pings
+    // are dropped so the frame matches the drawn polyline + pins.
+    let pool: MapPing[];
     if (focused == null) {
-      for (const p of route)
-        points.push({ lat: p.latitude, lng: p.longitude });
+      pool = route;
     } else {
       const t = trips[focused];
-      if (!t || t.startedAt == null) return;
+      if (!t) return;
+      const startMs = t.startedAt;
+      if (startMs == null) return;
       const endMs = t.endedAt ?? Date.now();
-      for (const p of route) {
-        if (p.loadId !== t.loadId) continue;
-        if (p.recordedAt < t.startedAt) continue;
-        if (p.recordedAt > endMs) continue;
-        points.push({ lat: p.latitude, lng: p.longitude });
-      }
-      if (points.length < 2) return; // no fit if the trip has < 2 valid pings
+      pool = route.filter(
+        (p) =>
+          p.loadId === t.loadId &&
+          p.recordedAt >= startMs &&
+          p.recordedAt <= endMs,
+      );
+      if (pool.length < 2) return; // no fit if the trip has < 2 valid pings
     }
+    const points = cameraPointsFor(pool);
+    if (points.length < 2) return;
 
     const bounds = new google.maps.LatLngBounds();
     points.forEach((p) => bounds.extend(p));
@@ -535,6 +617,9 @@ function MapInner(
       if (after < 9) map.setZoom(10);
       else if (after > 16) map.setZoom(15);
     }
+    // Record only after a successful fit — if the route hadn't loaded
+    // yet when the focus pin was clicked, the next data update retries.
+    lastFocusFitRef.current = { sel: props.selectedId, focus: focused };
     // Intentionally skip the lastFittedIdRef bookkeeping here — the
     // auto-fit-on-selection effect owns that flag. Focus fit is an
     // independent affordance triggered only by explicit user clicks.
@@ -587,12 +672,31 @@ function MapInner(
       polylinesRef.current = [];
       segmentsRef.current = [];
       prevRouteRef.current = null;
+      prevTripsSigRef.current = null;
       setIsSnapping(false);
       emitOutlierCount(0, 'reset');
       return;
     }
 
     const trips = props.selectedTrips ?? [];
+
+    // Live fleet queries emit a brand-new trips array on every reactive
+    // update even when nothing about the selected driver changed. A full
+    // teardown + re-snap on each of those makes the route (and the
+    // snapping badge) flicker constantly. Skip when the inputs that
+    // actually shape the polyline are unchanged.
+    const tripsSig = trips
+      .map((t) => `${t.loadId}:${t.startedAt}:${t.endedAt}:${t.status}`)
+      .join('|');
+    if (
+      prevRouteRef.current === props.routeHistory &&
+      prevTripsSigRef.current === tripsSig &&
+      segmentsRef.current.length > 0
+    ) {
+      return;
+    }
+    prevTripsSigRef.current = tripsSig;
+
     const focusedLegIndex = props.focusedTripIndex ?? null;
     const SESSION_ROUTE_TONE = '#9BA3B4';
 
@@ -660,10 +764,9 @@ function MapInner(
       // Sanitize the tail using the previous-last ping as the anchor
       // so a "first" tail ping that jumped from the prior known
       // location still gets flagged.
-      const MAX_KMH = 150 * 1.60934;
       const sanitizedTail = sanitizePings(
         [prev![prev!.length - 1], ...newTail],
-        MAX_KMH,
+        MAX_PLAUSIBLE_KMH,
       ).slice(1); // drop the anchor we prepended
 
       let lastSegment = segmentsRef.current[segmentsRef.current.length - 1];
@@ -725,12 +828,7 @@ function MapInner(
     // produces the spoke-pattern we used to see fanning out across the
     // map. We don't drop the ping outright; we just start a fresh segment
     // at it so the chord through nothing is never drawn.
-    const MAX_PLAUSIBLE_MPH = 150;
-    const KM_PER_MILE = 1.60934;
-    const cleanedPings = sanitizePings(
-      props.routeHistory,
-      MAX_PLAUSIBLE_MPH * KM_PER_MILE,
-    );
+    const cleanedPings = sanitizePings(props.routeHistory, MAX_PLAUSIBLE_KMH);
 
     // Slice the ping stream into runs of equal leg-index. Pings that
     // don't fall inside any leg's [startedAt, endedAt] window get
@@ -898,13 +996,16 @@ function MapInner(
     props.selectedId,
     props.routeHistory,
     props.selectedTrips,
-    props.mode,
-    props.sessions,
     apiKey,
+    setIsSnapping,
+    emitOutlierCount,
     // NOTE: props.focusedTripIndex is intentionally NOT in this dep
     // array. Focus changes shouldn't tear down + re-snap every polyline
     // — that would burn Roads API calls just to dim a line. The
     // separate effect below mutates opacity in place instead.
+    // props.sessions / props.mode are likewise absent: the effect never
+    // reads them, and props.sessions changes identity on every reactive
+    // fleet update.
   ]);
 
   // ───── Focus-mode opacity update ─────
@@ -1060,6 +1161,12 @@ function MapInner(
             focusedTripIndex={props.focusedTripIndex ?? null}
           />
         )}
+        {props.hoveredPing && selectedSession && (
+          <HoveredPingHighlight
+            latitude={props.hoveredPing.latitude}
+            longitude={props.hoveredPing.longitude}
+          />
+        )}
       </>
     );
   }
@@ -1130,6 +1237,12 @@ function MapInner(
           sessionStartedAt={selectedPast.startedAt}
           sessionEndedAt={selectedPast.endedAt}
           focusedTripIndex={props.focusedTripIndex ?? null}
+        />
+      )}
+      {props.hoveredPing && selectedPast && (
+        <HoveredPingHighlight
+          latitude={props.hoveredPing.latitude}
+          longitude={props.hoveredPing.longitude}
         />
       )}
     </>
@@ -1294,6 +1407,63 @@ function describePing(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// HoveredPingHighlight — marks the ping whose row the dispatcher is
+// hovering in the activity panel. A solid dot on the exact coordinate
+// plus a pulsing halo so it stands out over the polyline even at fleet
+// zoom. Non-clickable — it's a transient echo of the list hover, not an
+// interaction target.
+// ─────────────────────────────────────────────────────────────────────────
+
+function HoveredPingHighlight({
+  latitude,
+  longitude,
+}: {
+  latitude: number;
+  longitude: number;
+}) {
+  return (
+    <AdvancedMarker
+      position={{ lat: latitude, lng: longitude }}
+      zIndex={1300}
+      clickable={false}
+    >
+      {/* Zero-size wrapper so the marker anchor IS the coordinate;
+          halo + dot center themselves on it via negative offsets, NOT
+          transform — sessionPulse animates transform:scale and would
+          clobber a translate-based centering. */}
+      <div style={{ position: 'relative', width: 0, height: 0 }}>
+        <span
+          style={{
+            position: 'absolute',
+            left: -17,
+            top: -17,
+            width: 34,
+            height: 34,
+            borderRadius: '50%',
+            background: '#2E5CFF',
+            opacity: 0.2,
+            animation: 'sessionPulse 1.6s ease-out infinite',
+          }}
+        />
+        <span
+          style={{
+            position: 'absolute',
+            left: -8,
+            top: -8,
+            width: 12,
+            height: 12,
+            borderRadius: '50%',
+            background: '#2E5CFF',
+            border: '2px solid #FFFFFF',
+            boxShadow: '0 1px 4px rgba(15,22,36,0.35)',
+          }}
+        />
+      </div>
+    </AdvancedMarker>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // SelectedDriverPulse — pulsing halo behind the live driver's pin. Rendered
 // as a separate AdvancedMarker so it can sit one z-index below the avatar.
 // ─────────────────────────────────────────────────────────────────────────
@@ -1312,18 +1482,35 @@ function SelectedDriverPulse({ sessions, selectedId, mode }: LiveProps) {
       zIndex={900}
       clickable={false}
     >
-      <span
+      {/* Same 40px footprint as the selected LiveDriverPin so the default
+          bottom-center marker anchor stacks this halo dead behind the
+          avatar; the 56px halo centers inside it via negative margins
+          (sessionPulse animates transform:scale, so centering must not
+          live in transform). */}
+      <div
         style={{
-          display: 'block',
-          width: 56,
-          height: 56,
-          borderRadius: '50%',
-          background: color,
-          opacity: 0.18,
-          transform: 'translate(-50%, -50%)',
-          animation: 'sessionPulse 2.4s ease-out infinite',
+          position: 'relative',
+          width: 40,
+          height: 40,
+          pointerEvents: 'none',
         }}
-      />
+      >
+        <span
+          style={{
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            width: 56,
+            height: 56,
+            marginLeft: -28,
+            marginTop: -28,
+            borderRadius: '50%',
+            background: color,
+            opacity: 0.18,
+            animation: 'sessionPulse 2.4s ease-out infinite',
+          }}
+        />
+      </div>
     </AdvancedMarker>
   );
 }
@@ -1498,6 +1685,154 @@ function sanitizePings(
     }
   }
   return out;
+}
+
+/**
+ * Points the camera is allowed to fit to. Three filters, all aimed at
+ * one rule: the camera frames what the map actually shows, nothing else.
+ *
+ *   1. Same outlier flagging as the polyline (>150 mph jumps).
+ *   2. Group pings into the runs the polyline draws (a `breakBefore`
+ *      flag starts a new run) and drop single-ping runs — a 1-point
+ *      path never renders. This also covers a bogus FIRST ping: the
+ *      sanitizer can't flag it (no predecessor), but it strands itself
+ *      in a singleton run and gets dropped here all the same.
+ *   3. Cluster the surviving runs spatially and keep only ONE cluster.
+ *      This is the defense against a sustained second GPS stream on one
+ *      session — e.g. a simulated/secondary feed tracking a route while
+ *      the driver's own device pings from 400 km away. Those phantom
+ *      pings arrive in groups, so they survive the singleton filter as
+ *      "real" runs; fitting bounds across both regions centers the
+ *      camera on the empty land between them and puts every pin
+ *      off-screen. Which cluster wins:
+ *        • With an `anchor` (the driver's latest position, passed by
+ *          the selection fit): the cluster the DRIVER is in. Selecting
+ *          a driver means "show me the driver" — the route is context,
+ *          and in the normal case (driver actually driving the load)
+ *          the driver's cluster IS the whole route anyway.
+ *        • Without an anchor, or when the anchor is far from every
+ *          cluster: majority of pings wins.
+ *      The losing cluster still shows in the outlier badge + ping-dots
+ *      debug overlay; it just can't steal the frame.
+ *
+ * Falls back to the raw list when filtering would leave fewer than 2
+ * points — better a shaky frame than no frame.
+ */
+function cameraPointsFor(
+  pings: MapPing[],
+  anchor?: google.maps.LatLngLiteral | null,
+): google.maps.LatLngLiteral[] {
+  if (pings.length === 0) return [];
+  const flagged = sanitizePings(pings, MAX_PLAUSIBLE_KMH);
+
+  type Run = Array<MapPing & { breakBefore?: boolean }>;
+  const runs: Run[] = [];
+  let run: Run = [];
+  for (const p of flagged) {
+    if (p.breakBefore && run.length > 0) {
+      runs.push(run);
+      run = [];
+    }
+    run.push(p);
+  }
+  if (run.length > 0) runs.push(run);
+
+  const drawn = runs.filter((r) => r.length >= 2);
+  if (drawn.length === 0) {
+    return flagged.map((p) => ({ lat: p.latitude, lng: p.longitude }));
+  }
+
+  const kept = pickCluster(drawn, anchor ?? null).flat();
+  const source = kept.length >= 2 ? kept : flagged;
+  return source.map((p) => ({ lat: p.latitude, lng: p.longitude }));
+}
+
+/**
+ * Union runs that pass within CLUSTER_RADIUS_KM of each other (compared
+ * via run endpoints — runs are split only at implausible jumps, so a
+ * genuine long-haul route stays one run and never gets carved up), then
+ * pick the winner: the cluster containing the anchor when one does,
+ * otherwise the cluster holding the most pings. A single cluster
+ * degrades gracefully to "everything".
+ */
+const CLUSTER_RADIUS_KM = 100;
+function pickCluster<T extends MapPing>(
+  runs: T[][],
+  anchor: google.maps.LatLngLiteral | null,
+): T[][] {
+  const n = runs.length;
+  if (n <= 1) return runs;
+  const endpoints = (r: T[]): T[] => [r[0], r[r.length - 1]];
+  const near = (a: T[], b: T[]): boolean => {
+    for (const p of endpoints(a))
+      for (const q of endpoints(b))
+        if (
+          haversineKm(p.latitude, p.longitude, q.latitude, q.longitude) <
+          CLUSTER_RADIUS_KM
+        )
+          return true;
+    return false;
+  };
+  // Tiny union-find — run counts are dozens at most.
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  for (let i = 0; i < n; i++)
+    for (let j = i + 1; j < n; j++)
+      if (near(runs[i], runs[j])) parent[find(i)] = find(j);
+
+  const byRoot = new Map<number, T[][]>();
+  runs.forEach((r, i) => {
+    const root = find(i);
+    const list = byRoot.get(root) ?? [];
+    list.push(r);
+    byRoot.set(root, list);
+  });
+
+  const pingCount = (cluster: T[][]): number =>
+    cluster.reduce((sum, r) => sum + r.length, 0);
+
+  // Anchor pass: a cluster "contains" the anchor when any of its pings
+  // is within the cluster radius. Largest such cluster wins (the anchor
+  // can sit between two nearby clusters).
+  if (anchor) {
+    let best: T[][] | null = null;
+    let bestCount = -1;
+    for (const cluster of byRoot.values()) {
+      const holdsAnchor = cluster.some((r) =>
+        r.some(
+          (p) =>
+            haversineKm(p.latitude, p.longitude, anchor.lat, anchor.lng) <
+            CLUSTER_RADIUS_KM,
+        ),
+      );
+      if (!holdsAnchor) continue;
+      const count = pingCount(cluster);
+      if (count > bestCount) {
+        bestCount = count;
+        best = cluster;
+      }
+    }
+    if (best) return best;
+    // Anchor is far from every cluster (e.g. stale latestLocation from a
+    // feed that never wrote session pings) — fall through to majority.
+  }
+
+  let best: T[][] = [];
+  let bestCount = -1;
+  for (const cluster of byRoot.values()) {
+    const count = pingCount(cluster);
+    if (count > bestCount) {
+      bestCount = count;
+      best = cluster;
+    }
+  }
+  return best;
 }
 
 function haversineKm(

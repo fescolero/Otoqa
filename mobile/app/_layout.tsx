@@ -137,7 +137,8 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
   const uploadLoadDocumentMutation = useMutation(api.driverMobile.uploadLoadDocument);
   const addDetourStopsMutation = useMutation(api.driverMobile.addDetourStops);
   const switchTruckMutation = useMutation(api.driverMobile.switchTruck);
-  const getUploadUrl = useAction(api.s3Upload.getPODUploadUrl);
+  // All replayed uploads presign through the unified load-documents
+  // action (org-prefixed R2 keys) — getPODUploadUrl is deprecated.
   const getLoadDocumentUploadUrl = useAction(api.s3Upload.getLoadDocumentUploadUrl);
 
   useEffect(() => {
@@ -152,11 +153,18 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
 
         case 'checkOut': {
           let podPhotoUrl: string | undefined;
+          let podPhotoKey: string | undefined;
+
+          // loadId is queue-only context for the presign below (org
+          // prefix resolution); checkOutFromStop's validator rejects
+          // undeclared args, so it must not reach the mutation.
+          const { loadId: _queuedLoadId, ...checkOutArgs } = payload as any;
 
           // If there's a photo, upload it first
           if (photoPath) {
-            const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
+            const { uploadUrl, fileUrl, key, metadataHeaders } = await getLoadDocumentUploadUrl({
               loadId: String(payload.loadId || ''),
+              type: 'POD',
               stopId: String(payload.stopId || ''),
               filename: `pod_${Date.now()}.jpg`,
               // Forward whatever the checkout mutation already has —
@@ -174,12 +182,13 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
             const uploadResult = await uploadPODPhoto(uploadUrl, photoPath, 3, metadataHeaders);
             if (uploadResult.success) {
               podPhotoUrl = fileUrl;
+              podPhotoKey = key;
             }
           }
 
           await checkOutMutation({
-            ...(payload as any),
-            podPhotoUrl,
+            ...checkOutArgs,
+            ...(podPhotoUrl ? { podPhotoUrl, podPhotoKey } : {}),
           });
           break;
         }
@@ -190,8 +199,9 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
 
         case 'recordPOD': {
           if (photoPath) {
-            const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
+            const { uploadUrl, fileUrl, key, metadataHeaders } = await getLoadDocumentUploadUrl({
               loadId: String(payload.loadId || ''),
+              type: 'POD',
               stopId: String(payload.stopId || ''),
               filename: `pod_${Date.now()}.jpg`,
               driverId: payload.driverId ? String(payload.driverId) : undefined,
@@ -202,6 +212,7 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
               await recordPODMutation({
                 ...(payload as any),
                 photoUrl: fileUrl,
+                photoKey: key,
               });
             }
           }
@@ -214,11 +225,42 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
           // type / capturedAt / capturedLat/Lng / note captured at queue
           // time (accurate GPS at the moment the photo was taken, not at
           // sync time, which may be hours later in a dead zone).
+          //
+          // The mutation args are built EXPLICITLY — never spread the
+          // raw payload. Queued payloads carry extra fields the
+          // uploadLoadDocument validator rejects (driverTimestamp is
+          // injected by enqueueMutation on every entry, accidentKind is
+          // presign-only), and Convex fails the whole call on any
+          // undeclared arg, which would permanently strand the entry.
+          const p = payload as any;
+          const mutationArgs = (externalUrl: string, externalKey?: string) => ({
+            loadId: p.loadId,
+            driverId: p.driverId,
+            type: p.type,
+            externalUrl,
+            externalKey,
+            capturedAt: typeof p.capturedAt === 'number' ? p.capturedAt : undefined,
+            capturedLat: typeof p.capturedLat === 'number' ? p.capturedLat : undefined,
+            capturedLng: typeof p.capturedLng === 'number' ? p.capturedLng : undefined,
+            gpsAccuracyM: typeof p.gpsAccuracyM === 'number' ? p.gpsAccuracyM : undefined,
+            note: typeof p.note === 'string' ? p.note : undefined,
+          });
+
+          // Record-only entries (payload.externalUrl set, no photoPath)
+          // mean the PUT already succeeded but the mutation timed out —
+          // just replay the mutation. Re-uploading would orphan the
+          // original object in R2 under a fresh key.
+          if (typeof p.externalUrl === 'string') {
+            await uploadLoadDocumentMutation(
+              mutationArgs(p.externalUrl, typeof p.externalKey === 'string' ? p.externalKey : undefined),
+            );
+            break;
+          }
           if (!photoPath) {
             throw new Error('uploadLoadDocument queued without photoPath');
           }
           const docType = String(payload.type || 'Other');
-          const { uploadUrl, fileUrl, metadataHeaders } = await getLoadDocumentUploadUrl({
+          const { uploadUrl, fileUrl, key, metadataHeaders } = await getLoadDocumentUploadUrl({
             loadId: String(payload.loadId || ''),
             type: docType as 'POD' | 'Receipt' | 'Cargo' | 'Damage' | 'Accident' | 'Other',
             filename: `${docType.toLowerCase()}_${Date.now()}.jpg`,
@@ -246,10 +288,7 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
             throw new Error(uploadResult.error ?? 'Upload failed');
           }
 
-          await uploadLoadDocumentMutation({
-            ...(payload as any),
-            externalUrl: fileUrl,
-          });
+          await uploadLoadDocumentMutation(mutationArgs(fileUrl, key));
           break;
         }
 
@@ -287,7 +326,6 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
     uploadLoadDocumentMutation,
     addDetourStopsMutation,
     switchTruckMutation,
-    getUploadUrl,
     getLoadDocumentUploadUrl,
   ]);
 

@@ -151,10 +151,14 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
     }
 
     // Online path — try everything inline, fall back to queue on timeout.
+    // Tracks the successful PUT so the catch block can queue a
+    // record-only retry instead of re-uploading (which would orphan the
+    // first object in R2 under a fresh key).
+    let uploaded: { fileUrl: string; key: string } | null = null;
     try {
       const location = await safelyReadLocation();
 
-      const { uploadUrl, fileUrl, metadataHeaders } = await getUploadUrl({
+      const { uploadUrl, fileUrl, key, metadataHeaders } = await getUploadUrl({
         loadId: String(opts.loadId),
         type: opts.type,
         filename: `${opts.type.toLowerCase()}_${capturedAt}.jpg`,
@@ -172,6 +176,7 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
       if (!putResult.success) {
         throw new Error(putResult.error ?? 'Upload failed');
       }
+      uploaded = { fileUrl, key };
 
       const mutationResult = await withTimeout(
         uploadMutation({
@@ -179,6 +184,7 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
           driverId: opts.driverId,
           type: opts.type,
           externalUrl: fileUrl,
+          externalKey: key,
           capturedAt,
           capturedLat: location?.latitude,
           capturedLng: location?.longitude,
@@ -209,6 +215,9 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
       });
 
       // Best-effort fallback — queue it so the driver isn't blocked.
+      // If the PUT already landed, queue a record-only entry carrying
+      // the existing fileUrl/key: the processor skips the re-upload and
+      // just replays the mutation, so no duplicate/orphaned R2 object.
       try {
         const location = await safelyReadLocation();
         await enqueueMutation(
@@ -221,8 +230,12 @@ export function useUploadDocument(getFreshLocation?: LocationGetter) {
             capturedLat: location?.latitude,
             capturedLng: location?.longitude,
             note: opts.note,
+            accidentKind: opts.accidentKind,
+            ...(uploaded
+              ? { externalUrl: uploaded.fileUrl, externalKey: uploaded.key }
+              : {}),
           },
-          { photoUri: opts.photoUri },
+          uploaded ? undefined : { photoUri: opts.photoUri },
         );
         return {
           success: true,

@@ -2211,6 +2211,11 @@ export default defineSchema({
     // for driver POD photos that go through the R2 presigned-URL flow).
     storageId: v.optional(v.id('_storage')),
     externalUrl: v.optional(v.string()),
+    // R2 object key (orgs/{orgId}/loads/{loadId}/{type}/...). Preferred
+    // over externalUrl going forward: keys survive bucket/domain moves
+    // and are what signed GET + DeleteObject operate on. Legacy rows
+    // carry only externalUrl — derive the key from its pathname.
+    externalKey: v.optional(v.string()),
     fileName: v.optional(v.string()),
     contentType: v.optional(v.string()),
 

@@ -71,8 +71,11 @@ export async function snapPathToRoads(
   if (cached) return cached;
 
   try {
+    // Chunks overlap by one point: each chunk starts on the previous
+    // chunk's last point so the road geometry is continuous across the
+    // boundary. The stitch below drops the duplicated point when joining.
     const chunks: RawPoint[][] = [];
-    for (let i = 0; i < points.length; i += MAX_POINTS_PER_CALL) {
+    for (let i = 0; i < points.length - 1; i += MAX_POINTS_PER_CALL - 1) {
       chunks.push(points.slice(i, i + MAX_POINTS_PER_CALL));
     }
 

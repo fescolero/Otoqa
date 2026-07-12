@@ -810,19 +810,32 @@ function formatCoord(lat: number, lng: number): string {
 }
 
 /** Compute distance between consecutive pings (newest-first input) via
- *  Haversine. Returns null when fewer than 2 pings. */
+ *  Haversine. Returns null when fewer than 2 pings.
+ *
+ *  Segments implying an impossible jump (>150 mph between consecutive
+ *  pings — same threshold the map uses to hide outliers) are skipped:
+ *  a session polluted by a second GPS stream otherwise racks up
+ *  hundreds of phantom km per back-and-forth, showing shift distances
+ *  like "6,651 km in 43 minutes". */
 function computeDistanceKm(pings: RecentPing[]): number | null {
   if (pings.length < 2) return null;
+  const MAX_PLAUSIBLE_KMH = 150 * 1.60934;
   // Reverse to chronological order before summing
   const chrono = [...pings].reverse();
   let km = 0;
   for (let i = 1; i < chrono.length; i++) {
-    km += haversineKm(
+    const segKm = haversineKm(
       chrono[i - 1].latitude,
       chrono[i - 1].longitude,
       chrono[i].latitude,
       chrono[i].longitude
     );
+    const hours = Math.max(
+      (chrono[i].recordedAt - chrono[i - 1].recordedAt) / 3600_000,
+      1 / 3600 // 1s floor, mirrors the map's sanitizer
+    );
+    if (segKm / hours > MAX_PLAUSIBLE_KMH) continue;
+    km += segKm;
   }
   return km;
 }

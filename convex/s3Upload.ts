@@ -1,15 +1,27 @@
 'use node';
 
 import { v } from 'convex/values';
-import { action } from './_generated/server';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { action, internalAction } from './_generated/server';
+import { internal } from './_generated/api';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { keyFromExternalUrl } from './lib/r2';
+import type { Id } from './_generated/dataModel';
 
 // ============================================
 // S3/R2 UPLOAD ACTION
 // Generate presigned URLs for direct mobile uploads
 // Supports both AWS S3 and Cloudflare R2
 // ============================================
+//
+// Bucket layout (see docs/r2-storage.md for the full contract):
+//
+//   orgs/{workosOrgId}/loads/{loadId}/{docType}/{ts}-{rand}-{filename}
+//
+// The org segment comes from the load row server-side (never from the
+// client), so a per-customer export or deletion is a single prefix
+// operation. Legacy prefixes `pod-photos/` and `load-documents/` are
+// read-only history — no new objects land there.
 
 function createS3Client() {
   const bucket = process.env.S3_BUCKET;
@@ -23,7 +35,7 @@ function createS3Client() {
   }
 
   // Determine endpoint - use R2 if account ID is provided
-  const endpoint = r2AccountId 
+  const endpoint = r2AccountId
     ? `https://${r2AccountId}.r2.cloudflarestorage.com`
     : undefined; // Use default AWS endpoint
 
@@ -47,6 +59,51 @@ function createS3Client() {
 }
 
 /**
+ * Build the canonical object key for a driver-captured load document.
+ *
+ * `orgSegment` is the load's workosOrgId, or 'unassigned' when the load
+ * couldn't be resolved (a driver mid-checkout must never be blocked on a
+ * bucket-layout concern — 'unassigned' objects are rare and easy to
+ * audit). The random suffix guards against two captures landing in the
+ * same millisecond.
+ */
+function buildDocumentKey(
+  orgSegment: string,
+  loadId: string,
+  docType: string,
+  filename: string,
+): string {
+  const timestamp = Date.now();
+  const randomSuffix = Math.random().toString(36).substring(2, 8);
+  const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
+  return `orgs/${orgSegment}/loads/${loadId}/${docType}/${timestamp}-${randomSuffix}-${sanitizedFilename}`;
+}
+
+function buildFileUrl(key: string, r2AccountId: string | undefined, bucket: string): string {
+  const cloudflareDomain = process.env.CLOUDFLARE_DOMAIN;
+  if (cloudflareDomain) {
+    return `https://${cloudflareDomain}/${key}`;
+  } else if (r2AccountId) {
+    // R2 public URL (if bucket is public)
+    return `https://pub-${r2AccountId}.r2.dev/${key}`;
+  }
+  return `https://${bucket}.s3.amazonaws.com/${key}`;
+}
+
+/**
+ * Resolve the org segment for a client-supplied loadId string. Returns
+ * 'unassigned' when the id doesn't resolve to a load — never trusts a
+ * client-supplied org value.
+ */
+async function resolveOrgSegment(
+  ctx: { runQuery: (ref: any, args: any) => Promise<any> },
+  loadId: string,
+): Promise<string> {
+  const org = await ctx.runQuery(internal.loadDocuments.resolveLoadOrg, { loadId });
+  return org ?? 'unassigned';
+}
+
+/**
  * Generate a presigned URL for uploading a file directly to S3/R2
  */
 export const getUploadUrl = action({
@@ -67,7 +124,6 @@ export const getUploadUrl = action({
     }
 
     const { client, bucket, r2AccountId } = createS3Client();
-    const cloudflareDomain = process.env.CLOUDFLARE_DOMAIN;
 
     // Generate unique key for the file
     const timestamp = Date.now();
@@ -86,16 +142,7 @@ export const getUploadUrl = action({
       expiresIn: 300,
     });
 
-    // Construct the final file URL
-    let fileUrl: string;
-    if (cloudflareDomain) {
-      fileUrl = `https://${cloudflareDomain}/${key}`;
-    } else if (r2AccountId) {
-      // R2 public URL (if bucket is public)
-      fileUrl = `https://pub-${r2AccountId}.r2.dev/${key}`;
-    } else {
-      fileUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
-    }
+    const fileUrl = buildFileUrl(key, r2AccountId, bucket);
 
     return { uploadUrl, fileUrl, key };
   },
@@ -104,26 +151,26 @@ export const getUploadUrl = action({
 /**
  * Presigned upload URL for unified load documents (driver-captured).
  *
- * Keys are grouped by document type so R2 lifecycle rules + ops tooling
- * can slice by kind:
- *   load-documents/{loadId}/{type}/{ts}-{filename}
+ * Keys are grouped org-first so per-customer export/deletion is a single
+ * prefix operation, then by document type so R2 lifecycle rules + ops
+ * tooling can slice by kind:
+ *   orgs/{workosOrgId}/loads/{loadId}/{type}/{ts}-{rand}-{filename}
  *
  * Custom metadata is baked into the presigned PUT so every R2 object
- * carries loadId, driverId, docType, capturedAt, and (when available)
- * GPS + accuracy. This lets ops search the bucket directly — `aws s3api
- * list-objects-v2` + the R2 dashboard filter by these without needing
- * to hit Convex. Keys use kebab-case because S3 lowercases all user
- * metadata keys and strips leading `x-amz-meta-` on read.
+ * carries org, loadId, driverId, docType, capturedAt, and (when
+ * available) GPS + accuracy. This lets ops search the bucket directly —
+ * `aws s3api list-objects-v2` + the R2 dashboard filter by these without
+ * needing to hit Convex. Keys use kebab-case because S3 lowercases all
+ * user metadata keys and strips leading `x-amz-meta-` on read.
  *
- * Returns the same shape as getPODUploadUrl so mobile's S3 uploader
- * (lib/s3-upload.ts) can reuse the PUT flow — the client must echo
- * the exact same metadata headers on PUT or the presigned signature
- * fails. Callers receive `metadataHeaders` to forward verbatim.
+ * The client must echo the exact same metadata headers on PUT or the
+ * presigned signature fails. Callers receive `metadataHeaders` to
+ * forward verbatim, and should persist the returned `key` on the Convex
+ * row (externalKey) — that's what signed GETs and deletion operate on.
  *
- * The driver app should call this instead of getPODUploadUrl for any
- * document the driver is capturing — POD included. getPODUploadUrl is
- * kept alive for the dual-write transition and will be removed once the
- * Load Details UI fully cuts over to uploadLoadDocument.
+ * This is the single presign path for every driver-captured document,
+ * POD-on-checkout included (pass `stopId` there so the object metadata
+ * records which stop the POD closes out).
  */
 export const getLoadDocumentUploadUrl = action({
   args: {
@@ -138,6 +185,9 @@ export const getLoadDocumentUploadUrl = action({
     ),
     filename: v.string(),
     contentType: v.optional(v.string()),
+    // POD-on-checkout only: which stop this document closes out. Lands
+    // on the R2 object as `stop-id` metadata.
+    stopId: v.optional(v.string()),
     // Optional metadata embedded in the R2 object. Drivers in a dead
     // zone can omit GPS and the object still uploads — just without
     // location stamped on the binary (the Convex row still carries
@@ -170,20 +220,22 @@ export const getLoadDocumentUploadUrl = action({
     }
 
     const { client, bucket, r2AccountId } = createS3Client();
-    const cloudflareDomain = process.env.CLOUDFLARE_DOMAIN;
 
-    const timestamp = Date.now();
-    const sanitizedFilename = args.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const key = `load-documents/${args.loadId}/${args.type}/${timestamp}-${sanitizedFilename}`;
+    // Org comes from the load row, never from the client — the key's
+    // org prefix is what per-customer export/deletion trusts.
+    const orgSegment = await resolveOrgSegment(ctx, args.loadId);
+    const key = buildDocumentKey(orgSegment, args.loadId, args.type, args.filename);
 
     // Build the metadata map — all values must be strings; skip empties
     // so S3 doesn't store "undefined" literals. Stick to kebab-case
     // keys to avoid server-side normalization surprises.
     const metadata: Record<string, string> = {
+      'org-id': orgSegment,
       'load-id': args.loadId,
       'doc-type': args.type,
       'uploaded-via': 'driver-mobile',
     };
+    if (args.stopId) metadata['stop-id'] = args.stopId;
     if (args.driverId) metadata['driver-id'] = args.driverId;
     if (args.capturedAt) metadata['captured-at'] = String(args.capturedAt);
     if (typeof args.capturedLat === 'number')
@@ -219,27 +271,18 @@ export const getLoadDocumentUploadUrl = action({
       metadataHeaders[`x-amz-meta-${k}`] = v;
     }
 
-    let fileUrl: string;
-    if (cloudflareDomain) {
-      fileUrl = `https://${cloudflareDomain}/${key}`;
-    } else if (r2AccountId) {
-      fileUrl = `https://pub-${r2AccountId}.r2.dev/${key}`;
-    } else {
-      fileUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
-    }
+    const fileUrl = buildFileUrl(key, r2AccountId, bucket);
 
     return { uploadUrl, fileUrl, key, metadataHeaders };
   },
 });
 
 /**
- * Get a presigned URL specifically for POD (Proof of Delivery) photos.
- *
- * Same metadata pattern as getLoadDocumentUploadUrl — loadId, stopId,
- * driverId, capturedAt, GPS are baked into the PUT so POD-on-checkout
- * objects in the pod-photos/ prefix are searchable from R2 directly.
- * GPS is trusted here (check-out already captured it in
- * checkOutFromStop args); caller forwards from useCheckIn.
+ * DEPRECATED — POD presigns now go through getLoadDocumentUploadUrl with
+ * type 'POD' + stopId. Kept alive only so driver-app builds still in the
+ * field keep working; it produces the same org-prefixed key layout as
+ * the unified path so even legacy clients stop writing to `pod-photos/`.
+ * Remove once mobile adoption of the unified path is complete.
  */
 export const getPODUploadUrl = action({
   args: {
@@ -264,18 +307,12 @@ export const getPODUploadUrl = action({
     }
 
     const { client, bucket, r2AccountId } = createS3Client();
-    const cloudflareDomain = process.env.CLOUDFLARE_DOMAIN;
 
-    // Generate unique key for POD photo
-    const timestamp = Date.now();
-    const sanitizedFilename = args.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const key = `pod-photos/${args.loadId}/${args.stopId}/${timestamp}-${sanitizedFilename}`;
-
-    // #region agent log
-    console.log('[DEBUG-ec49a3] getPODUploadUrl called:', JSON.stringify({ loadId: args.loadId, stopId: args.stopId, filename: args.filename }));
-    // #endregion
+    const orgSegment = await resolveOrgSegment(ctx, args.loadId);
+    const key = buildDocumentKey(orgSegment, args.loadId, 'POD', args.filename);
 
     const metadata: Record<string, string> = {
+      'org-id': orgSegment,
       'load-id': args.loadId,
       'stop-id': args.stopId,
       'doc-type': 'POD',
@@ -304,18 +341,95 @@ export const getPODUploadUrl = action({
       metadataHeaders[`x-amz-meta-${k}`] = v;
     }
 
-    // Presigned URL generated — not logging to avoid credential exposure
-
-    // Construct the final file URL
-    let fileUrl: string;
-    if (cloudflareDomain) {
-      fileUrl = `https://${cloudflareDomain}/${key}`;
-    } else if (r2AccountId) {
-      fileUrl = `https://pub-${r2AccountId}.r2.dev/${key}`;
-    } else {
-      fileUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
-    }
+    const fileUrl = buildFileUrl(key, r2AccountId, bucket);
 
     return { uploadUrl, fileUrl, key, metadataHeaders };
+  },
+});
+
+/**
+ * Short-lived signed GET URL for a load document stored in R2.
+ *
+ * This is the read path that lets the bucket stay private: consumers
+ * (web ops UI, driver app) exchange a documentId for a URL that expires
+ * in 15 minutes instead of embedding permanent public URLs. Access
+ * control lives in the internal query — org members and the assigned
+ * driver only.
+ *
+ * Works for every row shape: Convex-storage docs return the storage URL,
+ * key-bearing R2 docs get a presigned GET, and legacy URL-only rows fall
+ * back to a presigned GET on the key derived from the URL's pathname
+ * (correct for both r2.dev and custom-domain URLs, and harmless while
+ * the bucket is still public).
+ */
+export const getDocumentDownloadUrl = action({
+  args: {
+    documentId: v.id('loadDocuments'),
+  },
+  returns: v.object({
+    url: v.union(v.string(), v.null()),
+    expiresAt: v.union(v.number(), v.null()),
+  }),
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ url: string | null; expiresAt: number | null }> => {
+    // Auth + org/driver scoping happens inside the internal query, which
+    // sees the same caller identity as this action. Explicit annotations
+    // (here and on `doc`) break the s3Upload ↔ loadDocuments
+    // generated-API type cycle.
+    const doc: {
+      storageId?: Id<'_storage'>;
+      externalKey?: string;
+      externalUrl?: string;
+    } | null = await ctx.runQuery(internal.loadDocuments.getDocForAccess, {
+      documentId: args.documentId,
+    });
+    if (!doc) {
+      throw new Error('Document not found');
+    }
+
+    if (doc.storageId) {
+      const url = await ctx.storage.getUrl(doc.storageId);
+      // Convex storage URLs don't carry a fixed expiry we control.
+      return { url, expiresAt: null };
+    }
+
+    const key =
+      doc.externalKey ?? (doc.externalUrl ? keyFromExternalUrl(doc.externalUrl) : null);
+    if (!key) {
+      return { url: null, expiresAt: null };
+    }
+
+    const { client, bucket } = createS3Client();
+    const expiresIn = 900; // 15 minutes
+    const url = await getSignedUrl(
+      client,
+      new GetObjectCommand({ Bucket: bucket, Key: key }),
+      { expiresIn },
+    );
+    return { url, expiresAt: Date.now() + expiresIn * 1000 };
+  },
+});
+
+/**
+ * Delete a single object from R2/S3. Internal-only — scheduled by
+ * loadDocuments.remove after the Convex row is gone, so a crash between
+ * the two leaves at worst an orphaned object (safe), never a dangling
+ * row pointing at deleted bytes.
+ *
+ * DeleteObject is idempotent on S3/R2 (deleting a missing key succeeds),
+ * so scheduler retries are harmless.
+ */
+export const deleteObject = internalAction({
+  args: {
+    key: v.string(),
+  },
+  returns: v.null(),
+  handler: async (_ctx, args) => {
+    const { client, bucket } = createS3Client();
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: args.key }));
+    console.log('[S3Upload] Deleted object:', args.key);
+    return null;
   },
 });
