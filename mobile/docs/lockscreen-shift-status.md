@@ -90,6 +90,16 @@ working. Enforced by:
 - All five `startLocationUpdatesAsync` sites share one
   `TRACKING_FGS_NOTIFICATION` config ('Location service') instead of
   divergent titles.
+- The demotion deliberately NO-OPs while notifications are denied: if
+  the shift card can't post, the location-service notification stays
+  visible as the driver's only tracking indicator (channel demotion is
+  irreversible from code, so it only happens once the card is up). It
+  also re-runs after every successful shift-card post, covering drivers
+  who grant notification permission after app startup.
+- Upgrade installs get IMPORTANCE_MIN (enough to leave the lock screen
+  on stock Android) but keep their original channel visibility — only
+  fresh installs get the full SECRET treatment (Android never lets code
+  change visibility on an existing channel).
 - FCM wake pushes: the `otoqa_wake` channel is SECRET on fresh installs,
   and `dismissInfraNotifications` sweeps already-presented wake /
   session-ended cards at startup and after every handled push (FCM

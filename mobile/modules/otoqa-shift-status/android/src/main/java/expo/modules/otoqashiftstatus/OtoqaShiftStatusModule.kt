@@ -71,16 +71,21 @@ class OtoqaShiftStatusModule : Module() {
       startedAtMs = base
       prefs().edit().putLong(PREF_STARTED_AT, base).apply()
       postNotification(statusLine)
+      // Card is visibly up → safe to hide the redundant FGS notification
+      // (covers permission granted after the startup demotion pass).
+      runCatching { demoteFgsChannels() }
       true
     }
 
     AsyncFunction("updateShiftStatus") { statusLine: String ->
       // Recover the chronometer base from prefs after process death so a
       // check-in that lands before the resume path re-asserts still
-      // updates the (surviving) notification. A zero base after that
-      // means start never ran or the shift ended → no-op, never
-      // resurrect a torn-down surface.
-      if (startedAtMs == 0L) {
+      // updates the surviving notification — but ONLY when the card is
+      // actually on screen. Gating the rehydration on an active
+      // notification prevents a late update (End Shift race, replayed
+      // queue entry) from resurrecting a torn-down surface with a stale
+      // base.
+      if (startedAtMs == 0L && isShiftNotificationActive()) {
         startedAtMs = prefs().getLong(PREF_STARTED_AT, 0L)
       }
       if (startedAtMs == 0L || !canPostNotifications()) return@AsyncFunction false
@@ -90,7 +95,9 @@ class OtoqaShiftStatusModule : Module() {
 
     AsyncFunction("endShiftStatus") {
       startedAtMs = 0L
-      prefs().edit().remove(PREF_STARTED_AT).apply()
+      // commit() (synchronous) rather than apply(): a concurrent late
+      // update must not observe the old base after the cancel below.
+      prefs().edit().remove(PREF_STARTED_AT).commit()
       NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
       true
     }
@@ -103,26 +110,41 @@ class OtoqaShiftStatusModule : Module() {
     //      notification id per service instance).
     //   2. Any other pre-existing channel raised above MIN that matches
     //      the FGS suffix (older builds / Expo Go scoped app ids).
-    // IMPORTANCE_MIN + VISIBILITY_SECRET = alive but invisible on the
-    // lock screen and collapsed to the minimized shade section. Android
-    // permits programmatically LOWERING channel importance, never
-    // raising it, so this is safe to run on every launch. Called from
-    // app startup (_layout.tsx).
+    //
+    // Mutability contract (per createNotificationChannel docs): for an
+    // EXISTING channel only name/description update freely; importance
+    // is lowered only if the user hasn't customized the channel; sound/
+    // visibility/badge changes are ignored. So fresh installs get the
+    // full IMPORTANCE_MIN + VISIBILITY_SECRET treatment (pre-create wins
+    // the race with expo-location), while upgrades get MIN importance —
+    // which already keeps the card off the lock screen on stock Android
+    // — but retain their original visibility.
+    //
+    // Deliberately a NO-OP while notifications are blocked: if the shift
+    // card can't post, the FGS notification is the driver's only visible
+    // evidence that tracking runs — hiding it then would leave zero
+    // indicator (and channel demotion is irreversible from code).
     AsyncFunction("configureQuietChannels") {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return@AsyncFunction true
-      val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-      val fgsSuffix = ":OTOQA_LOCATION_TRACKING"
-      // Pre-create for fresh installs so expo-location's own
-      // LOW-importance creation never runs (it skips existing channels).
-      quietChannel(nm, "${context.packageName}$fgsSuffix", "Location service")
-      for (channel in nm.notificationChannels) {
-        if (channel.id.endsWith(fgsSuffix) &&
-          channel.importance > NotificationManager.IMPORTANCE_MIN
-        ) {
-          quietChannel(nm, channel.id, channel.name?.toString() ?: "Location service")
-        }
-      }
+      if (!canPostNotifications()) return@AsyncFunction false
+      demoteFgsChannels()
       true
+    }
+  }
+
+  private fun demoteFgsChannels() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    val fgsSuffix = ":OTOQA_LOCATION_TRACKING"
+    // Pre-create for fresh installs so expo-location's own
+    // LOW-importance creation never runs (it skips existing channels).
+    quietChannel(nm, "${context.packageName}$fgsSuffix", "Location service")
+    for (channel in nm.notificationChannels) {
+      if (channel.id.endsWith(fgsSuffix) &&
+        channel.importance > NotificationManager.IMPORTANCE_MIN
+      ) {
+        quietChannel(nm, channel.id, channel.name?.toString() ?: "Location service")
+      }
     }
   }
 
@@ -138,6 +160,16 @@ class OtoqaShiftStatusModule : Module() {
 
   private fun prefs() =
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+  /** True when the shift card is currently displayed (survives process death). */
+  private fun isShiftNotificationActive(): Boolean {
+    return try {
+      val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+      nm.activeNotifications.any { it.id == NOTIFICATION_ID }
+    } catch (e: Exception) {
+      false
+    }
+  }
 
   private fun canPostNotifications(): Boolean {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

@@ -23,7 +23,10 @@ import type { Id } from './_generated/dataModel';
 // operation. Legacy prefixes `pod-photos/` and `load-documents/` are
 // read-only history — no new objects land there.
 
-function createS3Client() {
+// Exported for the presign regression test (s3Upload.presign.test.ts) —
+// the SDK's checksum defaults broke every R2 upload once; the test pins
+// the presigned-URL shape so a dependency bump can't silently do it again.
+export function createS3Client() {
   const bucket = process.env.S3_BUCKET;
   const region = process.env.S3_REGION || 'auto';
   const accessKeyId = process.env.S3_ACCESS_KEY_ID;

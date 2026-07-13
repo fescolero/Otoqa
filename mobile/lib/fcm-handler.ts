@@ -49,7 +49,7 @@
  *   UX cost: PRIORITY_MIN means the notification appears only in the
  *   shade (no popup, no sound, no peek) and we dismiss it from the
  *   handler immediately after the wake completes (see
- *   dismissWakeNotifications below). Driver sees at most a 1-second
+ *   dismissInfraNotifications below). Driver sees at most a 1-second
  *   flash in the shade.
  *
  * Receive paths (both wired at root init):
@@ -192,36 +192,6 @@ function readPayloadType(data: unknown): string | null {
   return typeof t === 'string' ? t : null;
 }
 
-/**
- * Find any presented wake notifications and dismiss them. Called after
- * a successful wake handler run so the driver doesn't see wake
- * notifications stacking up in the shade every ~5 minutes.
- *
- * Filters by `data.type === 'wake_tracking'` so we never dismiss
- * driver-facing dispatch notifications that share the notification
- * pipe.
- */
-async function dismissWakeNotifications(): Promise<void> {
-  try {
-    const presented = await Notifications.getPresentedNotificationsAsync();
-    const wakeIds = presented
-      .filter(
-        (n) =>
-          (n.request?.content?.data as { type?: string } | null)?.type ===
-          WAKE_PAYLOAD_TYPE,
-      )
-      .map((n) => n.request.identifier);
-    for (const id of wakeIds) {
-      await Notifications.dismissNotificationAsync(id);
-    }
-  } catch (err) {
-    // Non-critical — notification will auto-clear on next wake or when
-    // the user opens the shade.
-    lg.debug(
-      `dismissWakeNotifications failed: ${err instanceof Error ? err.message : err}`,
-    );
-  }
-}
 
 /**
  * Core handler for a wake payload, shared by foreground + background
@@ -269,7 +239,7 @@ async function handleWakePayload(
       trackFcmWakeIgnored({ reason: 'resume_declined', detail: result.message });
       // Still dismiss — the notification served its delivery purpose;
       // we don't need the user to see a stale wake in the shade.
-      await dismissWakeNotifications();
+      await dismissInfraNotifications();
       return;
     }
     trackFcmWakeResumeSuccess({
@@ -286,7 +256,7 @@ async function handleWakePayload(
   // Best-effort dismissal so the wake doesn't accumulate in the shade.
   // Runs after resumeTracking returns so the FGS-start exemption window
   // (~10s on Android 12+) isn't consumed by the dismissal call.
-  await dismissWakeNotifications();
+  await dismissInfraNotifications();
 }
 
 /**
@@ -496,7 +466,6 @@ async function routePayload(
   switch (type) {
     case WAKE_PAYLOAD_TYPE:
       await handleWakePayload(data, deliveryPath);
-      void dismissInfraNotifications();
       return;
     case SESSION_ENDED_PAYLOAD_TYPE:
       await handleSessionEndedPayload(data, deliveryPath);
