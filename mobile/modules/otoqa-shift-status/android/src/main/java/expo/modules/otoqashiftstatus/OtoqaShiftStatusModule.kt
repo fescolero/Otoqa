@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Bundle
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -265,7 +266,14 @@ class OtoqaShiftStatusModule : Module() {
       .setVisibility(Notification.VISIBILITY_PUBLIC)
       // Compact text for the status-bar chip when promoted.
       .setShortCriticalText("Shift")
-      .requestPromotedOngoing(true)
+    // Live Update promotion request. The documented mechanism is the
+    // Notification.EXTRA_REQUEST_PROMOTED_ONGOING extras key
+    // ("android.requestPromotedOngoing") — there is no Builder method
+    // for it (a requestPromotedOngoing(...) call failed to compile
+    // against the API 36 android.jar on EAS). The string literal keeps
+    // this compilable against any compileSdk; systems without Live
+    // Updates ignore the extra entirely.
+    builder.addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", true) })
     if (contentIntent != null) builder.setContentIntent(contentIntent)
     return builder.build()
   }
