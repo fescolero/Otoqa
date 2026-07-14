@@ -165,9 +165,12 @@ export function FuelEntryEditContent({ id }: { id: string }) {
         try {
           const args = mapValsToFuelEntryUpdateArgs(vals);
           if (type === 'def') {
+            // fuelType is a fuelEntries-only field — the defEntries
+            // validator rejects it, so drop it before the update call.
+            const { fuelType: _fuelType, ...defArgs } = args;
             await updateDefEntry({
               entryId: id as Id<'defEntries'>,
-              ...args,
+              ...defArgs,
               updatedBy: user.id,
             });
           } else {

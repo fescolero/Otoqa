@@ -85,7 +85,10 @@ export default function CreateDefEntryPage() {
           return;
         }
         try {
-          const args = mapValsToFuelEntryArgs(vals);
+          // fuelType is a fuelEntries-only field — the DEF schema never
+          // renders it, but strip defensively since the defEntries
+          // validator rejects unknown keys.
+          const { fuelType: _fuelType, ...args } = mapValsToFuelEntryArgs(vals);
           const id = await createDefEntry({
             ...args,
             organizationId,

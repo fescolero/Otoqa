@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg } from './lib/auth';
+import { DEFAULT_FUEL_TYPE, type FuelType } from './lib/fuelTypes';
 
 export const fuelByDriver = query({
   args: {
@@ -193,6 +194,48 @@ export const fuelByVendor = query({
     );
 
     return results.sort((a, b) => b.totalCost - a.totalCost);
+  },
+});
+
+export const fuelByType = query({
+  args: {
+    organizationId: v.string(),
+    dateRangeStart: v.number(),
+    dateRangeEnd: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const entries = await ctx.db
+      .query('fuelEntries')
+      .withIndex('by_organization_and_date', (q) =>
+        q.eq('organizationId', args.organizationId)
+          .gte('entryDate', args.dateRangeStart)
+          .lte('entryDate', args.dateRangeEnd)
+      )
+      .collect();
+
+    // Rows created before the fuelType field existed count as diesel.
+    const byType: Record<string, { gallons: number; totalCost: number; entries: number }> = {};
+
+    for (const entry of entries) {
+      const key: FuelType = entry.fuelType ?? DEFAULT_FUEL_TYPE;
+      if (!byType[key]) {
+        byType[key] = { gallons: 0, totalCost: 0, entries: 0 };
+      }
+      byType[key].gallons += entry.gallons;
+      byType[key].totalCost += entry.totalCost;
+      byType[key].entries += 1;
+    }
+
+    return Object.entries(byType)
+      .map(([fuelType, data]) => ({
+        fuelType: fuelType as FuelType,
+        gallons: Math.round(data.gallons * 100) / 100,
+        totalCost: Math.round(data.totalCost * 100) / 100,
+        avgPricePerGallon: data.gallons > 0 ? Math.round((data.totalCost / data.gallons) * 1000) / 1000 : 0,
+        entries: data.entries,
+      }))
+      .sort((a, b) => b.totalCost - a.totalCost);
   },
 });
 

@@ -34,6 +34,12 @@
  */
 
 import type { Id, TableNames } from '@/convex/_generated/dataModel';
+import {
+  FUEL_TYPES,
+  FUEL_TYPE_LABELS,
+  DEFAULT_FUEL_TYPE,
+  type FuelType,
+} from '@/convex/lib/fuelTypes';
 import type {
   CreateFormSchema,
   FieldOption,
@@ -92,6 +98,11 @@ export interface BuildFuelEntrySchemaArgs {
  *  exactly. Schema author wins by skipping the slug-to-literal remap.
  * ──────────────────────────────────────────────────────────────── */
 
+const FUEL_TYPE_OPTIONS: FieldOption[] = FUEL_TYPES.map((t) => ({
+  value: t,
+  label: FUEL_TYPE_LABELS[t],
+}));
+
 const PAYMENT_METHODS: FieldOption[] = [
   { value: 'FUEL_CARD', label: 'Fuel card' },
   { value: 'CASH', label: 'Cash · driver paid' },
@@ -112,6 +123,7 @@ export const FUEL_ENTRY_FIELD_IDS = {
   vendorId: 'vendorId',
   city: 'city',
   state: 'state',
+  fuelType: 'fuelType',
   gallons: 'gallons',
   pricePerGallon: 'pricePerGallon',
   driverId: 'driverId',
@@ -232,6 +244,20 @@ export function buildFuelEntrySchema(
         subtitle:
           'Enter the two values printed clearest on the receipt — we compute the total on save.',
         fields: [
+          // DEF has its own table + workflow, so the type picker only
+          // exists on the diesel form. Missing values read as Diesel.
+          ...(isFuel
+            ? [
+                {
+                  id: ids.fuelType,
+                  label: 'Fuel type',
+                  kind: 'select' as const,
+                  default: DEFAULT_FUEL_TYPE,
+                  options: FUEL_TYPE_OPTIONS,
+                  hint: 'Keeps the fuel report separated by product.',
+                },
+              ]
+            : []),
           {
             id: ids.gallons,
             label: 'Gallons',
@@ -370,6 +396,9 @@ export function buildFuelEntrySchema(
 export interface FuelEntryCreateArgs {
   entryDate: number;
   vendorId: Id<'fuelVendors'>;
+  /** Only set for diesel (fuelEntries) rows — the DEF mutations don't
+   *  accept it, and the translator omits the key when unset. */
+  fuelType?: FuelType;
   gallons: number;
   pricePerGallon: number;
   driverId?: Id<'drivers'>;
@@ -399,6 +428,12 @@ export function mapValsToFuelEntryArgs(
   const city = trimStr(vals[ids.city]);
   const state = trimStr(vals[ids.state]);
   const paymentMethod = String(vals[ids.paymentMethod] ?? '');
+  // Only present on the diesel form. Conditional spread below keeps the
+  // key out of DEF create/update payloads (their validators reject it).
+  const fuelTypeStr = trimStr(vals[ids.fuelType]);
+  const fuelType = (FUEL_TYPES as readonly string[]).includes(fuelTypeStr)
+    ? (fuelTypeStr as FuelType)
+    : undefined;
 
   // Cast `as Id<'_branded'>` is safe here: the schema's select options
   // were populated from Convex ids, so any non-empty value came from a
@@ -407,6 +442,7 @@ export function mapValsToFuelEntryArgs(
   return {
     entryDate: ymdToUnixMs(dateStr),
     vendorId: String(vals[ids.vendorId] ?? '') as Id<'fuelVendors'>,
+    ...(fuelType ? { fuelType } : {}),
     gallons: Number(vals[ids.gallons] ?? 0),
     pricePerGallon: Number(vals[ids.pricePerGallon] ?? 0),
     driverId: optionalId<'drivers'>(vals[ids.driverId]),
@@ -452,6 +488,7 @@ export function mapValsToFuelEntryArgs(
 export interface FuelEntryRecord {
   entryDate: number;
   vendorId: string;
+  fuelType?: string;
   gallons: number;
   pricePerGallon: number;
   driverId?: string;
@@ -474,6 +511,9 @@ export function mapRecordToFuelEntryVals(
   return {
     [ids.date]: unixMsToYmd(record.entryDate),
     [ids.vendorId]: record.vendorId,
+    // Legacy fuel rows (pre-fuelType) seed the default; DEF records
+    // never have the field and their schema drops the value anyway.
+    [ids.fuelType]: record.fuelType ?? DEFAULT_FUEL_TYPE,
     [ids.gallons]: record.gallons,
     [ids.pricePerGallon]: record.pricePerGallon,
     [ids.driverId]: record.driverId ?? '',

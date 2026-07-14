@@ -3,10 +3,12 @@
  * surface. Mirrors fuel-reports-screen.jsx (v6 design):
  *
  *   SavedViews (Overview · IFTA · By vehicle)
- *   Control strip: time-range select + FilterBar (Driver / Carrier / Truck / Vendor)
+ *   Control strip: time-range select + FilterBar (Fuel type / Driver /
+ *   Carrier / Truck / Vendor)
  *   Scrollable canvas:
  *     Overview  — 4 KPI cards (+ sparklines), spend/price combo chart,
- *                 exceptions card, vendor share, IFTA snapshot
+ *                 exceptions card, fuel-type share, vendor share,
+ *                 IFTA snapshot
  *     IFTA      — hero strip + jurisdiction reconciliation table
  *     By vehicle — KPIs + fuel-economy table
  *
@@ -35,6 +37,12 @@ import {
   WIcon,
 } from '@/components/web';
 import { api } from '@/convex/_generated/api';
+import {
+  DEFAULT_FUEL_TYPE,
+  FUEL_TYPES,
+  FUEL_TYPE_LABELS,
+  type FuelType,
+} from '@/convex/lib/fuelTypes';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { exportToCSV } from '@/lib/csv-export';
@@ -164,6 +172,7 @@ export function FuelReportsClient() {
 
   const summary = useAuthQuery(api.fuelReports.monthlySummary, baseArgs);
   const byVendor = useAuthQuery(api.fuelReports.fuelByVendor, baseArgs);
+  const byFuelType = useAuthQuery(api.fuelReports.fuelByType, baseArgs);
   const byDriver = useAuthQuery(api.fuelReports.fuelByDriver, baseArgs);
   const byTruck = useAuthQuery(api.fuelReports.fuelByTruck, baseArgs);
   const cpm = useAuthQuery(api.fuelReports.costPerMile, baseArgs);
@@ -202,6 +211,8 @@ export function FuelReportsClient() {
       entryDate: e.entryDate as number,
       vendorId: e.vendorId as string,
       vendorName: (e.vendorName as string) ?? 'Unknown',
+      // Rows created before the fuelType field existed count as diesel.
+      fuelType: ((e.fuelType as string) ?? DEFAULT_FUEL_TYPE) as FuelType,
       driverName: e.driverName as string | undefined,
       driverId: e.driverId as string | undefined,
       // carrierId comes through from the raw entry record — used by the
@@ -244,6 +255,17 @@ export function FuelReportsClient() {
   // FilterBar options.
   const filterProps: FilterProperty[] = React.useMemo(() => {
     return [
+      {
+        id: 'fuelType',
+        label: 'Fuel type',
+        icon: 'droplet',
+        kind: 'enum',
+        operator: 'is any of',
+        options: FUEL_TYPES.map((t) => ({
+          value: t,
+          label: FUEL_TYPE_LABELS[t],
+        })),
+      },
       {
         id: 'driver',
         label: 'Driver',
@@ -312,7 +334,12 @@ export function FuelReportsClient() {
     const chip = filters.find((c) => c.propId === 'vendor');
     return new Set(chip?.values ?? []);
   }, [filters]);
-  const anyChip = driverIds.size + carrierIds.size + truckIds.size + vendorIds.size > 0;
+  const fuelTypeIds = React.useMemo(() => {
+    const chip = filters.find((c) => c.propId === 'fuelType');
+    return new Set(chip?.values ?? []);
+  }, [filters]);
+  const anyChip =
+    driverIds.size + carrierIds.size + truckIds.size + vendorIds.size + fuelTypeIds.size > 0;
 
   // Apply chip filters to the raw entry pool. Each chip operates as
   // `is any of` — match the entry if its id is in the selected set.
@@ -325,9 +352,10 @@ export function FuelReportsClient() {
       if (vendorIds.size > 0 && !vendorIds.has(e.vendorId)) return false;
       if (truckIds.size > 0 && (!e.truckId || !truckIds.has(e.truckId))) return false;
       if (carrierIds.size > 0 && (!e.carrierId || !carrierIds.has(e.carrierId))) return false;
+      if (fuelTypeIds.size > 0 && !fuelTypeIds.has(e.fuelType)) return false;
       return true;
     });
-  }, [rawEntries, anyChip, driverIds, vendorIds, truckIds, carrierIds]);
+  }, [rawEntries, anyChip, driverIds, vendorIds, truckIds, carrierIds, fuelTypeIds]);
 
   // ─── KPIs (Overview) ──────────────────────────────────────────────────
   // When no chips are active we trust the server-side aggregates (they
@@ -484,6 +512,32 @@ export function FuelReportsClient() {
       .sort((a, b) => b.totalCost - a.totalCost);
   }, [anyChip, byVendor, filteredEntries]);
 
+  // Fuel-type share — same server/client split as vendor share: trust the
+  // org-wide aggregate when no chips are active, recompute from the
+  // filtered pool when they are.
+  const fuelTypeShare = React.useMemo(() => {
+    if (!anyChip) {
+      return ((byFuelType ?? []) as Array<{ fuelType: FuelType; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>);
+    }
+    const m = new Map<FuelType, { fuelType: FuelType; gallons: number; totalCost: number; entries: number }>();
+    for (const e of filteredEntries) {
+      const cur = m.get(e.fuelType) ?? { fuelType: e.fuelType, gallons: 0, totalCost: 0, entries: 0 };
+      cur.gallons += e.gallons;
+      cur.totalCost += e.totalCost;
+      cur.entries += 1;
+      m.set(e.fuelType, cur);
+    }
+    return [...m.values()]
+      .map((t) => ({
+        fuelType: t.fuelType,
+        gallons: t.gallons,
+        totalCost: t.totalCost,
+        avgPricePerGallon: t.gallons > 0 ? t.totalCost / t.gallons : 0,
+        entries: t.entries,
+      }))
+      .sort((a, b) => b.totalCost - a.totalCost);
+  }, [anyChip, byFuelType, filteredEntries]);
+
   // ─── Tab views ────────────────────────────────────────────────────────
   const views: SavedView[] = [
     { id: 'overview', label: 'Overview' },
@@ -575,6 +629,7 @@ export function FuelReportsClient() {
               gallonSpark={gallonSpark}
               priceSpark={priceSpark}
               byVendor={vendorShare}
+              byFuelType={fuelTypeShare}
               trendBuckets={trendBuckets}
               exceptionCounts={exceptionCounts}
               rawEntries={filteredEntries}
@@ -717,7 +772,7 @@ function ScopeLine({
   filterProps: FilterProperty[];
 }) {
   const parts: string[] = [];
-  for (const id of ['driver', 'carrier', 'truck', 'vendor'] as const) {
+  for (const id of ['fuelType', 'driver', 'carrier', 'truck', 'vendor'] as const) {
     const chip = filters.find((c) => c.propId === id);
     if (!chip || !chip.values.length) continue;
     const prop = filterProps.find((p) => p.id === id);
@@ -761,6 +816,7 @@ function OverviewView({
   gallonSpark,
   priceSpark,
   byVendor,
+  byFuelType,
   trendBuckets,
   exceptionCounts,
   rawEntries,
@@ -779,6 +835,7 @@ function OverviewView({
   gallonSpark: number[];
   priceSpark: number[];
   byVendor: Array<{ vendorId: string; vendorName: string; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
+  byFuelType: Array<{ fuelType: FuelType; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   trendBuckets: Array<{ label: string; spend: number; ppg: number | null }>;
   exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
   rawEntries: RawEntry[];
@@ -870,7 +927,16 @@ function OverviewView({
 
       <FuelPurchasesTable entries={rawEntries} onOpenEntry={onOpenEntry} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        <DSCard title="Spend by fuel type">
+          {byFuelType.length === 0 ? (
+            <p className="m-0 py-3 text-[12.5px] text-[var(--text-tertiary)]">
+              No fuel spend in this period.
+            </p>
+          ) : (
+            <FuelTypeShare types={byFuelType} />
+          )}
+        </DSCard>
         <DSCard title="Spend by vendor">
           {byVendor.length === 0 ? (
             <p className="m-0 py-3 text-[12.5px] text-[var(--text-tertiary)]">
@@ -947,6 +1013,8 @@ function Sparkline({
   w?: number;
   h?: number;
 }) {
+  // Hook must run unconditionally — keep it above the early return.
+  const gid = `sp-${React.useId().replace(/[^a-zA-Z0-9]/g, '')}`;
   if (data.length < 2) return <div style={{ width: w, height: h }} />;
   const min = Math.min(...data);
   const max = Math.max(...data);
@@ -960,7 +1028,6 @@ function Sparkline({
     .map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ' ' + p[1].toFixed(1))
     .join(' ');
   const area = `${line} L ${w} ${h} L 0 ${h} Z`;
-  const gid = `sp-${React.useId().replace(/[^a-zA-Z0-9]/g, '')}`;
   return (
     <svg width={w} height={h} style={{ flexShrink: 0, display: 'block' }}>
       <defs>
@@ -1236,6 +1303,7 @@ interface RawEntry {
   entryDate: number;
   vendorId: string;
   vendorName: string;
+  fuelType: FuelType;
   driverName?: string;
   driverId?: string;
   truckUnitId?: string;
@@ -1317,6 +1385,7 @@ function FuelPurchasesTable({
           const dateLabel = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
           const timeLabel = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
           const locLabel = r.location ? `${r.location.city}, ${r.location.state}` : '';
+          const typeLabel = FUEL_TYPE_LABELS[r.fuelType] ?? r.fuelType;
           const truckLoad = [r.truckUnitId, r.loadReference ?? (r.loadId ? String(r.loadId).slice(-6) : null)]
             .filter(Boolean)
             .join(' · ');
@@ -1359,7 +1428,7 @@ function FuelPurchasesTable({
                 <div className="min-w-0">
                   <div className="text-[12.5px] font-medium truncate">{r.vendorName}</div>
                   <div className="text-[11px] text-[var(--text-tertiary)] truncate mt-0.5">
-                    {locLabel || '—'}
+                    {[typeLabel, locLabel].filter(Boolean).join(' · ')}
                   </div>
                 </div>
               </div>
@@ -1434,6 +1503,60 @@ function FuelPurchasesTable({
         </div>
       )}
     </DSCard>
+  );
+}
+
+// ─── Fuel-type share ───────────────────────────────────────────────────
+// One bar per fuel product (Diesel / Dyed diesel / Biodiesel / Gasoline /
+// Other). DEF is intentionally absent: it lives in defEntries and has
+// its own workflow — this report covers pump fuel only.
+function FuelTypeShare({
+  types,
+}: {
+  types: Array<{ fuelType: FuelType; gallons: number; totalCost: number; avgPricePerGallon: number }>;
+}) {
+  const total = types.reduce((s, t) => s + t.totalCost, 0) || 1;
+  const max = Math.max(...types.map((t) => t.totalCost), 1);
+  return (
+    <div className="flex flex-col gap-3">
+      {types.map((t) => {
+        const pct = (t.totalCost / total) * 100;
+        const widthPct = (t.totalCost / max) * 100;
+        return (
+          <div key={t.fuelType} className="flex items-center gap-2.5">
+            <div className="min-w-0" style={{ width: 132 }}>
+              <div className="text-[12px] font-medium truncate">
+                {FUEL_TYPE_LABELS[t.fuelType] ?? t.fuelType}
+              </div>
+              <div className="num text-[10.5px] text-[var(--text-tertiary)] truncate">
+                {frN(t.gallons)} gal · ${t.avgPricePerGallon.toFixed(3)}/gal
+              </div>
+            </div>
+            <div
+              className="flex-1 overflow-hidden"
+              style={{ height: 16, background: 'var(--bg-surface-2)', borderRadius: 4 }}
+            >
+              <div
+                style={{
+                  width: `${widthPct}%`,
+                  height: '100%',
+                  background: 'var(--accent)',
+                  opacity: 0.85,
+                  borderRadius: 4,
+                }}
+              />
+            </div>
+            <div
+              className="text-right flex items-baseline justify-end gap-1.5"
+              style={{ width: 96 }}
+            >
+              <span className="num text-[12.5px] font-semibold">{frMoney(t.totalCost)}</span>
+              <span className="num text-[11px] text-[var(--text-tertiary)]">{Math.round(pct)}%</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

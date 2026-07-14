@@ -10,6 +10,12 @@ import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useAction, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
+import {
+  FUEL_TYPES,
+  FUEL_TYPE_LABELS,
+  normalizeFuelTypeCode,
+  type FuelType,
+} from '@/convex/lib/fuelTypes';
 import { useRouter } from 'next/navigation';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useOrganizationId } from '@/contexts/organization-context';
@@ -59,7 +65,6 @@ type ExtractedFuelEntry = {
 };
 
 type FuelPaymentMethod = 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA';
-type FuelCategory = 'FUEL' | 'DEF' | 'OTHER';
 
 interface BulkFuelEntryInput {
   entryDate: number;
@@ -67,6 +72,7 @@ interface BulkFuelEntryInput {
   carrierId?: Id<'carrierPartnerships'>;
   truckId?: Id<'trucks'>;
   vendorId: Id<'fuelVendors'>;
+  fuelType?: FuelType;
   gallons: number;
   pricePerGallon: number;
   odometerReading?: number;
@@ -185,50 +191,13 @@ function formatPaymentMethodLabel(value: FuelPaymentMethod) {
   }
 }
 
-const FUEL_TYPE_NORMALIZATION_MAP: Record<string, FuelCategory> = {
-  'DSL': 'FUEL',
-  'DIESEL': 'FUEL',
-  'ULSD': 'FUEL',
-  'ULTRA LOW SULFUR DIESEL': 'FUEL',
-  'LSD': 'FUEL',
-  'DYED': 'FUEL',
-  'DYED DIESEL': 'FUEL',
-  'AGO': 'FUEL',
-  'AUTOMOTIVE GAS OIL': 'FUEL',
-  'B5': 'FUEL',
-  'B10': 'FUEL',
-  'B20': 'FUEL',
-  'BIODIESEL': 'FUEL',
-  'DEF': 'DEF',
-  'DIESEL EXHAUST FLUID': 'DEF',
-  'GSL': 'OTHER',
-  'GAS': 'OTHER',
-  'GASOLINE': 'OTHER',
-  'REG': 'OTHER',
-  'REGULAR': 'OTHER',
-  'UNL': 'OTHER',
-  'UNLEADED': 'OTHER',
-  'PREM': 'OTHER',
-  'PREMIUM': 'OTHER',
-  'MID': 'OTHER',
-  'MIDGRADE': 'OTHER',
-};
+// Canonical normalization lives in convex/lib/fuelTypes so the report
+// queries, the CSV import, and this page all agree on the taxonomy.
+const normalizeFuelType = normalizeFuelTypeCode;
 
-function normalizeFuelType(value: string): FuelCategory | string {
-  const normalized = value
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  return FUEL_TYPE_NORMALIZATION_MAP[normalized] ?? normalized;
-}
-
-function formatFuelCategoryLabel(value: FuelCategory) {
-  if (value === 'FUEL') return 'Fuel';
+function formatFuelTypeLabel(value: FuelType | 'DEF') {
   if (value === 'DEF') return 'DEF';
-  return 'Other';
+  return FUEL_TYPE_LABELS[value];
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -430,11 +399,11 @@ export default function OcrFuelImportPage() {
         if (normalizedFuelType === 'DEF') {
           errors.push('Fuel type is DEF; use the DEF workflow instead');
         }
-        if (normalizedFuelType === 'OTHER') {
-          warnings.push('Fuel type normalized to OTHER; verify this is a fuel entry');
+        if (fuelType && normalizedFuelType === 'OTHER') {
+          warnings.push('Fuel type normalized to Other; verify this is a fuel entry');
         }
         if (!fuelType) {
-          warnings.push('Fuel type missing');
+          warnings.push('Fuel type missing; will report as Diesel');
         }
 
         let resolvedDriverId: Id<'drivers'> | undefined;
@@ -738,9 +707,17 @@ export default function OcrFuelImportPage() {
             const city = row.extracted.city?.value?.toString().trim() || '';
             const state = row.extracted.state?.value?.toString().trim() || '';
 
+            // Persist the normalized fuel type so reports can separate
+            // products. DEF rows carry a validation error and never
+            // reach this map; entries with no type stay untyped and
+            // report as Diesel.
+            const fuelTypeRaw = row.extracted.fuelType?.value?.toString().trim() || '';
+            const normalizedType = fuelTypeRaw ? normalizeFuelType(fuelTypeRaw) : null;
+
             return {
               entryDate: tryParseDate(row.extracted.entryDate.value?.toString() || '') || Date.now(),
               vendorId: row.selectedVendorId!,
+              ...(normalizedType && normalizedType !== 'DEF' ? { fuelType: normalizedType } : {}),
               gallons: Number(row.extracted.gallons.value),
               pricePerGallon: Number(row.extracted.pricePerGallon.value),
               ...(row.selectedDriverId ? { driverId: row.selectedDriverId } : {}),
@@ -1268,7 +1245,7 @@ export default function OcrFuelImportPage() {
                                     </div>
                                     <div className="space-y-3">
                                       <div className="space-y-1">
-                                        <p className="text-xs font-medium text-muted-foreground">Entry Type</p>
+                                        <p className="text-xs font-medium text-muted-foreground">Fuel Type</p>
                                         <Select
                                           value={
                                             row.extracted.fuelType?.value
@@ -1289,16 +1266,19 @@ export default function OcrFuelImportPage() {
                                           </SelectTrigger>
                                           <SelectContent>
                                             <SelectItem value="__none__">Unassigned</SelectItem>
-                                            {(['FUEL', 'DEF', 'OTHER'] as FuelCategory[]).map((type) => (
+                                            {([...FUEL_TYPES, 'DEF'] as Array<FuelType | 'DEF'>).map((type) => (
                                               <SelectItem key={type} value={type}>
-                                                {formatFuelCategoryLabel(type)}
+                                                {formatFuelTypeLabel(type)}
                                               </SelectItem>
                                             ))}
                                           </SelectContent>
                                         </Select>
                                         {row.extracted.fuelType?.value && (
                                           <p className="text-xs text-muted-foreground">
-                                            Normalized: {normalizeFuelType(row.extracted.fuelType.value.toString())}
+                                            Normalized:{' '}
+                                            {formatFuelTypeLabel(
+                                              normalizeFuelType(row.extracted.fuelType.value.toString()),
+                                            )}
                                           </p>
                                         )}
                                       </div>

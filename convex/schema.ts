@@ -1,6 +1,7 @@
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { scheduleRuleValidator } from './lib/validators';
+import { fuelTypeValidator } from './lib/fuelTypes';
 import {
   chargeComponents,
   fuelSurchargeCalculators,
@@ -3234,6 +3235,9 @@ export default defineSchema({
     carrierId: v.optional(v.id('carrierPartnerships')),
     truckId: v.optional(v.id('trucks')),
     vendorId: v.id('fuelVendors'),
+    // Missing on rows created before fuel-type separation — treated as
+    // DIESEL by reports. DEF lives in `defEntries`, never here.
+    fuelType: v.optional(fuelTypeValidator),
     gallons: v.number(),
     pricePerGallon: v.number(),
     totalCost: v.number(),

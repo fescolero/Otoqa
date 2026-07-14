@@ -17,12 +17,14 @@ import { Upload, Download, CheckCircle, AlertCircle, Loader2, ArrowLeft, ArrowRi
 import { toast } from 'sonner';
 import { generateCSVTemplate } from '@/lib/csv-export';
 import { Id } from '@/convex/_generated/dataModel';
+import { normalizeFuelTypeCode, type FuelType } from '@/convex/lib/fuelTypes';
 
 type FuelField =
   | 'date'
   | 'driverName'
   | 'truckUnit'
   | 'vendorName'
+  | 'fuelType'
   | 'gallons'
   | 'pricePerGallon'
   | 'total'
@@ -47,6 +49,7 @@ const FUEL_FIELDS: Array<FieldDef> = [
   { key: 'driverName', label: 'Driver Name', required: false },
   { key: 'truckUnit', label: 'Truck Unit', required: false },
   { key: 'vendorName', label: 'Vendor Name', required: true },
+  { key: 'fuelType', label: 'Fuel Type', required: false },
   { key: 'gallons', label: 'Gallons', required: true },
   { key: 'pricePerGallon', label: 'Price Per Gallon', required: true },
   { key: 'total', label: 'Total', required: false },
@@ -80,6 +83,12 @@ const AUTO_MAP: Record<string, FuelField> = {
   'station': 'vendorName',
   'fuel station': 'vendorName',
   'merchant': 'vendorName',
+  'fuel type': 'fuelType',
+  'fuel_type': 'fuelType',
+  'fueltype': 'fuelType',
+  'product': 'fuelType',
+  'product type': 'fuelType',
+  'product code': 'fuelType',
   'gallons': 'gallons',
   'quantity': 'gallons',
   'gal': 'gallons',
@@ -147,6 +156,7 @@ interface BulkFuelEntryInput {
   carrierId?: Id<'carrierPartnerships'>;
   truckId?: Id<'trucks'>;
   vendorId: Id<'fuelVendors'>;
+  fuelType?: FuelType;
   gallons: number;
   pricePerGallon: number;
   odometerReading?: number;
@@ -441,6 +451,16 @@ export default function ImportFuelEntriesPage() {
         }
       }
 
+      const fuelTypeStr = mapped.fuelType;
+      if (fuelTypeStr) {
+        const normalizedType = normalizeFuelTypeCode(fuelTypeStr);
+        if (normalizedType === 'DEF') {
+          errors.push('Fuel type is DEF; use the DEF workflow instead');
+        } else if (normalizedType === 'OTHER') {
+          warnings.push(`Fuel type "${fuelTypeStr}" normalized to Other`);
+        }
+      }
+
       return {
         raw: row,
         mapped,
@@ -507,6 +527,11 @@ export default function ImportFuelEntriesPage() {
             pricePerGallon: ppg,
           };
 
+          if (row.mapped.fuelType) {
+            // DEF rows carry a validation error and never reach this map.
+            const normalizedType = normalizeFuelTypeCode(row.mapped.fuelType);
+            if (normalizedType !== 'DEF') entry.fuelType = normalizedType;
+          }
           if (row.resolvedDriverId) entry.driverId = row.resolvedDriverId;
           if (row.resolvedTruckId) entry.truckId = row.resolvedTruckId;
           if (odometer !== undefined && !isNaN(odometer) && odometer >= 0) {
