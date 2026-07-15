@@ -99,6 +99,15 @@ function endOfYear(d: Date) {
 function fmtShort(d: Date): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
+function ymdToLocalDate(ymd: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return null;
+  // Local time, matching how <input type="date"> values are entered.
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+function dateToYmd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 // Each preset comes with the matching *prior* period so we can deliver
 // vs-prior-period deltas on the KPI cards without a separate config.
@@ -172,12 +181,42 @@ export function FuelReportsClient() {
   const organizationId = useOrganizationId();
   const [view, setView] = React.useState<'overview' | 'ifta' | 'vehicle'>('overview');
   const [rangeId, setRangeId] = React.useState('this-quarter');
+  // Custom From/To (YYYY-MM-DD strings, local time) — active when
+  // rangeId === 'custom'. Presets keep working alongside it.
+  const [custom, setCustom] = React.useState<{ start: string; end: string } | null>(null);
   const [filters, setFilters] = React.useState<FilterChipValue[]>([]);
 
   // Frozen "now" so the range bounds don't drift mid-session.
   const now = React.useMemo(() => new Date(), []);
   const ranges = React.useMemo(() => buildRanges(now), [now]);
-  const range = ranges.find((r) => r.id === rangeId) ?? ranges[2];
+  const range = React.useMemo(() => {
+    if (rangeId === 'custom' && custom) {
+      const start = ymdToLocalDate(custom.start);
+      const endDay = ymdToLocalDate(custom.end);
+      if (start && endDay && start <= endDay) {
+        const end = new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate(), 23, 59, 59, 999);
+        const spanDays = (end.getTime() - start.getTime()) / 86_400_000;
+        // Prior period = the window of equal length immediately before.
+        const lenMs = end.getTime() - start.getTime() + 1;
+        const priorEnd = new Date(start.getTime() - 1);
+        const priorStart = new Date(start.getTime() - lenMs);
+        const sameYear = start.getFullYear() === end.getFullYear();
+        return {
+          id: 'custom',
+          label: 'Custom',
+          sub: sameYear
+            ? `${fmtShort(start)} – ${fmtShort(end)}, ${end.getFullYear()}`
+            : `${fmtShort(start)}, ${start.getFullYear()} – ${fmtShort(end)}, ${end.getFullYear()}`,
+          start,
+          end,
+          granularity: (spanDays > 100 ? 'month' : 'week') as 'week' | 'month',
+          priorStart,
+          priorEnd,
+        };
+      }
+    }
+    return ranges.find((r) => r.id === rangeId) ?? ranges[2];
+  }, [rangeId, custom, ranges]);
 
   // Query args. Range bounds → epoch ms.
   const baseArgs = organizationId
@@ -672,7 +711,16 @@ export function FuelReportsClient() {
           padding: '10px 24px',
         }}
       >
-        <RangeSelect ranges={ranges} rangeId={rangeId} onChange={setRangeId} />
+        <RangeSelect
+          ranges={ranges}
+          rangeId={rangeId}
+          active={range}
+          onChange={setRangeId}
+          onCustomApply={(start, end) => {
+            setCustom({ start, end });
+            setRangeId('custom');
+          }}
+        />
         <span
           aria-hidden
           style={{ width: 1, height: 22, background: 'var(--border-hairline-strong)' }}
@@ -748,27 +796,45 @@ export function FuelReportsClient() {
 }
 
 // ─── Range select ──────────────────────────────────────────────────────
+// Preset rows + a custom From/To picker behind a hairline in the footer.
 function RangeSelect({
   ranges,
   rangeId,
+  active,
   onChange,
+  onCustomApply,
 }: {
   ranges: RangeOption[];
   rangeId: string;
+  /** The resolved active range (a preset or the custom range) — drives
+   *  the trigger label so "Custom" shows its real bounds. */
+  active: RangeOption;
   onChange: (id: string) => void;
+  onCustomApply: (start: string, end: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef<HTMLDivElement>(null);
-  const active = ranges.find((r) => r.id === rangeId) ?? ranges[0];
+  // Custom-range draft inputs, seeded from the active range each time
+  // the dropdown opens so editing starts from what's on screen.
+  const [draftStart, setDraftStart] = React.useState('');
+  const [draftEnd, setDraftEnd] = React.useState('');
 
   React.useEffect(() => {
     if (!open) return;
+    setDraftStart(dateToYmd(active.start));
+    setDraftEnd(dateToYmd(active.end));
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  const draftValid =
+    !!ymdToLocalDate(draftStart) &&
+    !!ymdToLocalDate(draftEnd) &&
+    draftStart <= draftEnd;
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
@@ -802,7 +868,7 @@ function RangeSelect({
             top: 'calc(100% + 6px)',
             left: 0,
             zIndex: 50,
-            width: 256,
+            width: 288,
             background: 'var(--bg-surface)',
             border: '1px solid var(--border-strong)',
             borderRadius: 10,
@@ -841,6 +907,71 @@ function RangeSelect({
               </button>
             );
           })}
+
+          {/* Custom range — behind a hairline in the footer. */}
+          <div
+            style={{
+              borderTop: '1px solid var(--border-hairline)',
+              margin: '4px 0 0',
+              padding: '8px 10px 6px',
+            }}
+          >
+            <div className="flex items-center gap-1.5 mb-2">
+              <span className="text-[12.5px] font-medium flex-1">Custom range</span>
+              {rangeId === 'custom' && <WIcon name="check" size={12} color="var(--accent)" />}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="date"
+                value={draftStart}
+                max={draftEnd || undefined}
+                onChange={(e) => setDraftStart(e.target.value)}
+                aria-label="Custom range start"
+                className="focus-ring num flex-1 min-w-0"
+                style={{
+                  height: 28,
+                  padding: '0 6px',
+                  borderRadius: 6,
+                  border: '1px solid var(--border-hairline-strong)',
+                  background: 'transparent',
+                  color: 'var(--text-primary)',
+                  fontSize: 11.5,
+                }}
+              />
+              <span className="text-[11px] text-[var(--text-tertiary)]">–</span>
+              <input
+                type="date"
+                value={draftEnd}
+                min={draftStart || undefined}
+                onChange={(e) => setDraftEnd(e.target.value)}
+                aria-label="Custom range end"
+                className="focus-ring num flex-1 min-w-0"
+                style={{
+                  height: 28,
+                  padding: '0 6px',
+                  borderRadius: 6,
+                  border: '1px solid var(--border-hairline-strong)',
+                  background: 'transparent',
+                  color: 'var(--text-primary)',
+                  fontSize: 11.5,
+                }}
+              />
+            </div>
+            <div className="flex justify-end mt-2">
+              <WBtn
+                size="sm"
+                variant="primary"
+                disabled={!draftValid}
+                onClick={() => {
+                  if (!draftValid) return;
+                  onCustomApply(draftStart, draftEnd);
+                  setOpen(false);
+                }}
+              >
+                Apply
+              </WBtn>
+            </div>
+          </div>
         </div>
       )}
     </div>
