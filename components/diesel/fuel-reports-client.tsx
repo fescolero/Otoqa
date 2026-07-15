@@ -607,16 +607,14 @@ export function FuelReportsClient() {
 
   // Avg $/gal is a RATIO, not a subtotal — blending products (diesel
   // ~$5.50 vs DEF ~$3.50) yields a number that is true for neither and
-  // moves with the purchase mix, not with prices. It only renders when
-  // the current scope holds exactly one product; otherwise the card
-  // points the user at the Fuel type filter.
-  const singleType = fuelTypeShare.length === 1 ? fuelTypeShare[0] : null;
-  const ppgValue = singleType ? singleType.avgPricePerGallon : null;
-  const ppgScopeLabel = singleType
-    ? fuelProductLabel(singleType.fuelType)
-    : fuelTypeShare.length === 0
-      ? 'no purchases in range'
-      : 'mixed types — filter by fuel type';
+  // moves with the purchase mix, not with prices. So the card never
+  // blends: one product in scope → big number + trend spark; several →
+  // one weighted average PER product (ordered by spend).
+  const ppgList = fuelTypeShare.map((t) => ({
+    fuelType: t.fuelType,
+    avg: t.avgPricePerGallon,
+  }));
+  const singleType = ppgList.length === 1 ? ppgList[0] : null;
   const priceSpark = singleType
     ? trendBuckets
         .map((b) => b.ppgByType[singleType.fuelType])
@@ -708,8 +706,7 @@ export function FuelReportsClient() {
               totalGallons={totalGallons}
               totalEntries={totalEntries}
               iftaGallons={iftaGallons}
-              ppgValue={ppgValue}
-              ppgScopeLabel={ppgScopeLabel}
+              ppgList={ppgList}
               spendDeltaPct={spendDeltaPct}
               gallonsDeltaPct={gallonsDeltaPct}
               entriesDeltaPct={entriesDeltaPct}
@@ -899,8 +896,7 @@ function OverviewView({
   totalGallons,
   totalEntries,
   iftaGallons,
-  ppgValue,
-  ppgScopeLabel,
+  ppgList,
   spendDeltaPct,
   gallonsDeltaPct,
   entriesDeltaPct,
@@ -922,8 +918,7 @@ function OverviewView({
   totalGallons: number;
   totalEntries: number;
   iftaGallons: number;
-  ppgValue: number | null;
-  ppgScopeLabel: string;
+  ppgList: Array<{ fuelType: FuelProduct; avg: number }>;
   spendDeltaPct: number;
   gallonsDeltaPct: number;
   entriesDeltaPct: number;
@@ -975,14 +970,18 @@ function OverviewView({
           spark={gallonSpark}
           color="var(--accent)"
         />
-        <KpiCard
-          label="Avg price / gal"
-          value={ppgValue != null ? `$${ppgValue.toFixed(3)}` : '—'}
-          delta={ppgScopeLabel}
-          tone="neutral"
-          spark={priceSpark}
-          color="#A66800"
-        />
+        {ppgList.length > 1 ? (
+          <PpgBreakdownCard items={ppgList} />
+        ) : (
+          <KpiCard
+            label="Avg price / gal"
+            value={ppgList.length === 1 ? `$${ppgList[0].avg.toFixed(3)}` : '—'}
+            delta={ppgList.length === 1 ? fuelProductLabel(ppgList[0].fuelType) : 'no purchases in range'}
+            tone="neutral"
+            spark={priceSpark}
+            color="#A66800"
+          />
+        )}
         <KpiCard
           label="Purchases"
           value={frN(totalEntries)}
@@ -1061,6 +1060,56 @@ function OverviewView({
         >
           <IftaSnapshot totalGallons={iftaGallons} />
         </DSCard>
+      </div>
+    </div>
+  );
+}
+
+// ─── Avg $/gal breakdown card ──────────────────────────────────────────
+// KPI-row variant used when the scope holds several fuel products: one
+// weighted average PER product (ordered by spend, dot in the product's
+// series color) — never a blended figure, which would move with the
+// purchase mix rather than with prices. Shows the top three; the full
+// list lives in the Spend-by-fuel-type card below.
+function PpgBreakdownCard({
+  items,
+}: {
+  items: Array<{ fuelType: FuelProduct; avg: number }>;
+}) {
+  const shown = items.slice(0, 3);
+  const more = items.length - shown.length;
+  return (
+    <div
+      className="rounded-xl border bg-card"
+      style={{ borderColor: 'var(--border-hairline)', padding: '14px 16px' }}
+    >
+      <div className="tw-label text-[10.5px] text-[var(--text-tertiary)] truncate">
+        Avg price / gal
+      </div>
+      <div className="mt-2 flex flex-col gap-1">
+        {shown.map((it) => (
+          <div key={it.fuelType} className="flex items-center gap-1.5 min-w-0">
+            <span
+              aria-hidden
+              className="shrink-0"
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 2,
+                background: FUEL_PRODUCT_COLORS[it.fuelType],
+              }}
+            />
+            <span className="flex-1 text-[11.5px] text-[var(--text-secondary)] truncate">
+              {fuelProductLabel(it.fuelType)}
+            </span>
+            <span className="num text-[13.5px] font-semibold">${it.avg.toFixed(3)}</span>
+          </div>
+        ))}
+        {more > 0 && (
+          <div className="text-[11px] text-[var(--text-tertiary)]">
+            +{more} more in “Spend by fuel type”
+          </div>
+        )}
       </div>
     </div>
   );
