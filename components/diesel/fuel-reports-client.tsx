@@ -445,7 +445,7 @@ export function FuelReportsClient() {
       label: string;
       spend: number;
       byType: Partial<Record<FuelProduct, number>>;
-      ppgSum: number;
+      gallonsByType: Partial<Record<FuelProduct, number>>;
       entries: number;
     };
 
@@ -456,7 +456,7 @@ export function FuelReportsClient() {
       while (cur <= range.end) {
         const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}`;
         const label = cur.toLocaleDateString('en-US', { month: 'short' });
-        buckets.set(key, { key, label, spend: 0, byType: {}, ppgSum: 0, entries: 0 });
+        buckets.set(key, { key, label, spend: 0, byType: {}, gallonsByType: {}, entries: 0 });
         cur.setMonth(cur.getMonth() + 1);
       }
     } else {
@@ -468,7 +468,7 @@ export function FuelReportsClient() {
       while (cur <= range.end) {
         const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`;
         const label = cur.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        buckets.set(key, { key, label, spend: 0, byType: {}, ppgSum: 0, entries: 0 });
+        buckets.set(key, { key, label, spend: 0, byType: {}, gallonsByType: {}, entries: 0 });
         cur.setDate(cur.getDate() + 7);
       }
     }
@@ -490,20 +490,27 @@ export function FuelReportsClient() {
       if (!cur) continue; // entry outside the enumerated range (shouldn't happen).
       cur.spend += e.totalCost;
       cur.byType[e.fuelType] = (cur.byType[e.fuelType] ?? 0) + e.totalCost;
-      cur.ppgSum += e.pricePerGallon;
+      cur.gallonsByType[e.fuelType] = (cur.gallonsByType[e.fuelType] ?? 0) + e.gallons;
       cur.entries += 1;
     }
 
-    // Step 3 — sort + project to chart shape. ppg is `null` for empty
-    // buckets so the price line skips them instead of collapsing to 0.
+    // Step 3 — sort + project to chart shape. Per-product $/gal is
+    // gallons-weighted (cost ÷ gallons), one value per product per
+    // bucket; products absent from a bucket just have no point there.
     return [...buckets.values()]
       .sort((a, b) => a.key.localeCompare(b.key))
-      .map((b) => ({
-        label: b.label,
-        spend: b.spend,
-        byType: b.byType,
-        ppg: b.entries > 0 ? b.ppgSum / b.entries : null,
-      }));
+      .map((b) => {
+        const ppgByType: Partial<Record<FuelProduct, number>> = {};
+        for (const [t, gal] of Object.entries(b.gallonsByType) as Array<[FuelProduct, number]>) {
+          if (gal > 0) ppgByType[t] = (b.byType[t] ?? 0) / gal;
+        }
+        return {
+          label: b.label,
+          spend: b.spend,
+          byType: b.byType,
+          ppgByType,
+        };
+      });
   }, [filteredEntries, range.start, range.end, range.granularity]);
 
   // Exception classifier — counts per rule, computed from filtered entries.
@@ -904,7 +911,7 @@ function OverviewView({
   priceSpark: number[];
   byVendor: Array<{ vendorId: string; vendorName: string; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   byFuelType: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
-  trendBuckets: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppg: number | null }>;
+  trendBuckets: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
   exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
   rawEntries: RawEntry[];
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
@@ -1168,19 +1175,21 @@ function ChartLegend({ items }: { items: Array<{ color: string; label: string; d
   );
 }
 
-// ─── Combo chart (grouped spend bars + price line) ──────────────────────
+// ─── Combo chart (grouped spend bars + per-product price lines) ─────────
 // Each bucket renders one bar per fuel product SIDE BY SIDE (grouped, not
 // stacked), in fixed FUEL_PRODUCT_ORDER with fixed colors. Every product
 // keeps the same position within its group across buckets so the eye can
-// track a series even when a bucket skips it. Buckets with no activity
-// (spend=0, ppg=null) still render: their group is just empty (so the
-// x-axis label remains anchored) and the price line skips that point so
-// it doesn't dip to 0.
+// track a series even when a bucket skips it. One dashed $/gal trend line
+// per product (gallons-weighted, in the product's color) — a blended
+// average would move with the product MIX, not with prices. Lines connect
+// across buckets where the product wasn't purchased, so sparse data still
+// reads as a trend; dots mark the buckets with real data. Buckets with no
+// activity at all still render so their x-axis label stays anchored.
 function ComboChart({
   data,
   products,
 }: {
-  data: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppg: number | null }>;
+  data: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
   products: FuelProduct[];
 }) {
   const W = 620;
@@ -1196,9 +1205,13 @@ function ComboChart({
   // bucket total — each bar starts at the baseline.
   const maxSpend =
     Math.max(...data.flatMap((d) => products.map((t) => d.byType[t] ?? 0))) * 1.1 || 1;
-  // Only consider non-null ppgs for the y-axis range; otherwise empty
-  // buckets squash the visible band of price values.
-  const livePpgs = data.map((d) => d.ppg).filter((v): v is number => v != null);
+  // Price scale spans every product's observed $/gal so all trend lines
+  // share one hidden scale; only real data points contribute.
+  const livePpgs = data.flatMap((d) =>
+    products
+      .map((t) => d.ppgByType[t])
+      .filter((v): v is number => v != null),
+  );
   const ppgMin = livePpgs.length > 0 ? Math.min(...livePpgs) - 0.06 : 0;
   const ppgMax = livePpgs.length > 0 ? Math.max(...livePpgs) + 0.06 : 1;
   const ppgSpan = ppgMax - ppgMin || 1;
@@ -1210,24 +1223,25 @@ function ComboChart({
   const subSlot = groupW / seriesCount;
   const subBarW = Math.max(subSlot - 2, 2);
 
-  // Build the price-line path as connected segments across the non-null
-  // points. Each consecutive run becomes a moveTo + multiple lineTo's.
-  const linePts: Array<{ x: number; y: number } | null> = data.map((d, i) => {
-    if (d.ppg == null) return null;
-    const x = padL + slot * i + slot / 2;
-    const y = padT + chartH - ((d.ppg - ppgMin) / ppgSpan) * chartH;
-    return { x, y };
+  // One trend line per product: collect that product's data points
+  // (buckets where it was purchased) and connect them in order — gaps
+  // are bridged so the line reads as a continuous trend.
+  const priceLines = products.map((t) => {
+    const pts = data.flatMap((d, i) => {
+      const v = d.ppgByType[t];
+      if (v == null) return [];
+      return [{
+        x: padL + slot * i + slot / 2,
+        y: padT + chartH - ((v - ppgMin) / ppgSpan) * chartH,
+        label: d.label,
+        value: v,
+      }];
+    });
+    const path = pts
+      .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+      .join(' ');
+    return { product: t, pts, path };
   });
-  let line = '';
-  let inSegment = false;
-  for (const p of linePts) {
-    if (p == null) {
-      inSegment = false;
-      continue;
-    }
-    line += `${inSegment ? ' L ' : ' M '}${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
-    inSegment = true;
-  }
   const grid = [0, 0.25, 0.5, 0.75, 1];
 
   // Density-aware label cadence: with > 8 buckets show every other label
@@ -1282,21 +1296,36 @@ function ComboChart({
             </g>
           );
         })}
-        <path
-          d={line}
-          fill="none"
-          stroke={PRICE_LINE_COLOR}
-          strokeWidth={2}
-          strokeDasharray="4 2"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          vectorEffect="non-scaling-stroke"
-        />
-        {linePts.map((p, i) =>
-          p ? (
-            <circle key={i} cx={p.x} cy={p.y} r={2.4} fill={PRICE_LINE_COLOR} vectorEffect="non-scaling-stroke" />
-          ) : null,
-        )}
+        {priceLines.map(({ product, pts, path }) => (
+          <g key={product}>
+            {pts.length > 1 && (
+              <path
+                d={path}
+                fill="none"
+                stroke={FUEL_PRODUCT_COLORS[product]}
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
+            {pts.map((p, i) => (
+              <circle
+                key={i}
+                cx={p.x}
+                cy={p.y}
+                r={2.2}
+                fill={FUEL_PRODUCT_COLORS[product]}
+                stroke="var(--bg-surface)"
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+              >
+                <title>{`${p.label} · ${fuelProductLabel(product)}: $${p.value.toFixed(3)}/gal`}</title>
+              </circle>
+            ))}
+          </g>
+        ))}
       </svg>
       <div className="flex justify-between mt-1.5">
         {data.map((d, i) => {
