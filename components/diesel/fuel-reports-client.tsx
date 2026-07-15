@@ -394,22 +394,21 @@ export function FuelReportsClient() {
   const totals = summary?.totals;
   let totalSpend: number;
   let totalGallons: number;
-  let avgPpg: number;
+  let totalEntries: number;
   if (anyChip) {
     totalSpend = filteredEntries.reduce((s, e) => s + (e.totalCost ?? 0), 0);
     totalGallons = filteredEntries.reduce((s, e) => s + (e.gallons ?? 0), 0);
-    avgPpg = totalGallons > 0 ? totalSpend / totalGallons : 0;
+    totalEntries = filteredEntries.length;
   } else {
     totalSpend = (totals?.totalFuelCost ?? 0) + (totals?.totalDefCost ?? 0);
     totalGallons = (totals?.totalFuelGallons ?? 0) + (totals?.totalDefGallons ?? 0);
-    avgPpg = totalGallons > 0 ? totalSpend / totalGallons : 0;
+    totalEntries = (totals?.totalFuelEntries ?? 0) + (totals?.totalDefEntries ?? 0);
   }
   // IFTA cares about road fuel only — DEF is an additive, never a
   // taxable gallon, so the IFTA surfaces get a DEF-free figure.
   const iftaGallons = anyChip
     ? filteredEntries.reduce((s, e) => (e.fuelType === 'DEF' ? s : s + (e.gallons ?? 0)), 0)
     : (totals?.totalFuelGallons ?? 0);
-  const months = summary?.months ?? [];
 
   // Prior-period totals → deltas. We can only compare apples-to-apples
   // when no filter is active (the prior summary is org-wide); skip
@@ -417,22 +416,10 @@ export function FuelReportsClient() {
   const prior = priorSummary?.totals;
   const priorSpend = anyChip ? 0 : (prior?.totalFuelCost ?? 0) + (prior?.totalDefCost ?? 0);
   const priorGallons = anyChip ? 0 : (prior?.totalFuelGallons ?? 0) + (prior?.totalDefGallons ?? 0);
-  const priorPpg = priorGallons > 0 ? priorSpend / priorGallons : 0;
+  const priorEntries = anyChip ? 0 : (prior?.totalFuelEntries ?? 0) + (prior?.totalDefEntries ?? 0);
   const spendDeltaPct = priorSpend > 0 ? ((totalSpend - priorSpend) / priorSpend) * 100 : 0;
   const gallonsDeltaPct = priorGallons > 0 ? ((totalGallons - priorGallons) / priorGallons) * 100 : 0;
-  const ppgDeltaAbs = priorPpg > 0 ? avgPpg - priorPpg : 0;
-
-  // Sparkline data — combined fuel + DEF across months.
-  const spendSpark = months.map((m: { fuelCost: number; defCost: number }) => m.fuelCost + m.defCost);
-  const gallonSpark = months.map(
-    (m: { fuelGallons: number; defGallons: number }) => m.fuelGallons + m.defGallons,
-  );
-  const priceSpark = months.map(
-    (m: { fuelCost: number; defCost: number; fuelGallons: number; defGallons: number }) => {
-      const gal = m.fuelGallons + m.defGallons;
-      return gal > 0 ? (m.fuelCost + m.defCost) / gal : 0;
-    },
-  );
+  const entriesDeltaPct = priorEntries > 0 ? ((totalEntries - priorEntries) / priorEntries) * 100 : 0;
 
   // ─── Trend buckets ────────────────────────────────────────────────────
   // The chart enumerates EVERY bucket in the selected range up-front so
@@ -507,6 +494,8 @@ export function FuelReportsClient() {
         return {
           label: b.label,
           spend: b.spend,
+          gallons: Object.values(b.gallonsByType).reduce((s, g) => s + (g ?? 0), 0),
+          entries: b.entries,
           byType: b.byType,
           ppgByType,
         };
@@ -610,6 +599,30 @@ export function FuelReportsClient() {
       .sort((a, b) => b.totalCost - a.totalCost);
   }, [anyChip, byFuelType, filteredEntries]);
 
+  // Sparklines track the ON-SCREEN scope (range + filters) via the trend
+  // buckets, so the little curves always agree with the big numbers.
+  const spendSpark = trendBuckets.map((b) => b.spend);
+  const gallonSpark = trendBuckets.map((b) => b.gallons);
+  const entriesSpark = trendBuckets.map((b) => b.entries);
+
+  // Avg $/gal is a RATIO, not a subtotal — blending products (diesel
+  // ~$5.50 vs DEF ~$3.50) yields a number that is true for neither and
+  // moves with the purchase mix, not with prices. It only renders when
+  // the current scope holds exactly one product; otherwise the card
+  // points the user at the Fuel type filter.
+  const singleType = fuelTypeShare.length === 1 ? fuelTypeShare[0] : null;
+  const ppgValue = singleType ? singleType.avgPricePerGallon : null;
+  const ppgScopeLabel = singleType
+    ? fuelProductLabel(singleType.fuelType)
+    : fuelTypeShare.length === 0
+      ? 'no purchases in range'
+      : 'mixed types — filter by fuel type';
+  const priceSpark = singleType
+    ? trendBuckets
+        .map((b) => b.ppgByType[singleType.fuelType])
+        .filter((v): v is number => v != null)
+    : [];
+
   // ─── Tab views ────────────────────────────────────────────────────────
   const views: SavedView[] = [
     { id: 'overview', label: 'Overview' },
@@ -693,13 +706,16 @@ export function FuelReportsClient() {
               range={range}
               totalSpend={totalSpend}
               totalGallons={totalGallons}
+              totalEntries={totalEntries}
               iftaGallons={iftaGallons}
-              avgPpg={avgPpg}
+              ppgValue={ppgValue}
+              ppgScopeLabel={ppgScopeLabel}
               spendDeltaPct={spendDeltaPct}
               gallonsDeltaPct={gallonsDeltaPct}
-              ppgDeltaAbs={ppgDeltaAbs}
+              entriesDeltaPct={entriesDeltaPct}
               spendSpark={spendSpark}
               gallonSpark={gallonSpark}
+              entriesSpark={entriesSpark}
               priceSpark={priceSpark}
               byVendor={vendorShare}
               byFuelType={fuelTypeShare}
@@ -881,13 +897,16 @@ function OverviewView({
   range,
   totalSpend,
   totalGallons,
+  totalEntries,
   iftaGallons,
-  avgPpg,
+  ppgValue,
+  ppgScopeLabel,
   spendDeltaPct,
   gallonsDeltaPct,
-  ppgDeltaAbs,
+  entriesDeltaPct,
   spendSpark,
   gallonSpark,
+  entriesSpark,
   priceSpark,
   byVendor,
   byFuelType,
@@ -901,17 +920,20 @@ function OverviewView({
   range: RangeOption;
   totalSpend: number;
   totalGallons: number;
+  totalEntries: number;
   iftaGallons: number;
-  avgPpg: number;
+  ppgValue: number | null;
+  ppgScopeLabel: string;
   spendDeltaPct: number;
   gallonsDeltaPct: number;
-  ppgDeltaAbs: number;
+  entriesDeltaPct: number;
   spendSpark: number[];
   gallonSpark: number[];
+  entriesSpark: number[];
   priceSpark: number[];
   byVendor: Array<{ vendorId: string; vendorName: string; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   byFuelType: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
-  trendBuckets: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
+  trendBuckets: Array<{ label: string; spend: number; gallons: number; entries: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
   exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
   rawEntries: RawEntry[];
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
@@ -920,8 +942,6 @@ function OverviewView({
 }) {
   const fmtPct = (p: number) =>
     `${p > 0 ? '+' : ''}${p.toFixed(1)}% vs prior period`;
-  const fmtPpgDelta = (d: number) =>
-    `${d > 0 ? '+' : '−'}$${Math.abs(d).toFixed(2)} vs prior period`;
 
   // Products with spend in the visible range — drives both the stack
   // order and the legend, in canonical order (never data-order, so the
@@ -932,9 +952,14 @@ function OverviewView({
 
   return (
     <div className="flex flex-col gap-4">
+      {/* KPI row — totals only. Spend / gallons / purchases are true
+          subtotals: they re-scope cleanly under any filter combination.
+          Avg $/gal is the one ratio, and it only shows a value when the
+          scope is a single product — a blended figure would give a false
+          notion of price. */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
         <KpiCard
-          label="Total fuel & DEF spend"
+          label="Total spend"
           value={frMoney(totalSpend)}
           delta={spendDeltaPct === 0 ? range.label : fmtPct(spendDeltaPct)}
           // Higher spend reads as a negative signal.
@@ -945,26 +970,25 @@ function OverviewView({
         <KpiCard
           label="Gallons purchased"
           value={frN(totalGallons)}
-          delta={gallonsDeltaPct === 0 ? 'fuel + DEF' : fmtPct(gallonsDeltaPct)}
-          tone={gallonsDeltaPct === 0 ? 'neutral' : 'neutral'}
+          delta={gallonsDeltaPct === 0 ? 'all products in scope' : fmtPct(gallonsDeltaPct)}
+          tone="neutral"
           spark={gallonSpark}
           color="var(--accent)"
         />
         <KpiCard
           label="Avg price / gal"
-          value={avgPpg > 0 ? `$${avgPpg.toFixed(3)}` : '—'}
-          delta={ppgDeltaAbs === 0 ? '' : fmtPpgDelta(ppgDeltaAbs)}
-          // Higher price reads as a negative signal.
-          tone={ppgDeltaAbs === 0 ? 'neutral' : ppgDeltaAbs > 0 ? 'down' : 'up'}
+          value={ppgValue != null ? `$${ppgValue.toFixed(3)}` : '—'}
+          delta={ppgScopeLabel}
+          tone="neutral"
           spark={priceSpark}
           color="#A66800"
         />
         <KpiCard
-          label="Fleet economy"
-          value={`${FLEET_MPG} mpg`}
-          delta="$0.658 / mi"
+          label="Purchases"
+          value={frN(totalEntries)}
+          delta={entriesDeltaPct === 0 ? range.label : fmtPct(entriesDeltaPct)}
           tone="neutral"
-          spark={[6.2, 6.3, 6.2, 6.4, 6.3, 6.5, 6.4, 6.4]}
+          spark={entriesSpark}
           color="#0F8C5F"
         />
       </div>
@@ -1453,6 +1477,16 @@ interface RawEntry {
   receiptStorageId?: string;
 }
 
+type PurchaseSortKey =
+  | 'date'
+  | 'vendor'
+  | 'type'
+  | 'driver'
+  | 'gallons'
+  | 'ppg'
+  | 'total'
+  | 'payment';
+
 function FuelPurchasesTable({
   entries,
   onOpenEntry,
@@ -1460,16 +1494,62 @@ function FuelPurchasesTable({
   entries: RawEntry[];
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
 }) {
-  // Sort newest first, cap at 50 for the in-card view (the full ledger is
-  // already linked elsewhere via the Diesel tab).
+  // Sortable columns — default newest first. Sorting runs over the FULL
+  // loaded pool before the 50-row cap, so "top 50 by total" etc. is
+  // meaningful, not just a reorder of the newest 50.
+  const [sortKey, setSortKey] = React.useState<PurchaseSortKey>('date');
+  const [sortDir, setSortDir] = React.useState<'asc' | 'desc'>('desc');
+
+  const onSort = (key: PurchaseSortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      // Numbers and dates start with the big/new end first; text starts A→Z.
+      setSortDir(
+        key === 'date' || key === 'gallons' || key === 'ppg' || key === 'total' ? 'desc' : 'asc',
+      );
+    }
+  };
+
   const rows = React.useMemo(() => {
-    return [...entries].sort((a, b) => b.entryDate - a.entryDate).slice(0, 50);
-  }, [entries]);
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const cmp = (a: RawEntry, b: RawEntry): number => {
+      switch (sortKey) {
+        case 'date':    return a.entryDate - b.entryDate;
+        case 'vendor':  return a.vendorName.localeCompare(b.vendorName);
+        // Canonical product order (Diesel, DEF, …) rather than
+        // alphabetical, so the grouping matches the rest of the page.
+        case 'type':    return FUEL_PRODUCT_ORDER.indexOf(a.fuelType) - FUEL_PRODUCT_ORDER.indexOf(b.fuelType);
+        case 'driver':  return (a.driverName ?? '').localeCompare(b.driverName ?? '');
+        case 'gallons': return a.gallons - b.gallons;
+        case 'ppg':     return a.pricePerGallon - b.pricePerGallon;
+        case 'total':   return a.totalCost - b.totalCost;
+        case 'payment': return (a.paymentMethod ?? '').localeCompare(b.paymentMethod ?? '');
+      }
+    };
+    return [...entries]
+      .sort((a, b) => {
+        const c = cmp(a, b);
+        // Tie-break newest first so equal keys stay in a stable, useful order.
+        return c !== 0 ? dir * c : b.entryDate - a.entryDate;
+      })
+      .slice(0, 50);
+  }, [entries, sortKey, sortDir]);
   const sumGal = rows.reduce((s, r) => s + r.gallons, 0);
   const sumTotal = rows.reduce((s, r) => s + r.totalCost, 0);
 
   const grid = '92px 1.5fr 122px 1.4fr 84px 80px 96px 1fr';
-  const cols = ['Date', 'Vendor · location', 'Type', 'Driver · truck', 'Gallons', '$/gal', 'Total', 'Payment'];
+  const cols: Array<{ key: PurchaseSortKey; label: string; right?: boolean }> = [
+    { key: 'date',    label: 'Date' },
+    { key: 'vendor',  label: 'Vendor · location' },
+    { key: 'type',    label: 'Type' },
+    { key: 'driver',  label: 'Driver · truck' },
+    { key: 'gallons', label: 'Gallons', right: true },
+    { key: 'ppg',     label: '$/gal',   right: true },
+    { key: 'total',   label: 'Total',   right: true },
+    { key: 'payment', label: 'Payment' },
+  ];
 
   return (
     <DSCard
@@ -1494,19 +1574,31 @@ function FuelPurchasesTable({
           borderBottom: '1px solid var(--border-hairline)',
         }}
       >
-        {cols.map((c, i) => (
-          <div
-            key={c}
-            className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase"
-            style={{
-              padding: '9px 14px',
-              letterSpacing: 0.04,
-              textAlign: i >= 4 && i <= 6 ? 'right' : 'left',
-            }}
-          >
-            {c}
-          </div>
-        ))}
+        {cols.map((c) => {
+          const active = sortKey === c.key;
+          return (
+            <button
+              key={c.key}
+              type="button"
+              onClick={() => onSort(c.key)}
+              title={`Sort by ${c.label}`}
+              className="focus-ring flex items-center gap-1 text-[11px] font-semibold uppercase cursor-pointer"
+              style={{
+                padding: '9px 14px',
+                letterSpacing: 0.04,
+                justifyContent: c.right ? 'flex-end' : 'flex-start',
+                background: 'transparent',
+                border: 'none',
+                color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+              }}
+            >
+              {c.label}
+              {active && (
+                <WIcon name={sortDir === 'asc' ? 'sort-asc' : 'sort-desc'} size={11} />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {rows.length === 0 ? (
