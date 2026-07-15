@@ -1265,6 +1265,10 @@ function ComboChart({
   data: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
   products: FuelProduct[];
 }) {
+  // Instant hover tooltip — the hit target is the FULL bucket column
+  // (not the thin bar), and the tooltip is our own layer, so there is
+  // no native-title hover delay.
+  const [hoverIdx, setHoverIdx] = React.useState<number | null>(null);
   const W = 620;
   const H = 188;
   const padT = 10;
@@ -1322,12 +1326,13 @@ function ComboChart({
   const labelCadence = n > 8 ? 2 : 1;
 
   return (
-    <div>
+    <div style={{ position: 'relative' }}>
       <svg
         width="100%"
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="none"
         style={{ display: 'block', height: 188 }}
+        onMouseLeave={() => setHoverIdx(null)}
       >
         {grid.map((g, i) => (
           <line
@@ -1341,6 +1346,15 @@ function ComboChart({
             vectorEffect="non-scaling-stroke"
           />
         ))}
+        {hoverIdx != null && (
+          <rect
+            x={padL + slot * hoverIdx}
+            y={padT}
+            width={slot}
+            height={chartH}
+            fill="var(--bg-row-hover)"
+          />
+        )}
         {data.map((d, i) => {
           if (d.spend <= 0) return null;
           const x0 = padL + slot * i + (slot - groupW) / 2;
@@ -1361,9 +1375,7 @@ function ComboChart({
                     height={h}
                     rx={1.5}
                     fill={FUEL_PRODUCT_COLORS[t]}
-                  >
-                    <title>{`${d.label} · ${fuelProductLabel(t)}: ${frMoney(v)}`}</title>
-                  </rect>
+                  />
                 );
               })}
             </g>
@@ -1393,13 +1405,25 @@ function ComboChart({
                 stroke="var(--bg-surface)"
                 strokeWidth={1}
                 vectorEffect="non-scaling-stroke"
-              >
-                <title>{`${p.label} · ${fuelProductLabel(product)}: $${p.value.toFixed(3)}/gal`}</title>
-              </circle>
+              />
             ))}
           </g>
         ))}
+        {/* Hover hit targets — one transparent rect per bucket, full
+            chart height, rendered last so they sit on top of the marks. */}
+        {data.map((_, i) => (
+          <rect
+            key={i}
+            x={padL + slot * i}
+            y={0}
+            width={slot}
+            height={H}
+            fill="transparent"
+            onMouseEnter={() => setHoverIdx(i)}
+          />
+        ))}
       </svg>
+      {hoverIdx != null && <ComboTooltip data={data} products={products} idx={hoverIdx} W={W} padL={padL} slot={slot} />}
       <div className="flex justify-between mt-1.5">
         {data.map((d, i) => {
           const show = i === 0 || i === n - 1 || i % labelCadence === 0;
@@ -1414,6 +1438,91 @@ function ComboChart({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ─── Combo chart tooltip ────────────────────────────────────────────────
+// Custom hover layer (no native-title delay): anchored to the hovered
+// bucket's center, listing each product's spend and $/gal plus the
+// bucket total. pointer-events: none so it never steals the hover.
+function ComboTooltip({
+  data,
+  products,
+  idx,
+  W,
+  padL,
+  slot,
+}: {
+  data: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppgByType: Partial<Record<FuelProduct, number>> }>;
+  products: FuelProduct[];
+  idx: number;
+  W: number;
+  padL: number;
+  slot: number;
+}) {
+  const d = data[idx];
+  if (!d) return null;
+  const n = data.length;
+  const centerPct = ((padL + slot * idx + slot / 2) / W) * 100;
+  // Flip near the edges so the tooltip never overflows the card.
+  const transform =
+    idx <= 1 ? 'translateX(-12%)' : idx >= n - 2 ? 'translateX(-88%)' : 'translateX(-50%)';
+  const rows = products.filter((t) => (d.byType[t] ?? 0) > 0);
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: `${centerPct}%`,
+        top: 4,
+        transform,
+        zIndex: 30,
+        pointerEvents: 'none',
+        background: 'var(--bg-surface)',
+        border: '1px solid var(--border-strong)',
+        borderRadius: 8,
+        boxShadow: 'var(--shadow-popover)',
+        padding: '8px 10px',
+        minWidth: 178,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <div className="flex items-baseline justify-between gap-4">
+        <span className="num text-[11.5px] font-semibold">{d.label}</span>
+        <span className="num text-[11.5px] font-semibold">{frMoney(d.spend)}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="text-[11px] text-[var(--text-tertiary)] mt-1">No purchases</div>
+      ) : (
+        <div className="mt-1.5 flex flex-col gap-1">
+          {rows.map((t) => {
+            const ppg = d.ppgByType[t];
+            return (
+              <div key={t} className="flex items-center gap-1.5">
+                <span
+                  aria-hidden
+                  className="shrink-0"
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: FUEL_PRODUCT_COLORS[t],
+                  }}
+                />
+                <span className="text-[11px] text-[var(--text-secondary)]" style={{ minWidth: 64 }}>
+                  {fuelProductLabel(t)}
+                </span>
+                <span className="num text-[11.5px] font-semibold" style={{ marginLeft: 'auto' }}>
+                  {frMoney(d.byType[t] ?? 0)}
+                </span>
+                <span className="num text-[10.5px] text-[var(--text-tertiary)]" style={{ width: 64, textAlign: 'right' }}>
+                  {ppg != null ? `$${ppg.toFixed(3)}/gal` : ''}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
