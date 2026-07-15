@@ -31,6 +31,14 @@ export const FUEL_TYPE_LABELS: Record<FuelType, string> = {
   OTHER: 'Other',
 };
 
+/** What the fuel REPORT can show per row/bucket: every storable fuel
+ *  type plus DEF (sourced from the defEntries table, not fuelEntries). */
+export type FuelProduct = FuelType | 'DEF';
+
+export function fuelProductLabel(product: FuelProduct): string {
+  return product === 'DEF' ? 'DEF' : FUEL_TYPE_LABELS[product];
+}
+
 export const fuelTypeValidator = v.union(
   v.literal('DIESEL'),
   v.literal('DYED_DIESEL'),

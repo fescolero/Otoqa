@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg } from './lib/auth';
-import { DEFAULT_FUEL_TYPE, type FuelType } from './lib/fuelTypes';
+import { DEFAULT_FUEL_TYPE, type FuelProduct } from './lib/fuelTypes';
 
 export const fuelByDriver = query({
   args: {
@@ -158,14 +158,27 @@ export const fuelByVendor = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
-    const entries = await ctx.db
-      .query('fuelEntries')
-      .withIndex('by_organization_and_date', (q) =>
-        q.eq('organizationId', args.organizationId)
-          .gte('entryDate', args.dateRangeStart)
-          .lte('entryDate', args.dateRangeEnd)
-      )
-      .collect();
+    // Vendor spend covers every product bought at the pump — fuel AND
+    // DEF — so the card's total matches the report's headline spend.
+    const [fuelEntriesList, defEntriesList] = await Promise.all([
+      ctx.db
+        .query('fuelEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+      ctx.db
+        .query('defEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+    ]);
+    const entries = [...fuelEntriesList, ...defEntriesList];
 
     const byVendor: Record<string, { gallons: number; totalCost: number; entries: number }> = {};
 
@@ -205,31 +218,47 @@ export const fuelByType = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
-    const entries = await ctx.db
-      .query('fuelEntries')
-      .withIndex('by_organization_and_date', (q) =>
-        q.eq('organizationId', args.organizationId)
-          .gte('entryDate', args.dateRangeStart)
-          .lte('entryDate', args.dateRangeEnd)
-      )
-      .collect();
+    const [entries, defEntriesList] = await Promise.all([
+      ctx.db
+        .query('fuelEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+      ctx.db
+        .query('defEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+    ]);
 
     // Rows created before the fuelType field existed count as diesel.
+    // DEF has no fuelType column at all — its table IS the type.
     const byType: Record<string, { gallons: number; totalCost: number; entries: number }> = {};
-
-    for (const entry of entries) {
-      const key: FuelType = entry.fuelType ?? DEFAULT_FUEL_TYPE;
+    const bump = (key: FuelProduct, gallons: number, totalCost: number) => {
       if (!byType[key]) {
         byType[key] = { gallons: 0, totalCost: 0, entries: 0 };
       }
-      byType[key].gallons += entry.gallons;
-      byType[key].totalCost += entry.totalCost;
+      byType[key].gallons += gallons;
+      byType[key].totalCost += totalCost;
       byType[key].entries += 1;
+    };
+
+    for (const entry of entries) {
+      bump(entry.fuelType ?? DEFAULT_FUEL_TYPE, entry.gallons, entry.totalCost);
+    }
+    for (const entry of defEntriesList) {
+      bump('DEF', entry.gallons, entry.totalCost);
     }
 
     return Object.entries(byType)
       .map(([fuelType, data]) => ({
-        fuelType: fuelType as FuelType,
+        fuelType: fuelType as FuelProduct,
         gallons: Math.round(data.gallons * 100) / 100,
         totalCost: Math.round(data.totalCost * 100) / 100,
         avgPricePerGallon: data.gallons > 0 ? Math.round((data.totalCost / data.gallons) * 1000) / 1000 : 0,

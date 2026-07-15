@@ -41,7 +41,8 @@ import {
   DEFAULT_FUEL_TYPE,
   FUEL_TYPES,
   FUEL_TYPE_LABELS,
-  type FuelType,
+  fuelProductLabel,
+  type FuelProduct,
 } from '@/convex/lib/fuelTypes';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
@@ -190,11 +191,12 @@ export function FuelReportsClient() {
   // Individual entries drive: weekly chart bars, exception counts, the
   // Fuel purchases table. The summary query gives us monthly aggregates
   // only — for weekly granularity + per-entry exception classification we
-  // need the raw rows. Capped at 500; if the range exceeds that we still
-  // get correct totals from the summary query above, and the per-entry
-  // surfaces show "showing 500 of N".
+  // need the raw rows. listCombined merges fuelEntries + defEntries and
+  // tags each row with its source table. Capped at 500; if the range
+  // exceeds that we still get correct totals from the summary query
+  // above, and the per-entry surfaces show "showing 500 of N".
   const entriesPage = useAuthQuery(
-    api.fuelEntries.list,
+    api.fuelEntries.listCombined,
     organizationId
       ? ({
           organizationId,
@@ -206,13 +208,20 @@ export function FuelReportsClient() {
   );
   const rawEntries = React.useMemo(() => {
     if (!entriesPage) return [];
-    return ((entriesPage as { page: Array<Record<string, unknown>> }).page ?? []).map((e) => ({
+    return ((entriesPage as { page: Array<Record<string, unknown>> }).page ?? []).map((e) => {
+      const entryType = ((e.type as string) ?? 'fuel') as 'fuel' | 'def';
+      return {
       _id: e._id as string,
       entryDate: e.entryDate as number,
+      // DEF rows come from their own table (no fuelType column) — the
+      // table IS the type. Fuel rows created before the fuelType field
+      // existed count as diesel.
+      type: entryType,
+      fuelType: (entryType === 'def'
+        ? 'DEF'
+        : ((e.fuelType as string) ?? DEFAULT_FUEL_TYPE)) as FuelProduct,
       vendorId: e.vendorId as string,
       vendorName: (e.vendorName as string) ?? 'Unknown',
-      // Rows created before the fuelType field existed count as diesel.
-      fuelType: ((e.fuelType as string) ?? DEFAULT_FUEL_TYPE) as FuelType,
       driverName: e.driverName as string | undefined,
       driverId: e.driverId as string | undefined,
       // carrierId comes through from the raw entry record — used by the
@@ -231,7 +240,8 @@ export function FuelReportsClient() {
       fuelCardNumber: e.fuelCardNumber as string | undefined,
       receiptUrl: e.receiptUrl as string | undefined,
       receiptStorageId: e.receiptStorageId as string | undefined,
-    }));
+      };
+    });
   }, [entriesPage]);
 
   // Lookup data for the FilterBar options.
@@ -261,10 +271,13 @@ export function FuelReportsClient() {
         icon: 'droplet',
         kind: 'enum',
         operator: 'is any of',
-        options: FUEL_TYPES.map((t) => ({
-          value: t,
-          label: FUEL_TYPE_LABELS[t],
-        })),
+        options: [
+          ...FUEL_TYPES.map((t) => ({
+            value: t as string,
+            label: FUEL_TYPE_LABELS[t],
+          })),
+          { value: 'DEF', label: 'DEF' },
+        ],
       },
       {
         id: 'driver',
@@ -358,10 +371,12 @@ export function FuelReportsClient() {
   }, [rawEntries, anyChip, driverIds, vendorIds, truckIds, carrierIds, fuelTypeIds]);
 
   // ─── KPIs (Overview) ──────────────────────────────────────────────────
-  // When no chips are active we trust the server-side aggregates (they
-  // count every entry, not just the 500-row raw page). When chips ARE
-  // active we recompute from the filtered raw entries so the KPIs match
-  // the visible chart / table.
+  // Headline totals cover EVERY product bought at the pump — fuel AND
+  // DEF — so the unfiltered page equals the sum of all Fuel type filter
+  // options. When no chips are active we trust the server-side
+  // aggregates (they count every entry, not just the 500-row raw page).
+  // When chips ARE active we recompute from the filtered raw entries so
+  // the KPIs match the visible chart / table.
   const totals = summary?.totals;
   let totalSpend: number;
   let totalGallons: number;
@@ -371,27 +386,39 @@ export function FuelReportsClient() {
     totalGallons = filteredEntries.reduce((s, e) => s + (e.gallons ?? 0), 0);
     avgPpg = totalGallons > 0 ? totalSpend / totalGallons : 0;
   } else {
-    totalSpend = totals?.totalFuelCost ?? 0;
-    totalGallons = totals?.totalFuelGallons ?? 0;
-    avgPpg = totals?.avgFuelPricePerGallon ?? 0;
+    totalSpend = (totals?.totalFuelCost ?? 0) + (totals?.totalDefCost ?? 0);
+    totalGallons = (totals?.totalFuelGallons ?? 0) + (totals?.totalDefGallons ?? 0);
+    avgPpg = totalGallons > 0 ? totalSpend / totalGallons : 0;
   }
+  // IFTA cares about road fuel only — DEF is an additive, never a
+  // taxable gallon, so the IFTA surfaces get a DEF-free figure.
+  const iftaGallons = anyChip
+    ? filteredEntries.reduce((s, e) => (e.fuelType === 'DEF' ? s : s + (e.gallons ?? 0)), 0)
+    : (totals?.totalFuelGallons ?? 0);
   const months = summary?.months ?? [];
 
   // Prior-period totals → deltas. We can only compare apples-to-apples
   // when no filter is active (the prior summary is org-wide); skip
   // deltas under a filtered scope to avoid misleading numbers.
   const prior = priorSummary?.totals;
-  const priorSpend = anyChip ? 0 : (prior?.totalFuelCost ?? 0);
-  const priorGallons = anyChip ? 0 : (prior?.totalFuelGallons ?? 0);
-  const priorPpg = anyChip ? 0 : (prior?.avgFuelPricePerGallon ?? 0);
+  const priorSpend = anyChip ? 0 : (prior?.totalFuelCost ?? 0) + (prior?.totalDefCost ?? 0);
+  const priorGallons = anyChip ? 0 : (prior?.totalFuelGallons ?? 0) + (prior?.totalDefGallons ?? 0);
+  const priorPpg = priorGallons > 0 ? priorSpend / priorGallons : 0;
   const spendDeltaPct = priorSpend > 0 ? ((totalSpend - priorSpend) / priorSpend) * 100 : 0;
   const gallonsDeltaPct = priorGallons > 0 ? ((totalGallons - priorGallons) / priorGallons) * 100 : 0;
   const ppgDeltaAbs = priorPpg > 0 ? avgPpg - priorPpg : 0;
 
-  // Sparkline data — fuelCost across months.
-  const spendSpark = months.map((m: { fuelCost: number }) => m.fuelCost);
-  const gallonSpark = months.map((m: { fuelGallons: number }) => m.fuelGallons);
-  const priceSpark = months.map((m: { avgFuelPrice: number }) => m.avgFuelPrice);
+  // Sparkline data — combined fuel + DEF across months.
+  const spendSpark = months.map((m: { fuelCost: number; defCost: number }) => m.fuelCost + m.defCost);
+  const gallonSpark = months.map(
+    (m: { fuelGallons: number; defGallons: number }) => m.fuelGallons + m.defGallons,
+  );
+  const priceSpark = months.map(
+    (m: { fuelCost: number; defCost: number; fuelGallons: number; defGallons: number }) => {
+      const gal = m.fuelGallons + m.defGallons;
+      return gal > 0 ? (m.fuelCost + m.defCost) / gal : 0;
+    },
+  );
 
   // ─── Trend buckets ────────────────────────────────────────────────────
   // The chart enumerates EVERY bucket in the selected range up-front so
@@ -465,16 +492,30 @@ export function FuelReportsClient() {
     if (filteredEntries.length === 0) {
       return { receipt: 0, offcard: 0, price: 0, unlink: 0, total: 0 };
     }
-    const PRICE_THRESHOLD = avgPpg + 0.20;
+    // Price anomalies compare within the SAME product — DEF runs a
+    // different price band than diesel, so a blended average would
+    // flag normal entries as soon as multiple products are in scope.
+    const typeAgg = new Map<FuelProduct, { cost: number; gallons: number }>();
+    for (const e of filteredEntries) {
+      const cur = typeAgg.get(e.fuelType) ?? { cost: 0, gallons: 0 };
+      cur.cost += e.totalCost ?? 0;
+      cur.gallons += e.gallons ?? 0;
+      typeAgg.set(e.fuelType, cur);
+    }
+    const avgByType = new Map<FuelProduct, number>();
+    for (const [t, agg] of typeAgg) {
+      avgByType.set(t, agg.gallons > 0 ? agg.cost / agg.gallons : 0);
+    }
     let receipt = 0, offcard = 0, price = 0, unlink = 0;
     for (const e of filteredEntries) {
       if (!e.receiptUrl && !e.receiptStorageId) receipt++;
       if (e.paymentMethod && e.paymentMethod !== 'FUEL_CARD') offcard++;
-      if (avgPpg > 0 && e.pricePerGallon > PRICE_THRESHOLD) price++;
+      const typeAvg = avgByType.get(e.fuelType) ?? 0;
+      if (typeAvg > 0 && e.pricePerGallon > typeAvg + 0.20) price++;
       if (!e.loadId) unlink++;
     }
     return { receipt, offcard, price, unlink, total: receipt + offcard + price + unlink };
-  }, [filteredEntries, avgPpg]);
+  }, [filteredEntries]);
 
   const filtersActive = filters.some((c) => c.values.length > 0);
 
@@ -517,9 +558,9 @@ export function FuelReportsClient() {
   // filtered pool when they are.
   const fuelTypeShare = React.useMemo(() => {
     if (!anyChip) {
-      return ((byFuelType ?? []) as Array<{ fuelType: FuelType; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>);
+      return ((byFuelType ?? []) as Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>);
     }
-    const m = new Map<FuelType, { fuelType: FuelType; gallons: number; totalCost: number; entries: number }>();
+    const m = new Map<FuelProduct, { fuelType: FuelProduct; gallons: number; totalCost: number; entries: number }>();
     for (const e of filteredEntries) {
       const cur = m.get(e.fuelType) ?? { fuelType: e.fuelType, gallons: 0, totalCost: 0, entries: 0 };
       cur.gallons += e.gallons;
@@ -621,6 +662,7 @@ export function FuelReportsClient() {
               range={range}
               totalSpend={totalSpend}
               totalGallons={totalGallons}
+              iftaGallons={iftaGallons}
               avgPpg={avgPpg}
               spendDeltaPct={spendDeltaPct}
               gallonsDeltaPct={gallonsDeltaPct}
@@ -642,7 +684,7 @@ export function FuelReportsClient() {
           {view === 'ifta' && (
             <IftaView
               range={range}
-              totalGallons={totalGallons}
+              totalGallons={iftaGallons}
             />
           )}
 
@@ -808,6 +850,7 @@ function OverviewView({
   range,
   totalSpend,
   totalGallons,
+  iftaGallons,
   avgPpg,
   spendDeltaPct,
   gallonsDeltaPct,
@@ -827,6 +870,7 @@ function OverviewView({
   range: RangeOption;
   totalSpend: number;
   totalGallons: number;
+  iftaGallons: number;
   avgPpg: number;
   spendDeltaPct: number;
   gallonsDeltaPct: number;
@@ -835,7 +879,7 @@ function OverviewView({
   gallonSpark: number[];
   priceSpark: number[];
   byVendor: Array<{ vendorId: string; vendorName: string; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
-  byFuelType: Array<{ fuelType: FuelType; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
+  byFuelType: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   trendBuckets: Array<{ label: string; spend: number; ppg: number | null }>;
   exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
   rawEntries: RawEntry[];
@@ -852,7 +896,7 @@ function OverviewView({
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
         <KpiCard
-          label="Total fuel spend"
+          label="Total fuel & DEF spend"
           value={frMoney(totalSpend)}
           delta={spendDeltaPct === 0 ? range.label : fmtPct(spendDeltaPct)}
           // Higher spend reads as a negative signal.
@@ -863,7 +907,7 @@ function OverviewView({
         <KpiCard
           label="Gallons purchased"
           value={frN(totalGallons)}
-          delta={gallonsDeltaPct === 0 ? 'fuel only' : fmtPct(gallonsDeltaPct)}
+          delta={gallonsDeltaPct === 0 ? 'fuel + DEF' : fmtPct(gallonsDeltaPct)}
           tone={gallonsDeltaPct === 0 ? 'neutral' : 'neutral'}
           spark={gallonSpark}
           color="var(--accent)"
@@ -950,7 +994,7 @@ function OverviewView({
           title="IFTA — net position"
           action={<span className="text-[11.5px] text-[var(--text-tertiary)]">{range.label}</span>}
         >
-          <IftaSnapshot totalGallons={totalGallons} />
+          <IftaSnapshot totalGallons={iftaGallons} />
         </DSCard>
       </div>
     </div>
@@ -1303,7 +1347,9 @@ interface RawEntry {
   entryDate: number;
   vendorId: string;
   vendorName: string;
-  fuelType: FuelType;
+  /** Source table — drives the detail-page link. */
+  type: 'fuel' | 'def';
+  fuelType: FuelProduct;
   driverName?: string;
   driverId?: string;
   truckUnitId?: string;
@@ -1385,7 +1431,7 @@ function FuelPurchasesTable({
           const dateLabel = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
           const timeLabel = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
           const locLabel = r.location ? `${r.location.city}, ${r.location.state}` : '';
-          const typeLabel = FUEL_TYPE_LABELS[r.fuelType] ?? r.fuelType;
+          const typeLabel = fuelProductLabel(r.fuelType);
           const truckLoad = [r.truckUnitId, r.loadReference ?? (r.loadId ? String(r.loadId).slice(-6) : null)]
             .filter(Boolean)
             .join(' · ');
@@ -1395,7 +1441,7 @@ function FuelPurchasesTable({
             <button
               key={r._id}
               type="button"
-              onClick={() => onOpenEntry(r._id, 'fuel')}
+              onClick={() => onOpenEntry(r._id, r.type)}
               className="grid items-center text-left cursor-pointer focus-ring"
               style={{
                 gridTemplateColumns: grid,
@@ -1507,13 +1553,13 @@ function FuelPurchasesTable({
 }
 
 // ─── Fuel-type share ───────────────────────────────────────────────────
-// One bar per fuel product (Diesel / Dyed diesel / Biodiesel / Gasoline /
-// Other). DEF is intentionally absent: it lives in defEntries and has
-// its own workflow — this report covers pump fuel only.
+// One bar per product bought at the pump: Diesel / Dyed diesel /
+// Biodiesel / Gasoline / Other from fuelEntries, plus DEF from its own
+// defEntries table.
 function FuelTypeShare({
   types,
 }: {
-  types: Array<{ fuelType: FuelType; gallons: number; totalCost: number; avgPricePerGallon: number }>;
+  types: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number }>;
 }) {
   const total = types.reduce((s, t) => s + t.totalCost, 0) || 1;
   const max = Math.max(...types.map((t) => t.totalCost), 1);
@@ -1526,7 +1572,7 @@ function FuelTypeShare({
           <div key={t.fuelType} className="flex items-center gap-2.5">
             <div className="min-w-0" style={{ width: 132 }}>
               <div className="text-[12px] font-medium truncate">
-                {FUEL_TYPE_LABELS[t.fuelType] ?? t.fuelType}
+                {fuelProductLabel(t.fuelType)}
               </div>
               <div className="num text-[10.5px] text-[var(--text-tertiary)] truncate">
                 {frN(t.gallons)} gal · ${t.avgPricePerGallon.toFixed(3)}/gal

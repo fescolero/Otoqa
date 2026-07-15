@@ -52,6 +52,26 @@ async function insertEntry(
   });
 }
 
+async function insertDefEntry(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  vendorId: Id<'fuelVendors'>,
+  opts: { entryDate: number; gallons: number; totalCost: number },
+): Promise<void> {
+  const now = Date.now();
+  await ctx.db.insert('defEntries', {
+    organizationId: ORG,
+    entryDate: opts.entryDate,
+    vendorId,
+    gallons: opts.gallons,
+    pricePerGallon: opts.totalCost / opts.gallons,
+    totalCost: opts.totalCost,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: USER,
+  });
+}
+
 describe('fuelByType', () => {
   it('separates spend by fuel type and counts untyped legacy rows as DIESEL', async () => {
     const t = convexTest(schema).withIdentity({ subject: USER, org_id: ORG });
@@ -77,12 +97,23 @@ describe('fuelByType', () => {
         totalCost: 35,
         fuelType: 'GASOLINE',
       });
+      // DEF lives in its own table and must surface as the DEF bucket.
+      await insertDefEntry(ctx, vendorId, {
+        entryDate: RANGE_START + 5_000,
+        gallons: 20,
+        totalCost: 70,
+      });
       // Out of range — must be ignored.
       await insertEntry(ctx, vendorId, {
         entryDate: RANGE_END + 100_000,
         gallons: 999,
         totalCost: 9_999,
         fuelType: 'GASOLINE',
+      });
+      await insertDefEntry(ctx, vendorId, {
+        entryDate: RANGE_END + 100_000,
+        gallons: 999,
+        totalCost: 9_999,
       });
     });
 
@@ -92,7 +123,7 @@ describe('fuelByType', () => {
       dateRangeEnd: RANGE_END,
     });
 
-    expect(results.map((r) => r.fuelType)).toEqual(['DIESEL', 'DYED_DIESEL', 'GASOLINE']);
+    expect(results.map((r) => r.fuelType)).toEqual(['DIESEL', 'DYED_DIESEL', 'DEF', 'GASOLINE']);
 
     const diesel = results[0];
     expect(diesel.gallons).toBe(150); // 100 legacy + 50 typed
@@ -105,7 +136,13 @@ describe('fuelByType', () => {
     expect(dyed.totalCost).toBe(240);
     expect(dyed.entries).toBe(1);
 
-    const gas = results[2];
+    const def = results[2];
+    expect(def.gallons).toBe(20);
+    expect(def.totalCost).toBe(70);
+    expect(def.entries).toBe(1);
+    expect(def.avgPricePerGallon).toBe(3.5);
+
+    const gas = results[3];
     expect(gas.totalCost).toBe(35);
     expect(gas.entries).toBe(1);
   });
