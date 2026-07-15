@@ -988,7 +988,7 @@ function OverviewView({
               No purchases recorded in this range.
             </p>
           ) : (
-            <ComboChart data={trendBuckets} />
+            <ComboChart data={trendBuckets} products={productsInChart} />
           )}
         </DSCard>
         <DSCard
@@ -1168,16 +1168,20 @@ function ChartLegend({ items }: { items: Array<{ color: string; label: string; d
   );
 }
 
-// ─── Combo chart (stacked spend bars + price line) ──────────────────────
-// Each bar stacks spend by fuel product (fixed FUEL_PRODUCT_ORDER, fixed
-// colors) so the mix is visible per bucket. Buckets with no activity
-// (spend=0, ppg=null) still render: their bar is just zero-height (so the
+// ─── Combo chart (grouped spend bars + price line) ──────────────────────
+// Each bucket renders one bar per fuel product SIDE BY SIDE (grouped, not
+// stacked), in fixed FUEL_PRODUCT_ORDER with fixed colors. Every product
+// keeps the same position within its group across buckets so the eye can
+// track a series even when a bucket skips it. Buckets with no activity
+// (spend=0, ppg=null) still render: their group is just empty (so the
 // x-axis label remains anchored) and the price line skips that point so
 // it doesn't dip to 0.
 function ComboChart({
   data,
+  products,
 }: {
   data: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppg: number | null }>;
+  products: FuelProduct[];
 }) {
   const W = 620;
   const H = 188;
@@ -1187,7 +1191,11 @@ function ComboChart({
   const chartH = H - 22 - padT;
   const chartW = W - padL - padR;
   const n = data.length;
-  const maxSpend = Math.max(...data.map((d) => d.spend)) * 1.1 || 1;
+  const seriesCount = Math.max(products.length, 1);
+  // Grouped bars scale to the largest SINGLE product value, not the
+  // bucket total — each bar starts at the baseline.
+  const maxSpend =
+    Math.max(...data.flatMap((d) => products.map((t) => d.byType[t] ?? 0))) * 1.1 || 1;
   // Only consider non-null ppgs for the y-axis range; otherwise empty
   // buckets squash the visible band of price values.
   const livePpgs = data.map((d) => d.ppg).filter((v): v is number => v != null);
@@ -1195,7 +1203,12 @@ function ComboChart({
   const ppgMax = livePpgs.length > 0 ? Math.max(...livePpgs) + 0.06 : 1;
   const ppgSpan = ppgMax - ppgMin || 1;
   const slot = chartW / n;
-  const barW = Math.min(slot * 0.5, 26);
+  // Group geometry: the group takes up to 72% of the slot, capped so a
+  // lone series doesn't balloon; each product gets an equal sub-slot
+  // with a 2px gap between neighbors.
+  const groupW = Math.min(slot * 0.72, seriesCount * 16, 96);
+  const subSlot = groupW / seriesCount;
+  const subBarW = Math.max(subSlot - 2, 2);
 
   // Build the price-line path as connected segments across the non-null
   // points. Each consecutive run becomes a moveTo + multiple lineTo's.
@@ -1243,28 +1256,24 @@ function ComboChart({
         ))}
         {data.map((d, i) => {
           if (d.spend <= 0) return null;
-          const x = padL + slot * i + (slot - barW) / 2;
-          // Stack bottom-up in canonical product order; a 1px surface
-          // stroke keeps adjacent segments visually separated.
-          let yCursor = padT + chartH;
+          const x0 = padL + slot * i + (slot - groupW) / 2;
           return (
             <g key={i}>
-              {FUEL_PRODUCT_ORDER.map((t) => {
+              {products.map((t, k) => {
                 const v = d.byType[t] ?? 0;
                 if (v <= 0) return null;
-                const h = (v / maxSpend) * chartH;
-                yCursor -= h;
+                const h = Math.max((v / maxSpend) * chartH, 1.5);
+                const x = x0 + k * subSlot + (subSlot - subBarW) / 2;
+                const y = padT + chartH - h;
                 return (
                   <rect
                     key={t}
                     x={x}
-                    y={yCursor}
-                    width={barW}
+                    y={y}
+                    width={subBarW}
                     height={h}
-                    rx={1}
+                    rx={1.5}
                     fill={FUEL_PRODUCT_COLORS[t]}
-                    stroke="var(--bg-surface)"
-                    strokeWidth={1}
                   >
                     <title>{`${d.label} · ${fuelProductLabel(t)}: ${frMoney(v)}`}</title>
                   </rect>
