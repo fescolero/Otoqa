@@ -39,8 +39,7 @@ import {
 import { api } from '@/convex/_generated/api';
 import {
   DEFAULT_FUEL_TYPE,
-  FUEL_TYPES,
-  FUEL_TYPE_LABELS,
+  FUEL_PRODUCT_ORDER,
   fuelProductLabel,
   type FuelProduct,
 } from '@/convex/lib/fuelTypes';
@@ -49,6 +48,24 @@ import { useOrganizationId } from '@/contexts/organization-context';
 import { exportToCSV } from '@/lib/csv-export';
 
 const FLEET_MPG = 6.4;
+
+// Fixed per-product series colors — color follows the entity, so a
+// filter that changes which products appear never repaints survivors.
+// The set was validated (CVD separation, normal-vision floor, ≥3:1
+// contrast) against both app surfaces (#FFFFFF / #12151C) in the
+// FUEL_PRODUCT_ORDER stacking order.
+const FUEL_PRODUCT_COLORS: Record<FuelProduct, string> = {
+  DIESEL: 'var(--accent)', // #2E5CFF in both themes
+  DEF: '#008300',
+  DYED_DIESEL: '#d55181',
+  BIODIESEL: '#c98500',
+  GASOLINE: '#199e70',
+  OTHER: '#9085e9',
+};
+
+// The $/gal overlay is a reference line, not a series — muted ink keeps
+// it from competing (or colliding) with the per-product bar hues.
+const PRICE_LINE_COLOR = '#898781';
 
 interface RangeOption {
   id: string;
@@ -271,13 +288,10 @@ export function FuelReportsClient() {
         icon: 'droplet',
         kind: 'enum',
         operator: 'is any of',
-        options: [
-          ...FUEL_TYPES.map((t) => ({
-            value: t as string,
-            label: FUEL_TYPE_LABELS[t],
-          })),
-          { value: 'DEF', label: 'DEF' },
-        ],
+        options: FUEL_PRODUCT_ORDER.map((t) => ({
+          value: t as string,
+          label: fuelProductLabel(t),
+        })),
       },
       {
         id: 'driver',
@@ -426,7 +440,14 @@ export function FuelReportsClient() {
   // labels intact. Without this, a sparse month produced just 3-4 bars
   // sitting inside a wide empty card.
   const trendBuckets = React.useMemo(() => {
-    type Bucket = { key: string; label: string; spend: number; ppgSum: number; entries: number };
+    type Bucket = {
+      key: string;
+      label: string;
+      spend: number;
+      byType: Partial<Record<FuelProduct, number>>;
+      ppgSum: number;
+      entries: number;
+    };
 
     // Step 1 — enumerate every bucket between range.start and range.end.
     const buckets = new Map<string, Bucket>();
@@ -435,7 +456,7 @@ export function FuelReportsClient() {
       while (cur <= range.end) {
         const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}`;
         const label = cur.toLocaleDateString('en-US', { month: 'short' });
-        buckets.set(key, { key, label, spend: 0, ppgSum: 0, entries: 0 });
+        buckets.set(key, { key, label, spend: 0, byType: {}, ppgSum: 0, entries: 0 });
         cur.setMonth(cur.getMonth() + 1);
       }
     } else {
@@ -447,12 +468,13 @@ export function FuelReportsClient() {
       while (cur <= range.end) {
         const key = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`;
         const label = cur.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        buckets.set(key, { key, label, spend: 0, ppgSum: 0, entries: 0 });
+        buckets.set(key, { key, label, spend: 0, byType: {}, ppgSum: 0, entries: 0 });
         cur.setDate(cur.getDate() + 7);
       }
     }
 
-    // Step 2 — drop each entry into its bucket.
+    // Step 2 — drop each entry into its bucket, split by product so the
+    // chart can stack spend by fuel type.
     for (const e of filteredEntries) {
       const d = new Date(e.entryDate);
       d.setHours(0, 0, 0, 0);
@@ -467,6 +489,7 @@ export function FuelReportsClient() {
       const cur = buckets.get(key);
       if (!cur) continue; // entry outside the enumerated range (shouldn't happen).
       cur.spend += e.totalCost;
+      cur.byType[e.fuelType] = (cur.byType[e.fuelType] ?? 0) + e.totalCost;
       cur.ppgSum += e.pricePerGallon;
       cur.entries += 1;
     }
@@ -478,6 +501,7 @@ export function FuelReportsClient() {
       .map((b) => ({
         label: b.label,
         spend: b.spend,
+        byType: b.byType,
         ppg: b.entries > 0 ? b.ppgSum / b.entries : null,
       }));
   }, [filteredEntries, range.start, range.end, range.granularity]);
@@ -880,7 +904,7 @@ function OverviewView({
   priceSpark: number[];
   byVendor: Array<{ vendorId: string; vendorName: string; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
   byFuelType: Array<{ fuelType: FuelProduct; gallons: number; totalCost: number; avgPricePerGallon: number; entries: number }>;
-  trendBuckets: Array<{ label: string; spend: number; ppg: number | null }>;
+  trendBuckets: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppg: number | null }>;
   exceptionCounts: { receipt: number; offcard: number; price: number; unlink: number; total: number };
   rawEntries: RawEntry[];
   onOpenEntry: (id: string, type: 'fuel' | 'def') => void;
@@ -891,6 +915,13 @@ function OverviewView({
     `${p > 0 ? '+' : ''}${p.toFixed(1)}% vs prior period`;
   const fmtPpgDelta = (d: number) =>
     `${d > 0 ? '+' : '−'}$${Math.abs(d).toFixed(2)} vs prior period`;
+
+  // Products with spend in the visible range — drives both the stack
+  // order and the legend, in canonical order (never data-order, so the
+  // colors stay stable as filters change).
+  const productsInChart = FUEL_PRODUCT_ORDER.filter((t) =>
+    trendBuckets.some((b) => (b.byType[t] ?? 0) > 0),
+  );
 
   return (
     <div className="flex flex-col gap-4">
@@ -937,8 +968,11 @@ function OverviewView({
           action={
             <ChartLegend
               items={[
-                { color: 'var(--accent)', label: 'Spend' },
-                { color: '#A66800', label: '$/gal', dashed: true },
+                ...productsInChart.map((t) => ({
+                  color: FUEL_PRODUCT_COLORS[t],
+                  label: fuelProductLabel(t),
+                })),
+                { color: PRICE_LINE_COLOR, label: '$/gal', dashed: true },
               ]}
             />
           }
@@ -1096,7 +1130,7 @@ function Sparkline({
 
 function ChartLegend({ items }: { items: Array<{ color: string; label: string; dashed?: boolean }> }) {
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex items-center gap-3 flex-wrap justify-end">
       {items.map((it, i) => (
         <span
           key={i}
@@ -1134,14 +1168,16 @@ function ChartLegend({ items }: { items: Array<{ color: string; label: string; d
   );
 }
 
-// ─── Combo chart (spend bars + price line) ──────────────────────────────
-// Buckets with no activity (spend=0, ppg=null) still render: their bar is
-// just zero-height (so the x-axis label remains anchored) and the price
-// line skips that point so it doesn't dip to 0.
+// ─── Combo chart (stacked spend bars + price line) ──────────────────────
+// Each bar stacks spend by fuel product (fixed FUEL_PRODUCT_ORDER, fixed
+// colors) so the mix is visible per bucket. Buckets with no activity
+// (spend=0, ppg=null) still render: their bar is just zero-height (so the
+// x-axis label remains anchored) and the price line skips that point so
+// it doesn't dip to 0.
 function ComboChart({
   data,
 }: {
-  data: Array<{ label: string; spend: number; ppg: number | null }>;
+  data: Array<{ label: string; spend: number; byType: Partial<Record<FuelProduct, number>>; ppg: number | null }>;
 }) {
   const W = 620;
   const H = 188;
@@ -1207,26 +1243,40 @@ function ComboChart({
         ))}
         {data.map((d, i) => {
           if (d.spend <= 0) return null;
-          const h = (d.spend / maxSpend) * chartH;
           const x = padL + slot * i + (slot - barW) / 2;
-          const y = padT + chartH - h;
-          const last = i === n - 1;
+          // Stack bottom-up in canonical product order; a 1px surface
+          // stroke keeps adjacent segments visually separated.
+          let yCursor = padT + chartH;
           return (
-            <rect
-              key={i}
-              x={x}
-              y={y}
-              width={barW}
-              height={h}
-              rx={2}
-              fill={last ? 'var(--accent)' : 'rgba(46,92,255,0.30)'}
-            />
+            <g key={i}>
+              {FUEL_PRODUCT_ORDER.map((t) => {
+                const v = d.byType[t] ?? 0;
+                if (v <= 0) return null;
+                const h = (v / maxSpend) * chartH;
+                yCursor -= h;
+                return (
+                  <rect
+                    key={t}
+                    x={x}
+                    y={yCursor}
+                    width={barW}
+                    height={h}
+                    rx={1}
+                    fill={FUEL_PRODUCT_COLORS[t]}
+                    stroke="var(--bg-surface)"
+                    strokeWidth={1}
+                  >
+                    <title>{`${d.label} · ${fuelProductLabel(t)}: ${frMoney(v)}`}</title>
+                  </rect>
+                );
+              })}
+            </g>
           );
         })}
         <path
           d={line}
           fill="none"
-          stroke="#A66800"
+          stroke={PRICE_LINE_COLOR}
           strokeWidth={2}
           strokeDasharray="4 2"
           strokeLinejoin="round"
@@ -1235,7 +1285,7 @@ function ComboChart({
         />
         {linePts.map((p, i) =>
           p ? (
-            <circle key={i} cx={p.x} cy={p.y} r={2.4} fill="#A66800" vectorEffect="non-scaling-stroke" />
+            <circle key={i} cx={p.x} cy={p.y} r={2.4} fill={PRICE_LINE_COLOR} vectorEffect="non-scaling-stroke" />
           ) : null,
         )}
       </svg>
@@ -1380,8 +1430,8 @@ function FuelPurchasesTable({
   const sumGal = rows.reduce((s, r) => s + r.gallons, 0);
   const sumTotal = rows.reduce((s, r) => s + r.totalCost, 0);
 
-  const grid = '92px 1.6fr 1.5fr 84px 80px 96px 1.1fr';
-  const cols = ['Date', 'Vendor · location', 'Driver · truck', 'Gallons', '$/gal', 'Total', 'Payment'];
+  const grid = '92px 1.5fr 122px 1.4fr 84px 80px 96px 1fr';
+  const cols = ['Date', 'Vendor · location', 'Type', 'Driver · truck', 'Gallons', '$/gal', 'Total', 'Payment'];
 
   return (
     <DSCard
@@ -1413,7 +1463,7 @@ function FuelPurchasesTable({
             style={{
               padding: '9px 14px',
               letterSpacing: 0.04,
-              textAlign: i >= 3 && i <= 5 ? 'right' : 'left',
+              textAlign: i >= 4 && i <= 6 ? 'right' : 'left',
             }}
           >
             {c}
@@ -1474,9 +1524,22 @@ function FuelPurchasesTable({
                 <div className="min-w-0">
                   <div className="text-[12.5px] font-medium truncate">{r.vendorName}</div>
                   <div className="text-[11px] text-[var(--text-tertiary)] truncate mt-0.5">
-                    {[typeLabel, locLabel].filter(Boolean).join(' · ')}
+                    {locLabel || '—'}
                   </div>
                 </div>
+              </div>
+              <div className="px-3.5 py-2 flex items-center gap-1.5 min-w-0">
+                <span
+                  aria-hidden
+                  className="shrink-0"
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: FUEL_PRODUCT_COLORS[r.fuelType],
+                  }}
+                />
+                <span className="text-[12px] font-medium truncate">{typeLabel}</span>
               </div>
               <div className="px-3.5 py-2 flex items-center gap-2 min-w-0">
                 {r.driverName ? (
@@ -1535,6 +1598,7 @@ function FuelPurchasesTable({
         >
           <div className="px-3.5 py-2 text-[12px] font-bold">Total</div>
           <div />
+          <div />
           <div className="px-3.5 py-2 text-right text-[11px] text-[var(--text-tertiary)]">
             {rows.length} purchase{rows.length === 1 ? '' : 's'}
           </div>
@@ -1586,7 +1650,7 @@ function FuelTypeShare({
                 style={{
                   width: `${widthPct}%`,
                   height: '100%',
-                  background: 'var(--accent)',
+                  background: FUEL_PRODUCT_COLORS[t.fuelType],
                   opacity: 0.85,
                   borderRadius: 4,
                 }}

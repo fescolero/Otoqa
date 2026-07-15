@@ -35,6 +35,17 @@ export const FUEL_TYPE_LABELS: Record<FuelType, string> = {
  *  type plus DEF (sourced from the defEntries table, not fuelEntries). */
 export type FuelProduct = FuelType | 'DEF';
 
+/** Canonical display order for report surfaces (filter dropdown, chart
+ *  stacking, legends): the two everyday products first, then the rest. */
+export const FUEL_PRODUCT_ORDER: readonly FuelProduct[] = [
+  'DIESEL',
+  'DEF',
+  'DYED_DIESEL',
+  'BIODIESEL',
+  'GASOLINE',
+  'OTHER',
+] as const;
+
 export function fuelProductLabel(product: FuelProduct): string {
   return product === 'DEF' ? 'DEF' : FUEL_TYPE_LABELS[product];
 }
