@@ -36,6 +36,7 @@ import {
   WBtn,
   WIcon,
 } from '@/components/web';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { api } from '@/convex/_generated/api';
 import {
   DEFAULT_FUEL_TYPE,
@@ -43,6 +44,7 @@ import {
   fuelProductLabel,
   type FuelProduct,
 } from '@/convex/lib/fuelTypes';
+import { cn } from '@/lib/utils';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { exportToCSV } from '@/lib/csv-export';
@@ -796,7 +798,10 @@ export function FuelReportsClient() {
 }
 
 // ─── Range select ──────────────────────────────────────────────────────
-// Preset rows + a custom From/To picker behind a hairline in the footer.
+// Period selector mirroring the accounting Reports shell's
+// ReportRangeSelect: the app's Popover primitive with a preset list,
+// and a "Custom range…" row that flips the panel to a From/To editor
+// with a back link and a full-width Apply button.
 function RangeSelect({
   ranges,
   rangeId,
@@ -813,23 +818,12 @@ function RangeSelect({
   onCustomApply: (start: string, end: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
-  const ref = React.useRef<HTMLDivElement>(null);
+  const isCustom = rangeId === 'custom';
+  const [mode, setMode] = React.useState<'presets' | 'custom'>('presets');
   // Custom-range draft inputs, seeded from the active range each time
-  // the dropdown opens so editing starts from what's on screen.
+  // the popover opens so editing starts from what's on screen.
   const [draftStart, setDraftStart] = React.useState('');
   const [draftEnd, setDraftEnd] = React.useState('');
-
-  React.useEffect(() => {
-    if (!open) return;
-    setDraftStart(dateToYmd(active.start));
-    setDraftEnd(dateToYmd(active.end));
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
 
   const draftValid =
     !!ymdToLocalDate(draftStart) &&
@@ -837,144 +831,129 @@ function RangeSelect({
     draftStart <= draftEnd;
 
   return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="focus-ring inline-flex items-center gap-2 cursor-pointer"
-        style={{
-          height: 30,
-          padding: '0 10px',
-          borderRadius: 8,
-          background: 'var(--bg-surface)',
-          border: '1px solid var(--border-hairline-strong)',
-          color: 'var(--text-primary)',
-          fontSize: 12.5,
-          fontWeight: 500,
-        }}
-      >
-        <WIcon name="calendar" size={13} color="var(--text-tertiary)" />
-        <span>{active.label}</span>
-        <span className="num" style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>
-          · {active.sub}
-        </span>
-        <WIcon name="chevron-down" size={11} color="var(--text-tertiary)" />
-      </button>
-      {open && (
-        <div
-          className="shadow-[var(--shadow-popover)]"
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 6px)',
-            left: 0,
-            zIndex: 50,
-            width: 288,
-            background: 'var(--bg-surface)',
-            border: '1px solid var(--border-strong)',
-            borderRadius: 10,
-            padding: 4,
-          }}
+    <Popover
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (o) {
+          setMode(isCustom ? 'custom' : 'presets');
+          setDraftStart(dateToYmd(active.start));
+          setDraftEnd(dateToYmd(active.end));
+        }
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="focus-ring inline-flex h-[30px] items-center gap-2 rounded-lg border border-[var(--border-hairline-strong)] bg-[var(--bg-surface)] pl-2.5 pr-2 text-[12.5px] font-medium text-foreground cursor-pointer"
         >
-          {ranges.map((r) => {
-            const on = r.id === rangeId;
-            return (
-              <button
-                key={r.id}
-                type="button"
-                onClick={() => {
-                  onChange(r.id);
-                  setOpen(false);
-                }}
-                className="focus-ring w-full flex items-center gap-2 cursor-pointer text-left"
-                style={{
-                  padding: '8px 10px',
-                  borderRadius: 6,
-                  border: 'none',
-                  background: on ? 'var(--bg-sidebar-active)' : 'transparent',
-                }}
-                onMouseEnter={(e) => {
-                  if (!on) e.currentTarget.style.background = 'var(--bg-row-hover)';
-                }}
-                onMouseLeave={(e) => {
-                  if (!on) e.currentTarget.style.background = 'transparent';
-                }}
-              >
-                <div className="flex-1 min-w-0 leading-tight">
-                  <div className="text-[12.5px] font-medium">{r.label}</div>
-                  <div className="num text-[11px] text-[var(--text-tertiary)] mt-px">{r.sub}</div>
-                </div>
-                {on && <WIcon name="check" size={12} color="var(--accent)" />}
-              </button>
-            );
-          })}
-
-          {/* Custom range — behind a hairline in the footer. */}
-          <div
-            style={{
-              borderTop: '1px solid var(--border-hairline)',
-              margin: '4px 0 0',
-              padding: '8px 10px 6px',
-            }}
-          >
-            <div className="flex items-center gap-1.5 mb-2">
-              <span className="text-[12.5px] font-medium flex-1">Custom range</span>
-              {rangeId === 'custom' && <WIcon name="check" size={12} color="var(--accent)" />}
-            </div>
-            <div className="flex items-center gap-1.5">
-              <input
-                type="date"
-                value={draftStart}
-                max={draftEnd || undefined}
-                onChange={(e) => setDraftStart(e.target.value)}
-                aria-label="Custom range start"
-                className="focus-ring num flex-1 min-w-0"
-                style={{
-                  height: 28,
-                  padding: '0 6px',
-                  borderRadius: 6,
-                  border: '1px solid var(--border-hairline-strong)',
-                  background: 'transparent',
-                  color: 'var(--text-primary)',
-                  fontSize: 11.5,
-                }}
+          <WIcon name="calendar" size={13} className="text-[var(--text-tertiary)]" />
+          <span>{active.label}</span>
+          <span className="num font-normal text-[var(--text-tertiary)]">· {active.sub}</span>
+          <WIcon name="chevron-down" size={11} className="text-[var(--text-tertiary)]" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[268px] p-1">
+        {mode === 'presets' ? (
+          <>
+            {ranges.map((r) => {
+              const on = !isCustom && r.id === rangeId;
+              return (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => {
+                    onChange(r.id);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    'focus-ring flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left cursor-pointer hover:bg-[var(--bg-row-hover)]',
+                    on && 'bg-[var(--bg-sidebar-active)]',
+                  )}
+                >
+                  <span className="flex-1 min-w-0 leading-tight">
+                    <span
+                      className={cn(
+                        'block text-[12.5px] font-medium',
+                        on ? 'text-[var(--accent)]' : 'text-foreground',
+                      )}
+                    >
+                      {r.label}
+                    </span>
+                    <span className="num block text-[11px] text-[var(--text-tertiary)] mt-px">
+                      {r.sub}
+                    </span>
+                  </span>
+                  {on && <WIcon name="check" size={13} className="text-[var(--accent)]" />}
+                </button>
+              );
+            })}
+            <div className="my-1 h-px bg-[var(--border-hairline)]" />
+            <button
+              type="button"
+              onClick={() => setMode('custom')}
+              className={cn(
+                'focus-ring flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left cursor-pointer hover:bg-[var(--bg-row-hover)]',
+                isCustom && 'bg-[var(--bg-sidebar-active)]',
+              )}
+            >
+              <WIcon
+                name="calendar"
+                size={13}
+                className={isCustom ? 'text-[var(--accent)]' : 'text-[var(--text-tertiary)]'}
               />
-              <span className="text-[11px] text-[var(--text-tertiary)]">–</span>
-              <input
-                type="date"
-                value={draftEnd}
-                min={draftStart || undefined}
-                onChange={(e) => setDraftEnd(e.target.value)}
-                aria-label="Custom range end"
-                className="focus-ring num flex-1 min-w-0"
-                style={{
-                  height: 28,
-                  padding: '0 6px',
-                  borderRadius: 6,
-                  border: '1px solid var(--border-hairline-strong)',
-                  background: 'transparent',
-                  color: 'var(--text-primary)',
-                  fontSize: 11.5,
-                }}
-              />
-            </div>
-            <div className="flex justify-end mt-2">
-              <WBtn
-                size="sm"
-                variant="primary"
-                disabled={!draftValid}
-                onClick={() => {
-                  if (!draftValid) return;
-                  onCustomApply(draftStart, draftEnd);
-                  setOpen(false);
-                }}
+              <span
+                className={cn(
+                  'flex-1 text-[12.5px] font-medium',
+                  isCustom ? 'text-[var(--accent)]' : 'text-foreground',
+                )}
               >
-                Apply
-              </WBtn>
-            </div>
+                Custom range…
+              </span>
+              <WIcon name="chevron-right" size={12} className="text-[var(--text-tertiary)]" />
+            </button>
+          </>
+        ) : (
+          <div className="p-1.5">
+            <button
+              type="button"
+              onClick={() => setMode('presets')}
+              className="focus-ring mb-2 inline-flex items-center gap-1.5 rounded px-1.5 py-1 text-[11.5px] font-medium text-[var(--text-secondary)] cursor-pointer"
+            >
+              <WIcon name="chevron-left" size={12} /> Presets
+            </button>
+            <label className="mb-1 block text-[11px] text-[var(--text-tertiary)]">From</label>
+            <input
+              type="date"
+              value={draftStart}
+              max={draftEnd || undefined}
+              onChange={(e) => setDraftStart(e.target.value)}
+              className="h-[30px] w-full rounded-md border border-[var(--border-hairline-strong)] bg-[var(--bg-surface-2)] px-2 text-[12.5px] text-foreground"
+            />
+            <label className="mb-1 mt-2 block text-[11px] text-[var(--text-tertiary)]">To</label>
+            <input
+              type="date"
+              value={draftEnd}
+              min={draftStart || undefined}
+              onChange={(e) => setDraftEnd(e.target.value)}
+              className="h-[30px] w-full rounded-md border border-[var(--border-hairline-strong)] bg-[var(--bg-surface-2)] px-2 text-[12.5px] text-foreground"
+            />
+            <button
+              type="button"
+              disabled={!draftValid}
+              onClick={() => {
+                if (!draftValid) return;
+                onCustomApply(draftStart, draftEnd);
+                setOpen(false);
+              }}
+              className="focus-ring mt-2.5 h-[30px] w-full rounded-md bg-[var(--accent)] text-[12.5px] font-medium text-white disabled:opacity-50 cursor-pointer"
+            >
+              Apply range
+            </button>
           </div>
-        </div>
-      )}
-    </div>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 
