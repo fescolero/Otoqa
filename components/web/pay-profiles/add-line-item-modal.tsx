@@ -40,6 +40,7 @@ const RATE_TYPES: DesignRateType[] = [
   'Flat',
   'Hourly',
   'Hourly (per shift)',
+  'Hourly (off-load)',
   'Weekly',
 ];
 
@@ -53,6 +54,7 @@ const TYPE_DESCRIPTIONS: Record<DesignRateType, string> = {
   'Flat':                 'A fixed payment per trip, regardless of distance.',
   'Hourly':               'Paid per hour on a load (check-in to checkout, per leg).',
   'Hourly (per shift)':   'Paid per active hour of the whole shift (clock-in to clock-out), once per session. Combine with a per-leg Hourly differential to pay on-load hours a higher rate.',
+  'Hourly (off-load)':    'Paid per hour outside loads: shift start → first check-in, plus last checkout → shift end. Pairs with per-leg Hourly for split on-load/off-load rates.',
   'Weekly':               'Flat weekly stipend or guarantee.',
 };
 

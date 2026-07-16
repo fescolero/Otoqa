@@ -408,7 +408,7 @@ export function calculatePay(input: CalculatePayInput): CalculatePayResult {
 export type CalculateSessionPayInput = {
   driverId: string; // payeeId
   sessionId: string;
-  session: { activeMinutes: number; startedAt: number; payProfileOverrideId?: string };
+  session: { activeMinutes: number; startedAt: number; payProfileOverrideId?: string; bookendMinutes?: number };
   profileAssignments: ProfileAssignment[];
   profiles: Map<string, PayProfile>;
   rules: PayRule[];
@@ -471,7 +471,10 @@ export function calculateSessionPay(input: CalculateSessionPayInput): CalculateP
     leg: { legLoadedMiles: 0, legEmptyMiles: 0, totalMiles: 0, durationMinutes: 0 },
     load: { invoiceTotalCents: ZERO_CENTS, linehaulTotalCents: ZERO_CENTS, isHazmat: false, requiresTarp: false, isOversize: false },
     stops: { count: 0, dwellMinutesSum: 0 },
-    session: { activeMinutes: input.session.activeMinutes },
+    session: {
+      activeMinutes: input.session.activeMinutes,
+      bookendMinutes: input.session.bookendMinutes ?? 0,
+    },
   };
   const placeholderLeg: LegInput = { _id: '', legLoadedMiles: 0, legEmptyMiles: 0, sequence: 0, payeeSplits: [] };
   const placeholderLoad: LoadInput = { _id: '', isHazmat: false, requiresTarp: false };
@@ -618,6 +621,10 @@ type TriggerContext = {
   // calcs leave this undefined, so `session.*` sources resolve to null there.
   session?: {
     activeMinutes: number;
+    // Off-load bookends: (shift start → first leg check-in) + (last leg
+    // checkout → shift end). Excludes between-load gaps. A shift with no
+    // checked-in legs is entirely off-load (bookend = active minutes).
+    bookendMinutes: number;
   };
 };
 
@@ -684,6 +691,11 @@ function resolveTriggerSource(source: string, ctx: TriggerContext): RawTriggerVa
       // in a session calc; null in a leg context (those rules are filtered out
       // before evaluation, so this null is never actually reached there).
       return ctx.session ? { kind: 'number', value: ctx.session.activeMinutes } : null;
+    case 'session.bookendMinutes':
+      // Shift-scoped: off-load bookends — time before the first leg check-in
+      // plus time after the last leg checkout. Pays yard/deadhead hours at
+      // their own rate alongside on-load per-leg lines.
+      return ctx.session ? { kind: 'number', value: ctx.session.bookendMinutes } : null;
     case 'stops.count':
       return { kind: 'number', value: ctx.stops.count };
     case 'stops.dwellMinutesSum':

@@ -32,6 +32,7 @@ export type DesignRateType =
   | 'Flat'
   | 'Hourly'
   | 'Hourly (per shift)'
+  | 'Hourly (off-load)'
   | 'Weekly';
 
 export type TriggerSource =
@@ -41,6 +42,7 @@ export type TriggerSource =
   | 'leg.totalMiles'
   | 'leg.durationMinutes'
   | 'session.activeMinutes'
+  | 'session.bookendMinutes'
   | 'stops.count'
   | 'stops.dwellMinutesSum'
   | 'load.invoiceTotalCents'
@@ -89,6 +91,11 @@ export const RATE_TYPE_BINDINGS: Record<DesignRateType, RateTypeBinding> = {
   // partitions session.* rules from leg rules, so a profile can pay a base
   // rate on all shift hours plus a per-leg differential while on a load.
   'Hourly (per shift)':   { source: 'session.activeMinutes',  transform: 'HOURS_FROM_MINUTES', unit: '/hr', supportsDistance: false },
+  // Off-load bookends: shift start → first leg check-in, plus last leg
+  // checkout → shift end (between-load gaps excluded). Fires once per shift.
+  // Pairs with per-leg Hourly lines so on-load and off-load hours pay
+  // different rates on the same profile.
+  'Hourly (off-load)':    { source: 'session.bookendMinutes', transform: 'HOURS_FROM_MINUTES', unit: '/hr', supportsDistance: false },
   // "Weekly" is a period-level guarantee, not a per-leg rule. It belongs in
   // payProfile.postCalcRules with kind=MINIMUM_GUARANTEE_PERIOD (already
   // supported by the calc engine — see applyPostCalcRules.ts). What's
@@ -113,6 +120,7 @@ export const RATE_TYPE_TO_COMPONENT_CODE: Record<DesignRateType, string> = {
   'Flat':                 'WAGE_FLAT',
   'Hourly':               'WAGE_HOURLY',
   'Hourly (per shift)':   'WAGE_HOURLY',
+  'Hourly (off-load)':    'WAGE_HOURLY',
   'Weekly':               'WAGE_FLAT',
 };
 
@@ -126,6 +134,7 @@ export function triggerToDesignType(source: string, transform?: string): DesignR
   if (source === 'load.invoiceTotalCents' && transform === 'PERCENT') return 'Percentage from Load';
   if (source === 'leg.durationMinutes') return 'Hourly';
   if (source === 'session.activeMinutes') return 'Hourly (per shift)';
+  if (source === 'session.bookendMinutes') return 'Hourly (off-load)';
   if (source === 'constant.1') return 'Flat';
   return 'Flat';
 }
@@ -144,6 +153,7 @@ export const RATE_TYPE_COLOR: Record<DesignRateType, string> = {
   'Flat':                 '#5A6172',
   'Hourly':               '#0F8C5F',
   'Hourly (per shift)':   '#0F8C5F',
+  'Hourly (off-load)':    '#0F8C5F',
   'Weekly':               '#0F8C5F',
 };
 

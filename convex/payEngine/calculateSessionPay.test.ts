@@ -93,6 +93,24 @@ describe('calculateSessionPay', () => {
     expect(centsToNumber(r.payItems[0].amountCents)).toBeCloseTo(200.0, 6);
   });
 
+  it('session.bookendMinutes pays only the off-load bookends', () => {
+    const bookendRule = rule({
+      _id: 'r_bookend', profileId: PROF, name: 'Off-load hours', componentId: COMP_HR,
+      trigger: { source: 'session.bookendMinutes', transform: 'HOURS_FROM_MINUTES' },
+      rateAmountMicroCents: microCentsFromDecimalString('22.00', 'USD'),
+    });
+    // 600 active min, 90 min of bookends (45 before first check-in + 45 after
+    // last checkout) → 1.5h × $22 = $33; the shift-hours rule still pays 10h.
+    const r = calculateSessionPay(sessionInput({
+      session: { activeMinutes: 600, startedAt: T, bookendMinutes: 90 },
+      rules: [sessionHourly, bookendRule],
+    }));
+    expect(r.payItems).toHaveLength(2);
+    const bookend = r.payItems.find(p => p.description === 'Off-load hours')!;
+    expect(bookend.quantity).toBeCloseTo(1.5, 6);
+    expect(centsToNumber(bookend.amountCents)).toBeCloseTo(33.0, 6);
+  });
+
   it('session payProfileOverrideId beats the default assignment', () => {
     const PROF_OVR = 'prof_override';
     const overrideProfile: PayProfile = { _id: PROF_OVR, workosOrgId: 'org_test', name: 'SoCal', payeeType: 'DRIVER', currency: 'USD', isActive: true };

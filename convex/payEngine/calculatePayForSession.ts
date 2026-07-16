@@ -95,10 +95,39 @@ export const calculatePayForSession = internalMutation({
       matchContractTag: a.matchContractTag, effectiveStart: a.effectiveStart, effectiveEnd: a.effectiveEnd, isActive: a.isActive,
     }));
 
+    // 1b. Off-load bookends for `session.bookendMinutes` rules: shift start →
+    // first leg check-in, plus last leg checkout → shift end. Between-load
+    // gaps are excluded by design. A shift with no checked-in legs is
+    // entirely off-load.
+    const sessionLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+    let firstCheckinAt: number | null = null;
+    let lastCheckoutAt: number | null = null;
+    for (const leg of sessionLegs) {
+      if (leg.status === 'CANCELED') continue;
+      if (leg.startedAt != null && (firstCheckinAt === null || leg.startedAt < firstCheckinAt)) {
+        firstCheckinAt = leg.startedAt;
+      }
+      if (leg.endedAt != null && (lastCheckoutAt === null || leg.endedAt > lastCheckoutAt)) {
+        lastCheckoutAt = leg.endedAt;
+      }
+    }
+    const sessionEndedAt = session.endedAt ?? session.startedAt + activeMinutes * 60_000;
+    const bookendMinutes =
+      firstCheckinAt === null || lastCheckoutAt === null
+        ? activeMinutes
+        : Math.min(
+            activeMinutes,
+            Math.max(0, Math.round((firstCheckinAt - startedAt) / 60_000))
+              + Math.max(0, Math.round((sessionEndedAt - lastCheckoutAt) / 60_000)),
+          );
+
     // 2. Pure session calc.
     const result = calculateSessionPay({
       driverId, sessionId: args.sessionId as string,
-      session: { activeMinutes, startedAt, payProfileOverrideId: session.payProfileOverrideId },
+      session: { activeMinutes, startedAt, payProfileOverrideId: session.payProfileOverrideId, bookendMinutes },
       profileAssignments: calcAssignments, profiles, rules, components,
     });
 

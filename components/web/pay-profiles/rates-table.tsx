@@ -44,6 +44,7 @@ const RATE_TYPE_OPTIONS: Array<{ value: DesignRateType; label: string }> = [
   { value: 'Flat',                 label: 'Flat' },
   { value: 'Hourly',               label: 'Hourly' },
   { value: 'Hourly (per shift)',   label: 'Hourly (per shift)' },
+  { value: 'Hourly (off-load)',    label: 'Hourly (off-load)' },
   { value: 'Weekly',               label: 'Weekly (soon)' },
 ];
 

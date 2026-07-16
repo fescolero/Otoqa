@@ -109,7 +109,7 @@ const CURRENCIES = [
 // (e.g. an H&W fringe per hour worked). Unit picks the engine trigger; the
 // "counts as" component drives paycheck bucketing and tax treatment. ───────
 
-type CustomUnit = 'hr' | 'hr_shift' | 'mi' | 'mi_empty' | 'mi_total' | 'load';
+type CustomUnit = 'hr' | 'hr_shift' | 'hr_offload' | 'mi' | 'mi_empty' | 'mi_total' | 'load';
 
 const UNIT_META: Record<CustomUnit, {
   /** Picker label — spells out WHICH miles so an "Empty miles" line can't
@@ -121,6 +121,7 @@ const UNIT_META: Record<CustomUnit, {
 }> = {
   hr:       { label: '/hr on load', suffix: '/hr',  defaultCode: 'WAGE_HOURLY',  trigger: { source: 'leg.durationMinutes', transform: 'HOURS_FROM_MINUTES' } },
   hr_shift: { label: '/hr shift',  suffix: '/hr',   defaultCode: 'WAGE_HOURLY',  trigger: { source: 'session.activeMinutes', transform: 'HOURS_FROM_MINUTES' } },
+  hr_offload: { label: '/hr off-load', suffix: '/hr', defaultCode: 'WAGE_HOURLY',  trigger: { source: 'session.bookendMinutes', transform: 'HOURS_FROM_MINUTES' } },
   mi:       { label: '/mi loaded', suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.legLoadedMiles' } },
   mi_empty: { label: '/mi empty',  suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.legEmptyMiles' } },
   mi_total: { label: '/mi total',  suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.totalMiles' } },

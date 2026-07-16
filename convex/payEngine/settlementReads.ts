@@ -21,6 +21,7 @@ import {
   ageDays,
   applyAcknowledgements,
   bucketForSettlement,
+  buildShiftLoadRows,
   cadenceFromFrequency,
   cadenceFromPaymentTerms,
   computeCarrierBlockers,
@@ -187,28 +188,66 @@ async function linesFor(ctx: QueryCtx, caches: AdapterCaches, settlement: Doc<'s
 }
 
 /** Project already-collected payItems into the detail-shape payable rows (driver + carrier). */
-async function payablesFromItems(ctx: QueryCtx, caches: AdapterCaches, items: Doc<'payItems'>[]) {
+async function payablesFromItems(
+  ctx: QueryCtx,
+  caches: AdapterCaches,
+  items: Doc<'payItems'>[],
+  // Driver id for shift-loads enrichment (driver detail queries pass it;
+  // carrier details have no sessions and omit it).
+  driverPayeeId?: string,
+) {
   const payables = [];
-  // Session lookups back the shift-line pay profile override picker; scoped
-  // per call (details queries collect one settlement's items).
+  // Session lookups back the shift lines' clock range, loads mini-table, and
+  // pay profile override picker; scoped per call (details queries collect one
+  // settlement's items). Shift-load rows reuse the adapter's loads cache.
   const sessions = new Map<string, Doc<'driverSessions'> | null>();
+  const shiftLoadsBySession = new Map<string, Awaited<ReturnType<typeof buildShiftLoadRows>>>();
+  const wsCaches = { ...newWorkStartCaches(), loads: caches.loads };
   for (const it of items) {
     if (it.isVoided) continue;
     const category = bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
     const dollars = Number(it.amountCents) / 100;
+
     const sessionId = it.sourceRef.sessionId;
-    let sessionOverrideId: Id<'payProfiles'> | undefined;
+    let session: Doc<'driverSessions'> | null = null;
+    let shiftLoads: Awaited<ReturnType<typeof buildShiftLoadRows>>;
     if (sessionId) {
-      let s = sessions.get(sessionId as string);
-      if (s === undefined) {
-        s = (await ctx.db.get(sessionId)) ?? null;
-        sessions.set(sessionId as string, s);
+      const key = sessionId as string;
+      const cached = sessions.get(key);
+      if (cached === undefined) {
+        session = (await ctx.db.get(sessionId)) ?? null;
+        sessions.set(key, session);
+      } else session = cached;
+      if (session && driverPayeeId) {
+        if (!shiftLoadsBySession.has(key)) {
+          shiftLoadsBySession.set(
+            key,
+            await buildShiftLoadRows(ctx, driverPayeeId as Id<'drivers'>, session, wsCaches),
+          );
+        }
+        shiftLoads = shiftLoadsBySession.get(key);
       }
-      sessionOverrideId = s?.payProfileOverrideId;
     }
+
+    // Load labels for leg-derived lines — same display source as legacy.
+    let loadInternalId: string | undefined;
+    let loadOrderNumber: string | undefined;
+    if (it.sourceRef.loadId) {
+      const loadKey = it.sourceRef.loadId as string;
+      let load = caches.loads.get(loadKey);
+      if (load === undefined) {
+        load = ((await ctx.db.get(it.sourceRef.loadId)) ?? null) as Doc<'loadInformation'> | null;
+        caches.loads.set(loadKey, load);
+      }
+      loadInternalId = load?.internalId;
+      loadOrderNumber = load?.orderNumber;
+    }
+
     payables.push({
       _id: it._id,
       loadId: it.sourceRef.loadId,
+      loadInternalId,
+      loadOrderNumber,
       description: it.description,
       quantity: it.quantity,
       rate: Number(it.rateMicroCents) / 100000,
@@ -219,8 +258,14 @@ async function payablesFromItems(ctx: QueryCtx, caches: AdapterCaches, items: Do
       warningMessage: it.warning,
       createdAt: it.createdAt,
       edited: it.reviewerEdit != null,
+      // Work-time anchors: periodAnchorAt is the engine's work-start stamp
+      // (shift start for session lines, work date for leg lines) — drives the
+      // panel's day grouping and time display like legacy workStart did.
+      workStart: it.periodAnchorAt,
+      workEnd: session?.endedAt ?? undefined,
+      shiftLoads: shiftLoads ?? undefined,
       sessionId,
-      sessionPayProfileOverrideId: sessionOverrideId,
+      sessionPayProfileOverrideId: session?.payProfileOverrideId,
     });
   }
   return payables;
@@ -463,7 +508,7 @@ export const getSettlementDetails = query({
     );
 
     // Payables in the detail shape (description-level lines).
-    const payables = await payablesFromItems(ctx, caches, items);
+    const payables = await payablesFromItems(ctx, caches, items, settlement.payeeId);
 
     return {
       settlement: {
