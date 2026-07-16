@@ -39,6 +39,7 @@ const RATE_TYPES: DesignRateType[] = [
   'Percentage from Load',
   'Flat',
   'Hourly',
+  'Hourly (per shift)',
   'Weekly',
 ];
 
@@ -50,7 +51,8 @@ const TYPE_DESCRIPTIONS: Record<DesignRateType, string> = {
   'Per Extra Order Stop': 'Flat fee per additional order on the same stop.',
   'Percentage from Load': 'A % cut of the linehaul revenue.',
   'Flat':                 'A fixed payment per trip, regardless of distance.',
-  'Hourly':               'Paid by the hour — used for detention, layover, local routes.',
+  'Hourly':               'Paid per hour on a load (check-in to checkout, per leg).',
+  'Hourly (per shift)':   'Paid per active hour of the whole shift (clock-in to clock-out), once per session. Combine with a per-leg Hourly differential to pay on-load hours a higher rate.',
   'Weekly':               'Flat weekly stipend or guarantee.',
 };
 

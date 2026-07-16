@@ -31,6 +31,7 @@ export type DesignRateType =
   | 'Percentage from Load'
   | 'Flat'
   | 'Hourly'
+  | 'Hourly (per shift)'
   | 'Weekly';
 
 export type TriggerSource =
@@ -39,6 +40,7 @@ export type TriggerSource =
   | 'leg.legEmptyMiles'
   | 'leg.totalMiles'
   | 'leg.durationMinutes'
+  | 'session.activeMinutes'
   | 'stops.count'
   | 'stops.dwellMinutesSum'
   | 'load.invoiceTotalCents'
@@ -82,6 +84,11 @@ export const RATE_TYPE_BINDINGS: Record<DesignRateType, RateTypeBinding> = {
   'Percentage from Load': { source: 'load.invoiceTotalCents', transform: 'PERCENT', unit: '% load', supportsDistance: false },
   'Flat':                 { source: 'constant.1',             unit: '/load',   supportsDistance: false },
   'Hourly':               { source: 'leg.durationMinutes',    transform: 'HOURS_FROM_MINUTES', unit: '/hr', supportsDistance: false },
+  // Shift-scoped hours: fires once per completed session on the driver's
+  // total active minutes (clock-in → clock-out), NOT per leg. The engine
+  // partitions session.* rules from leg rules, so a profile can pay a base
+  // rate on all shift hours plus a per-leg differential while on a load.
+  'Hourly (per shift)':   { source: 'session.activeMinutes',  transform: 'HOURS_FROM_MINUTES', unit: '/hr', supportsDistance: false },
   // "Weekly" is a period-level guarantee, not a per-leg rule. It belongs in
   // payProfile.postCalcRules with kind=MINIMUM_GUARANTEE_PERIOD (already
   // supported by the calc engine — see applyPostCalcRules.ts). What's
@@ -105,6 +112,7 @@ export const RATE_TYPE_TO_COMPONENT_CODE: Record<DesignRateType, string> = {
   'Percentage from Load': 'WAGE_PERCENT',
   'Flat':                 'WAGE_FLAT',
   'Hourly':               'WAGE_HOURLY',
+  'Hourly (per shift)':   'WAGE_HOURLY',
   'Weekly':               'WAGE_FLAT',
 };
 
@@ -117,6 +125,7 @@ export function triggerToDesignType(source: string, transform?: string): DesignR
   if (source === 'stops.count') return 'Per Extra Stop';
   if (source === 'load.invoiceTotalCents' && transform === 'PERCENT') return 'Percentage from Load';
   if (source === 'leg.durationMinutes') return 'Hourly';
+  if (source === 'session.activeMinutes') return 'Hourly (per shift)';
   if (source === 'constant.1') return 'Flat';
   return 'Flat';
 }
@@ -134,6 +143,7 @@ export const RATE_TYPE_COLOR: Record<DesignRateType, string> = {
   'Percentage from Load': '#A66800',
   'Flat':                 '#5A6172',
   'Hourly':               '#0F8C5F',
+  'Hourly (per shift)':   '#0F8C5F',
   'Weekly':               '#0F8C5F',
 };
 
