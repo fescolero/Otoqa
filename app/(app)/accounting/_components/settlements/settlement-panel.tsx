@@ -1185,6 +1185,17 @@ export function SettlementPanel({
     };
   }, [payables, row.planBasis, editable]);
 
+  // A shift can carry several session lines (Base Rate, H&W, off-load) — the
+  // Profile picker controls the whole session, so render it on the first
+  // line of each session only.
+  const firstShiftLineBySession = React.useMemo(() => {
+    const m = new Map<string, string>();
+    for (const l of lines?.earn ?? []) {
+      if (l.isShift && l.sessionId && !m.has(l.sessionId)) m.set(l.sessionId, l._id);
+    }
+    return m;
+  }, [lines]);
+
   // In / scheduled / lane per load, lifted from the shift lines' loads tables
   // — enriches the load group headers so each visual unit carries the same
   // review columns as the shift table.
@@ -1683,6 +1694,7 @@ export function SettlementPanel({
                         onApplyRules={applyRules}
                         shiftProfile={
                           party === 'driver' && editable && g.line.isShift && g.line.sessionId
+                            && firstShiftLineBySession.get(g.line.sessionId) === g.line._id
                             ? {
                                 value: g.line.sessionOverrideId ?? 'auto',
                                 options: shiftProfileOptions,
