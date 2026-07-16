@@ -174,7 +174,7 @@ type ProfileRow = {
   inUseDrivers: number;
   inUseCarriers: number;
   updatedAt: number;
-  createdBy: string;
+  updatedByName: string;
 };
 
 function ProfilesTable({ rows }: { rows: ProfileRow[] }) {
@@ -293,12 +293,14 @@ function ProfileRowCells({ row }: { row: ProfileRow }) {
       </Cell>
 
       <Cell>
-        <div className="flex items-center gap-1.5">
-          <Avatar name={row.createdBy} size={20} />
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div className="shrink-0">
+            <Avatar name={row.updatedByName} size={20} />
+          </div>
           <div className="min-w-0">
-            <div className="num text-[12px]" style={{ color: 'var(--text-secondary)' }}>{updatedDate}</div>
-            <div className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
-              by {row.createdBy}
+            <div className="num text-[12px] whitespace-nowrap" style={{ color: 'var(--text-secondary)' }}>{updatedDate}</div>
+            <div className="text-[11px] truncate" style={{ color: 'var(--text-tertiary)' }} title={row.updatedByName}>
+              by {row.updatedByName}
             </div>
           </div>
         </div>

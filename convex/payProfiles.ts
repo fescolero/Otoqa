@@ -8,7 +8,7 @@
 // the legacy rateProfiles.ts surface for new-engine orgs.
 
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, type QueryCtx } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { currencyValidator } from './payEngine/schema';
 import type { Id } from './_generated/dataModel';
@@ -56,6 +56,7 @@ export const listForOrg = query({
           rules: rules.sort((a, b) => a.sortOrder - b.sortOrder),
           inUseDrivers: activeAssignments.filter(a => a.payeeType === 'DRIVER').length,
           inUseCarriers: activeAssignments.filter(a => a.payeeType === 'CARRIER').length,
+          updatedByName: await resolveActorName(ctx, workosOrgId, p._id, p.createdBy),
         };
       }),
     );
@@ -520,6 +521,43 @@ export const duplicate = mutation({
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+/** Human-readable name for the profile list's "Updated by" cell — raw
+ *  createdBy is a WorkOS user id ("user_01KAF…"), useless on screen.
+ *  Resolution order:
+ *    1. Latest profile-level audit entry's performedByName/Email — captures
+ *       the most recent actor, not just the creator.
+ *    2. The creator's orgMembers record (name, then email).
+ *    3. "System" for seeded/service ids, "Unknown user" for unresolvable
+ *       WorkOS ids — never the raw id. */
+async function resolveActorName(
+  ctx: QueryCtx,
+  workosOrgId: string,
+  profileId: Id<'payProfiles'>,
+  createdBy: string,
+): Promise<string> {
+  const lastEntry = await ctx.db
+    .query('auditLog')
+    .withIndex('by_org_entity', q =>
+      q.eq('organizationId', workosOrgId).eq('entityType', 'payProfile').eq('entityId', profileId))
+    .order('desc')
+    .first();
+  const fromAudit = lastEntry?.performedByName ?? lastEntry?.performedByEmail;
+  if (fromAudit) return fromAudit;
+
+  const member = await ctx.db
+    .query('orgMembers')
+    .withIndex('by_org_user', q =>
+      q.eq('organizationId', workosOrgId).eq('workosUserId', createdBy))
+    .first();
+  if (member) {
+    const name = [member.firstName, member.lastName].filter(Boolean).join(' ');
+    if (name) return name;
+    if (member.email) return member.email;
+  }
+
+  return createdBy.startsWith('user_') ? 'Unknown user' : 'System';
+}
 
 function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   const out: Record<string, unknown> = {};
