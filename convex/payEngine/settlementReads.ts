@@ -189,10 +189,23 @@ async function linesFor(ctx: QueryCtx, caches: AdapterCaches, settlement: Doc<'s
 /** Project already-collected payItems into the detail-shape payable rows (driver + carrier). */
 async function payablesFromItems(ctx: QueryCtx, caches: AdapterCaches, items: Doc<'payItems'>[]) {
   const payables = [];
+  // Session lookups back the shift-line pay profile override picker; scoped
+  // per call (details queries collect one settlement's items).
+  const sessions = new Map<string, Doc<'driverSessions'> | null>();
   for (const it of items) {
     if (it.isVoided) continue;
     const category = bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
     const dollars = Number(it.amountCents) / 100;
+    const sessionId = it.sourceRef.sessionId;
+    let sessionOverrideId: Id<'payProfiles'> | undefined;
+    if (sessionId) {
+      let s = sessions.get(sessionId as string);
+      if (s === undefined) {
+        s = (await ctx.db.get(sessionId)) ?? null;
+        sessions.set(sessionId as string, s);
+      }
+      sessionOverrideId = s?.payProfileOverrideId;
+    }
     payables.push({
       _id: it._id,
       loadId: it.sourceRef.loadId,
@@ -206,6 +219,8 @@ async function payablesFromItems(ctx: QueryCtx, caches: AdapterCaches, items: Do
       warningMessage: it.warning,
       createdAt: it.createdAt,
       edited: it.reviewerEdit != null,
+      sessionId,
+      sessionPayProfileOverrideId: sessionOverrideId,
     });
   }
   return payables;

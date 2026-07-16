@@ -408,7 +408,7 @@ export function calculatePay(input: CalculatePayInput): CalculatePayResult {
 export type CalculateSessionPayInput = {
   driverId: string; // payeeId
   sessionId: string;
-  session: { activeMinutes: number; startedAt: number };
+  session: { activeMinutes: number; startedAt: number; payProfileOverrideId?: string };
   profileAssignments: ProfileAssignment[];
   profiles: Map<string, PayProfile>;
   rules: PayRule[];
@@ -418,22 +418,42 @@ export type CalculateSessionPayInput = {
 export function calculateSessionPay(input: CalculateSessionPayInput): CalculatePayResult {
   const warnings: Warning[] = [];
 
-  // 1. Resolve the driver's profile. Jurisdiction/distance strategies need a
-  //    leg, which a multi-leg shift doesn't have — session pay uses the default
-  //    (or ALWAYS_ACTIVE) assignment effective at shift start.
-  const now = input.session.startedAt;
-  const active = input.profileAssignments.filter(a =>
-    a.isActive
-    && (a.effectiveStart === undefined || a.effectiveStart <= now)
-    && (a.effectiveEnd === undefined || a.effectiveEnd >= now),
-  );
-  const chosen = active.find(a => a.isDefault)
-    ?? active.find(a => a.selectionStrategy === 'ALWAYS_ACTIVE');
-  if (!chosen) {
-    warnings.push({ level: 'FLAG', code: 'NO_PROFILE', message: 'No default/always-active payProfile for session pay' });
-    return { selectedProfileId: null, payItems: [], warnings };
+  // 1. Resolve the driver's profile.
+  //    Precedence 1: shift-level explicit override — mirrors the leg/load
+  //    override semantics on the leg path (missing/inactive falls through
+  //    with a warning rather than failing the calc).
+  let selectedProfileId: string | null = null;
+  if (input.session.payProfileOverrideId) {
+    const overrideProfile = input.profiles.get(input.session.payProfileOverrideId);
+    if (overrideProfile && overrideProfile.isActive) {
+      selectedProfileId = overrideProfile._id;
+    } else {
+      warnings.push({
+        level: 'WARNING',
+        code: 'SESSION_OVERRIDE_INVALID',
+        message: `Session payProfileOverrideId ${input.session.payProfileOverrideId} missing or inactive`,
+      });
+    }
   }
-  const selectedProfileId = chosen.profileId;
+
+  //    Precedence 2: jurisdiction/distance strategies need a leg, which a
+  //    multi-leg shift doesn't have — session pay uses the default (or
+  //    ALWAYS_ACTIVE) assignment effective at shift start.
+  if (!selectedProfileId) {
+    const now = input.session.startedAt;
+    const active = input.profileAssignments.filter(a =>
+      a.isActive
+      && (a.effectiveStart === undefined || a.effectiveStart <= now)
+      && (a.effectiveEnd === undefined || a.effectiveEnd >= now),
+    );
+    const chosen = active.find(a => a.isDefault)
+      ?? active.find(a => a.selectionStrategy === 'ALWAYS_ACTIVE');
+    if (!chosen) {
+      warnings.push({ level: 'FLAG', code: 'NO_PROFILE', message: 'No default/always-active payProfile for session pay' });
+      return { selectedProfileId: null, payItems: [], warnings };
+    }
+    selectedProfileId = chosen.profileId;
+  }
   const profile = input.profiles.get(selectedProfileId);
   if (!profile) {
     warnings.push({ level: 'FLAG', code: 'PROFILE_NOT_FOUND', message: `Selected profileId ${selectedProfileId} not in profiles map` });

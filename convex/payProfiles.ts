@@ -598,6 +598,73 @@ export const setLoadOverride = mutation({
   },
 });
 
+/** Set (or clear) a shift-level pay profile override.
+ *
+ *  Session (shift-hours) pay normally selects the driver's default assignment
+ *  at shift start; this pins one shift to a specific profile instead
+ *  (calculateSessionPay precedence: override → default assignment). Honored
+ *  by the NEW pay engine only — the legacy session calc has no override
+ *  concept, so orgs still reading the legacy ledger won't see it in
+ *  statements until settlements_read_ledger flips to 'new'.
+ *
+ *  Completed shifts recalc immediately (scheduled); an override set on an
+ *  active shift applies when the shift ends and pay first calculates. */
+export const setSessionOverride = mutation({
+  args: {
+    sessionId: v.id('driverSessions'),
+    // Omit to clear the override (back to the driver's default assignment).
+    profileId: v.optional(v.id('payProfiles')),
+  },
+  handler: async (ctx, { sessionId, profileId }) => {
+    const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
+    const session = await ctx.db.get(sessionId);
+    if (!session) throw new Error('Driver session not found');
+    if (session.organizationId !== orgId) throw new Error('Not authorized for this organization');
+
+    let profileName: string | null = null;
+    if (profileId) {
+      const profile = await ctx.db.get(profileId);
+      if (!profile) throw new Error('Pay profile not found');
+      if (profile.workosOrgId !== orgId) throw new Error('Pay profile belongs to a different organization');
+      if (!profile.isActive) throw new Error('Cannot use an archived pay profile as an override');
+      if (profile.payeeType !== 'DRIVER') throw new Error('Shift pay overrides must use a driver profile');
+      profileName = profile.name;
+    }
+
+    if ((session.payProfileOverrideId ?? null) === (profileId ?? null)) return null;
+
+    const now = Date.now();
+    // Patching with an explicit undefined removes the field (clears override).
+    await ctx.db.patch(sessionId, { payProfileOverrideId: profileId });
+
+    // Recalculate the shift's pay in the new engine. Skips internally if the
+    // session isn't completed yet.
+    await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForSession.calculatePayForSession, {
+      sessionId,
+      userId,
+    });
+
+    const shiftDate = new Date(session.startedAt).toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+    });
+    await ctx.db.insert('auditLog', {
+      organizationId: orgId,
+      entityType: 'driverSession',
+      entityId: sessionId,
+      action: 'updated',
+      description: profileName
+        ? `Set shift pay profile override to "${profileName}" for shift on ${shiftDate}`
+        : `Cleared shift pay profile override for shift on ${shiftDate} (back to driver default)`,
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      timestamp: now,
+    });
+
+    return null;
+  },
+});
+
 // ============================================================================
 // HELPERS
 // ============================================================================

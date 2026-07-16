@@ -420,6 +420,10 @@ export const getSettlementDetails = query({
         // can render the time range.
         workStart: v.optional(v.float64()),
         workEnd: v.optional(v.float64()),
+        // Shift-line linkage — drives the review panel's per-shift pay
+        // profile override picker.
+        sessionId: v.optional(v.id('driverSessions')),
+        sessionPayProfileOverrideId: v.optional(v.id('payProfiles')),
         // Shift lines: the loads run during the session, one reviewable row
         // each (scheduled time + order number + lane).
         shiftLoads: v.optional(v.array(v.object({
@@ -542,6 +546,7 @@ export const getSettlementDetails = query({
         const workStart = await resolveWorkStartTimestamp(ctx, payable, detailCaches);
         let workEnd: number | undefined;
         let shiftLoads: ShiftLoadRow[] | undefined;
+        let sessionOverrideId: Id<'payProfiles'> | undefined;
         if (payable.sessionId) {
           const sessionKey = payable.sessionId as string;
           let session = detailCaches.sessions.get(sessionKey);
@@ -550,6 +555,7 @@ export const getSettlementDetails = query({
             detailCaches.sessions.set(sessionKey, session);
           }
           workEnd = session?.endedAt ?? undefined;
+          sessionOverrideId = session?.payProfileOverrideId;
 
           if (session?.endedAt) {
             shiftLoads = await buildShiftLoadRows(ctx, settlement.driverId, session, detailCaches);
@@ -582,6 +588,10 @@ export const getSettlementDetails = query({
           workStart: workStart ?? undefined,
           workEnd,
           shiftLoads,
+          // Shift-line linkage for the review panel's per-shift pay profile
+          // override picker.
+          sessionId: payable.sessionId,
+          sessionPayProfileOverrideId: sessionOverrideId,
           // Review-edit state. Clock window prefers the reviewer override,
           // falling back to the session-derived work start / end.
           edited: payable.editedAt != null,

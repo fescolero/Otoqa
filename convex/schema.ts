@@ -2819,6 +2819,13 @@ export default defineSchema({
     status: v.union(v.literal('active'), v.literal('completed')),
 
     totalActiveMinutes: v.optional(v.float64()), // computed on end
+
+    // Shift-level pay profile override. Session pay normally selects the
+    // driver's default assignment at shift start; this pins the shift to a
+    // specific payProfile instead (precedence: override → default). Set from
+    // the settlement review's shift line; honored by the NEW pay engine only
+    // (calculateSessionPay) — legacy paySession ignores it.
+    payProfileOverrideId: v.optional(v.id('payProfiles')),
     softCap10hAt: v.optional(v.float64()), // stamped when 10h banner shown
     softCap14hAt: v.optional(v.float64()), // stamped when 14h banner shown
 

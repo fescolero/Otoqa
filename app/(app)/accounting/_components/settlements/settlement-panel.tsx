@@ -19,7 +19,9 @@
 
 import * as React from 'react';
 import { toast } from 'sonner';
+import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { classifyPayable, type PayableCategory } from '@/convex/lib/settlementShared';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useSettlementsLedger } from './use-settlements-ledger';
@@ -73,6 +75,10 @@ interface DetailsPayable {
   workStart?: number;
   /** Shift check-out — present on session-based hourly lines. */
   workEnd?: number;
+  /** Session behind a shift line — enables the per-shift profile picker. */
+  sessionId?: string;
+  /** The shift's current pay profile override (if any). */
+  sessionPayProfileOverrideId?: string;
   /** The loads run during the shift, one reviewable row each. */
   shiftLoads?: Array<{ label: string; actualAt?: number; scheduledAt?: number; lane?: string }>;
   /** Rules-engine warning — surfaces inline on the line and gates approval. */
@@ -108,6 +114,10 @@ interface PanelLine {
   loads?: Array<{ label: string; actualAt?: number; scheduledAt?: number; lane?: string }>;
   /** Session-backed shift line — gets the loads mini-table (or its absence note). */
   isShift?: boolean;
+  /** Session id behind a shift line — enables the per-shift profile picker. */
+  sessionId?: string;
+  /** The shift's current pay profile override (if any). */
+  sessionOverrideId?: string;
   /** Rules-engine warning shown inline; this line is a blocker jump target. */
   warning?: string;
   /** Review-edit state — drives the editor and the "Adjusted" badge. */
@@ -367,6 +377,7 @@ function StLineRow({
   onRevert,
   onAdjustLoad,
   onApplyRules,
+  shiftProfile,
 }: {
   line: PanelLine;
   first: boolean;
@@ -378,6 +389,13 @@ function StLineRow({
   onRevert?: (payableId: string) => void;
   onAdjustLoad?: (loadId: string, label: string) => void;
   onApplyRules?: (payableId: string) => void;
+  /** Per-shift pay profile override control (driver hourly shift lines). */
+  shiftProfile?: {
+    value: string;                                    // 'auto' | payProfiles id
+    options: Array<{ value: string; label: string }>;
+    saving: boolean;
+    onChange: (value: string) => void;
+  };
 }) {
   const [editing, setEditing] = React.useState(false);
   return (
@@ -446,6 +464,52 @@ function StLineRow({
         {line.sub && (
           <div className="truncate" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginTop: 2 }}>
             {line.sub}
+          </div>
+        )}
+        {shiftProfile && (
+          <div className="flex items-center gap-1.5" style={{ marginTop: 4 }}>
+            <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>
+              Profile
+            </span>
+            <div className="relative">
+              <select
+                value={shiftProfile.value}
+                disabled={shiftProfile.saving}
+                onChange={(e) => shiftProfile.onChange(e.target.value)}
+                className="appearance-none cursor-pointer disabled:cursor-wait"
+                style={{
+                  height: 22,
+                  padding: '0 22px 0 7px',
+                  borderRadius: 5,
+                  border: '1px solid var(--border-hairline)',
+                  background: 'transparent',
+                  fontFamily: 'inherit',
+                  fontSize: 11,
+                  color: shiftProfile.value === 'auto' ? 'var(--text-tertiary)' : 'var(--text-secondary)',
+                  opacity: shiftProfile.saving ? 0.6 : 1,
+                  maxWidth: 240,
+                }}
+              >
+                <option value="auto">Driver default (auto)</option>
+                {shiftProfile.options.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              <span
+                className="absolute pointer-events-none"
+                style={{ right: 7, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }}
+              >
+                <WIcon name="chevron-down" size={10} />
+              </span>
+            </div>
+            {shiftProfile.value !== 'auto' && (
+              <span
+                className="uppercase"
+                style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.4, color: '#A66800', padding: '1px 5px', borderRadius: 3, background: 'rgba(245,158,11,0.12)' }}
+              >
+                Override
+              </span>
+            )}
           </div>
         )}
         {line.loads && line.loads.length > 0 ? (
@@ -911,6 +975,8 @@ export function SettlementPanel({
         hours: row.planBasis === 'hourly' && category === 'EARNING' ? p.quantity : undefined,
         loads: p.shiftLoads,
         isShift,
+        sessionId: p.sessionId,
+        sessionOverrideId: p.sessionPayProfileOverrideId,
         warning: p.warningMessage,
         // Inline-edit state.
         edited: p.edited,
@@ -1084,6 +1150,44 @@ export function SettlementPanel({
       toast.error("Couldn't apply the update", { description: friendlyError(err) });
     } finally {
       setBusy(false);
+    }
+  };
+
+  // ── shift-level pay profile override (driver hourly shifts) ────────────────
+  // Session pay selects the driver's default assignment at shift start; the
+  // picker pins one shift to a specific profile instead. New-engine only —
+  // legacy statements won't reflect it until settlements_read_ledger = 'new'.
+  const driverProfiles = useAuthQuery(
+    api.payProfiles.listForOrg,
+    party === 'driver'
+      ? { workosOrgId: organizationId, includeInactive: true, payeeType: 'DRIVER' as const }
+      : 'skip',
+  );
+  const shiftProfileOptions = React.useMemo(
+    () => (driverProfiles ?? [])
+      .filter(p => p.isActive)
+      .map(p => ({ value: p._id as string, label: p.name })),
+    [driverProfiles],
+  );
+  const setSessionOverride = useMutation(api.payProfiles.setSessionOverride);
+  const [savingShiftSession, setSavingShiftSession] = React.useState<string | null>(null);
+  const changeShiftProfile = async (sessionId: string, value: string) => {
+    setSavingShiftSession(sessionId);
+    try {
+      await setSessionOverride({
+        sessionId: sessionId as Id<'driverSessions'>,
+        profileId: value === 'auto' ? undefined : (value as Id<'payProfiles'>),
+      });
+      toast.success(
+        value === 'auto'
+          ? 'Shift override cleared — recalculating shift pay'
+          : 'Shift pay profile set — recalculating shift pay',
+      );
+      onChanged?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to update shift pay profile');
+    } finally {
+      setSavingShiftSession(null);
     }
   };
 
@@ -1368,7 +1472,28 @@ export function SettlementPanel({
                 <React.Fragment key={dayKey}>
                   <StDayHeader dayKey={dayKey} dayLines={dayLines} first={gi === 0} />
                   {dayLines.map((l) => (
-                    <StLineRow key={l._id} line={l} first={false} mono={row.planBasis !== 'hourly'} highlighted={highlightLineId === l._id} onRemove={removeLine} onEdit={editLine} onRevert={revertLine} onAdjustLoad={adjustForLoad} onApplyRules={applyRules} />
+                    <StLineRow
+                      key={l._id}
+                      line={l}
+                      first={false}
+                      mono={row.planBasis !== 'hourly'}
+                      highlighted={highlightLineId === l._id}
+                      onRemove={removeLine}
+                      onEdit={editLine}
+                      onRevert={revertLine}
+                      onAdjustLoad={adjustForLoad}
+                      onApplyRules={applyRules}
+                      shiftProfile={
+                        party === 'driver' && editable && l.isShift && l.sessionId
+                          ? {
+                              value: l.sessionOverrideId ?? 'auto',
+                              options: shiftProfileOptions,
+                              saving: savingShiftSession === l.sessionId,
+                              onChange: (v) => changeShiftProfile(l.sessionId!, v),
+                            }
+                          : undefined
+                      }
+                    />
                   ))}
                 </React.Fragment>
               ))

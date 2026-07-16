@@ -44,8 +44,15 @@ export const calculatePayForSession = internalMutation({
       .collect();
 
     const profiles = new Map<string, PayProfile>();
-    for (const a of assignments) {
-      const p = await ctx.db.get(a.profileId as Id<'payProfiles'>);
+    // Candidate set: assigned profiles PLUS the shift override target (the
+    // override may point at a profile the driver isn't assigned to — that's
+    // its purpose). Rules/components below are collected per profiles-map key,
+    // so adding it here is what makes the override's rules calculable.
+    const candidateProfileIds = assignments.map((a) => a.profileId as Id<'payProfiles'>);
+    if (session.payProfileOverrideId) candidateProfileIds.push(session.payProfileOverrideId);
+    for (const pid of candidateProfileIds) {
+      if (profiles.has(pid)) continue;
+      const p = await ctx.db.get(pid);
       if (!p) continue;
       profiles.set(p._id, {
         _id: p._id, workosOrgId: p.workosOrgId, name: p.name, payeeType: p.payeeType as 'DRIVER' | 'CARRIER',
@@ -91,7 +98,7 @@ export const calculatePayForSession = internalMutation({
     // 2. Pure session calc.
     const result = calculateSessionPay({
       driverId, sessionId: args.sessionId as string,
-      session: { activeMinutes, startedAt },
+      session: { activeMinutes, startedAt, payProfileOverrideId: session.payProfileOverrideId },
       profileAssignments: calcAssignments, profiles, rules, components,
     });
 

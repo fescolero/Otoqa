@@ -92,6 +92,35 @@ describe('calculateSessionPay', () => {
     const r = calculateSessionPay(sessionInput({ rules: [cappedRule] }));
     expect(centsToNumber(r.payItems[0].amountCents)).toBeCloseTo(200.0, 6);
   });
+
+  it('session payProfileOverrideId beats the default assignment', () => {
+    const PROF_OVR = 'prof_override';
+    const overrideProfile: PayProfile = { _id: PROF_OVR, workosOrgId: 'org_test', name: 'SoCal', payeeType: 'DRIVER', currency: 'USD', isActive: true };
+    const overrideHourly = rule({
+      _id: 'r_ovr', profileId: PROF_OVR, name: 'Hourly (shift)', componentId: COMP_HR,
+      trigger: { source: 'session.activeMinutes', transform: 'HOURS_FROM_MINUTES' },
+      rateAmountMicroCents: microCentsFromDecimalString('22.00', 'USD'),
+    });
+    const r = calculateSessionPay(sessionInput({
+      session: { activeMinutes: 600, startedAt: T, payProfileOverrideId: PROF_OVR },
+      profiles: new Map([[PROF, profile()], [PROF_OVR, overrideProfile]]),
+      rules: [sessionHourly, overrideHourly],
+    }));
+    expect(r.selectedProfileId).toBe(PROF_OVR);
+    expect(r.payItems).toHaveLength(1);
+    // 10h × $22.00 (override), NOT $28.50 (default assignment's profile)
+    expect(centsToNumber(r.payItems[0].amountCents)).toBeCloseTo(220.0, 6);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('missing/inactive session override falls through to the default with a warning', () => {
+    const r = calculateSessionPay(sessionInput({
+      session: { activeMinutes: 600, startedAt: T, payProfileOverrideId: 'prof_ghost' },
+    }));
+    expect(r.selectedProfileId).toBe(PROF);
+    expect(centsToNumber(r.payItems[0].amountCents)).toBeCloseTo(285.0, 6);
+    expect(r.warnings.map((w) => w.code)).toContain('SESSION_OVERRIDE_INVALID');
+  });
 });
 
 describe('calculatePay (leg) ignores session-scoped rules', () => {
