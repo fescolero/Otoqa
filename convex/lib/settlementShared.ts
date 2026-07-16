@@ -48,18 +48,32 @@ export interface LineSummary {
   net: number;
   /** Sum of SYSTEM earning quantities (miles or hours depending on basis). */
   systemQuantity: number;
+  /** Hours counted ONCE. The new ledger emits several rate lines over the
+   *  same hours (shift H&W + per-leg base + per-leg premium), so summing
+   *  quantities double-counts. Dedupe: max quantity per session (a shift's
+   *  activeMinutes-based line spans its leg lines), falling back to max per
+   *  load when no session lines exist. Miles keep the plain sum — loaded and
+   *  empty mile lines cover DIFFERENT miles and must add. */
+  workedQuantity: number;
   loadCount: number;
   lineCount: number;
 }
 
 export function summarizeLines(
-  payables: Array<ClassifiablePayable & { quantity: number; loadId?: Id<'loadInformation'> }>,
+  payables: Array<ClassifiablePayable & {
+    quantity: number;
+    loadId?: Id<'loadInformation'>;
+    sessionId?: Id<'driverSessions'>;
+  }>,
 ): LineSummary {
   let earnTotal = 0;
   let reimbTotal = 0;
   let deductTotal = 0;
   let systemQuantity = 0;
   const loadIds = new Set<string>();
+  const bySession = new Map<string, number>();
+  const byLoad = new Map<string, number>();
+  let unanchoredQuantity = 0;
 
   for (const p of payables) {
     const category = classifyPayable(p);
@@ -69,10 +83,28 @@ export function summarizeLines(
       reimbTotal += p.totalAmount;
     } else {
       earnTotal += p.totalAmount;
-      if (p.sourceType === 'SYSTEM') systemQuantity += p.quantity;
+      if (p.sourceType === 'SYSTEM') {
+        systemQuantity += p.quantity;
+        if (p.sessionId) {
+          const k = p.sessionId as string;
+          bySession.set(k, Math.max(bySession.get(k) ?? 0, p.quantity));
+        } else if (p.loadId) {
+          const k = p.loadId as string;
+          byLoad.set(k, Math.max(byLoad.get(k) ?? 0, p.quantity));
+        } else {
+          unanchoredQuantity += p.quantity;
+        }
+      }
     }
     if (p.loadId) loadIds.add(p.loadId);
   }
+
+  // Session lines (activeMinutes-based) span the shift's leg lines, so when
+  // any exist, per-load groups are subsets and drop out of the count.
+  const workedQuantity =
+    (bySession.size > 0
+      ? [...bySession.values()].reduce((s, v) => s + v, 0)
+      : [...byLoad.values()].reduce((s, v) => s + v, 0)) + unanchoredQuantity;
 
   return {
     earnTotal,
@@ -80,6 +112,7 @@ export function summarizeLines(
     deductTotal,
     net: earnTotal + reimbTotal - deductTotal,
     systemQuantity,
+    workedQuantity,
     loadCount: loadIds.size,
     lineCount: payables.length,
   };
@@ -712,13 +745,16 @@ export function ageDays(periodEnd: number, now: number = Date.now()): number {
 /** Display units for the work column, e.g. "1,234 mi" / "38.5 h" / "6 loads". */
 export function unitsLabel(
   basis: PayBasisKey | null,
-  summary: Pick<LineSummary, 'systemQuantity' | 'loadCount'>,
+  summary: Pick<LineSummary, 'systemQuantity' | 'loadCount'> & Partial<Pick<LineSummary, 'workedQuantity'>>,
 ): string {
   if (basis === 'mile' && summary.systemQuantity > 0) {
     return `${Math.round(summary.systemQuantity).toLocaleString('en-US')} mi`;
   }
-  if (basis === 'hourly' && summary.systemQuantity > 0) {
-    return `${summary.systemQuantity.toFixed(1)} h`;
+  // Hours use the deduped count — several rate lines can cover the same
+  // hours (see LineSummary.workedQuantity).
+  const hoursQuantity = summary.workedQuantity ?? summary.systemQuantity;
+  if (basis === 'hourly' && hoursQuantity > 0) {
+    return `${hoursQuantity.toFixed(1)} h`;
   }
   return `${summary.loadCount} load${summary.loadCount === 1 ? '' : 's'}`;
 }

@@ -783,9 +783,33 @@ function StLineRow({
   );
 }
 
+/** Hours counted once for a day's lines. Several rate lines cover the same
+ *  hours on the new ledger (shift H&W + each load's base + premium), so
+ *  summing quantities double-counts. Shift lines are authoritative when
+ *  present (max per session — the activeMinutes line spans its legs);
+ *  otherwise max per load (base + premium share the load's hours). */
+function dedupedDayHours(dayLines: PanelLine[]): number {
+  const shiftLines = dayLines.filter((l) => l.isShift && l.hours != null);
+  if (shiftLines.length > 0) {
+    const bySession = new Map<string, number>();
+    for (const l of shiftLines) {
+      const k = l.sessionId ?? l._id;
+      bySession.set(k, Math.max(bySession.get(k) ?? 0, l.hours ?? 0));
+    }
+    return [...bySession.values()].reduce((s, v) => s + v, 0);
+  }
+  const byLoad = new Map<string, number>();
+  for (const l of dayLines) {
+    if (l.hours == null) continue;
+    const k = l.loadId ?? l._id;
+    byLoad.set(k, Math.max(byLoad.get(k) ?? 0, l.hours));
+  }
+  return [...byLoad.values()].reduce((s, v) => s + v, 0);
+}
+
 /** Day band inside the earnings card — date left, hours/amount summary right. */
 function StDayHeader({ dayKey, dayLines, first }: { dayKey: number; dayLines: PanelLine[]; first: boolean }) {
-  const hours = dayLines.reduce((s, l) => s + (l.hours ?? 0), 0);
+  const hours = dedupedDayHours(dayLines);
   const amount = dayLines.reduce((s, l) => s + l.amount, 0);
   return (
     <div
