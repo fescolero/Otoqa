@@ -109,16 +109,21 @@ const CURRENCIES = [
 // (e.g. an H&W fringe per hour worked). Unit picks the engine trigger; the
 // "counts as" component drives paycheck bucketing and tax treatment. ───────
 
-type CustomUnit = 'hr' | 'mi' | 'load';
+type CustomUnit = 'hr' | 'mi' | 'mi_empty' | 'mi_total' | 'load';
 
 const UNIT_META: Record<CustomUnit, {
+  /** Picker label — spells out WHICH miles so an "Empty miles" line can't
+   *  silently bind to hours or loaded miles. */
+  label: string;
   suffix: string;
   defaultCode: string;
   trigger: { source: string; transform?: 'HOURS_FROM_MINUTES' };
 }> = {
-  hr:   { suffix: '/hr',   defaultCode: 'WAGE_HOURLY',  trigger: { source: 'leg.durationMinutes', transform: 'HOURS_FROM_MINUTES' } },
-  mi:   { suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.legLoadedMiles' } },
-  load: { suffix: '/load', defaultCode: 'WAGE_FLAT',    trigger: { source: 'constant.1' } },
+  hr:       { label: '/hr',        suffix: '/hr',   defaultCode: 'WAGE_HOURLY',  trigger: { source: 'leg.durationMinutes', transform: 'HOURS_FROM_MINUTES' } },
+  mi:       { label: '/mi loaded', suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.legLoadedMiles' } },
+  mi_empty: { label: '/mi empty',  suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.legEmptyMiles' } },
+  mi_total: { label: '/mi total',  suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.totalMiles' } },
+  load:     { label: '/load',      suffix: '/load', defaultCode: 'WAGE_FLAT',    trigger: { source: 'constant.1' } },
 };
 
 type CustomLine = { key: number; name: string; code: string; unit: CustomUnit; rate: string };
@@ -532,7 +537,7 @@ export default function NewPayProfilePage() {
                     <div className="w-[120px] shrink-0">
                       <Input value={l.rate} onChange={v => patchCustomLine(l.key, { rate: v })} mono prefix="$" placeholder="0.000" />
                     </div>
-                    <div className="w-[86px] shrink-0">
+                    <div className="w-[118px] shrink-0">
                       <Select
                         value={l.unit}
                         onChange={v => patchCustomLine(l.key, {
@@ -543,7 +548,7 @@ export default function NewPayProfilePage() {
                             ? UNIT_META[v as CustomUnit].defaultCode
                             : l.code,
                         })}
-                        options={(Object.keys(UNIT_META) as CustomUnit[]).map(u => ({ value: u, label: UNIT_META[u].suffix }))}
+                        options={(Object.keys(UNIT_META) as CustomUnit[]).map(u => ({ value: u, label: UNIT_META[u].label }))}
                       />
                     </div>
                     <button
@@ -657,7 +662,7 @@ export default function NewPayProfilePage() {
                   >
                     <span className="text-[12px] truncate" style={{ color: 'var(--text-secondary)' }}>{l.name.trim()}</span>
                     <span className="num text-[12px] shrink-0" style={{ color: 'var(--text-tertiary)' }}>
-                      ${l.rate.trim()} {UNIT_META[l.unit].suffix}
+                      ${l.rate.trim()} {UNIT_META[l.unit].label}
                     </span>
                   </div>
                 ))}
