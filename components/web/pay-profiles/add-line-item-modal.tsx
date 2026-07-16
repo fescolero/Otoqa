@@ -2,10 +2,14 @@
  * AddLineItemModal — two-step rate-line creation flow.
  *
  *   Step 1: pick a rate type (9 options, 2 marked "coming soon").
- *   Step 2: name + rate amount + distance (if mileage-based).
+ *   Step 2: name + counts-as component + rate amount + distance (if
+ *           mileage-based).
  *
- * On submit, looks up the default chargeComponent for the picked type
- * (via convex chargeComponents.getByCode), then calls payRules.addRule.
+ * Each rate type has a default chargeComponent (e.g. Hourly → WAGE_HOURLY),
+ * but the "Counts as" picker lets a line be classified differently — an
+ * hourly H&W fringe line uses HEALTH_WELFARE so it buckets as non-taxable
+ * fringe on settlements and certified payroll instead of taxable base wage.
+ * On submit, calls payRules.addRule with the chosen component.
  *
  * Visual reference: settings-screen.jsx > AddLineItemModal.
  */
@@ -75,13 +79,17 @@ export function AddLineItemModal({ profileId, workosOrgId, onClose }: AddLineIte
   const [error, setError] = React.useState<string | null>(null);
 
   const addRule = useMutation(api.payRules.addRule);
-  // Resolve the component for the chosen type. Convex query auto-rerruns
-  // when `type` changes.
-  const targetComponentCode = type ? RATE_TYPE_TO_COMPONENT_CODE[type] : null;
-  const component = useQuery(
-    api.chargeComponents.getByCode,
-    targetComponentCode ? { workosOrgId, code: targetComponentCode } : 'skip',
+  // The org's component catalog backs the "Counts as" picker. Each rate type
+  // has a default code; the user can override it (e.g. Hourly line classified
+  // as HEALTH_WELFARE fringe instead of WAGE_HOURLY taxable wage).
+  const components = useQuery(api.chargeComponents.listForOrg, { workosOrgId });
+  const [componentCode, setComponentCode] = React.useState<string | null>(null);
+  const targetComponentCode = componentCode ?? (type ? RATE_TYPE_TO_COMPONENT_CODE[type] : null);
+  const component = React.useMemo(
+    () => components?.find(c => c.code === targetComponentCode) ?? null,
+    [components, targetComponentCode],
   );
+  const componentsLoading = components === undefined;
 
   const binding = type ? RATE_TYPE_BINDINGS[type] : null;
   const comingSoon = binding?.comingSoon ?? false;
@@ -105,6 +113,7 @@ export function AddLineItemModal({ profileId, workosOrgId, onClose }: AddLineIte
   const pickType = (t: DesignRateType) => {
     setType(t);
     setName(t);
+    setComponentCode(null); // reset "Counts as" to the type's default
     setError(null);
     if (!RATE_TYPE_BINDINGS[t].comingSoon) setStep('details');
   };
@@ -207,8 +216,9 @@ export function AddLineItemModal({ profileId, workosOrgId, onClose }: AddLineIte
               type={type}
               binding={binding}
               comingSoon={comingSoon}
-              componentReady={component !== undefined}
+              components={components}
               componentCode={targetComponentCode}
+              onChangeComponent={setComponentCode}
               name={name}
               rate={rate}
               dist={dist}
@@ -256,7 +266,8 @@ export function AddLineItemModal({ profileId, workosOrgId, onClose }: AddLineIte
                 !rate.trim() ||
                 comingSoon ||
                 submitting ||
-                component === undefined
+                componentsLoading ||
+                !component
               }
               onClick={step === 'type' ? undefined : handleSubmit}
             >
@@ -319,12 +330,32 @@ function TypePicker({ onPick }: { onPick: (t: DesignRateType) => void }) {
   );
 }
 
+// Buckets a rate line can be classified into. Deductions/withholdings/
+// garnishments are managed elsewhere — a profile rate line is always an
+// earning-side component.
+const EARNING_BUCKETS: Record<string, string> = {
+  BASE_WAGE: 'Base wage',
+  BASE_FRINGE: 'Fringe',
+  ACCESSORIAL: 'Accessorial',
+  BONUS: 'Bonus',
+};
+
+type ComponentOption = {
+  _id: string;
+  code: string;
+  displayName: string;
+  bucket: string;
+  appliesTo: string[];
+  isActive: boolean;
+};
+
 function DetailsForm({
   type,
   binding,
   comingSoon,
-  componentReady,
+  components,
   componentCode,
+  onChangeComponent,
   name,
   rate,
   dist,
@@ -336,8 +367,9 @@ function DetailsForm({
   type: DesignRateType;
   binding: typeof RATE_TYPE_BINDINGS[DesignRateType];
   comingSoon: boolean;
-  componentReady: boolean;
+  components: ComponentOption[] | undefined;
   componentCode: string | null;
+  onChangeComponent: (code: string) => void;
   name: string;
   rate: string;
   dist: string;
@@ -349,6 +381,20 @@ function DetailsForm({
   const prefix = binding.unit.includes('$') || !binding.unit.includes('%') ? '$' : '';
   const suffix = binding.unit.includes('%') ? '%' : '';
 
+  const componentOptions = React.useMemo(() => {
+    if (!components) return [];
+    return components
+      .filter(c => c.isActive && c.appliesTo.includes('PAY') && c.bucket in EARNING_BUCKETS)
+      .sort((a, b) =>
+        a.bucket === b.bucket
+          ? a.displayName.localeCompare(b.displayName)
+          : Object.keys(EARNING_BUCKETS).indexOf(a.bucket) - Object.keys(EARNING_BUCKETS).indexOf(b.bucket))
+      .map(c => ({
+        value: c.code,
+        label: `${c.displayName} · ${EARNING_BUCKETS[c.bucket]}`,
+      }));
+  }, [components]);
+
   return (
     <div className="flex flex-col gap-4">
       {comingSoon && (
@@ -356,7 +402,7 @@ function DetailsForm({
           className="px-3 py-2 rounded text-[12px]"
           style={{ background: 'rgba(245,158,11,0.10)', color: '#A66800' }}
         >
-          <strong>Coming soon.</strong> This rate type isn't wired into the
+          <strong>Coming soon.</strong> This rate type isn&apos;t wired into the
           calc engine yet. Choose another type to continue.
         </div>
       )}
@@ -380,6 +426,23 @@ function DetailsForm({
 
       <FormRow label="Name" hint="Shows on driver settlements and the rates table.">
         <ModalInput value={name} onChange={onChangeName} placeholder={`e.g. ${type}`} />
+      </FormRow>
+
+      <FormRow
+        label="Counts as"
+        hint="Drives paycheck bucketing and tax treatment — e.g. an hourly H&W line classified as Health & Welfare pays as non-taxable fringe on top of base wage."
+      >
+        {componentOptions.length > 0 ? (
+          <ModalSelect
+            value={componentCode ?? ''}
+            onChange={onChangeComponent}
+            options={componentOptions}
+          />
+        ) : (
+          <div className="text-[11.5px] italic" style={{ color: 'var(--text-tertiary)' }}>
+            Loading component catalog…
+          </div>
+        )}
       </FormRow>
 
       <div className="grid gap-3" style={{ gridTemplateColumns: '1fr 140px' }}>
@@ -413,11 +476,6 @@ function DetailsForm({
         </FormRow>
       )}
 
-      {!comingSoon && !componentReady && (
-        <div className="text-[11.5px] italic" style={{ color: 'var(--text-tertiary)' }}>
-          Resolving chargeComponent ({componentCode})…
-        </div>
-      )}
     </div>
   );
 }

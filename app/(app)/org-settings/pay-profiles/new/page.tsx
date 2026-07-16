@@ -19,7 +19,7 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { toast } from 'sonner';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';
@@ -105,6 +105,33 @@ const CURRENCIES = [
   { value: 'MXN', label: 'MXN — Mexican Peso ($)' },
 ] as const;
 
+// ── Custom lines — manually described rates stacked on top of the base
+// (e.g. an H&W fringe per hour worked). Unit picks the engine trigger; the
+// "counts as" component drives paycheck bucketing and tax treatment. ───────
+
+type CustomUnit = 'hr' | 'mi' | 'load';
+
+const UNIT_META: Record<CustomUnit, {
+  suffix: string;
+  defaultCode: string;
+  trigger: { source: string; transform?: 'HOURS_FROM_MINUTES' };
+}> = {
+  hr:   { suffix: '/hr',   defaultCode: 'WAGE_HOURLY',  trigger: { source: 'leg.durationMinutes', transform: 'HOURS_FROM_MINUTES' } },
+  mi:   { suffix: '/mi',   defaultCode: 'WAGE_MILEAGE', trigger: { source: 'leg.legLoadedMiles' } },
+  load: { suffix: '/load', defaultCode: 'WAGE_FLAT',    trigger: { source: 'constant.1' } },
+};
+
+type CustomLine = { key: number; name: string; code: string; unit: CustomUnit; rate: string };
+
+// Buckets a profile rate line can be classified into (earning side only —
+// deductions/withholdings are managed elsewhere).
+const EARNING_BUCKETS: Record<string, string> = {
+  BASE_WAGE: 'Base wage',
+  BASE_FRINGE: 'Fringe',
+  ACCESSORIAL: 'Accessorial',
+  BONUS: 'Bonus',
+};
+
 type Currency = (typeof CURRENCIES)[number]['value'];
 type PayeeType = 'DRIVER' | 'CARRIER';
 
@@ -141,7 +168,34 @@ export default function NewPayProfilePage() {
     empty: true, detention: true, stop: false,
   });
   const [emptyAmt, setEmptyAmt] = React.useState(fmt3(0.6 * 0.85));
+  const [customLines, setCustomLines] = React.useState<CustomLine[]>([]);
+  const customKeyRef = React.useRef(0);
   const [submitting, setSubmitting] = React.useState(false);
+
+  // Component catalog for the custom lines' "Counts as" picker.
+  const components = useQuery(
+    api.chargeComponents.listForOrg,
+    workosOrgId ? { workosOrgId } : 'skip',
+  );
+  const componentOptions = React.useMemo(() => {
+    if (!components) return [];
+    return components
+      .filter(c => c.isActive && c.appliesTo.includes('PAY') && c.bucket in EARNING_BUCKETS)
+      .sort((a, b) =>
+        a.bucket === b.bucket
+          ? a.displayName.localeCompare(b.displayName)
+          : Object.keys(EARNING_BUCKETS).indexOf(a.bucket) - Object.keys(EARNING_BUCKETS).indexOf(b.bucket))
+      .map(c => ({ value: c.code, label: `${c.displayName} · ${EARNING_BUCKETS[c.bucket]}` }));
+  }, [components]);
+
+  const addCustomLine = () => setCustomLines(lines => [
+    ...lines,
+    { key: ++customKeyRef.current, name: '', code: 'HEALTH_WELFARE', unit: 'hr', rate: '' },
+  ]);
+  const patchCustomLine = (key: number, patch: Partial<CustomLine>) =>
+    setCustomLines(lines => lines.map(l => (l.key === key ? { ...l, ...patch } : l)));
+  const removeCustomLine = (key: number) =>
+    setCustomLines(lines => lines.filter(l => l.key !== key));
 
   const pickModel = (m: ModelPreset) => {
     setModel(m);
@@ -169,7 +223,17 @@ export default function NewPayProfilePage() {
 
   const payeeWord = payeeType === 'DRIVER' ? 'drivers' : 'carriers';
   const baseMicro = toMicroUnits(base, model.payBasis === 'PERCENTAGE');
-  const canCreate = !!workosOrgId && name.trim().length > 0 && baseMicro !== null && !submitting;
+  // Custom lines: fully blank rows are ignored; partially filled rows block
+  // create so nothing is silently dropped.
+  const validCustomLines = customLines.filter(
+    l => l.name.trim() !== '' && toMicroUnits(l.rate, false) !== null,
+  );
+  const customLinesOk = customLines.every(
+    l => (l.name.trim() === '' && l.rate.trim() === '')
+      || (l.name.trim() !== '' && toMicroUnits(l.rate, false) !== null),
+  );
+  const canCreate = !!workosOrgId && name.trim().length > 0 && baseMicro !== null
+    && customLinesOk && !submitting;
 
   const submit = React.useCallback(async () => {
     if (!canCreate || !workosOrgId || baseMicro === null) return;
@@ -217,6 +281,14 @@ export default function NewPayProfilePage() {
           minThreshold: 2,                  // fires from the 2nd stop on
         });
       }
+      for (const l of validCustomLines) {
+        initialRules.push({
+          name: l.name.trim(),
+          componentCode: l.code,
+          trigger: UNIT_META[l.unit].trigger,
+          rateAmountMicroCents: toMicroUnits(l.rate, false)!,
+        });
+      }
 
       const profileId = await createProfile({
         workosOrgId,
@@ -234,7 +306,7 @@ export default function NewPayProfilePage() {
       toast.error(e instanceof Error ? e.message : 'Failed to create pay profile');
       setSubmitting(false);
     }
-  }, [canCreate, workosOrgId, baseMicro, baseName, model, acc, emptyAmt, name, desc, payeeType, currency, orgDefault, createProfile, router]);
+  }, [canCreate, workosOrgId, baseMicro, baseName, model, acc, emptyAmt, validCustomLines, name, desc, payeeType, currency, orgDefault, createProfile, router]);
 
   const cancel = React.useCallback(() => router.push('/org-settings/pay-profiles'), [router]);
 
@@ -371,8 +443,8 @@ export default function NewPayProfilePage() {
           <DSCard
             bodyClassName="p-0"
             title={
-              <SectionTitle sub="Optional starters — toggle the ones that apply. Amounts are absolute; fine-tune in the editor.">
-                Common accessorials
+              <SectionTitle sub="Optional starters — toggle the ones that apply, or add your own lines (e.g. an H&W fringe on top of the base rate). Amounts are absolute; fine-tune in the editor.">
+                Accessorials &amp; extra lines
               </SectionTitle>
             }
           >
@@ -450,6 +522,66 @@ export default function NewPayProfilePage() {
                   </button>
                 );
               })}
+
+              {customLines.map(l => (
+                <div key={l.key} style={{ borderTop: '1px solid var(--border-hairline)' }}>
+                  <div className="flex items-center gap-2 px-3.5 py-2.5">
+                    <div className="flex-1 min-w-0">
+                      <Input value={l.name} onChange={v => patchCustomLine(l.key, { name: v })} placeholder="e.g. H&W" />
+                    </div>
+                    <div className="w-[120px] shrink-0">
+                      <Input value={l.rate} onChange={v => patchCustomLine(l.key, { rate: v })} mono prefix="$" placeholder="0.000" />
+                    </div>
+                    <div className="w-[86px] shrink-0">
+                      <Select
+                        value={l.unit}
+                        onChange={v => patchCustomLine(l.key, {
+                          unit: v as CustomUnit,
+                          // keep the wage default in sync unless the user
+                          // classified the line as something specific already
+                          code: Object.values(UNIT_META).some(m => m.defaultCode === l.code)
+                            ? UNIT_META[v as CustomUnit].defaultCode
+                            : l.code,
+                        })}
+                        options={(Object.keys(UNIT_META) as CustomUnit[]).map(u => ({ value: u, label: UNIT_META[u].suffix }))}
+                      />
+                    </div>
+                    <button
+                      onClick={() => removeCustomLine(l.key)}
+                      className="focus-ring inline-flex items-center justify-center w-7 h-7 rounded border-0 bg-transparent cursor-pointer shrink-0"
+                      style={{ color: 'var(--text-tertiary)' }}
+                      aria-label="Remove line"
+                      title="Remove line"
+                    >
+                      <WIcon name="close" size={13} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 pb-2.5 pr-3.5" style={{ paddingLeft: 14 }}>
+                    <span className="text-[11px] whitespace-nowrap" style={{ color: 'var(--text-tertiary)' }}>Counts as</span>
+                    <div className="flex-1 min-w-0">
+                      <Select
+                        value={l.code}
+                        onChange={v => patchCustomLine(l.key, { code: v })}
+                        options={componentOptions.length > 0
+                          ? componentOptions
+                          : [{ value: l.code, label: 'Loading component catalog…' }]}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              <button
+                onClick={addCustomLine}
+                className="focus-ring w-full flex items-center gap-2 px-3.5 py-2.5 bg-transparent border-0 cursor-pointer text-left hover:bg-[var(--bg-row-hover)]"
+                style={{ fontFamily: 'inherit', borderTop: '1px solid var(--border-hairline)', color: 'var(--accent)' }}
+              >
+                <WIcon name="plus" size={13} />
+                <span className="text-[12.5px] font-medium">Add custom line</span>
+                <span className="text-[11.5px] ml-auto" style={{ color: 'var(--text-tertiary)' }}>
+                  fringe, bonus, or another rate on top of base
+                </span>
+              </button>
             </div>
           </DSCard>
         </div>
@@ -517,6 +649,18 @@ export default function NewPayProfilePage() {
                     <span className="num text-[12px]" style={{ color: 'var(--text-tertiary)' }}>{accDetail(a)}</span>
                   </div>
                 ))}
+                {validCustomLines.map(l => (
+                  <div
+                    key={l.key}
+                    className="flex items-center justify-between py-[7px]"
+                    style={{ borderTop: '1px solid var(--border-hairline)' }}
+                  >
+                    <span className="text-[12px] truncate" style={{ color: 'var(--text-secondary)' }}>{l.name.trim()}</span>
+                    <span className="num text-[12px] shrink-0" style={{ color: 'var(--text-tertiary)' }}>
+                      ${l.rate.trim()} {UNIT_META[l.unit].suffix}
+                    </span>
+                  </div>
+                ))}
               </div>
               <div
                 className="px-3.5 py-2 text-[11.5px]"
@@ -537,7 +681,11 @@ export default function NewPayProfilePage() {
               <ChecklistRow done label="Choose who it applies to" />
               <ChecklistRow done={name.trim().length > 0} label="Name the profile" />
               <ChecklistRow done={baseMicro !== null} label="Set the base rate" />
-              <ChecklistRow done={chosenAcc.length > 0} label={`Accessorials (optional) · ${chosenAcc.length} added`} last />
+              <ChecklistRow
+                done={chosenAcc.length + validCustomLines.length > 0}
+                label={`Extra lines (optional) · ${chosenAcc.length + validCustomLines.length} added`}
+                last
+              />
             </div>
             <div
               className="mt-3 flex items-start gap-2 px-3 py-2.5 rounded-lg"
