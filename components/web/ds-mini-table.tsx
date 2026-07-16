@@ -351,22 +351,25 @@ function DSRowActions({ actions }: { actions: DSRowAction[] }) {
           className="z-50 min-w-[180px] rounded-lg border border-[var(--border-hairline-strong)] bg-card p-1 shadow-[var(--shadow-popover)]"
         >
           {actions.map((a, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={a.onClick}
-              className={cn(
-                'focus-ring w-full px-2.5 py-1.5 rounded-md text-left text-[12.5px] flex items-center gap-2',
-                'hover:bg-[var(--bg-row-hover)]',
-                a.danger ? 'text-[#B43030]' : 'text-foreground',
-              )}
-            >
-              {a.icon && <WIcon name={a.icon} size={13} />}
-              <span className="flex-1">{a.label}</span>
-              {a.kbd && (
-                <span className="text-[10.5px] font-medium text-[var(--text-tertiary)] font-mono">{a.kbd}</span>
-              )}
-            </button>
+            // Close wrapper: the menu should dismiss as soon as an action is
+            // picked, like any menu — otherwise it lingers over the table.
+            <PopoverPrimitive.Close asChild key={i}>
+              <button
+                type="button"
+                onClick={a.onClick}
+                className={cn(
+                  'focus-ring w-full px-2.5 py-1.5 rounded-md text-left text-[12.5px] flex items-center gap-2',
+                  'hover:bg-[var(--bg-row-hover)]',
+                  a.danger ? 'text-[#B43030]' : 'text-foreground',
+                )}
+              >
+                {a.icon && <WIcon name={a.icon} size={13} />}
+                <span className="flex-1">{a.label}</span>
+                {a.kbd && (
+                  <span className="text-[10.5px] font-medium text-[var(--text-tertiary)] font-mono">{a.kbd}</span>
+                )}
+              </button>
+            </PopoverPrimitive.Close>
           ))}
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>

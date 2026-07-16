@@ -72,9 +72,11 @@ export const get = query({
     if (!profile) return null;
     if (profile.workosOrgId !== callerOrgId) return null;
 
+    // Active rules only — removeRule soft-deactivates (audit trail), and a
+    // removed line must actually leave the editor's rates table.
     const rules = await ctx.db
       .query('payRules')
-      .withIndex('by_profile_active', q => q.eq('profileId', profileId))
+      .withIndex('by_profile_active', q => q.eq('profileId', profileId).eq('isActive', true))
       .collect();
     const assignments = await ctx.db
       .query('payeeProfileAssignments')
@@ -471,9 +473,10 @@ export const duplicate = mutation({
       createdBy: userId,
     });
 
+    // Copy active rules only — soft-removed lines shouldn't resurrect in copies.
     const rules = await ctx.db
       .query('payRules')
-      .withIndex('by_profile_active', q => q.eq('profileId', profileId))
+      .withIndex('by_profile_active', q => q.eq('profileId', profileId).eq('isActive', true))
       .collect();
     for (const r of rules) {
       await ctx.db.insert('payRules', {
