@@ -112,6 +112,11 @@ interface PanelLine {
   hours?: number;
   /** Loads run during the shift — rendered one row each for review. */
   loads?: Array<{ label: string; actualAt?: number; scheduledAt?: number; lane?: string; noPay?: boolean }>;
+  /** Suppress the shift line's loads mini-table — set when the statement has
+   *  per-load groups carrying the same columns (new ledger). The loads data
+   *  stays on the line: it feeds the group headers and the no-pay warning.
+   *  Legacy-read statements have no load groups, so their table remains. */
+  hideLoadsTable?: boolean;
   /** Session-backed shift line — gets the loads mini-table (or its absence note). */
   isShift?: boolean;
   /** Session id behind a shift line — enables the per-shift profile picker. */
@@ -420,6 +425,13 @@ function StLoadHeader({
   first: boolean;
 }) {
   const inLabel = meta?.actualAt != null ? fmtTime(meta.actualAt) : time;
+  // Same late-check-in signal the shift loads table used: quietly amber when
+  // the driver checked in >45 min behind the scheduled start.
+  const driftMin =
+    meta?.actualAt != null && meta?.scheduledAt != null
+      ? Math.round((meta.actualAt - meta.scheduledAt) / 60000)
+      : null;
+  const late = driftMin != null && driftMin > 45;
   return (
     <div
       className="flex items-baseline gap-2 min-w-0"
@@ -429,7 +441,11 @@ function StLoadHeader({
         {label}
       </span>
       {inLabel && (
-        <span className="num whitespace-nowrap shrink-0" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        <span
+          className="num whitespace-nowrap shrink-0"
+          title={late ? `Checked in ${driftMin} min after the scheduled start` : undefined}
+          style={{ fontSize: 11, color: late ? '#A66800' : 'var(--text-secondary)', fontWeight: late ? 600 : 400 }}
+        >
           {inLabel}
         </span>
       )}
@@ -599,7 +615,7 @@ function StLineRow({
             )}
           </div>
         )}
-        {line.loads && line.loads.length > 0 ? (
+        {line.loads && line.loads.length > 0 && !line.hideLoadsTable ? (
           // Flat sub-section — a divider and the column grid carry the
           // structure; no third nested box (canvas → card → rows only).
           <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--border-hairline)' }}>
@@ -672,12 +688,30 @@ function StLineRow({
               );
             })}
           </div>
-        ) : line.isShift ? (
+        ) : line.isShift && (!line.loads || line.loads.length === 0) ? (
           <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: 6 }}>
             <WIcon name="circle-alert" size={12} color="#A66800" />
             No loads linked to this shift
           </div>
         ) : null}
+        {/* Table hidden (per-load groups carry its columns) — but a load with
+            no pay lines has no group to appear in, so it must be called out
+            here or it vanishes from review entirely. */}
+        {line.hideLoadsTable && (line.loads ?? []).some((ld) => ld.noPay) && (
+          <div
+            className="flex items-start gap-1.5"
+            style={{ marginTop: 6, fontSize: 11.5, lineHeight: '16px', color: '#A66800', fontWeight: 500 }}
+          >
+            <WIcon name="circle-alert" size={12} color="#A66800" />
+            <span>
+              No pay lines for{' '}
+              <span className="num tw-mono">
+                {(line.loads ?? []).filter((ld) => ld.noPay).map((ld) => ld.label).join(', ')}
+              </span>
+              {' '}— check the leg&apos;s check-in/checkout, then recalculate.
+            </span>
+          </div>
+        )}
         {line.warning && (
           <div
             className="flex items-start gap-1.5"
@@ -1103,6 +1137,17 @@ export function SettlementPanel({
       else if (category === 'REIMBURSEMENT') reimb.push(line);
       else earn.push(line);
     }
+    // Per-load groups (new ledger) carry the loads table's columns on their
+    // headers — the shift line's mini-table would duplicate them, so it hides.
+    // Statements with no load groups (legacy read) keep the table: it's the
+    // only load visibility there.
+    const hasLoadGroups = earn.some((l) => !l.isShift && l.loadId);
+    if (hasLoadGroups) {
+      for (const l of earn) {
+        if (l.isShift) l.hideLoadsTable = true;
+      }
+    }
+
     // Statements read chronologically — days ascending, lines by time within.
     earn.sort((a, b) => a.at - b.at);
     const earnTotal = earn.reduce((s, l) => s + l.amount, 0);
