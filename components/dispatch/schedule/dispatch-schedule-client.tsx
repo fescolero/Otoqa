@@ -7,7 +7,9 @@
  */
 
 import * as React from 'react';
+import { useRouter } from 'next/navigation';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { ReassignDriverDialog } from '@/components/sessions/reassign-driver-dialog';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { PageHeader } from '@/components/web/page-header';
@@ -624,6 +626,7 @@ export function DispatchScheduleClient({ organizationId }: { organizationId: str
           <DetailDrawer
             trip={picked}
             ownerName={pickedOwner?.name ?? '—'}
+            driverId={entity === 'drivers' ? (picked.rowId as Id<'drivers'>) : null}
             onClose={() => setPicked(null)}
           />
         )}
@@ -935,14 +938,23 @@ function NowIndicator({ x, totalH, label }: { x: number; totalH: number; label: 
 function DetailDrawer({
   trip,
   ownerName,
+  driverId,
   onClose,
 }: {
   trip: TripBar;
   ownerName: string;
+  /** Set when the schedule is in drivers view — rowId is the driver's _id. */
+  driverId: Id<'drivers'> | null;
   onClose: () => void;
 }) {
+  const router = useRouter();
+  const [reassignOpen, setReassignOpen] = React.useState(false);
   const s = TRIP_STATUS[trip.status] ?? TRIP_STATUS.assigned;
   const durHrs = (trip.endMs - trip.startMs) / HOUR_MS;
+  // Reassign is a driver-to-driver handoff, so it needs a driver row and a
+  // load that isn't already delivered. Carrier bars and completed legs keep
+  // the button visible but disabled.
+  const canReassign = Boolean(trip.loadId && driverId && trip.status !== 'completed');
   return (
     <div
       // Flex sibling (not absolute) so the schedule body's flex-1 width
@@ -1126,11 +1138,42 @@ function DetailDrawer({
           background: 'var(--bg-surface-2)',
         }}
       >
-        <WBtn size="sm">Reassign</WBtn>
-        <WBtn size="sm" variant="primary">
+        <WBtn
+          size="sm"
+          disabled={!canReassign}
+          title={
+            canReassign
+              ? undefined
+              : !trip.loadId
+                ? 'No load linked to this trip'
+                : !driverId
+                  ? 'Reassign is only available for driver trips'
+                  : 'Completed trips cannot be reassigned'
+          }
+          onClick={() => setReassignOpen(true)}
+        >
+          Reassign
+        </WBtn>
+        <WBtn
+          size="sm"
+          variant="primary"
+          disabled={!trip.loadId}
+          title={trip.loadId ? undefined : 'No load linked to this trip'}
+          onClick={() => trip.loadId && router.push(`/loads/${trip.loadId}`)}
+        >
           Open trip
         </WBtn>
       </div>
+
+      {trip.loadId && driverId && (
+        <ReassignDriverDialog
+          open={reassignOpen}
+          onOpenChange={setReassignOpen}
+          loadId={trip.loadId}
+          fromDriverId={driverId}
+          fromDriverName={ownerName}
+        />
+      )}
     </div>
   );
 }
