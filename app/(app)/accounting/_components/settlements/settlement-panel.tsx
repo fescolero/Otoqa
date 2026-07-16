@@ -118,6 +118,12 @@ interface PanelLine {
   sessionId?: string;
   /** The shift's current pay profile override (if any). */
   sessionOverrideId?: string;
+  /** Raw rate-line description (e.g. "Base hourly") — used as the row label
+   *  when the line renders inside a load group (the group header carries the
+   *  order number). */
+  desc?: string;
+  /** Work time formatted for display — lifted into the load group header. */
+  timeLabel?: string;
   /** Rules-engine warning shown inline; this line is a blocker jump target. */
   warning?: string;
   /** Review-edit state — drives the editor and the "Adjusted" badge. */
@@ -366,6 +372,55 @@ function StLineEditor({ line, onEdit, onCancel }: {
 }
 
 /** One line inside an earnings / reimbursement / deduction card. */
+// ── load grouping — one header per load, its rate lines nested under it ─────
+//
+// A load paying multiple rate lines (base hourly + on-load premium, or
+// mileage + stop pay) would otherwise render as sibling rows that read like
+// duplicate charges. Group them: the header carries the order number, work
+// time, and the load's combined total; each rate line renders indented
+// beneath it with its own edit affordances intact.
+
+type DayRenderGroup =
+  | { kind: 'line'; line: PanelLine }
+  | { kind: 'load'; key: string; label: string; time?: string; total: number; lines: PanelLine[] };
+
+function groupLoadLines(dayLines: PanelLine[]): DayRenderGroup[] {
+  const out: DayRenderGroup[] = [];
+  const byLoad = new Map<string, number>();
+  for (const l of dayLines) {
+    if (l.isShift || !l.loadId) {
+      out.push({ kind: 'line', line: l });
+      continue;
+    }
+    const i = byLoad.get(l.loadId);
+    if (i === undefined) {
+      byLoad.set(l.loadId, out.length);
+      out.push({ kind: 'load', key: l.loadId, label: l.label, time: l.timeLabel, total: l.amount, lines: [l] });
+    } else {
+      const g = out[i] as Extract<DayRenderGroup, { kind: 'load' }>;
+      g.total += l.amount;
+      g.lines.push(l);
+    }
+  }
+  return out;
+}
+
+function StLoadHeader({ label, time, total, first }: { label: string; time?: string; total: number; first: boolean }) {
+  return (
+    <div
+      className="flex items-baseline gap-2"
+      style={{ padding: '9px 14px 2px', borderTop: first ? 'none' : '1px solid var(--border-hairline)' }}
+    >
+      <span className="num tw-mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>
+        {label}
+      </span>
+      {time && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{time}</span>}
+      <span className="flex-1" />
+      <span className="num" style={{ fontSize: 12.5, fontWeight: 600 }}>{fmtUSD(total)}</span>
+    </div>
+  );
+}
+
 function StLineRow({
   line,
   first,
@@ -378,6 +433,7 @@ function StLineRow({
   onAdjustLoad,
   onApplyRules,
   shiftProfile,
+  indent,
 }: {
   line: PanelLine;
   first: boolean;
@@ -396,6 +452,8 @@ function StLineRow({
     saving: boolean;
     onChange: (value: string) => void;
   };
+  /** Rendered nested under a load group header — indented, no divider. */
+  indent?: boolean;
 }) {
   const [editing, setEditing] = React.useState(false);
   return (
@@ -403,7 +461,7 @@ function StLineRow({
       data-line-id={line._id}
       className="group flex items-start gap-3"
       style={{
-        padding: '10px 14px',
+        padding: indent ? '5px 14px 5px 28px' : '10px 14px',
         borderTop: first ? 'none' : '1px solid var(--border-hairline)',
         // Pulses when a readiness blocker jumps to this line.
         background: highlighted ? 'rgba(245,158,11,0.10)' : line.warning ? 'rgba(245,158,11,0.04)' : undefined,
@@ -977,6 +1035,8 @@ export function SettlementPanel({
         isShift,
         sessionId: p.sessionId,
         sessionOverrideId: p.sessionPayProfileOverrideId,
+        desc: p.description,
+        timeLabel: time,
         warning: p.warningMessage,
         // Inline-edit state.
         edited: p.edited,
@@ -1026,7 +1086,15 @@ export function SettlementPanel({
   const isBlocked = row.bucket === 'attention';
   const isOpen = row.bucket === 'open';
   const planMeta = row.planBasis ? PLAN_META[row.planBasis] : null;
-  const earnCount = lines?.earn.length ?? row.lineCount;
+  // Shift count = distinct sessions among earn lines — a shift can carry
+  // several rate lines (base, H&W, off-load), and loads add per-leg lines,
+  // so counting lines overstates wildly ("13 shifts" for one shift).
+  const distinctShifts = lines
+    ? new Set(lines.earn.filter((l) => l.isShift).map((l) => l.sessionId ?? l._id)).size
+    : null;
+  const earnCount = distinctShifts !== null && distinctShifts > 0
+    ? distinctShifts
+    : (lines?.earn.length ?? row.lineCount);
   const earnLabel =
     row.planBasis === 'hourly'
       ? `Earnings · ${earnCount} shift${earnCount === 1 ? '' : 's'} · ${row.units}`
@@ -1471,30 +1539,50 @@ export function SettlementPanel({
               ).map(([dayKey, dayLines], gi) => (
                 <React.Fragment key={dayKey}>
                   <StDayHeader dayKey={dayKey} dayLines={dayLines} first={gi === 0} />
-                  {dayLines.map((l) => (
-                    <StLineRow
-                      key={l._id}
-                      line={l}
-                      first={false}
-                      mono={row.planBasis !== 'hourly'}
-                      highlighted={highlightLineId === l._id}
-                      onRemove={removeLine}
-                      onEdit={editLine}
-                      onRevert={revertLine}
-                      onAdjustLoad={adjustForLoad}
-                      onApplyRules={applyRules}
-                      shiftProfile={
-                        party === 'driver' && editable && l.isShift && l.sessionId
-                          ? {
-                              value: l.sessionOverrideId ?? 'auto',
-                              options: shiftProfileOptions,
-                              saving: savingShiftSession === l.sessionId,
-                              onChange: (v) => changeShiftProfile(l.sessionId!, v),
-                            }
-                          : undefined
-                      }
-                    />
-                  ))}
+                  {groupLoadLines(dayLines).map((g) =>
+                    g.kind === 'line' ? (
+                      <StLineRow
+                        key={g.line._id}
+                        line={g.line}
+                        first={false}
+                        mono={row.planBasis !== 'hourly'}
+                        highlighted={highlightLineId === g.line._id}
+                        onRemove={removeLine}
+                        onEdit={editLine}
+                        onRevert={revertLine}
+                        onAdjustLoad={adjustForLoad}
+                        onApplyRules={applyRules}
+                        shiftProfile={
+                          party === 'driver' && editable && g.line.isShift && g.line.sessionId
+                            ? {
+                                value: g.line.sessionOverrideId ?? 'auto',
+                                options: shiftProfileOptions,
+                                saving: savingShiftSession === g.line.sessionId,
+                                onChange: (v) => changeShiftProfile(g.line.sessionId!, v),
+                              }
+                            : undefined
+                        }
+                      />
+                    ) : (
+                      <React.Fragment key={g.key}>
+                        <StLoadHeader label={g.label} time={g.time} total={g.total} first={false} />
+                        {g.lines.map((l) => (
+                          <StLineRow
+                            key={l._id}
+                            line={{ ...l, label: l.desc ?? l.label, sub: undefined }}
+                            first
+                            indent
+                            highlighted={highlightLineId === l._id}
+                            onRemove={removeLine}
+                            onEdit={editLine}
+                            onRevert={revertLine}
+                            onAdjustLoad={adjustForLoad}
+                            onApplyRules={applyRules}
+                          />
+                        ))}
+                      </React.Fragment>
+                    ),
+                  )}
                 </React.Fragment>
               ))
             ) : (
