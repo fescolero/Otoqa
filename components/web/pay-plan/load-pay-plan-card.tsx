@@ -79,6 +79,41 @@ export function LoadPayPlanCard({ loadId, organizationId, userId }: LoadPayPlanC
   );
   const activePlan = (assignments ?? []).find(a => a.isDefault) ?? (assignments ?? [])[0] ?? null;
 
+  // Load-level pay profile override. Engine precedence puts it above every
+  // assignment (leg override → LOAD OVERRIDE → jurisdiction → distance →
+  // default), so when set, every driver leg on this load pays off it.
+  // includeInactive so an override pointing at a since-archived profile still
+  // resolves for display (the engine falls through to default and warns).
+  const driverProfiles = useAuthQuery(api.payProfiles.listForOrg, {
+    workosOrgId: organizationId,
+    includeInactive: true,
+    payeeType: 'DRIVER',
+  });
+  const overrideId = loadDetails?.payProfileOverrideId ?? null;
+  const overrideProfile = overrideId
+    ? (driverProfiles ?? []).find(p => p._id === overrideId) ?? null
+    : null;
+  const setLoadOverride = useMutation(api.payProfiles.setLoadOverride);
+  const [savingOverride, setSavingOverride] = React.useState(false);
+  const handleOverrideChange = async (value: string) => {
+    setSavingOverride(true);
+    try {
+      await setLoadOverride({
+        loadId,
+        profileId: value === 'auto' ? undefined : (value as Id<'payProfiles'>),
+      });
+      toast.success(
+        value === 'auto'
+          ? 'Override cleared — pay follows the driver’s assigned profile'
+          : 'Pay profile override set — recalculating pay',
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to update pay profile override');
+    } finally {
+      setSavingOverride(false);
+    }
+  };
+
   // Roll customer-billing rows into the simple shape this card displays.
   const billingLines: PayLine[] = React.useMemo(() => {
     if (!invoiceLineItems) return [];
@@ -209,10 +244,38 @@ export function LoadPayPlanCard({ loadId, organizationId, userId }: LoadPayPlanC
         ) : (
           <>
             <PlanBanner
-              planName={activePlan?.profileName ?? '— No plan assigned'}
-              planSummary={summarizeRules(activePlan?.rules)}
+              planName={
+                overrideProfile
+                  ? overrideProfile.name
+                  : (activePlan?.profileName ?? '— No plan assigned')
+              }
+              planSummary={
+                overrideProfile
+                  ? summarizeRules(overrideProfile.rules)
+                  : summarizeRules(activePlan?.rules)
+              }
+              override={!!overrideProfile}
               onOpen={() => setOpen(true)}
             />
+
+            {payeeKind !== 'CARRIER' && (
+              <OverridePicker
+                value={overrideId ?? 'auto'}
+                saving={savingOverride}
+                defaultLabel={
+                  activePlan?.profileName
+                    ? `Driver default (${activePlan.profileName})`
+                    : 'Driver default (auto)'
+                }
+                profiles={(driverProfiles ?? [])
+                  .filter(p => p.isActive || p._id === overrideId)
+                  .map(p => ({
+                    value: p._id,
+                    label: p.isActive ? p.name : `${p.name} (archived)`,
+                  }))}
+                onChange={handleOverrideChange}
+              />
+            )}
 
             <PayLineGroup
               label="Customer billing"
@@ -268,10 +331,12 @@ type PayLine = {
 function PlanBanner({
   planName,
   planSummary,
+  override,
   onOpen,
 }: {
   planName: string;
   planSummary: string;
+  override?: boolean;
   onOpen: () => void;
 }) {
   return (
@@ -307,8 +372,25 @@ function PlanBanner({
         <WIcon name="doc-dollar" size={14} />
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>
-          {planName}
+        <div className="flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>
+          <span className="truncate">{planName}</span>
+          {override && (
+            <span
+              style={{
+                fontSize: 9.5,
+                fontWeight: 700,
+                letterSpacing: 0.03,
+                textTransform: 'uppercase',
+                color: '#A66800',
+                background: 'rgba(245,158,11,0.12)',
+                padding: '1px 6px',
+                borderRadius: 8,
+                flexShrink: 0,
+              }}
+            >
+              Override
+            </span>
+          )}
         </div>
         <div
           className="truncate"
@@ -319,6 +401,70 @@ function PlanBanner({
       </div>
       <WIcon name="chevron-right" size={12} />
     </button>
+  );
+}
+
+/** Load-level pay profile override picker. "Auto" follows the driver's
+ *  assigned profile; picking a profile pins every driver leg on this load
+ *  to it (engine precedence: leg override → load override → assignments). */
+function OverridePicker({
+  value,
+  saving,
+  defaultLabel,
+  profiles,
+  onChange,
+}: {
+  value: string;
+  saving: boolean;
+  defaultLabel: string;
+  profiles: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2" style={{ marginBottom: 10 }}>
+      <span
+        className="shrink-0"
+        style={{
+          fontSize: 10.5,
+          fontWeight: 500,
+          color: 'var(--text-tertiary)',
+          textTransform: 'uppercase',
+          letterSpacing: 0.5,
+        }}
+      >
+        Pay profile
+      </span>
+      <div className="relative flex-1 min-w-0">
+        <select
+          value={value}
+          disabled={saving}
+          onChange={e => onChange(e.target.value)}
+          className="appearance-none w-full cursor-pointer disabled:cursor-wait"
+          style={{
+            height: 28,
+            padding: '0 26px 0 9px',
+            borderRadius: 6,
+            border: '1px solid var(--border-hairline-strong)',
+            background: 'var(--bg-surface)',
+            fontFamily: 'inherit',
+            fontSize: 12,
+            color: 'var(--text-primary)',
+            opacity: saving ? 0.6 : 1,
+          }}
+        >
+          <option value="auto">{defaultLabel}</option>
+          {profiles.map(p => (
+            <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
+        </select>
+        <span
+          className="absolute pointer-events-none"
+          style={{ right: 9, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }}
+        >
+          <WIcon name="chevron-down" size={11} />
+        </span>
+      </div>
+    </div>
   );
 }
 

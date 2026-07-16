@@ -9,6 +9,7 @@
 
 import { v } from 'convex/values';
 import { mutation, query, type QueryCtx } from './_generated/server';
+import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { currencyValidator } from './payEngine/schema';
 import type { Id } from './_generated/dataModel';
@@ -517,6 +518,83 @@ export const duplicate = mutation({
     });
 
     return newId;
+  },
+});
+
+/** Set (or clear) a load-level pay profile override.
+ *
+ *  The calc engine's selection precedence is: leg override → LOAD OVERRIDE →
+ *  jurisdiction assignment → distance assignment → driver default. Setting
+ *  this makes every driver leg on the load pay off the chosen profile
+ *  regardless of the driver's assignments.
+ *
+ *  After patching, pay is recalculated for each non-canceled driver leg —
+ *  legacy engine inline (unchanged behavior: it doesn't read overrides) and
+ *  the new pay engine via the same latest-wins scheduled cascade that
+ *  loadPayables.recalculate uses, so displayed payItems refresh reactively. */
+export const setLoadOverride = mutation({
+  args: {
+    loadId: v.id('loadInformation'),
+    // Omit to clear the override (back to automatic selection).
+    profileId: v.optional(v.id('payProfiles')),
+  },
+  handler: async (ctx, { loadId, profileId }) => {
+    const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
+    const load = await ctx.db.get(loadId);
+    if (!load) throw new Error('Load not found');
+    if (load.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+
+    let profileName: string | null = null;
+    if (profileId) {
+      const profile = await ctx.db.get(profileId);
+      if (!profile) throw new Error('Pay profile not found');
+      if (profile.workosOrgId !== orgId) throw new Error('Pay profile belongs to a different organization');
+      if (!profile.isActive) throw new Error('Cannot use an archived pay profile as an override');
+      if (profile.payeeType !== 'DRIVER') throw new Error('Load pay overrides must use a driver profile');
+      profileName = profile.name;
+    }
+
+    if ((load.payProfileOverrideId ?? null) === (profileId ?? null)) return null;
+
+    const now = Date.now();
+    // Patching with an explicit undefined removes the field (clears override).
+    await ctx.db.patch(loadId, { payProfileOverrideId: profileId, updatedAt: now });
+
+    // Recalculate every driver leg so pay reflects the new selection.
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', q => q.eq('loadId', loadId))
+      .collect();
+    for (const leg of legs) {
+      if (!leg.driverId || leg.status === 'CANCELED') continue;
+      await ctx.runMutation(internal.driverPayCalculation.calculateDriverPay, {
+        legId: leg._id,
+        userId,
+      });
+      await ctx.db.patch(leg._id, { latestRecalcRequestedAt: now });
+      await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForLeg.calculatePayForLeg, {
+        legId: leg._id,
+        userId,
+        requestedAt: now,
+      });
+    }
+
+    await ctx.db.insert('auditLog', {
+      organizationId: orgId,
+      entityType: 'load',
+      entityId: loadId,
+      entityName: load.orderNumber,
+      action: 'updated',
+      description: profileName
+        ? `Set pay profile override to "${profileName}" for load ${load.orderNumber}`
+        : `Cleared pay profile override for load ${load.orderNumber} (back to driver default)`,
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      timestamp: now,
+    });
+
+    return null;
   },
 });
 
