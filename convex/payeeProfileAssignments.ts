@@ -7,9 +7,22 @@
 // automatically clears the prior default in a single mutation.
 
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, type MutationCtx } from './_generated/server';
 import { requireCallerIdentity } from './lib/auth';
 import type { Doc, Id } from './_generated/dataModel';
+
+/** Assignment changes count as profile activity: bump the linked profile's
+ *  updatedAt/updatedBy so the list's "Updated" column reflects who changed
+ *  the roster, not just who last edited rates. */
+async function touchProfile(
+  ctx: MutationCtx,
+  profileId: Id<'payProfiles'>,
+  userId: string,
+  now: number,
+) {
+  const profile = await ctx.db.get(profileId);
+  if (profile) await ctx.db.patch(profileId, { updatedAt: now, updatedBy: userId });
+}
 
 // ============================================================================
 // QUERIES
@@ -146,6 +159,8 @@ export const assign = mutation({
       createdBy: userId,
     });
 
+    await touchProfile(ctx, args.profileId, userId, now);
+
     await ctx.db.insert('auditLog', {
       organizationId: orgId,
       entityType: 'payeeProfileAssignment',
@@ -189,6 +204,7 @@ export const setDefault = mutation({
     }
 
     await ctx.db.patch(assignmentId, { isDefault: true, updatedAt: now });
+    await touchProfile(ctx, target.profileId, userId, now);
 
     const profile = await ctx.db.get(target.profileId);
     await ctx.db.insert('auditLog', {
@@ -233,6 +249,8 @@ export const unassign = mutation({
         await ctx.db.patch(candidates[0]._id, { isDefault: true, updatedAt: now });
       }
     }
+
+    await touchProfile(ctx, target.profileId, userId, now);
 
     const profile = await ctx.db.get(target.profileId);
     await ctx.db.insert('auditLog', {
@@ -279,6 +297,7 @@ export const updateStrategy = mutation({
     if (Object.keys(cleaned).length === 0) return;
 
     await ctx.db.patch(assignmentId, { ...cleaned, updatedAt: now });
+    await touchProfile(ctx, target.profileId, userId, now);
 
     const profile = await ctx.db.get(target.profileId);
     await ctx.db.insert('auditLog', {
