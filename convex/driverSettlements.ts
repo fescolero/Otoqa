@@ -1607,10 +1607,27 @@ export const removePayableFromSettlement = mutation({
       throw new Error('Cannot remove payables from approved or paid settlements');
     }
 
-    await ctx.db.patch(args.payableId, {
-      settlementId: undefined,
-      updatedAt: Date.now(),
-    });
+    // Standalone manual adjustments are per-statement by design (the same
+    // rule deleteSettlement applies). Detaching one would strand it in the
+    // unsettled pool where every future statement generation re-collects it —
+    // the "removed line keeps coming back" loop. Delete it outright instead.
+    // Work-derived lines (load/leg/session) keep detach semantics so a line
+    // can intentionally roll to the next period.
+    const isStandaloneManual =
+      payable.sourceType === 'MANUAL' && !payable.loadId && !payable.legId && !payable.sessionId;
+
+    if (isStandaloneManual) {
+      await ctx.db.delete(args.payableId);
+      // Shadow dual-write: void the mirrored payItem (the line is gone).
+      await ctx.scheduler.runAfter(0, internal.payEngine.manualCoverage.syncManualPayItem, {
+        workosOrgId: payable.workosOrgId, table: 'loadPayables', payableId: args.payableId,
+      });
+    } else {
+      await ctx.db.patch(args.payableId, {
+        settlementId: undefined,
+        updatedAt: Date.now(),
+      });
+    }
 
     await logAudit(ctx, {
       organizationId: settlement.workosOrgId,
@@ -1621,7 +1638,9 @@ export const removePayableFromSettlement = mutation({
       performedBy: userId,
       performedByName: userName,
       performedByEmail: userEmail,
-      description: `Removed payable "${payable.description}" from settlement ${settlement.statementNumber}`,
+      description: isStandaloneManual
+        ? `Deleted adjustment "${payable.description}" ($${payable.totalAmount.toFixed(2)}) from settlement ${settlement.statementNumber}`
+        : `Removed payable "${payable.description}" from settlement ${settlement.statementNumber}`,
     });
 
     return null;
