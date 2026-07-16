@@ -411,7 +411,7 @@ function TripCard({
             className="mt-0.5 truncate text-[11px]"
             style={{ color: 'var(--text-tertiary)' }}
           >
-            #{trip.loadInternalId}
+            #{displayLoadId(trip)}
             {trip.startedAt && (
               <>
                 <span className="mx-1">·</span>
@@ -431,6 +431,12 @@ function TripCard({
               </>
             )}
           </div>
+          {(trip.hcr || trip.tripNumber) && (
+            <div className="mt-1 flex flex-wrap items-center gap-1">
+              {trip.hcr && <TagBadge label="HCR" value={trip.hcr} />}
+              {trip.tripNumber && <TagBadge label="Trip" value={trip.tripNumber} />}
+            </div>
+          )}
         </div>
         </button>
         {/* Focus pin — isolates this trip's polyline on the map. Click
@@ -525,6 +531,23 @@ function TripStopRow({
         )}
       </span>
     </div>
+  );
+}
+
+/** Small neutral pill for load facet tags (HCR / Trip) on a trip card. */
+function TagBadge({ label, value }: { label: string; value: string }) {
+  return (
+    <span
+      className="num inline-flex items-center gap-1 rounded border px-[6px] py-px text-[10.5px] font-medium"
+      style={{
+        color: 'var(--text-secondary)',
+        background: 'var(--bg-canvas)',
+        borderColor: 'var(--border-hairline)',
+      }}
+    >
+      <span style={{ color: 'var(--text-tertiary)' }}>{label}</span>
+      {value}
+    </span>
   );
 }
 
@@ -791,6 +814,12 @@ function LiveDot({ tone }: { tone: string }) {
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
+
+/** Card-facing load id: prefer the customer order number; otherwise show
+ *  the internalId with source prefixes ("FK-") stripped. */
+function displayLoadId(trip: TripInfo): string {
+  return trip.orderNumber ?? trip.loadInternalId.replace(/^FK-/i, '');
+}
 
 function formatHHMM(ms: number): string {
   const d = new Date(ms);

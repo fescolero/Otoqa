@@ -41,6 +41,7 @@ import { paginationOptsValidator } from 'convex/server';
 import { query, QueryCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId } from './lib/auth';
+import { getLoadFacets } from './lib/loadFacets';
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
 const DRIVING_SPEED_THRESHOLD_MPH = 5;
@@ -73,6 +74,12 @@ export type TripInfo = {
   legId: Id<'dispatchLegs'>;
   loadId: Id<'loadInformation'>;
   loadInternalId: string;
+  /** Customer-facing order number — preferred display id over internalId
+   *  (which carries source prefixes like "FK-"). */
+  orderNumber: string | null;
+  /** HCR + Trip facet tags — same loadTags source the schedule Gantt uses. */
+  hcr: string | null;
+  tripNumber: string | null;
   sequence: number;
   status: 'PENDING' | 'ACTIVE' | 'COMPLETED' | 'CANCELED';
 
@@ -206,10 +213,11 @@ async function loadTripsForSession(
     // sessionId which is org-scoped, but a stale cross-org leg would
     // be a confusing leak.
     if (leg.workosOrgId !== callerOrgId) continue;
-    const [load, startStop, endStop] = await Promise.all([
+    const [load, startStop, endStop, facets] = await Promise.all([
       ctx.db.get(leg.loadId),
       ctx.db.get(leg.startStopId),
       ctx.db.get(leg.endStopId),
+      getLoadFacets(ctx, leg.loadId),
     ]);
     if (!load) continue;
 
@@ -217,6 +225,9 @@ async function loadTripsForSession(
       legId: leg._id,
       loadId: leg.loadId,
       loadInternalId: load.internalId,
+      orderNumber: load.orderNumber ?? null,
+      hcr: facets.hcr ?? null,
+      tripNumber: facets.trip ?? null,
       sequence: leg.sequence,
       status: leg.status,
       startedAt: leg.startedAt ?? null,

@@ -22,6 +22,12 @@ export interface TripInfo {
   legId: Id<'dispatchLegs'>;
   loadId: Id<'loadInformation'>;
   loadInternalId: string;
+  /** Customer-facing order number — preferred display id over internalId
+   *  (which carries source prefixes like "FK-"). */
+  orderNumber: string | null;
+  /** HCR + Trip facet tags — same loadTags source the schedule Gantt uses. */
+  hcr: string | null;
+  tripNumber: string | null;
   sequence: number;
   status: TripLegStatus;
 
