@@ -3,7 +3,7 @@
 import * as React from 'react';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useMutation } from 'convex/react';
+import { useAction, useMutation } from 'convex/react';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Button } from '@/components/ui/button';
@@ -243,10 +243,46 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const [activeSection, setActiveSection] = useState('overview');
   const [mapOpen, setMapOpen] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<DocRecord | null>(null);
+  const getDownloadUrl = useAction(api.s3Upload.getDocumentDownloadUrl);
+
+  const resolveDocUrl = React.useCallback(
+    async (documentId: Id<'loadDocuments'>, fallback: string | null): Promise<string | null> => {
+      try {
+        const res = await getDownloadUrl({ documentId });
+        return res.url ?? fallback;
+      } catch (err) {
+        console.warn('[LoadDetail] signed URL resolution failed:', err);
+        return fallback;
+      }
+    },
+    [getDownloadUrl],
+  );
+
   const [cancellationOpen, setCancellationOpen] = useState(false);
 
   // Fetch load data
   const loadData = useAuthQuery(api.loads.getLoad, { loadId: loadId as Id<'loadInformation'> });
+  // Unified document rows (driver R2 uploads + ops Convex-storage uploads).
+  // R2-backed docs are NOT displayable via their stored public URL — the
+  // bucket doesn't need public access enabled (uploads use presigned
+  // PUTs) — so display URLs are exchanged per-document for a short-lived
+  // presigned GET via s3Upload.getDocumentDownloadUrl at click time.
+  const loadDocsData = useAuthQuery(api.loadDocuments.listForLoad, {
+    loadId: loadId as Id<'loadInformation'>,
+  });
+  // documentId per doc row id — R2-backed rows (no Convex storageId)
+  // resolve a signed URL on click instead of trusting the stored public
+  // URL. Derived, not a ref: the docs list re-renders this anyway.
+  const docIdByRow = React.useMemo(() => {
+    const map = new Map<string, Id<'loadDocuments'>>();
+    (loadDocsData ?? []).forEach((doc) => {
+      if (doc.type === 'EXTRA_DOC') return;
+      if (!doc.storageId && (doc.externalKey || doc.externalUrl)) {
+        map.set(`doc-${doc._id}`, doc._id);
+      }
+    });
+    return map;
+  }, [loadDocsData]);
   // Pay plan totals — sourced from the new pay engine's unified payItems
   // ledger. Covers driver + carrier payees in one query. The top-of-page
   // KPI/margin calc and the LoadPayPlanCard both subscribe, so the figure
@@ -419,8 +455,9 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     .filter((s) => s.stopType === 'DELIVERY')
     .pop() as StopWithEvidence | undefined;
   const hasPOD = !!(
-    finalDeliveryStop &&
-    ((finalDeliveryStop.deliveryPhotos?.length ?? 0) > 0 || finalDeliveryStop.signatureImage)
+    (finalDeliveryStop &&
+      ((finalDeliveryStop.deliveryPhotos?.length ?? 0) > 0 || finalDeliveryStop.signatureImage)) ||
+    loadDocsData?.some((d) => d.type === 'POD')
   );
   const statusId = resolveStatusId('load', loadData.status);
 
@@ -1005,17 +1042,31 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
           const stop = row as StopRow;
           setSelectedStop(stop);
           // Pass 1: clicking a stop row opens its photos in the lightbox
-          // when any are on file. Map-modal-centred behavior lands in
-          // Pass 2 alongside the per-stop side panel.
-          const photos: string[] = [
-            ...(stop.deliveryPhotos ?? []),
-            ...(stop.signatureImage ? [stop.signatureImage] : []),
-          ];
-          if (photos.length > 0) {
-            setLightboxPhotos(photos);
-            setLightboxLabel(`Stop ${stop.sequenceNumber} — ${stop.city ?? ''}`);
-            setLightboxOpen(true);
-          }
+          // when any are on file. Photos come from loadDocuments rows
+          // inferred to this stop, resolved to short-lived signed URLs
+          // (raw deliveryPhotos URLs require a public bucket, which is
+          // never enabled). Signature images pass through as-is.
+          const stopDocs = (loadDocsData ?? []).filter(
+            (d) => d.type !== 'EXTRA_DOC' && d.inferredStopId === stop._id,
+          );
+          const label = `Stop ${stop.sequenceNumber} — ${stop.city ?? ''}`;
+          void Promise.all(
+            stopDocs.map((d) =>
+              d.storageId
+                ? Promise.resolve(d.url)
+                : resolveDocUrl(d._id, d.externalUrl ?? null),
+            ),
+          ).then((resolved) => {
+            const photos: string[] = [
+              ...resolved.filter((u): u is string => !!u),
+              ...(stop.signatureImage ? [stop.signatureImage] : []),
+            ];
+            if (photos.length > 0) {
+              setLightboxPhotos(photos);
+              setLightboxLabel(label);
+              setLightboxOpen(true);
+            }
+          });
         }}
       />
     </DSCard>
@@ -1028,26 +1079,43 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   // this load shows up in one place. Click a row to open DocPreviewModal.
   const docRows: DocRecord[] = [];
 
-  // Per-stop POD photos and signatures.
+  // Driver + ops documents from the unified loadDocuments table. This
+  // replaced the legacy stop.deliveryPhotos source: those raw R2 URLs
+  // require a public bucket (never enabled — presigned PUTs don't need
+  // it), and every deliveryPhotos entry is dual-written/backfilled into
+  // loadDocuments anyway. R2-backed rows record their documentId in
+  // docIdByRow and get a signed GET URL resolved on click.
+  (loadDocsData ?? []).forEach((doc) => {
+    if (doc.type === 'EXTRA_DOC') return; // deprecated legacy tag
+    const rowId = `doc-${doc._id}`;
+    const stopLabel =
+      doc.inferredStopSequence != null ? ` — Stop ${doc.inferredStopSequence}` : '';
+    const when = formatTime(new Date(doc.capturedAt ?? doc.uploadedAt).toISOString());
+    const isPdf = !!doc.contentType?.includes('pdf');
+    // Convex-storage docs (ops uploads) have a directly servable url; R2
+    // docs (in docIdByRow) get a signed-GET URL resolved at click time.
+    const directUrl = docIdByRow.has(rowId) ? '' : (doc.url ?? '');
+    docRows.push({
+      id: rowId,
+      name: `${doc.type}${stopLabel}${doc.fileName ? ` — ${doc.fileName}` : ''}`,
+      src: doc.uploadedBy.startsWith('driver:') ? 'Driver' : 'Ops',
+      when,
+      status: 'valid',
+      preview: isPdf ? { kind: 'pdf', url: directUrl } : { kind: 'image', url: directUrl },
+      downloadUrl: directUrl || undefined,
+      openUrl: directUrl || undefined,
+      activity: doc.capturedAt
+        ? [{ id: 'cap', text: <>Captured by driver · <span className="num">{when}</span></> }]
+        : undefined,
+    });
+  });
+
+  // Per-stop signatures and notes still come from the stop rows (they
+  // are not part of loadDocuments).
   loadData.stops.forEach((s) => {
     const sw = s as StopWithEvidence;
     const stopLabel = `Stop ${sw.sequenceNumber} ${sw.stopType === 'PICKUP' ? 'pickup' : 'delivery'}`;
     const when = sw.checkedInAt ? formatTime(sw.checkedInAt) : '—';
-    sw.deliveryPhotos?.forEach((url, i) => {
-      docRows.push({
-        id: `${sw._id}-photo-${i}`,
-        name: `${stopLabel} — Photo ${i + 1}`,
-        src: 'Driver',
-        when,
-        status: 'valid',
-        preview: { kind: 'image', url },
-        downloadUrl: url,
-        openUrl: url,
-        activity: sw.checkedInAt
-          ? [{ id: 'check', text: <>Captured at check-in · <span className="num">{when}</span></> }]
-          : undefined,
-      });
-    });
     if (sw.signatureImage) {
       docRows.push({
         id: `${sw._id}-sig`,
@@ -1081,7 +1149,10 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     status: 'expiring',
     preview: { kind: 'placeholder' },
   });
-  if (!docRows.some((r) => r.id.includes('photo') && r.id.startsWith(origin?._id ?? '___'))) {
+  const originHasPhoto = (loadDocsData ?? []).some(
+    (d) => d.type !== 'EXTRA_DOC' && origin && d.inferredStopId === origin._id,
+  );
+  if (!originHasPhoto) {
     docRows.push({
       id: 'bol-pickup',
       name: 'BOL — pickup',
@@ -1128,7 +1199,32 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         rows={docRows}
         total={docRows.length}
         className="rounded-t-none border-0 border-t"
-        onRowClick={(row) => setPreviewDoc(row)}
+        onRowClick={(row) => {
+          const documentId = docIdByRow.get(row.id);
+          if (!documentId) {
+            setPreviewDoc(row);
+            return;
+          }
+          // Open immediately (empty URL renders as loading canvas), then
+          // swap in the short-lived signed URL.
+          setPreviewDoc(row);
+          void resolveDocUrl(documentId, null).then((url) => {
+            if (!url) return;
+            setPreviewDoc((current) =>
+              current?.id === row.id
+                ? {
+                    ...current,
+                    preview:
+                      current.preview.kind === 'pdf'
+                        ? { kind: 'pdf', url }
+                        : { kind: 'image', url },
+                    downloadUrl: url,
+                    openUrl: url,
+                  }
+                : current,
+            );
+          });
+        }}
       />
     </DSCard>
   );

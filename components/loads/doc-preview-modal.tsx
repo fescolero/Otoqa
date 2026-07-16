@@ -107,7 +107,15 @@ export function DocPreviewModal({ doc, onClose }: DocPreviewModalProps) {
           className="overflow-auto flex justify-center items-start p-6"
           style={{ background: 'var(--bg-surface-2)' }}
         >
-          {doc.preview.kind === 'image' && (
+          {doc.preview.kind === 'image' && !doc.preview.url && (
+            // R2-backed docs open with an empty URL while the caller
+            // exchanges the documentId for a short-lived signed URL —
+            // an empty <img src> would request the page URL itself.
+            <div className="flex items-center justify-center h-full text-[13px] text-[var(--text-secondary)]">
+              Loading preview…
+            </div>
+          )}
+          {doc.preview.kind === 'image' && doc.preview.url && (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               src={doc.preview.url}
