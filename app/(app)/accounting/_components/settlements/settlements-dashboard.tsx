@@ -18,7 +18,7 @@
  * SettlementDocPanel.
  */
 
-import { useMemo, useState, startTransition } from 'react';
+import { useEffect, useMemo, useState, startTransition } from 'react';
 import { useMutation, usePaginatedQuery, useConvex } from 'convex/react';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
@@ -167,6 +167,19 @@ export function SettlementsDashboard({ party, organizationId, userId }: Settleme
   const ledger = useSettlementsLedger({ party: isCarrier ? 'carrier' : 'driver', organizationId, userId });
   const useNew = ledger.useNew;
   const R = useNew ? api.payEngine.settlementReads : null;
+
+  // The read ledger flipped at runtime (settlements_read_ledger changed):
+  // every held row snapshot carries ids from the OTHER ledger's tables, so a
+  // stale overlay would feed e.g. a driverSettlements id into the new
+  // adapter's v.id('settlements') validator and crash the details query.
+  // Close overlays and clear selection; fresh rows arrive from the new refs.
+  useEffect(() => {
+    setOpenRow(null);
+    setDocIndex(null);
+    setPayRows(null);
+    setReopenRow(null);
+    setSelectedIds(new Set());
+  }, [useNew]);
 
   // ── data (both party modules wired; the inactive one is skipped) ──
   const driverStats = useAuthQuery(
