@@ -12,7 +12,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { SettingsHeader } from '@/components/web/settings-header';
@@ -61,8 +61,10 @@ export default function PayProfilesListPage() {
         subtitle="Pre-defined compensation templates. Assign one as a driver or carrier's default. Changes here apply to every payee using the profile."
         actions={
           <>
-            <WBtn size="sm" leading="import">Import</WBtn>
-            <WBtn size="sm" accent leading="plus">New profile</WBtn>
+            <WBtn size="sm" leading="import" disabled title="Import is coming soon">Import</WBtn>
+            <Link href="/org-settings/pay-profiles/new">
+              <WBtn size="sm" accent leading="plus">New profile</WBtn>
+            </Link>
           </>
         }
       />

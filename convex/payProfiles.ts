@@ -209,6 +209,28 @@ const payBasisValidator = v.union(
   v.literal('HYBRID'),
 );
 
+// Starter rate lines seeded atomically with the profile (create page).
+// Components are referenced by catalog code and resolved server-side so the
+// client never has to pre-fetch componentIds; an unknown code aborts the
+// whole mutation, leaving no half-created profile behind.
+const initialRuleValidator = v.object({
+  name: v.string(),
+  componentCode: v.string(),
+  trigger: v.object({
+    source: v.string(),
+    transform: v.optional(v.union(
+      v.literal('IDENTITY'),
+      v.literal('HOURS_FROM_MINUTES'),
+      v.literal('COUNT'),
+      v.literal('SUM'),
+      v.literal('PERCENT'),
+    )),
+    filter: v.optional(v.string()),
+  }),
+  rateAmountMicroCents: v.int64(),
+  minThreshold: v.optional(v.number()),
+});
+
 export const create = mutation({
   args: {
     workosOrgId: v.string(),
@@ -221,10 +243,24 @@ export const create = mutation({
     state: v.optional(v.string()),
     contractTag: v.optional(v.string()),
     isDefault: v.optional(v.boolean()),
+    initialRules: v.optional(v.array(initialRuleValidator)),
   },
   handler: async (ctx, args) => {
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
+
+    // Only one profile can be the default per payee type — setting the flag
+    // here clears it everywhere else so the invariant holds.
+    if (args.isDefault) {
+      const siblings = await ctx.db
+        .query('payProfiles')
+        .withIndex('by_org_payeeType', q =>
+          q.eq('workosOrgId', args.workosOrgId).eq('payeeType', args.payeeType))
+        .collect();
+      for (const s of siblings) {
+        if (s.isDefault) await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+      }
+    }
 
     const profileId = await ctx.db.insert('payProfiles', {
       workosOrgId: args.workosOrgId,
@@ -242,6 +278,42 @@ export const create = mutation({
       updatedAt: now,
       createdBy: userId,
     });
+
+    for (const [i, rule] of (args.initialRules ?? []).entries()) {
+      const component = await ctx.db
+        .query('chargeComponents')
+        .withIndex('by_org_code', q =>
+          q.eq('workosOrgId', args.workosOrgId).eq('code', rule.componentCode))
+        .first();
+      if (!component) {
+        throw new Error(`Charge component "${rule.componentCode}" not found for this organization`);
+      }
+      const ruleId = await ctx.db.insert('payRules', {
+        profileId,
+        name: rule.name,
+        componentId: component._id,
+        trigger: rule.trigger,
+        rateAmountMicroCents: rule.rateAmountMicroCents,
+        minThreshold: rule.minThreshold,
+        isActive: true,
+        sortOrder: i + 1,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: userId,
+      });
+      await ctx.db.insert('auditLog', {
+        organizationId: args.workosOrgId,
+        entityType: 'payRule',
+        entityId: ruleId,
+        entityName: rule.name,
+        action: 'created',
+        description: `Added rule "${rule.name}" to profile "${args.name}"`,
+        performedBy: userId,
+        performedByName: userName,
+        performedByEmail: userEmail,
+        timestamp: now,
+      });
+    }
 
     await ctx.db.insert('auditLog', {
       organizationId: args.workosOrgId,
@@ -282,6 +354,22 @@ export const update = mutation({
 
     const now = Date.now();
     const cleaned = stripUndefined(patch);
+
+    // Keep the single-default invariant: promoting this profile demotes any
+    // other default of the same payee type.
+    if (cleaned.isDefault === true) {
+      const siblings = await ctx.db
+        .query('payProfiles')
+        .withIndex('by_org_payeeType', q =>
+          q.eq('workosOrgId', profile.workosOrgId).eq('payeeType', profile.payeeType))
+        .collect();
+      for (const s of siblings) {
+        if (s._id !== profileId && s.isDefault) {
+          await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+        }
+      }
+    }
+
     await ctx.db.patch(profileId, { ...cleaned, updatedAt: now });
 
     const changedKeys = Object.keys(cleaned);
