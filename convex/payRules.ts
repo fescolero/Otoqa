@@ -113,7 +113,7 @@ export const addRule = mutation({
       createdBy: userId,
     });
 
-    await ctx.db.patch(args.profileId, { updatedAt: now });
+    await ctx.db.patch(args.profileId, { updatedAt: now, updatedBy: userId });
 
     await ctx.db.insert('auditLog', {
       organizationId: orgId,
@@ -167,7 +167,7 @@ export const updateRule = mutation({
     const now = Date.now();
     const cleaned = stripUndefined(patch);
     await ctx.db.patch(ruleId, { ...cleaned, updatedAt: now });
-    await ctx.db.patch(profile._id, { updatedAt: now });
+    await ctx.db.patch(profile._id, { updatedAt: now, updatedBy: userId });
 
     const changedKeys = Object.keys(cleaned);
     if (changedKeys.length > 0) {
@@ -202,7 +202,7 @@ export const removeRule = mutation({
     // Soft-deactivate rather than hard-delete — preserves audit trail and
     // any historical payItems that point to this rule.
     await ctx.db.patch(ruleId, { isActive: false, updatedAt: now });
-    await ctx.db.patch(profile._id, { updatedAt: now });
+    await ctx.db.patch(profile._id, { updatedAt: now, updatedBy: userId });
 
     await ctx.db.insert('auditLog', {
       organizationId: orgId,
@@ -240,7 +240,7 @@ export const reorder = mutation({
         await ctx.db.patch(rule._id, { sortOrder: i + 1, updatedAt: now });
       }
     }
-    await ctx.db.patch(profileId, { updatedAt: now });
+    await ctx.db.patch(profileId, { updatedAt: now, updatedBy: userId });
 
     await ctx.db.insert('auditLog', {
       organizationId: orgId,

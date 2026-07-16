@@ -56,7 +56,7 @@ export const listForOrg = query({
           rules: rules.sort((a, b) => a.sortOrder - b.sortOrder),
           inUseDrivers: activeAssignments.filter(a => a.payeeType === 'DRIVER').length,
           inUseCarriers: activeAssignments.filter(a => a.payeeType === 'CARRIER').length,
-          updatedByName: await resolveActorName(ctx, workosOrgId, p._id, p.createdBy),
+          updatedByName: await resolveActorName(ctx, workosOrgId, p._id, p.updatedBy ?? p.createdBy),
         };
       }),
     );
@@ -261,7 +261,7 @@ export const create = mutation({
           q.eq('workosOrgId', args.workosOrgId).eq('payeeType', args.payeeType))
         .collect();
       for (const s of siblings) {
-        if (s.isDefault) await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+        if (s.isDefault) await ctx.db.patch(s._id, { isDefault: false, updatedAt: now, updatedBy: userId });
       }
     }
 
@@ -280,6 +280,7 @@ export const create = mutation({
       createdAt: now,
       updatedAt: now,
       createdBy: userId,
+      updatedBy: userId,
     });
 
     for (const [i, rule] of (args.initialRules ?? []).entries()) {
@@ -368,12 +369,12 @@ export const update = mutation({
         .collect();
       for (const s of siblings) {
         if (s._id !== profileId && s.isDefault) {
-          await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+          await ctx.db.patch(s._id, { isDefault: false, updatedAt: now, updatedBy: userId });
         }
       }
     }
 
-    await ctx.db.patch(profileId, { ...cleaned, updatedAt: now });
+    await ctx.db.patch(profileId, { ...cleaned, updatedAt: now, updatedBy: userId });
 
     const changedKeys = Object.keys(cleaned);
     if (changedKeys.length > 0) {
@@ -402,7 +403,7 @@ export const archive = mutation({
     if (!profile) throw new Error('Pay profile not found');
     if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
     const now = Date.now();
-    await ctx.db.patch(profileId, { isActive: false, updatedAt: now });
+    await ctx.db.patch(profileId, { isActive: false, updatedAt: now, updatedBy: userId });
     await ctx.db.insert('auditLog', {
       organizationId: orgId,
       entityType: 'payProfile',
@@ -426,7 +427,7 @@ export const restore = mutation({
     if (!profile) throw new Error('Pay profile not found');
     if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
     const now = Date.now();
-    await ctx.db.patch(profileId, { isActive: true, updatedAt: now });
+    await ctx.db.patch(profileId, { isActive: true, updatedAt: now, updatedBy: userId });
     await ctx.db.insert('auditLog', {
       organizationId: orgId,
       entityType: 'payProfile',
@@ -472,6 +473,7 @@ export const duplicate = mutation({
       createdAt: now,
       updatedAt: now,
       createdBy: userId,
+      updatedBy: userId,
     });
 
     // Copy active rules only — soft-removed lines shouldn't resurrect in copies.
@@ -522,33 +524,25 @@ export const duplicate = mutation({
 // HELPERS
 // ============================================================================
 
-/** Human-readable name for the profile list's "Updated by" cell — raw
- *  createdBy is a WorkOS user id ("user_01KAF…"), useless on screen.
+/** Human-readable name for the profile list's "Updated by" cell — the raw
+ *  actor id is a WorkOS user id ("user_01KAF…"), useless on screen.
+ *  `actorId` is the profile's updatedBy stamp (createdBy for legacy rows).
  *  Resolution order:
- *    1. Latest profile-level audit entry's performedByName/Email — captures
- *       the most recent actor, not just the creator.
- *    2. The creator's orgMembers record (name, then email).
+ *    1. The actor's orgMembers record (name, then email) — exact person.
+ *    2. Latest profile-level audit entry's performedByName/Email — carries
+ *       the identity name even when orgMembers hasn't synced the user.
  *    3. "System" for seeded/service ids, "Unknown user" for unresolvable
  *       WorkOS ids — never the raw id. */
 async function resolveActorName(
   ctx: QueryCtx,
   workosOrgId: string,
   profileId: Id<'payProfiles'>,
-  createdBy: string,
+  actorId: string,
 ): Promise<string> {
-  const lastEntry = await ctx.db
-    .query('auditLog')
-    .withIndex('by_org_entity', q =>
-      q.eq('organizationId', workosOrgId).eq('entityType', 'payProfile').eq('entityId', profileId))
-    .order('desc')
-    .first();
-  const fromAudit = lastEntry?.performedByName ?? lastEntry?.performedByEmail;
-  if (fromAudit) return fromAudit;
-
   const member = await ctx.db
     .query('orgMembers')
     .withIndex('by_org_user', q =>
-      q.eq('organizationId', workosOrgId).eq('workosUserId', createdBy))
+      q.eq('organizationId', workosOrgId).eq('workosUserId', actorId))
     .first();
   if (member) {
     const name = [member.firstName, member.lastName].filter(Boolean).join(' ');
@@ -556,7 +550,18 @@ async function resolveActorName(
     if (member.email) return member.email;
   }
 
-  return createdBy.startsWith('user_') ? 'Unknown user' : 'System';
+  const lastEntry = await ctx.db
+    .query('auditLog')
+    .withIndex('by_org_entity', q =>
+      q.eq('organizationId', workosOrgId).eq('entityType', 'payProfile').eq('entityId', profileId))
+    .order('desc')
+    .first();
+  if (lastEntry && lastEntry.performedBy === actorId) {
+    const fromAudit = lastEntry.performedByName ?? lastEntry.performedByEmail;
+    if (fromAudit) return fromAudit;
+  }
+
+  return actorId.startsWith('user_') ? 'Unknown user' : 'System';
 }
 
 function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {

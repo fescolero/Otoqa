@@ -338,6 +338,10 @@ export const payProfiles = defineTable({
   createdAt: v.number(),
   updatedAt: v.number(),
   createdBy: v.string(),
+  // Last actor who touched the profile — stamped by every profile mutation,
+  // including rule edits that bump updatedAt. Optional for pre-existing rows;
+  // readers fall back to createdBy.
+  updatedBy: v.optional(v.string()),
 })
   .index('by_org_active', ['workosOrgId', 'isActive'])
   .index('by_org_payeeType', ['workosOrgId', 'payeeType', 'isActive'])
