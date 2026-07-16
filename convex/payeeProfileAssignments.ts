@@ -9,7 +9,7 @@
 import { v } from 'convex/values';
 import { mutation, query, type MutationCtx } from './_generated/server';
 import { requireCallerIdentity } from './lib/auth';
-import type { Doc, Id } from './_generated/dataModel';
+import type { Id } from './_generated/dataModel';
 
 /** Assignment changes count as profile activity: bump the linked profile's
  *  updatedAt/updatedBy so the list's "Updated" column reflects who changed
