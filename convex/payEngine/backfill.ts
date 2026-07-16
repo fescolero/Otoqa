@@ -57,10 +57,47 @@ export const backfillLegPay = internalMutation({
 // legs, so items on legs that later changed status survive. This voids them
 // directly by ruleId — surgical and status-independent. Idempotent.
 export const voidStaleSessionRuleLegItems = internalMutation({
-  args: { workosOrgId: v.string(), ruleIds: v.array(v.string()) },
-  returns: v.object({ scanned: v.number(), voided: v.number() }),
+  args: {
+    workosOrgId: v.string(),
+    // Explicit allowlist. Omit to self-discover: every active rule whose
+    // trigger source is session-scoped — a PER-LEG item referencing one is
+    // stale by definition (the rule can only pay per shift now). Covers the
+    // common migration of editing a rule's type from per-leg to per-shift
+    // in place, which keeps the same ruleId.
+    ruleIds: v.optional(v.array(v.string())),
+    // Defaults to DRY-RUN — reports what it would void; pass dryRun:false to apply.
+    dryRun: v.optional(v.boolean()),
+  },
+  returns: v.object({
+    dryRun: v.boolean(),
+    sessionRuleCount: v.number(),
+    scanned: v.number(),
+    stale: v.number(),
+    voided: v.number(),
+  }),
   handler: async (ctx, args) => {
-    const ruleSet = new Set(args.ruleIds);
+    const dryRun = args.dryRun ?? true;
+
+    let ruleSet: Set<string>;
+    if (args.ruleIds && args.ruleIds.length > 0) {
+      ruleSet = new Set(args.ruleIds);
+    } else {
+      ruleSet = new Set();
+      const profiles = await ctx.db
+        .query('payProfiles')
+        .withIndex('by_org_active', (q) => q.eq('workosOrgId', args.workosOrgId).eq('isActive', true))
+        .collect();
+      for (const p of profiles) {
+        const rules = await ctx.db
+          .query('payRules')
+          .withIndex('by_profile_active', (q) => q.eq('profileId', p._id).eq('isActive', true))
+          .collect();
+        for (const r of rules) {
+          if (r.trigger.source.startsWith('session.')) ruleSet.add(r._id);
+        }
+      }
+    }
+
     const items = await ctx.db
       .query('payItems')
       .withIndex('by_org_lifecycle', (q) =>
@@ -68,6 +105,7 @@ export const voidStaleSessionRuleLegItems = internalMutation({
       )
       .collect();
     const now = Date.now();
+    let stale = 0;
     let voided = 0;
     for (const it of items) {
       if (it.isLocked) continue;
@@ -75,11 +113,14 @@ export const voidStaleSessionRuleLegItems = internalMutation({
       const sd = it.sourceData;
       const ruleId = sd && sd._variant === 'EARNING' ? sd.ruleId : null;
       if (ruleId && ruleSet.has(ruleId)) {
-        await ctx.db.patch(it._id, { isVoided: true, voidedAt: now, voidReason: 'rule moved to session source', updatedAt: now });
-        voided++;
+        stale++;
+        if (!dryRun) {
+          await ctx.db.patch(it._id, { isVoided: true, voidedAt: now, voidReason: 'rule moved to session source', updatedAt: now });
+          voided++;
+        }
       }
     }
-    return { scanned: items.length, voided };
+    return { dryRun, sessionRuleCount: ruleSet.size, scanned: items.length, stale, voided };
   },
 });
 
