@@ -25,6 +25,8 @@ import {
   RATE_TYPE_BINDINGS,
   RATE_TYPE_COLOR,
   RATE_TYPE_TO_COMPONENT_CODE,
+  earningComponentOptions,
+  type EarningComponent,
   type DesignRateType,
 } from '@/lib/payProfileDisplay';
 
@@ -330,25 +332,6 @@ function TypePicker({ onPick }: { onPick: (t: DesignRateType) => void }) {
   );
 }
 
-// Buckets a rate line can be classified into. Deductions/withholdings/
-// garnishments are managed elsewhere — a profile rate line is always an
-// earning-side component.
-const EARNING_BUCKETS: Record<string, string> = {
-  BASE_WAGE: 'Base wage',
-  BASE_FRINGE: 'Fringe',
-  ACCESSORIAL: 'Accessorial',
-  BONUS: 'Bonus',
-};
-
-type ComponentOption = {
-  _id: string;
-  code: string;
-  displayName: string;
-  bucket: string;
-  appliesTo: string[];
-  isActive: boolean;
-};
-
 function DetailsForm({
   type,
   binding,
@@ -367,7 +350,7 @@ function DetailsForm({
   type: DesignRateType;
   binding: typeof RATE_TYPE_BINDINGS[DesignRateType];
   comingSoon: boolean;
-  components: ComponentOption[] | undefined;
+  components: EarningComponent[] | undefined;
   componentCode: string | null;
   onChangeComponent: (code: string) => void;
   name: string;
@@ -381,19 +364,10 @@ function DetailsForm({
   const prefix = binding.unit.includes('$') || !binding.unit.includes('%') ? '$' : '';
   const suffix = binding.unit.includes('%') ? '%' : '';
 
-  const componentOptions = React.useMemo(() => {
-    if (!components) return [];
-    return components
-      .filter(c => c.isActive && c.appliesTo.includes('PAY') && c.bucket in EARNING_BUCKETS)
-      .sort((a, b) =>
-        a.bucket === b.bucket
-          ? a.displayName.localeCompare(b.displayName)
-          : Object.keys(EARNING_BUCKETS).indexOf(a.bucket) - Object.keys(EARNING_BUCKETS).indexOf(b.bucket))
-      .map(c => ({
-        value: c.code,
-        label: `${c.displayName} · ${EARNING_BUCKETS[c.bucket]}`,
-      }));
-  }, [components]);
+  const componentOptions = React.useMemo(
+    () => earningComponentOptions(components, 'code'),
+    [components],
+  );
 
   return (
     <div className="flex flex-col gap-4">

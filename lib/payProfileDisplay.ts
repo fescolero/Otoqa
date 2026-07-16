@@ -214,6 +214,52 @@ export function distanceLabel(op: DistanceOp, value: number | null): string {
 }
 
 // ============================================================================
+// EARNING COMPONENT OPTIONS ("Counts as" pickers)
+// ============================================================================
+//
+// Buckets a profile rate line can be classified into — earning side only
+// (deductions / withholdings / garnishments are managed elsewhere). The
+// classification drives paycheck bucketing and tax treatment: an hourly H&W
+// line counted as Health & Welfare pays as non-taxable fringe, not base wage.
+
+export const EARNING_BUCKETS: Record<string, string> = {
+  BASE_WAGE: 'Base wage',
+  BASE_FRINGE: 'Fringe',
+  ACCESSORIAL: 'Accessorial',
+  BONUS: 'Bonus',
+};
+
+export type EarningComponent = {
+  _id: string;
+  code: string;
+  displayName: string;
+  bucket: string;
+  appliesTo: string[];
+  isActive: boolean;
+};
+
+/** Build <select> options for a "Counts as" picker from the org's component
+ *  catalog. `valueKey` picks what the option value carries: catalog `code`
+ *  (create flows — resolved server-side) or `_id` (updateRule patches). */
+export function earningComponentOptions(
+  components: EarningComponent[] | undefined,
+  valueKey: 'code' | '_id' = 'code',
+): Array<{ value: string; label: string }> {
+  if (!components) return [];
+  const order = Object.keys(EARNING_BUCKETS);
+  return components
+    .filter(c => c.isActive && c.appliesTo.includes('PAY') && c.bucket in EARNING_BUCKETS)
+    .sort((a, b) =>
+      a.bucket === b.bucket
+        ? a.displayName.localeCompare(b.displayName)
+        : order.indexOf(a.bucket) - order.indexOf(b.bucket))
+    .map(c => ({
+      value: c[valueKey],
+      label: `${c.displayName} · ${EARNING_BUCKETS[c.bucket]}`,
+    }));
+}
+
+// ============================================================================
 // PROFILE SUMMARY (one-line description shown on the list page)
 // ============================================================================
 

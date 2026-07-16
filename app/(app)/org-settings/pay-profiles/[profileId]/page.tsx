@@ -173,6 +173,7 @@ export default function PayProfileEditorPage() {
             >
               <RatesTable
                 rules={profile.rules}
+                workosOrgId={workosOrgId}
                 onAddLineItem={() => setAddLineOpen(true)}
               />
             </DSCard>

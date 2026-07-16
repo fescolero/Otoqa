@@ -27,7 +27,7 @@ import { SettingsHeader } from '@/components/web/settings-header';
 import { WBtn, WIcon, DSCard, Kbd } from '@/components/web';
 import type { IconName } from '@/components/web/icons';
 import { ModelTag } from '@/components/web/pay-profiles/model-tag';
-import type { PayBasis } from '@/lib/payProfileDisplay';
+import { earningComponentOptions, type PayBasis } from '@/lib/payProfileDisplay';
 
 // ============================================================================
 // Model presets — the four per-leg trigger models the engine supports.
@@ -128,15 +128,6 @@ const UNIT_META: Record<CustomUnit, {
 
 type CustomLine = { key: number; name: string; code: string; unit: CustomUnit; rate: string };
 
-// Buckets a profile rate line can be classified into (earning side only —
-// deductions/withholdings are managed elsewhere).
-const EARNING_BUCKETS: Record<string, string> = {
-  BASE_WAGE: 'Base wage',
-  BASE_FRINGE: 'Fringe',
-  ACCESSORIAL: 'Accessorial',
-  BONUS: 'Bonus',
-};
-
 type Currency = (typeof CURRENCIES)[number]['value'];
 type PayeeType = 'DRIVER' | 'CARRIER';
 
@@ -182,16 +173,10 @@ export default function NewPayProfilePage() {
     api.chargeComponents.listForOrg,
     workosOrgId ? { workosOrgId } : 'skip',
   );
-  const componentOptions = React.useMemo(() => {
-    if (!components) return [];
-    return components
-      .filter(c => c.isActive && c.appliesTo.includes('PAY') && c.bucket in EARNING_BUCKETS)
-      .sort((a, b) =>
-        a.bucket === b.bucket
-          ? a.displayName.localeCompare(b.displayName)
-          : Object.keys(EARNING_BUCKETS).indexOf(a.bucket) - Object.keys(EARNING_BUCKETS).indexOf(b.bucket))
-      .map(c => ({ value: c.code, label: `${c.displayName} · ${EARNING_BUCKETS[c.bucket]}` }));
-  }, [components]);
+  const componentOptions = React.useMemo(
+    () => earningComponentOptions(components, 'code'),
+    [components],
+  );
 
   const addCustomLine = () => setCustomLines(lines => [
     ...lines,

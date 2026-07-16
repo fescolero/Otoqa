@@ -17,7 +17,7 @@
 'use client';
 
 import * as React from 'react';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Doc, Id } from '@/convex/_generated/dataModel';
 import { DSMiniTable, type DSMiniColumn, type DSRowAction } from '@/components/web';
@@ -27,6 +27,8 @@ import {
   triggerToDesignType,
   formatRateMicroCents,
   deriveDistanceLabel,
+  earningComponentOptions,
+  EARNING_BUCKETS,
   type DesignRateType,
 } from '@/lib/payProfileDisplay';
 
@@ -158,12 +160,29 @@ function parseDistanceKey(
 
 export interface RatesTableProps {
   rules: Doc<'payRules'>[];
+  workosOrgId: string | null;
   onAddLineItem: () => void;
 }
 
-export function RatesTable({ rules, onAddLineItem }: RatesTableProps) {
+export function RatesTable({ rules, workosOrgId, onAddLineItem }: RatesTableProps) {
   const updateRule = useMutation(api.payRules.updateRule);
   const removeRule = useMutation(api.payRules.removeRule);
+
+  // Component catalog backs the "Counts as" column — the classification that
+  // drives paycheck bucketing / tax treatment (base wage vs fringe vs bonus).
+  const components = useQuery(
+    api.chargeComponents.listForOrg,
+    workosOrgId ? { workosOrgId } : 'skip',
+  );
+  const componentOptions = React.useMemo(
+    () => earningComponentOptions(components, '_id'),
+    [components],
+  );
+  const componentsById = React.useMemo(() => {
+    const m = new Map<string, Doc<'chargeComponents'>>();
+    for (const c of components ?? []) m.set(c._id, c);
+    return m;
+  }, [components]);
 
   const rows = React.useMemo(() => rules.map(toRow), [rules]);
 
@@ -200,6 +219,27 @@ export function RatesTable({ rules, onAddLineItem }: RatesTableProps) {
       render: r => <span className="text-[13px] font-medium truncate">{r.name}</span>,
       editor: { type: 'text' },
       getValue: r => r.name,
+    },
+    {
+      key: 'component',
+      label: 'Counts as',
+      width: '180px',
+      render: r => {
+        const c = componentsById.get(r.rule.componentId);
+        if (!c) {
+          return <span className="text-[12px] italic" style={{ color: 'var(--text-tertiary)' }}>…</span>;
+        }
+        return (
+          <span className="inline-flex items-baseline gap-1.5 min-w-0">
+            <span className="text-[12.5px] truncate" style={{ color: 'var(--text-secondary)' }}>{c.displayName}</span>
+            <span className="text-[10.5px] shrink-0" style={{ color: 'var(--text-tertiary)' }}>
+              {EARNING_BUCKETS[c.bucket] ?? c.bucket}
+            </span>
+          </span>
+        );
+      },
+      editor: { type: 'select', options: componentOptions },
+      getValue: r => r.rule.componentId,
     },
     {
       key: 'rate',
@@ -244,6 +284,12 @@ export function RatesTable({ rules, onAddLineItem }: RatesTableProps) {
       case 'name':
         if (value !== row.name) await updateRule({ ruleId, patch: { name: value } });
         return;
+
+      case 'component': {
+        if (!value || value === row.rule.componentId) return;
+        await updateRule({ ruleId, patch: { componentId: value as Id<'chargeComponents'> } });
+        return;
+      }
 
       case 'rate': {
         const microCents = parseRateInput(value, row.designType);
