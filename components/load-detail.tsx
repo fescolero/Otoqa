@@ -1140,39 +1140,10 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     }
   });
 
-  // Load-level documents (placeholders until file store lands).
-  docRows.push({
-    id: 'rate',
-    name: 'Rate confirmation',
-    src: 'Customer',
-    when: '—',
-    status: 'expiring',
-    preview: { kind: 'placeholder' },
-  });
-  const originHasPhoto = (loadDocsData ?? []).some(
-    (d) => d.type !== 'EXTRA_DOC' && origin && d.inferredStopId === origin._id,
-  );
-  if (!originHasPhoto) {
-    docRows.push({
-      id: 'bol-pickup',
-      name: 'BOL — pickup',
-      src: 'Driver',
-      when: origin?.checkedInAt ? formatTime(origin.checkedInAt) : '—',
-      status: 'expiring',
-      preview: { kind: 'placeholder' },
-    });
-  }
-  if (!hasPOD) {
-    docRows.push({
-      id: 'bol-delivery',
-      name: 'BOL — delivery',
-      src: 'Driver',
-      when: '—',
-      status: 'expiring',
-      preview: { kind: 'placeholder' },
-    });
-  }
-
+  // No synthetic placeholder rows ('Rate confirmation' / 'BOL — pickup'
+  // / 'BOL — delivery'): the table now lists real documents from
+  // loadDocuments only. Missing-POD pressure is signaled by the
+  // attention band + status chips, not fake table entries.
   const documentsContent = (
     <DSCard
       title={`Documents (${docRows.length})`}
