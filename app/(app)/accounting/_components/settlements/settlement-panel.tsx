@@ -111,7 +111,7 @@ interface PanelLine {
   /** Hours on this line (hourly basis) — feeds the day subtotal. */
   hours?: number;
   /** Loads run during the shift — rendered one row each for review. */
-  loads?: Array<{ label: string; actualAt?: number; scheduledAt?: number; lane?: string }>;
+  loads?: Array<{ label: string; actualAt?: number; scheduledAt?: number; lane?: string; noPay?: boolean }>;
   /** Session-backed shift line — gets the loads mini-table (or its absence note). */
   isShift?: boolean;
   /** Session id behind a shift line — enables the per-shift profile picker. */
@@ -405,18 +405,47 @@ function groupLoadLines(dayLines: PanelLine[]): DayRenderGroup[] {
   return out;
 }
 
-function StLoadHeader({ label, time, total, first }: { label: string; time?: string; total: number; first: boolean }) {
+function StLoadHeader({
+  label,
+  time,
+  meta,
+  total,
+  first,
+}: {
+  label: string;
+  time?: string;
+  /** In / scheduled / lane pulled from the shift's loads table for this load. */
+  meta?: { actualAt?: number; scheduledAt?: number; lane?: string };
+  total: number;
+  first: boolean;
+}) {
+  const inLabel = meta?.actualAt != null ? fmtTime(meta.actualAt) : time;
   return (
     <div
-      className="flex items-baseline gap-2"
+      className="flex items-baseline gap-2 min-w-0"
       style={{ padding: '9px 14px 2px', borderTop: first ? 'none' : '1px solid var(--border-hairline)' }}
     >
-      <span className="num tw-mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>
+      <span className="num tw-mono shrink-0" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>
         {label}
       </span>
-      {time && <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{time}</span>}
-      <span className="flex-1" />
-      <span className="num" style={{ fontSize: 12.5, fontWeight: 600 }}>{fmtUSD(total)}</span>
+      {inLabel && (
+        <span className="num whitespace-nowrap shrink-0" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+          {inLabel}
+        </span>
+      )}
+      {meta?.scheduledAt != null && (
+        <span className="num whitespace-nowrap shrink-0" style={{ fontSize: 10.5, color: 'var(--text-tertiary)' }}>
+          sched {fmtTime(meta.scheduledAt)}
+        </span>
+      )}
+      {meta?.lane ? (
+        <span className="truncate flex-1" title={meta.lane} style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+          {fmtLane(meta.lane)}
+        </span>
+      ) : (
+        <span className="flex-1" />
+      )}
+      <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 600 }}>{fmtUSD(total)}</span>
     </div>
   );
 }
@@ -627,8 +656,17 @@ function StLineRow({
                   <span className="num tw-mono truncate" style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
                     {ld.label}
                   </span>
-                  <span className="truncate" title={ld.lane} style={{ color: 'var(--text-tertiary)' }}>
-                    {ld.lane ? fmtLane(ld.lane) : '—'}
+                  <span className="flex items-center gap-1.5 min-w-0" style={{ color: 'var(--text-tertiary)' }}>
+                    <span className="truncate" title={ld.lane}>{ld.lane ? fmtLane(ld.lane) : '—'}</span>
+                    {ld.noPay && (
+                      <span
+                        className="uppercase whitespace-nowrap"
+                        title="This load produced no pay lines — check the leg's check-in/checkout times, then recalculate."
+                        style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.4, color: '#A66800', padding: '1px 5px', borderRadius: 3, background: 'rgba(245,158,11,0.12)' }}
+                      >
+                        No pay
+                      </span>
+                    )}
                   </span>
                 </div>
               );
@@ -992,6 +1030,15 @@ export function SettlementPanel({
     // not the day-grouped earnings flow. Amount is signed (deductions stored
     // negative).
     const adjustments: Array<{ _id: string; label: string; amount: number; loadLabel?: string }> = [];
+    // Which loads actually produced pay lines — the shift's loads table flags
+    // the ones that didn't (missed checkout, calc gap) so a reviewer can see
+    // a load isn't silently unpaid.
+    const paidLoadLabels = new Set<string>();
+    for (const p of payables) {
+      if (p.sourceType === 'MANUAL' || p.workEnd != null) continue;
+      const ll = p.loadOrderNumber ?? p.loadInternalId;
+      if (ll) paidLoadLabels.add(ll);
+    }
     for (const p of payables) {
       const category = classifyPayable(p);
       const loadLabel = p.loadOrderNumber ?? p.loadInternalId;
@@ -1031,7 +1078,7 @@ export function SettlementPanel({
         dayKey: startOfDay(workAt),
         at: workAt,
         hours: row.planBasis === 'hourly' && category === 'EARNING' ? p.quantity : undefined,
-        loads: p.shiftLoads,
+        loads: p.shiftLoads?.map((ld) => ({ ...ld, noPay: !paidLoadLabels.has(ld.label) })),
         isShift,
         sessionId: p.sessionId,
         sessionOverrideId: p.sessionPayProfileOverrideId,
@@ -1068,6 +1115,19 @@ export function SettlementPanel({
       net: earnTotal + reimbTotal - deductTotal + adjTotal,
     };
   }, [payables, row.planBasis, editable]);
+
+  // In / scheduled / lane per load, lifted from the shift lines' loads tables
+  // — enriches the load group headers so each visual unit carries the same
+  // review columns as the shift table.
+  const shiftLoadMeta = React.useMemo(() => {
+    const m = new Map<string, { actualAt?: number; scheduledAt?: number; lane?: string }>();
+    for (const l of lines?.earn ?? []) {
+      for (const ld of l.loads ?? []) {
+        if (!m.has(ld.label)) m.set(ld.label, ld);
+      }
+    }
+    return m;
+  }, [lines]);
 
   // While the details query streams in, the header strip falls back to the
   // (already-enriched) row totals so nothing flashes empty.
@@ -1565,7 +1625,7 @@ export function SettlementPanel({
                       />
                     ) : (
                       <React.Fragment key={g.key}>
-                        <StLoadHeader label={g.label} time={g.time} total={g.total} first={false} />
+                        <StLoadHeader label={g.label} time={g.time} meta={shiftLoadMeta.get(g.label)} total={g.total} first={false} />
                         {g.lines.map((l) => (
                           <StLineRow
                             key={l._id}
