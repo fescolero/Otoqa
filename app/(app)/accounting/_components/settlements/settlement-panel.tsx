@@ -360,13 +360,78 @@ function StLineEditor({ line, onEdit, onCancel }: {
         value={rate} onChange={(e) => setRate(e.target.value)} onKeyDown={onKeys}
         className="num focus-ring" style={{ ...EDIT_INPUT, width: 64, textAlign: 'right' }}
       />
-      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{isPct ? '%' : isShift || line.basis === 'mile' ? (isShift ? '/hr' : '/mi') : ''}</span>
+      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{isPct ? '%' : isShift || line.basis === 'hourly' ? '/hr' : line.basis === 'mile' ? '/mi' : ''}</span>
       {preview && (
         <span className="num" style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
           = {preview.hours.toFixed(2)} h · {fmtUSD(preview.amount, false)}
         </span>
       )}
       <button onClick={commit} className="focus-ring inline-flex items-center justify-center rounded" title="Apply" style={{ width: 26, height: 26, border: 0, cursor: 'pointer', background: 'var(--accent)', color: '#FFF' }}>
+        <WIcon name="check" size={13} strokeWidth={2.4} />
+      </button>
+      <button onClick={onCancel} className="focus-ring inline-flex items-center justify-center rounded" title="Cancel" style={{ width: 26, height: 26, border: '1px solid var(--border-hairline)', cursor: 'pointer', background: 'transparent', color: 'var(--text-tertiary)' }}>
+        <WIcon name="close" size={12} />
+      </button>
+    </div>
+  );
+}
+
+/** Shift-level clock editor — ONE time correction for the whole shift. Every
+ *  full-shift layer (Base rate, H&W, …) rides the same clock, so the card owns
+ *  the time edit and fans it out; layer rows only edit their own rate. */
+function StShiftClockEditor({ clockStart, clockEnd, breakMinutes, onCommit, onCancel }: {
+  clockStart: number;
+  clockEnd: number;
+  breakMinutes?: number;
+  onCommit: (patch: { overrideStartAt: number; overrideEndAt: number; breakMinutes: number }) => void;
+  onCancel: () => void;
+}) {
+  const [start, setStart] = React.useState(toTimeInput(clockStart));
+  const [end, setEnd] = React.useState(toTimeInput(clockEnd));
+  const [brk, setBrk] = React.useState(String(breakMinutes ?? 0));
+
+  // Same overnight-aware math as StLineEditor: the end time anchors on the
+  // START's calendar day and rolls forward only when end ≤ start, so a
+  // clock-out already past midnight can't produce a multi-day span.
+  const resolve = React.useCallback(() => {
+    const s = fromTimeInput(start, clockStart);
+    if (s == null) return null;
+    let e = fromTimeInput(end, s);
+    if (e == null) return null;
+    if (e <= s) e += 24 * 3_600_000;
+    const b = parseFloat(brk);
+    return { s, e, b: Number.isFinite(b) && b >= 0 ? b : 0 };
+  }, [start, end, brk, clockStart]);
+
+  const commit = () => {
+    const r = resolve();
+    if (!r) return;
+    onCommit({ overrideStartAt: r.s, overrideEndAt: r.e, breakMinutes: r.b });
+  };
+  const onKeys = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') commit();
+    if (e.key === 'Escape') onCancel();
+  };
+  const preview = React.useMemo(() => {
+    const r = resolve();
+    if (!r) return null;
+    return Math.max((r.e - r.s) / 3_600_000 - r.b / 60, 0);
+  }, [resolve]);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2" style={{ marginTop: 7 }}>
+      <input autoFocus type="time" value={start} onChange={(e) => setStart(e.target.value)} onKeyDown={onKeys} className="num focus-ring" style={EDIT_INPUT} />
+      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>–</span>
+      <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} onKeyDown={onKeys} className="num focus-ring" style={EDIT_INPUT} />
+      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>break</span>
+      <input type="number" min="0" step="5" value={brk} onChange={(e) => setBrk(e.target.value)} onKeyDown={onKeys} className="num focus-ring" style={{ ...EDIT_INPUT, width: 52, textAlign: 'right' }} />
+      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>min</span>
+      {preview != null && (
+        <span className="num" style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
+          = {preview.toFixed(2)} h paid
+        </span>
+      )}
+      <button onClick={commit} className="focus-ring inline-flex items-center justify-center rounded" title="Apply to all shift-hour pay lines" style={{ width: 26, height: 26, border: 0, cursor: 'pointer', background: 'var(--accent)', color: '#FFF' }}>
         <WIcon name="check" size={13} strokeWidth={2.4} />
       </button>
       <button onClick={onCancel} className="focus-ring inline-flex items-center justify-center rounded" title="Cancel" style={{ width: 26, height: 26, border: '1px solid var(--border-hairline)', cursor: 'pointer', background: 'transparent', color: 'var(--text-tertiary)' }}>
@@ -946,10 +1011,13 @@ function StDayHeader({ dayKey, dayLines, first }: { dayKey: number; dayLines: Pa
 /** Handlers a shift card threads down to its line rows. */
 interface ShiftCardHandlers {
   onRemove: (id: string) => void;
-  onEdit: (id: string, patch: { rate?: number; overrideStartAt?: number; overrideEndAt?: number; breakMinutes?: number }) => void;
+  onEdit: (id: string, patch: { rate?: number; quantity?: number; overrideStartAt?: number; overrideEndAt?: number; breakMinutes?: number }) => void;
   onRevert: (id: string) => void;
   onAdjustLoad: (loadId: string, label: string) => void;
   onApplyRules: (id: string) => void;
+  /** Shift-level clock correction — applied to EVERY full-shift layer, since
+   *  the backend recomputes one payItem per call and they share one clock. */
+  onEditClock: (lineIds: string[], patch: { overrideStartAt: number; overrideEndAt: number; breakMinutes: number }) => void;
 }
 
 function StShiftCard({
@@ -968,6 +1036,7 @@ function StShiftCard({
   handlers: ShiftCardHandlers;
 }) {
   const [showLoads, setShowLoads] = React.useState(false);
+  const [editingClock, setEditingClock] = React.useState(false);
   const crosses =
     card.clockStart != null && card.clockEnd != null &&
     new Date(card.clockStart).toDateString() !== new Date(card.clockEnd).toDateString();
@@ -979,6 +1048,13 @@ function StShiftCard({
   // Layers that span every shift hour vs. partial-hour layers (off-load etc.)
   const allHourLayers = card.sessionLines.filter((l) => Math.abs((l.hours ?? 0) - card.hours) < 0.02);
   const partialLayers = card.sessionLines.filter((l) => !allHourLayers.includes(l));
+
+  // The clock edit lives on the CARD, not the layer rows: Base rate and H&W
+  // ride the same shift clock, so one correction recomputes all of them.
+  // Partial-hour layers keep their engine-derived hours (a clock override
+  // would wrongly inflate them to the full span).
+  const clockEditIds = allHourLayers.filter((l) => l.editableLine).map((l) => l._id);
+  const canEditClock = clockEditIds.length > 0 && card.clockStart != null && card.clockEnd != null;
 
   const distinctLoads = new Set(card.loadLines.map((l) => l.label)).size;
   const premiumRate = card.loadLines[0]?.rate;
@@ -992,9 +1068,11 @@ function StShiftCard({
   // Layer rows render without the shift-level context they'd duplicate.
   // hideLoadsTable stays set so StLineRow shows neither the loads table nor
   // the "no loads linked" empty note — both live on the card itself.
+  // isShift is dropped so the per-layer editor is RATE-ONLY: the clock edit
+  // is a single card-level action (one shift, one time correction).
   const layerLine = (l: PanelLine): PanelLine => ({
     ...l, label: l.desc ?? l.label, sub: undefined, loads: undefined,
-    hideLoadsTable: true, warning: undefined,
+    hideLoadsTable: true, warning: undefined, isShift: false,
   });
   const layerRow = (l: PanelLine) => (
     <StLineRow
@@ -1004,7 +1082,10 @@ function StShiftCard({
       indent
       highlighted={highlightLineId === l._id}
       onRemove={handlers.onRemove}
-      onEdit={handlers.onEdit}
+      // A rate-only edit pins the layer's CURRENT hours — without an explicit
+      // quantity the backend re-derives it from the full session span, which
+      // would silently inflate partial-hour layers (off-load bookends).
+      onEdit={(id, patch) => handlers.onEdit(id, { ...patch, quantity: l.hours })}
       onRevert={handlers.onRevert}
       onApplyRules={handlers.onApplyRules}
     />
@@ -1023,7 +1104,7 @@ function StShiftCard({
   return (
     <div style={{ borderTop: first ? 'none' : '1px solid var(--border-hairline)' }}>
       {/* header — one span across both dates */}
-      <div style={{ padding: '11px 14px 10px', background: 'var(--bg-surface-2)', borderBottom: '1px solid var(--border-hairline)' }}>
+      <div className="group" style={{ padding: '11px 14px 10px', background: 'var(--bg-surface-2)', borderBottom: '1px solid var(--border-hairline)' }}>
         <div className="flex items-start gap-3">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -1043,7 +1124,28 @@ function StShiftCard({
               {card.clockEnd != null && (
                 <span className="num" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtTime(card.clockEnd)}</span>
               )}
+              {canEditClock && !editingClock && (
+                <button
+                  type="button"
+                  onClick={() => setEditingClock(true)}
+                  title="Correct clock time or break for the whole shift — every shift-hour pay line recalculates"
+                  className="focus-ring inline-flex items-center gap-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{ height: 20, padding: '0 7px', border: '1px solid var(--border-hairline)', background: 'transparent', cursor: 'pointer', fontSize: 10.5, fontWeight: 500, color: 'var(--text-tertiary)' }}
+                >
+                  <WIcon name="edit" size={10} />
+                  Edit time
+                </button>
+              )}
             </div>
+            {editingClock && canEditClock && (
+              <StShiftClockEditor
+                clockStart={card.clockStart!}
+                clockEnd={card.clockEnd!}
+                breakMinutes={card.breakMinutes}
+                onCommit={(patch) => { handlers.onEditClock(clockEditIds, patch); setEditingClock(false); }}
+                onCancel={() => setEditingClock(false)}
+              />
+            )}
             <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginTop: 4 }}>
               <span className="num">{card.hours.toFixed(2)} h paid</span>
               {card.breakMinutes != null && card.breakMinutes > 0 && (
@@ -1769,6 +1871,24 @@ export function SettlementPanel({
       setBusy(false);
     }
   };
+  // One shift-level clock correction fans out to every full-shift layer (Base
+  // rate, H&W, …): they all ride the same clock, but the backend recomputes a
+  // single payItem per call — editing just one layer would leave the others'
+  // hours stale.
+  const editShiftClock = async (
+    lineIds: string[],
+    patch: { overrideStartAt: number; overrideEndAt: number; breakMinutes: number },
+  ) => {
+    setBusy(true);
+    try {
+      for (const id of lineIds) await ledger.editLine(id, patch);
+      toast.success(lineIds.length > 1 ? `Shift time updated — ${lineIds.length} pay lines recalculated` : 'Shift time updated');
+    } catch (err) {
+      toast.error("Couldn't update the shift time", { description: friendlyError(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
   const revertLine = async (payableId: string) => {
     setBusy(true);
     try {
@@ -2144,6 +2264,7 @@ export function SettlementPanel({
                         onRevert: revertLine,
                         onAdjustLoad: adjustForLoad,
                         onApplyRules: applyRules,
+                        onEditClock: editShiftClock,
                       }}
                     />
                   ))}
