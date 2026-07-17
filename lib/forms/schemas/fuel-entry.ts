@@ -280,22 +280,25 @@ export function buildFuelEntrySchema(
         title: 'Assignment',
         subtitle: 'Who made the purchase + what they were driving.',
         fields: [
+          // Optional (recommended): imports already create unassigned
+          // entries, so the manual form matches — the mutations accept
+          // both as v.optional and reports render "Unassigned".
           {
             id: ids.driverId,
             label: 'Driver',
             kind: 'select',
-            required: 'tier1',
+            recommended: true,
             placeholder:
-              driverOptions.length === 0 ? 'No drivers loaded' : '— Select —',
+              driverOptions.length === 0 ? 'No drivers loaded' : '— None —',
             options: driverOptions,
           },
           {
             id: ids.truckId,
             label: 'Truck',
             kind: 'select',
-            required: 'tier1',
+            recommended: true,
             placeholder:
-              truckOptions.length === 0 ? 'No trucks loaded' : '— Select —',
+              truckOptions.length === 0 ? 'No trucks loaded' : '— None —',
             options: truckOptions,
           },
           {
