@@ -642,7 +642,7 @@ function StLineRow({
               );
             })}
           </div>
-        ) : line.isShift && (!line.loads || line.loads.length === 0) ? (
+        ) : line.isShift && !line.hideLoadsTable && (!line.loads || line.loads.length === 0) ? (
           <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: 6 }}>
             <WIcon name="circle-alert" size={12} color="#A66800" />
             No loads linked to this shift
@@ -988,9 +988,11 @@ function StShiftCard({
   const noPayLabels = card.loads.filter((ld) => ld.noPay).map((ld) => ld.label);
 
   // Layer rows render without the shift-level context they'd duplicate.
+  // hideLoadsTable stays set so StLineRow shows neither the loads table nor
+  // the "no loads linked" empty note — both live on the card itself.
   const layerLine = (l: PanelLine): PanelLine => ({
     ...l, label: l.desc ?? l.label, sub: undefined, loads: undefined,
-    hideLoadsTable: undefined, warning: undefined,
+    hideLoadsTable: true, warning: undefined,
   });
   const layerRow = (l: PanelLine) => (
     <StLineRow
