@@ -970,7 +970,7 @@ function StShiftCard({
     card.clockStart != null && card.clockEnd != null &&
     new Date(card.clockStart).toDateString() !== new Date(card.clockEnd).toDateString();
   const endDayLabel = crosses
-    ? new Date(card.clockEnd!).toLocaleDateString('en-US', { weekday: 'short' })
+    ? new Date(card.clockEnd!).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
     : null;
   const blended = card.hours > 0 ? card.total / card.hours : 0;
 
@@ -1495,13 +1495,16 @@ export function SettlementPanel({
         desc: p.description,
         timeLabel: time,
         warning: p.warningMessage,
-        // Inline-edit state.
+        // Inline-edit state. Clock window prefers the reviewer override and
+        // falls back to the session work times — the new-ledger adapter only
+        // sets clockStart/End when a reviewer edited, so without the fallback
+        // shift cards would render no clock range at all.
         edited: p.edited,
         rate: p.rate,
         basis: row.planBasis,
         breakMinutes: p.breakMinutes,
-        clockStart: p.clockStart,
-        clockEnd: p.clockEnd,
+        clockStart: shiftStart,
+        clockEnd: shiftEnd,
         originalTotalAmount: p.originalTotalAmount,
         rulesChanged: p.rulesChanged,
         rulesAmount: p.rulesAmount,
