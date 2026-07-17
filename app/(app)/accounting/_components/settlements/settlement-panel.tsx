@@ -491,12 +491,7 @@ function StLineRow({
   onAdjustLoad?: (loadId: string, label: string) => void;
   onApplyRules?: (payableId: string) => void;
   /** Per-shift pay profile override control (driver hourly shift lines). */
-  shiftProfile?: {
-    value: string;                                    // 'auto' | payProfiles id
-    options: Array<{ value: string; label: string }>;
-    saving: boolean;
-    onChange: (value: string) => void;
-  };
+  shiftProfile?: ShiftProfileConfig;
   /** Rendered nested under a load group header — indented, no divider. */
   indent?: boolean;
 }) {
@@ -570,49 +565,8 @@ function StLineRow({
           </div>
         )}
         {shiftProfile && (
-          <div className="flex items-center gap-1.5" style={{ marginTop: 4 }}>
-            <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>
-              Profile
-            </span>
-            <div className="relative">
-              <select
-                value={shiftProfile.value}
-                disabled={shiftProfile.saving}
-                onChange={(e) => shiftProfile.onChange(e.target.value)}
-                className="appearance-none cursor-pointer disabled:cursor-wait"
-                style={{
-                  height: 22,
-                  padding: '0 22px 0 7px',
-                  borderRadius: 5,
-                  border: '1px solid var(--border-hairline)',
-                  background: 'transparent',
-                  fontFamily: 'inherit',
-                  fontSize: 11,
-                  color: shiftProfile.value === 'auto' ? 'var(--text-tertiary)' : 'var(--text-secondary)',
-                  opacity: shiftProfile.saving ? 0.6 : 1,
-                  maxWidth: 240,
-                }}
-              >
-                <option value="auto">Driver default (auto)</option>
-                {shiftProfile.options.map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-              <span
-                className="absolute pointer-events-none"
-                style={{ right: 7, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }}
-              >
-                <WIcon name="chevron-down" size={10} />
-              </span>
-            </div>
-            {shiftProfile.value !== 'auto' && (
-              <span
-                className="uppercase"
-                style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.4, color: '#A66800', padding: '1px 5px', borderRadius: 3, background: 'rgba(245,158,11,0.12)' }}
-              >
-                Override
-              </span>
-            )}
+          <div style={{ marginTop: 4 }}>
+            <StShiftProfilePicker config={shiftProfile} />
           </div>
         )}
         {line.loads && line.loads.length > 0 && !line.hideLoadsTable ? (
@@ -783,6 +737,162 @@ function StLineRow({
   );
 }
 
+// ─── shift cards (hourly plans) ─────────────────────────────────────────────
+//
+// Design: settlement-review-modal.jsx — the SHIFT is the unit, not the day. A
+// night shift clocks out after midnight but stays on one card, its post-
+// midnight loads included. Pay renders as stacked layers so it reads as
+// adding up rather than replacing: session-scoped lines (base, H&W) on every
+// shift hour, plus a load premium on the hours actually on a load.
+
+interface ShiftCardData {
+  key: string;
+  sessionId?: string;
+  sessionOverrideId?: string;
+  dayKey: number;
+  at: number;
+  clockStart?: number;
+  clockEnd?: number;
+  breakMinutes?: number;
+  warning?: string;
+  loads: NonNullable<PanelLine['loads']>;
+  /** Session-scoped pay layers (base rate, H&W, off-load…). */
+  sessionLines: PanelLine[];
+  /** Per-load premium lines matched to this shift by order number. */
+  loadLines: PanelLine[];
+  hours: number;
+  loadHours: number;
+  loadPay: number;
+  total: number;
+}
+
+function buildShiftCards(earn: PanelLine[]): { cards: ShiftCardData[]; leftovers: PanelLine[] } {
+  const bySession = new Map<string, ShiftCardData>();
+  const order: string[] = [];
+  for (const l of earn) {
+    if (!l.isShift) continue;
+    const k = l.sessionId ?? l._id;
+    let c = bySession.get(k);
+    if (!c) {
+      c = {
+        key: k, sessionId: l.sessionId, sessionOverrideId: l.sessionOverrideId,
+        dayKey: l.dayKey, at: l.at,
+        clockStart: l.clockStart, clockEnd: l.clockEnd, breakMinutes: l.breakMinutes,
+        warning: l.warning, loads: [], sessionLines: [], loadLines: [],
+        hours: 0, loadHours: 0, loadPay: 0, total: 0,
+      };
+      bySession.set(k, c);
+      order.push(k);
+    }
+    c.sessionLines.push(l);
+    c.sessionOverrideId = c.sessionOverrideId ?? l.sessionOverrideId;
+    c.warning = c.warning ?? l.warning;
+    c.breakMinutes = c.breakMinutes ?? l.breakMinutes;
+    if (l.clockStart != null) c.clockStart = Math.min(c.clockStart ?? Infinity, l.clockStart);
+    if (l.clockEnd != null) c.clockEnd = Math.max(c.clockEnd ?? -Infinity, l.clockEnd);
+    if ((l.loads?.length ?? 0) > c.loads.length) c.loads = l.loads!;
+  }
+
+  // Leg premium lines attach to their shift by order number (leg pay items
+  // carry no session id; the shift's loads table is the linkage — same match
+  // the no-pay flags use). Unmatched lines fall back to day-grouped display.
+  const labelToSession = new Map<string, string>();
+  for (const k of order) {
+    for (const ld of bySession.get(k)!.loads) {
+      if (!labelToSession.has(ld.label)) labelToSession.set(ld.label, k);
+    }
+  }
+  const leftovers: PanelLine[] = [];
+  for (const l of earn) {
+    if (l.isShift) continue;
+    const k = l.loadId ? labelToSession.get(l.label) : undefined;
+    if (k) bySession.get(k)!.loadLines.push(l);
+    else leftovers.push(l);
+  }
+
+  const cards = order.map((k) => {
+    const c = bySession.get(k)!;
+    c.hours = c.sessionLines.reduce((m, l) => Math.max(m, l.hours ?? 0), 0);
+    const perLoad = new Map<string, number>();
+    for (const l of c.loadLines) {
+      perLoad.set(l.label, Math.max(perLoad.get(l.label) ?? 0, l.hours ?? 0));
+      c.loadPay += l.amount;
+    }
+    c.loadHours = [...perLoad.values()].reduce((s, v) => s + v, 0);
+    c.total = c.sessionLines.reduce((s, l) => s + l.amount, 0) + c.loadPay;
+    return c;
+  });
+  return { cards, leftovers };
+}
+
+const SHIFT_GROUP_LABEL: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2,
+  fontSize: 10, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase',
+  color: 'var(--text-tertiary)',
+};
+
+function StShiftDot({ color }: { color: string }) {
+  return <span style={{ width: 7, height: 7, borderRadius: 2, background: color, flexShrink: 0 }} />;
+}
+
+/** Per-shift pay profile override control — 'auto' follows the driver's
+ *  default assignment; a profile pins the shift to it. */
+interface ShiftProfileConfig {
+  value: string;                                    // 'auto' | payProfiles id
+  options: Array<{ value: string; label: string }>;
+  saving: boolean;
+  onChange: (value: string) => void;
+}
+
+function StShiftProfilePicker({ config }: { config: ShiftProfileConfig }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>
+        Profile
+      </span>
+      <span className="relative inline-flex">
+        <select
+          value={config.value}
+          disabled={config.saving}
+          onChange={(e) => config.onChange(e.target.value)}
+          className="appearance-none cursor-pointer disabled:cursor-wait"
+          style={{
+            height: 22,
+            padding: '0 22px 0 7px',
+            borderRadius: 5,
+            border: '1px solid var(--border-hairline)',
+            background: 'transparent',
+            fontFamily: 'inherit',
+            fontSize: 11,
+            color: config.value === 'auto' ? 'var(--text-tertiary)' : 'var(--text-secondary)',
+            opacity: config.saving ? 0.6 : 1,
+            maxWidth: 240,
+          }}
+        >
+          <option value="auto">Driver default (auto)</option>
+          {config.options.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <span
+          className="absolute pointer-events-none"
+          style={{ right: 7, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }}
+        >
+          <WIcon name="chevron-down" size={10} />
+        </span>
+      </span>
+      {config.value !== 'auto' && (
+        <span
+          className="uppercase"
+          style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.4, color: '#A66800', padding: '1px 5px', borderRadius: 3, background: 'rgba(245,158,11,0.12)' }}
+        >
+          Override
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Hours counted once for a day's lines. Several rate lines cover the same
  *  hours on the new ledger (shift H&W + each load's base + premium), so
  *  summing quantities double-counts. Shift lines are authoritative when
@@ -827,6 +937,248 @@ function StDayHeader({ dayKey, dayLines, first }: { dayKey: number; dayLines: Pa
         {hours > 0 ? `${Math.round(hours * 100) / 100} h · ` : ''}
         {fmtUSD(amount, false)}
       </span>
+    </div>
+  );
+}
+
+/** Handlers a shift card threads down to its line rows. */
+interface ShiftCardHandlers {
+  onRemove: (id: string) => void;
+  onEdit: (id: string, patch: { rate?: number; overrideStartAt?: number; overrideEndAt?: number; breakMinutes?: number }) => void;
+  onRevert: (id: string) => void;
+  onAdjustLoad: (loadId: string, label: string) => void;
+  onApplyRules: (id: string) => void;
+}
+
+function StShiftCard({
+  card,
+  first,
+  highlightLineId,
+  loadMeta,
+  shiftProfile,
+  handlers,
+}: {
+  card: ShiftCardData;
+  first: boolean;
+  highlightLineId: string | null;
+  loadMeta: Map<string, { actualAt?: number; scheduledAt?: number; lane?: string }>;
+  shiftProfile?: ShiftProfileConfig;
+  handlers: ShiftCardHandlers;
+}) {
+  const [showLoads, setShowLoads] = React.useState(false);
+  const crosses =
+    card.clockStart != null && card.clockEnd != null &&
+    new Date(card.clockStart).toDateString() !== new Date(card.clockEnd).toDateString();
+  const endDayLabel = crosses
+    ? new Date(card.clockEnd!).toLocaleDateString('en-US', { weekday: 'short' })
+    : null;
+  const blended = card.hours > 0 ? card.total / card.hours : 0;
+
+  // Layers that span every shift hour vs. partial-hour layers (off-load etc.)
+  const allHourLayers = card.sessionLines.filter((l) => Math.abs((l.hours ?? 0) - card.hours) < 0.02);
+  const partialLayers = card.sessionLines.filter((l) => !allHourLayers.includes(l));
+
+  const distinctLoads = new Set(card.loadLines.map((l) => l.label)).size;
+  const premiumRate = card.loadLines[0]?.rate;
+  const lateCount = card.loads.reduce((n, ld) => {
+    const drift = ld.actualAt != null && ld.scheduledAt != null
+      ? Math.round((ld.actualAt - ld.scheduledAt) / 60000) : null;
+    return n + (drift != null && drift > 45 ? 1 : 0);
+  }, 0);
+  const noPayLabels = card.loads.filter((ld) => ld.noPay).map((ld) => ld.label);
+
+  // Layer rows render without the shift-level context they'd duplicate.
+  const layerLine = (l: PanelLine): PanelLine => ({
+    ...l, label: l.desc ?? l.label, sub: undefined, loads: undefined,
+    hideLoadsTable: undefined, warning: undefined,
+  });
+  const layerRow = (l: PanelLine) => (
+    <StLineRow
+      key={l._id}
+      line={layerLine(l)}
+      first
+      indent
+      highlighted={highlightLineId === l._id}
+      onRemove={handlers.onRemove}
+      onEdit={handlers.onEdit}
+      onRevert={handlers.onRevert}
+      onApplyRules={handlers.onApplyRules}
+    />
+  );
+
+  const chip = (label: string, fg: string, bg: string, icon?: IconName) => (
+    <span
+      className="inline-flex items-center gap-1 uppercase"
+      style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4, color: fg, background: bg, padding: '1px 7px', borderRadius: 999 }}
+    >
+      {icon && <WIcon name={icon} size={10} />}
+      {label}
+    </span>
+  );
+
+  return (
+    <div style={{ borderTop: first ? 'none' : '1px solid var(--border-hairline)' }}>
+      {/* header — one span across both dates */}
+      <div style={{ padding: '11px 14px 10px', background: 'var(--bg-surface-2)', borderBottom: '1px solid var(--border-hairline)' }}>
+        <div className="flex items-start gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>
+                Shift
+              </span>
+              {crosses && chip('Crosses midnight', '#5148C0', 'rgba(99,102,241,0.12)', 'moon')}
+              {card.warning && chip('Needs review', '#A66800', 'rgba(245,158,11,0.14)', 'warn-tri')}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 5 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{fmtDayLabel(card.dayKey)}</span>
+              {card.clockStart != null && (
+                <span className="num" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtTime(card.clockStart)}</span>
+              )}
+              <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>→</span>
+              {endDayLabel && <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{endDayLabel}</span>}
+              {card.clockEnd != null && (
+                <span className="num" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtTime(card.clockEnd)}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginTop: 4 }}>
+              <span className="num">{card.hours.toFixed(2)} h paid</span>
+              {card.breakMinutes != null && card.breakMinutes > 0 && (
+                <>
+                  <span style={{ opacity: 0.55 }}>·</span>
+                  <span className="num">{card.breakMinutes} min break</span>
+                </>
+              )}
+              {shiftProfile && (
+                <>
+                  <span style={{ opacity: 0.55 }}>·</span>
+                  <StShiftProfilePicker config={shiftProfile} />
+                </>
+              )}
+            </div>
+          </div>
+          <div className="text-right shrink-0">
+            <div className="num" style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{fmtUSD(card.total)}</div>
+            {card.hours > 0 && (
+              <div className="num" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                ≈ {fmtUSD(blended)}/hr blended
+              </div>
+            )}
+          </div>
+        </div>
+        {card.warning && (
+          <div className="flex items-start gap-1.5" style={{ marginTop: 7, fontSize: 11.5, lineHeight: '16px', color: '#A66800', fontWeight: 500 }}>
+            <WIcon name="warn-tri" size={12} color="#A66800" />
+            <span>{card.warning}</span>
+          </div>
+        )}
+      </div>
+
+      {/* stacked pay layers */}
+      <div style={{ padding: '2px 0 0' }}>
+        <div style={{ padding: '8px 14px 0' }}>
+          <div style={SHIFT_GROUP_LABEL}>
+            <StShiftDot color="#2E5CFF" />
+            Paid on all {card.hours.toFixed(2)} shift hours
+          </div>
+        </div>
+        {allHourLayers.map(layerRow)}
+        {partialLayers.length > 0 && (
+          <>
+            <div style={{ padding: '8px 14px 0' }}>
+              <div style={SHIFT_GROUP_LABEL}>
+                <StShiftDot color="#6366F1" />
+                Partial-hour shift pay
+              </div>
+            </div>
+            {partialLayers.map(layerRow)}
+          </>
+        )}
+
+        <div style={{ padding: '10px 14px 0' }}>
+          <div style={SHIFT_GROUP_LABEL}>
+            <StShiftDot color="#10B981" />
+            Load premium · only while on a load
+          </div>
+        </div>
+        {card.loadLines.length > 0 ? (
+          <>
+            <button
+              onClick={() => setShowLoads((s) => !s)}
+              className="focus-ring w-full flex items-baseline gap-3 text-left"
+              style={{ padding: '7px 14px 7px 28px', background: 'transparent', border: 0, cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              <span className="flex-1 min-w-0">
+                <span style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>Load hours</span>
+                <span className="num" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginLeft: 8 }}>
+                  {card.loadHours.toFixed(2)} h · {distinctLoads} load{distinctLoads === 1 ? '' : 's'}
+                  {premiumRate != null ? ` @ $${premiumRate.toFixed(2)}/hr` : ''}
+                </span>
+                {lateCount > 0 && (
+                  <span style={{ fontSize: 10.5, fontWeight: 600, color: '#A66800', marginLeft: 8 }}>
+                    {lateCount} late check-in{lateCount === 1 ? '' : 's'}
+                  </span>
+                )}
+                <span className="inline-flex items-center gap-1" style={{ fontSize: 11, fontWeight: 500, color: 'var(--accent)', marginLeft: 8 }}>
+                  <WIcon
+                    name="chevron-down"
+                    size={11}
+                    style={{ transform: showLoads ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-fast) var(--ease-out)' }}
+                  />
+                  {showLoads ? 'Hide' : 'Show'}
+                </span>
+              </span>
+              <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>
+                {fmtUSD(card.loadPay)}
+              </span>
+            </button>
+            {showLoads &&
+              groupLoadLines(card.loadLines).map((g) =>
+                g.kind === 'load' ? (
+                  <React.Fragment key={g.key}>
+                    <StLoadHeader label={g.label} time={g.time} meta={loadMeta.get(g.label)} total={g.total} first={false} />
+                    {g.lines.map((l) => (
+                      <StLineRow
+                        key={l._id}
+                        line={{ ...l, label: l.desc ?? l.label, sub: undefined }}
+                        first
+                        indent
+                        highlighted={highlightLineId === l._id}
+                        onRemove={handlers.onRemove}
+                        onEdit={handlers.onEdit}
+                        onRevert={handlers.onRevert}
+                        onAdjustLoad={handlers.onAdjustLoad}
+                        onApplyRules={handlers.onApplyRules}
+                      />
+                    ))}
+                  </React.Fragment>
+                ) : null,
+              )}
+          </>
+        ) : (
+          <div className="flex items-center gap-2" style={{ padding: '8px 14px 8px 28px', fontSize: 11.5, color: 'var(--text-tertiary)' }}>
+            <WIcon name="circle-alert" size={12} color="#F59E0B" />
+            No loads linked to this shift — paid shift hours only.
+          </div>
+        )}
+        {noPayLabels.length > 0 && (
+          <div className="flex items-start gap-1.5" style={{ padding: '2px 14px 6px 28px', fontSize: 11.5, lineHeight: '16px', color: '#A66800', fontWeight: 500 }}>
+            <WIcon name="circle-alert" size={12} color="#A66800" />
+            <span>
+              No pay lines for <span className="num tw-mono">{noPayLabels.join(', ')}</span> — check the leg&apos;s
+              check-in/checkout, then recalculate.
+            </span>
+          </div>
+        )}
+
+        {/* shift total */}
+        <div
+          className="flex items-center gap-3"
+          style={{ margin: '6px 14px 0', padding: '9px 0 10px', borderTop: '1px solid var(--border-hairline)' }}
+        >
+          <span className="flex-1" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>Shift total</span>
+          <span className="num" style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{fmtUSD(card.total)}</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1209,6 +1561,16 @@ export function SettlementPanel({
     return m;
   }, [lines]);
 
+  // Shift-card view (hourly plans): the SHIFT is the unit — session pay
+  // layers plus its loads' premium lines nested inside one card, midnight
+  // crossing included. Falls back to day-grouped lines when a statement has
+  // no session lines (legacy read path).
+  const shiftData = React.useMemo(
+    () => (row.planBasis === 'hourly' && lines ? buildShiftCards(lines.earn) : null),
+    [row.planBasis, lines],
+  );
+  const useShiftCards = !!shiftData && shiftData.cards.length > 0;
+
   // While the details query streams in, the header strip falls back to the
   // (already-enriched) row totals so nothing flashes empty.
   const totals = lines ?? {
@@ -1245,6 +1607,68 @@ export function SettlementPanel({
       : isOpen
         ? `ends ${fmtShortDate(row.periodEnd)}`
         : `pay ${fmtShortDate(row.payDate)}`;
+
+  // Day-grouped earnings — mile/flat/pct plans, and the fallback for hourly
+  // statements without session lines (legacy read) or lines a shift card
+  // couldn't claim. `firstBand` controls the top border of the first band.
+  const renderDayGrouped = (earnLines: PanelLine[], firstBand: boolean) =>
+    Array.from(
+      earnLines.reduce((m, l) => {
+        const list = m.get(l.dayKey) ?? [];
+        list.push(l);
+        m.set(l.dayKey, list);
+        return m;
+      }, new Map<number, PanelLine[]>()),
+    ).map(([dayKey, dayLines], gi) => (
+      <React.Fragment key={dayKey}>
+        <StDayHeader dayKey={dayKey} dayLines={dayLines} first={firstBand && gi === 0} />
+        {groupLoadLines(dayLines).map((g) =>
+          g.kind === 'line' ? (
+            <StLineRow
+              key={g.line._id}
+              line={g.line}
+              first={false}
+              mono={row.planBasis !== 'hourly'}
+              highlighted={highlightLineId === g.line._id}
+              onRemove={removeLine}
+              onEdit={editLine}
+              onRevert={revertLine}
+              onAdjustLoad={adjustForLoad}
+              onApplyRules={applyRules}
+              shiftProfile={
+                party === 'driver' && editable && g.line.isShift && g.line.sessionId
+                  && firstShiftLineBySession.get(g.line.sessionId) === g.line._id
+                  ? {
+                      value: g.line.sessionOverrideId ?? 'auto',
+                      options: shiftProfileOptions,
+                      saving: savingShiftSession === g.line.sessionId,
+                      onChange: (v) => changeShiftProfile(g.line.sessionId!, v),
+                    }
+                  : undefined
+              }
+            />
+          ) : (
+            <React.Fragment key={g.key}>
+              <StLoadHeader label={g.label} time={g.time} meta={shiftLoadMeta.get(g.label)} total={g.total} first={false} />
+              {g.lines.map((l) => (
+                <StLineRow
+                  key={l._id}
+                  line={{ ...l, label: l.desc ?? l.label, sub: undefined }}
+                  first
+                  indent
+                  highlighted={highlightLineId === l._id}
+                  onRemove={removeLine}
+                  onEdit={editLine}
+                  onRevert={revertLine}
+                  onAdjustLoad={adjustForLoad}
+                  onApplyRules={applyRules}
+                />
+              ))}
+            </React.Fragment>
+          ),
+        )}
+      </React.Fragment>
+    ));
 
   // ── actions ────────────────────────────────────────────────────────────────
   const setStatus = async (newStatus: 'PENDING' | 'APPROVED', successMsg: string) => {
@@ -1662,70 +2086,68 @@ export function SettlementPanel({
           )}
 
           <StSectionLabel>{earnLabel}</StSectionLabel>
+          {useShiftCards && (
+            <div
+              className="flex gap-2"
+              style={{
+                marginBottom: 10,
+                padding: '9px 12px',
+                background: 'var(--bg-surface-2)',
+                border: '1px solid var(--border-hairline)',
+                borderRadius: 9,
+                fontSize: 11.5,
+                lineHeight: '16px',
+                color: 'var(--text-tertiary)',
+              }}
+            >
+              <WIcon name="help" size={14} color="var(--text-tertiary)" style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>
+                Each shift pays its{' '}
+                <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>shift-hour layers on every hour</span>, plus a{' '}
+                <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>load premium</span> on hours spent on a load —
+                the layers add up. A night shift clocks out after midnight but stays on one card.
+              </span>
+            </div>
+          )}
           <div style={CARD_STYLE}>
             {detailsLoading ? (
               <div style={{ padding: '14px 14px', fontSize: 12.5, color: 'var(--text-tertiary)' }}>
                 Loading statement lines…
               </div>
             ) : lines && lines.earn.length > 0 ? (
-              // Lines grouped by the day the work happened (chronological).
-              Array.from(
-                lines.earn.reduce((m, l) => {
-                  const list = m.get(l.dayKey) ?? [];
-                  list.push(l);
-                  m.set(l.dayKey, list);
-                  return m;
-                }, new Map<number, PanelLine[]>()),
-              ).map(([dayKey, dayLines], gi) => (
-                <React.Fragment key={dayKey}>
-                  <StDayHeader dayKey={dayKey} dayLines={dayLines} first={gi === 0} />
-                  {groupLoadLines(dayLines).map((g) =>
-                    g.kind === 'line' ? (
-                      <StLineRow
-                        key={g.line._id}
-                        line={g.line}
-                        first={false}
-                        mono={row.planBasis !== 'hourly'}
-                        highlighted={highlightLineId === g.line._id}
-                        onRemove={removeLine}
-                        onEdit={editLine}
-                        onRevert={revertLine}
-                        onAdjustLoad={adjustForLoad}
-                        onApplyRules={applyRules}
-                        shiftProfile={
-                          party === 'driver' && editable && g.line.isShift && g.line.sessionId
-                            && firstShiftLineBySession.get(g.line.sessionId) === g.line._id
-                            ? {
-                                value: g.line.sessionOverrideId ?? 'auto',
-                                options: shiftProfileOptions,
-                                saving: savingShiftSession === g.line.sessionId,
-                                onChange: (v) => changeShiftProfile(g.line.sessionId!, v),
-                              }
-                            : undefined
-                        }
-                      />
-                    ) : (
-                      <React.Fragment key={g.key}>
-                        <StLoadHeader label={g.label} time={g.time} meta={shiftLoadMeta.get(g.label)} total={g.total} first={false} />
-                        {g.lines.map((l) => (
-                          <StLineRow
-                            key={l._id}
-                            line={{ ...l, label: l.desc ?? l.label, sub: undefined }}
-                            first
-                            indent
-                            highlighted={highlightLineId === l._id}
-                            onRemove={removeLine}
-                            onEdit={editLine}
-                            onRevert={revertLine}
-                            onAdjustLoad={adjustForLoad}
-                            onApplyRules={applyRules}
-                          />
-                        ))}
-                      </React.Fragment>
-                    ),
-                  )}
-                </React.Fragment>
-              ))
+              useShiftCards && shiftData ? (
+                <>
+                  {shiftData.cards.map((c, i) => (
+                    <StShiftCard
+                      key={c.key}
+                      card={c}
+                      first={i === 0}
+                      highlightLineId={highlightLineId}
+                      loadMeta={shiftLoadMeta}
+                      shiftProfile={
+                        party === 'driver' && editable && c.sessionId
+                          ? {
+                              value: c.sessionOverrideId ?? 'auto',
+                              options: shiftProfileOptions,
+                              saving: savingShiftSession === c.sessionId,
+                              onChange: (v) => changeShiftProfile(c.sessionId!, v),
+                            }
+                          : undefined
+                      }
+                      handlers={{
+                        onRemove: removeLine,
+                        onEdit: editLine,
+                        onRevert: revertLine,
+                        onAdjustLoad: adjustForLoad,
+                        onApplyRules: applyRules,
+                      }}
+                    />
+                  ))}
+                  {shiftData.leftovers.length > 0 && renderDayGrouped(shiftData.leftovers, false)}
+                </>
+              ) : (
+                renderDayGrouped(lines.earn, true)
+              )
             ) : (
               <div style={{ padding: '14px 14px', fontSize: 12.5, color: 'var(--text-tertiary)' }}>
                 No earning lines yet.
