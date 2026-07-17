@@ -134,6 +134,8 @@ interface PanelLine {
   /** Review-edit state — drives the editor and the "Adjusted" badge. */
   edited?: boolean;
   rate?: number;
+  /** Pre-edit system rate — a difference from `rate` marks a rate edit. */
+  originalRate?: number;
   basis?: SettlementRow['planBasis'];
   breakMinutes?: number;
   clockStart?: number;
@@ -902,6 +904,258 @@ function StShiftDot({ color }: { color: string }) {
   return <span style={{ width: 7, height: 7, borderRadius: 2, background: color, flexShrink: 0 }} />;
 }
 
+/** Inline, click-to-edit $/hr control (design: SrmRateEdit). The rate text
+ *  itself is the affordance — dashed underline, click to swap in an input.
+ *  One click, type, Enter — no separate edit mode for the whole row. */
+function StInlineRate({ rate, editable, edited, onRate }: {
+  rate: number;
+  editable: boolean;
+  /** Reviewer-changed rate — renders accented so the edit is visible at rest. */
+  edited?: boolean;
+  onRate: (v: number) => void;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [val, setVal] = React.useState('');
+  const begin = (e: React.MouseEvent) => { e.stopPropagation(); setVal(String(rate)); setEditing(true); };
+  const commit = () => {
+    const n = parseFloat(val);
+    if (Number.isFinite(n) && n >= 0 && Math.abs(n - rate) > 0.0001) onRate(+n.toFixed(2));
+    setEditing(false);
+  };
+  const onKeys = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') commit();
+    if (e.key === 'Escape') setEditing(false);
+  };
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>$</span>
+        <input
+          autoFocus type="number" step="0.05" min="0" value={val}
+          onChange={(e) => setVal(e.target.value)} onKeyDown={onKeys}
+          className="num focus-ring"
+          style={{ width: 54, height: 22, borderRadius: 5, padding: '0 5px', textAlign: 'right', border: '1px solid var(--accent)', background: 'var(--bg-surface)', fontSize: 11, color: 'var(--text-primary)', fontFamily: 'inherit', outline: 'none' }}
+        />
+        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>/hr</span>
+        <button onClick={commit} className="focus-ring inline-flex items-center justify-center" title="Apply" style={{ width: 20, height: 20, borderRadius: 5, border: 0, cursor: 'pointer', background: 'var(--accent)', color: '#FFF' }}>
+          <WIcon name="check" size={10} strokeWidth={2.6} />
+        </button>
+        <button onClick={() => setEditing(false)} className="focus-ring inline-flex items-center justify-center" title="Cancel" style={{ width: 20, height: 20, borderRadius: 5, border: '1px solid var(--border-hairline)', cursor: 'pointer', background: 'transparent', color: 'var(--text-tertiary)' }}>
+          <WIcon name="close" size={10} />
+        </button>
+      </span>
+    );
+  }
+  if (!editable) {
+    return <span className="num" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>${rate.toFixed(2)}/hr</span>;
+  }
+  return (
+    <button onClick={begin} className="focus-ring" title="Edit rate" style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer', fontFamily: 'inherit' }}>
+      <span className="num" style={{ fontSize: 11.5, fontWeight: edited ? 600 : 400, color: edited ? 'var(--accent)' : 'var(--text-secondary)', borderBottom: '1px dashed var(--border-hairline-strong, var(--border-hairline))' }}>
+        ${rate.toFixed(2)}/hr
+      </span>
+    </button>
+  );
+}
+
+/** Reviewer-changed rate on a line (differs from the pre-edit original). */
+const rateEdited = (l: PanelLine): boolean =>
+  l.originalRate != null && l.rate != null && Math.abs(l.originalRate - l.rate) > 0.005;
+
+const ST_ADJUSTED_BADGE: React.CSSProperties = {
+  fontSize: 9, fontWeight: 600, letterSpacing: 0.4, textTransform: 'uppercase',
+  color: 'var(--accent)', padding: '1px 5px', borderRadius: 3, background: 'rgba(46,92,255,0.08)',
+};
+
+/** Rules drift note + one-click adopt, shared by the compact shift-card rows. */
+function StRulesDrift({ line, onApplyRules }: { line: PanelLine; onApplyRules: (id: string) => void }) {
+  if (!line.rulesChanged || line.rulesAmount == null) return null;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap" style={{ marginTop: 3, fontSize: 11.5, lineHeight: '16px', color: 'var(--text-secondary)' }}>
+      <WIcon name="refresh" size={12} color="#6366F1" />
+      <span>
+        Pay rules changed — now{' '}
+        <span className="num" style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{fmtUSD(line.rulesAmount, false)}</span>.
+      </span>
+      <button
+        type="button"
+        onClick={() => onApplyRules(line._id)}
+        className="focus-ring rounded cursor-pointer"
+        style={{ padding: '1px 7px', fontSize: 11, fontWeight: 600, color: '#4F46E5', background: 'rgba(99,102,241,0.1)' }}
+      >
+        Apply update
+      </button>
+    </div>
+  );
+}
+
+/** One stacked pay layer (Base rate, H&W, off-load…) — compact single line:
+ *  dot · name · hours @ inline-editable rate · amount. Replaces the old
+ *  hover-button + full editor row; the shift clock is edited on the card. */
+function StPayLayerRow({ line, dot, first, highlighted, onRate, onRevert, onApplyRules }: {
+  line: PanelLine;
+  dot: string;
+  first: boolean;
+  highlighted: boolean;
+  onRate: (v: number) => void;
+  onRevert: (id: string) => void;
+  onApplyRules: (id: string) => void;
+}) {
+  return (
+    <div
+      data-line-id={line._id}
+      className="group flex items-baseline gap-2.5"
+      style={{
+        padding: '7px 14px',
+        borderTop: first ? 'none' : '1px solid var(--border-hairline)',
+        background: highlighted ? 'rgba(245,158,11,0.10)' : undefined,
+        boxShadow: highlighted ? 'inset 2px 0 0 #F59E0B' : undefined,
+        transition: 'background var(--dur-med) var(--ease-out)',
+        scrollMarginTop: 12,
+      }}
+    >
+      <span style={{ width: 7, height: 7, borderRadius: 2, background: dot, flexShrink: 0, transform: 'translateY(-1px)' }} />
+      <div className="flex-1 min-w-0">
+        <span style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>{line.desc ?? line.label}</span>
+        {line.hours != null && line.rate != null ? (
+          <>
+            <span className="num" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginLeft: 8 }}>{line.hours.toFixed(2)} h @ </span>
+            <StInlineRate rate={line.rate} editable={!!line.editableLine} edited={rateEdited(line)} onRate={onRate} />
+          </>
+        ) : line.calc ? (
+          <span className="num" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginLeft: 8 }}>{line.calc}</span>
+        ) : null}
+        {line.edited && (
+          <>
+            <span className="uppercase" style={{ ...ST_ADJUSTED_BADGE, marginLeft: 8 }}>Adjusted</span>
+            <button
+              type="button"
+              onClick={() => onRevert(line._id)}
+              title="Restore the original system amount"
+              className="focus-ring opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ marginLeft: 6, fontSize: 10.5, color: 'var(--text-tertiary)', background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              Revert
+            </button>
+          </>
+        )}
+        <StRulesDrift line={line} onApplyRules={onApplyRules} />
+      </div>
+      <div className="text-right shrink-0">
+        <span className="num" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>{fmtUSD(line.amount)}</span>
+        {line.edited && line.originalTotalAmount != null && line.originalTotalAmount !== line.amount && (
+          <span className="num" style={{ fontSize: 10.5, color: 'var(--text-tertiary)', marginLeft: 6, textDecoration: 'line-through' }}>
+            {fmtUSD(line.originalTotalAmount)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Compact per-load rows inside the load-premium drawer (design: one line per
+ *  load — order # · in/sched · late · lane, hours + amount right). Extra rate
+ *  lines on the same load render as follow-on rows labeled by description. */
+function StLoadRows({ group, meta, highlightLineId, showRate, onRate, onRevert, onApplyRules, onAdjustLoad }: {
+  group: Extract<DayRenderGroup, { kind: 'load' }>;
+  meta?: { actualAt?: number; scheduledAt?: number; lane?: string };
+  highlightLineId: string | null;
+  /** Per-row inline rate — shown when the aggregate header can't carry one. */
+  showRate: boolean;
+  onRate: (line: PanelLine, v: number) => void;
+  onRevert: (id: string) => void;
+  onApplyRules: (id: string) => void;
+  onAdjustLoad?: (loadId: string, label: string) => void;
+}) {
+  const driftMin =
+    meta?.actualAt != null && meta?.scheduledAt != null
+      ? Math.round((meta.actualAt - meta.scheduledAt) / 60000)
+      : null;
+  const late = driftMin != null && driftMin > 45;
+  return (
+    <>
+      {group.lines.map((l, j) => (
+        <div
+          key={l._id}
+          data-line-id={l._id}
+          className="group flex items-baseline gap-2.5"
+          style={{
+            padding: '5px 0',
+            background: highlightLineId === l._id ? 'rgba(245,158,11,0.10)' : undefined,
+            transition: 'background var(--dur-med) var(--ease-out)',
+            scrollMarginTop: 12,
+          }}
+        >
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline gap-2 flex-wrap">
+              {j === 0 ? (
+                <span className="num tw-mono" style={{ fontSize: 11.5, fontWeight: 500, color: 'var(--text-primary)' }}>{group.label}</span>
+              ) : (
+                <span style={{ fontSize: 11.5, fontWeight: 500, color: 'var(--text-secondary)' }}>{l.desc ?? l.label}</span>
+              )}
+              {j === 0 && meta?.actualAt != null && (
+                <span className="inline-flex items-baseline gap-1" title={late ? `Checked in ${driftMin} min after the scheduled start` : 'Checked in on time'}>
+                  <span style={{ fontSize: 9.5, color: 'var(--text-tertiary)' }}>in</span>
+                  <span className="num" style={{ fontSize: 11, fontWeight: late ? 600 : 500, color: late ? '#A66800' : 'var(--text-secondary)' }}>{fmtTime(meta.actualAt)}</span>
+                  {meta.scheduledAt != null && (
+                    <>
+                      <span style={{ fontSize: 9.5, color: 'var(--text-tertiary)', marginLeft: 4 }}>sched</span>
+                      <span className="num" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{fmtTime(meta.scheduledAt)}</span>
+                    </>
+                  )}
+                </span>
+              )}
+              {j === 0 && late && (
+                <span className="uppercase" style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: 0.3, color: '#A66800' }}>late</span>
+              )}
+              {l.edited && <span className="uppercase" style={ST_ADJUSTED_BADGE}>Adjusted</span>}
+              {l.edited && (
+                <button
+                  type="button"
+                  onClick={() => onRevert(l._id)}
+                  title="Restore the original system amount"
+                  className="focus-ring opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{ fontSize: 10.5, color: 'var(--text-tertiary)', background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline' }}
+                >
+                  Revert
+                </button>
+              )}
+              {j === 0 && l.adjustableLoad && l.loadId && onAdjustLoad && (
+                <button
+                  type="button"
+                  onClick={() => onAdjustLoad(l.loadId!, l.label)}
+                  title="Add an adjustment tied to this load"
+                  className="focus-ring opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{ fontSize: 10.5, fontWeight: 500, color: 'var(--text-tertiary)', background: 'none', border: 0, padding: 0, cursor: 'pointer' }}
+                >
+                  + Adjust
+                </button>
+              )}
+            </div>
+            {j === 0 && meta?.lane && (
+              <div className="truncate" title={meta.lane} style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
+                {fmtLane(meta.lane)}
+              </div>
+            )}
+            <StRulesDrift line={l} onApplyRules={onApplyRules} />
+          </div>
+          {l.hours != null && (
+            <span className="num shrink-0" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{l.hours.toFixed(2)} h</span>
+          )}
+          {showRate && l.rate != null && (
+            <span className="shrink-0">
+              <StInlineRate rate={l.rate} editable={!!l.editableLine} edited={rateEdited(l)} onRate={(v) => onRate(l, v)} />
+            </span>
+          )}
+          <span className="num shrink-0" style={{ fontSize: 11.5, fontWeight: 500, color: 'var(--text-primary)', minWidth: 52, textAlign: 'right' }}>
+            {fmtUSD(l.amount)}
+          </span>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** Per-shift pay profile override control — 'auto' follows the driver's
  *  default assignment; a profile pins the shift to it. */
 interface ShiftProfileConfig {
@@ -1015,9 +1269,13 @@ interface ShiftCardHandlers {
   onRevert: (id: string) => void;
   onAdjustLoad: (loadId: string, label: string) => void;
   onApplyRules: (id: string) => void;
-  /** Shift-level clock correction — applied to EVERY full-shift layer, since
-   *  the backend recomputes one payItem per call and they share one clock. */
-  onEditClock: (lineIds: string[], patch: { overrideStartAt: number; overrideEndAt: number; breakMinutes: number }) => void;
+  /** Batched edits committed as ONE action with a single toast — the shift
+   *  clock fan-out and the aggregate load-premium rate edit. The backend
+   *  recomputes one payItem per call, so shared corrections must fan out. */
+  onBatchEdit: (
+    edits: Array<{ id: string; patch: { rate?: number; quantity?: number; overrideStartAt?: number; overrideEndAt?: number; breakMinutes?: number } }>,
+    successMessage: string,
+  ) => void;
 }
 
 function StShiftCard({
@@ -1065,27 +1323,35 @@ function StShiftCard({
   }, 0);
   const noPayLabels = card.loads.filter((ld) => ld.noPay).map((ld) => ld.label);
 
-  // Layer rows render without the shift-level context they'd duplicate.
-  // hideLoadsTable stays set so StLineRow shows neither the loads table nor
-  // the "no loads linked" empty note — both live on the card itself.
-  // isShift is dropped so the per-layer editor is RATE-ONLY: the clock edit
-  // is a single card-level action (one shift, one time correction).
-  const layerLine = (l: PanelLine): PanelLine => ({
-    ...l, label: l.desc ?? l.label, sub: undefined, loads: undefined,
-    hideLoadsTable: true, warning: undefined, isShift: false,
-  });
-  const layerRow = (l: PanelLine) => (
-    <StLineRow
+  // Aggregate load-premium rate: when every load line shares one rate, the
+  // "Load hours" header carries a single inline edit that fans out to all of
+  // them. Mixed rates (mid-period profile change) fall back to per-row edits.
+  const uniformLoadRate =
+    premiumRate != null && card.loadLines.every((l) => l.rate != null && Math.abs(l.rate - premiumRate) < 0.005)
+      ? premiumRate
+      : null;
+  const editableLoadLines = card.loadLines.filter((l) => l.editableLine);
+  const changeLoadRate = (v: number) => {
+    // Quantity pinned per line — without it the backend would re-derive hours.
+    handlers.onBatchEdit(
+      editableLoadLines.map((l) => ({ id: l._id, patch: { rate: v, quantity: l.hours } })),
+      `Load premium updated — ${editableLoadLines.length} load line${editableLoadLines.length === 1 ? '' : 's'} recalculated`,
+    );
+  };
+  // A rate-only layer edit pins the layer's CURRENT hours — without an
+  // explicit quantity the backend re-derives it from the full session span,
+  // which would silently inflate partial-hour layers (off-load bookends).
+  const changeLayerRate = (l: PanelLine, v: number) => handlers.onEdit(l._id, { rate: v, quantity: l.hours });
+
+  const LAYER_DOTS = ['#2E5CFF', '#6366F1', '#8B5CF6', '#0EA5E9'];
+  const layerRow = (l: PanelLine, i: number, dotOffset = 0) => (
+    <StPayLayerRow
       key={l._id}
-      line={layerLine(l)}
-      first
-      indent
+      line={l}
+      dot={LAYER_DOTS[(i + dotOffset) % LAYER_DOTS.length]}
+      first={i === 0}
       highlighted={highlightLineId === l._id}
-      onRemove={handlers.onRemove}
-      // A rate-only edit pins the layer's CURRENT hours — without an explicit
-      // quantity the backend re-derives it from the full session span, which
-      // would silently inflate partial-hour layers (off-load bookends).
-      onEdit={(id, patch) => handlers.onEdit(id, { ...patch, quantity: l.hours })}
+      onRate={(v) => changeLayerRate(l, v)}
       onRevert={handlers.onRevert}
       onApplyRules={handlers.onApplyRules}
     />
@@ -1114,37 +1380,46 @@ function StShiftCard({
               {crosses && chip('Crosses midnight', '#5148C0', 'rgba(99,102,241,0.12)', 'moon')}
               {card.warning && chip('Needs review', '#A66800', 'rgba(245,158,11,0.14)', 'warn-tri')}
             </div>
-            <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 5 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{fmtDayLabel(card.dayKey)}</span>
-              {card.clockStart != null && (
-                <span className="num" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtTime(card.clockStart)}</span>
-              )}
-              <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>→</span>
-              {endDayLabel && <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{endDayLabel}</span>}
-              {card.clockEnd != null && (
-                <span className="num" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtTime(card.clockEnd)}</span>
-              )}
-              {canEditClock && !editingClock && (
-                <button
-                  type="button"
-                  onClick={() => setEditingClock(true)}
-                  title="Correct clock time or break for the whole shift — every shift-hour pay line recalculates"
-                  className="focus-ring inline-flex items-center gap-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                  style={{ height: 20, padding: '0 7px', border: '1px solid var(--border-hairline)', background: 'transparent', cursor: 'pointer', fontSize: 10.5, fontWeight: 500, color: 'var(--text-tertiary)' }}
-                >
-                  <WIcon name="edit" size={10} />
-                  Edit time
-                </button>
-              )}
-            </div>
-            {editingClock && canEditClock && (
+            {editingClock && canEditClock ? (
+              // The clock text row swaps for the editor in place — one shift,
+              // one time correction, applied to every full-shift pay layer.
               <StShiftClockEditor
                 clockStart={card.clockStart!}
                 clockEnd={card.clockEnd!}
                 breakMinutes={card.breakMinutes}
-                onCommit={(patch) => { handlers.onEditClock(clockEditIds, patch); setEditingClock(false); }}
+                onCommit={(patch) => {
+                  handlers.onBatchEdit(
+                    clockEditIds.map((id) => ({ id, patch })),
+                    `Shift time updated — ${clockEditIds.length} pay line${clockEditIds.length === 1 ? '' : 's'} recalculated`,
+                  );
+                  setEditingClock(false);
+                }}
                 onCancel={() => setEditingClock(false)}
               />
+            ) : (
+              <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 5 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{fmtDayLabel(card.dayKey)}</span>
+                {card.clockStart != null && (
+                  <span className="num" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtTime(card.clockStart)}</span>
+                )}
+                <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>→</span>
+                {endDayLabel && <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{endDayLabel}</span>}
+                {card.clockEnd != null && (
+                  <span className="num" style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{fmtTime(card.clockEnd)}</span>
+                )}
+                {canEditClock && (
+                  <button
+                    type="button"
+                    onClick={() => setEditingClock(true)}
+                    title="Correct clock-in / clock-out or break for the whole shift — every shift-hour pay line recalculates"
+                    className="focus-ring inline-flex items-center gap-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                    style={{ height: 20, padding: '0 7px', border: '1px solid var(--border-hairline)', background: 'transparent', cursor: 'pointer', fontSize: 10.5, fontWeight: 500, color: 'var(--text-tertiary)' }}
+                  >
+                    <WIcon name="edit" size={10} />
+                    Edit clock
+                  </button>
+                )}
+              </div>
             )}
             <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginTop: 4 }}>
               <span className="num">{card.hours.toFixed(2)} h paid</span>
@@ -1187,7 +1462,7 @@ function StShiftCard({
             Paid on all {card.hours.toFixed(2)} shift hours
           </div>
         </div>
-        {allHourLayers.map(layerRow)}
+        {allHourLayers.map((l, i) => layerRow(l, i))}
         {partialLayers.length > 0 && (
           <>
             <div style={{ padding: '8px 14px 0' }}>
@@ -1196,69 +1471,75 @@ function StShiftCard({
                 Partial-hour shift pay
               </div>
             </div>
-            {partialLayers.map(layerRow)}
+            {partialLayers.map((l, i) => layerRow(l, i, 1))}
           </>
         )}
 
         <div style={{ padding: '10px 14px 0' }}>
           <div style={SHIFT_GROUP_LABEL}>
             <StShiftDot color="#10B981" />
-            Load premium · only while on a load
+            Load premium · only while moving freight
           </div>
         </div>
         {card.loadLines.length > 0 ? (
           <>
-            <button
-              onClick={() => setShowLoads((s) => !s)}
-              className="focus-ring w-full flex items-baseline gap-3 text-left"
-              style={{ padding: '7px 14px 7px 28px', background: 'transparent', border: 0, cursor: 'pointer', fontFamily: 'inherit' }}
-            >
-              <span className="flex-1 min-w-0">
+            <div className="flex items-baseline gap-2.5" style={{ padding: '7px 14px' }}>
+              <span style={{ width: 7, height: 7, borderRadius: 2, background: '#10B981', flexShrink: 0, transform: 'translateY(-1px)' }} />
+              <div className="flex-1 min-w-0">
                 <span style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>Load hours</span>
                 <span className="num" style={{ fontSize: 11.5, color: 'var(--text-tertiary)', marginLeft: 8 }}>
                   {card.loadHours.toFixed(2)} h · {distinctLoads} load{distinctLoads === 1 ? '' : 's'}
-                  {premiumRate != null ? ` @ $${premiumRate.toFixed(2)}/hr` : ''}
+                  {uniformLoadRate != null ? ' @ ' : ''}
                 </span>
+                {uniformLoadRate != null && (
+                  <StInlineRate
+                    rate={uniformLoadRate}
+                    editable={editableLoadLines.length > 0}
+                    edited={card.loadLines.some(rateEdited)}
+                    onRate={changeLoadRate}
+                  />
+                )}
                 {lateCount > 0 && (
                   <span style={{ fontSize: 10.5, fontWeight: 600, color: '#A66800', marginLeft: 8 }}>
                     {lateCount} late check-in{lateCount === 1 ? '' : 's'}
                   </span>
                 )}
-                <span className="inline-flex items-center gap-1" style={{ fontSize: 11, fontWeight: 500, color: 'var(--accent)', marginLeft: 8 }}>
+                <button
+                  onClick={() => setShowLoads((s) => !s)}
+                  className="focus-ring inline-flex items-center gap-1"
+                  style={{ marginLeft: 8, padding: 0, fontSize: 11, fontWeight: 500, color: 'var(--accent)', background: 'transparent', border: 0, cursor: 'pointer', fontFamily: 'inherit' }}
+                >
                   <WIcon
                     name="chevron-down"
                     size={11}
                     style={{ transform: showLoads ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-fast) var(--ease-out)' }}
                   />
                   {showLoads ? 'Hide' : 'Show'}
-                </span>
-              </span>
+                </button>
+              </div>
               <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>
                 {fmtUSD(card.loadPay)}
               </span>
-            </button>
-            {showLoads &&
-              groupLoadLines(card.loadLines).map((g) =>
-                g.kind === 'load' ? (
-                  <React.Fragment key={g.key}>
-                    <StLoadHeader label={g.label} time={g.time} meta={loadMeta.get(g.label)} total={g.total} first={false} />
-                    {g.lines.map((l) => (
-                      <StLineRow
-                        key={l._id}
-                        line={{ ...l, label: l.desc ?? l.label, sub: undefined }}
-                        first
-                        indent
-                        highlighted={highlightLineId === l._id}
-                        onRemove={handlers.onRemove}
-                        onEdit={handlers.onEdit}
-                        onRevert={handlers.onRevert}
-                        onAdjustLoad={handlers.onAdjustLoad}
-                        onApplyRules={handlers.onApplyRules}
-                      />
-                    ))}
-                  </React.Fragment>
-                ) : null,
-              )}
+            </div>
+            {showLoads && (
+              <div style={{ margin: '1px 14px 6px 17px', borderLeft: '2px solid var(--border-hairline)', paddingLeft: 13 }}>
+                {groupLoadLines(card.loadLines).map((g) =>
+                  g.kind === 'load' ? (
+                    <StLoadRows
+                      key={g.key}
+                      group={g}
+                      meta={loadMeta.get(g.label)}
+                      highlightLineId={highlightLineId}
+                      showRate={uniformLoadRate == null}
+                      onRate={(l, v) => handlers.onEdit(l._id, { rate: v, quantity: l.hours })}
+                      onRevert={handlers.onRevert}
+                      onApplyRules={handlers.onApplyRules}
+                      onAdjustLoad={handlers.onAdjustLoad}
+                    />
+                  ) : null,
+                )}
+              </div>
+            )}
           </>
         ) : (
           <div className="flex items-center gap-2" style={{ padding: '8px 14px 8px 28px', fontSize: 11.5, color: 'var(--text-tertiary)' }}>
@@ -1607,6 +1888,7 @@ export function SettlementPanel({
         // shift cards would render no clock range at all.
         edited: p.edited,
         rate: p.rate,
+        originalRate: p.originalRate,
         basis: row.planBasis,
         breakMinutes: p.breakMinutes,
         clockStart: shiftStart,
@@ -1871,20 +2153,21 @@ export function SettlementPanel({
       setBusy(false);
     }
   };
-  // One shift-level clock correction fans out to every full-shift layer (Base
-  // rate, H&W, …): they all ride the same clock, but the backend recomputes a
-  // single payItem per call — editing just one layer would leave the others'
-  // hours stale.
-  const editShiftClock = async (
-    lineIds: string[],
-    patch: { overrideStartAt: number; overrideEndAt: number; breakMinutes: number },
+  // Fan-out edits committed as one action: the shift clock correction (every
+  // full-shift layer rides the same clock) and the aggregate load-premium rate
+  // (one rate across all of a shift's load lines). The backend recomputes a
+  // single payItem per call, so a shared correction must touch each line.
+  const editLinesBatch = async (
+    edits: Array<{ id: string; patch: { rate?: number; quantity?: number; overrideStartAt?: number; overrideEndAt?: number; breakMinutes?: number } }>,
+    successMessage: string,
   ) => {
+    if (edits.length === 0) return;
     setBusy(true);
     try {
-      for (const id of lineIds) await ledger.editLine(id, patch);
-      toast.success(lineIds.length > 1 ? `Shift time updated — ${lineIds.length} pay lines recalculated` : 'Shift time updated');
+      for (const e of edits) await ledger.editLine(e.id, e.patch);
+      toast.success(successMessage);
     } catch (err) {
-      toast.error("Couldn't update the shift time", { description: friendlyError(err) });
+      toast.error("Couldn't update the lines", { description: friendlyError(err) });
     } finally {
       setBusy(false);
     }
@@ -2264,7 +2547,7 @@ export function SettlementPanel({
                         onRevert: revertLine,
                         onAdjustLoad: adjustForLoad,
                         onApplyRules: applyRules,
-                        onEditClock: editShiftClock,
+                        onBatchEdit: editLinesBatch,
                       }}
                     />
                   ))}

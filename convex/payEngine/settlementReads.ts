@@ -243,6 +243,12 @@ async function payablesFromItems(
       loadOrderNumber = load?.orderNumber;
     }
 
+    // Reviewer-edit surface (mirrors the legacy detail shape): the corrected
+    // clock window, the pre-edit originals (drives the strikethrough and the
+    // rate-edited highlight), and the rules-drift flag from the session recalc.
+    const edit = it.reviewerEdit;
+    const origDollars = edit ? Number(edit.originalAmountCents) / 100 : undefined;
+    const engineDollars = edit?.engineAmountCents != null ? Number(edit.engineAmountCents) / 100 : undefined;
     payables.push({
       _id: it._id,
       loadId: it.sourceRef.loadId,
@@ -257,7 +263,15 @@ async function payablesFromItems(
       isLocked: it.isLocked,
       warningMessage: it.warning,
       createdAt: it.createdAt,
-      edited: it.reviewerEdit != null,
+      edited: edit != null,
+      breakMinutes: edit?.breakMinutes,
+      clockStart: edit?.overrideStartAt ?? (sessionId ? it.periodAnchorAt : undefined),
+      clockEnd: edit?.overrideEndAt ?? (sessionId ? (session?.endedAt ?? undefined) : undefined),
+      originalRate: edit ? Number(edit.originalRateMicroCents) / 100000 : undefined,
+      originalQuantity: edit?.originalQuantity,
+      originalTotalAmount: origDollars != null ? (category === 'DEDUCTION' ? -origDollars : origDollars) : undefined,
+      rulesChanged: engineDollars != null,
+      rulesAmount: engineDollars != null ? (category === 'DEDUCTION' ? -engineDollars : engineDollars) : undefined,
       // Work-time anchors: periodAnchorAt is the engine's work-start stamp
       // (shift start for session lines, work date for leg lines) — drives the
       // panel's day grouping and time display like legacy workStart did.
