@@ -2022,6 +2022,24 @@ export function SettlementPanel({
                   {row.payeeName}
                 </span>
                 <SettleChip chip={chipKeyForRow(row)} />
+                {isOpen && (
+                  <span
+                    className="inline-flex items-center gap-1 uppercase whitespace-nowrap"
+                    style={{
+                      fontSize: 10.5,
+                      fontWeight: 600,
+                      letterSpacing: 0.03,
+                      color: 'var(--text-tertiary)',
+                      background: 'var(--bg-surface-2)',
+                      border: '1px solid var(--border-hairline)',
+                      padding: '2px 8px',
+                      borderRadius: 999,
+                    }}
+                  >
+                    <WIcon name="calendar" size={11} />
+                    Accruing · ends {fmtShortDate(row.periodEnd)}
+                  </span>
+                )}
               </div>
               <div
                 className="flex items-center gap-1.5 whitespace-nowrap overflow-hidden"
@@ -2071,27 +2089,6 @@ export function SettlementPanel({
             a right rail that stays visible while the lines scroll. */}
         <div className="flex-1 flex min-h-0">
         <div ref={bodyRef} className="scroll-thin flex-1 overflow-auto min-w-0" style={{ padding: '18px 20px 24px' }}>
-          {isOpen && (
-            <div
-              className="flex items-center gap-2.5"
-              style={{
-                padding: '10px 14px',
-                marginBottom: 20,
-                background: 'var(--bg-surface-2)',
-                border: '1px solid var(--border-hairline)',
-                borderRadius: 10,
-                fontSize: 12.5,
-                color: 'var(--text-secondary)',
-              }}
-            >
-              <WIcon name="calendar" size={15} color="var(--text-tertiary)" />
-              <span>
-                Period in progress — lines keep accruing until{' '}
-                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{fmtShortDate(row.periodEnd)}</span>.
-              </span>
-            </div>
-          )}
-
           <StSectionLabel>{earnLabel}</StSectionLabel>
           {useShiftCards && (
             <div
