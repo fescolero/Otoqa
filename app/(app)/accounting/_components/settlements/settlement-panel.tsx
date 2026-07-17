@@ -812,6 +812,8 @@ function buildShiftCards(earn: PanelLine[]): { cards: ShiftCardData[]; leftovers
 
   const cards = order.map((k) => {
     const c = bySession.get(k)!;
+    // Dominant layer first — base wage above fringe reads naturally.
+    c.sessionLines.sort((a, b) => b.amount - a.amount);
     c.hours = c.sessionLines.reduce((m, l) => Math.max(m, l.hours ?? 0), 0);
     const perLoad = new Map<string, number>();
     for (const l of c.loadLines) {
