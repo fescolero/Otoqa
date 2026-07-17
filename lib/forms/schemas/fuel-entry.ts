@@ -327,11 +327,11 @@ export function buildFuelEntrySchema(
             // span:2 — six payment options at their natural pill
             // widths wrap awkwardly into a one-track (232px) cell.
             // Two tracks (~478px) lays all six on a single row.
+            // Optional with no default: an untouched field records no
+            // payment method rather than silently stamping FUEL_CARD.
             id: ids.paymentMethod,
             label: 'Payment method',
             kind: 'segmented',
-            required: 'tier1',
-            default: 'FUEL_CARD',
             span: 2,
             options: PAYMENT_METHODS,
           },
