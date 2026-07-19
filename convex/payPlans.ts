@@ -299,6 +299,51 @@ export function calculateNextPeriods(
   return periods;
 }
 
+// Doc-shaped return fields for queries that spread a payPlans document
+// (list / get). ONE source of truth — when a field is added to the payPlans
+// schema, add it here once and every doc-spreading validator picks it up;
+// hand-duplicated copies drifted from the schema before (currency /
+// amendmentPolicy were saved by mutations but rejected by the validators).
+const PAY_PLAN_DOC_FIELDS = {
+  workosOrgId: v.string(),
+  name: v.string(),
+  description: v.optional(v.string()),
+  frequency: v.union(
+    v.literal('WEEKLY'),
+    v.literal('BIWEEKLY'),
+    v.literal('SEMIMONTHLY'),
+    v.literal('MONTHLY')
+  ),
+  periodStartDayOfWeek: v.optional(v.union(
+    v.literal('SUNDAY'), v.literal('MONDAY'), v.literal('TUESDAY'),
+    v.literal('WEDNESDAY'), v.literal('THURSDAY'), v.literal('FRIDAY'),
+    v.literal('SATURDAY')
+  )),
+  periodStartDayOfMonth: v.optional(v.number()),
+  biweeklyAnchor: v.optional(v.string()),
+  timezone: v.optional(v.string()),
+  cutoffTime: v.string(),
+  paymentLagDays: v.number(),
+  payableTrigger: v.union(
+    v.literal('DELIVERY_DATE'),
+    v.literal('COMPLETION_DATE'),
+    v.literal('APPROVAL_DATE')
+  ),
+  autoCarryover: v.boolean(),
+  includeStandaloneAdjustments: v.boolean(),
+  currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+  amendmentPolicy: v.optional(v.union(
+    v.literal('REJECT_LATE_CHANGES'),
+    v.literal('CASCADE_TO_NEXT'),
+    v.literal('REOPEN_ALLOWED'),
+  )),
+  isActive: v.boolean(),
+  isDefault: v.optional(v.boolean()),
+  createdAt: v.float64(),
+  createdBy: v.string(),
+  updatedAt: v.optional(v.float64()),
+};
+
 // ============================================
 // QUERIES
 // ============================================
@@ -315,37 +360,7 @@ export const list = query({
     v.object({
       _id: v.id('payPlans'),
       _creationTime: v.number(),
-      workosOrgId: v.string(),
-      name: v.string(),
-      description: v.optional(v.string()),
-      frequency: v.union(
-        v.literal('WEEKLY'),
-        v.literal('BIWEEKLY'),
-        v.literal('SEMIMONTHLY'),
-        v.literal('MONTHLY')
-      ),
-      periodStartDayOfWeek: v.optional(v.union(
-        v.literal('SUNDAY'), v.literal('MONDAY'), v.literal('TUESDAY'),
-        v.literal('WEDNESDAY'), v.literal('THURSDAY'), v.literal('FRIDAY'),
-        v.literal('SATURDAY')
-      )),
-      periodStartDayOfMonth: v.optional(v.number()),
-      biweeklyAnchor: v.optional(v.string()),
-      timezone: v.optional(v.string()),
-      cutoffTime: v.string(),
-      paymentLagDays: v.number(),
-      payableTrigger: v.union(
-        v.literal('DELIVERY_DATE'),
-        v.literal('COMPLETION_DATE'),
-        v.literal('APPROVAL_DATE')
-      ),
-      autoCarryover: v.boolean(),
-      includeStandaloneAdjustments: v.boolean(),
-      isActive: v.boolean(),
-      isDefault: v.optional(v.boolean()),
-      createdAt: v.float64(),
-      createdBy: v.string(),
-      updatedAt: v.optional(v.float64()),
+      ...PAY_PLAN_DOC_FIELDS,
       driverCount: v.number(),
     })
   ),
@@ -408,37 +423,7 @@ export const get = query({
     v.object({
       _id: v.id('payPlans'),
       _creationTime: v.number(),
-      workosOrgId: v.string(),
-      name: v.string(),
-      description: v.optional(v.string()),
-      frequency: v.union(
-        v.literal('WEEKLY'),
-        v.literal('BIWEEKLY'),
-        v.literal('SEMIMONTHLY'),
-        v.literal('MONTHLY')
-      ),
-      periodStartDayOfWeek: v.optional(v.union(
-        v.literal('SUNDAY'), v.literal('MONDAY'), v.literal('TUESDAY'),
-        v.literal('WEDNESDAY'), v.literal('THURSDAY'), v.literal('FRIDAY'),
-        v.literal('SATURDAY')
-      )),
-      periodStartDayOfMonth: v.optional(v.number()),
-      biweeklyAnchor: v.optional(v.string()),
-      timezone: v.optional(v.string()),
-      cutoffTime: v.string(),
-      paymentLagDays: v.number(),
-      payableTrigger: v.union(
-        v.literal('DELIVERY_DATE'),
-        v.literal('COMPLETION_DATE'),
-        v.literal('APPROVAL_DATE')
-      ),
-      autoCarryover: v.boolean(),
-      includeStandaloneAdjustments: v.boolean(),
-      isActive: v.boolean(),
-      isDefault: v.optional(v.boolean()),
-      createdAt: v.float64(),
-      createdBy: v.string(),
-      updatedAt: v.optional(v.float64()),
+      ...PAY_PLAN_DOC_FIELDS,
       resolvedTimezone: v.string(),
       currentPeriod: v.object({
         periodStart: v.float64(),
