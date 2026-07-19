@@ -3,6 +3,7 @@ import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { calculateCurrentPeriod, cutoffInstant } from './payPlans';
 
 /**
  * Driver Settlement Engine
@@ -62,148 +63,12 @@ function calculateMileageVariance(
 // ============================================
 // PAY PLAN PERIOD CALCULATIONS
 // ============================================
-
-/**
- * Get the day of week as a number (0 = Sunday, 1 = Monday, etc.)
- */
-function getDayOfWeekNumber(
-  day: 'SUNDAY' | 'MONDAY' | 'TUESDAY' | 'WEDNESDAY' | 'THURSDAY' | 'FRIDAY' | 'SATURDAY'
-): number {
-  const dayMap: Record<string, number> = {
-    SUNDAY: 0, MONDAY: 1, TUESDAY: 2, WEDNESDAY: 3,
-    THURSDAY: 4, FRIDAY: 5, SATURDAY: 6,
-  };
-  return dayMap[day];
-}
-
-/**
- * Calculate weekly period start date
- */
-function calculateWeeklyPeriodStart(referenceDate: Date, startDayOfWeek: number): Date {
-  const date = new Date(referenceDate);
-  const currentDay = date.getDay();
-  const daysToSubtract = (currentDay - startDayOfWeek + 7) % 7;
-  date.setDate(date.getDate() - daysToSubtract);
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-/**
- * Calculate biweekly period start date (aligned to fixed anchor)
- */
-function calculateBiweeklyPeriodStart(referenceDate: Date, startDayOfWeek: number): Date {
-  const anchorDate = new Date('2024-01-01T00:00:00');
-  const anchorDayOfWeek = anchorDate.getDay();
-  const daysToAdjust = (startDayOfWeek - anchorDayOfWeek + 7) % 7;
-  anchorDate.setDate(anchorDate.getDate() + daysToAdjust);
-  
-  const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-  const weeksSinceAnchor = Math.floor((referenceDate.getTime() - anchorDate.getTime()) / msPerWeek);
-  const biweeklyPeriods = Math.floor(weeksSinceAnchor / 2);
-  
-  const periodStart = new Date(anchorDate);
-  periodStart.setDate(periodStart.getDate() + biweeklyPeriods * 14);
-  periodStart.setHours(0, 0, 0, 0);
-  return periodStart;
-}
-
-/**
- * Calculate semimonthly period start (1st-15th or 16th-end)
- */
-function calculateSemimonthlyPeriodStart(referenceDate: Date): Date {
-  const date = new Date(referenceDate);
-  const dayOfMonth = date.getDate();
-  date.setDate(dayOfMonth <= 15 ? 1 : 16);
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-/**
- * Calculate monthly period start
- */
-function calculateMonthlyPeriodStart(referenceDate: Date, startDayOfMonth: number): Date {
-  const date = new Date(referenceDate);
-  const currentDay = date.getDate();
-  const lastDayOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  const effectiveStartDay = Math.min(startDayOfMonth, lastDayOfMonth);
-  
-  if (currentDay < effectiveStartDay) {
-    date.setMonth(date.getMonth() - 1);
-  }
-  
-  const lastDayOfTargetMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  date.setDate(Math.min(startDayOfMonth, lastDayOfTargetMonth));
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-/**
- * Calculate period end based on frequency and start
- */
-function calculatePeriodEnd(
-  periodStart: Date,
-  frequency: 'WEEKLY' | 'BIWEEKLY' | 'SEMIMONTHLY' | 'MONTHLY'
-): Date {
-  const endDate = new Date(periodStart);
-
-  switch (frequency) {
-    case 'WEEKLY':
-      endDate.setDate(endDate.getDate() + 7);
-      break;
-    case 'BIWEEKLY':
-      endDate.setDate(endDate.getDate() + 14);
-      break;
-    case 'SEMIMONTHLY':
-      if (periodStart.getDate() === 1) {
-        endDate.setDate(16);
-      } else {
-        endDate.setMonth(endDate.getMonth() + 1);
-        endDate.setDate(1);
-      }
-      break;
-    case 'MONTHLY':
-      endDate.setMonth(endDate.getMonth() + 1);
-      break;
-  }
-
-  // End at 23:59:59.999 of the day before
-  endDate.setTime(endDate.getTime() - 1);
-  return endDate;
-}
-
-/**
- * Calculate the period dates from a Pay Plan
- */
-function calculatePlanPeriod(
-  plan: Doc<'payPlans'>,
-  referenceDate: Date = new Date()
-): { periodStart: Date; periodEnd: Date } {
-  let periodStart: Date;
-
-  switch (plan.frequency) {
-    case 'WEEKLY':
-      periodStart = calculateWeeklyPeriodStart(
-        referenceDate,
-        getDayOfWeekNumber(plan.periodStartDayOfWeek!)
-      );
-      break;
-    case 'BIWEEKLY':
-      periodStart = calculateBiweeklyPeriodStart(
-        referenceDate,
-        getDayOfWeekNumber(plan.periodStartDayOfWeek!)
-      );
-      break;
-    case 'SEMIMONTHLY':
-      periodStart = calculateSemimonthlyPeriodStart(referenceDate);
-      break;
-    case 'MONTHLY':
-      periodStart = calculateMonthlyPeriodStart(referenceDate, plan.periodStartDayOfMonth || 1);
-      break;
-  }
-
-  const periodEnd = calculatePeriodEnd(periodStart, plan.frequency);
-  return { periodStart, periodEnd };
-}
+//
+// Period boundaries come from the ONE engine in payPlans.ts
+// (calculateCurrentPeriod): bi-weekly anchor aware, org/plan-timezone aware.
+// A forked copy used to live here — it predated the anchor and computed
+// boundaries at server-UTC midnights, so generated settlements disagreed
+// with the Pay plans modal's preview. Never fork this math again.
 
 /**
  * Get the payable's period-inclusion timestamp.
@@ -236,15 +101,9 @@ function isWithinCutoffWindow(
   cutoffTime: string,
   timezone: string
 ): boolean {
-  // Parse cutoff time (e.g., "17:00")
-  const [hours, minutes] = cutoffTime.split(':').map(Number);
-  
-  // Create the cutoff datetime for the period end day
-  const cutoffDate = new Date(periodEnd);
-  cutoffDate.setHours(hours, minutes, 0, 0);
-  
-  // If timestamp is before the cutoff on the period end day, it's included
-  return timestamp <= cutoffDate.getTime();
+  // Cutoff = HH:MM on the period's last day IN THE ORG TIMEZONE — work
+  // stamped before it belongs to the closing period.
+  return timestamp <= cutoffInstant(periodEnd, cutoffTime, timezone);
 }
 
 // ============================================
@@ -1955,10 +1814,8 @@ export const generateStatementFromPlan = mutation({
     const now = Date.now();
     const refDate = args.referenceDate ? new Date(args.referenceDate) : new Date();
 
-    // Calculate period dates from the plan
-    const { periodStart, periodEnd } = calculatePlanPeriod(plan, refDate);
-
-    // Resolve timezone
+    // Resolve timezone FIRST — period boundaries land at midnight in the
+    // org/plan zone (same engine the Pay plans modal previews with).
     let timezone = plan.timezone;
     if (!timezone) {
       const org = await ctx.db
@@ -1967,6 +1824,8 @@ export const generateStatementFromPlan = mutation({
         .first();
       timezone = org?.defaultTimezone || 'America/New_York';
     }
+
+    const { periodStart, periodEnd } = calculateCurrentPeriod(plan, refDate, timezone);
 
     // Generate statement number
     const statementNumber = await generateStatementNumber(ctx, args.workosOrgId);
@@ -2177,8 +2036,7 @@ export const generateOrRefreshForDriver = internalMutation({
 
     const now = Date.now();
     const refDate = args.referenceDate ? new Date(args.referenceDate) : new Date();
-    const { periodStart, periodEnd } = calculatePlanPeriod(plan, refDate);
-
+    // Timezone first — the shared engine anchors boundaries in the org zone.
     let timezone = plan.timezone;
     if (!timezone) {
       const org = await ctx.db
@@ -2187,6 +2045,8 @@ export const generateOrRefreshForDriver = internalMutation({
         .first();
       timezone = org?.defaultTimezone || 'America/New_York';
     }
+
+    const { periodStart, periodEnd } = calculateCurrentPeriod(plan, refDate, timezone);
 
     const existing = await ctx.db
       .query('driverSettlements')
@@ -2297,7 +2157,7 @@ export const generateOrRefreshForDriver = internalMutation({
         // No statement covers that period — backfill one for the period the
         // work was done in. (Historical backfill skips the cutoff test: the
         // cutoff only disambiguates the live period boundary.)
-        const p = calculatePlanPeriod(plan, new Date(triggerTimestamp));
+        const p = calculateCurrentPeriod(plan, new Date(triggerTimestamp), timezone!);
         const key = p.periodStart.getTime();
         const group = backfill.get(key) ?? { periodStart: p.periodStart, periodEnd: p.periodEnd, ids: [] };
         group.ids.push(payable._id);

@@ -272,6 +272,18 @@ export function calculateCurrentPeriod(
 }
 
 /**
+ * Instant of `cutoffTime` (HH:MM) on the period's LAST day, in `timezone`.
+ * Used by settlement generation to decide whether boundary-hour work still
+ * belongs to the closing period.
+ */
+export function cutoffInstant(periodEndMs: number, cutoffTime: string, timezone: string): number {
+  const wall = wallFromInstant(periodEndMs, timezone); // last day, 23:59:59.999 wall clock
+  const [h, m] = cutoffTime.split(':').map(Number);
+  wall.setUTCHours(h || 0, m || 0, 0, 0);
+  return instantFromWall(wall, timezone);
+}
+
+/**
  * Calculate next N periods for preview.
  */
 export function calculateNextPeriods(
