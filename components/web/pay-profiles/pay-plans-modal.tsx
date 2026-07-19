@@ -301,7 +301,10 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
         style={{
           width: 720,
           maxWidth: '100%',
-          maxHeight: '86vh',
+          // Fixed height (not content-sized): the dialog must not resize as
+          // the plan list and draft stream in — loading skeletons below fill
+          // the same box, so nothing snaps when data lands.
+          height: 'min(660px, 86vh)',
           background: 'var(--bg-surface)',
           border: '1px solid var(--border-hairline)',
           borderRadius: 10,
@@ -355,9 +358,8 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
               }}
             >
               <div style={{ flex: 1 }}>
-                {plans === undefined && (
-                  <div style={{ padding: '14px', fontSize: 12, color: 'var(--text-tertiary)' }}>Loading…</div>
-                )}
+                {plans === undefined &&
+                  Array.from({ length: 3 }).map((_, i) => <RailRowSkeleton key={i} />)}
                 {active.map((p) => (
                   <RailRow key={p._id} plan={p} active={selId === p._id} onSelect={() => setSelId(p._id)} />
                 ))}
@@ -391,11 +393,15 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
             {/* ── editor ────────────────────────────────────────────────── */}
             <div className="scroll-thin" style={{ overflow: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 16 }}>
               {!draft ? (
-                <div style={{ fontSize: 12.5, color: 'var(--text-tertiary)', padding: 8 }}>
-                  {plans !== undefined && plans.length === 0
-                    ? 'No pay plans yet — use "New pay plan" to create the first one.'
-                    : 'Select a plan to edit.'}
-                </div>
+                plans !== undefined && plans.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: 'var(--text-tertiary)', padding: 8 }}>
+                    No pay plans yet — use &quot;New pay plan&quot; to create the first one.
+                  </div>
+                ) : (
+                  // Loading (or selection settling) — a full-size stand-in for
+                  // the editor so the pane doesn't grow when the draft lands.
+                  <EditorSkeleton />
+                )
               ) : (
                 <>
                   <PPField label="Plan name">
@@ -757,6 +763,43 @@ function RailRow({ plan, active, archived, onSelect }: {
         {FREQ_LABEL[plan.frequency]} · {archived ? 'archived' : `${plan.driverCount} driver${plan.driverCount === 1 ? '' : 's'}`}
       </div>
     </button>
+  );
+}
+
+/** Rail row-shaped shimmer — same footprint as RailRow so the list doesn't
+ *  jump when real plans replace it. */
+function RailRowSkeleton() {
+  return (
+    <div style={{ padding: '11px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
+      <div className="animate-pulse rounded" style={{ width: '62%', height: 12, background: 'var(--border-hairline)', marginBottom: 6 }} />
+      <div className="animate-pulse rounded" style={{ width: '44%', height: 9, background: 'var(--border-hairline)', opacity: 0.7 }} />
+    </div>
+  );
+}
+
+/** Editor-shaped shimmer — mirrors the loaded layout (name, description,
+ *  frequency, anchor, pay-lag, preview box) so the dialog height and pane
+ *  contents don't snap when the draft loads. */
+function EditorSkeleton() {
+  const label = (w: number) => (
+    <div className="animate-pulse rounded" style={{ width: w, height: 10, background: 'var(--border-hairline)' }} />
+  );
+  const field = (labelW: number, inputW: number | string, inputH = 28) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+      {label(labelW)}
+      <div className="animate-pulse rounded-[7px]" style={{ width: inputW, height: inputH, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
+    </div>
+  );
+  return (
+    <>
+      {field(64, '100%')}
+      {field(78, '100%')}
+      {field(66, 320, 30)}
+      {field(96, 296, 28)}
+      {field(70, 220, 28)}
+      <div className="animate-pulse rounded-[9px]" style={{ height: 148, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
+      <div className="animate-pulse rounded-[9px]" style={{ height: 38, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
+    </>
   );
 }
 
