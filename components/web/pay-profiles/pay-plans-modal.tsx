@@ -521,6 +521,14 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
                       <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-tertiary)' }}>
                         {previewReady ? 'Computing…' : 'Set the first period start date to preview.'}
                       </div>
+                    ) : preview.length === 0 ? (
+                      // The engine always returns 3 periods — an empty result
+                      // means the deployed backend is behind this UI (e.g.
+                      // `npx convex dev` not running / failed to push).
+                      <div style={{ padding: '10px 12px', fontSize: 12, color: '#A66800' }}>
+                        Couldn&apos;t compute the preview — the backend looks out of date. Make sure the Convex
+                        deploy is current, then reopen.
+                      </div>
                     ) : (
                       preview.map((pr, i) => (
                         <div
