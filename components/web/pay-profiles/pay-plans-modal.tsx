@@ -331,8 +331,10 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
           maxWidth: '100%',
           // Fixed height (not content-sized): the dialog must not resize as
           // the plan list and draft stream in — loading skeletons below fill
-          // the same box, so nothing snaps when data lands.
-          height: 'min(660px, 86vh)',
+          // the same box, so nothing snaps when data lands. Sized to the
+          // viewport (90vh) so tall screens get a taller modal, capped so it
+          // doesn't sprawl on very large displays.
+          height: 'min(880px, 90vh)',
           background: 'var(--bg-surface)',
           border: '1px solid var(--border-hairline)',
           borderRadius: 10,
