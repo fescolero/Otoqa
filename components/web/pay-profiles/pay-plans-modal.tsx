@@ -409,7 +409,7 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
               </div>
               <button
                 onClick={() => setSelId('new')}
-                className="focus-ring inline-flex items-center gap-2 w-full text-left"
+                className="focus-ring inline-flex items-center gap-2 w-full text-left shrink-0"
                 style={{
                   padding: '11px 14px', border: 0, borderTop: '1px solid var(--border-hairline)',
                   background: 'transparent', cursor: 'pointer', fontSize: 12, fontWeight: 500, color: 'var(--accent)',
@@ -530,7 +530,7 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
                   </PPField>
 
                   {/* live preview — engine-computed periods */}
-                  <div style={{ borderRadius: 9, border: '1px solid var(--border-hairline)', overflow: 'hidden' }}>
+                  <div className="shrink-0" style={{ borderRadius: 9, border: '1px solid var(--border-hairline)', overflow: 'hidden' }}>
                     <div
                       className="flex items-center gap-2"
                       style={{ padding: '8px 12px', background: 'var(--bg-surface-2)', borderBottom: '1px solid var(--border-hairline)' }}
@@ -582,7 +582,7 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
                   </div>
 
                   {/* Advanced — engine fields, tucked away to keep the layout compact */}
-                  <div style={{ borderRadius: 9, border: '1px solid var(--border-hairline)', overflow: 'hidden' }}>
+                  <div className="shrink-0" style={{ borderRadius: 9, border: '1px solid var(--border-hairline)', overflow: 'hidden' }}>
                     <button
                       onClick={() => setAdvOpen((o) => !o)}
                       className="focus-ring flex items-center gap-2 w-full text-left"
@@ -825,7 +825,7 @@ function EditorSkeleton() {
     <div className="animate-pulse rounded" style={{ width: w, height: 10, background: 'var(--border-hairline)' }} />
   );
   const field = (labelW: number, inputW: number | string, inputH = 28) => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, flexShrink: 0 }}>
       {label(labelW)}
       <div className="animate-pulse rounded-[7px]" style={{ width: inputW, height: inputH, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
     </div>
@@ -837,8 +837,8 @@ function EditorSkeleton() {
       {field(66, 320, 30)}
       {field(96, 296, 28)}
       {field(70, 220, 28)}
-      <div className="animate-pulse rounded-[9px]" style={{ height: 148, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
-      <div className="animate-pulse rounded-[9px]" style={{ height: 38, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
+      <div className="animate-pulse rounded-[9px] shrink-0" style={{ height: 148, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
+      <div className="animate-pulse rounded-[9px] shrink-0" style={{ height: 38, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)' }} />
     </>
   );
 }
@@ -862,7 +862,10 @@ function RailRowNewDraft({ name }: { name: string }) {
 
 function PPField({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    // flexShrink 0: the editor pane is a flex column — without this, fields
+    // COMPRESS to fit the pane instead of overflowing it, which collapses
+    // hints/boxes and leaves nothing to scroll.
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>
       <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{label}</div>
       {children}
       {hint && <div style={{ fontSize: 11, color: 'var(--text-tertiary)', lineHeight: '15px' }}>{hint}</div>}
@@ -873,7 +876,7 @@ function PPField({ label, hint, children }: { label: string; hint?: string; chil
 function InfoBanner({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="flex items-center gap-2"
+      className="flex items-center gap-2 shrink-0"
       style={{ padding: '9px 11px', borderRadius: 8, background: 'var(--bg-surface-2)', border: '1px solid var(--border-hairline)', fontSize: 12, color: 'var(--text-secondary)' }}
     >
       <WIcon name="info" size={13} color="var(--text-tertiary)" />
