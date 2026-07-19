@@ -71,12 +71,16 @@ const todayISO = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
-const fmtShort = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+// Period boundaries are computed at UTC midnights on the server (Convex runs
+// in UTC), so they're formatted in UTC too — otherwise a viewer west of
+// Greenwich sees every boundary a day early (pick July 16, read "Jul 15").
+const fmtShort = (t: number) =>
+  new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 const fmtFull = (t: number) =>
-  new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 const sameMonth = (a: number, b: number) => {
   const da = new Date(a), db = new Date(b);
-  return da.getMonth() === db.getMonth() && da.getFullYear() === db.getFullYear();
+  return da.getUTCMonth() === db.getUTCMonth() && da.getUTCFullYear() === db.getUTCFullYear();
 };
 
 // ── draft state ─────────────────────────────────────────────────────────────
