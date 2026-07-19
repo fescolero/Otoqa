@@ -90,7 +90,8 @@ export const NAV: NavSection[] = [
     icon: 'settings',
     items: [
       { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles' },
-      { id: 'pay-plans',    label: 'Pay plans',       href: '/org-settings/pay-plans' },
+      // Opens the PayPlansModal over the Pay profiles page (no standalone page).
+      { id: 'pay-plans',    label: 'Pay plans',       href: '/org-settings/pay-profiles?pay-plans=open' },
       { id: 'integrations', label: 'Integrations',    href: '/settings/integrations' },
       { id: 'billing',      label: 'Billing & usage', href: '/settings/billing' },
     ],
