@@ -208,6 +208,33 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Chromium picks a wheel target by walking up from the cursor and SKIPS
+  // scroll containers with nothing to scroll — overscroll-behavior never
+  // engages on those, so a wheel over the rail's empty space, the header, or
+  // the footer fell through and scrolled the page BEHIND the modal. Verified
+  // in a standalone repro. Fix: intercept wheel on the overlay and let it
+  // through only when an inner pane between the cursor and the overlay can
+  // actually consume it (that pane's own overscroll-contain handles its
+  // scroll end); kill everything else. Non-passive on purpose.
+  const overlayRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    const el = overlayRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      let node = e.target as HTMLElement | null;
+      while (node && node !== el) {
+        if (node.scrollHeight > node.clientHeight + 1) {
+          const st = getComputedStyle(node);
+          if (st.overflowY === 'auto' || st.overflowY === 'scroll') return;
+        }
+        node = node.parentElement;
+      }
+      e.preventDefault();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
   const patch = (changes: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...changes } : d));
 
   // Live preview — backend-computed so the page shows the engine's real math.
@@ -292,12 +319,9 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div
+      ref={overlayRef}
       onMouseDown={onClose}
       className="fixed inset-0 flex items-center justify-center"
-      // The overlay is itself a scroll container with overscroll containment,
-      // so wheel events over ANY part of the modal (header, footer, rail,
-      // panes at their scroll end) stop here instead of chaining through and
-      // scrolling the page behind the modal.
       style={{ zIndex: 80, background: 'rgba(15,22,36,0.32)', padding: 24, overflowY: 'auto', overscrollBehavior: 'contain' }}
     >
       <div
