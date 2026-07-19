@@ -61,6 +61,9 @@ export default function PayProfilesListPage() {
         subtitle="Pre-defined compensation templates. Assign one as a driver or carrier's default. Changes here apply to every payee using the profile."
         actions={
           <>
+            <Link href="/org-settings/pay-plans">
+              <WBtn size="sm" leading="calendar" title="Settlement cadences — how often each driver gets paid">Pay plans</WBtn>
+            </Link>
             <WBtn size="sm" leading="import" disabled title="Import is coming soon">Import</WBtn>
             <Link href="/org-settings/pay-profiles/new">
               <WBtn size="sm" accent leading="plus">New profile</WBtn>

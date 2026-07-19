@@ -75,35 +75,57 @@ function calculateWeeklyPeriodStart(
   return date;
 }
 
+/** Parse a "YYYY-MM-DD" anchor into a local-midnight Date, or null. */
+function parseAnchorDate(anchor: string | undefined): Date | null {
+  if (!anchor) return null;
+  const m = anchor.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 /**
- * Calculate the most recent period start for BIWEEKLY frequency
- * Uses a reference anchor date to maintain consistent 2-week intervals
+ * Calculate the most recent period start for BIWEEKLY frequency.
+ *
+ * When the plan carries an explicit anchor ("first period starts" date) every
+ * 14-day cycle counts forward from it — this is what lets an org control
+ * which week is the "on" week. Reference dates before the anchor resolve to
+ * the anchor itself (the first period). Without an anchor, falls back to the
+ * legacy fixed anchor (Jan 1, 2024, adjusted to the configured weekday) so
+ * pre-existing plans keep their historical period boundaries.
  */
 function calculateBiweeklyPeriodStart(
   referenceDate: Date,
   startDayOfWeek: number,
-  timezone: string
+  timezone: string,
+  biweeklyAnchor?: string
 ): Date {
-  // Use a fixed anchor date (Jan 1, 2024 was a Monday)
-  const anchorDate = new Date('2024-01-01T00:00:00');
-  const anchorDayOfWeek = anchorDate.getDay();
+  const explicit = parseAnchorDate(biweeklyAnchor);
+  const anchorDate = explicit ?? new Date('2024-01-01T00:00:00');
+  if (!explicit) {
+    // Legacy path: adjust the fixed anchor (a Monday) to the configured day.
+    const daysToAdjust = (startDayOfWeek - anchorDate.getDay() + 7) % 7;
+    anchorDate.setDate(anchorDate.getDate() + daysToAdjust);
+  }
 
-  // Adjust anchor to the configured start day
-  const daysToAdjust = (startDayOfWeek - anchorDayOfWeek + 7) % 7;
-  anchorDate.setDate(anchorDate.getDate() + daysToAdjust);
-
-  // Calculate weeks since anchor
-  const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-  const weeksSinceAnchor = Math.floor((referenceDate.getTime() - anchorDate.getTime()) / msPerWeek);
-
-  // Round down to nearest even number of weeks (bi-weekly)
-  const biweeklyPeriods = Math.floor(weeksSinceAnchor / 2);
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysSinceAnchor = Math.floor((referenceDate.getTime() - anchorDate.getTime()) / msPerDay);
+  // Clamp: before the anchor, the first period IS the anchor period.
+  const cycles = Math.max(0, Math.floor(daysSinceAnchor / 14));
 
   const periodStart = new Date(anchorDate);
-  periodStart.setDate(periodStart.getDate() + biweeklyPeriods * 14);
+  periodStart.setDate(periodStart.getDate() + cycles * 14);
   periodStart.setHours(0, 0, 0, 0);
 
   return periodStart;
+}
+
+/** Weekday name from an anchor date — lets BIWEEKLY derive its start day. */
+const DOW_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'] as const;
+function dayOfWeekFromAnchor(anchor: string): (typeof DOW_NAMES)[number] | null {
+  const d = parseAnchorDate(anchor);
+  return d ? DOW_NAMES[d.getDay()] : null;
 }
 
 /**
@@ -221,13 +243,14 @@ export function calculateCurrentPeriod(
       );
       break;
     case 'BIWEEKLY':
-      if (!plan.periodStartDayOfWeek) {
-        throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek');
+      if (!plan.periodStartDayOfWeek && !plan.biweeklyAnchor) {
+        throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek or biweeklyAnchor');
       }
       periodStart = calculateBiweeklyPeriodStart(
         referenceDate,
-        getDayOfWeekNumber(plan.periodStartDayOfWeek),
-        plan.timezone || 'America/New_York'
+        plan.periodStartDayOfWeek ? getDayOfWeekNumber(plan.periodStartDayOfWeek) : 0,
+        plan.timezone || 'America/New_York',
+        plan.biweeklyAnchor
       );
       break;
     case 'SEMIMONTHLY':
@@ -308,6 +331,7 @@ export const list = query({
         v.literal('SATURDAY')
       )),
       periodStartDayOfMonth: v.optional(v.number()),
+      biweeklyAnchor: v.optional(v.string()),
       timezone: v.optional(v.string()),
       cutoffTime: v.string(),
       paymentLagDays: v.number(),
@@ -319,6 +343,7 @@ export const list = query({
       autoCarryover: v.boolean(),
       includeStandaloneAdjustments: v.boolean(),
       isActive: v.boolean(),
+      isDefault: v.optional(v.boolean()),
       createdAt: v.float64(),
       createdBy: v.string(),
       updatedAt: v.optional(v.float64()),
@@ -399,6 +424,7 @@ export const get = query({
         v.literal('SATURDAY')
       )),
       periodStartDayOfMonth: v.optional(v.number()),
+      biweeklyAnchor: v.optional(v.string()),
       timezone: v.optional(v.string()),
       cutoffTime: v.string(),
       paymentLagDays: v.number(),
@@ -410,6 +436,7 @@ export const get = query({
       autoCarryover: v.boolean(),
       includeStandaloneAdjustments: v.boolean(),
       isActive: v.boolean(),
+      isDefault: v.optional(v.boolean()),
       createdAt: v.float64(),
       createdBy: v.string(),
       updatedAt: v.optional(v.float64()),
@@ -649,6 +676,7 @@ export const previewPeriods = query({
       v.literal('SATURDAY')
     )),
     periodStartDayOfMonth: v.optional(v.number()),
+    biweeklyAnchor: v.optional(v.string()),
     paymentLagDays: v.number(),
   },
   returns: v.array(
@@ -681,13 +709,14 @@ export const previewPeriods = query({
           );
           break;
         case 'BIWEEKLY':
-          if (!args.periodStartDayOfWeek) {
-            throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek');
+          if (!args.periodStartDayOfWeek && !args.biweeklyAnchor) {
+            throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek or biweeklyAnchor');
           }
           periodStart = calculateBiweeklyPeriodStart(
             referenceDate,
-            getDayOfWeekNumber(args.periodStartDayOfWeek),
-            'America/New_York'
+            args.periodStartDayOfWeek ? getDayOfWeekNumber(args.periodStartDayOfWeek) : 0,
+            'America/New_York',
+            args.biweeklyAnchor
           );
           break;
         case 'SEMIMONTHLY':
@@ -758,14 +787,32 @@ export const create = mutation({
     ),
     autoCarryover: v.boolean(),
     includeStandaloneAdjustments: v.boolean(),
+    biweeklyAnchor: v.optional(v.string()),
+    currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+    amendmentPolicy: v.optional(v.union(
+      v.literal('REJECT_LATE_CHANGES'),
+      v.literal('CASCADE_TO_NEXT'),
+      v.literal('REOPEN_ALLOWED'),
+    )),
+    isDefault: v.optional(v.boolean()),
     userId: v.string(),
   },
   returns: v.id('payPlans'),
   handler: async (ctx, args) => {
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
+    // BIWEEKLY can derive its weekday from the anchor date; the anchor is the
+    // authoritative control for which week is the "on" week.
+    let periodStartDayOfWeek = args.periodStartDayOfWeek;
+    if (args.frequency === 'BIWEEKLY' && !periodStartDayOfWeek && args.biweeklyAnchor) {
+      periodStartDayOfWeek = dayOfWeekFromAnchor(args.biweeklyAnchor) ?? undefined;
+    }
+    if (args.biweeklyAnchor && !parseAnchorDate(args.biweeklyAnchor)) {
+      throw new Error('biweeklyAnchor must be a YYYY-MM-DD date');
+    }
+
     // Validate frequency-specific fields
-    if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !args.periodStartDayOfWeek) {
+    if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !periodStartDayOfWeek) {
       throw new Error('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
     }
 
@@ -784,20 +831,35 @@ export const create = mutation({
 
     const now = Date.now();
 
+    // Single default per org: making this plan the default unsets any other.
+    if (args.isDefault) {
+      const siblings = await ctx.db
+        .query('payPlans')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+        .collect();
+      for (const s of siblings) {
+        if (s.isDefault) await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+      }
+    }
+
     const planId = await ctx.db.insert('payPlans', {
       workosOrgId: args.workosOrgId,
       name: args.name,
       description: args.description,
       frequency: args.frequency,
-      periodStartDayOfWeek: args.periodStartDayOfWeek,
+      periodStartDayOfWeek,
       periodStartDayOfMonth: args.periodStartDayOfMonth,
+      biweeklyAnchor: args.biweeklyAnchor,
       timezone: args.timezone,
       cutoffTime: args.cutoffTime,
       paymentLagDays: args.paymentLagDays,
       payableTrigger: args.payableTrigger,
       autoCarryover: args.autoCarryover,
       includeStandaloneAdjustments: args.includeStandaloneAdjustments,
+      currency: args.currency,
+      amendmentPolicy: args.amendmentPolicy,
       isActive: true,
+      isDefault: args.isDefault,
       createdAt: now,
       createdBy: userId,
     });
@@ -849,6 +911,14 @@ export const update = mutation({
     )),
     autoCarryover: v.optional(v.boolean()),
     includeStandaloneAdjustments: v.optional(v.boolean()),
+    biweeklyAnchor: v.optional(v.string()),
+    currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+    amendmentPolicy: v.optional(v.union(
+      v.literal('REJECT_LATE_CHANGES'),
+      v.literal('CASCADE_TO_NEXT'),
+      v.literal('REOPEN_ALLOWED'),
+    )),
+    isDefault: v.optional(v.boolean()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -858,8 +928,9 @@ export const update = mutation({
     if (!plan) throw new Error('Pay plan not found');
     if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
+    const now = Date.now();
     const updates: Partial<Doc<'payPlans'>> = {
-      updatedAt: Date.now(),
+      updatedAt: now,
     };
 
     if (args.name !== undefined) updates.name = args.name;
@@ -867,17 +938,35 @@ export const update = mutation({
     if (args.frequency !== undefined) updates.frequency = args.frequency;
     if (args.periodStartDayOfWeek !== undefined) updates.periodStartDayOfWeek = args.periodStartDayOfWeek;
     if (args.periodStartDayOfMonth !== undefined) updates.periodStartDayOfMonth = args.periodStartDayOfMonth;
+    if (args.biweeklyAnchor !== undefined) updates.biweeklyAnchor = args.biweeklyAnchor;
     if (args.timezone !== undefined) updates.timezone = args.timezone;
     if (args.cutoffTime !== undefined) updates.cutoffTime = args.cutoffTime;
     if (args.paymentLagDays !== undefined) updates.paymentLagDays = args.paymentLagDays;
     if (args.payableTrigger !== undefined) updates.payableTrigger = args.payableTrigger;
     if (args.autoCarryover !== undefined) updates.autoCarryover = args.autoCarryover;
     if (args.includeStandaloneAdjustments !== undefined) updates.includeStandaloneAdjustments = args.includeStandaloneAdjustments;
+    if (args.currency !== undefined) updates.currency = args.currency;
+    if (args.amendmentPolicy !== undefined) updates.amendmentPolicy = args.amendmentPolicy;
+    if (args.isDefault !== undefined) updates.isDefault = args.isDefault;
+
+    if (args.biweeklyAnchor && !parseAnchorDate(args.biweeklyAnchor)) {
+      throw new Error('biweeklyAnchor must be a YYYY-MM-DD date');
+    }
 
     // Validate frequency-specific fields with the final values
     const finalFrequency = args.frequency ?? plan.frequency;
-    const finalDayOfWeek = args.periodStartDayOfWeek ?? plan.periodStartDayOfWeek;
     const finalDayOfMonth = args.periodStartDayOfMonth ?? plan.periodStartDayOfMonth;
+    const finalAnchor = args.biweeklyAnchor ?? plan.biweeklyAnchor;
+    let finalDayOfWeek = args.periodStartDayOfWeek ?? plan.periodStartDayOfWeek;
+
+    // BIWEEKLY keeps its weekday in lockstep with the anchor date.
+    if (finalFrequency === 'BIWEEKLY' && finalAnchor) {
+      const derived = dayOfWeekFromAnchor(finalAnchor);
+      if (derived) {
+        finalDayOfWeek = derived;
+        updates.periodStartDayOfWeek = derived;
+      }
+    }
 
     if ((finalFrequency === 'WEEKLY' || finalFrequency === 'BIWEEKLY') && !finalDayOfWeek) {
       throw new Error('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
@@ -885,6 +974,19 @@ export const update = mutation({
 
     if (finalFrequency === 'MONTHLY' && !finalDayOfMonth) {
       throw new Error('MONTHLY frequency requires periodStartDayOfMonth');
+    }
+
+    // Single default per org: promoting this plan demotes any other default.
+    if (args.isDefault === true && !plan.isDefault) {
+      const siblings = await ctx.db
+        .query('payPlans')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', plan.workosOrgId))
+        .collect();
+      for (const s of siblings) {
+        if (s._id !== plan._id && s.isDefault) {
+          await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+        }
+      }
     }
 
     await ctx.db.patch(args.planId, updates);
@@ -924,6 +1026,10 @@ export const archive = mutation({
     const plan = await ctx.db.get(args.planId);
     if (!plan) throw new Error('Pay plan not found');
     if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+
+    if (plan.isDefault) {
+      throw new Error('Cannot archive the default pay plan. Set another plan as default first.');
+    }
 
     // Check if any drivers are using this plan
     const driversUsingPlan = await ctx.db

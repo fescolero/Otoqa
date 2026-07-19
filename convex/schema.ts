@@ -1901,6 +1901,10 @@ export default defineSchema({
     ),
     periodStartDayOfMonth: v.optional(v.number()), // For MONTHLY: 1-28 (avoid 29-31 edge cases)
     // SEMIMONTHLY is always 1st and 16th (industry standard, no config needed)
+    // For BIWEEKLY: the date the FIRST period starts ("YYYY-MM-DD"). Every
+    // 14-day cycle counts forward from here — this is what controls which
+    // week is the "on" week. Absent = legacy fixed anchor (Jan 1, 2024).
+    biweeklyAnchor: v.optional(v.string()),
 
     // Timezone (optional - inherits from organization.defaultTimezone if not set)
     timezone: v.optional(v.string()), // IANA timezone: "America/New_York" (overrides org default)
@@ -1930,6 +1934,9 @@ export default defineSchema({
 
     // === Metadata ===
     isActive: v.boolean(),
+    // Org default — new drivers inherit it; at most one per org (enforced in
+    // mutations); can't be archived while default.
+    isDefault: v.optional(v.boolean()),
     createdAt: v.float64(),
     createdBy: v.string(),
     updatedAt: v.optional(v.float64()),
