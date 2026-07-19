@@ -59,239 +59,238 @@ function getDayOfWeekNumber(
   return dayMap[day];
 }
 
-/**
- * Calculate the most recent period start for WEEKLY frequency
- */
-function calculateWeeklyPeriodStart(
-  referenceDate: Date,
-  startDayOfWeek: number,
-  timezone: string
-): Date {
-  const date = new Date(referenceDate);
-  const currentDay = date.getDay();
-  const daysToSubtract = (currentDay - startDayOfWeek + 7) % 7;
-  date.setDate(date.getDate() - daysToSubtract);
-  date.setHours(0, 0, 0, 0);
-  return date;
+// ── timezone-aware calendar math ────────────────────────────────────────────
+//
+// Period boundaries are "midnight on day X in the plan's timezone" (plan
+// override > org default > America/New_York) — NOT server-UTC midnights,
+// which read a day off for anyone west of Greenwich. All calendar arithmetic
+// happens in WALL-CLOCK space: a "wall" Date carries the tz-local calendar
+// values in its UTC fields, so getUTCDay/setUTCDate do calendar math free of
+// the server's own timezone. Conversions happen only at the edges:
+// instant → wall ("what day is it there?") and wall midnight → instant
+// ("when is midnight there?").
+
+const dtfCache = new Map<string, Intl.DateTimeFormat>();
+function tzFormatter(timeZone: string): Intl.DateTimeFormat {
+  let f = dtfCache.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    dtfCache.set(timeZone, f);
+  }
+  return f;
 }
 
-/** Parse a "YYYY-MM-DD" anchor into a local-midnight Date, or null. */
+/** Wall-clock components of an instant in `timeZone`, as a UTC-field Date. */
+function wallFromInstant(ms: number, timeZone: string): Date {
+  try {
+    const parts: Record<string, string> = {};
+    for (const p of tzFormatter(timeZone).formatToParts(new Date(ms))) {
+      if (p.type !== 'literal') parts[p.type] = p.value;
+    }
+    return new Date(Date.UTC(
+      +parts.year, +parts.month - 1, +parts.day,
+      +parts.hour === 24 ? 0 : +parts.hour, +parts.minute, +parts.second,
+    ));
+  } catch {
+    // Unknown/unsupported zone — fall back to UTC wall clock.
+    return new Date(ms);
+  }
+}
+
+/** Instant (UTC ms) of the wall-clock time in `wall`'s UTC fields,
+ *  interpreted in `timeZone`. Second pass corrects across DST edges. */
+function instantFromWall(wall: Date, timeZone: string): number {
+  const wallMs = wall.getTime();
+  let guess = wallMs;
+  for (let i = 0; i < 2; i++) {
+    const offset = wallFromInstant(guess, timeZone).getTime() - guess;
+    guess = wallMs - offset;
+  }
+  return guess;
+}
+
+/** Parse a "YYYY-MM-DD" anchor into a wall-clock midnight, or null. */
 function parseAnchorDate(anchor: string | undefined): Date | null {
   if (!anchor) return null;
   const m = anchor.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
-  const d = new Date(+m[1], +m[2] - 1, +m[3]);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-/**
- * Calculate the most recent period start for BIWEEKLY frequency.
- *
- * When the plan carries an explicit anchor ("first period starts" date) every
- * 14-day cycle counts forward from it — this is what lets an org control
- * which week is the "on" week. Reference dates before the anchor resolve to
- * the anchor itself (the first period). Without an anchor, falls back to the
- * legacy fixed anchor (Jan 1, 2024, adjusted to the configured weekday) so
- * pre-existing plans keep their historical period boundaries.
- */
-function calculateBiweeklyPeriodStart(
-  referenceDate: Date,
-  startDayOfWeek: number,
-  timezone: string,
-  biweeklyAnchor?: string
-): Date {
-  const explicit = parseAnchorDate(biweeklyAnchor);
-  const anchorDate = explicit ?? new Date('2024-01-01T00:00:00');
-  if (!explicit) {
-    // Legacy path: adjust the fixed anchor (a Monday) to the configured day.
-    const daysToAdjust = (startDayOfWeek - anchorDate.getDay() + 7) % 7;
-    anchorDate.setDate(anchorDate.getDate() + daysToAdjust);
-  }
-
-  const msPerDay = 24 * 60 * 60 * 1000;
-  const daysSinceAnchor = Math.floor((referenceDate.getTime() - anchorDate.getTime()) / msPerDay);
-  // Clamp: before the anchor, the first period IS the anchor period.
-  const cycles = Math.max(0, Math.floor(daysSinceAnchor / 14));
-
-  const periodStart = new Date(anchorDate);
-  periodStart.setDate(periodStart.getDate() + cycles * 14);
-  periodStart.setHours(0, 0, 0, 0);
-
-  return periodStart;
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
 }
 
 /** Weekday name from an anchor date — lets BIWEEKLY derive its start day. */
 const DOW_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'] as const;
 function dayOfWeekFromAnchor(anchor: string): (typeof DOW_NAMES)[number] | null {
   const d = parseAnchorDate(anchor);
-  return d ? DOW_NAMES[d.getDay()] : null;
+  return d ? DOW_NAMES[d.getUTCDay()] : null;
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** Most recent WEEKLY period start (wall space). */
+function weeklyWallStart(wallRef: Date, startDayOfWeek: number): Date {
+  const d = new Date(wallRef);
+  const daysToSubtract = (d.getUTCDay() - startDayOfWeek + 7) % 7;
+  d.setUTCDate(d.getUTCDate() - daysToSubtract);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
 }
 
 /**
- * Calculate the period start for SEMIMONTHLY frequency
- * Fixed: 1st-15th and 16th-end of month
+ * Most recent BIWEEKLY period start (wall space).
+ *
+ * With an explicit anchor ("first period starts" date) every 14-day cycle
+ * counts forward from it — this is what lets an org control which week is
+ * the "on" week; references before the anchor resolve to the anchor itself.
+ * Without one, falls back to the legacy fixed anchor (Jan 1, 2024, adjusted
+ * to the configured weekday) so pre-existing plans keep their boundaries.
  */
-function calculateSemimonthlyPeriodStart(referenceDate: Date): Date {
-  const date = new Date(referenceDate);
-  const dayOfMonth = date.getDate();
-
-  if (dayOfMonth <= 15) {
-    // First half: 1st of current month
-    date.setDate(1);
+function biweeklyWallStart(wallRef: Date, startDayOfWeek: number, biweeklyAnchor?: string): Date {
+  const explicit = parseAnchorDate(biweeklyAnchor);
+  let anchor: Date;
+  if (explicit) {
+    anchor = explicit;
   } else {
-    // Second half: 16th of current month
-    date.setDate(16);
+    anchor = new Date(Date.UTC(2024, 0, 1)); // a Monday
+    const adj = (startDayOfWeek - anchor.getUTCDay() + 7) % 7;
+    anchor.setUTCDate(anchor.getUTCDate() + adj);
   }
-
-  date.setHours(0, 0, 0, 0);
-  return date;
+  const ref = new Date(wallRef);
+  ref.setUTCHours(0, 0, 0, 0);
+  const daysSince = Math.floor((ref.getTime() - anchor.getTime()) / MS_PER_DAY);
+  const cycles = Math.max(0, Math.floor(daysSince / 14));
+  const d = new Date(anchor);
+  d.setUTCDate(d.getUTCDate() + cycles * 14);
+  return d;
 }
 
-/**
- * Calculate the period start for MONTHLY frequency
- */
-function calculateMonthlyPeriodStart(
-  referenceDate: Date,
-  startDayOfMonth: number
-): Date {
-  const date = new Date(referenceDate);
-  const currentDay = date.getDate();
-
-  // Clamp to valid day (handle months with fewer days)
-  const lastDayOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  const effectiveStartDay = Math.min(startDayOfMonth, lastDayOfMonth);
-
-  if (currentDay < effectiveStartDay) {
-    // Go to previous month
-    date.setMonth(date.getMonth() - 1);
-  }
-
-  // Set to the start day
-  const lastDayOfTargetMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  date.setDate(Math.min(startDayOfMonth, lastDayOfTargetMonth));
-  date.setHours(0, 0, 0, 0);
-
-  return date;
+/** SEMIMONTHLY period start (wall space) — fixed 1st / 16th. */
+function semimonthlyWallStart(wallRef: Date): Date {
+  const d = new Date(wallRef);
+  d.setUTCDate(d.getUTCDate() <= 15 ? 1 : 16);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
 }
 
-/**
- * Calculate period end based on frequency and start
- */
-function calculatePeriodEnd(
-  periodStart: Date,
+/** MONTHLY period start (wall space), clamped to short months. */
+function monthlyWallStart(wallRef: Date, startDayOfMonth: number): Date {
+  const d = new Date(wallRef);
+  const lastDayOfMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  if (d.getUTCDate() < Math.min(startDayOfMonth, lastDayOfMonth)) {
+    d.setUTCDate(1); // avoid month-length rollover surprises
+    d.setUTCMonth(d.getUTCMonth() - 1);
+  }
+  const lastDayOfTargetMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(startDayOfMonth, lastDayOfTargetMonth));
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+/** EXCLUSIVE period end (= next period's start) in wall space. */
+function wallPeriodEndExclusive(
+  wallStart: Date,
   frequency: 'WEEKLY' | 'BIWEEKLY' | 'SEMIMONTHLY' | 'MONTHLY',
-  startDayOfMonth?: number
 ): Date {
-  const endDate = new Date(periodStart);
-
+  const d = new Date(wallStart);
   switch (frequency) {
     case 'WEEKLY':
-      endDate.setDate(endDate.getDate() + 7);
+      d.setUTCDate(d.getUTCDate() + 7);
       break;
     case 'BIWEEKLY':
-      endDate.setDate(endDate.getDate() + 14);
+      d.setUTCDate(d.getUTCDate() + 14);
       break;
     case 'SEMIMONTHLY':
-      if (periodStart.getDate() === 1) {
-        // First half ends on 15th
-        endDate.setDate(16);
+      if (wallStart.getUTCDate() === 1) {
+        d.setUTCDate(16);
       } else {
-        // Second half ends on 1st of next month
-        endDate.setMonth(endDate.getMonth() + 1);
-        endDate.setDate(1);
+        d.setUTCDate(1);
+        d.setUTCMonth(d.getUTCMonth() + 1);
       }
       break;
     case 'MONTHLY':
-      endDate.setMonth(endDate.getMonth() + 1);
+      d.setUTCMonth(d.getUTCMonth() + 1);
       break;
   }
-
-  // Subtract 1ms to get 23:59:59.999 of the previous day
-  endDate.setTime(endDate.getTime() - 1);
-  return endDate;
+  return d;
 }
 
 /**
- * Calculate the pay date based on period end and lag days
- */
-function calculatePayDate(periodEnd: Date, paymentLagDays: number): Date {
-  const payDate = new Date(periodEnd);
-  payDate.setDate(payDate.getDate() + paymentLagDays + 1); // +1 because period end is 23:59:59
-  payDate.setHours(0, 0, 0, 0);
-  return payDate;
-}
-
-/**
- * Calculate current period for a pay plan
+ * Calculate the current period for a pay plan. Boundaries land at midnight
+ * in `timezone` (defaults to the plan's own override, then America/New_York
+ * — callers with ctx should pass the org-resolved zone).
  */
 export function calculateCurrentPeriod(
   plan: Doc<'payPlans'>,
-  referenceDate: Date = new Date()
+  referenceDate: Date = new Date(),
+  timezone?: string,
 ): { periodStart: Date; periodEnd: Date; payDate: Date } {
-  let periodStart: Date;
+  const tz = timezone ?? plan.timezone ?? 'America/New_York';
+  const wallRef = wallFromInstant(referenceDate.getTime(), tz);
 
+  let wallStart: Date;
   switch (plan.frequency) {
     case 'WEEKLY':
       if (!plan.periodStartDayOfWeek) {
         throw new Error('WEEKLY frequency requires periodStartDayOfWeek');
       }
-      periodStart = calculateWeeklyPeriodStart(
-        referenceDate,
-        getDayOfWeekNumber(plan.periodStartDayOfWeek),
-        plan.timezone || 'America/New_York'
-      );
+      wallStart = weeklyWallStart(wallRef, getDayOfWeekNumber(plan.periodStartDayOfWeek));
       break;
     case 'BIWEEKLY':
       if (!plan.periodStartDayOfWeek && !plan.biweeklyAnchor) {
         throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek or biweeklyAnchor');
       }
-      periodStart = calculateBiweeklyPeriodStart(
-        referenceDate,
+      wallStart = biweeklyWallStart(
+        wallRef,
         plan.periodStartDayOfWeek ? getDayOfWeekNumber(plan.periodStartDayOfWeek) : 0,
-        plan.timezone || 'America/New_York',
-        plan.biweeklyAnchor
+        plan.biweeklyAnchor,
       );
       break;
     case 'SEMIMONTHLY':
-      periodStart = calculateSemimonthlyPeriodStart(referenceDate);
+      wallStart = semimonthlyWallStart(wallRef);
       break;
     case 'MONTHLY':
-      periodStart = calculateMonthlyPeriodStart(
-        referenceDate,
-        plan.periodStartDayOfMonth || 1
-      );
+      wallStart = monthlyWallStart(wallRef, plan.periodStartDayOfMonth || 1);
       break;
     default:
       throw new Error(`Unknown frequency: ${plan.frequency}`);
   }
 
-  const periodEnd = calculatePeriodEnd(periodStart, plan.frequency, plan.periodStartDayOfMonth);
-  const payDate = calculatePayDate(periodEnd, plan.paymentLagDays);
+  const wallEndExclusive = wallPeriodEndExclusive(wallStart, plan.frequency);
+  const wallPay = new Date(wallEndExclusive);
+  wallPay.setUTCDate(wallPay.getUTCDate() + plan.paymentLagDays);
 
-  return { periodStart, periodEnd, payDate };
+  return {
+    periodStart: new Date(instantFromWall(wallStart, tz)),
+    // 23:59:59.999 local on the period's last day.
+    periodEnd: new Date(instantFromWall(wallEndExclusive, tz) - 1),
+    payDate: new Date(instantFromWall(wallPay, tz)),
+  };
 }
 
 /**
- * Calculate next N periods for preview
+ * Calculate next N periods for preview.
  */
 export function calculateNextPeriods(
   plan: Doc<'payPlans'>,
-  count: number = 3
+  count: number = 3,
+  timezone?: string,
 ): Array<{ periodStart: Date; periodEnd: Date; payDate: Date; label: string }> {
+  const tz = timezone ?? plan.timezone ?? 'America/New_York';
   const periods: Array<{ periodStart: Date; periodEnd: Date; payDate: Date; label: string }> = [];
   let referenceDate = new Date();
 
   for (let i = 0; i < count; i++) {
-    const period = calculateCurrentPeriod(plan, referenceDate);
+    const period = calculateCurrentPeriod(plan, referenceDate, tz);
 
-    const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const formatDate = (d: Date) =>
+      d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tz });
     const label = `${formatDate(period.periodStart)} - ${formatDate(period.periodEnd)}`;
 
-    periods.push({
-      ...period,
-      label,
-    });
+    periods.push({ ...period, label });
 
     // Move reference to after this period for next iteration
     referenceDate = new Date(period.periodEnd.getTime() + 1);
@@ -465,8 +464,8 @@ export const get = query({
     if (plan.workosOrgId !== callerOrgId) return null;
 
     const resolvedTimezone = await resolveTimezone(ctx, plan);
-    const currentPeriod = calculateCurrentPeriod(plan);
-    const nextPeriods = calculateNextPeriods(plan, 3);
+    const currentPeriod = calculateCurrentPeriod(plan, new Date(), resolvedTimezone);
+    const nextPeriods = calculateNextPeriods(plan, 3, resolvedTimezone);
 
     return {
       ...plan,
@@ -522,7 +521,7 @@ export const getForDriver = query({
     const plan = await ctx.db.get(driver.payPlanId);
     if (!plan) return null;
 
-    const currentPeriod = calculateCurrentPeriod(plan);
+    const currentPeriod = calculateCurrentPeriod(plan, new Date(), await resolveTimezone(ctx, plan));
 
     return {
       _id: plan._id,
@@ -570,7 +569,7 @@ export const getCurrentPeriodForPlan = query({
     if (!plan || !plan.isActive) return null;
     if (plan.workosOrgId !== callerOrgId) return null;
 
-    const currentPeriod = calculateCurrentPeriod(plan);
+    const currentPeriod = calculateCurrentPeriod(plan, new Date(), await resolveTimezone(ctx, plan));
 
     // Calculate period number (periods since start of year)
     const yearStart = new Date(currentPeriod.periodStart.getFullYear(), 0, 1);
@@ -678,78 +677,55 @@ export const previewPeriods = query({
     periodStartDayOfMonth: v.optional(v.number()),
     biweeklyAnchor: v.optional(v.string()),
     paymentLagDays: v.number(),
+    // Plan-level timezone override being edited; org default when absent.
+    timezone: v.optional(v.string()),
   },
-  returns: v.array(
-    v.object({
-      periodStart: v.float64(),
-      periodEnd: v.float64(),
-      payDate: v.float64(),
-      label: v.string(),
-    })
-  ),
+  returns: v.object({
+    // The zone the boundaries were computed in — the client formats dates in
+    // this same zone so what the user picks is what they read back.
+    timezone: v.string(),
+    periods: v.array(
+      v.object({
+        periodStart: v.float64(),
+        periodEnd: v.float64(),
+        payDate: v.float64(),
+        label: v.string(),
+      })
+    ),
+  }),
   handler: async (ctx, args) => {
-    await requireCallerOrgId(ctx);
+    const callerOrgId = await requireCallerOrgId(ctx);
 
-    // Calculate periods directly without creating a full Doc object
-    const periods: Array<{ periodStart: Date; periodEnd: Date; payDate: Date; label: string }> = [];
-    let referenceDate = new Date();
-
-    for (let i = 0; i < 3; i++) {
-      let periodStart: Date;
-
-      switch (args.frequency) {
-        case 'WEEKLY':
-          if (!args.periodStartDayOfWeek) {
-            throw new Error('WEEKLY frequency requires periodStartDayOfWeek');
-          }
-          periodStart = calculateWeeklyPeriodStart(
-            referenceDate,
-            getDayOfWeekNumber(args.periodStartDayOfWeek),
-            'America/New_York'
-          );
-          break;
-        case 'BIWEEKLY':
-          if (!args.periodStartDayOfWeek && !args.biweeklyAnchor) {
-            throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek or biweeklyAnchor');
-          }
-          periodStart = calculateBiweeklyPeriodStart(
-            referenceDate,
-            args.periodStartDayOfWeek ? getDayOfWeekNumber(args.periodStartDayOfWeek) : 0,
-            'America/New_York',
-            args.biweeklyAnchor
-          );
-          break;
-        case 'SEMIMONTHLY':
-          periodStart = calculateSemimonthlyPeriodStart(referenceDate);
-          break;
-        case 'MONTHLY':
-          periodStart = calculateMonthlyPeriodStart(
-            referenceDate,
-            args.periodStartDayOfMonth || 1
-          );
-          break;
-        default:
-          throw new Error(`Unknown frequency: ${args.frequency}`);
-      }
-
-      const periodEnd = calculatePeriodEnd(periodStart, args.frequency, args.periodStartDayOfMonth);
-      const payDate = calculatePayDate(periodEnd, args.paymentLagDays);
-
-      const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      const label = `${formatDate(periodStart)} - ${formatDate(periodEnd)}`;
-
-      periods.push({ periodStart, periodEnd, payDate, label });
-
-      // Move reference to after this period for next iteration
-      referenceDate = new Date(periodEnd.getTime() + 1);
+    // Resolve like a saved plan would: override > org default > system default.
+    let timezone = args.timezone;
+    if (!timezone) {
+      const org = await ctx.db
+        .query('organizations')
+        .withIndex('by_organization', (q) => q.eq('workosOrgId', callerOrgId))
+        .first();
+      timezone = org?.defaultTimezone || 'America/New_York';
     }
 
-    return periods.map((p) => ({
-      periodStart: p.periodStart.getTime(),
-      periodEnd: p.periodEnd.getTime(),
-      payDate: p.payDate.getTime(),
-      label: p.label,
-    }));
+    // Draft plan shape — same math as saved plans, no doc required.
+    const draftPlan = {
+      frequency: args.frequency,
+      periodStartDayOfWeek: args.periodStartDayOfWeek,
+      periodStartDayOfMonth: args.periodStartDayOfMonth,
+      biweeklyAnchor: args.biweeklyAnchor,
+      paymentLagDays: args.paymentLagDays,
+      timezone,
+    } as Doc<'payPlans'>;
+
+    const periods = calculateNextPeriods(draftPlan, 3, timezone);
+    return {
+      timezone,
+      periods: periods.map((p) => ({
+        periodStart: p.periodStart.getTime(),
+        periodEnd: p.periodEnd.getTime(),
+        payDate: p.payDate.getTime(),
+        label: p.label,
+      })),
+    };
   },
 });
 

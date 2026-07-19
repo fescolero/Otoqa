@@ -71,17 +71,22 @@ const todayISO = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
-// Period boundaries are computed at UTC midnights on the server (Convex runs
-// in UTC), so they're formatted in UTC too — otherwise a viewer west of
-// Greenwich sees every boundary a day early (pick July 16, read "Jul 15").
-const fmtShort = (t: number) =>
-  new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-const fmtFull = (t: number) =>
-  new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-const sameMonth = (a: number, b: number) => {
-  const da = new Date(a), db = new Date(b);
-  return da.getUTCMonth() === db.getUTCMonth() && da.getUTCFullYear() === db.getUTCFullYear();
+// Period boundaries land at midnight in the ORG/PLAN timezone (the backend
+// returns the zone it computed in), so dates are formatted in that same zone
+// — what the user picks is what they read back, regardless of where they or
+// the server sit.
+const fmtShort = (t: number, tz?: string) =>
+  new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tz });
+const fmtFull = (t: number, tz?: string) =>
+  new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: tz });
+const sameMonth = (a: number, b: number, tz?: string) => {
+  const ym = (t: number) =>
+    new Date(t).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', timeZone: tz });
+  return ym(a) === ym(b);
 };
+/** Inclusive day count of a period (start 00:00 → end 23:59:59.999). */
+const periodDays = (start: number, endInclusive: number) =>
+  Math.round((endInclusive + 1 - start) / 86_400_000);
 
 // ── draft state ─────────────────────────────────────────────────────────────
 
@@ -241,13 +246,18 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
 
   const patch = (changes: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...changes } : d));
 
-  // Live preview — backend-computed so the page shows the engine's real math.
+  // Live preview — backend-computed so the page shows the engine's real math,
+  // in the plan's resolved timezone (returned alongside the periods).
   const previewReady =
     !!draft && (draft.frequency !== 'BIWEEKLY' || /^\d{4}-\d{2}-\d{2}$/.test(draft.biweeklyAnchor));
-  const preview = useQuery(
+  const previewData = useQuery(
     api.payPlans.previewPeriods,
-    draft && previewReady ? scheduleArgs(draft) : 'skip',
+    draft && previewReady
+      ? { ...scheduleArgs(draft), timezone: draft.timezone || undefined }
+      : 'skip',
   );
+  const preview = previewData?.periods;
+  const previewTz = previewData?.timezone;
 
   const save = async () => {
     if (!draft || !workosOrgId || !user) return;
@@ -567,9 +577,13 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
                           style={{ padding: '9px 12px', borderTop: i === 0 ? 'none' : '1px solid var(--border-hairline)' }}
                         >
                           <span className="num" style={{ fontSize: 12.5, color: 'var(--text-primary)', minWidth: 128 }}>
-                            {fmtShort(pr.periodStart)} – {fmtShort(pr.periodEnd)}
+                            {fmtShort(pr.periodStart, previewTz)} – {fmtShort(pr.periodEnd, previewTz)}
                           </span>
-                          {!sameMonth(pr.periodStart, pr.periodEnd) && (
+                          {/* Inclusive count — "Jul 15 – Jul 28" IS 14 days. */}
+                          <span className="num whitespace-nowrap" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                            · {periodDays(pr.periodStart, pr.periodEnd)} days
+                          </span>
+                          {!sameMonth(pr.periodStart, pr.periodEnd, previewTz) && (
                             <span
                               className="whitespace-nowrap"
                               style={{ fontSize: 10, fontWeight: 600, color: '#A66800', background: 'rgba(166,104,0,0.10)', padding: '1px 6px', borderRadius: 4 }}
@@ -580,7 +594,7 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
                           <span className="flex-1" />
                           <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>pays</span>
                           <span className="num" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>
-                            {fmtFull(pr.payDate)}
+                            {fmtFull(pr.payDate, previewTz)}
                           </span>
                         </div>
                       ))
