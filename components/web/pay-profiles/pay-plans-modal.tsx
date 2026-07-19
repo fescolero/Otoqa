@@ -294,7 +294,11 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
     <div
       onMouseDown={onClose}
       className="fixed inset-0 flex items-center justify-center"
-      style={{ zIndex: 80, background: 'rgba(15,22,36,0.32)', padding: 24 }}
+      // The overlay is itself a scroll container with overscroll containment,
+      // so wheel events over ANY part of the modal (header, footer, rail,
+      // panes at their scroll end) stop here instead of chaining through and
+      // scrolling the page behind the modal.
+      style={{ zIndex: 80, background: 'rgba(15,22,36,0.32)', padding: 24, overflowY: 'auto', overscrollBehavior: 'contain' }}
     >
       <div
         onMouseDown={(e) => e.stopPropagation()}
@@ -353,6 +357,7 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
                 borderRight: '1px solid var(--border-hairline)',
                 background: 'var(--bg-surface-2)',
                 overflow: 'auto',
+                overscrollBehavior: 'contain',
                 display: 'flex',
                 flexDirection: 'column',
               }}
@@ -391,7 +396,10 @@ export function PayPlansModal({ onClose }: { onClose: () => void }) {
             </div>
 
             {/* ── editor ────────────────────────────────────────────────── */}
-            <div className="scroll-thin" style={{ overflow: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div
+              className="scroll-thin"
+              style={{ overflow: 'auto', overscrollBehavior: 'contain', padding: 18, display: 'flex', flexDirection: 'column', gap: 16 }}
+            >
               {!draft ? (
                 plans !== undefined && plans.length === 0 ? (
                   <div style={{ fontSize: 12.5, color: 'var(--text-tertiary)', padding: 8 }}>
