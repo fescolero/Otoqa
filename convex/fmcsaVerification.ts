@@ -16,8 +16,9 @@
  *   2. FMCSA Open Data on data.transportation.gov (Socrata JSON API) — the
  *      official programmatic channel FMCSA points to while QCMobile is down.
  *      Company Census File (az4n-8mr2) answers existence / legal name /
- *      record status; the AuthHist dataset variants map docket numbers to
- *      the USDOT number for the MC cross-check. These are MCMIS extracts
+ *      record status; Motus AuthHist (dm5j-zc6c) maps docket numbers to the
+ *      USDOT number and carries per-docket operating-authority status for
+ *      the MC cross-check. These are MCMIS extracts
  *      refreshed on a weekly-to-monthly cadence — near-real-time, not live —
  *      so results carry `source: 'open-data'` and the UI labels them.
  *      Optional SOCRATA_APP_TOKEN env var lifts the shared rate limit.
@@ -41,11 +42,11 @@ import { assertCallerOwnsOrg } from './lib/auth';
 const QCMOBILE_BASE_URL = 'https://mobile.fmcsa.dot.gov/qc/services';
 const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
 const CENSUS_DATASET = 'az4n-8mr2'; // Company Census File
-// Authority-history variants (docket ↔ USDOT), tried in order. Their column
-// names differ per dataset (dm5j-zc6c rejects `dot_number`), so the lookup
-// uses full-text `$q` search plus client-side column matching instead of a
-// hardcoded filter column.
-const AUTHHIST_DATASETS = ['sn3k-dnx7', 'wahn-z3rq', 'dm5j-zc6c'];
+// Motus AuthHist — the live authority dataset (schema confirmed against the
+// portal): docket_number, usdot_number, op_auth_type, op_auth_status,
+// reason, status_change_date. The older AuthHist variants (sn3k-dnx7,
+// wahn-z3rq) no longer serve metadata.
+const AUTHHIST_DATASET = 'dm5j-zc6c';
 
 type UsdotStatus = 'verified' | 'not_found' | 'error';
 type McStatus = 'verified' | 'mismatch' | 'unchecked';
@@ -260,43 +261,15 @@ export function matchDocketRows(
 }
 
 /**
- * Keep only rows that belong to this USDOT number — any column whose name
- * mentions "dot" (but not "docket") and whose digits equal the wanted DOT.
- * Exported for tests. Needed because `$q` full-text search also returns
- * rows where the number merely appears in some other column.
+ * Does any authority row carry an active operating-authority status?
+ * Exported for tests. `op_auth_status` values are text ("Active" /
+ * "Inactive" style); "inactive" must not read as active.
  */
-export function filterDotRows(
-  rows: Array<Record<string, unknown>>,
-  dot: string,
-): Array<Record<string, unknown>> {
-  return rows.filter((row) =>
-    Object.entries(row).some(([key, value]) => {
-      const k = key.toLowerCase();
-      if (!k.includes('dot') || k.includes('docket')) return false;
-      return docketDigits(String(value ?? '')) === dot;
-    }),
-  );
-}
-
-/**
- * Fetch this carrier's authority rows from whichever AuthHist variant
- * responds with data. Returns null when no dataset yielded rows for the
- * DOT (either the carrier has no authority on file, or the datasets were
- * unreachable) — callers treat that as "unchecked", never "mismatch".
- */
-async function fetchAuthorityRows(
-  dot: string,
-): Promise<Array<Record<string, unknown>> | null> {
-  for (const dataset of AUTHHIST_DATASETS) {
-    try {
-      const rows = await socrataGet(dataset, { $q: dot, $limit: '5000' });
-      const relevant = filterDotRows(rows, dot);
-      if (relevant.length > 0) return relevant;
-    } catch {
-      // Dataset unavailable or renamed — try the next variant.
-    }
-  }
-  return null;
+export function authorityActiveFromRows(rows: Array<Record<string, unknown>>): boolean {
+  return rows.some((row) => {
+    const status = String(row.op_auth_status ?? '').trim();
+    return /active/i.test(status) && !/inactive/i.test(status);
+  });
 }
 
 async function checkWithOpenData(
@@ -316,13 +289,22 @@ async function checkWithOpenData(
     };
   }
 
+  // Authority rows for this carrier — precise server-side filter on the
+  // confirmed `usdot_number` column. A failed fetch leaves authRows null so
+  // the MC badge stays "unchecked" instead of claiming "not on file".
+  let authRows: Array<Record<string, unknown>> | null = null;
+  try {
+    authRows = await socrataGet(AUTHHIST_DATASET, { usdot_number: dot, $limit: '5000' });
+  } catch {
+    authRows = null;
+  }
+
   let mcStatus: McStatus = 'unchecked';
   const wantedDocket = mcNumber ? docketDigits(mcNumber) : '';
-  if (wantedDocket) {
-    // No authority rows found (or datasets unreachable) → stay unchecked;
-    // rows found but none matching the MC → mismatch.
-    const authRows = await fetchAuthorityRows(dot);
-    if (authRows) mcStatus = matchDocketRows(authRows, wantedDocket);
+  if (wantedDocket && authRows) {
+    // The filter is exact, so an empty row set genuinely means FMCSA has no
+    // authority on file for this DOT → the MC number is "not on file".
+    mcStatus = matchDocketRows(authRows, wantedDocket);
   }
 
   return {
@@ -330,9 +312,11 @@ async function checkWithOpenData(
     usdotStatus: 'verified',
     mcStatus,
     source: 'open-data',
-    // Census status is the registration record status — the closest
-    // open-data equivalent of QCMobile's allowedToOperate.
-    allowedToOperate: census.recordActive,
+    // Prefer the real per-docket operating-authority status; carriers with
+    // no authority rows (e.g. private carriers) fall back to the census
+    // registration record status.
+    allowedToOperate:
+      authRows && authRows.length > 0 ? authorityActiveFromRows(authRows) : census.recordActive,
     legalName: census.legalName,
     // Safety rating is not in the census dataset; storeResult leaves the
     // previously known rating untouched when this is absent.

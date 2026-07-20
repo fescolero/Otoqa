@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { filterDotRows, matchDocketRows, parseCensusRecord } from './fmcsaVerification';
+import {
+  authorityActiveFromRows,
+  matchDocketRows,
+  parseCensusRecord,
+} from './fmcsaVerification';
 
 // Both helpers are pure parsers over Socrata rows — no Convex runtime needed.
 
@@ -61,27 +65,18 @@ describe('matchDocketRows', () => {
   });
 });
 
-describe('filterDotRows', () => {
-  it('keeps rows whose dot-named column matches, across naming variants', () => {
+describe('authorityActiveFromRows', () => {
+  it('is active when any docket row has an active status', () => {
     const rows = [
-      { dot_number: '80321', docket_number: '123' },
-      { dot_no: 80321, docket_number: '456' },
-      { usdot: '80321', docket_number: '789' },
-      { dot_number: '99999', docket_number: '000' },
+      { docket_number: '111', op_auth_status: 'Inactive' },
+      { docket_number: '222', op_auth_status: 'ACTIVE' },
     ];
-    expect(filterDotRows(rows, '80321').map((r) => r.docket_number)).toEqual([
-      '123',
-      '456',
-      '789',
-    ]);
+    expect(authorityActiveFromRows(rows)).toBe(true);
   });
 
-  it('never matches on docket columns even when digits collide with the DOT', () => {
-    const rows = [{ docket_number: '80321' }];
-    expect(filterDotRows(rows, '80321')).toEqual([]);
-  });
-
-  it('returns empty for rows with no dot-like columns', () => {
-    expect(filterDotRows([{ legal_name: 'X' }], '80321')).toEqual([]);
+  it('never reads "Inactive" as active, and handles missing status', () => {
+    expect(authorityActiveFromRows([{ op_auth_status: 'INACTIVE' }])).toBe(false);
+    expect(authorityActiveFromRows([{ docket_number: '111' }])).toBe(false);
+    expect(authorityActiveFromRows([])).toBe(false);
   });
 });
