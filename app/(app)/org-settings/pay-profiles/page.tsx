@@ -12,7 +12,6 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';
@@ -33,22 +32,6 @@ export default function PayProfilesListPage() {
   const workosOrgId = useOrganizationId();
   const [filter, setFilter] = React.useState<FilterTab>('active');
   const [plansOpen, setPlansOpen] = React.useState(false);
-
-  // The sidebar's "Pay plans" entry (and the old /org-settings/pay-plans
-  // route) land here with ?pay-plans=open — the manager is a modal over this
-  // page, not its own destination. Keyed on searchParams so the sidebar entry
-  // also works while already on this page; the param is stripped afterward so
-  // refresh/back is clean.
-  const searchParams = useSearchParams();
-  React.useEffect(() => {
-    if (searchParams.get('pay-plans') === 'open') {
-      setPlansOpen(true);
-      const params = new URLSearchParams(searchParams.toString());
-      params.delete('pay-plans');
-      const qs = params.toString();
-      window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
-    }
-  }, [searchParams]);
 
   const data = useQuery(
     api.payProfiles.listForOrg,

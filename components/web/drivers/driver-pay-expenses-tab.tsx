@@ -17,7 +17,7 @@
  *
  * "Manage pay profiles" sheet (full-page only) lets the user pick a default
  * profile and add/remove additional profile assignments. Profile values
- * themselves are managed at /org-settings/pay-plans (settings-only edit).
+ * themselves are managed in the Pay plans modal on the Pay profiles page.
  *
  * TODO: Add an optional `condition` enum field to driverProfileAssignments
  * (route-local · route-otr · route-regional · team-trip · hazmat-trip ·
