@@ -482,6 +482,42 @@ const ADDRESS_FIELD_BY_SUFFIX: Record<string, keyof OrgAddress> = {
 // Rail: workspace-at-a-glance summary
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * Opaque IDs don't fit the rail and must not wrap — middle-truncate so both
+ * the prefix and the distinctive tail stay visible, and make the whole value
+ * click-to-copy (the full ID is what anyone actually wants from this row).
+ */
+function CopyableId({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  const shortened =
+    value.length > 20 ? `${value.slice(0, 12)}…${value.slice(-5)}` : value;
+  return (
+    <button
+      type="button"
+      title={`${value}\nClick to copy`}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1600);
+        } catch {
+          toast.error('Unable to copy — please copy manually.');
+        }
+      }}
+      className="focus-ring group inline-flex items-center gap-1.5 rounded -mx-1 px-1 py-0.5 hover:bg-[var(--bg-row-hover)] cursor-pointer min-w-0"
+    >
+      <span className="num text-[12px] whitespace-nowrap">{shortened}</span>
+      {copied ? (
+        <WIcon name="check" size={12} color="#0F8C5F" />
+      ) : (
+        <span className="inline-flex opacity-0 group-hover:opacity-100 transition-opacity">
+          <WIcon name="copy" size={12} color="var(--text-tertiary)" />
+        </span>
+      )}
+    </button>
+  );
+}
+
 function WorkspaceRail({
   org,
   workosOrgId,
@@ -523,14 +559,19 @@ function WorkspaceRail({
             },
             {
               label: 'Workspace ID',
-              value: (
-                <span className="num text-[12px] truncate" title={workosOrgId}>
-                  {workosOrgId}
-                </span>
-              ),
+              value: <CopyableId value={workosOrgId} />,
             },
             { label: 'Created', value: formatDate(org.createdAt) },
-            domain ? { label: 'Domain', value: domain } : null,
+            domain
+              ? {
+                  label: 'Domain',
+                  value: (
+                    <span className="truncate" title={domain}>
+                      {domain}
+                    </span>
+                  ),
+                }
+              : null,
           ]}
         />
       </DSCard>

@@ -120,7 +120,9 @@ export function DSProps({ items, className, labelWidth = 120 }: DSPropsProps) {
           </dt>
           <dd
             className={cn(
-              'py-2.5 m-0 text-[13px] text-foreground inline-flex items-center gap-2',
+              // min-w-0 lets flex children shrink so `truncate` on a value
+              // can actually engage instead of overflowing the card.
+              'py-2.5 m-0 text-[13px] text-foreground inline-flex items-center gap-2 min-w-0',
               i > 0 && 'border-t border-[var(--border-hairline)]',
             )}
           >
