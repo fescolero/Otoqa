@@ -24,6 +24,15 @@ crons.interval(
   {},
 );
 
+// ✅ Verify carrier authority nightly against FMCSA (Settings → General
+// badges). Off-peak, staggered per org inside the action.
+crons.cron(
+  'verify-carrier-authority',
+  '15 5 * * *',
+  internal.fmcsaVerification.verifyAllOrgs,
+  {},
+);
+
 // ✅ Recalculate platform usage metering daily (undercount correction)
 // Loads-written-per-cycle counts raised from source loads; the first run
 // doubles as the historical backfill. Powers Settings → Billing & usage.

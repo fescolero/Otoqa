@@ -115,7 +115,8 @@ type FrozenAmounts = {
 };
 
 /**
- * Helper: claim the next invoice number for an org — INV-YYYY-NNNN, one
+ * Helper: claim the next invoice number for an org — <PREFIX>YYYY-NNNN
+ * (default prefix "INV-", configurable per org on Settings → General), one
  * sequence per org per year. Runs inside the calling mutation's transaction,
  * so Convex serializability makes concurrent claims race-free.
  */
@@ -138,7 +139,14 @@ async function claimInvoiceNumber(
     seq = 1;
     await ctx.db.insert('invoiceCounters', { workosOrgId, year, nextSeq: 2, updatedAt: Date.now() });
   }
-  return `INV-${year}-${String(seq).padStart(4, '0')}`;
+
+  const org = await ctx.db
+    .query('organizations')
+    .withIndex('by_organization', (q) => q.eq('workosOrgId', workosOrgId))
+    .unique();
+  const prefix = org?.invoicePrefix ?? 'INV-';
+
+  return `${prefix}${year}-${String(seq).padStart(4, '0')}`;
 }
 
 /**

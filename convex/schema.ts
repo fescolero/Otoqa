@@ -94,12 +94,36 @@ export default defineSchema({
         }),
       ),
     ),
-    // Regional display preferences (org-wide defaults; consumed
-    // incrementally — see Settings → General).
+    // Regional display preferences (org-wide defaults; consumed via
+    // lib/org-format.ts, provided by the app shell).
     dateFormat: v.optional(v.string()), // e.g. "MM/DD/YYYY"
     distanceUnit: v.optional(v.string()), // "mi" | "km"
     weekStart: v.optional(v.string()), // "sunday" | "monday"
     numberFormat: v.optional(v.string()), // e.g. "1,234.56"
+    // Customer-invoice number prefix (convex/invoices.ts claimInvoiceNumber).
+    // Absent = default "INV-".
+    invoicePrefix: v.optional(v.string()),
+    // Latest FMCSA authority check result (convex/fmcsaVerification.ts).
+    // Nightly cron + on-demand from Settings → General.
+    authorityVerification: v.optional(
+      v.object({
+        checkedAt: v.number(),
+        usdotStatus: v.union(
+          v.literal('verified'),
+          v.literal('not_found'),
+          v.literal('error'),
+        ),
+        mcStatus: v.union(
+          v.literal('verified'),
+          v.literal('mismatch'),
+          v.literal('unchecked'),
+        ),
+        allowedToOperate: v.optional(v.boolean()),
+        legalName: v.optional(v.string()),
+        safetyRating: v.optional(v.string()),
+        error: v.optional(v.string()),
+      }),
+    ),
 
     // PAY ENGINE — default currency for new pay-engine entities (profiles,
     // settlements, payItems). Fallback when no more specific source applies.

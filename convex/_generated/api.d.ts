@@ -70,6 +70,7 @@ import type * as fourKitesPullSyncAction from "../fourKitesPullSyncAction.js";
 import type * as fourKitesScheduledSync from "../fourKitesScheduledSync.js";
 import type * as fourKitesSyncHelpers from "../fourKitesSyncHelpers.js";
 import type * as fourKitesTest from "../fourKitesTest.js";
+import type * as fmcsaVerification from "../fmcsaVerification.js";
 import type * as fuelEntries from "../fuelEntries.js";
 import type * as fuelReceiptImport from "../fuelReceiptImport.js";
 import type * as fuelReports from "../fuelReports.js";
@@ -257,6 +258,7 @@ declare const fullApi: ApiFromModules<{
   fourKitesScheduledSync: typeof fourKitesScheduledSync;
   fourKitesSyncHelpers: typeof fourKitesSyncHelpers;
   fourKitesTest: typeof fourKitesTest;
+  fmcsaVerification: typeof fmcsaVerification;
   fuelEntries: typeof fuelEntries;
   fuelReceiptImport: typeof fuelReceiptImport;
   fuelReports: typeof fuelReports;

@@ -55,6 +55,7 @@ import {
   type EditableSelectOption,
 } from '@/components/web';
 import { Switch } from '@/components/ui/switch';
+import { formatDate } from '@/lib/utils/format';
 
 type OrgSettings = NonNullable<FunctionReturnType<typeof api.settings.getOrgSettings>>;
 type OrgUpdates = FunctionArgs<typeof api.settings.updateOrgSettings>['updates'];
@@ -134,8 +135,6 @@ const formatPhone = (value: string): string => {
   return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
 };
 
-const dateLabel = (ms: number) =>
-  new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Saved indicator — header "Saving… / All changes saved" dot
@@ -157,14 +156,25 @@ function SavedIndicator({ saving }: { saving: boolean }) {
 // Verification badge for authority numbers
 // ═══════════════════════════════════════════════════════════════════════════
 
-function VerifyBadge({ state }: { state: 'verified' | 'pending' }) {
-  const p =
-    state === 'verified'
-      ? { bg: 'rgba(16,185,129,0.10)', fg: '#0F8C5F', icon: 'badge-check' as const, label: 'Verified' }
-      : { bg: 'rgba(245,158,11,0.12)', fg: '#A66800', icon: 'clock' as const, label: 'Pending' };
+function VerifyBadge({
+  state,
+  label,
+  title,
+}: {
+  state: 'verified' | 'pending' | 'attention';
+  label?: string;
+  title?: string;
+}) {
+  const PRESETS = {
+    verified: { bg: 'rgba(16,185,129,0.10)', fg: '#0F8C5F', icon: 'badge-check' as const, label: 'Verified' },
+    pending: { bg: 'rgba(245,158,11,0.12)', fg: '#A66800', icon: 'clock' as const, label: 'Pending' },
+    attention: { bg: 'rgba(239,68,68,0.10)', fg: '#B43030', icon: 'warn-tri' as const, label: 'Attention' },
+  };
+  const p = { ...PRESETS[state], ...(label ? { label } : {}) };
   return (
     <span
       className="inline-flex items-center gap-1 whitespace-nowrap font-semibold"
+      title={title}
       style={{
         height: 18,
         padding: '0 8px 0 6px',
@@ -519,7 +529,7 @@ function WorkspaceRail({
                 </span>
               ),
             },
-            { label: 'Created', value: dateLabel(org.createdAt) },
+            { label: 'Created', value: formatDate(org.createdAt) },
             domain ? { label: 'Domain', value: domain } : null,
           ]}
         />
@@ -657,6 +667,7 @@ export default function GeneralSettingsPage() {
   );
   const updateOrgSettings = useMutation(api.settings.updateOrgSettings);
   const generateUploadUrl = useMutation(api.settings.generateUploadUrl);
+  const requestVerification = useMutation(api.fmcsaVerification.requestVerification);
 
   // WorkOS-side org facts (name for the init CTA, verified domains for the
   // rail) — same endpoint the legacy /org-settings page used.
@@ -771,7 +782,35 @@ export default function GeneralSettingsPage() {
   // ── derived values ──────────────────────────────────────────────────────
   const contacts = org.contacts ?? [];
   const mailingSame = org.mailingAddress == null;
-  const authorityVerified = org.operatingAuthorityActive === true;
+
+  // FMCSA verification state → badge props (convex/fmcsaVerification.ts).
+  const av = org.authorityVerification;
+  const usdotBadge = !av
+    ? ({ state: 'pending', title: 'Not verified yet — run Verify now' } as const)
+    : av.usdotStatus === 'verified' && av.allowedToOperate
+      ? ({ state: 'verified', title: `FMCSA: ${av.legalName ?? 'active authority'}` } as const)
+      : av.usdotStatus === 'verified'
+        ? ({ state: 'attention', label: 'Inactive', title: 'FMCSA lists this carrier as not allowed to operate' } as const)
+        : av.usdotStatus === 'not_found'
+          ? ({ state: 'attention', label: 'Not found', title: av.error } as const)
+          : ({ state: 'pending', title: av.error } as const);
+  const mcBadge =
+    av?.mcStatus === 'verified'
+      ? ({ state: 'verified', title: 'Docket number on file with FMCSA' } as const)
+      : av?.mcStatus === 'mismatch'
+        ? ({ state: 'attention', label: 'Not on file', title: 'This docket number is not registered to the USDOT number above' } as const)
+        : ({ state: 'pending', title: 'Verified together with the USDOT number' } as const);
+
+  const handleVerifyNow = async () => {
+    if (!organizationId) return;
+    try {
+      await requestVerification({ workosOrgId: organizationId });
+      toast.success('Verification started — results update here shortly.');
+    } catch (error) {
+      console.error('Failed to start verification:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to start verification');
+    }
+  };
 
   const patchBusinessAddress = (patch: Partial<OrgAddress>) =>
     commit({ billingAddress: { ...org.billingAddress, ...patch } });
@@ -875,9 +914,27 @@ export default function GeneralSettingsPage() {
             {/* Carrier authority */}
             <DSCard
               title={
-                <SectionTitle sub="Federal and NMFTA identifiers, shown on invoices and rate confirmations.">
+                <SectionTitle sub="Federal and NMFTA identifiers. Verified numbers are checked nightly against FMCSA.">
                   Carrier authority
                 </SectionTitle>
+              }
+              action={
+                <span className="inline-flex items-center gap-2.5">
+                  {av && (
+                    <span className="text-[11.5px] text-[var(--text-tertiary)] whitespace-nowrap">
+                      Last checked {formatDate(av.checkedAt)}
+                    </span>
+                  )}
+                  <WBtn
+                    size="sm"
+                    leading="refresh"
+                    onClick={handleVerifyNow}
+                    disabled={!org.usdotNumber?.trim()}
+                    title={org.usdotNumber?.trim() ? undefined : 'Add a USDOT number first'}
+                  >
+                    Verify now
+                  </WBtn>
+                </span>
               }
             >
               <DSPropsEditable
@@ -889,9 +946,7 @@ export default function GeneralSettingsPage() {
                     value: org.usdotNumber ?? '',
                     placeholder: 'Add USDOT number',
                     display: org.usdotNumber ? <span className="num">{org.usdotNumber}</span> : undefined,
-                    trailing: org.usdotNumber ? (
-                      <VerifyBadge state={authorityVerified ? 'verified' : 'pending'} />
-                    ) : undefined,
+                    trailing: org.usdotNumber ? <VerifyBadge {...usdotBadge} /> : undefined,
                   },
                   {
                     key: 'mcNumber',
@@ -899,9 +954,7 @@ export default function GeneralSettingsPage() {
                     value: org.mcNumber ?? '',
                     placeholder: 'MC-000000',
                     display: org.mcNumber ? <span className="num">{org.mcNumber}</span> : undefined,
-                    trailing: org.mcNumber ? (
-                      <VerifyBadge state={authorityVerified ? 'verified' : 'pending'} />
-                    ) : undefined,
+                    trailing: org.mcNumber ? <VerifyBadge {...mcBadge} /> : undefined,
                   },
                   {
                     key: 'scacCode',
@@ -910,6 +963,14 @@ export default function GeneralSettingsPage() {
                     placeholder: 'Add SCAC',
                     display: org.scacCode ? <span className="num">{org.scacCode}</span> : undefined,
                   },
+                  org.safetyRating
+                    ? {
+                        key: 'safetyRating',
+                        label: 'Safety rating',
+                        readOnly: true,
+                        value: org.safetyRating,
+                      }
+                    : null,
                 ]}
               />
             </DSCard>
@@ -1085,22 +1146,28 @@ export default function GeneralSettingsPage() {
               />
             </DSCard>
 
-            {/* Invoice numbering — real sequence, read-only */}
+            {/* Invoice numbering — configurable prefix, real sequence */}
             <DSCard
               title={
-                <SectionTitle sub="Invoice numbers are issued automatically — one INV-YYYY-NNNN sequence per year.">
+                <SectionTitle sub="Numbers are issued automatically — one prefix-YYYY-NNNN sequence per year. Clearing the prefix reverts to INV-.">
                   Invoice numbering
                 </SectionTitle>
               }
             >
               <DSPropsEditable
+                onCommit={(k, v) => {
+                  if (k === 'invoicePrefix') {
+                    const next = Array.isArray(v) ? v.join('') : v;
+                    commit({ invoicePrefix: next.trim() === '' ? null : next });
+                  }
+                }}
                 items={[
                   {
-                    key: 'invPrefix',
+                    key: 'invoicePrefix',
                     label: 'Invoice prefix',
-                    readOnly: true,
-                    value: 'INV-',
-                    display: <span className="num">INV-</span>,
+                    value: org.invoicePrefix ?? 'INV-',
+                    placeholder: 'INV-',
+                    display: <span className="num">{org.invoicePrefix ?? 'INV-'}</span>,
                   },
                   {
                     key: 'nextInv',

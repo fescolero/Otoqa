@@ -17,6 +17,7 @@ import { api } from '@/convex/_generated/api';
 import { OrganizationProvider, useOrganizationId } from '@/contexts/organization-context';
 import { GoogleMapsProvider } from '@/contexts/google-maps-context';
 import { Avatar, OrgMark } from '@/components/web';
+import { setOrgFormatPrefs } from '@/lib/org-format';
 import { identifyUser } from '@/lib/posthog';
 import { CommandPalette, useCmdkShortcut } from './command-palette';
 import { Sidebar } from './sidebar';
@@ -93,6 +94,20 @@ function ShellLayout({
   const organizationId = useOrganizationId();
   const liveOrgSettings = useQuery(api.settings.getOrgSettings, { workosOrgId: organizationId });
   const org = liveOrgSettings === undefined ? orgSettings : liveOrgSettings;
+
+  // Publish the workspace's Regional & formats preferences so the shared
+  // formatters (lib/utils/format.ts → lib/org-format.ts) and calendar
+  // pickers respect them everywhere.
+  React.useEffect(() => {
+    if (liveOrgSettings === undefined) return;
+    setOrgFormatPrefs({
+      dateFormat: liveOrgSettings?.dateFormat,
+      numberFormat: liveOrgSettings?.numberFormat,
+      distanceUnit: liveOrgSettings?.distanceUnit,
+      weekStart: liveOrgSettings?.weekStart,
+      currency: liveOrgSettings?.defaultCurrency,
+    });
+  }, [liveOrgSettings]);
 
   const orgName = org?.name ?? 'Organization';
 

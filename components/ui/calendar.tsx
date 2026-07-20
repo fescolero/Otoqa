@@ -9,6 +9,7 @@ import {
 import { DayButton, DayPicker, getDefaultClassNames, type DropdownProps } from "react-day-picker"
 
 import { cn } from "@/lib/utils"
+import { orgWeekStartsOn } from "@/lib/org-format"
 import { Button, buttonVariants } from "@/components/ui/button"
 import {
   Select,
@@ -34,6 +35,9 @@ function Calendar({
 
   return (
     <DayPicker
+      // Workspace "Week starts on" preference (Settings → General); an
+      // explicit weekStartsOn prop in `props` still wins.
+      weekStartsOn={orgWeekStartsOn()}
       showOutsideDays={showOutsideDays}
       className={cn(
         "bg-background group/calendar p-3 [--cell-size:--spacing(8)] [[data-slot=card-content]_&]:bg-transparent [[data-slot=popover-content]_&]:bg-transparent",

@@ -105,6 +105,8 @@ export const updateOrgSettings = mutation({
       distanceUnit: v.optional(v.string()),
       weekStart: v.optional(v.string()),
       numberFormat: v.optional(v.string()),
+      // Empty string / null reverts to the default "INV-" prefix.
+      invoicePrefix: v.optional(v.union(v.string(), v.null())),
     }),
   },
   handler: async (ctx, args) => {
@@ -115,7 +117,16 @@ export const updateOrgSettings = mutation({
     // null means "clear this field" — Convex removes fields patched to
     // undefined. Only rewrite keys the caller actually sent; materializing
     // absent keys as undefined would silently clear them on every save.
-    const { logoStorageId, mailingAddress, ...restUpdates } = args.updates;
+    const { logoStorageId, mailingAddress, invoicePrefix, ...restUpdates } = args.updates;
+
+    let normalizedPrefix: string | undefined;
+    if (typeof invoicePrefix === 'string' && invoicePrefix.trim() !== '') {
+      normalizedPrefix = invoicePrefix.trim().toUpperCase();
+      if (!/^[A-Z0-9][A-Z0-9-]{0,11}$/.test(normalizedPrefix)) {
+        throw new Error('Invoice prefix must be 1–12 letters, numbers, or dashes');
+      }
+    }
+
     const updates = {
       ...restUpdates,
       ...(logoStorageId !== undefined
@@ -124,6 +135,7 @@ export const updateOrgSettings = mutation({
       ...(mailingAddress !== undefined
         ? { mailingAddress: mailingAddress === null ? undefined : mailingAddress }
         : {}),
+      ...(invoicePrefix !== undefined ? { invoicePrefix: normalizedPrefix } : {}),
     };
 
     const existing = await ctx.db
@@ -244,13 +256,15 @@ export const getWorkspaceSummary = query({
       .withIndex('by_org_year', (q) => q.eq('workosOrgId', args.workosOrgId).eq('year', year))
       .first();
     const nextSeq = counter?.nextSeq ?? 1;
+    const prefix = org?.invoicePrefix ?? 'INV-';
 
     return {
       driverCount: drivers.filter((d) => !d.isDeleted).length,
       truckCount: trucks.filter((t) => !t.isDeleted).length,
       loadsThisCycle: usage?.loadsWritten ?? 0,
       ratePerLoad: org?.billingRatePerLoad ?? DEFAULT_BILLING_RATE_PER_LOAD,
-      nextInvoiceNumber: `INV-${year}-${String(nextSeq).padStart(4, '0')}`,
+      invoicePrefix: prefix,
+      nextInvoiceNumber: `${prefix}${year}-${String(nextSeq).padStart(4, '0')}`,
     };
   },
 });
