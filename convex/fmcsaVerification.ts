@@ -16,7 +16,7 @@
  *   2. FMCSA Open Data on data.transportation.gov (Socrata JSON API) — the
  *      official programmatic channel FMCSA points to while QCMobile is down.
  *      Company Census File (az4n-8mr2) answers existence / legal name /
- *      record status; Authority History (dm5j-zc6c) maps docket numbers to
+ *      record status; the AuthHist dataset variants map docket numbers to
  *      the USDOT number for the MC cross-check. These are MCMIS extracts
  *      refreshed on a weekly-to-monthly cadence — near-real-time, not live —
  *      so results carry `source: 'open-data'` and the UI labels them.
@@ -41,7 +41,11 @@ import { assertCallerOwnsOrg } from './lib/auth';
 const QCMOBILE_BASE_URL = 'https://mobile.fmcsa.dot.gov/qc/services';
 const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
 const CENSUS_DATASET = 'az4n-8mr2'; // Company Census File
-const AUTHHIST_DATASET = 'dm5j-zc6c'; // Authority History (docket ↔ USDOT)
+// Authority-history variants (docket ↔ USDOT), tried in order. Their column
+// names differ per dataset (dm5j-zc6c rejects `dot_number`), so the lookup
+// uses full-text `$q` search plus client-side column matching instead of a
+// hardcoded filter column.
+const AUTHHIST_DATASETS = ['sn3k-dnx7', 'wahn-z3rq', 'dm5j-zc6c'];
 
 type UsdotStatus = 'verified' | 'not_found' | 'error';
 type McStatus = 'verified' | 'mismatch' | 'unchecked';
@@ -255,6 +259,46 @@ export function matchDocketRows(
   return 'mismatch';
 }
 
+/**
+ * Keep only rows that belong to this USDOT number — any column whose name
+ * mentions "dot" (but not "docket") and whose digits equal the wanted DOT.
+ * Exported for tests. Needed because `$q` full-text search also returns
+ * rows where the number merely appears in some other column.
+ */
+export function filterDotRows(
+  rows: Array<Record<string, unknown>>,
+  dot: string,
+): Array<Record<string, unknown>> {
+  return rows.filter((row) =>
+    Object.entries(row).some(([key, value]) => {
+      const k = key.toLowerCase();
+      if (!k.includes('dot') || k.includes('docket')) return false;
+      return docketDigits(String(value ?? '')) === dot;
+    }),
+  );
+}
+
+/**
+ * Fetch this carrier's authority rows from whichever AuthHist variant
+ * responds with data. Returns null when no dataset yielded rows for the
+ * DOT (either the carrier has no authority on file, or the datasets were
+ * unreachable) — callers treat that as "unchecked", never "mismatch".
+ */
+async function fetchAuthorityRows(
+  dot: string,
+): Promise<Array<Record<string, unknown>> | null> {
+  for (const dataset of AUTHHIST_DATASETS) {
+    try {
+      const rows = await socrataGet(dataset, { $q: dot, $limit: '5000' });
+      const relevant = filterDotRows(rows, dot);
+      if (relevant.length > 0) return relevant;
+    } catch {
+      // Dataset unavailable or renamed — try the next variant.
+    }
+  }
+  return null;
+}
+
 async function checkWithOpenData(
   dot: string,
   mcNumber: string | undefined,
@@ -275,14 +319,10 @@ async function checkWithOpenData(
   let mcStatus: McStatus = 'unchecked';
   const wantedDocket = mcNumber ? docketDigits(mcNumber) : '';
   if (wantedDocket) {
-    try {
-      const authRows = await socrataGet(AUTHHIST_DATASET, { dot_number: dot, $limit: '5000' });
-      mcStatus = matchDocketRows(authRows, wantedDocket);
-    } catch {
-      // Census succeeded but the authority lookup failed — report the USDOT
-      // result and leave MC unchecked rather than failing the whole run.
-      mcStatus = 'unchecked';
-    }
+    // No authority rows found (or datasets unreachable) → stay unchecked;
+    // rows found but none matching the MC → mismatch.
+    const authRows = await fetchAuthorityRows(dot);
+    if (authRows) mcStatus = matchDocketRows(authRows, wantedDocket);
   }
 
   return {
