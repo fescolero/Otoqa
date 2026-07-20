@@ -70,6 +70,7 @@ export { WIcon } from './icons';
 export type { IconName } from './icons';
 export { InfiniteFooter } from './infinite-footer';
 export { Kbd } from './kbd';
+export { OrgMark, orgMonogram } from './org-mark';
 export { PageHeader } from './page-header';
 export type { PageHeaderStat } from './page-header';
 export { QRPlacardCard } from './qr-placard-card';

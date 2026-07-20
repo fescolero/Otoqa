@@ -46,6 +46,7 @@ import {
   DSPropsEditable,
   EditableAddress,
   EditableField,
+  OrgMark,
   SettingsHeader,
   WBtn,
   WIcon,
@@ -136,15 +137,6 @@ const formatPhone = (value: string): string => {
 const dateLabel = (ms: number) =>
   new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
-const monogramOf = (name: string) =>
-  name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0])
-    .join('')
-    .toUpperCase() || '?';
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Saved indicator — header "Saving… / All changes saved" dot
 // ═══════════════════════════════════════════════════════════════════════════
@@ -230,49 +222,20 @@ function SectionTitle({ children, sub }: { children: React.ReactNode; sub?: Reac
 
 function LogoSlot({
   logoUrl,
-  monogram,
+  name,
   uploading,
   onPick,
   onRemove,
 }: {
   logoUrl: string | null;
-  monogram: string;
+  name: string;
   uploading: boolean;
   onPick: () => void;
   onRemove: () => void;
 }) {
   return (
     <div className="flex items-center gap-3.5">
-      {logoUrl ? (
-        <div
-          className="inline-flex items-center justify-center overflow-hidden shrink-0"
-          style={{
-            width: 56,
-            height: 56,
-            borderRadius: 12,
-            border: '1px solid var(--border-hairline)',
-            background: 'var(--bg-surface-2)',
-          }}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={logoUrl} alt="Company logo" className="h-full w-full object-contain" />
-        </div>
-      ) : (
-        <div
-          className="inline-flex items-center justify-center shrink-0 text-white font-bold"
-          style={{
-            width: 56,
-            height: 56,
-            borderRadius: 12,
-            background: 'var(--accent)',
-            fontSize: 20,
-            letterSpacing: -0.5,
-            boxShadow: '0 1px 2px rgba(15,22,36,0.14)',
-          }}
-        >
-          {monogram}
-        </div>
-      )}
+      <OrgMark name={name} logoUrl={logoUrl} size={56} />
       <div className="min-w-0">
         <div className="flex gap-2 mb-1.5">
           <WBtn size="sm" leading="upload" onClick={onPick} disabled={uploading}>
@@ -525,24 +488,7 @@ function WorkspaceRail({
     <div className="flex flex-col gap-4" style={{ position: 'sticky', top: 0 }}>
       <DSCard title={<SectionTitle sub="Read-only account facts.">Workspace</SectionTitle>}>
         <div className="flex items-center gap-3 mb-3.5">
-          <div
-            className="inline-flex items-center justify-center overflow-hidden shrink-0 text-white font-bold"
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 10,
-              background: 'var(--accent)',
-              fontSize: 15,
-              letterSpacing: -0.4,
-            }}
-          >
-            {org.logoUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={org.logoUrl} alt="" className="h-full w-full object-contain bg-white" />
-            ) : (
-              monogramOf(org.name)
-            )}
-          </div>
+          <OrgMark name={org.name} logoUrl={org.logoUrl} size={40} />
           <div className="min-w-0">
             <div className="text-[13.5px] font-semibold truncate">{org.name}</div>
             {org.dba && (
@@ -893,7 +839,7 @@ export default function GeneralSettingsPage() {
               <div className="mb-4">
                 <LogoSlot
                   logoUrl={org.logoUrl}
-                  monogram={monogramOf(org.name)}
+                  name={org.name}
                   uploading={uploadingLogo}
                   onPick={() => fileInputRef.current?.click()}
                   onRemove={() => commit({ logoStorageId: null })}

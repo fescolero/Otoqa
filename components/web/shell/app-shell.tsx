@@ -12,9 +12,11 @@
 'use client';
 
 import * as React from 'react';
-import { OrganizationProvider } from '@/contexts/organization-context';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { OrganizationProvider, useOrganizationId } from '@/contexts/organization-context';
 import { GoogleMapsProvider } from '@/contexts/google-maps-context';
-import { Avatar } from '@/components/web';
+import { Avatar, OrgMark } from '@/components/web';
 import { identifyUser } from '@/lib/posthog';
 import { CommandPalette, useCmdkShortcut } from './command-palette';
 import { Sidebar } from './sidebar';
@@ -84,13 +86,15 @@ function ShellLayout({
   const [cmdkOpen, setCmdkOpen] = React.useState(false);
   useCmdkShortcut(setCmdkOpen);
 
-  const orgName = orgSettings?.name ?? 'Organization';
-  const orgInitials = orgName
-    .split(' ')
-    .map((s) => s[0] ?? '')
-    .slice(0, 1)
-    .join('')
-    .toUpperCase();
+  // Live org subscription — the server-rendered `orgSettings` prop is a
+  // snapshot from the layout; subscribing here keeps the sidebar name/logo
+  // in sync when they're edited on Settings → General. Falls back to the
+  // snapshot while the client query loads.
+  const organizationId = useOrganizationId();
+  const liveOrgSettings = useQuery(api.settings.getOrgSettings, { workosOrgId: organizationId });
+  const org = liveOrgSettings === undefined ? orgSettings : liveOrgSettings;
+
+  const orgName = org?.name ?? 'Organization';
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -98,16 +102,11 @@ function ShellLayout({
         onCmdk={() => setCmdkOpen(true)}
         header={
           <span className="flex items-center gap-2 min-w-0">
-            <span
-              className="h-7 w-7 rounded-md inline-flex items-center justify-center text-white text-[12px] font-semibold shrink-0"
-              style={{ background: 'var(--accent)' }}
-            >
-              {orgInitials}
-            </span>
+            <OrgMark name={orgName} logoUrl={org?.logoUrl} size={28} />
             <span className="flex flex-col min-w-0 leading-tight">
               <span className="text-[12.5px] font-semibold text-foreground truncate">{orgName}</span>
-              {orgSettings?.subscriptionPlan && (
-                <span className="text-[10.5px] text-[var(--text-tertiary)] truncate">{orgSettings.subscriptionPlan}</span>
+              {org?.subscriptionPlan && (
+                <span className="text-[10.5px] text-[var(--text-tertiary)] truncate">{org.subscriptionPlan}</span>
               )}
             </span>
           </span>
