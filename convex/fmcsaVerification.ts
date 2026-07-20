@@ -43,16 +43,18 @@ import { assertCallerOwnsOrg } from './lib/auth';
 const QCMOBILE_BASE_URL = 'https://mobile.fmcsa.dot.gov/qc/services';
 const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
 const CENSUS_DATASET = 'az4n-8mr2'; // Company Census File
-// Authority registries, queried in order for the MC ↔ USDOT cross-check:
-//   6qg9-x4f8 — L&I / Motus "Carrier" file: the full current registry
-//     (docket numbers, authority types/status, insurance on file).
-//   dm5j-zc6c — Motus AuthHist: authority status-CHANGE history. Sparse for
-//     carriers whose authority predates Motus and hasn't changed since
-//     (confirmed live: a real carrier's DOT returned zero rows), so it only
-//     backs up the registry.
-// Filter column naming differs across these files, so lookups try the known
-// variants (usdot_number, dot_number) until one is accepted.
-const AUTHORITY_DATASETS = ['6qg9-x4f8', 'dm5j-zc6c'];
+// Authority registries, queried in order for the MC ↔ USDOT cross-check.
+// `conclusiveWhenEmpty` marks a FULL registry: only those may turn an empty
+// answer into "not on file". Motus AuthHist is a status-CHANGE history —
+// sparse for carriers whose authority predates Motus (confirmed live: a
+// real carrier's DOT returned zero rows) — so it can only confirm, never
+// deny. The legacy L&I Carrier registry (6qg9-x4f8) has been retired
+// (dataset-level 404); when the Motus Carrier registry's dataset ID is
+// known, add it here first with conclusiveWhenEmpty: true.
+const AUTHORITY_DATASETS: Array<{ id: string; conclusiveWhenEmpty: boolean }> = [
+  { id: 'dm5j-zc6c', conclusiveWhenEmpty: false }, // Motus AuthHist
+];
+// Filter column naming differs across FMCSA files; try until one is accepted.
 const DOT_FILTER_COLUMNS = ['usdot_number', 'dot_number'];
 
 type UsdotStatus = 'verified' | 'not_found' | 'error';
@@ -293,27 +295,28 @@ export function authorityActiveFromRows(rows: Array<Record<string, unknown>>): b
  * Fetch this carrier's authority rows from the first registry dataset and
  * filter-column combination that responds. Returns:
  *   - rows      → authority on file (docket cross-check is meaningful)
- *   - []        → registries answered and have nothing for this DOT
- *   - null      → nothing answered (network/schema failure) — callers must
- *                 treat this as "couldn't check", never "not on file".
+ *   - []        → a FULL registry answered and has nothing for this DOT
+ *   - null      → nothing conclusive (only history files answered empty, or
+ *                 nothing answered at all) — callers must treat this as
+ *                 "couldn't check", never "not on file".
  */
 async function fetchAuthorityRows(
   dot: string,
 ): Promise<Array<Record<string, unknown>> | null> {
-  let anyAnswered = false;
-  for (const dataset of AUTHORITY_DATASETS) {
+  let conclusiveEmpty = false;
+  for (const { id, conclusiveWhenEmpty } of AUTHORITY_DATASETS) {
     for (const column of DOT_FILTER_COLUMNS) {
       try {
-        const rows = await socrataGet(dataset, { [column]: dot, $limit: '5000' });
-        anyAnswered = true;
+        const rows = await socrataGet(id, { [column]: dot, $limit: '5000' });
         if (rows.length > 0) return rows;
+        if (conclusiveWhenEmpty) conclusiveEmpty = true;
         break; // dataset answered with no rows — its other column won't differ
       } catch {
         // Wrong filter column for this file or dataset unavailable — try next.
       }
     }
   }
-  return anyAnswered ? [] : null;
+  return conclusiveEmpty ? [] : null;
 }
 
 async function checkWithOpenData(
@@ -338,9 +341,8 @@ async function checkWithOpenData(
   let mcStatus: McStatus = 'unchecked';
   const wantedDocket = mcNumber ? docketDigits(mcNumber) : '';
   if (wantedDocket && authRows) {
-    // Both registries answered, so an empty row set genuinely means FMCSA
-    // has no authority on file for this DOT → the MC number is "not on
-    // file". A null (nothing answered) stays "unchecked".
+    // Rows → real cross-check. Empty (only possible from a full registry)
+    // → genuinely "not on file". Null stays "unchecked".
     mcStatus = matchDocketRows(authRows, wantedDocket);
   }
 
