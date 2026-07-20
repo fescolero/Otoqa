@@ -45,14 +45,14 @@ const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
 const CENSUS_DATASET = 'az4n-8mr2'; // Company Census File
 // Authority registries, queried in order for the MC ↔ USDOT cross-check.
 // `conclusiveWhenEmpty` marks a FULL registry: only those may turn an empty
-// answer into "not on file". Motus AuthHist is a status-CHANGE history —
-// sparse for carriers whose authority predates Motus (confirmed live: a
-// real carrier's DOT returned zero rows) — so it can only confirm, never
-// deny. The legacy L&I Carrier registry (6qg9-x4f8) has been retired
-// (dataset-level 404); when the Motus Carrier registry's dataset ID is
-// known, add it here first with conclusiveWhenEmpty: true.
+// answer into "not on file". Motus Carrier is the current complete registry
+// (successor to the retired L&I Carrier file 6qg9-x4f8); Motus AuthHist is
+// a status-CHANGE history — sparse for carriers whose authority predates
+// Motus (confirmed live: a real carrier's DOT returned zero rows) — so it
+// can only confirm, never deny.
 const AUTHORITY_DATASETS: Array<{ id: string; conclusiveWhenEmpty: boolean }> = [
-  { id: 'dm5j-zc6c', conclusiveWhenEmpty: false }, // Motus AuthHist
+  { id: 'nakq-58th', conclusiveWhenEmpty: true }, // Motus Carrier — full registry
+  { id: 'dm5j-zc6c', conclusiveWhenEmpty: false }, // Motus AuthHist — change history
 ];
 // Filter column naming differs across FMCSA files; try until one is accepted.
 const DOT_FILTER_COLUMNS = ['usdot_number', 'dot_number'];
