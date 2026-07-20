@@ -78,8 +78,15 @@ describe('authorityActiveFromRows', () => {
     expect(authorityActiveFromRows(rows)).toBe(true);
   });
 
-  it('never reads "Inactive" as active, and handles missing status', () => {
+  it('reads legacy L&I column styles — "A"/"I" flags and *_authority names', () => {
+    expect(authorityActiveFromRows([{ common_authority: 'A' }])).toBe(true);
+    expect(authorityActiveFromRows([{ contract_auth_status: 'Active' }])).toBe(true);
+    expect(authorityActiveFromRows([{ common_authority: 'I' }])).toBe(false);
+  });
+
+  it('never reads "Inactive" as active, and ignores type columns', () => {
     expect(authorityActiveFromRows([{ op_auth_status: 'INACTIVE' }])).toBe(false);
+    expect(authorityActiveFromRows([{ op_auth_type: 'ACTIVE-LOOKING TYPE' }])).toBe(false);
     expect(authorityActiveFromRows([{ docket_number: '111' }])).toBe(false);
     expect(authorityActiveFromRows([])).toBe(false);
   });

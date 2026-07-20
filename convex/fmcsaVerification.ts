@@ -16,9 +16,10 @@
  *   2. FMCSA Open Data on data.transportation.gov (Socrata JSON API) — the
  *      official programmatic channel FMCSA points to while QCMobile is down.
  *      Company Census File (az4n-8mr2) answers existence / legal name /
- *      record status; Motus AuthHist (dm5j-zc6c) maps docket numbers to the
- *      USDOT number and carries per-docket operating-authority status for
- *      the MC cross-check. These are MCMIS extracts
+ *      record status; the L&I Carrier registry (6qg9-x4f8, with Motus
+ *      AuthHist dm5j-zc6c as backup) maps docket numbers to the USDOT
+ *      number and carries operating-authority status for the MC
+ *      cross-check. These are MCMIS extracts
  *      refreshed on a weekly-to-monthly cadence — near-real-time, not live —
  *      so results carry `source: 'open-data'` and the UI labels them.
  *      Optional SOCRATA_APP_TOKEN env var lifts the shared rate limit.
@@ -42,11 +43,17 @@ import { assertCallerOwnsOrg } from './lib/auth';
 const QCMOBILE_BASE_URL = 'https://mobile.fmcsa.dot.gov/qc/services';
 const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
 const CENSUS_DATASET = 'az4n-8mr2'; // Company Census File
-// Motus AuthHist — the live authority dataset (schema confirmed against the
-// portal): docket_number, usdot_number, op_auth_type, op_auth_status,
-// reason, status_change_date. The older AuthHist variants (sn3k-dnx7,
-// wahn-z3rq) no longer serve metadata.
-const AUTHHIST_DATASET = 'dm5j-zc6c';
+// Authority registries, queried in order for the MC ↔ USDOT cross-check:
+//   6qg9-x4f8 — L&I / Motus "Carrier" file: the full current registry
+//     (docket numbers, authority types/status, insurance on file).
+//   dm5j-zc6c — Motus AuthHist: authority status-CHANGE history. Sparse for
+//     carriers whose authority predates Motus and hasn't changed since
+//     (confirmed live: a real carrier's DOT returned zero rows), so it only
+//     backs up the registry.
+// Filter column naming differs across these files, so lookups try the known
+// variants (usdot_number, dot_number) until one is accepted.
+const AUTHORITY_DATASETS = ['6qg9-x4f8', 'dm5j-zc6c'];
+const DOT_FILTER_COLUMNS = ['usdot_number', 'dot_number'];
 
 type UsdotStatus = 'verified' | 'not_found' | 'error';
 type McStatus = 'verified' | 'mismatch' | 'unchecked';
@@ -266,14 +273,47 @@ export function matchDocketRows(
 
 /**
  * Does any authority row carry an active operating-authority status?
- * Exported for tests. `op_auth_status` values are text ("Active" /
- * "Inactive" style); "inactive" must not read as active.
+ * Exported for tests. Status columns vary by file (`op_auth_status` in the
+ * Motus datasets, `*_authority` / `*_auth_status` style in the legacy L&I
+ * layout) with values like "Active"/"Inactive" or "A"/"I" — so this checks
+ * every auth-named non-type column, and "Inactive" must never read as
+ * active.
  */
 export function authorityActiveFromRows(rows: Array<Record<string, unknown>>): boolean {
-  return rows.some((row) => {
-    const status = String(row.op_auth_status ?? '').trim();
-    return /active/i.test(status) && !/inactive/i.test(status);
-  });
+  return rows.some((row) =>
+    Object.entries(row).some(([key, value]) => {
+      if (!/auth/i.test(key) || /type/i.test(key)) return false;
+      const status = String(value ?? '').trim().toUpperCase();
+      return status === 'A' || status.startsWith('ACTIVE');
+    }),
+  );
+}
+
+/**
+ * Fetch this carrier's authority rows from the first registry dataset and
+ * filter-column combination that responds. Returns:
+ *   - rows      → authority on file (docket cross-check is meaningful)
+ *   - []        → registries answered and have nothing for this DOT
+ *   - null      → nothing answered (network/schema failure) — callers must
+ *                 treat this as "couldn't check", never "not on file".
+ */
+async function fetchAuthorityRows(
+  dot: string,
+): Promise<Array<Record<string, unknown>> | null> {
+  let anyAnswered = false;
+  for (const dataset of AUTHORITY_DATASETS) {
+    for (const column of DOT_FILTER_COLUMNS) {
+      try {
+        const rows = await socrataGet(dataset, { [column]: dot, $limit: '5000' });
+        anyAnswered = true;
+        if (rows.length > 0) return rows;
+        break; // dataset answered with no rows — its other column won't differ
+      } catch {
+        // Wrong filter column for this file or dataset unavailable — try next.
+      }
+    }
+  }
+  return anyAnswered ? [] : null;
 }
 
 async function checkWithOpenData(
@@ -293,21 +333,14 @@ async function checkWithOpenData(
     };
   }
 
-  // Authority rows for this carrier — precise server-side filter on the
-  // confirmed `usdot_number` column. A failed fetch leaves authRows null so
-  // the MC badge stays "unchecked" instead of claiming "not on file".
-  let authRows: Array<Record<string, unknown>> | null = null;
-  try {
-    authRows = await socrataGet(AUTHHIST_DATASET, { usdot_number: dot, $limit: '5000' });
-  } catch {
-    authRows = null;
-  }
+  const authRows = await fetchAuthorityRows(dot);
 
   let mcStatus: McStatus = 'unchecked';
   const wantedDocket = mcNumber ? docketDigits(mcNumber) : '';
   if (wantedDocket && authRows) {
-    // The filter is exact, so an empty row set genuinely means FMCSA has no
-    // authority on file for this DOT → the MC number is "not on file".
+    // Both registries answered, so an empty row set genuinely means FMCSA
+    // has no authority on file for this DOT → the MC number is "not on
+    // file". A null (nothing answered) stays "unchecked".
     mcStatus = matchDocketRows(authRows, wantedDocket);
   }
 
