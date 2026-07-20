@@ -77,3 +77,27 @@ describe('<EditableField type="multiselect">', () => {
     ).toBeInTheDocument();
   });
 });
+
+describe('<EditableField> empty-value placeholder', () => {
+  it('shows the placeholder (a clickable target) when the value is an empty string', async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    render(
+      <EditableField value="" placeholder="Add USDOT number" onCommit={onCommit} ariaLabel="USDOT" />,
+    );
+    // '' must fall through to the placeholder — an empty button is invisible
+    // and effectively unclickable (regression: Settings → General authority
+    // fields could never be filled in).
+    const trigger = screen.getByText('Add USDOT number');
+    await user.click(trigger);
+    await user.keyboard('2847591{Enter}');
+    expect(onCommit).toHaveBeenCalledWith('2847591');
+  });
+
+  it('shows the textarea placeholder when the value is an empty string', () => {
+    render(
+      <EditableField type="textarea" value="" placeholder="Add notes" onCommit={() => {}} />,
+    );
+    expect(screen.getByText('Add notes')).toBeInTheDocument();
+  });
+});

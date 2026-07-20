@@ -211,7 +211,9 @@ function TextField({ type = 'text', value, onCommit, placeholder, readOnly, clas
         aria-label={ariaLabel}
         className="text-left text-[13px] text-foreground hover:text-foreground rounded -mx-1 px-1 py-0.5 hover:bg-[var(--bg-row-hover)] cursor-text min-w-0 truncate"
       >
-        {display ?? value ?? <span className="text-[var(--text-tertiary)]">{placeholder ?? '—'}</span>}
+        {/* Truthiness, not ??: an empty-string value must fall through to the
+            placeholder or the idle button renders with no visible click target. */}
+        {display ?? (value || <span className="text-[var(--text-tertiary)]">{placeholder ?? '—'}</span>)}
       </button>
       <EditAffordance icon="edit" />
       <SavedHint ago={ago} />
@@ -274,7 +276,8 @@ function TextareaField({ value, onCommit, rows = 3, placeholder, readOnly, class
         aria-label={ariaLabel}
         className="text-left text-[13px] text-foreground rounded -mx-1 px-1 py-0.5 hover:bg-[var(--bg-row-hover)] cursor-text whitespace-pre-line"
       >
-        {display ?? value ?? <span className="text-[var(--text-tertiary)]">{placeholder ?? '—'}</span>}
+        {/* Truthiness, not ?? — see TextField. */}
+        {display ?? (value || <span className="text-[var(--text-tertiary)]">{placeholder ?? '—'}</span>)}
       </button>
       <EditAffordance icon="edit" />
       <SavedHint ago={ago} />
