@@ -118,6 +118,9 @@ export default defineSchema({
           v.literal('mismatch'),
           v.literal('unchecked'),
         ),
+        // Which provider produced the result: 'qcmobile' is the live API,
+        // 'open-data' is the data.transportation.gov MCMIS extract.
+        source: v.optional(v.union(v.literal('qcmobile'), v.literal('open-data'))),
         allowedToOperate: v.optional(v.boolean()),
         legalName: v.optional(v.string()),
         safetyRating: v.optional(v.string()),

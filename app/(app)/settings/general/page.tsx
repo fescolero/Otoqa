@@ -921,8 +921,19 @@ export default function GeneralSettingsPage() {
               action={
                 <span className="inline-flex items-center gap-2.5">
                   {av && (
-                    <span className="text-[11.5px] text-[var(--text-tertiary)] whitespace-nowrap">
+                    <span
+                      className="text-[11.5px] text-[var(--text-tertiary)] whitespace-nowrap"
+                      title={
+                        av.source === 'open-data'
+                          ? 'Checked against the FMCSA open-data extract (refreshed weekly to monthly)'
+                          : av.source === 'qcmobile'
+                            ? 'Checked live against the FMCSA QCMobile API'
+                            : undefined
+                      }
+                    >
                       Last checked {formatDate(av.checkedAt)}
+                      {av.source === 'open-data' && ' · open data'}
+                      {av.source === 'qcmobile' && ' · live'}
                     </span>
                   )}
                   <WBtn
