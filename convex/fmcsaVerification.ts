@@ -63,8 +63,12 @@ interface VerificationResult {
   error?: string;
 }
 
-/** Digits-only view of an MC/docket number ("MC-948217" → "948217"). */
-const docketDigits = (value: string) => value.replace(/\D/g, '');
+/**
+ * Digits-only, leading-zero-insensitive view of an MC/docket number —
+ * "MC-948217" and "00948217" both normalize to "948217". MCMIS extracts
+ * often zero-pad docket numbers, so exact digit comparison false-negatives.
+ */
+const docketDigits = (value: string) => value.replace(/\D/g, '').replace(/^0+(?=\d)/, '');
 
 // ─── Public entry: on-demand verification from Settings → General ─────────
 
@@ -180,7 +184,7 @@ async function checkWithQcMobile(
       const dockets = (await qcMobileGet(`/carriers/${dot}/docket-numbers`, webKey)) as {
         content?: Array<{ docketNumber?: number | string }> | null;
       } | null;
-      const registered = (dockets?.content ?? []).map((d) => String(d.docketNumber ?? ''));
+      const registered = (dockets?.content ?? []).map((d) => docketDigits(String(d.docketNumber ?? '')));
       mcStatus = registered.includes(wantedDocket) ? 'verified' : 'mismatch';
     } catch {
       // Snapshot succeeded but docket lookup failed — report the USDOT

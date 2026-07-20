@@ -55,6 +55,10 @@ describe('matchDocketRows', () => {
     expect(matchDocketRows([{ docket_num: 'MC948217' }], '948217')).toBe('verified');
   });
 
+  it('ignores leading zeros — MCMIS extracts zero-pad docket numbers', () => {
+    expect(matchDocketRows([{ docket_number: '00838202' }], '838202')).toBe('verified');
+  });
+
   it('returns mismatch when no docket matches or no rows exist', () => {
     expect(matchDocketRows([{ docket_number: '111111' }], '948217')).toBe('mismatch');
     expect(matchDocketRows([], '948217')).toBe('mismatch');
