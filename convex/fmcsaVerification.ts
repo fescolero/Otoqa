@@ -45,13 +45,15 @@ const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
 const CENSUS_DATASET = 'az4n-8mr2'; // Company Census File
 // Authority registries, queried in order for the MC ↔ USDOT cross-check.
 // `conclusiveWhenEmpty` marks a FULL registry: only those may turn an empty
-// answer into "not on file". Motus Carrier is the current complete registry
-// (successor to the retired L&I Carrier file 6qg9-x4f8); Motus AuthHist is
-// a status-CHANGE history — sparse for carriers whose authority predates
-// Motus (confirmed live: a real carrier's DOT returned zero rows) — so it
-// can only confirm, never deny.
+// answer into "not on file". NONE currently qualify: the legacy L&I Carrier
+// file (6qg9-x4f8) is retired, and the entire Motus dataset family only
+// carries deltas since Motus launched (~2025) — confirmed live: an active
+// AUTHORIZED FOR HIRE carrier was absent from both Motus Carrier and
+// AuthHist. So open data can currently confirm an MC (rows with a matching
+// docket) or contradict it (rows exist, docket differs) but never prove
+// absence. Restore conclusiveWhenEmpty if FMCSA publishes a full registry.
 const AUTHORITY_DATASETS: Array<{ id: string; conclusiveWhenEmpty: boolean }> = [
-  { id: 'nakq-58th', conclusiveWhenEmpty: true }, // Motus Carrier — full registry
+  { id: 'nakq-58th', conclusiveWhenEmpty: false }, // Motus Carrier — deltas since launch
   { id: 'dm5j-zc6c', conclusiveWhenEmpty: false }, // Motus AuthHist — change history
 ];
 // Filter column naming differs across FMCSA files; try until one is accepted.
@@ -292,28 +294,67 @@ export function authorityActiveFromRows(rows: Array<Record<string, unknown>>): b
 }
 
 /**
+ * Rows whose DOT-named column (never a docket column) normalizes to the
+ * wanted DOT. Exported for tests — guards the LIKE fallback below against
+ * a different DOT that merely shares a digit suffix.
+ */
+export function rowsMatchingDot(
+  rows: Array<Record<string, unknown>>,
+  dot: string,
+): Array<Record<string, unknown>> {
+  return rows.filter((row) =>
+    Object.entries(row).some(([key, value]) => {
+      const k = key.toLowerCase();
+      if (!k.includes('dot') || k.includes('docket')) return false;
+      return docketDigits(String(value ?? '')) === dot;
+    }),
+  );
+}
+
+/**
  * Fetch this carrier's authority rows from the first registry dataset and
- * filter-column combination that responds. Returns:
+ * filter-column combination that responds. Each dataset gets two attempts:
+ * exact equality, then a LIKE suffix sweep in case the file stores
+ * zero-padded identifiers ("01239730"), verified client-side. Returns:
  *   - rows      → authority on file (docket cross-check is meaningful)
  *   - []        → a FULL registry answered and has nothing for this DOT
- *   - null      → nothing conclusive (only history files answered empty, or
- *                 nothing answered at all) — callers must treat this as
- *                 "couldn't check", never "not on file".
+ *   - null      → nothing conclusive (only delta/history files answered
+ *                 empty, or nothing answered at all) — callers must treat
+ *                 this as "couldn't check", never "not on file".
  */
 async function fetchAuthorityRows(
   dot: string,
 ): Promise<Array<Record<string, unknown>> | null> {
   let conclusiveEmpty = false;
   for (const { id, conclusiveWhenEmpty } of AUTHORITY_DATASETS) {
+    let answered = false;
     for (const column of DOT_FILTER_COLUMNS) {
       try {
         const rows = await socrataGet(id, { [column]: dot, $limit: '5000' });
+        answered = true;
         if (rows.length > 0) return rows;
-        if (conclusiveWhenEmpty) conclusiveEmpty = true;
         break; // dataset answered with no rows — its other column won't differ
       } catch {
         // Wrong filter column for this file or dataset unavailable — try next.
       }
+    }
+    if (answered) {
+      // Zero-padded identifiers don't equality-match; sweep by suffix and
+      // verify client-side. `dot` is digits-only, so the SoQL is inert.
+      for (const column of DOT_FILTER_COLUMNS) {
+        try {
+          const rows = await socrataGet(id, {
+            $where: `${column} like '%${dot}'`,
+            $limit: '5000',
+          });
+          const relevant = rowsMatchingDot(rows, dot);
+          if (relevant.length > 0) return relevant;
+          break;
+        } catch {
+          // Column not in this file — try the next name.
+        }
+      }
+      if (conclusiveWhenEmpty) conclusiveEmpty = true;
     }
   }
   return conclusiveEmpty ? [] : null;

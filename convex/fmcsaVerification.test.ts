@@ -3,6 +3,7 @@ import {
   authorityActiveFromRows,
   matchDocketRows,
   parseCensusRecord,
+  rowsMatchingDot,
 } from './fmcsaVerification';
 
 // Both helpers are pure parsers over Socrata rows — no Convex runtime needed.
@@ -89,5 +90,25 @@ describe('authorityActiveFromRows', () => {
     expect(authorityActiveFromRows([{ op_auth_type: 'ACTIVE-LOOKING TYPE' }])).toBe(false);
     expect(authorityActiveFromRows([{ docket_number: '111' }])).toBe(false);
     expect(authorityActiveFromRows([])).toBe(false);
+  });
+});
+
+describe('rowsMatchingDot', () => {
+  it('matches dot-named columns across naming variants and zero-padding', () => {
+    const rows = [
+      { usdot_number: '1239730', docket_number: '1' },
+      { usdot_number: '01239730', docket_number: '2' },
+      { dot_no: 1239730, docket_number: '3' },
+      { usdot_number: '21239730', docket_number: '4' }, // different DOT, shared suffix
+    ];
+    expect(rowsMatchingDot(rows, '1239730').map((r) => r.docket_number)).toEqual([
+      '1',
+      '2',
+      '3',
+    ]);
+  });
+
+  it('never matches docket columns whose digits collide with the DOT', () => {
+    expect(rowsMatchingDot([{ docket_number: '1239730' }], '1239730')).toEqual([]);
   });
 });
