@@ -89,6 +89,7 @@ export const NAV: NavSection[] = [
     label: 'Settings',
     icon: 'settings',
     items: [
+      { id: 'general',      label: 'General',         href: '/settings/general' },
       { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles' },
       { id: 'integrations', label: 'Integrations',    href: '/settings/integrations' },
       { id: 'billing',      label: 'Billing & usage', href: '/settings/billing' },

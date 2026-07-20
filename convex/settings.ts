@@ -3,6 +3,25 @@ import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { logAudit } from './lib/audit';
 import { seedChargeComponentsLogic } from './payEngine/seedChargeComponents';
+import { getPeriodKey } from './accountingStatsHelpers';
+import { DEFAULT_BILLING_RATE_PER_LOAD } from './platformUsageHelpers';
+
+const addressValidator = v.object({
+  addressLine1: v.string(),
+  addressLine2: v.optional(v.string()),
+  city: v.string(),
+  state: v.string(),
+  zip: v.string(),
+  country: v.string(),
+});
+
+const contactValidator = v.object({
+  id: v.string(),
+  role: v.string(),
+  name: v.string(),
+  email: v.string(),
+  phone: v.string(),
+});
 
 /**
  * Settings Management for Multi-Tenant Organizations
@@ -61,28 +80,51 @@ export const updateOrgSettings = mutation({
       domain: v.optional(v.string()),
       billingEmail: v.optional(v.string()),
       billingPhone: v.optional(v.string()),
-      billingAddress: v.optional(
-        v.object({
-          addressLine1: v.string(),
-          addressLine2: v.optional(v.string()),
-          city: v.string(),
-          state: v.string(),
-          zip: v.string(),
-          country: v.string(),
-        }),
-      ),
-      logoStorageId: v.optional(v.id('_storage')),
+      billingAddress: v.optional(addressValidator),
+      // v.null() clears the stored value (Convex patch removes fields set
+      // to undefined; args can't carry undefined, so null is the wire form).
+      logoStorageId: v.optional(v.union(v.id('_storage'), v.null())),
       subscriptionPlan: v.optional(v.string()),
       subscriptionStatus: v.optional(v.string()),
       billingCycle: v.optional(v.string()),
       nextBillingDate: v.optional(v.string()),
       defaultTimezone: v.optional(v.string()),
+      defaultCurrency: v.optional(
+        v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN')),
+      ),
+      // Company profile (Settings → General)
+      dba: v.optional(v.string()),
+      entityType: v.optional(v.string()),
+      usdotNumber: v.optional(v.string()),
+      mcNumber: v.optional(v.string()),
+      scacCode: v.optional(v.string()),
+      mailingAddress: v.optional(v.union(addressValidator, v.null())),
+      billingContactName: v.optional(v.string()),
+      contacts: v.optional(v.array(contactValidator)),
+      dateFormat: v.optional(v.string()),
+      distanceUnit: v.optional(v.string()),
+      weekStart: v.optional(v.string()),
+      numberFormat: v.optional(v.string()),
     }),
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     // assertCallerOwnsOrg already throws on unauthenticated, so identity is non-null
     const identity = (await ctx.auth.getUserIdentity())!;
+
+    // null means "clear this field" — Convex removes fields patched to
+    // undefined. Only rewrite keys the caller actually sent; materializing
+    // absent keys as undefined would silently clear them on every save.
+    const { logoStorageId, mailingAddress, ...restUpdates } = args.updates;
+    const updates = {
+      ...restUpdates,
+      ...(logoStorageId !== undefined
+        ? { logoStorageId: logoStorageId === null ? undefined : logoStorageId }
+        : {}),
+      ...(mailingAddress !== undefined
+        ? { mailingAddress: mailingAddress === null ? undefined : mailingAddress }
+        : {}),
+    };
 
     const existing = await ctx.db
       .query('organizations')
@@ -93,26 +135,22 @@ export const updateOrgSettings = mutation({
       // Create new organization record with defaults
       // Web TMS users are BROKER type by default (WorkOS auth)
       const orgId = await ctx.db.insert('organizations', {
+        ...updates,
         workosOrgId: args.workosOrgId,
         orgType: 'BROKER', // Default for web TMS (WorkOS) users
-        name: args.updates.name ?? 'Unnamed Organization',
-        industry: args.updates.industry,
-        domain: args.updates.domain,
-        logoStorageId: args.updates.logoStorageId,
-        billingEmail: args.updates.billingEmail ?? identity.email ?? '',
-        billingPhone: args.updates.billingPhone,
-        billingAddress: args.updates.billingAddress ?? {
+        name: updates.name ?? 'Unnamed Organization',
+        billingEmail: updates.billingEmail ?? identity.email ?? '',
+        billingAddress: updates.billingAddress ?? {
           addressLine1: '',
           city: '',
           state: '',
           zip: '',
           country: 'USA',
         },
-        subscriptionPlan: args.updates.subscriptionPlan ?? 'Enterprise',
-        subscriptionStatus: args.updates.subscriptionStatus ?? 'Active',
-        billingCycle: args.updates.billingCycle ?? 'Annual',
-        nextBillingDate: args.updates.nextBillingDate,
-        defaultTimezone: args.updates.defaultTimezone ?? 'America/New_York',
+        subscriptionPlan: updates.subscriptionPlan ?? 'Enterprise',
+        subscriptionStatus: updates.subscriptionStatus ?? 'Active',
+        billingCycle: updates.billingCycle ?? 'Annual',
+        defaultTimezone: updates.defaultTimezone ?? 'America/New_York',
         createdAt: Date.now(),
         updatedAt: Date.now(),
       });
@@ -142,7 +180,7 @@ export const updateOrgSettings = mutation({
 
     // Update existing organization
     await ctx.db.patch(existing._id, {
-      ...args.updates,
+      ...updates,
       updatedAt: Date.now(),
     });
 
@@ -160,6 +198,60 @@ export const updateOrgSettings = mutation({
     });
 
     return existing._id;
+  },
+});
+
+/**
+ * Workspace-at-a-glance for Settings → General: fleet counts, loads written
+ * this billing cycle, the org's metered rate, and the next invoice number
+ * the numbering sequence will issue (INV-YYYY-NNNN, per convex/invoices.ts
+ * claimInvoiceNumber).
+ */
+export const getWorkspaceSummary = query({
+  args: { workosOrgId: v.string() },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+
+    const org = await ctx.db
+      .query('organizations')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .unique();
+
+    // Fleet counts — bounded by real fleet sizes (dozens–hundreds of rows).
+    const [drivers, trucks] = await Promise.all([
+      ctx.db
+        .query('drivers')
+        .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
+        .collect(),
+      ctx.db
+        .query('trucks')
+        .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
+        .collect(),
+    ]);
+
+    const now = Date.now();
+    const currentPeriodKey = getPeriodKey(now);
+    const usage = await ctx.db
+      .query('platformUsageStats')
+      .withIndex('by_org_period', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('periodKey', currentPeriodKey),
+      )
+      .first();
+
+    const year = new Date(now).getUTCFullYear();
+    const counter = await ctx.db
+      .query('invoiceCounters')
+      .withIndex('by_org_year', (q) => q.eq('workosOrgId', args.workosOrgId).eq('year', year))
+      .first();
+    const nextSeq = counter?.nextSeq ?? 1;
+
+    return {
+      driverCount: drivers.filter((d) => !d.isDeleted).length,
+      truckCount: trucks.filter((t) => !t.isDeleted).length,
+      loadsThisCycle: usage?.loadsWritten ?? 0,
+      ratePerLoad: org?.billingRatePerLoad ?? DEFAULT_BILLING_RATE_PER_LOAD,
+      nextInvoiceNumber: `INV-${year}-${String(nextSeq).padStart(4, '0')}`,
+    };
   },
 });
 

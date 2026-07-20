@@ -63,6 +63,44 @@ export default defineSchema({
     domain: v.optional(v.string()),
     logoStorageId: v.optional(v.id('_storage')), // Company Logo from Convex Storage
 
+    // === COMPANY PROFILE (Settings → General) ===
+    dba: v.optional(v.string()), // Doing-business-as name
+    entityType: v.optional(v.string()), // LLC, C-Corp, S-Corp, Sole proprietor, Partnership
+    scacCode: v.optional(v.string()), // NMFTA Standard Carrier Alpha Code
+    // Where paper mail / checks go. Absent = same as billingAddress.
+    mailingAddress: v.optional(
+      v.object({
+        addressLine1: v.string(),
+        addressLine2: v.optional(v.string()),
+        city: v.string(),
+        state: v.string(),
+        zip: v.string(),
+        country: v.string(),
+      }),
+    ),
+    // Display name for the billing contact (email/phone live on
+    // billingEmail / billingPhone, which platform invoicing reads).
+    billingContactName: v.optional(v.string()),
+    // Additional role contacts (dispatch, safety, after-hours, …) shown on
+    // Settings → General. The billing contact is NOT stored here.
+    contacts: v.optional(
+      v.array(
+        v.object({
+          id: v.string(),
+          role: v.string(),
+          name: v.string(),
+          email: v.string(),
+          phone: v.string(),
+        }),
+      ),
+    ),
+    // Regional display preferences (org-wide defaults; consumed
+    // incrementally — see Settings → General).
+    dateFormat: v.optional(v.string()), // e.g. "MM/DD/YYYY"
+    distanceUnit: v.optional(v.string()), // "mi" | "km"
+    weekStart: v.optional(v.string()), // "sunday" | "monday"
+    numberFormat: v.optional(v.string()), // e.g. "1,234.56"
+
     // PAY ENGINE — default currency for new pay-engine entities (profiles,
     // settlements, payItems). Fallback when no more specific source applies.
     // Optional for backward compatibility; treat as 'USD' when missing.
