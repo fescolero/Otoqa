@@ -14,6 +14,9 @@ export interface NavItem {
   href: string;
   /** Optional shortcut hint shown in the command palette. */
   kbd?: string;
+  /** RBAC area (lib/team-rbac.ts) gating visibility — needs `view`.
+   *  Overrides the section's area; absent on both = always visible. */
+  area?: string;
 }
 
 export interface NavSection {
@@ -24,6 +27,9 @@ export interface NavSection {
   /** Top-level destination if this section has no children. */
   href?: string;
   items?: NavItem[];
+  /** RBAC area gating visibility — needs `view` on it (items may override
+   *  per-item; the section shows if any visible item remains). */
+  area?: string;
 }
 
 export const NAV: NavSection[] = [
@@ -37,6 +43,7 @@ export const NAV: NavSection[] = [
     id: 'fleet',
     label: 'Fleet Management',
     icon: 'truck',
+    area: 'fleet',
     items: [
       { id: 'drivers',  label: 'Drivers',  href: '/fleet/drivers' },
       { id: 'trucks',   label: 'Trucks',   href: '/fleet/trucks' },
@@ -47,19 +54,21 @@ export const NAV: NavSection[] = [
     id: 'operations',
     label: 'Company Operations',
     icon: 'building',
+    area: 'partners',
     items: [
       { id: 'carriers',     label: 'Carriers',     href: '/operations/carriers' },
       { id: 'customers',    label: 'Customers',    href: '/operations/customers' },
-      { id: 'compliance',   label: 'Compliance',   href: '/operations/compliance' },
-      { id: 'diesel',       label: 'Diesel',       href: '/operations/diesel' },
-      { id: 'fuel-vendors', label: 'Fuel Vendors', href: '/operations/diesel/vendors' },
-      { id: 'fuel-reports', label: 'Fuel Reports', href: '/operations/diesel/reports' },
+      { id: 'compliance',   label: 'Compliance',   href: '/operations/compliance', area: 'fleet' },
+      { id: 'diesel',       label: 'Diesel',       href: '/operations/diesel', area: 'fuel' },
+      { id: 'fuel-vendors', label: 'Fuel Vendors', href: '/operations/diesel/vendors', area: 'fuel' },
+      { id: 'fuel-reports', label: 'Fuel Reports', href: '/operations/diesel/reports', area: 'fuel' },
     ],
   },
   {
     id: 'load-ops',
     label: 'Load Operations',
     icon: 'package',
+    area: 'loads',
     items: [
       { id: 'loads',    label: 'Loads',                  href: '/loads' },
       { id: 'planner',  label: 'Dispatch Planner',       href: '/dispatch/planner' },
@@ -72,31 +81,55 @@ export const NAV: NavSection[] = [
     label: 'Lane Analyzer',
     icon: 'chart-bar',
     href: '/lane-analyzer',
+    area: 'reports',
   },
   {
     id: 'accounting',
     label: 'Accounting',
     icon: 'calculator',
+    area: 'accounting',
     items: [
       { id: 'invoices',            label: 'Invoices',            href: '/invoices' },
       { id: 'driver-settlements',  label: 'Driver Settlements',  href: '/accounting/driver-settlements' },
       { id: 'carrier-settlements', label: 'Carrier Settlements', href: '/accounting/carrier-settlements' },
-      { id: 'reports',             label: 'Reports',             href: '/accounting/reports' },
+      { id: 'reports',             label: 'Reports',             href: '/accounting/reports', area: 'reports' },
     ],
   },
   {
     id: 'settings',
     label: 'Settings',
     icon: 'settings',
+    area: 'settings',
     items: [
       { id: 'general',      label: 'General',         href: '/settings/general' },
-      { id: 'team',         label: 'Team & roles',    href: '/settings/team' },
-      { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles' },
+      { id: 'team',         label: 'Team & roles',    href: '/settings/team', area: 'team' },
+      { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles', area: 'accounting' },
       { id: 'integrations', label: 'Integrations',    href: '/settings/integrations' },
       { id: 'billing',      label: 'Billing & usage', href: '/settings/billing' },
     ],
   },
 ];
+
+/**
+ * NAV filtered to what the caller's role may see (`view` on the item's
+ * area, falling back to the section's; unannotated entries always show).
+ * A section survives if its own destination is visible or any item is.
+ */
+export function visibleNav(canView: (area: string) => boolean): NavSection[] {
+  const out: NavSection[] = [];
+  for (const sec of NAV) {
+    if (sec.items) {
+      const items = sec.items.filter((it) => {
+        const area = it.area ?? sec.area;
+        return !area || canView(area);
+      });
+      if (items.length > 0) out.push({ ...sec, items });
+    } else if (!sec.area || canView(sec.area)) {
+      out.push(sec);
+    }
+  }
+  return out;
+}
 
 /** Resolve the breadcrumb trail for a given pathname. Uses the same
  *  longest-match logic as `findActive` so a deeply-nested route

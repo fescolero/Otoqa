@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getTeamContext, isTeamContextError } from '@/lib/team-server';
+import { getTeamContext, isTeamContextError, requireTeamManage } from '@/lib/team-server';
 import { allPermissionSlugs, permissionsFromMatrix, type PermMatrix } from '@/lib/team-rbac';
 
 /**
@@ -15,6 +15,10 @@ async function resolveOrgRole(slug: string) {
   const ctx = await getTeamContext();
   if (isTeamContextError(ctx)) {
     return { failure: NextResponse.json({ error: ctx.error }, { status: ctx.status }) };
+  }
+  const denied = await requireTeamManage(ctx);
+  if (denied) {
+    return { failure: NextResponse.json({ error: denied.error }, { status: denied.status }) };
   }
   try {
     const role = await ctx.workos.authorization.getOrganizationRole(ctx.organizationId, slug);

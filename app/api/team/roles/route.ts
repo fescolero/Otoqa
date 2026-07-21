@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getTeamContext, isTeamContextError, listAllPermissionSlugs } from '@/lib/team-server';
+import { getTeamContext, isTeamContextError, listAllPermissionSlugs, requireTeamManage } from '@/lib/team-server';
 import { humanizeRoleSlug } from '@/lib/team-utils';
 import { allPermissionSlugs, permissionsFromMatrix, type PermMatrix } from '@/lib/team-rbac';
 import type { TeamRoleDTO } from '@/lib/team-types';
@@ -74,6 +74,8 @@ export async function POST(request: Request) {
     if (isTeamContextError(ctx)) {
       return NextResponse.json({ error: ctx.error }, { status: ctx.status });
     }
+    const denied = await requireTeamManage(ctx);
+    if (denied) return NextResponse.json({ error: denied.error }, { status: denied.status });
     const { workos, organizationId } = ctx;
 
     const body = (await request.json()) as {

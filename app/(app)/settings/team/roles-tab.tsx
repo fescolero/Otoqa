@@ -97,6 +97,7 @@ export function RolesTab({
   roles,
   rbacAvailable,
   seeding,
+  canManage,
   visual,
   memberCountFor,
   onOpenRole,
@@ -105,6 +106,8 @@ export function RolesTab({
   roles: TeamRoleDTO[];
   rbacAvailable: boolean;
   seeding: boolean;
+  /** team:manage — without it the tab is read-only (server enforces too). */
+  canManage: boolean;
   visual: (slug: string) => RoleVisual;
   memberCountFor: (slug: string) => number;
   onOpenRole: (slug: string) => void;
@@ -201,6 +204,7 @@ export function RolesTab({
         );
       })}
 
+      {canManage && (
       <button
         type="button"
         onClick={onCreateRole}
@@ -216,6 +220,7 @@ export function RolesTab({
           </span>
         </span>
       </button>
+      )}
       </div>
     </div>
   );
@@ -266,6 +271,7 @@ export function RoleEditorView({
   role,
   roles,
   holders,
+  canManage,
   visual,
   onBack,
   onOpenRole,
@@ -276,6 +282,8 @@ export function RoleEditorView({
   role: TeamRoleDTO;
   roles: TeamRoleDTO[];
   holders: TeamMemberDTO[];
+  /** team:manage — without it the matrix and actions are read-only. */
+  canManage: boolean;
   visual: (slug: string) => RoleVisual;
   onBack: () => void;
   onOpenRole: (slug: string) => void;
@@ -285,6 +293,7 @@ export function RoleEditorView({
 }) {
   const v = visual(role.slug);
   const system = role.type === 'environment';
+  const readOnly = system || !canManage;
   const [matrix, setMatrix] = useState<PermMatrix>(() => matrixFromPermissions(role.permissions));
   const [saving, setSaving] = useState(0);
   useEffect(() => setMatrix(matrixFromPermissions(role.permissions)), [role.slug, role.permissions]);
@@ -352,10 +361,12 @@ export function RoleEditorView({
               />
               {saving > 0 ? 'Saving…' : 'All changes saved'}
             </span>
-            <WBtn size="sm" leading="copy" onClick={() => onDuplicate(role)}>
-              Duplicate
-            </WBtn>
-            {!system && (
+            {canManage && (
+              <WBtn size="sm" leading="copy" onClick={() => onDuplicate(role)}>
+                Duplicate
+              </WBtn>
+            )}
+            {!system && canManage && (
               <WBtn
                 size="sm"
                 danger
@@ -409,7 +420,7 @@ export function RoleEditorView({
                   <div className="mt-px truncate text-[11.5px] text-[var(--text-tertiary)]">{a.hint}</div>
                 </div>
                 <div className="shrink-0">
-                  <PermSeg value={matrix[a.id]} disabled={system} onChange={(lvl) => void setArea(a.id, lvl)} />
+                  <PermSeg value={matrix[a.id]} disabled={readOnly} onChange={(lvl) => void setArea(a.id, lvl)} />
                 </div>
               </div>
             ))}

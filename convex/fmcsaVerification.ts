@@ -38,7 +38,7 @@ import {
   mutation,
 } from './_generated/server';
 import { internal } from './_generated/api';
-import { assertCallerOwnsOrg } from './lib/auth';
+import { assertOrgPermission } from './lib/auth';
 
 const QCMOBILE_BASE_URL = 'https://mobile.fmcsa.dot.gov/qc/services';
 const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
@@ -86,7 +86,7 @@ const docketDigits = (value: string) => value.replace(/\D/g, '').replace(/^0+(?=
 export const requestVerification = mutation({
   args: { workosOrgId: v.string() },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    await assertOrgPermission(ctx, args.workosOrgId, 'settings:edit');
 
     const org = await ctx.db
       .query('organizations')

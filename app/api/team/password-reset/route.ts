@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getTeamContext, isTeamContextError } from '@/lib/team-server';
+import { getTeamContext, isTeamContextError, requireTeamManage } from '@/lib/team-server';
 
 /**
  * POST /api/team/password-reset — { email } → { url }.
@@ -15,6 +15,8 @@ export async function POST(request: Request) {
     if (isTeamContextError(ctx)) {
       return NextResponse.json({ error: ctx.error }, { status: ctx.status });
     }
+    const denied = await requireTeamManage(ctx);
+    if (denied) return NextResponse.json({ error: denied.error }, { status: denied.status });
     const { workos, organizationId } = ctx;
 
     const { email } = (await request.json()) as { email?: string };

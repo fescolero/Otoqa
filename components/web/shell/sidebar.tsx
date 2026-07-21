@@ -20,7 +20,15 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { WIcon } from '@/components/web';
-import { NAV, findActive, type NavItem, type NavSection } from './nav';
+import { NAV, findActive, visibleNav, type NavItem, type NavSection } from './nav';
+import { usePermissions } from '@/lib/use-permissions';
+
+/** NAV filtered by the caller's role — unannotated entries and legacy
+ *  sessions see everything (policy in convex/lib/permissions.ts). */
+function useVisibleNav(): NavSection[] {
+  const { can } = usePermissions();
+  return visibleNav((area) => can(area, 'view'));
+}
 import { useUserPreferences } from './use-user-preferences';
 
 const RAIL_W = 56;
@@ -130,6 +138,7 @@ function RailLayer({
   activeSection?: NavSection;
   onPickSection: (s: NavSection) => void;
 }) {
+  const nav = useVisibleNav();
   return (
     <aside
       className="absolute inset-y-0 left-0 flex flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-hairline)]"
@@ -151,7 +160,7 @@ function RailLayer({
         </button>
       )}
       <nav className="flex-1 overflow-y-auto py-2 flex flex-col items-center gap-0.5 scroll-thin">
-        {NAV.map((sec) => {
+        {nav.map((sec) => {
           const active = activeSection?.id === sec.id;
           const inner = (
             <span
@@ -216,6 +225,7 @@ function ExpandedPanel({
   sidebarMode: 'hover' | 'pinned' | 'rail';
   onTogglePin: () => void;
 }) {
+  const nav = useVisibleNav();
   return (
     <aside
       style={{
@@ -254,7 +264,7 @@ function ExpandedPanel({
         </button>
       )}
       <nav className="flex-1 overflow-y-auto py-2 px-2 flex flex-col gap-0.5 scroll-thin">
-        {NAV.map((sec) => (
+        {nav.map((sec) => (
           <SectionGroup
             key={sec.id}
             section={sec}

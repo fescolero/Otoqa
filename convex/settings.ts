@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { assertCallerOwnsOrg, assertOrgPermission, requireCallerOrgId } from './lib/auth';
 import { logAudit } from './lib/audit';
 import { seedChargeComponentsLogic } from './payEngine/seedChargeComponents';
 import { getPeriodKey } from './accountingStatsHelpers';
@@ -35,7 +35,8 @@ const contactValidator = v.object({
  */
 export const generateUploadUrl = mutation({
   handler: async (ctx) => {
-    await requireCallerOrgId(ctx);
+    const orgId = await requireCallerOrgId(ctx);
+    await assertOrgPermission(ctx, orgId, 'settings:edit');
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -120,8 +121,10 @@ export const updateOrgSettings = mutation({
     }),
   },
   handler: async (ctx, args) => {
-    await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // assertCallerOwnsOrg already throws on unauthenticated, so identity is non-null
+    // Workspace-profile writes need settings:edit (admins always pass;
+    // pre-RBAC sessions are grandfathered — see convex/lib/permissions.ts).
+    await assertOrgPermission(ctx, args.workosOrgId, 'settings:edit');
+    // assertOrgPermission already throws on unauthenticated, so identity is non-null
     const identity = (await ctx.auth.getUserIdentity())!;
 
     // null means "clear this field" — Convex removes fields patched to

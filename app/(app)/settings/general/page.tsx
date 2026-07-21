@@ -37,6 +37,7 @@ import { toast } from 'sonner';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';
+import { usePermissions } from '@/lib/use-permissions';
 
 import {
   Avatar,
@@ -700,6 +701,9 @@ interface WorkosOrg {
 export default function GeneralSettingsPage() {
   const organizationId = useOrganizationId();
   const { user } = useAuth();
+  // Soft client guard — the Convex mutations enforce settings:edit again.
+  const { can } = usePermissions();
+  const canEdit = can('settings', 'edit');
 
   const org = useQuery(
     api.settings.getOrgSettings,
@@ -737,6 +741,10 @@ export default function GeneralSettingsPage() {
 
   const commit = async (updates: OrgUpdates) => {
     if (!organizationId) return;
+    if (!canEdit) {
+      toast.error("Your role can't edit workspace settings — ask an admin.");
+      return;
+    }
     setPendingSaves((n) => n + 1);
     try {
       await updateOrgSettings({ workosOrgId: organizationId, updates });
@@ -783,6 +791,10 @@ export default function GeneralSettingsPage() {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file || !organizationId) return;
+    if (!canEdit) {
+      toast.error("Your role can't edit workspace settings — ask an admin.");
+      return;
+    }
     setUploadingLogo(true);
     try {
       const [traits, uploadUrl] = await Promise.all([analyzeLogoBlob(file), generateUploadUrl()]);
@@ -875,6 +887,10 @@ export default function GeneralSettingsPage() {
 
   const handleVerifyNow = async () => {
     if (!organizationId) return;
+    if (!canEdit) {
+      toast.error("Your role can't edit workspace settings — ask an admin.");
+      return;
+    }
     try {
       await requestVerification({ workosOrgId: organizationId });
       toast.success('Verification started — results update here shortly.');

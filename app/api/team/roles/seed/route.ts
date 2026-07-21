@@ -4,6 +4,7 @@ import {
   isConflict,
   isTeamContextError,
   listAllPermissionSlugs,
+  requireTeamManage,
 } from '@/lib/team-server';
 import {
   allPermissionSlugs,
@@ -28,6 +29,8 @@ export async function POST() {
     if (isTeamContextError(ctx)) {
       return NextResponse.json({ error: ctx.error }, { status: ctx.status });
     }
+    const denied = await requireTeamManage(ctx);
+    if (denied) return NextResponse.json({ error: denied.error }, { status: denied.status });
     const { workos } = ctx;
 
     // 1. Permission catalog. The list is paginated (read fully) AND a

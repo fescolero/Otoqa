@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getTeamContext, isTeamContextError } from '@/lib/team-server';
+import { getTeamContext, isTeamContextError, requireTeamManage } from '@/lib/team-server';
 
 /**
  * Membership actions. Every action first proves the membership belongs to
@@ -14,6 +14,8 @@ import { getTeamContext, isTeamContextError } from '@/lib/team-server';
 async function resolveMembership(membershipId: string) {
   const ctx = await getTeamContext();
   if (isTeamContextError(ctx)) return { failure: NextResponse.json({ error: ctx.error }, { status: ctx.status }) };
+  const denied = await requireTeamManage(ctx);
+  if (denied) return { failure: NextResponse.json({ error: denied.error }, { status: denied.status }) };
   const membership = await ctx.workos.userManagement.getOrganizationMembership(membershipId);
   if (membership.organizationId !== ctx.organizationId) {
     return { failure: NextResponse.json({ error: 'Membership not found' }, { status: 404 }) };

@@ -38,6 +38,7 @@ import { toast } from 'sonner';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';
+import { usePermissions } from '@/lib/use-permissions';
 
 import { Avatar, Chip, CountBadge, Kbd, SettingsHeader, WBtn, WIcon, type IconName } from '@/components/web';
 import {
@@ -529,6 +530,9 @@ interface ConfirmState {
 export default function TeamSettingsPage() {
   const organizationId = useOrganizationId();
   const { user } = useAuth();
+  // UI gating only — every mutation is enforced again server-side.
+  const { can } = usePermissions();
+  const canManage = can('team', 'manage');
 
   const [payload, setPayload] = useState<TeamPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -852,6 +856,7 @@ export default function TeamSettingsPage() {
         <RoleEditorView
           role={editingRole}
           roles={roles}
+          canManage={canManage}
           holders={members.filter((m) => m.roleSlug === editingRole.slug && m.status === 'active')}
           visual={roleStyle}
           onBack={() => setRoleEditSlug(null)}
@@ -867,9 +872,11 @@ export default function TeamSettingsPage() {
         title="Team & roles"
         subtitle="Everyone with access to your Otoqa workspace and what each role can do."
         actions={
-          <WBtn size="sm" accent leading="plus" onClick={() => setInviteOpen(true)}>
-            Invite people
-          </WBtn>
+          canManage ? (
+            <WBtn size="sm" accent leading="plus" onClick={() => setInviteOpen(true)}>
+              Invite people
+            </WBtn>
+          ) : undefined
         }
       />
 
@@ -981,9 +988,11 @@ export default function TeamSettingsPage() {
                 ? 'No invites are outstanding right now.'
                 : 'Invite a teammate to give them workspace access.'}
             </div>
-            <WBtn size="sm" accent leading="plus" onClick={() => setInviteOpen(true)}>
-              Invite people
-            </WBtn>
+            {canManage && (
+              <WBtn size="sm" accent leading="plus" onClick={() => setInviteOpen(true)}>
+                Invite people
+              </WBtn>
+            )}
           </div>
         ) : (
           <div style={{ background: 'var(--bg-surface)' }}>
@@ -1050,7 +1059,9 @@ export default function TeamSettingsPage() {
                     <span className="text-[12.5px] text-[var(--text-secondary)]">{lastActiveLabel(m)}</span>
                   </div>
                   <div className="flex justify-end" style={{ padding: '12px 28px 12px 16px' }}>
-                    <KebabMenu title="Member actions" items={kebab.items} roleSubmenu={kebab.roleSubmenu} />
+                    {canManage && (
+                      <KebabMenu title="Member actions" items={kebab.items} roleSubmenu={kebab.roleSubmenu} />
+                    )}
                   </div>
                 </div>
               );
@@ -1088,7 +1099,7 @@ export default function TeamSettingsPage() {
                   </span>
                 </div>
                 <div className="flex justify-end" style={{ padding: '12px 28px 12px 16px' }}>
-                  <KebabMenu title="Invite actions" items={inviteKebab(i)} />
+                  {canManage && <KebabMenu title="Invite actions" items={inviteKebab(i)} />}
                 </div>
               </div>
             ))}
@@ -1120,6 +1131,7 @@ export default function TeamSettingsPage() {
       ) : (
         <RolesTab
           roles={roles}
+          canManage={canManage}
           rbacAvailable={rolesData?.rbacAvailable ?? true}
           seeding={rolesData === null || (rolesData.rbacAvailable && !rolesData.seeded)}
           visual={roleStyle}
