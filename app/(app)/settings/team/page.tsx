@@ -23,12 +23,14 @@
  *   lands with the Roles phase), and "Send password reset" copies the
  *   reset link (WorkOS doesn't email API-created resets).
  *
- * Visual reference: Otoqa Web design — settings-team.jsx (Members tab).
- * The Roles tab ships separately; until then this page has no tab bar.
+ * Visual reference: Otoqa Web design — settings-team.jsx. The Roles tab
+ * (role cards + capability-matrix editor) lives in ./roles-tab.tsx; role
+ * data comes from /api/team/roles, with the permission catalog and preset
+ * roles auto-seeded into WorkOS on first visit.
  */
 
 import * as React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { useQuery } from 'convex/react';
@@ -58,6 +60,8 @@ import {
 
 import type { PendingInviteDTO, TeamMemberDTO, TeamPayload, TeamRoleDTO } from '@/lib/team-types';
 import { humanizeRoleSlug, relativeActivity } from '@/lib/team-utils';
+import { PERM_AREAS, PERM_LEVELS, matrixFromPermissions } from '@/lib/team-rbac';
+import { RoleEditorView, RolesTab } from './roles-tab';
 
 // ─── Role visuals — known slugs get the design's tones; custom slugs get a
 // stable palette pick so every role reads distinctly. ─────────────────────
@@ -354,6 +358,42 @@ function InviteModal({
               </span>
             )}
           </label>
+
+          {/* Permission preview — only once the role catalog carries real
+              permissions (post-seeding). */}
+          {selectedRole && selectedRole.permissions.length > 0 && (
+            <div className="overflow-hidden rounded-lg border border-[var(--border-hairline)]">
+              <div className="tw-label flex items-center gap-2 border-b border-[var(--border-hairline)] bg-[var(--bg-surface-2)] px-3 py-2 text-[11px]">
+                <RoleTag slug={selectedRole.slug} name={selectedRole.name} /> can access
+              </div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 px-3 py-2.5">
+                {(() => {
+                  const matrix = matrixFromPermissions(selectedRole.permissions);
+                  const tone = roleStyle(selectedRole.slug).tone;
+                  return PERM_AREAS.map((a) => {
+                    const lvl = matrix[a.id];
+                    const on = lvl !== 'none';
+                    return (
+                      <div
+                        key={a.id}
+                        className="flex items-center gap-2 text-[12px]"
+                        style={{
+                          color: on ? 'var(--text-secondary)' : 'var(--text-tertiary)',
+                          opacity: on ? 1 : 0.55,
+                        }}
+                      >
+                        <WIcon name={on ? 'check' : 'close'} size={12} color={on ? '#0F8C5F' : 'var(--text-tertiary)'} />
+                        <span className="flex-1 truncate">{a.label}</span>
+                        <span className="text-[11px] font-semibold" style={{ color: on ? tone : 'var(--text-tertiary)' }}>
+                          {PERM_LEVELS.find((l) => l.value === lvl)?.label}
+                        </span>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center justify-between gap-3 border-t border-[var(--border-hairline)] bg-[var(--bg-surface-2)] px-[18px] py-3">
@@ -374,11 +414,120 @@ function InviteModal({
   );
 }
 
+// ─── Create-custom-role modal ─────────────────────────────────────────────
+
+function CreateRoleModal({
+  roles,
+  onClose,
+  onCreated,
+}: {
+  roles: TeamRoleDTO[];
+  onClose: () => void;
+  onCreated: (slug: string) => void;
+}) {
+  const [name, setName] = useState('');
+  const [baseSlug, setBaseSlug] = useState(roles[0]?.slug ?? '');
+  const [creating, setCreating] = useState(false);
+  const base = roles.find((r) => r.slug === baseSlug);
+  const canCreate = name.trim().length >= 2 && !creating;
+
+  const create = async () => {
+    if (!canCreate) return;
+    setCreating(true);
+    try {
+      const result = (await callTeamApi('/api/team/roles', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: name.trim(),
+          ...(base ? { matrix: matrixFromPermissions(base.permissions) } : {}),
+        }),
+      })) as { slug: string };
+      toast.success(`Role "${name.trim()}" created`);
+      onCreated(result.slug);
+      onClose();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to create role');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      onMouseDown={onClose}
+      className="fixed inset-0 z-[90] flex items-center justify-center p-6"
+      style={{ background: 'rgba(15,22,36,0.32)' }}
+    >
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        className="flex w-[440px] max-w-full flex-col overflow-hidden rounded-[10px] border border-[var(--border-hairline-strong)] bg-[var(--bg-surface)] shadow-[var(--shadow-popover)]"
+      >
+        <div className="border-b border-[var(--border-hairline)] px-[18px] py-3.5">
+          <div className="tw-label text-[10.5px] mb-0.5">Team & roles</div>
+          <div className="text-[15px] font-semibold">Create custom role</div>
+        </div>
+        <div className="flex flex-col gap-4 p-[18px]">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[12.5px] font-semibold">Role name</span>
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Night dispatch"
+              className="focus-ring h-9 rounded-[7px] border border-[var(--border-hairline-strong)] bg-[var(--bg-surface)] px-2.5 text-[13px] outline-none"
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[12.5px] font-semibold">Start from</span>
+            <Select value={baseSlug} onValueChange={setBaseSlug}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Copy permissions from…" />
+              </SelectTrigger>
+              <SelectContent>
+                {roles.map((r) => (
+                  <SelectItem key={r.slug} value={r.slug}>
+                    {r.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-[11.5px] text-[var(--text-tertiary)]">
+              The new role starts with this role&rsquo;s permissions — adjust them in the editor.
+            </span>
+          </label>
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-[var(--border-hairline)] bg-[var(--bg-surface-2)] px-[18px] py-3">
+          <WBtn size="sm" onClick={onClose}>
+            Cancel
+          </WBtn>
+          <WBtn size="sm" accent leading="plus" onClick={() => void create()} disabled={!canCreate}>
+            {creating ? 'Creating…' : 'Create role'}
+          </WBtn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Page
 // ═══════════════════════════════════════════════════════════════════════════
 
 type StatusFilter = 'all' | 'active' | 'invited' | 'deactivated';
+
+interface RolesResponse {
+  roles: TeamRoleDTO[];
+  seeded: boolean;
+  rbacAvailable: boolean;
+}
 
 interface ConfirmState {
   title: string;
@@ -399,6 +548,12 @@ export default function TeamSettingsPage() {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const [tab, setTab] = useState<'members' | 'roles'>('members');
+  const [rolesData, setRolesData] = useState<RolesResponse | null>(null);
+  const [roleEditSlug, setRoleEditSlug] = useState<string | null>(null);
+  const [createRoleOpen, setCreateRoleOpen] = useState(false);
+  const seedAttempted = useRef(false);
+
   const load = useCallback(async () => {
     try {
       setLoadError(null);
@@ -409,9 +564,30 @@ export default function TeamSettingsPage() {
     }
   }, []);
 
+  // Role catalog — auto-seeds the permission catalog + preset roles into
+  // WorkOS on first visit (idempotent server-side).
+  const loadRoles = useCallback(async () => {
+    try {
+      let data = (await callTeamApi('/api/team/roles')) as unknown as RolesResponse;
+      if (data.rbacAvailable && !data.seeded && !seedAttempted.current) {
+        seedAttempted.current = true;
+        try {
+          await callTeamApi('/api/team/roles/seed', { method: 'POST' });
+          data = (await callTeamApi('/api/team/roles')) as unknown as RolesResponse;
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Failed to set up roles');
+        }
+      }
+      setRolesData(data);
+    } catch {
+      setRolesData({ roles: [], seeded: false, rbacAvailable: false });
+    }
+  }, []);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadRoles();
+  }, [load, loadRoles]);
 
   // Freshest activity signal — latest audited action per member.
   const memberUserIds = useMemo(
@@ -447,9 +623,61 @@ export default function TeamSettingsPage() {
 
   const members = useMemo(() => payload?.members ?? [], [payload?.members]);
   const invitations = useMemo(() => payload?.invitations ?? [], [payload?.invitations]);
-  const roles = payload?.roles ?? [];
+  // Prefer the full catalog (carries permissions) over the members payload's
+  // basic role list, which only serves as a degraded fallback.
+  const roles =
+    rolesData?.roles && rolesData.roles.length > 0 ? rolesData.roles : (payload?.roles ?? []);
   const roleName = (slug: string) =>
     roles.find((r) => r.slug === slug)?.name ?? humanizeRoleSlug(slug);
+
+  const memberCountFor = (slug: string) =>
+    members.filter((m) => m.roleSlug === slug && m.status === 'active').length;
+
+  const openRole = (slug: string) => {
+    setTab('roles');
+    setRoleEditSlug(slug);
+  };
+
+  const duplicateRole = (role: TeamRoleDTO) =>
+    void (async () => {
+      try {
+        const result = (await callTeamApi('/api/team/roles', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: `${role.name} (copy)`,
+            ...(role.description ? { description: role.description } : {}),
+            matrix: matrixFromPermissions(role.permissions),
+          }),
+        })) as { slug: string };
+        toast.success(`Duplicated as "${role.name} (copy)"`);
+        await loadRoles();
+        setRoleEditSlug(result.slug);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Failed to duplicate role');
+      }
+    })();
+
+  const deleteRole = (role: TeamRoleDTO) =>
+    setConfirm({
+      title: `Delete the ${role.name} role?`,
+      description: 'This removes the role and its permissions. Nobody holds it, so no access changes.',
+      confirmLabel: 'Delete role',
+      action: async () => {
+        setBusy(true);
+        try {
+          await callTeamApi(`/api/team/roles/${encodeURIComponent(role.slug)}`, {
+            method: 'DELETE',
+          });
+          toast.success(`${role.name} deleted`);
+          setRoleEditSlug(null);
+          await loadRoles();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Failed to delete role');
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
 
   const counts = {
     all: members.length + invitations.length,
@@ -626,8 +854,24 @@ export default function TeamSettingsPage() {
 
   const GRID = 'minmax(210px, 1.1fr) minmax(190px, 1.3fr) 180px 130px 90px 200px 44px';
 
+  const editingRole = roleEditSlug ? (roles.find((r) => r.slug === roleEditSlug) ?? null) : null;
+
   return (
     <div className="flex-1 overflow-hidden flex flex-col min-w-0">
+      {editingRole ? (
+        <RoleEditorView
+          role={editingRole}
+          roles={roles}
+          holders={members.filter((m) => m.roleSlug === editingRole.slug && m.status === 'active')}
+          visual={roleStyle}
+          onBack={() => setRoleEditSlug(null)}
+          onOpenRole={(slug) => setRoleEditSlug(slug)}
+          onDuplicate={duplicateRole}
+          onDelete={deleteRole}
+          onChanged={loadRoles}
+        />
+      ) : (
+        <>
       <SettingsHeader
         eyebrow="Settings"
         title="Team & roles"
@@ -639,6 +883,38 @@ export default function TeamSettingsPage() {
         }
       />
 
+      {/* Members | Roles tabs */}
+      <div className="flex border-b border-[var(--border-hairline)] bg-[var(--bg-surface)] px-7">
+        {(
+          [
+            { id: 'members', label: 'Members', n: counts.active + counts.invited },
+            { id: 'roles', label: 'Roles', n: roles.length },
+          ] as Array<{ id: 'members' | 'roles'; label: string; n: number }>
+        ).map((t) => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className="focus-ring relative inline-flex h-10 items-center gap-2 px-3.5 text-[13px]"
+              style={{
+                color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                fontWeight: active ? 600 : 500,
+              }}
+            >
+              {t.label}
+              <CountBadge n={t.n} tone={active ? 'accent' : 'neutral'} />
+              {active && (
+                <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-sm bg-[var(--accent)]" />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === 'members' ? (
+        <>
       {/* Toolbar — status filters + search */}
       <div className="flex items-stretch border-b border-[var(--border-hairline)] bg-[var(--bg-surface)] px-7">
         {(
@@ -757,7 +1033,14 @@ export default function TeamSettingsPage() {
                     <span className="block truncate text-[12.5px] text-[var(--text-secondary)]">{m.email}</span>
                   </div>
                   <div style={{ padding: '12px 16px' }}>
-                    <RoleTag slug={m.roleSlug} name={roleName(m.roleSlug)} />
+                    <button
+                      type="button"
+                      onClick={() => openRole(m.roleSlug)}
+                      className="focus-ring rounded-full"
+                      title={`Open ${roleName(m.roleSlug)} role`}
+                    >
+                      <RoleTag slug={m.roleSlug} name={roleName(m.roleSlug)} />
+                    </button>
                   </div>
                   <div style={{ padding: '12px 16px' }}>
                     {deactivated ? <Chip status="inactive" label="Deactivated" /> : <Chip status="active" />}
@@ -843,6 +1126,33 @@ export default function TeamSettingsPage() {
           .
         </span>
       </div>
+        </>
+      ) : (
+        <RolesTab
+          roles={roles}
+          rbacAvailable={rolesData?.rbacAvailable ?? true}
+          seeding={rolesData === null || (rolesData.rbacAvailable && !rolesData.seeded)}
+          visual={roleStyle}
+          memberCountFor={memberCountFor}
+          onOpenRole={openRole}
+          onCreateRole={() => setCreateRoleOpen(true)}
+        />
+      )}
+        </>
+      )}
+
+      {createRoleOpen && (
+        <CreateRoleModal
+          roles={roles}
+          onClose={() => setCreateRoleOpen(false)}
+          onCreated={(slug) => {
+            void loadRoles().then(() => {
+              setTab('roles');
+              setRoleEditSlug(slug);
+            });
+          }}
+        />
+      )}
 
       {inviteOpen && (
         <InviteModal roles={roles} onClose={() => setInviteOpen(false)} onSent={() => void load()} />
