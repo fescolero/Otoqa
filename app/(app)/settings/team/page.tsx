@@ -57,6 +57,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 import type { PendingInviteDTO, TeamMemberDTO, TeamPayload, TeamRoleDTO } from '@/lib/team-types';
 import { humanizeRoleSlug, relativeActivity } from '@/lib/team-utils';
@@ -281,12 +287,9 @@ function InviteModal({
     }
   }, [canSend, emails, roleSlug, onClose, onSent]);
 
+  // Escape / overlay-click close come from Radix; ⌘↵ submit stays ours.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-      }
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         void send();
@@ -294,25 +297,21 @@ function InviteModal({
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onClose, send]);
+  }, [send]);
 
   return (
-    <div
-      onMouseDown={onClose}
-      className="fixed inset-0 z-[90] flex items-center justify-center p-6"
-      style={{ background: 'rgba(15,22,36,0.32)' }}
-    >
-      <div
-        onMouseDown={(e) => e.stopPropagation()}
-        className="flex w-[560px] max-w-full flex-col overflow-hidden rounded-[10px] border border-[var(--border-hairline-strong)] bg-[var(--bg-surface)] shadow-[var(--shadow-popover)]"
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        showCloseButton={false}
+        className="w-[560px] gap-0 overflow-hidden rounded-[10px] border-[var(--border-hairline-strong)] bg-[var(--bg-surface)] p-0 shadow-[var(--shadow-popover)] sm:max-w-[560px]"
       >
         <div className="flex items-start justify-between border-b border-[var(--border-hairline)] px-[18px] py-3.5">
           <div>
             <div className="tw-label text-[10.5px] mb-0.5">Team & roles</div>
-            <div className="text-[15px] font-semibold">Invite people</div>
-            <div className="mt-0.5 max-w-[420px] text-[12px] text-[var(--text-tertiary)]">
+            <DialogTitle className="text-[15px] font-semibold">Invite people</DialogTitle>
+            <DialogDescription className="mt-0.5 max-w-[420px] text-[12px] text-[var(--text-tertiary)]">
               They&rsquo;ll get an email to set a password and join your workspace.
-            </div>
+            </DialogDescription>
           </div>
           <button
             type="button"
@@ -409,8 +408,8 @@ function InviteModal({
             </WBtn>
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -452,27 +451,18 @@ function CreateRoleModal({
     }
   };
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
   return (
-    <div
-      onMouseDown={onClose}
-      className="fixed inset-0 z-[90] flex items-center justify-center p-6"
-      style={{ background: 'rgba(15,22,36,0.32)' }}
-    >
-      <div
-        onMouseDown={(e) => e.stopPropagation()}
-        className="flex w-[440px] max-w-full flex-col overflow-hidden rounded-[10px] border border-[var(--border-hairline-strong)] bg-[var(--bg-surface)] shadow-[var(--shadow-popover)]"
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        showCloseButton={false}
+        className="w-[440px] gap-0 overflow-hidden rounded-[10px] border-[var(--border-hairline-strong)] bg-[var(--bg-surface)] p-0 shadow-[var(--shadow-popover)] sm:max-w-[440px]"
       >
         <div className="border-b border-[var(--border-hairline)] px-[18px] py-3.5">
           <div className="tw-label text-[10.5px] mb-0.5">Team & roles</div>
-          <div className="text-[15px] font-semibold">Create custom role</div>
+          <DialogTitle className="text-[15px] font-semibold">Create custom role</DialogTitle>
+          <DialogDescription className="sr-only">
+            Name the role and pick which existing role to copy permissions from.
+          </DialogDescription>
         </div>
         <div className="flex flex-col gap-4 p-[18px]">
           <label className="flex flex-col gap-1.5">
@@ -512,8 +502,8 @@ function CreateRoleModal({
             {creating ? 'Creating…' : 'Create role'}
           </WBtn>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
