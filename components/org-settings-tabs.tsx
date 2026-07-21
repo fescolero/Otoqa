@@ -3,7 +3,6 @@
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
-  Users,
   Plug,
   Truck,
   Route,
@@ -15,8 +14,6 @@ import {
 } from 'lucide-react';
 import { AutoAssignmentSettings } from '@/components/auto-assignment-settings';
 import { PartnerApiSettings } from '@/components/partner-api-settings';
-import { WidgetsProvider } from '@/components/widgets-provider';
-import { UsersManagement, WorkOsWidgets } from '@workos-inc/widgets';
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -34,7 +31,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import '@workos-inc/widgets/styles.css';
 
 interface Organization {
   id: string;
@@ -58,7 +54,6 @@ interface OrgSettingsTabsProps {
 }
 
 export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
-  const [widgetToken, setWidgetToken] = useState<string | null>(null);
   const [fourKitesModalOpen, setFourKitesModalOpen] = useState(false);
   const [fourKitesConfigureOpen, setFourKitesConfigureOpen] = useState(false);
   const [disconnectDialogOpen, setDisconnectDialogOpen] = useState(false);
@@ -138,29 +133,9 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
     }
   }, [manualSyncRequestedAt, fourKitesIntegration?.lastSyncStats.lastSyncTime]);
 
-  useEffect(() => {
-    async function fetchToken() {
-      try {
-        const response = await fetch('/api/widgets/token');
-        if (response.ok) {
-          const data = await response.json();
-          setWidgetToken(data.token);
-        }
-      } catch (error) {
-        console.error('Failed to fetch widget token:', error);
-      }
-    }
-    fetchToken();
-  }, []);
-
-
   return (
-    <Tabs defaultValue="users" className="w-full">
-      <TabsList className="grid w-full md:w-[500px] grid-cols-4">
-        <TabsTrigger value="users" className="flex items-center gap-2">
-          <Users className="h-4 w-4" />
-          <span className="hidden sm:inline">Users</span>
-        </TabsTrigger>
+    <Tabs defaultValue="automation" className="w-full">
+      <TabsList className="grid w-full md:w-[375px] grid-cols-3">
         <TabsTrigger value="automation" className="flex items-center gap-2">
           <Route className="h-4 w-4" />
           <span className="hidden sm:inline">Automation</span>
@@ -174,21 +149,6 @@ export function OrgSettingsTabs({ organization, user }: OrgSettingsTabsProps) {
           <span className="hidden sm:inline">API Partners</span>
         </TabsTrigger>
       </TabsList>
-
-      {/* Users Tab */}
-      <TabsContent value="users" className="space-y-6 mt-6">
-        {widgetToken ? (
-          <WidgetsProvider>
-            <WorkOsWidgets>
-              <UsersManagement authToken={widgetToken} />
-            </WorkOsWidgets>
-          </WidgetsProvider>
-        ) : (
-          <Card className="p-6">
-            <div className="text-center text-muted-foreground">Loading users management...</div>
-          </Card>
-        )}
-      </TabsContent>
 
       {/* Automation Tab */}
       <TabsContent value="automation" className="mt-6">

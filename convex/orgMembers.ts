@@ -108,3 +108,25 @@ export const resolveMemberNames = query({
     return names;
   },
 });
+
+// Last audit-log action per member (caller's org only) — powers the
+// "Last active" column on Settings → Team. Fresher than WorkOS
+// lastSignInAt: any audited action counts as activity, not just sign-ins.
+export const getLastActionTimes = query({
+  args: { userIds: v.array(v.string()) },
+  handler: async (ctx, args): Promise<Record<string, number>> => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const out: Record<string, number> = {};
+    for (const userId of new Set(args.userIds.slice(0, 100))) {
+      const last = await ctx.db
+        .query('auditLog')
+        .withIndex('by_user', (q) =>
+          q.eq('organizationId', callerOrgId).eq('performedBy', userId),
+        )
+        .order('desc')
+        .first();
+      if (last) out[userId] = last.timestamp;
+    }
+    return out;
+  },
+});

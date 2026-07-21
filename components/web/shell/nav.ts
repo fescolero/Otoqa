@@ -90,6 +90,7 @@ export const NAV: NavSection[] = [
     icon: 'settings',
     items: [
       { id: 'general',      label: 'General',         href: '/settings/general' },
+      { id: 'team',         label: 'Team & roles',    href: '/settings/team' },
       { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles' },
       { id: 'integrations', label: 'Integrations',    href: '/settings/integrations' },
       { id: 'billing',      label: 'Billing & usage', href: '/settings/billing' },

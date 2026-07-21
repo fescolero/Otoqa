@@ -7,6 +7,7 @@ import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { Globe, Palette, Ruler, Clock } from 'lucide-react';
 import { WidgetsProvider } from '@/components/widgets-provider';
 import { WorkOsWidgets, UserProfile } from '@workos-inc/widgets';
+import '@workos-inc/widgets/styles.css';
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
