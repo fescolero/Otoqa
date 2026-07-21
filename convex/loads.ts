@@ -2447,6 +2447,12 @@ export const getByDriver = query({
  * independent of the Loads tab's status filter. Same multi-source
  * dedup as `getByDriver`, but no status constraints — just sort by
  * createdAt desc and slice.
+ *
+ * Reads are bounded: each source is walked with `.take(candidateCap)`
+ * (index-ordered, newest first) rather than `.collect()`, and facet
+ * enrichment runs only on the final `limit` results. Loads older than
+ * a source's candidate window can't surface here, which is fine for a
+ * "most recent" card.
  */
 export const getRecentByDriver = query({
   args: {
@@ -2459,21 +2465,29 @@ export const getRecentByDriver = query({
     if (!driver || driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
 
     const limit = args.limit ?? 4;
+    // Bounded candidate window per source. Each index walk is `.take(cap)`
+    // instead of `.collect()` so a driver with a long history can't blow
+    // the per-function read limit. Oversized vs `limit` to survive dedup
+    // (multiple legs per load) and cross-source merging.
+    const candidateCap = Math.max(limit * 5, 25);
     const seenLoadIds = new Set<string>();
-    const enrichedLoads: Array<Record<string, any>> = [];
+    const candidates: Array<{
+      load: any;
+      leg?: { status: string; legLoadedMiles: number };
+    }> = [];
 
-    const allLegs = await ctx.db
+    const recentLegs = await ctx.db
       .query('dispatchLegs')
       .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
       .order('desc')
-      .collect();
+      .take(candidateCap);
 
-    for (const leg of allLegs) {
+    for (const leg of recentLegs) {
       if (seenLoadIds.has(leg.loadId)) continue;
       seenLoadIds.add(leg.loadId);
-      if (leg.driverId !== args.driverId) continue;
-      const enriched = await enrichLoadFromLeg(ctx, leg);
-      if (enriched) enrichedLoads.push(enriched);
+      const load = await ctx.db.get(leg.loadId);
+      if (!load) continue;
+      candidates.push({ load, leg: { status: leg.status, legLoadedMiles: leg.legLoadedMiles } });
     }
 
     const loadStatuses = ['Open', 'Assigned', 'Completed', 'Canceled', 'Expired'] as const;
@@ -2481,12 +2495,12 @@ export const getRecentByDriver = query({
       const fallbackLoads = await ctx.db
         .query('loadInformation')
         .withIndex('by_primary_driver_status', (q) => q.eq('primaryDriverId', args.driverId).eq('status', status))
-        .collect();
+        .order('desc')
+        .take(candidateCap);
       for (const load of fallbackLoads) {
         if (seenLoadIds.has(load._id)) continue;
         seenLoadIds.add(load._id);
-        const enrichedFallback = await enrichLoadDirectly(ctx, load);
-        if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+        candidates.push({ load });
       }
     }
 
@@ -2495,19 +2509,31 @@ export const getRecentByDriver = query({
       const assignments = await ctx.db
         .query('loadCarrierAssignments')
         .withIndex('by_assigned_driver', (q) => q.eq('assignedDriverId', args.driverId).eq('status', aStatus))
-        .collect();
+        .order('desc')
+        .take(candidateCap);
       for (const assignment of assignments) {
         if (seenLoadIds.has(assignment.loadId)) continue;
         seenLoadIds.add(assignment.loadId);
         const load = await ctx.db.get(assignment.loadId);
         if (!load) continue;
-        const enrichedFallback = await enrichLoadDirectly(ctx, load);
-        if (enrichedFallback) enrichedLoads.push(enrichedFallback);
+        candidates.push({ load });
       }
     }
 
-    enrichedLoads.sort((a, b) => b.createdAt - a.createdAt);
-    return enrichedLoads.slice(0, limit);
+    // Sort the merged candidate pool first, then enrich only the final
+    // page — facet-tag reads stay proportional to `limit`, not history size.
+    candidates.sort((a, b) => b.load._creationTime - a.load._creationTime);
+    const enrichedLoads: Array<Record<string, any>> = [];
+    for (const { load, leg } of candidates.slice(0, limit)) {
+      const enriched = await enrichLoadDirectly(ctx, load);
+      if (!enriched) continue;
+      if (leg) {
+        enriched.legStatus = leg.status;
+        enriched.legLoadedMiles = leg.legLoadedMiles;
+      }
+      enrichedLoads.push(enriched);
+    }
+    return enrichedLoads;
   },
 });
 
