@@ -27,6 +27,7 @@ import { UiPreferencesProvider } from './use-user-preferences';
 interface OrgSettings {
   name?: string;
   logoUrl?: string | null;
+  logoTraits?: { tone: 'dark' | 'light' | 'colorful'; hasAlpha: boolean } | null;
   subscriptionPlan?: string;
 }
 
@@ -117,7 +118,7 @@ function ShellLayout({
         onCmdk={() => setCmdkOpen(true)}
         header={
           <span className="flex items-center gap-2 min-w-0">
-            <OrgMark name={orgName} logoUrl={org?.logoUrl} size={28} />
+            <OrgMark name={orgName} logoUrl={org?.logoUrl} logoTraits={org?.logoTraits} size={28} />
             <span className="flex flex-col min-w-0 leading-tight">
               <span className="text-[12.5px] font-semibold text-foreground truncate">{orgName}</span>
               {org?.subscriptionPlan && (

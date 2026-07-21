@@ -8,6 +8,7 @@
 
 import * as React from 'react';
 import { cn } from '@/lib/utils';
+import type { LogoTraits } from '@/lib/logo-analysis';
 
 /** First letters of the first two words, uppercased — "Central Valley
  *  Freight LLC" → "CV". */
@@ -26,15 +27,26 @@ export function orgMonogram(name: string): string {
 interface OrgMarkProps {
   name: string;
   logoUrl?: string | null;
+  /** Upload-time analysis (organizations.logoTraits) — a transparent
+   *  monochrome logo gets a tile background of the opposite tone so it
+   *  stays visible in both themes; colorful or self-backgrounded logos
+   *  keep the neutral tile. */
+  logoTraits?: Pick<LogoTraits, 'tone' | 'hasAlpha'> | null;
   /** Tile edge in px — radius and type scale with it. Default 28. */
   size?: number;
   className?: string;
 }
 
-export function OrgMark({ name, logoUrl, size = 28, className }: OrgMarkProps) {
+export function OrgMark({ name, logoUrl, logoTraits, size = 28, className }: OrgMarkProps) {
   const radius = Math.round(size * 0.22);
 
   if (logoUrl) {
+    const forcedBg =
+      logoTraits?.hasAlpha && logoTraits.tone === 'dark'
+        ? '#FFFFFF'
+        : logoTraits?.hasAlpha && logoTraits.tone === 'light'
+          ? '#0F172A'
+          : null;
     return (
       <span
         className={cn('inline-flex items-center justify-center overflow-hidden shrink-0', className)}
@@ -42,8 +54,11 @@ export function OrgMark({ name, logoUrl, size = 28, className }: OrgMarkProps) {
           width: size,
           height: size,
           borderRadius: radius,
-          background: 'var(--bg-surface-2)',
+          background: forcedBg ?? 'var(--bg-surface-2)',
           border: '1px solid var(--border-hairline)',
+          // A forced background reads as a plate — give the mark breathing
+          // room so it doesn't touch the plate's edges.
+          padding: forcedBg ? Math.max(2, Math.round(size * 0.09)) : 0,
         }}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}

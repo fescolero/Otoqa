@@ -84,6 +84,16 @@ export const updateOrgSettings = mutation({
       // v.null() clears the stored value (Convex patch removes fields set
       // to undefined; args can't carry undefined, so null is the wire form).
       logoStorageId: v.optional(v.union(v.id('_storage'), v.null())),
+      logoTraits: v.optional(
+        v.union(
+          v.object({
+            tone: v.union(v.literal('dark'), v.literal('light'), v.literal('colorful')),
+            hasAlpha: v.boolean(),
+            analyzedAt: v.number(),
+          }),
+          v.null(),
+        ),
+      ),
       subscriptionPlan: v.optional(v.string()),
       subscriptionStatus: v.optional(v.string()),
       billingCycle: v.optional(v.string()),
@@ -117,7 +127,8 @@ export const updateOrgSettings = mutation({
     // null means "clear this field" — Convex removes fields patched to
     // undefined. Only rewrite keys the caller actually sent; materializing
     // absent keys as undefined would silently clear them on every save.
-    const { logoStorageId, mailingAddress, invoicePrefix, ...restUpdates } = args.updates;
+    const { logoStorageId, logoTraits, mailingAddress, invoicePrefix, ...restUpdates } =
+      args.updates;
 
     let normalizedPrefix: string | undefined;
     if (typeof invoicePrefix === 'string' && invoicePrefix.trim() !== '') {
@@ -132,10 +143,15 @@ export const updateOrgSettings = mutation({
       ...(logoStorageId !== undefined
         ? { logoStorageId: logoStorageId === null ? undefined : logoStorageId }
         : {}),
+      ...(logoTraits !== undefined
+        ? { logoTraits: logoTraits === null ? undefined : logoTraits }
+        : {}),
       ...(mailingAddress !== undefined
         ? { mailingAddress: mailingAddress === null ? undefined : mailingAddress }
         : {}),
       ...(invoicePrefix !== undefined ? { invoicePrefix: normalizedPrefix } : {}),
+      // Removing the logo always drops its analysis with it.
+      ...(logoStorageId === null ? { logoTraits: undefined } : {}),
     };
 
     const existing = await ctx.db

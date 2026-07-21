@@ -56,6 +56,7 @@ import {
 } from '@/components/web';
 import { Switch } from '@/components/ui/switch';
 import { formatDate } from '@/lib/utils/format';
+import { analyzeLogoBlob } from '@/lib/logo-analysis';
 
 type OrgSettings = NonNullable<FunctionReturnType<typeof api.settings.getOrgSettings>>;
 type OrgUpdates = FunctionArgs<typeof api.settings.updateOrgSettings>['updates'];
@@ -232,12 +233,14 @@ function SectionTitle({ children, sub }: { children: React.ReactNode; sub?: Reac
 
 function LogoSlot({
   logoUrl,
+  logoTraits,
   name,
   uploading,
   onPick,
   onRemove,
 }: {
   logoUrl: string | null;
+  logoTraits: OrgSettings['logoTraits'];
   name: string;
   uploading: boolean;
   onPick: () => void;
@@ -245,7 +248,7 @@ function LogoSlot({
 }) {
   return (
     <div className="flex items-center gap-3.5">
-      <OrgMark name={name} logoUrl={logoUrl} size={56} />
+      <OrgMark name={name} logoUrl={logoUrl} logoTraits={logoTraits} size={56} />
       <div className="min-w-0">
         <div className="flex gap-2 mb-1.5">
           <WBtn size="sm" leading="upload" onClick={onPick} disabled={uploading}>
@@ -534,7 +537,7 @@ function WorkspaceRail({
     <div className="flex flex-col gap-4" style={{ position: 'sticky', top: 0 }}>
       <DSCard title={<SectionTitle sub="Read-only account facts.">Workspace</SectionTitle>}>
         <div className="flex items-center gap-3 mb-3.5">
-          <OrgMark name={org.name} logoUrl={org.logoUrl} size={40} />
+          <OrgMark name={org.name} logoUrl={org.logoUrl} logoTraits={org.logoTraits} size={40} />
           <div className="min-w-0">
             <div className="text-[13.5px] font-semibold truncate">{org.name}</div>
             {org.dba && (
@@ -772,14 +775,17 @@ export default function GeneralSettingsPage() {
     }
   };
 
-  // Logo upload — 3-step Convex storage pattern (same as legacy page).
+  // Logo upload — 3-step Convex storage pattern (same as legacy page), plus
+  // client-side analysis so OrgMark can give transparent monochrome logos a
+  // contrasting tile background. Analysis is best-effort and never blocks
+  // the upload.
   const handleLogoFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file || !organizationId) return;
     setUploadingLogo(true);
     try {
-      const uploadUrl = await generateUploadUrl();
+      const [traits, uploadUrl] = await Promise.all([analyzeLogoBlob(file), generateUploadUrl()]);
       const result = await fetch(uploadUrl, {
         method: 'POST',
         headers: { 'Content-Type': file.type },
@@ -788,7 +794,7 @@ export default function GeneralSettingsPage() {
       const { storageId } = await result.json();
       await updateOrgSettings({
         workosOrgId: organizationId,
-        updates: { logoStorageId: storageId },
+        updates: { logoStorageId: storageId, logoTraits: traits },
       });
       toast.success('Logo uploaded');
     } catch (error) {
@@ -798,6 +804,31 @@ export default function GeneralSettingsPage() {
       setUploadingLogo(false);
     }
   };
+
+  // Backfill: logos uploaded before analysis existed have no traits — fetch
+  // the stored image once and classify it. Silent best-effort; the ref stops
+  // retry loops if the fetch or the save fails.
+  const logoBackfillRef = useRef(false);
+  const logoTraitsMissing = !!org?.logoUrl && !org.logoTraits;
+  const logoUrl = org?.logoUrl;
+  useEffect(() => {
+    if (!logoTraitsMissing || !logoUrl || !organizationId || logoBackfillRef.current) return;
+    logoBackfillRef.current = true;
+    (async () => {
+      try {
+        const blob = await (await fetch(logoUrl)).blob();
+        const traits = await analyzeLogoBlob(blob);
+        if (traits) {
+          await updateOrgSettings({
+            workosOrgId: organizationId,
+            updates: { logoTraits: traits },
+          });
+        }
+      } catch {
+        // Cross-origin or decode failure — the neutral tile remains.
+      }
+    })();
+  }, [logoTraitsMissing, logoUrl, organizationId, updateOrgSettings]);
 
   // ── loading / empty states ──────────────────────────────────────────────
   if (org === undefined) {
@@ -919,6 +950,7 @@ export default function GeneralSettingsPage() {
               <div className="mb-4">
                 <LogoSlot
                   logoUrl={org.logoUrl}
+                  logoTraits={org.logoTraits}
                   name={org.name}
                   uploading={uploadingLogo}
                   onPick={() => fileInputRef.current?.click()}

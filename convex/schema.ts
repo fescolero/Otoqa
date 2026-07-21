@@ -62,6 +62,16 @@ export default defineSchema({
     industry: v.optional(v.string()),
     domain: v.optional(v.string()),
     logoStorageId: v.optional(v.id('_storage')), // Company Logo from Convex Storage
+    // Client-side analysis of the uploaded logo (lib/logo-analysis.ts) —
+    // drives the contrasting tile background in OrgMark. Cleared with the
+    // logo.
+    logoTraits: v.optional(
+      v.object({
+        tone: v.union(v.literal('dark'), v.literal('light'), v.literal('colorful')),
+        hasAlpha: v.boolean(),
+        analyzedAt: v.number(),
+      }),
+    ),
 
     // === COMPANY PROFILE (Settings → General) ===
     dba: v.optional(v.string()), // Doing-business-as name
