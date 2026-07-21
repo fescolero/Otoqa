@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getTeamContext, isTeamContextError } from '@/lib/team-server';
+import { getTeamContext, isTeamContextError, listAllPermissionSlugs } from '@/lib/team-server';
 import { humanizeRoleSlug } from '@/lib/team-utils';
 import { allPermissionSlugs, permissionsFromMatrix, type PermMatrix } from '@/lib/team-rbac';
 import type { TeamRoleDTO } from '@/lib/team-types';
@@ -27,8 +27,7 @@ export async function GET() {
     const roles: TeamRoleDTO[] = [];
 
     try {
-      const permissions = await workos.authorization.listPermissions();
-      const have = new Set((permissions.data ?? []).map((p) => p.slug));
+      const have = await listAllPermissionSlugs(workos);
       seeded = allPermissionSlugs().every((slug) => have.has(slug));
     } catch {
       rbacAvailable = false;

@@ -49,3 +49,29 @@ export function isTeamContextError(
 ): ctx is TeamContextError {
   return 'error' in ctx;
 }
+
+/** Every permission slug in the environment — listPermissions is paginated,
+ *  so a single-page read misses slugs and breaks idempotent seeding. */
+export async function listAllPermissionSlugs(workos: WorkOS): Promise<Set<string>> {
+  const slugs = new Set<string>();
+  let after: string | null | undefined;
+  do {
+    const page = await workos.authorization.listPermissions({
+      limit: 100,
+      ...(after ? { after } : {}),
+    });
+    for (const p of page.data ?? []) slugs.add(p.slug);
+    after = page.listMetadata?.after;
+  } while (after);
+  return slugs;
+}
+
+/** WorkOS "already exists" conflict — safe to treat as success when the
+ *  goal is idempotent creation. */
+export function isConflict(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { status?: number }).status === 409
+  );
+}

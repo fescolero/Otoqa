@@ -1,5 +1,10 @@
 import { NextResponse } from 'next/server';
-import { getTeamContext, isTeamContextError } from '@/lib/team-server';
+import {
+  getTeamContext,
+  isConflict,
+  isTeamContextError,
+  listAllPermissionSlugs,
+} from '@/lib/team-server';
 import {
   allPermissionSlugs,
   permissionName,
@@ -25,17 +30,22 @@ export async function POST() {
     }
     const { workos } = ctx;
 
-    // 1. Permission catalog.
-    const existing = await workos.authorization.listPermissions();
-    const have = new Set((existing.data ?? []).map((p) => p.slug));
+    // 1. Permission catalog. The list is paginated (read fully) AND a
+    // concurrent seed can still race us — a 409 on create just means the
+    // slug already exists, which is the outcome we wanted.
+    const have = await listAllPermissionSlugs(workos);
     let createdPermissions = 0;
     for (const slug of allPermissionSlugs()) {
       if (have.has(slug)) continue;
-      await workos.authorization.createPermission({ slug, name: permissionName(slug) });
-      createdPermissions++;
+      try {
+        await workos.authorization.createPermission({ slug, name: permissionName(slug) });
+        createdPermissions++;
+      } catch (error) {
+        if (!isConflict(error)) throw error;
+      }
     }
 
-    // 2. Preset environment roles.
+    // 2. Preset environment roles — same conflict-tolerant pattern.
     const envRoles = await workos.authorization.listEnvironmentRoles();
     const bySlug = new Map((envRoles.data ?? []).map((r) => [r.slug, r]));
     let createdRoles = 0;
@@ -43,11 +53,16 @@ export async function POST() {
     for (const preset of PRESET_ROLES) {
       const current = bySlug.get(preset.slug);
       if (!current) {
-        await workos.authorization.createEnvironmentRole({
-          slug: preset.slug,
-          name: preset.name,
-          description: preset.description,
-        });
+        try {
+          await workos.authorization.createEnvironmentRole({
+            slug: preset.slug,
+            name: preset.name,
+            description: preset.description,
+          });
+        } catch (error) {
+          if (!isConflict(error)) throw error;
+          continue; // exists but wasn't listed — leave its permissions alone
+        }
         await workos.authorization.setEnvironmentRolePermissions(preset.slug, {
           permissions: permissionsFromMatrix(preset.matrix),
         });
