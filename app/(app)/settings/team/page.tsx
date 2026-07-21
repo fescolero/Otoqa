@@ -344,7 +344,7 @@ function InviteModal({
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Select role…" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className="z-[100]">
                 {roles.map((r) => (
                   <SelectItem key={r.slug} value={r.slug}>
                     {r.name}
@@ -491,7 +491,7 @@ function CreateRoleModal({
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Copy permissions from…" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className="z-[100]">
                 {roles.map((r) => (
                   <SelectItem key={r.slug} value={r.slug}>
                     {r.name}
