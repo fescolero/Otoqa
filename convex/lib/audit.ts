@@ -80,6 +80,7 @@ export const AUDIT_ACTIONS = [
   'completed',
   'held',
   'released',
+  'expired',
   'archived',
 ] as const;
 
