@@ -82,15 +82,34 @@ export const normalizeLegacyLiterals = internalMutation({
  */
 export const backfillExpiredLoadAuditRows = internalMutation({
   args: {
+    orgId: v.optional(v.string()),
     cursor: v.optional(v.string()),
     insertedTotal: v.optional(v.number()),
     batchNumber: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // Dispatch mode: fan out one chain per org so every page comes from the
+    // selective by_status index range (workosOrgId, 'Expired'). A plain
+    // .filter() over the whole table scans every load doc and blows the
+    // 16MB per-function read limit on large tables.
+    if (!args.orgId) {
+      const orgs = await ctx.db.query('organizations').take(500);
+      let dispatched = 0;
+      for (const org of orgs) {
+        if (!org.workosOrgId) continue;
+        await ctx.scheduler.runAfter(0, internal.auditLogMigration.backfillExpiredLoadAuditRows, {
+          orgId: org.workosOrgId,
+        });
+        dispatched++;
+      }
+      console.log(`[backfillExpiredLoadAuditRows] dispatched ${dispatched} per-org chains`);
+      return { dispatched };
+    }
+
     const batchNumber = (args.batchNumber ?? 0) + 1;
     const page = await ctx.db
       .query('loadInformation')
-      .filter((q) => q.eq(q.field('status'), 'Expired'))
+      .withIndex('by_status', (q) => q.eq('workosOrgId', args.orgId!).eq('status', 'Expired'))
       .paginate({ cursor: args.cursor ?? null, numItems: 100 });
 
     let inserted = 0;
@@ -130,18 +149,19 @@ export const backfillExpiredLoadAuditRows = internalMutation({
 
     const insertedTotal = (args.insertedTotal ?? 0) + inserted;
     console.log(
-      `[backfillExpiredLoadAuditRows] batch ${batchNumber}: scanned=${page.page.length} inserted=${inserted} failed=${failed} totalInserted=${insertedTotal} done=${page.isDone}`,
+      `[backfillExpiredLoadAuditRows] org=${args.orgId} batch ${batchNumber}: scanned=${page.page.length} inserted=${inserted} failed=${failed} totalInserted=${insertedTotal} done=${page.isDone}`,
     );
 
     if (!page.isDone) {
       await ctx.scheduler.runAfter(0, internal.auditLogMigration.backfillExpiredLoadAuditRows, {
+        orgId: args.orgId,
         cursor: page.continueCursor,
         insertedTotal,
         batchNumber,
       });
     } else {
       console.log(
-        `[backfillExpiredLoadAuditRows] COMPLETE after ${batchNumber} batches, ${insertedTotal} rows inserted`,
+        `[backfillExpiredLoadAuditRows] org=${args.orgId} COMPLETE after ${batchNumber} batches, ${insertedTotal} rows inserted`,
       );
     }
 
