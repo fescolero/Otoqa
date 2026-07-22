@@ -83,44 +83,68 @@ export const normalizeLegacyLiterals = internalMutation({
 export const backfillExpiredLoadAuditRows = internalMutation({
   args: {
     cursor: v.optional(v.string()),
+    insertedTotal: v.optional(v.number()),
+    batchNumber: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const batchNumber = (args.batchNumber ?? 0) + 1;
     const page = await ctx.db
       .query('loadInformation')
       .filter((q) => q.eq(q.field('status'), 'Expired'))
       .paginate({ cursor: args.cursor ?? null, numItems: 100 });
 
     let inserted = 0;
+    let failed = 0;
     for (const load of page.page) {
-      const existing = await ctx.db
-        .query('auditLog')
-        .withIndex('by_org_entity', (q) =>
-          q.eq('organizationId', load.workosOrgId).eq('entityType', 'load').eq('entityId', load._id),
-        )
-        .collect();
-      if (existing.some((row) => row.action === 'expired')) continue;
+      // A single bad document must not kill the whole continuation chain.
+      try {
+        const existing = await ctx.db
+          .query('auditLog')
+          .withIndex('by_org_entity', (q) =>
+            q.eq('organizationId', load.workosOrgId).eq('entityType', 'load').eq('entityId', load._id),
+          )
+          .collect();
+        if (existing.some((row) => row.action === 'expired')) continue;
 
-      await ctx.db.insert('auditLog', {
-        organizationId: load.workosOrgId,
-        entityType: 'load',
-        entityId: load._id,
-        entityName: load.internalId,
-        action: 'expired',
-        performedBy: 'system',
-        performedByName: 'System (auto-expiry)',
-        description: `Auto-expired load ${load.internalId}: pickup passed with no tracking activity (recorded retroactively — time approximated from the load's last update)`,
-        metadata: JSON.stringify({ backfilled: true }),
-        timestamp: load.updatedAt ?? load._creationTime,
-      });
-      inserted++;
+        await ctx.db.insert('auditLog', {
+          organizationId: load.workosOrgId,
+          entityType: 'load',
+          entityId: load._id,
+          entityName: load.internalId,
+          action: 'expired',
+          performedBy: 'system',
+          performedByName: 'System (auto-expiry)',
+          description: `Auto-expired load ${load.internalId}: pickup passed with no tracking activity (recorded retroactively — time approximated from the load's last update)`,
+          metadata: JSON.stringify({ backfilled: true }),
+          timestamp: load.updatedAt ?? load._creationTime,
+        });
+        inserted++;
+      } catch (err) {
+        failed++;
+        console.error(
+          `[backfillExpiredLoadAuditRows] load ${load._id} (${load.internalId ?? '?'}) failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
+
+    const insertedTotal = (args.insertedTotal ?? 0) + inserted;
+    console.log(
+      `[backfillExpiredLoadAuditRows] batch ${batchNumber}: scanned=${page.page.length} inserted=${inserted} failed=${failed} totalInserted=${insertedTotal} done=${page.isDone}`,
+    );
 
     if (!page.isDone) {
       await ctx.scheduler.runAfter(0, internal.auditLogMigration.backfillExpiredLoadAuditRows, {
         cursor: page.continueCursor,
+        insertedTotal,
+        batchNumber,
       });
+    } else {
+      console.log(
+        `[backfillExpiredLoadAuditRows] COMPLETE after ${batchNumber} batches, ${insertedTotal} rows inserted`,
+      );
     }
 
-    return { inserted, done: page.isDone };
+    return { inserted, insertedTotal, failed, batchNumber, done: page.isDone };
   },
 });
