@@ -2428,6 +2428,16 @@ export const autoExpireStaleLoads = internalMutation({
           status: 'Expired',
         });
         await updateLoadCount(ctx, load.workosOrgId, result.previousStatus, result.nextStatus);
+        await logAudit(ctx, {
+          organizationId: load.workosOrgId,
+          entityType: 'load',
+          entityId: load._id,
+          entityName: load.internalId,
+          action: 'expired',
+          performedBy: 'system',
+          performedByName: 'System (auto-expiry)',
+          description: `Auto-expired load ${load.internalId}: pickup date ${load.firstStopDate} passed with no tracking activity (was ${result.previousStatus})`,
+        });
         expired++;
 
         if (expired >= BATCH_SIZE) break;
@@ -2474,6 +2484,16 @@ export const autoExpireStaleLoads = internalMutation({
           status: 'Expired',
         });
         await updateLoadCount(ctx, load.workosOrgId, result.previousStatus, result.nextStatus);
+        await logAudit(ctx, {
+          organizationId: load.workosOrgId,
+          entityType: 'load',
+          entityId: load._id,
+          entityName: load.internalId,
+          action: 'expired',
+          performedBy: 'system',
+          performedByName: 'System (auto-expiry)',
+          description: `Auto-expired load ${load.internalId}: no tracking activity for 3+ days while In Transit`,
+        });
         expired++;
 
         if (expired >= BATCH_SIZE) break;
