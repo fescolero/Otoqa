@@ -3067,7 +3067,7 @@ export const autoExpireStaleLoads = internalMutation({
           action: 'expired',
           performedBy: 'system',
           performedByName: 'System (auto-expiry)',
-          description: `Auto-expired load ${load.internalId}: no tracking activity for 3+ days while In Transit`,
+          description: `Auto-expired load ${load.internalId}: no tracking activity for 12+ hours while In Transit`,
         });
         expired++;
 
