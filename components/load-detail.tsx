@@ -607,6 +607,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   const pickupCheckedIn = !!origin?.checkedInAt;
   const isCompleted = loadData.status === 'Completed';
   const isCanceled = loadData.status === 'Canceled';
+  const isExpired = loadData.status === 'Expired';
 
   // ── Live tracking primitives (driven by stop state) ────────────────────
   const originLabel = [origin?.city, origin?.state].filter(Boolean).join(', ') || 'Origin';
@@ -633,6 +634,15 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   if (isCanceled) {
     attentionHeadline = <>Load {orderToken} was cancelled.</>;
     attentionItems.push({ tone: 'crit', icon: 'close', title: 'Cancelled', detail: 'No further activity expected.' });
+  } else if (isExpired) {
+    attentionHeadline = <>Load {orderToken} expired.</>;
+    attentionItems.push({
+      tone: 'crit',
+      icon: 'clock',
+      tab: 'activity',
+      title: 'Expired',
+      detail: 'Auto-expired — pickup passed with no tracking activity. See History.',
+    });
   } else if (loadData.status === 'Open') {
     attentionHeadline = <>Load {orderToken} is waiting for assignment.</>;
     attentionItems.push({
@@ -780,6 +790,15 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       <DSCard title="Cancelled">
         <p className="m-0 text-[12.5px] text-[var(--text-secondary)]">
           This load was cancelled. See the activity log for the cancellation reason.
+        </p>
+      </DSCard>
+    );
+  } else if (isExpired) {
+    leftHeroCard = (
+      <DSCard title="Expired">
+        <p className="m-0 text-[12.5px] text-[var(--text-secondary)]">
+          This load auto-expired: the pickup time passed with no tracking activity. See the History
+          section on the Activity tab for when and why.
         </p>
       </DSCard>
     );
