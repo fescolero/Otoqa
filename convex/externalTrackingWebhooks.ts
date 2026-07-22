@@ -421,25 +421,25 @@ export const getActiveSubscriptions = internalQuery({
     loadSourceFilter: v.optional(v.string()),
   })),
   handler: async (ctx) => {
-    // Get all ACTIVE subscriptions across all orgs
+    // Filter at the index — previously scanned ALL subscriptions in every
+    // org and JS-filtered by status, which scales with total-subs-ever-
+    // created rather than active-subs.
     const subs = await ctx.db
       .query('webhookSubscriptions')
-      .withIndex('by_org') // Scan all - cron processes all orgs
+      .withIndex('by_status', (q) => q.eq('status', 'ACTIVE'))
       .collect();
 
-    return subs
-      .filter((s) => s.status === 'ACTIVE')
-      .map((s) => ({
-        _id: s._id,
-        workosOrgId: s.workosOrgId,
-        url: s.url,
-        events: s.events,
-        encryptedSecret: s.encryptedSecret,
-        lastDeliveredAt: s.lastDeliveredAt,
-        batchSize: s.batchSize,
-        intervalMinutes: s.intervalMinutes,
-        loadSourceFilter: s.loadSourceFilter,
-      }));
+    return subs.map((s) => ({
+      _id: s._id,
+      workosOrgId: s.workosOrgId,
+      url: s.url,
+      events: s.events,
+      encryptedSecret: s.encryptedSecret,
+      lastDeliveredAt: s.lastDeliveredAt,
+      batchSize: s.batchSize,
+      intervalMinutes: s.intervalMinutes,
+      loadSourceFilter: s.loadSourceFilter,
+    }));
   },
 });
 
@@ -508,125 +508,169 @@ export const updateLastDelivered = internalMutation({
  * Process pending webhook deliveries.
  * Sends HTTP POST to partner endpoints with signed payloads.
  */
+// Max concurrent webhook deliveries per tick. Caps the worst-case action
+// runtime at ~(timeout × ceil(pending/concurrency)) instead of
+// (timeout × pending). At pending=50, 10s timeout, sequential = 500s
+// (near the 600s action cap); parallel-10 = ~50s.
+//
+// 10 chosen as a polite default — most partner webhook endpoints accept
+// 10 concurrent inbound deliveries fine. Per-partner rate limiting (if a
+// specific partner complains) would be added on top of this, not as a
+// replacement.
+const WEBHOOK_DELIVERY_CONCURRENCY = 10;
+
+type PendingDelivery = {
+  _id: string;
+  subscriptionId: string;
+  deliveryId: string;
+  loadId: string;
+  eventType: string;
+  positionsFrom?: number;
+  positionsTo?: number;
+  attempts: number;
+  maxAttempts: number;
+};
+
+/**
+ * Per-delivery worker — same logic as the previous in-loop body, just
+ * factored out so it can be invoked concurrently by deliverPendingWebhooks.
+ * Returns nothing; all outcomes are persisted via mark{Success,Failed}.
+ */
+async function deliverOneWebhook(
+  ctx: any,
+  delivery: PendingDelivery,
+): Promise<void> {
+  const sub = await ctx.runQuery(internal.externalTrackingWebhooks.getSubscriptionById, {
+    subscriptionId: delivery.subscriptionId as Id<'webhookSubscriptions'>,
+  });
+
+  if (!sub || sub.status !== 'ACTIVE') {
+    await ctx.runMutation(internal.externalTrackingWebhooks.markDeliveryFailed, {
+      deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
+      httpStatus: 0,
+      errorMessage: 'Subscription no longer active',
+    });
+    return;
+  }
+
+  // Build payload
+  let positions: any[] = [];
+  if (delivery.eventType === 'position.update' && delivery.positionsFrom) {
+    const result = await ctx.runQuery(internal.externalTracking.getPositions, {
+      loadId: delivery.loadId,
+      isSandbox: false,
+      since: delivery.positionsFrom,
+      until: delivery.positionsTo,
+      limit: sub.batchSize ?? 100,
+    });
+    positions = result.positions;
+  }
+
+  const load = await ctx.runQuery(internal.externalTracking.resolveLoad, {
+    ref: delivery.loadId,
+    workosOrgId: sub.workosOrgId,
+    environment: 'production',
+  });
+
+  const payload = {
+    deliveryId: delivery.deliveryId,
+    event: delivery.eventType,
+    deliveredAt: new Date().toISOString(),
+    data: {
+      loadRef: load?.internalId || 'unknown',
+      externalLoadId: load?.externalLoadId,
+      trackingStatus: load?.trackingStatus || 'unknown',
+      positions,
+    },
+  };
+
+  const bodyString = JSON.stringify(payload);
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+
+  const signature = await ctx.runAction(internal.externalTrackingAuthCrypto.signWebhookPayload, {
+    encryptedSecret: sub.encryptedSecret,
+    timestamp,
+    body: bodyString,
+  });
+
+  try {
+    // Re-validate URL at delivery time (DNS rebinding defense)
+    validateWebhookUrl(sub.url);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    const response = await fetch(sub.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Otoqa-Signature': signature,
+        'X-Otoqa-Delivery-Id': delivery.deliveryId,
+        'User-Agent': 'Otoqa-Webhooks/1.0',
+      },
+      body: bodyString,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (response.ok) {
+      await ctx.runMutation(internal.externalTrackingWebhooks.markDeliverySuccess, {
+        deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
+        httpStatus: response.status,
+        subscriptionId: delivery.subscriptionId as Id<'webhookSubscriptions'>,
+      });
+    } else {
+      await ctx.runMutation(internal.externalTrackingWebhooks.markDeliveryFailed, {
+        deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
+        httpStatus: response.status,
+        errorMessage: `HTTP ${response.status}: ${response.statusText}`,
+      });
+    }
+  } catch (error: any) {
+    await ctx.runMutation(internal.externalTrackingWebhooks.markDeliveryFailed, {
+      deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
+      httpStatus: 0,
+      errorMessage: error.message || 'Network error',
+    });
+  }
+}
+
 export const deliverPendingWebhooks = internalAction({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
-    // Get pending deliveries
-    const pending: Array<{
-      _id: string;
-      subscriptionId: string;
-      deliveryId: string;
-      loadId: string;
-      eventType: string;
-      positionsFrom?: number;
-      positionsTo?: number;
-      attempts: number;
-      maxAttempts: number;
-    }> = await ctx.runQuery(internal.externalTrackingWebhooks.getPendingDeliveries, {});
+    const pending: PendingDelivery[] = await ctx.runQuery(
+      internal.externalTrackingWebhooks.getPendingDeliveries,
+      {},
+    );
 
-    for (const delivery of pending) {
-      // Get subscription details
-      const sub = await ctx.runQuery(internal.externalTrackingWebhooks.getSubscriptionById, {
-        subscriptionId: delivery.subscriptionId as Id<'webhookSubscriptions'>,
-      });
-
-      if (!sub || sub.status !== 'ACTIVE') {
-        await ctx.runMutation(internal.externalTrackingWebhooks.markDeliveryFailed, {
-          deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
-          httpStatus: 0,
-          errorMessage: 'Subscription no longer active',
-        });
-        continue;
-      }
-
-      // Build payload
-      let positions: any[] = [];
-      if (delivery.eventType === 'position.update' && delivery.positionsFrom) {
-        const result = await ctx.runQuery(internal.externalTracking.getPositions, {
-          loadId: delivery.loadId,
-          isSandbox: false,
-          since: delivery.positionsFrom,
-          until: delivery.positionsTo,
-          limit: sub.batchSize ?? 100,
-        });
-        positions = result.positions;
-      }
-
-      // Get load info for the payload
-      const load = await ctx.runQuery(internal.externalTracking.resolveLoad, {
-        ref: delivery.loadId,
-        workosOrgId: sub.workosOrgId,
-        environment: 'production',
-      });
-
-      const payload = {
-        deliveryId: delivery.deliveryId,
-        event: delivery.eventType,
-        deliveredAt: new Date().toISOString(),
-        data: {
-          loadRef: load?.internalId || 'unknown',
-          externalLoadId: load?.externalLoadId,
-          trackingStatus: load?.trackingStatus || 'unknown',
-          positions,
-        },
-      };
-
-      const bodyString = JSON.stringify(payload);
-      const timestamp = Math.floor(Date.now() / 1000).toString();
-
-      // Sign the payload
-      const signature = await ctx.runAction(internal.externalTrackingAuthCrypto.signWebhookPayload, {
-        encryptedSecret: sub.encryptedSecret,
-        timestamp,
-        body: bodyString,
-      });
-
-      // Deliver
-      try {
-        // Re-validate URL at delivery time (defense against DNS rebinding:
-        // hostname may have resolved to a public IP at creation but now
-        // points to an internal IP via DNS change)
-        validateWebhookUrl(sub.url);
-
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10_000); // 10s timeout
-
-        const response = await fetch(sub.url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Otoqa-Signature': signature,
-            'X-Otoqa-Delivery-Id': delivery.deliveryId,
-            'User-Agent': 'Otoqa-Webhooks/1.0',
-          },
-          body: bodyString,
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeout);
-
-        if (response.ok) {
-          await ctx.runMutation(internal.externalTrackingWebhooks.markDeliverySuccess, {
-            deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
-            httpStatus: response.status,
-            subscriptionId: delivery.subscriptionId as Id<'webhookSubscriptions'>,
-          });
-        } else {
-          await ctx.runMutation(internal.externalTrackingWebhooks.markDeliveryFailed, {
-            deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
-            httpStatus: response.status,
-            errorMessage: `HTTP ${response.status}: ${response.statusText}`,
-          });
+    // Process with bounded concurrency. Simple "next-available worker"
+    // pattern — each worker pulls from a shared queue until empty.
+    // Avoids piling 50+ open HTTP connections at once.
+    let nextIdx = 0;
+    const worker = async () => {
+      while (nextIdx < pending.length) {
+        const myIdx = nextIdx++;
+        const delivery = pending[myIdx];
+        try {
+          await deliverOneWebhook(ctx, delivery);
+        } catch (err) {
+          // deliverOneWebhook is supposed to catch its own errors and
+          // persist via mark*. Belt-and-suspenders: any uncaught throw
+          // here mustn't kill its sibling workers.
+          console.error(
+            `[deliverPendingWebhooks] worker error deliveryId=${delivery._id}`,
+            err,
+          );
         }
-      } catch (error: any) {
-        await ctx.runMutation(internal.externalTrackingWebhooks.markDeliveryFailed, {
-          deliveryId: delivery._id as Id<'webhookDeliveryQueue'>,
-          httpStatus: 0,
-          errorMessage: error.message || 'Network error',
-        });
       }
-    }
+    };
+
+    const concurrency = Math.min(WEBHOOK_DELIVERY_CONCURRENCY, pending.length);
+    await Promise.all(
+      Array.from({ length: concurrency }, () => worker()),
+    );
 
     return null;
   },
@@ -701,11 +745,15 @@ export const markDeliverySuccess = internalMutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    // Load once, derive attempts off the loaded doc rather than re-reading.
+    const delivery = await ctx.db.get(args.deliveryId);
+    if (!delivery) return null;
+
     await ctx.db.patch(args.deliveryId, {
       status: 'DELIVERED',
       lastHttpStatus: args.httpStatus,
       deliveredAt: Date.now(),
-      attempts: (await ctx.db.get(args.deliveryId))!.attempts + 1,
+      attempts: delivery.attempts + 1,
     });
 
     // Reset consecutive failures on success
@@ -746,10 +794,12 @@ export const markDeliveryFailed = internalMutation({
       nextAttemptAt: isDead ? undefined : Date.now() + delay,
     });
 
-    // Increment consecutive failures on subscription
+    // Increment consecutive failures on subscription. Field is required
+    // in the schema but defensive-coalesce protects against a row that
+    // was created before the field landed (or any future migration drift).
     const sub = await ctx.db.get(delivery.subscriptionId);
     if (sub) {
-      const newFailures = sub.consecutiveFailures + 1;
+      const newFailures = (sub.consecutiveFailures ?? 0) + 1;
       const updates: any = {
         consecutiveFailures: newFailures,
         lastFailureReason: args.errorMessage,

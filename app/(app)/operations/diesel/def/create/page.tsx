@@ -1,128 +1,110 @@
 'use client';
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
+/**
+ * DEF (diesel-exhaust-fluid) entry create page.
+ *
+ * Mirror of `/operations/diesel/create/page.tsx` — same shell, same
+ * schema factory, different mutation. The two routes sharing one UI
+ * is intentional: the only operational difference is which table
+ * (`fuelEntries` vs `defEntries`) the record lands in.
+ */
+
+import * as React from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { useMutation } from 'convex/react';
-import { api } from '@/convex/_generated/api';
-import { useState } from 'react';
-import { usePageInitialize } from '@/hooks/use-page-initialize';
-import { useOrgQuery } from '@/hooks/use-org-query';
-import { FuelEntryForm, FuelEntryFormData } from '@/components/diesel/fuel-entry-form';
 import { toast } from 'sonner';
-import { Id } from '@/convex/_generated/dataModel';
+import { api } from '@/convex/_generated/api';
+import { useOrganizationId } from '@/contexts/organization-context';
+import { useAuthQuery } from '@/hooks/use-auth-query';
+import { CreateForm, bindUploaders } from '@/components/web/create-form';
+import {
+  buildFuelEntrySchema,
+  mapValsToFuelEntryArgs,
+  FUEL_ENTRY_FIELD_IDS,
+  type CarrierRow,
+} from '@/lib/forms/schemas/fuel-entry';
 
 export default function CreateDefEntryPage() {
-  const { user, orgId: organizationId, router } = usePageInitialize();
+  const router = useRouter();
+  const { user } = useAuth();
+  const organizationId = useOrganizationId();
+
   const createDefEntry = useMutation(api.defEntries.create);
   const generateUploadUrl = useMutation(api.defEntries.generateUploadUrl);
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const drivers = useOrgQuery(api.drivers.list, {});
-  const trucks = useOrgQuery(api.trucks.list, {});
-  const vendors = useOrgQuery(api.fuelVendors.list, { activeOnly: true });
-  const carriersRaw = useOrgQuery(
+  const driversQ = useAuthQuery(
+    api.drivers.list,
+    organizationId ? { organizationId } : 'skip',
+  );
+  const trucksQ = useAuthQuery(
+    api.trucks.list,
+    organizationId ? { organizationId } : 'skip',
+  );
+  const vendorsQ = useAuthQuery(
+    api.fuelVendors.list,
+    organizationId ? { organizationId, activeOnly: true } : 'skip',
+  );
+  const carriersQ = useAuthQuery(
     api.carrierPartnerships.listForBroker,
-    {},
-    'brokerOrgId',
+    organizationId ? { brokerOrgId: organizationId } : 'skip',
   );
 
-  const carriers = (carriersRaw ?? []).map((c) => ({
-    _id: c._id,
-    carrierName: c.carrierName,
-    trackFuelConsumption: c.trackFuelConsumption ?? false,
-  }));
+  const carriers = React.useMemo<CarrierRow[]>(
+    () =>
+      (carriersQ ?? []).map((c) => ({
+        _id: c._id,
+        carrierName: c.carrierName,
+        trackFuelConsumption: c.trackFuelConsumption ?? false,
+      })),
+    [carriersQ],
+  );
 
-  const handleSubmit = async (data: FuelEntryFormData, options?: { continueAdding?: boolean }) => {
-    if (!organizationId || !user) return;
-
-    setIsSubmitting(true);
-    try {
-      await createDefEntry({
-        organizationId,
-        entryDate: data.entryDate,
-        vendorId: data.vendorId as Id<'fuelVendors'>,
-        gallons: data.gallons,
-        pricePerGallon: data.pricePerGallon,
-        ...(data.driverId && { driverId: data.driverId as Id<'drivers'> }),
-        ...(data.carrierId && { carrierId: data.carrierId as Id<'carrierPartnerships'> }),
-        ...(data.truckId && { truckId: data.truckId as Id<'trucks'> }),
-        ...(data.odometerReading && { odometerReading: data.odometerReading }),
-        ...(data.location && { location: data.location }),
-        ...(data.fuelCardNumber && { fuelCardNumber: data.fuelCardNumber }),
-        ...(data.receiptNumber && { receiptNumber: data.receiptNumber }),
-        ...(data.loadId && { loadId: data.loadId as Id<'loadInformation'> }),
-        ...(data.paymentMethod && {
-          paymentMethod: data.paymentMethod as 'FUEL_CARD' | 'CASH' | 'CHECK' | 'CREDIT_CARD' | 'EFS' | 'COMDATA',
+  const schema = React.useMemo(
+    () =>
+      bindUploaders(
+        buildFuelEntrySchema({
+          kind: 'def',
+          vendors: vendorsQ ?? [],
+          drivers: driversQ ?? [],
+          trucks: trucksQ ?? [],
+          carriers,
         }),
-        ...(data.notes && { notes: data.notes }),
-        ...(data.receiptStorageId && { receiptStorageId: data.receiptStorageId as Id<'_storage'> }),
-        createdBy: user.id,
-      });
-
-      toast.success(
-        options?.continueAdding ? 'DEF entry created. Ready for the next one.' : 'DEF entry created successfully',
-      );
-
-      if (!options?.continueAdding) {
-        router.push('/operations/diesel');
-      }
-    } catch (error) {
-      console.error('Failed to create DEF entry:', error);
-      toast.error('Failed to create DEF entry. Please try again.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+        { [FUEL_ENTRY_FIELD_IDS.attachment]: generateUploadUrl },
+      ),
+    [vendorsQ, driversQ, trucksQ, carriers, generateUploadUrl],
+  );
 
   return (
-    <>
-      <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b bg-background">
-        <div className="flex items-center gap-2 px-4">
-          <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/dashboard">Home</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="#">Company Operations</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/operations/diesel">Diesel</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem>
-                <BreadcrumbPage>New DEF Entry</BreadcrumbPage>
-              </BreadcrumbItem>
-            </BreadcrumbList>
-          </Breadcrumb>
-        </div>
-      </header>
-
-      <div className="flex flex-1 flex-col gap-6 p-6">
-        <FuelEntryForm
-          entryType="def"
-          drivers={drivers ?? []}
-          carriers={carriers}
-          trucks={trucks ?? []}
-          vendors={vendors ?? []}
-          onSubmit={handleSubmit}
-          onCancel={() => router.push('/operations/diesel')}
-          isSubmitting={isSubmitting}
-          generateUploadUrl={generateUploadUrl}
-        />
-      </div>
-    </>
+    <CreateForm
+      schema={schema}
+      onCancel={() => router.push('/operations/diesel')}
+      onSaved={async (vals, andNew) => {
+        if (!organizationId || !user) {
+          toast.error('Not signed in — please refresh and try again.');
+          return;
+        }
+        try {
+          // fuelType is a fuelEntries-only field — the DEF schema never
+          // renders it, but strip defensively since the defEntries
+          // validator rejects unknown keys.
+          const { fuelType: _fuelType, ...args } = mapValsToFuelEntryArgs(vals);
+          const id = await createDefEntry({
+            ...args,
+            organizationId,
+            createdBy: user.id,
+          });
+          toast.success(
+            andNew
+              ? 'DEF entry saved. Ready for the next one.'
+              : 'DEF entry saved.',
+          );
+          if (!andNew) router.push(`/operations/diesel/${id}`);
+        } catch (err) {
+          console.error('Failed to create DEF entry:', err);
+          toast.error('Failed to create DEF entry. Please try again.');
+        }
+      }}
+    />
   );
 }

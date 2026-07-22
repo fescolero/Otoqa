@@ -24,6 +24,27 @@ crons.interval(
   {},
 );
 
+// ✅ Verify carrier authority nightly against FMCSA (Settings → General
+// badges). Off-peak, staggered per org inside the action.
+crons.cron(
+  'verify-carrier-authority',
+  '15 5 * * *',
+  internal.fmcsaVerification.verifyAllOrgs,
+  {},
+);
+
+// ✅ Recalculate platform usage metering daily (undercount correction)
+// Loads-written-per-cycle counts raised from source loads; the first run
+// doubles as the historical backfill. Powers Settings → Billing & usage.
+// Fixed off-peak time (like the other heavy scans below) so its full
+// loadInformation pass doesn't stack on the interval-based recalc burst.
+crons.cron(
+  'recalculate-platform-usage',
+  '30 4 * * *',
+  internal.platformUsage.recalculateAllOrgsPlatformUsage,
+  {},
+);
+
 // ✅ Reconcile firstStopDate denormalized field daily
 // Ensures the cached firstStopDate on loads matches the actual first stop data
 // Self-healing mechanism for any edge cases or bugs that cause drift
@@ -45,6 +66,17 @@ crons.cron(
   {},
 );
 
+// ✅ Prune stale driverLatestLocation cache rows daily
+// Removes denormalized cache rows for drivers who haven't pinged in 30+
+// days. ingestBatch will re-insert on the next ping if a stale driver
+// returns. Keeps the cache table bounded against driver churn.
+crons.cron(
+  'prune-stale-driver-latest-location',
+  '30 3 * * *', // Daily at 3:30 AM UTC (after archive-old-locations)
+  internal.driverLocations.pruneStaleDriverLatestLocation,
+  {},
+);
+
 // ✅ Archive old audit log entries monthly
 // Moves auditLog rows older than 12 months to S3 cold storage as JSONL,
 // grouped by calendar month, then deletes them. Self-reschedules within a
@@ -52,7 +84,7 @@ crons.cron(
 // See convex/auditLogArchive.ts for the orchestrator and DB helpers.
 crons.cron(
   'archive-old-audit-logs',
-  '30 3 1 * *', // Run monthly on the 1st at 3:30 AM UTC (staggered after GPS archive)
+  '45 3 1 * *', // Monthly on the 1st at 3:45 AM UTC (staggered after the daily location jobs)
   internal.auditLogArchive.archiveOldAuditLogs,
   {},
 );
@@ -69,6 +101,30 @@ crons.interval('recurring-load-generation', { hours: 1 }, internal.recurringLoad
 // Runs every hour to pick up any loads that need auto-assignment
 // Supplements the on-create trigger for any missed loads
 crons.interval('scheduled-auto-assignment', { hours: 1 }, internal.autoAssignmentCron.runScheduledAutoAssignment, {});
+
+// ==========================================
+// DRIVER SETTLEMENTS
+// ==========================================
+
+// ✅ Driver settlement generation (hourly)
+// Pay plans define the cadence; this keeps the current period's DRAFT
+// statements existing and accruing as work lands (create-if-missing +
+// additive top-up via generateOrRefreshForDriver). Never touches manual
+// adjustments or statements past DRAFT. See convex/settlementsCron.ts.
+crons.interval('driver-settlement-generation', { hours: 1 }, internal.settlementsCron.tick, {});
+
+// ✅ Pay-engine (new-ledger) settlement generation — SHADOW (hourly)
+// Mirrors the legacy periods into the new settlements/payItems ledger so the
+// read adapter stays current behind the `settlements_read_ledger` flag.
+// Additive/shadow-only — writes new-ledger settlements, never touches legacy or
+// the dashboard until the flag is flipped. See convex/payEngine/generationCron.ts.
+crons.interval('pay-engine-settlement-generation', { hours: 1 }, internal.payEngine.generationCron.tick, {});
+
+// ✅ Session pay backstop (daily at 1 AM UTC)
+// Catches completed shifts from the last 7 days whose SESSION_DURATION
+// payable was never created (missed hook / transient failure). paySession
+// is idempotent, so broad re-scheduling is safe. See convex/sessionPay.ts.
+crons.cron('session-pay-backstop', '0 1 * * *', internal.sessionPay.backstopSweep, {});
 
 // ==========================================
 // EXTERNAL TRACKING API
@@ -105,11 +161,14 @@ crons.cron('external-tracking-sandbox-refresh', '0 4 * * *', internal.sandboxDat
 // LOAD EXPIRATION
 // ==========================================
 
-// ✅ Auto-expire stale loads (daily at 1 AM UTC)
-// Phase 1: Marks Open/Assigned loads as Expired when the pickup date has passed
-//          and no tracking data was received (trackingStatus still 'Pending')
-// Phase 2: Marks In Transit loads as Expired when no activity for 3+ days
-crons.cron('auto-expire-stale-loads', '0 1 * * *', internal.loads.autoExpireStaleLoads, {});
+// ✅ Auto-expire stale loads (hourly)
+// Phase 1: Marks Open/Assigned loads as Expired when the pickup date has arrived
+//          (firstStopDate <= today) AND the load has been idle for 6+ hours with
+//          trackingStatus still 'Pending'.
+// Phase 2: Marks In Transit loads as Expired after 12+ hours of no activity.
+// Hourly cadence keeps the 6h/12h windows honored within ~1h instead of the
+// previous up-to-24h lag from a once-daily run.
+crons.cron('auto-expire-stale-loads', '0 * * * *', internal.loads.autoExpireStaleLoads, {});
 
 // ==========================================
 // DRIVER SESSION SYSTEM
@@ -142,6 +201,51 @@ crons.interval(
 );
 
 // ==========================================
+// FOURKITES DISPATCHER PUSH
+// ==========================================
+
+// ✅ Push GPS updates to FourKites Dispatcher Update API (every 60 seconds)
+// One outbound POST per org per tick (batched, up to 100 loads per request).
+// FourKites's rate limit is 60 req/min per key — at most a couple req/min
+// per org under realistic load. Mirror of the cron model used by Samsara
+// ingest, but outbound. See convex/fourKitesDispatcherPush.ts.
+crons.interval(
+  'fourkites-dispatcher-push',
+  { seconds: 60 },
+  internal.fourKitesDispatcherPush.pushFourKitesUpdates,
+  {},
+);
+
+// ✅ AUDIT-ONLY: prune fourKitesPushAuditLog rows older than 14 days.
+// Tied to the AUDIT-ONLY feature for FK integration verification. Remove
+// this cron when the audit log table is removed.
+// Runs every 30 min and deletes a bounded batch (200 rows/run) so a
+// single tick can't time out even if a large backlog accumulates.
+crons.interval(
+  'fourkites-audit-log-prune',
+  { minutes: 30 },
+  internal.fourKitesDispatcherPushMutations.pruneFourKitesPushAuditLog,
+  {},
+);
+
+// ==========================================
+// SAMSARA GPS BACKUP INGEST
+// ==========================================
+
+// ✅ Poll Samsara Vehicle Stats GPS feed (every 10 seconds)
+// Backup GPS source for trucks whose mobile app has gone silent mid-shift.
+// Cursor-paginated per integration; sequential per tick. Samsara's
+// endpoint rate limit is 50 req/sec per org — at 10s × <100 integrations
+// we use ~0.1 req/sec per org, two orders of magnitude of headroom.
+// See convex/samsaraIngest.ts for the orchestration.
+crons.interval(
+  'samsara-gps-poll',
+  { seconds: 10 },
+  internal.samsaraIngest.pollAllIntegrations,
+  {},
+);
+
+// ==========================================
 // FACET SYSTEM MAINTENANCE
 // ==========================================
 
@@ -154,6 +258,44 @@ crons.cron(
   'prune-orphaned-facet-values',
   '0 5 * * *',
   internal.facetMaintenance.pruneOrphanedFacetValues,
+  {},
+);
+
+// ✅ Eventually-exact load status counts — change-gated rebuild (every 1 min)
+// Powers the Dispatch Planner badges (loads.countLoadsByStatusFiltered) without
+// the per-query facet/date scan that hit the 4096 read limit. The tick is cheap:
+// it only schedules a rebuild for orgs whose loads actually changed since the
+// last build (organizationStats.updatedAt moved), plus a ≤30-min safety-net.
+// Idle orgs cost ~2 reads/min. See convex/loadStatusCounts.ts + the design doc.
+crons.interval(
+  'load-status-counts-rebuild-gate',
+  { minutes: 1 },
+  internal.loadStatusCounts.tickRebuildGate,
+  {},
+);
+
+// ✅ Load status count cross-check (every 30 min)
+// Asserts the cache's all-time totals equal organizationStats (an independent
+// oracle). A full rebuild can't drift, so a mismatch flags a bug in either
+// mechanism. Doubles as the dark-launch confidence gate before flipping the
+// per-org loadStatusCounts.readFromCache flag.
+crons.interval(
+  'load-status-counts-verify',
+  { minutes: 30 },
+  internal.loadStatusCounts.verifyAllOrgs,
+  {},
+);
+
+// ✅ Expire create-form drafts older than 30 days (daily at 4 AM UTC)
+// Backs Phase 4 of the create-form rollout. Drafts that haven't been
+// touched in 30 days are presumed abandoned. Batched 500 per run; a
+// single nightly run easily handles the working set for a normal-size
+// org. See convex/createDrafts.ts for the implementation + the
+// docs/schema-evolution.md playbook for when this matters.
+crons.cron(
+  'expire-create-drafts',
+  '0 4 * * *',
+  internal.createDrafts.expireOld,
   {},
 );
 

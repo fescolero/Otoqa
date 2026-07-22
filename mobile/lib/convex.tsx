@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, createContext, useContext, type ReactNode } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo, createContext, useContext, type ReactNode } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import { ConvexReactClient } from 'convex/react';
 import { useAuth } from '@clerk/clerk-expo';
@@ -27,15 +27,64 @@ export const convex = new ConvexReactClient(CONVEX_URL, {
 interface ConvexAuthState {
   isLoading: boolean;
   isAuthenticated: boolean;
+  /**
+   * Force a fresh Convex auth cycle. Re-registers `convex.setAuth`, which
+   * tears down and rebuilds the AuthenticationManager (and nudges the
+   * WebSocket to reconnect). This is the imperative the UI's Retry buttons
+   * and the auto-recovery hook call when the app is stuck on a loading/error
+   * gate — without it, "Retry" only resets a visual timer and re-auth never
+   * actually happens. No-op when not signed in, and debounced so a button
+   * tap that races the auto-recovery tick doesn't double-fire.
+   */
+  forceReauth: () => void;
 }
 
 const ConvexAuthContext = createContext<ConvexAuthState>({
   isLoading: true,
   isAuthenticated: false,
+  forceReauth: () => {},
 });
 
 export function useConvexAuthState() {
   return useContext(ConvexAuthContext);
+}
+
+/**
+ * Subscribe to the live Convex WebSocket connection state. This is the
+ * ground-truth signal — distinct from NetInfo (which only knows about the
+ * device radio) and from our auth state (which is about tokens, not the
+ * socket). Lets the UI tell "phone is offline" apart from "phone is online
+ * but our backend is unreachable/slow".
+ *
+ * Deduped to the two fields we actually render off, because the underlying
+ * `subscribeToConnectionState` fires on every inflight-request change
+ * (i.e. on essentially every query/mutation) — storing the raw state would
+ * re-render consumers constantly. Only components that call this hook
+ * subscribe; the rest of the tree is untouched.
+ */
+export function useConvexConnectionState() {
+  const [state, setState] = useState<{ isWebSocketConnected: boolean; connectionRetries: number }>(
+    () => {
+      const cs = convex.connectionState();
+      return { isWebSocketConnected: cs.isWebSocketConnected, connectionRetries: cs.connectionRetries };
+    },
+  );
+
+  useEffect(() => {
+    const apply = (cs: { isWebSocketConnected: boolean; connectionRetries: number }) => {
+      setState((prev) =>
+        prev.isWebSocketConnected === cs.isWebSocketConnected &&
+        prev.connectionRetries === cs.connectionRetries
+          ? prev
+          : { isWebSocketConnected: cs.isWebSocketConnected, connectionRetries: cs.connectionRetries },
+      );
+    };
+    apply(convex.connectionState());
+    const unsubscribe = convex.subscribeToConnectionState(apply);
+    return unsubscribe;
+  }, []);
+
+  return state;
 }
 
 // How long to wait before propagating onChange(false) to React state.
@@ -46,10 +95,14 @@ const AUTH_FALSE_DEBOUNCE_MS = 3_000;
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_REAUTH_ATTEMPTS = 3;
 
+// Reactive half of the context — what actually drives re-renders. The
+// public ConvexAuthState adds the stable `forceReauth` imperative on top.
+type AuthStatus = { isLoading: boolean; isAuthenticated: boolean };
+
 // Provider component - use this ONCE in root layout
 export function ConvexAuthProvider({ children }: { children: ReactNode }) {
   const { isLoaded, isSignedIn, getToken } = useAuth();
-  const [authState, setAuthState] = useState<ConvexAuthState>({
+  const [authState, setAuthState] = useState<AuthStatus>({
     isLoading: true,
     isAuthenticated: false,
   });
@@ -62,6 +115,10 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
   const hasSetAuthRef = useRef(false);
   const reauthAttemptsRef = useRef(0);
   const [reauthTrigger, setReauthTrigger] = useState(0);
+  // Wall-clock of the last forceReauth so a manual Retry tap and the
+  // auto-recovery tick can't pile setAuth re-registrations on top of each
+  // other (each re-registration pauses the WS).
+  const lastForceReauthAtRef = useRef(0);
 
   const clearAuthTimeout = () => {
     if (authTimeoutRef.current) {
@@ -262,8 +319,37 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
     }
   }, [isLoaded, isSignedIn]);
 
+  // Imperative recovery — same machinery the foreground-return handler
+  // uses, exposed so the UI's Retry buttons and the auto-recovery hook can
+  // actually re-drive auth (previously "Retry" only reset a visual timer).
+  // Resets the reauth-attempt budget so a user who's been stuck through the
+  // automatic retries gets a clean run, flips hasSetAuth so the setup effect
+  // re-registers convex.setAuth, and bumps the trigger to re-run it.
+  const forceReauth = useCallback(() => {
+    if (!isSignedInRef.current) return;
+    const now = Date.now();
+    if (now - lastForceReauthAtRef.current < 4_000) return; // debounce double-fires
+    lastForceReauthAtRef.current = now;
+
+    clearAuthTimeout();
+    clearFalseDebounce();
+    reauthAttemptsRef.current = 0;
+    hasSetAuthRef.current = false;
+    wasAuthenticatedRef.current = false;
+    setAuthState({ isLoading: true, isAuthenticated: false });
+    setReauthTrigger((c) => c + 1);
+  }, []);
+
+  // Stable forceReauth + auth state. forceReauth never changes identity, so
+  // this memo only produces a new object when authState actually transitions
+  // — consumers re-render no more often than before this field.
+  const contextValue = useMemo<ConvexAuthState>(
+    () => ({ ...authState, forceReauth }),
+    [authState, forceReauth],
+  );
+
   return (
-    <ConvexAuthContext.Provider value={authState}>
+    <ConvexAuthContext.Provider value={contextValue}>
       {children}
     </ConvexAuthContext.Provider>
   );

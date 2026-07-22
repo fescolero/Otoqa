@@ -4,6 +4,7 @@ import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
 import { calculateDistanceMeters } from './lib/geo';
+import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrackingState';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
 // ============================================
@@ -931,60 +932,16 @@ export const checkInAtStop = mutation({
       });
     }
 
-    // Frontier state for the geofence evaluator. Stop 1 initializes; later
-    // stops advance the pointer and reset the APPROACHING/ARRIVED flags so
-    // the next stop's events can fire fresh.
-    if (stop.sequenceNumber === 1) {
-      const existingState = await ctx.db
-        .query('loadTrackingState')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-        .first();
-      if (!existingState && stop.latitude !== undefined && stop.longitude !== undefined) {
-        await ctx.db.insert('loadTrackingState', {
-          loadId: stop.loadId,
-          sessionId: session!._id,
-          driverId: driver._id,
-          organizationId: driver.organizationId,
-          currentStopSequenceNumber: stop.sequenceNumber,
-          currentStopLat: stop.latitude,
-          currentStopLng: stop.longitude,
-          approachingFired: false,
-          arrivedFired: false,
-          updatedAt: serverNow,
-        });
-      }
-    } else {
-      // Advance frontier to the next non-detour, non-canceled stop after this one.
-      const siblingStops = await ctx.db
-        .query('loadStops')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-        .collect();
-      const upcoming = siblingStops
-        .filter(
-          (s) =>
-            s.sequenceNumber > stop.sequenceNumber &&
-            s.stopType !== 'DETOUR' &&
-            s.status !== 'Canceled'
-        )
-        .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
-
-      if (upcoming && upcoming.latitude !== undefined && upcoming.longitude !== undefined) {
-        const state = await ctx.db
-          .query('loadTrackingState')
-          .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
-          .first();
-        if (state) {
-          await ctx.db.patch(state._id, {
-            currentStopSequenceNumber: upcoming.sequenceNumber,
-            currentStopLat: upcoming.latitude,
-            currentStopLng: upcoming.longitude,
-            approachingFired: false,
-            arrivedFired: false,
-            updatedAt: serverNow,
-          });
-        }
-      }
-    }
+    // Frontier state for the geofence evaluator: arrival watch advances to
+    // the next upcoming stop, departure watch locks onto the stop just
+    // checked into. First check-in creates the row.
+    await setFrontierOnCheckIn(ctx, {
+      stop,
+      sessionId: session!._id,
+      driverId: driver._id,
+      organizationId: driver.organizationId,
+      now: serverNow,
+    });
 
     // Update load tracking status if this is the first stop.
     // trackingStatus is partner-visible; leg.status is internal dispatch
@@ -1014,6 +971,7 @@ export const checkOutFromStop = mutation({
     driverTimestamp: v.string(), // ISO 8601 string
     notes: v.optional(v.string()),
     podPhotoUrl: v.optional(v.string()), // S3 URL for proof of delivery photo
+    podPhotoKey: v.optional(v.string()), // R2 object key for the same photo
   },
   returns: v.object({
     success: v.boolean(),
@@ -1117,14 +1075,20 @@ export const checkOutFromStop = mutation({
         deliveryPhotos: [...existingPhotos, args.podPhotoUrl],
       });
 
+      // capturedAt uses the driver's checkout time, not Date.now() — an
+      // offline checkout can replay hours later, and sync time would
+      // shove the POD out of chronological order in the doc timeline.
+      const driverCheckoutMs = Date.parse(args.driverTimestamp);
+
       await ctx.db.insert('loadDocuments', {
         loadId: stop.loadId,
         workosOrgId: load.workosOrgId,
         type: 'POD',
         externalUrl: args.podPhotoUrl,
+        externalKey: args.podPhotoKey,
         uploadedBy: `driver:${driver._id}`,
         driverId: driver._id,
-        capturedAt: Date.now(),
+        capturedAt: Number.isNaN(driverCheckoutMs) ? Date.now() : driverCheckoutMs,
         uploadedAt: Date.now(),
         capturedLat: args.latitude,
         capturedLng: args.longitude,
@@ -1172,15 +1136,19 @@ export const checkOutFromStop = mutation({
         });
       }
 
-      // Release the geofence frontier. Historical geofenceEvents stay —
-      // only the current-pointer state is removed.
-      const trackingState = await ctx.db
-        .query('loadTrackingState')
-        .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+      // Release the geofence frontier. Historical geofenceEvents stay; if a
+      // departure watch is still pending the row survives (loadCompleted)
+      // so the final facility exit gets its DEPARTED timestamp. The row is
+      // re-bound to the driver's CURRENT session — check-in may have
+      // happened under an earlier one (overnight dwell + auto-timeout), and
+      // the by_session ping lookup only sees the session on the row.
+      const activeSession = await ctx.db
+        .query('driverSessions')
+        .withIndex('by_driver_status', (q) =>
+          q.eq('driverId', driver._id).eq('status', 'active')
+        )
         .first();
-      if (trackingState) {
-        await ctx.db.delete(trackingState._id);
-      }
+      await releaseFrontierOnLoadComplete(ctx, stop.loadId, Date.now(), activeSession?._id);
     }
 
     return { success: true, message: 'Checked out successfully' };
@@ -1272,6 +1240,7 @@ export const recordPOD = mutation({
     stopId: v.id('loadStops'),
     driverId: v.id('drivers'),
     photoUrl: v.string(), // S3 URL
+    photoKey: v.optional(v.string()), // R2 object key for the same photo
   },
   returns: v.object({
     success: v.boolean(),
@@ -1326,6 +1295,7 @@ export const recordPOD = mutation({
       workosOrgId: load.workosOrgId,
       type: 'POD',
       externalUrl: args.photoUrl,
+      externalKey: args.photoKey,
       uploadedBy: `driver:${driver._id}`,
       driverId: driver._id,
       capturedAt: Date.now(),
@@ -1472,9 +1442,11 @@ export const uploadLoadDocument = mutation({
     driverId: v.id('drivers'),
     type: driverDocType,
     // Storage: the driver app goes through S3/R2 presigned URLs, so we
-    // store the fileUrl (externalUrl). storageId is present only for
-    // paths that use Convex file storage (ops uploads via the web app).
+    // store the fileUrl (externalUrl) plus the R2 object key. storageId
+    // is present only for paths that use Convex file storage (ops
+    // uploads via the web app).
     externalUrl: v.optional(v.string()),
+    externalKey: v.optional(v.string()),
     storageId: v.optional(v.id('_storage')),
     fileName: v.optional(v.string()),
     contentType: v.optional(v.string()),
@@ -1483,6 +1455,16 @@ export const uploadLoadDocument = mutation({
     capturedLng: v.optional(v.number()),
     gpsAccuracyM: v.optional(v.number()),
     note: v.optional(v.string()),
+    // Accepted-and-ignored compatibility args. App builds in the field
+    // replay offline-queued uploads by spreading the whole queued
+    // payload, which carries driverTimestamp (stamped on every queued
+    // entry by enqueueMutation) and accidentKind (presign-only; lands in
+    // R2 metadata, not on the row). Convex rejects any undeclared arg,
+    // so without these the replay throws ArgumentValidationError and the
+    // queued document is permanently lost after max retries. Keep until
+    // no deployed build spreads queue payloads into this mutation.
+    driverTimestamp: v.optional(v.string()),
+    accidentKind: v.optional(v.string()),
   },
   returns: v.object({
     documentId: v.id('loadDocuments'),
@@ -1536,6 +1518,7 @@ export const uploadLoadDocument = mutation({
       type: args.type,
       storageId: args.storageId,
       externalUrl: args.externalUrl,
+      externalKey: args.externalKey,
       fileName: args.fileName,
       contentType: args.contentType,
       // uploadedBy is a synthetic string for driver uploads; the WorkOS

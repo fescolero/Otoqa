@@ -15,6 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { MapPin, Clock, Route, Truck, Flag } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 
@@ -225,6 +226,8 @@ export function RouteHistoryMap({
   stops,
 }: RouteHistoryMapProps) {
   const apiKey = useGoogleMapsKey();
+  const mapId = useThemedMapId();
+  const colorScheme = useMapColorScheme();
 
   // Fetch route history from Convex
   const routeHistory = useQuery(api.driverLocations.getRouteHistoryForLoad, {
@@ -312,7 +315,8 @@ export function RouteHistoryMap({
           <Map
             defaultCenter={center}
             defaultZoom={6}
-            mapId="route-history-map"
+            mapId={mapId}
+            colorScheme={colorScheme}
             gestureHandling="cooperative"
             disableDefaultUI={false}
             zoomControl={true}
@@ -341,7 +345,8 @@ export function RouteHistoryMap({
         <Map
           defaultCenter={center}
           defaultZoom={6}
-          mapId="route-history-map"
+          mapId={mapId}
+          colorScheme={colorScheme}
           gestureHandling="cooperative"
           disableDefaultUI={false}
           zoomControl={true}

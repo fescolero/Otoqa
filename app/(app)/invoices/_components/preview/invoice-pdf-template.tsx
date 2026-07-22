@@ -168,6 +168,44 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     borderTop: '2 solid #e2e8f0',
   },
+  paymentHistorySection: {
+    marginBottom: 20,
+  },
+  paymentHistoryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  paymentHistoryTitle: {
+    fontSize: 8,
+    fontWeight: 'bold',
+    color: '#64748b',
+    textTransform: 'uppercase',
+  },
+  paymentHistoryTotal: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    fontFamily: 'Courier',
+  },
+  payColDate: {
+    flex: 1,
+    fontFamily: 'Courier',
+  },
+  payColRef: {
+    flex: 1.4,
+    fontFamily: 'Courier',
+  },
+  payColMiles: {
+    flex: 0.6,
+    textAlign: 'right',
+    fontFamily: 'Courier',
+  },
+  payColAmount: {
+    flex: 0.7,
+    textAlign: 'right',
+    fontFamily: 'Courier',
+  },
   footerSection: {
     flexDirection: 'row',
     gap: 40,
@@ -251,11 +289,22 @@ interface CompanyDetails {
   logoUrl?: string;
 }
 
+interface PaymentRow {
+  _id: string;
+  amount: number;
+  miles?: number | null;
+  paymentDate?: string | null;
+  reference?: string | null;
+  note?: string | null;
+}
+
 interface InvoicePDFTemplateProps {
   invoice: Invoice;
   customer: Customer;
   lineItems: InvoiceLineItem[];
   companyDetails: CompanyDetails;
+  /** Individual payment ledger rows — a history table renders when >1 exists. */
+  payments?: PaymentRow[];
 }
 
 const formatCurrency = (amount: number, currency: string = 'USD') => {
@@ -300,7 +349,11 @@ export const InvoicePDFTemplate: React.FC<InvoicePDFTemplateProps> = ({
   customer,
   lineItems,
   companyDetails,
+  payments,
 }) => {
+  const paymentRows = payments ?? [];
+  const showPaymentHistory = paymentRows.length > 1;
+  const paymentsTotal = paymentRows.reduce((s, r) => s + r.amount, 0);
   const customerAddress = customer.officeLocation
     ? `${customer.officeLocation.address}\n${customer.officeLocation.city}, ${customer.officeLocation.state} ${customer.officeLocation.zip}\n${customer.officeLocation.country || 'United States'}`
     : 'Address not available';
@@ -434,6 +487,39 @@ export const InvoicePDFTemplate: React.FC<InvoicePDFTemplateProps> = ({
             </View>
           </View>
         </View>
+
+        {/* Payment History — shown when the invoice was paid in multiple
+            installments (split / partial payments). */}
+        {showPaymentHistory && (
+          <View style={styles.paymentHistorySection}>
+            <View style={styles.paymentHistoryHeader}>
+              <Text style={styles.paymentHistoryTitle}>
+                Payment History · {paymentRows.length} payments
+              </Text>
+              <Text style={styles.paymentHistoryTotal}>
+                {formatCurrency(paymentsTotal, invoice.currency)}
+              </Text>
+            </View>
+            <View style={styles.tableHeader}>
+              <Text style={styles.payColDate}>Date</Text>
+              <Text style={styles.payColRef}>Reference / Check #</Text>
+              <Text style={styles.payColMiles}>Miles</Text>
+              <Text style={styles.payColAmount}>Amount</Text>
+            </View>
+            {paymentRows.map((r) => (
+              <View key={r._id} style={styles.tableRow}>
+                <Text style={styles.payColDate}>{formatDate(r.paymentDate ?? undefined)}</Text>
+                <Text style={styles.payColRef}>{r.reference || '-'}</Text>
+                <Text style={styles.payColMiles}>
+                  {r.miles != null && r.miles > 0 ? r.miles.toLocaleString() : '-'}
+                </Text>
+                <Text style={styles.payColAmount}>
+                  {formatCurrency(r.amount, invoice.currency)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
 
         {/* Footer */}
         <View style={styles.footerSection}>

@@ -25,6 +25,7 @@ import {
   trackLoadingGateResolved,
   trackLoadingGateRetry,
   trackAppSessionHealth,
+  trackConvexAuthEvent,
   type LoadingGate,
 } from '../../lib/analytics';
 import { useBootstrap, MODE_STORAGE_KEY } from '../../lib/hooks/useBootstrap';
@@ -32,6 +33,8 @@ import { usePermissionGates } from '../../lib/hooks/usePermissionGates';
 import { usePushWake } from '../../lib/hooks/usePushWake';
 import { useLocationService } from '../../lib/hooks/useLocationService';
 import { useAnalyticsInit } from '../../lib/hooks/useAnalyticsInit';
+import { useConnectionRecovery } from '../../lib/hooks/useConnectionRecovery';
+import { ConnectionErrorScreen, OfflineIndicator, type ConnErrorReason } from '../../lib/connection-error-screen';
 
 const GATE_TIMEOUT_MS = 12_000;
 
@@ -41,6 +44,10 @@ function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<str
   const resolvedRef = useRef(false);
   const [isTimedOut, setIsTimedOut] = useState(false);
   const retryCountRef = useRef(0);
+  // Bumped by retry() so the timeout effect re-arms even when isWaiting
+  // never toggles (profile/carrier gates during a forceReauth cycle) —
+  // otherwise a gate could only ever time out once.
+  const [armNonce, setArmNonce] = useState(0);
 
   useEffect(() => {
     if (isWaiting) {
@@ -73,7 +80,7 @@ function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<str
       timedOutRef.current = false;
       setIsTimedOut(false);
     }
-  }, [isWaiting]);
+  }, [isWaiting, armNonce]);
 
   const retry = useCallback(() => {
     retryCountRef.current += 1;
@@ -82,6 +89,7 @@ function useLoadingGate(gate: LoadingGate, isWaiting: boolean, deps?: Record<str
     timedOutRef.current = false;
     resolvedRef.current = false;
     setIsTimedOut(false);
+    setArmNonce((n) => n + 1);
   }, [gate]);
 
   return { isTimedOut, retry, retryCount: retryCountRef.current };
@@ -246,6 +254,92 @@ export default function AppLayout() {
   const profileGate = useLoadingGate('driver_profile', !!isProfileLoading);
   const carrierOrgGate = useLoadingGate('carrier_org', !!isCarrierOrgLoading);
 
+  // Convex auth resolved to "not authenticated" while Clerk still has us
+  // signed in. This is a terminal auth failure (the in-provider setup
+  // timeout fired, or its reauth budget was exhausted) — NOT a transient
+  // loading state. It needs its own render branch below, because if we let
+  // it fall through to the roles spinner, that gate is armed on
+  // `convexAuth.isAuthenticated` and so never times out — stranding the
+  // user on "Checking permissions…" forever.
+  const authFailed = !!isSignedIn && !convexAuth.isLoading && !convexAuth.isAuthenticated;
+
+  // Are we parked on a loading/error screen the user can't get past on their
+  // own? Drives both the messaging and the auto-recovery below.
+  const isStuck =
+    authFailed ||
+    convexAuthGate.isTimedOut ||
+    rolesGate.isTimedOut ||
+    profileGate.isTimedOut ||
+    carrierOrgGate.isTimedOut;
+
+  // Real recovery: re-drive Convex auth AND clear whichever visual gate
+  // timed out (forceReauth flips isLoading back to true, but a timed-out
+  // gate keeps its isTimedOut=true until retry() resets it, so the error
+  // screen would otherwise stick). Used by the auto-recovery hook.
+  const recover = useCallback(() => {
+    if (convexAuthGate.isTimedOut) convexAuthGate.retry();
+    if (rolesGate.isTimedOut) rolesGate.retry();
+    if (profileGate.isTimedOut) profileGate.retry();
+    if (carrierOrgGate.isTimedOut) carrierOrgGate.retry();
+    convexAuth.forceReauth();
+  }, [convexAuthGate, rolesGate, profileGate, carrierOrgGate, convexAuth]);
+
+  // Manual Retry handler for the gate error screens. Resets the tapped
+  // gate's visual timer and fires a real reauth — previously these buttons
+  // only reset the timer, so a genuinely stuck client never recovered.
+  const handleRetry = useCallback((gate?: { retry: () => void }, opts?: { auto?: boolean }) => {
+    gate?.retry();
+    trackConvexAuthEvent(opts?.auto ? 'auto_recovery' : 'manual_reauth', {});
+    convexAuth.forceReauth();
+  }, [convexAuth]);
+
+  // Self-heal: retry automatically when the network returns, and on a
+  // periodic backstop while stuck + online. Surfaces live connectivity
+  // (NetInfo) AND the real Convex WebSocket state so the error screens can
+  // tell three situations apart and guide the user accordingly.
+  const { isOffline, isWebSocketConnected, connectionQuality } = useConnectionRecovery({ isStuck, onRecover: recover });
+
+  // "Sign out" is the action that actually helps when the server is up but
+  // our session is bad — either because the live WS proves the server is
+  // reachable while auth keeps failing, or because we've burned through a
+  // couple of recovery attempts with no luck (a fallback for a flaky WS
+  // signal). Offline never suggests reauth — there's nothing to reauth against.
+  // Map the live signals to the design's three connection-error variants
+  // (see lib/connection-error-screen.tsx). Connectivity errors auto-retry
+  // until the connection is restored (no attempt cap); only the session
+  // case — server reachable but rejecting us — stops and asks for sign-in:
+  //   • offline → no connectivity → wait, auto-reconnect when back online.
+  //   • session → online + WS connected but auth rejected → sign out
+  //     (retrying can't mint a fresh session).
+  //   • server  → online but the WS can't reach Convex yet → keep retrying.
+  const suggestReauth = !isOffline && isWebSocketConnected;
+  const connReason: ConnErrorReason = isOffline ? 'offline' : suggestReauth ? 'session' : 'server';
+
+  // Offline-tolerant boot. Once the app has rendered once (authenticated +
+  // roles cached), OR the driver explicitly taps "Continue offline", we stop
+  // blocking on connectivity problems — they keep working on cached data and
+  // the offline queue syncs on reconnect. A SESSION failure (reachable server
+  // rejecting our auth) still blocks: sign-in is the only fix, so it's never
+  // bypassed.
+  const [continuedOffline, setContinuedOffline] = useState(false);
+  const [hasBootedOnce, setHasBootedOnce] = useState(false);
+  useEffect(() => {
+    if (convexAuth.isAuthenticated && !isRolesLoading) setHasBootedOnce(true);
+  }, [convexAuth.isAuthenticated, isRolesLoading]);
+  const handleContinueOffline = useCallback(() => setContinuedOffline(true), []);
+  const allowOfflineBypass = (continuedOffline || hasBootedOnce) && connReason !== 'session';
+  // The pill reports the connection state while in the app. "Offline" (on
+  // cached data — no network or not connected to Convex) takes priority;
+  // otherwise a weak/poor signal surfaces as "Weak signal". It clears once
+  // we're back to a good, authenticated connection.
+  const indicatorStatus: 'offline' | 'weak' | null =
+    isOffline || !convexAuth.isAuthenticated
+      ? 'offline'
+      : connectionQuality === 'poor'
+        ? 'weak'
+        : null;
+  const showOfflineIndicator = indicatorStatus !== null;
+
   // Identify user in PostHog once roles are known and mode is selected.
   useAnalyticsInit({
     userId,
@@ -317,20 +411,38 @@ export default function AppLayout() {
     return <Redirect href="/(auth)/sign-in" />;
   }
 
-  // Wait for Convex auth setup
-  if (convexAuth.isLoading) {
+  // Wait for Convex auth setup. Skipped entirely once we're allowed to run
+  // offline (booted before, or the driver chose to continue) — we fall
+  // through to render the app on cached data instead of blocking.
+  if (convexAuth.isLoading && !allowOfflineBypass) {
     if (convexAuthGate.isTimedOut) {
       return (
-        <GateErrorScreen
-          icon="cloud-offline-outline"
-          title="Connection Slow"
-          subtext="Having trouble connecting to the server."
-          onRetry={() => { convexAuthGate.retry(); }}
+        <ConnectionErrorScreen
+          reason={connReason}
+          onRetry={(opts) => handleRetry(convexAuthGate, opts)}
           onSignOut={handleSignOut}
+          onContinueOffline={handleContinueOffline}
         />
       );
     }
     return <LoadingRingScreen statusText="Connecting to server…" subText="Hang tight" />;
+  }
+
+  // Signed in with Clerk, but Convex auth came back "not authenticated".
+  // Terminal failure — show an actionable, self-healing screen rather than
+  // falling through to the roles spinner (whose gate never times out when
+  // unauthenticated, which is what left users stuck on "Checking
+  // permissions…" indefinitely). useConnectionRecovery is already retrying
+  // in the background; the Retry button forces an immediate fresh cycle.
+  if (authFailed && !allowOfflineBypass) {
+    return (
+      <ConnectionErrorScreen
+        reason={connReason}
+        onRetry={(opts) => handleRetry(undefined, opts)}
+        onSignOut={handleSignOut}
+        onContinueOffline={handleContinueOffline}
+      />
+    );
   }
 
   // Show loading while fetching roles
@@ -340,8 +452,12 @@ export default function AppLayout() {
         <GateErrorScreen
           icon="shield-outline"
           title="Taking Longer Than Expected"
-          subtext="Still checking your permissions. You can retry or sign out and try again."
-          onRetry={() => { rolesGate.retry(); }}
+          subtext={
+            isOffline
+              ? "You appear to be offline. We'll finish checking your permissions once your connection is back."
+              : 'Still checking your permissions. Retrying automatically — you can also retry or sign out.'
+          }
+          onRetry={() => handleRetry(rolesGate)}
           onSignOut={handleSignOut}
         />
       );
@@ -414,8 +530,12 @@ export default function AppLayout() {
         <GateErrorScreen
           icon="person-outline"
           title="Profile Load Slow"
-          subtext="Having trouble loading your profile data."
-          onRetry={() => { activeGate.retry(); }}
+          subtext={
+            isOffline
+              ? "You appear to be offline. We'll load your profile once your connection is back."
+              : 'Having trouble loading your profile data. Retrying automatically…'
+          }
+          onRetry={() => handleRetry(activeGate)}
           onSignOut={handleSignOut}
         />
       );
@@ -525,41 +645,48 @@ export default function AppLayout() {
   }
 
   return (
-    <AppModeContext.Provider
-      value={{
-        mode,
-        setMode,
-        roles: userRoles,
-        canSwitchModes,
-      }}
-    >
-      <CarrierOwnerContext.Provider value={carrierOwnerContextValue}>
-        <DriverContext.Provider value={driverContextValue}>
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.background },
-            }}
-          >
-            <Stack.Screen name="(driver-tabs)" />
-            <Stack.Screen name="trip/[id]" />
-            <Stack.Screen name="capture-photo" />
-            <Stack.Screen name="switch-truck" />
-            <Stack.Screen name="permissions" />
-            <Stack.Screen name="notifications" />
-            <Stack.Screen name="language" />
-            <Stack.Screen name="owner" />
-            <Stack.Screen
-              name="driver"
-              options={{
-                presentation: 'fullScreenModal',
-                animation: 'slide_from_bottom',
+    <>
+      <AppModeContext.Provider
+        value={{
+          mode,
+          setMode,
+          roles: userRoles,
+          canSwitchModes,
+        }}
+      >
+        <CarrierOwnerContext.Provider value={carrierOwnerContextValue}>
+          <DriverContext.Provider value={driverContextValue}>
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.background },
               }}
-            />
-          </Stack>
-        </DriverContext.Provider>
-      </CarrierOwnerContext.Provider>
-    </AppModeContext.Provider>
+            >
+              <Stack.Screen name="(driver-tabs)" />
+              <Stack.Screen name="trip/[id]" />
+              <Stack.Screen name="pay/index" />
+              <Stack.Screen name="pay/[id]" />
+              <Stack.Screen name="capture-photo" />
+              <Stack.Screen name="switch-truck" />
+              <Stack.Screen name="permissions" />
+              <Stack.Screen name="notifications" />
+              <Stack.Screen name="language" />
+              <Stack.Screen name="owner" />
+              <Stack.Screen
+                name="driver"
+                options={{
+                  presentation: 'fullScreenModal',
+                  animation: 'slide_from_bottom',
+                }}
+              />
+            </Stack>
+          </DriverContext.Provider>
+        </CarrierOwnerContext.Provider>
+      </AppModeContext.Provider>
+      {/* Offline-mode pill — floats over the app while running on cached
+          data, and animates away once we're reconnected + authenticated. */}
+      <OfflineIndicator visible={showOfflineIndicator} status={indicatorStatus ?? 'offline'} />
+    </>
   );
 }
 
@@ -573,25 +700,56 @@ function GateErrorScreen({
   subtext,
   onRetry,
   onSignOut,
+  primaryAction = 'retry',
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   title: string;
   subtext: string;
   onRetry: () => void;
   onSignOut: () => void;
+  // Which action gets the prominent button. When the server is up but the
+  // session is bad, Retry is futile — promote "Sign out" instead. Both
+  // actions stay available either way; only the emphasis changes.
+  primaryAction?: 'retry' | 'signOut';
 }) {
+  const retryButton = (
+    <Pressable style={styles.retryButton} onPress={onRetry}>
+      <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
+      <Text style={styles.retryButtonText}>Retry</Text>
+    </Pressable>
+  );
+  const signOutButton = (
+    <Pressable style={styles.retryButton} onPress={onSignOut}>
+      <Ionicons name="log-out-outline" size={18} color={colors.primaryForeground} />
+      <Text style={styles.retryButtonText}>Sign out & sign back in</Text>
+    </Pressable>
+  );
+  const retryLink = (
+    <Pressable style={styles.signOutLink} onPress={onRetry}>
+      <Text style={styles.signOutLinkText}>Retry</Text>
+    </Pressable>
+  );
+  const signOutLink = (
+    <Pressable style={styles.signOutLink} onPress={onSignOut}>
+      <Text style={styles.signOutLinkText}>Sign out</Text>
+    </Pressable>
+  );
   return (
     <View style={styles.loading}>
       <Ionicons name={icon} size={48} color={colors.warning} />
       <Text style={styles.loadingTitle}>{title}</Text>
       <Text style={styles.loadingSubtext}>{subtext}</Text>
-      <Pressable style={styles.retryButton} onPress={onRetry}>
-        <Ionicons name="refresh" size={18} color={colors.primaryForeground} />
-        <Text style={styles.retryButtonText}>Retry</Text>
-      </Pressable>
-      <Pressable style={styles.signOutLink} onPress={onSignOut}>
-        <Text style={styles.signOutLinkText}>Sign out</Text>
-      </Pressable>
+      {primaryAction === 'signOut' ? (
+        <>
+          {signOutButton}
+          {retryLink}
+        </>
+      ) : (
+        <>
+          {retryButton}
+          {signOutLink}
+        </>
+      )}
     </View>
   );
 }

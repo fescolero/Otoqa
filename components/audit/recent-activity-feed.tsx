@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { api } from '@/convex/_generated/api';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useOrgMemberSync } from '@/hooks/use-org-member-sync';
 import { formatDistanceToNow } from 'date-fns';
 import { Loader2, History } from 'lucide-react';
 import { Card } from '@/components/ui/card';
@@ -49,6 +50,10 @@ export function RecentActivityFeed({ hours = 24 }: RecentActivityFeedProps) {
   // Stable per mount so the query subscription isn't re-created every render.
   const [nowMs] = useState(() => Date.now());
   const logs = useAuthQuery(api.auditLog.getRecentActivity, { hours, nowMs });
+
+  // Performer names are resolved server-side from the org member
+  // directory; an unresolved ID means the directory needs a first sync.
+  useOrgMemberSync((logs ?? []).some((log) => !log.performedByName && !log.performedByEmail));
 
   return (
     <Card className="p-4">

@@ -17,6 +17,7 @@ import {
   purgeStaleUnsynced,
   getLastLocationForLoad,
   getLastLocationForSession,
+  resolveBackend,
   type LocationInput,
 } from './location-storage';
 import { log } from './log';
@@ -35,7 +36,9 @@ import {
   flushAnalytics,
 } from './analytics';
 import { requestIgnoreBatteryOptimizationOnce } from './battery-optimization';
+import { startShiftStatus, updateShiftStatus, endShiftStatus } from 'otoqa-shift-status';
 import { setBootState, clearBootState } from './boot-state';
+import { noteSyncFailure, noteSyncSuccess } from './sync-stall-alert';
 
 // Module-scoped namespaced logger. Debug/info calls are stripped in
 // production by Metro; warn/error pass through so Sentry / native
@@ -53,6 +56,19 @@ const lg = log('LocationTracking');
 // ============================================
 
 const LOCATION_TASK_NAME = 'OTOQA_LOCATION_TRACKING';
+
+// Single source of truth for the mandatory location foreground-service
+// notification. Its channel is demoted to minimized/lock-screen-hidden at
+// app startup (configureQuietChannels in otoqa-shift-status) — the
+// driver-facing status lives on the On-shift card instead. Keep every
+// startLocationUpdatesAsync call on this one config: divergent titles
+// made stale duplicates (new notification id per service cycle) look
+// like different notifications.
+const TRACKING_FGS_NOTIFICATION = {
+  notificationTitle: 'Location service',
+  notificationBody: 'Keeps route tracking running',
+  notificationColor: '#22c55e',
+};
 const TRACKING_STATE_KEY = 'location_tracking_state';
 
 // ============================================
@@ -477,6 +493,15 @@ export async function reconcileTrackingStateWithActiveSession(
   lg.debug(
     `Self-healed tracking state (reason=${reason}): attached session ${active._id.substring(0, 12)}`,
   );
+  // The rescued driver is mid-shift but startSessionTracking never ran
+  // on this device, so no lock-screen surface exists — assert it now
+  // (idempotent: the JS wrapper no-ops if it's already up).
+  if (typeof patched.startedAt === 'number' && patched.startedAt > 0) {
+    void startShiftStatus(
+      patched.startedAt,
+      patched.loadId ? 'On a trip' : 'On shift — no active trip',
+    );
+  }
   return patched;
 }
 
@@ -596,6 +621,23 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error) {
     lg.error('BG task error from OS:', error);
     trackBGTaskError({ step: 'os_error', error: String(error) });
+    return;
+  }
+
+  // Ensure the queue backend is resolved IN THIS JS CONTEXT. The root
+  // layout awaits resolveBackend() during React init, but this task can
+  // run headless (Android relaunches the task after process death, before
+  // any React tree mounts) — in that context every location-storage call
+  // would throw "resolveBackend() not called" and the task would silently
+  // drop captures + never mark synced rows. Idempotent when the layout
+  // already resolved.
+  try {
+    await resolveBackend();
+  } catch (resolveErr) {
+    const msg =
+      resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+    lg.error(`BG task: resolveBackend failed: ${msg}`);
+    trackBGTaskError({ step: 'resolve_backend', error: msg });
     return;
   }
 
@@ -821,9 +863,14 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   //     the gap between fires can be 15-40 min when Android Doze is
   //     batching FGS callbacks, so the cost of waiting is high.
   //   - Total worst-case retry budget: ~4s. Headless-context ceiling
-  //     is ~20s (Firebase Messaging SDK 23.2.1 background broadcast
-  //     timeout) to ~30s (expo-task-manager). Terminal HTTP errors
-  //     (401/403/400) skip retry since they won't resolve.
+  //     is ~20s (Firebase Messaging SDK 23.2.1 caps background
+  //     broadcasts at 20s) to ~30s (expo-task-manager
+  //     TASKMANAGER_BG_TIME_LIMIT_MS on Android). Terminal HTTP errors
+  //     (401/403/400) skip retry since they won't resolve on a
+  //     re-attempt with identical payload + API key.
+  //
+  // Mirrors the foreground `forceFlush` retry pattern intentionally — same
+  // strategy, tighter delays appropriate for the BG runtime budget.
   //
   // See PR for the 2026-05-08 sync-latency context (median 8.4 min,
   // p99 58 min — needed to know if BG task is firing at all).
@@ -886,10 +933,12 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             // 4xx (except 408/429) indicates a client-side problem; auth
             // won't change between attempts. 5xx, timeouts, and TypeError
             // (network) fall through and get retried.
+            // syncViaHttpEndpoint throws `HTTP ${status}: ${body}`.
+            const httpStatus = /^HTTP (\d{3})/.exec(msg)?.[1];
             if (
-              msg.includes('HTTP 401') ||
-              msg.includes('HTTP 403') ||
-              msg.includes('HTTP 400')
+              httpStatus?.startsWith('4') &&
+              httpStatus !== '408' &&
+              httpStatus !== '429'
             ) {
               lg.warn(`BG HTTP sync terminal error (no retry): ${msg}`);
               break;
@@ -905,7 +954,11 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
         if (result) {
           syncSuccess = true;
           syncCount = result.inserted;
-          await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+          // Record success before the SQLite bookkeeping: the server has
+          // the pings at this point, and a markAsSynced failure must not
+          // relabel a successful sync as outcome=failure. Safe to re-send
+          // on the next fire if marking fails — the ingest endpoint dedups
+          // by (sessionId|loadId, recordedAt).
           trackBgSyncOutcome({
             outcome: 'success',
             queueDepthBefore,
@@ -914,6 +967,32 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             syncDurationMs: Date.now() - syncStart,
             syncRetries,
           });
+          try {
+            await applyIngestOutcome(unsynced.map((r) => r.id), result, 'BG');
+            // Reset the stall-alert streaks — but only after marking
+            // persisted, and let the detector see whether this "success"
+            // made real progress. An HTTP 200 with broken local marking
+            // means the queue re-sends the same rows (all-dup batches)
+            // while new pings pile up behind the batch cap; that IS a
+            // stall even though every request "succeeds" (2026-07-11
+            // incident, second failure mode).
+            await noteSyncSuccess({
+              inserted: result.inserted,
+              duplicates: result.duplicates,
+              queueDepth: queueDepthBefore,
+            });
+          } catch (markErr) {
+            const msg = markErr instanceof Error ? markErr.message : String(markErr);
+            lg.warn(
+              `BG sync succeeded but marking rows synced failed (will re-send next fire): ${msg}`,
+            );
+            trackBGTaskError({ step: 'mark_synced', error: msg });
+            await noteSyncFailure({
+              queueDepth: queueDepthBefore,
+              oldestUnsyncedAgeSec,
+              error: `mark_synced: ${msg}`,
+            });
+          }
         } else {
           const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
           lg.warn(
@@ -928,20 +1007,35 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
             error: errMsg,
             syncRetries,
           });
+          // Silent-stall detection: capture keeps working while uploads
+          // fail (e.g. Samsung's per-app "Allow background data usage"
+          // off — 2026-07-11 incident), so tell the driver before the
+          // queue grows a whole shift deep.
+          await noteSyncFailure({
+            queueDepth: queueDepthBefore,
+            oldestUnsyncedAgeSec,
+            error: errMsg,
+          });
         }
       }
     } catch (flushError) {
       // Catches errors from getUnsyncedLocations / payload prep — not the
-      // HTTP call (that's handled inside the retry loop).
+      // HTTP call (handled inside the retry loop) nor marking rows synced
+      // (handled in its own try/catch above).
       const errMsg = flushError instanceof Error ? flushError.message : String(flushError);
       lg.warn(`BG sync prep failed (points safe in local queue): ${errMsg}`);
       syncAttempted = true;
       trackBGTaskError({ step: 'sync', error: errMsg });
+      await noteSyncFailure({ queueDepth: queueDepthBefore, error: errMsg });
       trackBgSyncOutcome({
         outcome: 'failure',
         queueDepthBefore,
         syncDurationMs: Date.now() - syncStart,
         error: errMsg,
+        // Always 0 here (prep failed before the retry loop); passed so
+        // every 'failure' event carries the field per the analytics.ts
+        // contract.
+        syncRetries,
       });
     }
   }
@@ -1132,11 +1226,7 @@ export async function startLocationTracking(params: {
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
         showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: 'Route Tracking Active',
-          notificationBody: 'Recording your delivery route',
-          notificationColor: '#22c55e',
-        },
+        foregroundService: TRACKING_FGS_NOTIFICATION,
         // OtherNavigation avoids competing with the driver's active nav app
         // (Apple Maps, Google Maps, Waze) for the AutomotiveNavigation slot.
         activityType: Location.ActivityType.OtherNavigation,
@@ -1156,6 +1246,10 @@ export async function startLocationTracking(params: {
       startForegroundPolling(params.organizationId);
 
       lg.debug('Background + foreground tracking started successfully');
+      // Lock-screen surface for legacy load-mode tracking too (drivers
+      // who check in without the Start Shift flow) — the timer anchors
+      // to tracking start, i.e. effectively trip start.
+      void startShiftStatus(state.startedAt, 'On a trip');
       return { success: true, message: 'Location tracking started' };
     } catch (bgError) {
       // Background tracking failed - fall back to foreground polling
@@ -1168,6 +1262,7 @@ export async function startLocationTracking(params: {
       // Start foreground-only polling as fallback
       startForegroundPolling(params.organizationId);
 
+      void startShiftStatus(state.startedAt, 'On a trip');
       return {
         success: true,
         message: 'Tracking started (foreground only - background not available)',
@@ -1187,6 +1282,13 @@ export async function startLocationTracking(params: {
 export async function stopLocationTracking(): Promise<{ success: boolean; message: string }> {
   try {
     lg.debug('Stopping tracking...');
+
+    // Tear down the lock-screen shift surface FIRST — before any await
+    // that can throw into the catch block and skip it. Every stop path
+    // (End Shift, legacy last-stop checkout, server-forced stop) lands
+    // here, and a lingering 'On shift' card after the shift ended is
+    // worse than any teardown-ordering nicety.
+    void endShiftStatus();
 
     // Stop sync interval and foreground polling
     stopSyncInterval();
@@ -1458,11 +1560,7 @@ async function applyOSLevelTrackingResources(state: TrackingState): Promise<{
       timeInterval: TRACKING_INTERVAL_MS,
       distanceInterval: BG_DISTANCE_INTERVAL,
       showsBackgroundLocationIndicator: true,
-      foregroundService: {
-        notificationTitle: 'Shift Active',
-        notificationBody: 'Recording your route while on shift',
-        notificationColor: '#22c55e',
-      },
+      foregroundService: TRACKING_FGS_NOTIFICATION,
       activityType: Location.ActivityType.OtherNavigation,
       pausesUpdatesAutomatically: false,
     });
@@ -1516,7 +1614,14 @@ export async function startSessionTracking(params: {
       startedAt: Date.now(),
     };
 
-    return await applyOSLevelTrackingResources(state);
+    const result = await applyOSLevelTrackingResources(state);
+    if (result.success) {
+      // Lock-screen shift surface (Android chronometer notification /
+      // iOS Live Activity). Fire-and-forget: the surface mirrors shift
+      // state and must never block or fail the shift itself.
+      void startShiftStatus(state.startedAt, 'On shift — no active trip');
+    }
+    return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Failed to start session tracking';
     lg.error('Session start failed:', errorMessage);
@@ -1552,6 +1657,9 @@ export async function attachLoadToSession(loadId: Id<'loadInformation'>): Promis
   lg.debug(
     `Attached load=${(loadId as string).substring(0, 12)}... to session`,
   );
+  // Deliberately NO surface update here: useCheckIn announces the
+  // specific stop line right after attach, and firing a generic 'On a
+  // trip' first would race it (both are fire-and-forget natives).
   return { success: true, message: 'Load attached to session' };
 }
 
@@ -1584,12 +1692,29 @@ export async function detachLoadFromSession(): Promise<{
   };
   await storage.set(TRACKING_STATE_KEY, JSON.stringify(updated));
   lg.debug('Detached load from session');
+  void updateShiftStatus('Trip complete — on shift');
   return { success: true, message: 'Load detached from session' };
 }
 
 /**
  * End session-mode tracking. Alias for stopLocationTracking — both tear
  * down the same OS-level resources and flush any unsynced points.
+ *
+ * TODO(mobile-fcm): Server now fires an FCM data push with
+ * `data: { type: 'session_ended', sessionId, endedAt, endReason }`
+ * whenever a session is ended *server-side* (dispatch override,
+ * auto-timeout, handoff, another device). The mobile FCM message
+ * handler should match on `type === 'session_ended'` and call
+ * `stopSessionTracking()` to drain the queue and shut the foreground
+ * tracker down.
+ *
+ * Without this handler, mobile keeps the foreground location service
+ * running until the user manually taps "End Shift" — and during that
+ * window, the server rejects every ping (see
+ * convex/driverLocations.ts::ingestBatch skippedSessionEnded +
+ * skippedLegInactive counters). Battery + bandwidth get burned for no
+ * useful data. Source of truth on the contract:
+ * convex/fcmWake.ts::sendSessionEnded.
  */
 export async function stopSessionTracking(): Promise<{ success: boolean; message: string }> {
   return stopLocationTracking();
@@ -1652,11 +1777,7 @@ export async function resumeTracking(): Promise<{
           timeInterval: TRACKING_INTERVAL_MS,
           distanceInterval: BG_DISTANCE_INTERVAL,
           showsBackgroundLocationIndicator: true,
-          foregroundService: {
-            notificationTitle: 'Route Tracking Active',
-            notificationBody: 'Recording your delivery route',
-            notificationColor: '#22c55e',
-          },
+          foregroundService: TRACKING_FGS_NOTIFICATION,
           activityType: Location.ActivityType.OtherNavigation,
           pausesUpdatesAutomatically: false,
         });
@@ -1670,6 +1791,16 @@ export async function resumeTracking(): Promise<{
     // This is the primary data source while the app is in the foreground --
     // the background task is throttled by the OS and fires infrequently.
     startForegroundPolling(state.organizationId);
+
+    // Re-assert the lock-screen shift surface after a process restart
+    // mid-shift — both session mode and legacy load mode (idempotent:
+    // the wrapper no-ops when the same shift is already showing).
+    if (typeof state.startedAt === 'number' && state.startedAt > 0) {
+      void startShiftStatus(
+        state.startedAt,
+        state.loadId ? 'On a trip' : 'On shift — no active trip',
+      );
+    }
 
     // Sync any unsynced locations from the queue (survived app restart)
     const unsyncedCount = await getUnsyncedCount();
@@ -1800,11 +1931,7 @@ async function maybeReregisterBgTaskHeartbeat(
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
         showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: 'Route Tracking Active',
-          notificationBody: 'Recording your delivery route',
-          notificationColor: '#22c55e',
-        },
+        foregroundService: TRACKING_FGS_NOTIFICATION,
         activityType: Location.ActivityType.OtherNavigation,
         pausesUpdatesAutomatically: false,
       });
@@ -2247,11 +2374,7 @@ export async function restartForegroundServices(): Promise<void> {
         timeInterval: TRACKING_INTERVAL_MS,
         distanceInterval: BG_DISTANCE_INTERVAL,
         showsBackgroundLocationIndicator: true,
-        foregroundService: {
-          notificationTitle: 'Route Tracking Active',
-          notificationBody: 'Recording your delivery route',
-          notificationColor: '#22c55e',
-        },
+        foregroundService: TRACKING_FGS_NOTIFICATION,
         activityType: Location.ActivityType.OtherNavigation,
         pausesUpdatesAutomatically: false,
       });

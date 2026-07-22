@@ -2,10 +2,10 @@
  * Profile tab — Otoqa Driver design system.
  *
  * Ports lib/profile-screen.jsx: CDL-style identity hero, license detail
- * rows, and three tiles (Payroll / Compliance / Documents). Payroll,
- * Compliance and Documents tiles are placeholders until their backends
- * land; they drill into screens that don't exist yet and show "Coming
- * soon" state.
+ * rows, and three tiles (Payroll / Compliance / Documents). The Payroll
+ * tile is live — it shows the current period's accruing net and drills
+ * into /pay (My Pay statements). Compliance and Documents tiles remain
+ * placeholders until their backends land.
  *
  * App preferences that used to live here (language, appearance, role
  * switch, version info) are kept as a secondary "App settings" block
@@ -24,10 +24,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 import { useDriver } from '../_layout';
+import { fmtMoney, type StatementRow } from '../../../lib/pay-format';
 import { useTheme } from '../../../lib/ThemeContext';
 import { useDensityTokens } from '../../../lib/density';
 import { Icon } from '../../../lib/design-icons';
@@ -44,11 +46,19 @@ export default function ProfileScreen() {
     trackScreen('Profile');
   }, []);
 
+  const router = useRouter();
   const { driverId } = useDriver();
   const profile = useQuery(
     api.driverMobile.getMyProfile,
     driverId ? { driverId: driverId as Id<'drivers'> } : 'skip',
   );
+
+  // Live payroll tile — the current period's accruing statement, if any.
+  const statements = useQuery(
+    api.mobileSettlements.getMyStatements,
+    driverId ? { driverId: driverId as Id<'drivers'> } : 'skip',
+  ) as StatementRow[] | undefined;
+  const accruing = statements?.find((r) => r.status === 'ACCRUING') ?? null;
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
@@ -63,9 +73,17 @@ export default function ProfileScreen() {
 
         <ProfileTiles
           palette={palette}
-          onOpenPayroll={() =>
-            Alert.alert('Payroll', 'Payroll is coming soon.')
+          payrollValue={accruing ? fmtMoney(accruing.net) : statements?.length ? '—' : null}
+          payrollSub={
+            accruing
+              ? 'This period so far · tap for statements'
+              : statements === undefined
+                ? 'Loading…'
+                : statements.length > 0
+                  ? 'View statements'
+                  : 'No statements yet'
           }
+          onOpenPayroll={() => router.push('/pay')}
           onOpenCompliance={() =>
             Alert.alert('Compliance', 'Compliance is coming soon.')
           }
@@ -222,11 +240,15 @@ function LicenseDetails({ palette, profile }: { palette: Palette; profile: any }
 
 function ProfileTiles({
   palette,
+  payrollValue,
+  payrollSub,
   onOpenPayroll,
   onOpenCompliance,
   onOpenDocs,
 }: {
   palette: Palette;
+  payrollValue: string | null;
+  payrollSub: string;
   onOpenPayroll: () => void;
   onOpenCompliance: () => void;
   onOpenDocs: () => void;
@@ -242,10 +264,10 @@ function ProfileTiles({
         <View style={{ flex: 1 }}>
           <View style={styles.tileHeader}>
             <Icon name="dollar" size={14} color={palette.accent} />
-            <Text style={styles.tileEyebrow}>PAYROLL · THIS WEEK</Text>
+            <Text style={styles.tileEyebrow}>MY PAY · THIS PERIOD</Text>
           </View>
-          <Text style={styles.tileValueLg}>—</Text>
-          <Text style={styles.tileSub}>Coming soon</Text>
+          <Text style={styles.tileValueLg}>{payrollValue ?? '—'}</Text>
+          <Text style={styles.tileSub}>{payrollSub}</Text>
         </View>
         <Icon name="chevron-right" size={20} color={palette.textTertiary} />
       </Pressable>

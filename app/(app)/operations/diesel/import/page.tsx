@@ -1,18 +1,8 @@
 'use client';
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
@@ -27,12 +17,14 @@ import { Upload, Download, CheckCircle, AlertCircle, Loader2, ArrowLeft, ArrowRi
 import { toast } from 'sonner';
 import { generateCSVTemplate } from '@/lib/csv-export';
 import { Id } from '@/convex/_generated/dataModel';
+import { normalizeFuelTypeCode, type FuelType } from '@/convex/lib/fuelTypes';
 
 type FuelField =
   | 'date'
   | 'driverName'
   | 'truckUnit'
   | 'vendorName'
+  | 'fuelType'
   | 'gallons'
   | 'pricePerGallon'
   | 'total'
@@ -57,6 +49,7 @@ const FUEL_FIELDS: Array<FieldDef> = [
   { key: 'driverName', label: 'Driver Name', required: false },
   { key: 'truckUnit', label: 'Truck Unit', required: false },
   { key: 'vendorName', label: 'Vendor Name', required: true },
+  { key: 'fuelType', label: 'Fuel Type', required: false },
   { key: 'gallons', label: 'Gallons', required: true },
   { key: 'pricePerGallon', label: 'Price Per Gallon', required: true },
   { key: 'total', label: 'Total', required: false },
@@ -90,6 +83,12 @@ const AUTO_MAP: Record<string, FuelField> = {
   'station': 'vendorName',
   'fuel station': 'vendorName',
   'merchant': 'vendorName',
+  'fuel type': 'fuelType',
+  'fuel_type': 'fuelType',
+  'fueltype': 'fuelType',
+  'product': 'fuelType',
+  'product type': 'fuelType',
+  'product code': 'fuelType',
   'gallons': 'gallons',
   'quantity': 'gallons',
   'gal': 'gallons',
@@ -157,6 +156,7 @@ interface BulkFuelEntryInput {
   carrierId?: Id<'carrierPartnerships'>;
   truckId?: Id<'trucks'>;
   vendorId: Id<'fuelVendors'>;
+  fuelType?: FuelType;
   gallons: number;
   pricePerGallon: number;
   odometerReading?: number;
@@ -451,6 +451,16 @@ export default function ImportFuelEntriesPage() {
         }
       }
 
+      const fuelTypeStr = mapped.fuelType;
+      if (fuelTypeStr) {
+        const normalizedType = normalizeFuelTypeCode(fuelTypeStr);
+        if (normalizedType === 'DEF') {
+          errors.push('Fuel type is DEF; use the DEF workflow instead');
+        } else if (normalizedType === 'OTHER') {
+          warnings.push(`Fuel type "${fuelTypeStr}" normalized to Other`);
+        }
+      }
+
       return {
         raw: row,
         mapped,
@@ -517,6 +527,11 @@ export default function ImportFuelEntriesPage() {
             pricePerGallon: ppg,
           };
 
+          if (row.mapped.fuelType) {
+            // DEF rows carry a validation error and never reach this map.
+            const normalizedType = normalizeFuelTypeCode(row.mapped.fuelType);
+            if (normalizedType !== 'DEF') entry.fuelType = normalizedType;
+          }
           if (row.resolvedDriverId) entry.driverId = row.resolvedDriverId;
           if (row.resolvedTruckId) entry.truckId = row.resolvedTruckId;
           if (odometer !== undefined && !isNaN(odometer) && odometer >= 0) {
@@ -565,32 +580,6 @@ export default function ImportFuelEntriesPage() {
 
   return (
     <>
-      <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12 border-b bg-background">
-        <div className="flex items-center gap-2 px-4">
-          <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-2 data-[orientation=vertical]:h-4" />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/dashboard">Home</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="#">Company Operations</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem className="hidden md:block">
-                <BreadcrumbLink href="/operations/diesel">Diesel</BreadcrumbLink>
-              </BreadcrumbItem>
-              <BreadcrumbSeparator className="hidden md:block" />
-              <BreadcrumbItem>
-                <BreadcrumbPage>Import Fuel Entries</BreadcrumbPage>
-              </BreadcrumbItem>
-            </BreadcrumbList>
-          </Breadcrumb>
-        </div>
-      </header>
-
       <div className="flex flex-1 flex-col gap-6 p-6">
         <div className="flex justify-end">
           <Button variant="outline" asChild>

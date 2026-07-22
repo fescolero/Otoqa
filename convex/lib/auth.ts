@@ -1,4 +1,5 @@
 import type { QueryCtx, MutationCtx, ActionCtx } from '../_generated/server';
+import { isPermitted, type PermissionClaims } from './permissions';
 
 /**
  * Shared authorization helpers for Convex functions.
@@ -20,6 +21,22 @@ interface IdentityWithOrg {
   subject: string;
   org_id?: string;
   organizationId?: string;
+}
+
+/**
+ * Non-throwing variant of `requireCallerOrgId` for functions that serve
+ * BOTH org-member (WorkOS) and driver-app (Clerk, no org claim) callers
+ * and branch on which one they got. Returns null when unauthenticated or
+ * when the identity carries no org claim — callers must treat null as
+ * "not an org member", never as "allowed".
+ */
+export async function getCallerOrgId(ctx: AnyCtx): Promise<string | null> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return null;
+
+  const claims = identity as unknown as IdentityWithOrg;
+  const orgId = claims.org_id ?? claims.organizationId;
+  return typeof orgId === 'string' && orgId ? orgId : null;
 }
 
 /**
@@ -84,6 +101,40 @@ export async function assertCallerOwnsOrg(
   const result = await requireCallerIdentity(ctx);
   if (result.orgId !== claimedOrgId) {
     throw new Error('Not authorized for this organization');
+  }
+  return result;
+}
+
+/**
+ * RBAC claims from the caller's access token. WorkOS puts `role`, `roles`,
+ * and `permissions` on the JWT once RBAC is configured; sessions predating
+ * that carry none (see lib/permissions.ts for how the policy treats them).
+ */
+export async function getCallerPermissionClaims(ctx: AnyCtx): Promise<PermissionClaims> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return {};
+  const claims = identity as unknown as PermissionClaims;
+  return {
+    role: typeof claims.role === 'string' ? claims.role : undefined,
+    roles: Array.isArray(claims.roles) ? claims.roles : undefined,
+    permissions: Array.isArray(claims.permissions) ? claims.permissions : undefined,
+  };
+}
+
+/**
+ * `assertCallerOwnsOrg` plus an RBAC permission check — the standard guard
+ * for permission-gated mutations that still take a client-supplied org ID.
+ * `slug` is an `area:level` permission (e.g. `settings:edit`).
+ */
+export async function assertOrgPermission(
+  ctx: AnyCtx,
+  claimedOrgId: string,
+  slug: string,
+): Promise<{ orgId: string; userId: string; userName: string | undefined; userEmail: string | undefined }> {
+  const result = await assertCallerOwnsOrg(ctx, claimedOrgId);
+  const claims = await getCallerPermissionClaims(ctx);
+  if (!isPermitted(claims, slug)) {
+    throw new Error(`Your role doesn't have the ${slug} permission`);
   }
   return result;
 }

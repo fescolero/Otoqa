@@ -49,6 +49,7 @@ export type AuditAction =
   | 'deleted'
   | 'deactivated'
   | 'reactivated'
+  | 'status_changed'
   | 'restored'
   | 'terminated'
   | 'permanently_deleted'

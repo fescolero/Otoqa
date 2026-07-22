@@ -4,6 +4,7 @@ import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { fuelTypeValidator } from './lib/fuelTypes';
 
 const paymentMethodValidator = v.optional(
   v.union(
@@ -341,6 +342,7 @@ export const create = mutation({
     carrierId: v.optional(v.id('carrierPartnerships')),
     truckId: v.optional(v.id('trucks')),
     vendorId: v.id('fuelVendors'),
+    fuelType: v.optional(fuelTypeValidator),
     gallons: v.number(),
     pricePerGallon: v.number(),
     odometerReading: v.optional(v.number()),
@@ -366,6 +368,7 @@ export const create = mutation({
       carrierId: args.carrierId,
       truckId: args.truckId,
       vendorId: args.vendorId,
+      fuelType: args.fuelType,
       gallons: args.gallons,
       pricePerGallon: args.pricePerGallon,
       totalCost,
@@ -405,6 +408,7 @@ export const update = mutation({
     carrierId: v.optional(v.id('carrierPartnerships')),
     truckId: v.optional(v.id('trucks')),
     vendorId: v.optional(v.id('fuelVendors')),
+    fuelType: v.optional(fuelTypeValidator),
     gallons: v.optional(v.number()),
     pricePerGallon: v.optional(v.number()),
     odometerReading: v.optional(v.number()),
@@ -514,6 +518,7 @@ export const bulkCreate = mutation({
         carrierId: v.optional(v.id('carrierPartnerships')),
         truckId: v.optional(v.id('trucks')),
         vendorId: v.id('fuelVendors'),
+        fuelType: v.optional(fuelTypeValidator),
         gallons: v.number(),
         pricePerGallon: v.number(),
         odometerReading: v.optional(v.number()),

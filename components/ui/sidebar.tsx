@@ -47,7 +47,21 @@ const SidebarContext = React.createContext<SidebarContextProps | null>(null)
 function useSidebar() {
   const context = React.useContext(SidebarContext)
   if (!context) {
-    throw new Error("useSidebar must be used within a SidebarProvider.")
+    // The Otoqa Web shell (components/web/shell/AppShell) replaces the
+    // shadcn SidebarProvider but legacy page components still import
+    // primitives like SidebarTrigger/SidebarInset. Returning a no-op stub
+    // keeps those compiling and rendering null until each page is migrated
+    // off the legacy primitives.
+    return {
+      state: "expanded" as const,
+      open: true,
+      setOpen: () => {},
+      isMobile: false,
+      openMobile: false,
+      setOpenMobile: () => {},
+      toggleSidebar: () => {},
+      __legacyShim: true,
+    } as SidebarContextProps & { __legacyShim: true }
   }
 
   return context
@@ -258,7 +272,12 @@ function SidebarTrigger({
   onClick,
   ...props
 }: React.ComponentProps<typeof Button>) {
-  const { toggleSidebar } = useSidebar()
+  const ctx = useSidebar() as ReturnType<typeof useSidebar> & { __legacyShim?: boolean }
+
+  // Legacy shim mode: the new Otoqa Web shell owns sidebar toggling via the
+  // Topbar, so legacy page-level triggers render nothing rather than a
+  // dead button.
+  if (ctx.__legacyShim) return null
 
   return (
     <Button
@@ -269,7 +288,7 @@ function SidebarTrigger({
       className={cn("size-7", className)}
       onClick={(event) => {
         onClick?.(event)
-        toggleSidebar()
+        ctx.toggleSidebar()
       }}
       {...props}
     >

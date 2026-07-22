@@ -1,69 +1,60 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import * as React from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useMutation } from 'convex/react';
+import { useAction, useMutation } from 'convex/react';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
-import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
-import {
-  ArrowLeft,
-  Edit2,
-  Trash2,
-  FileText,
-  Package,
-  DollarSign,
-  MapPin,
-  Ruler,
-  Clock,
-  Check,
-  Truck,
-  Share2,
   Download,
-  Camera,
-  Paperclip,
-  CheckCircle2,
-  FileCheck,
   X,
   ChevronLeft,
   ChevronRight,
   ZoomIn,
   ZoomOut,
-  Image as ImageIcon,
-  Route,
-  Radar,
 } from 'lucide-react';
-import Link from 'next/link';
 import { Id } from '@/convex/_generated/dataModel';
-import { DriverPaySection, CarrierPaySection } from '@/components/driver-pay';
-import { LiveRouteMap } from '@/components/dispatch/live-route-map';
+import Link from 'next/link';
+import { LoadPayPlanCard } from '@/components/web/pay-plan/load-pay-plan-card';
+import { LiveTrackingModal, type TimelineEvent } from '@/components/loads/live-tracking-modal';
+import { DocPreviewModal, type DocRecord } from '@/components/loads/doc-preview-modal';
+import {
+  CancellationReasonModal,
+  type CancellationReasonCode,
+} from '@/components/loads/cancellation-reason-modal';
 import { ReassignDriverDialog } from '@/components/sessions/reassign-driver-dialog';
 import { formatTimeWindow } from '@/lib/format-date-timezone';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import {
+  AttentionBand,
+  type AttentionItem,
+  Avatar,
+  Chip,
+  type ChipStatus,
+  DetailsFullPage,
+  type FPSection,
+  DSActivity,
+  DSCard,
+  DSMiniTable,
+  type DSMiniColumn,
+  DSProps,
+  type DSPropItem,
+  FPCommentsPeek,
+  QuickStats,
+  type QuickStat,
+  RecordActionsMenu,
+  type RecordActionGroup,
+  RouteProgressBar,
+  type ProgressMarker,
+  StatusPicker,
+  type StatusChangePayload,
+  WBtn,
+  WIcon,
+  resolveStatusId,
+} from '@/components/web';
+import { toast } from 'sonner';
 import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 
 interface LoadDetailProps {
@@ -244,24 +235,76 @@ function PhotoLightbox({
 // ============================================================================
 export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) {
   const router = useRouter();
-  const [isEditingStatus, setIsEditingStatus] = useState(false);
-  const [selectedStatus, setSelectedStatus] = useState<'Open' | 'Assigned' | 'Canceled' | 'Completed' | 'Expired'>('Open');
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [reassignDialogOpen, setReassignDialogOpen] = useState(false);
   const [selectedStop, setSelectedStop] = useState<StopWithEvidence | null>(null);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxPhotos, setLightboxPhotos] = useState<string[]>([]);
   const [lightboxLabel, setLightboxLabel] = useState('');
+  const [activeSection, setActiveSection] = useState('overview');
+  const [mapOpen, setMapOpen] = useState(false);
+  const [previewDoc, setPreviewDoc] = useState<DocRecord | null>(null);
+  const getDownloadUrl = useAction(api.s3Upload.getDocumentDownloadUrl);
 
-  // Section refs for scroll-to navigation
-  const manifestSectionRef = useRef<HTMLDivElement>(null);
-  const paySectionRef = useRef<HTMLDivElement>(null);
+  const resolveDocUrl = React.useCallback(
+    async (documentId: Id<'loadDocuments'>, fallback: string | null): Promise<string | null> => {
+      try {
+        const res = await getDownloadUrl({ documentId });
+        return res.url ?? fallback;
+      } catch (err) {
+        console.warn('[LoadDetail] signed URL resolution failed:', err);
+        return fallback;
+      }
+    },
+    [getDownloadUrl],
+  );
+
+  const [cancellationOpen, setCancellationOpen] = useState(false);
 
   // Fetch load data
   const loadData = useAuthQuery(api.loads.getLoad, { loadId: loadId as Id<'loadInformation'> });
-  const payablesData = useAuthQuery(api.loadPayables.getByLoad, { loadId: loadId as Id<'loadInformation'> });
+  // Unified document rows (driver R2 uploads + ops Convex-storage uploads).
+  // R2-backed docs are NOT displayable via their stored public URL — the
+  // bucket doesn't need public access enabled (uploads use presigned
+  // PUTs) — so display URLs are exchanged per-document for a short-lived
+  // presigned GET via s3Upload.getDocumentDownloadUrl at click time.
+  const loadDocsData = useAuthQuery(api.loadDocuments.listForLoad, {
+    loadId: loadId as Id<'loadInformation'>,
+  });
+  // documentId per doc row id — R2-backed rows (no Convex storageId)
+  // resolve a signed URL on click instead of trusting the stored public
+  // URL. Derived, not a ref: the docs list re-renders this anyway.
+  const docIdByRow = React.useMemo(() => {
+    const map = new Map<string, Id<'loadDocuments'>>();
+    (loadDocsData ?? []).forEach((doc) => {
+      if (doc.type === 'EXTRA_DOC') return;
+      if (!doc.storageId && (doc.externalKey || doc.externalUrl)) {
+        map.set(`doc-${doc._id}`, doc._id);
+      }
+    });
+    return map;
+  }, [loadDocsData]);
+  // Pay plan totals — sourced from the new pay engine's unified payItems
+  // ledger. Covers driver + carrier payees in one query. The top-of-page
+  // KPI/margin calc and the LoadPayPlanCard both subscribe, so the figure
+  // stays in lockstep with the card through every recalc.
+  const payPlanData = useAuthQuery(api.payItems.listForLoad, { loadId: loadId as Id<'loadInformation'> });
   const invoiceData = useAuthQuery(api.invoices.getInvoiceByLoad, { loadId: loadId as Id<'loadInformation'> });
-  
+  // GPS pings powering the modal's "GPS pings" tab. Uses the detailed
+  // query so each row can surface accuracy + the sync-delay between
+  // device-recorded and server-received timestamps. Only fetch while the
+  // modal is open so closed cards don't keep a live subscription open.
+  const gpsPings = useAuthQuery(
+    api.driverLocations.getDetailedRouteHistoryForLoad,
+    mapOpen ? { loadId: loadId as Id<'loadInformation'> } : 'skip',
+  );
+  // Suggested drivers — only fetched while the load is awaiting assignment.
+  const suggestedDrivers = useAuthQuery(
+    api.loads.getSuggestedDriversForLoad,
+    loadData && loadData.status === 'Open'
+      ? { loadId: loadId as Id<'loadInformation'>, limit: 4 }
+      : 'skip',
+  );
+
   const updateStatus = useMutation(api.loads.updateLoadStatus);
   const deleteLoad = useMutation(api.loads.deleteLoad);
 
@@ -273,21 +316,49 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     );
   }
 
-  // Scroll to section handler
-  const scrollToSection = (ref: React.RefObject<HTMLDivElement | null>) => {
-    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  // Translate StatusPicker state-machine IDs back to the DB enum on commit.
+  const STATUS_ID_TO_DB: Record<string, 'Open' | 'Assigned' | 'Canceled' | 'Completed' | 'Expired'> = {
+    open: 'Open',
+    assigned: 'Assigned',
+    completed: 'Completed',
+    canceled: 'Canceled',
+    expired: 'Expired',
   };
 
-  const handleStatusUpdate = async () => {
+  const handleStatusChange = async (payload: StatusChangePayload) => {
+    const dbStatus = STATUS_ID_TO_DB[payload.to.id];
+    if (!dbStatus) return;
+    // Canceled transitions need a reason code per existing audit policy —
+    // delegate to CancellationReasonModal instead of writing directly.
+    if (dbStatus === 'Canceled') {
+      setCancellationOpen(true);
+      return;
+    }
+    try {
+      await updateStatus({ loadId: loadId as Id<'loadInformation'>, status: dbStatus });
+    } catch (error) {
+      console.error('Failed to update status:', error);
+      toast.error('Failed to update status');
+    }
+  };
+
+  const handleCancellationConfirm = async (
+    reasonCode: CancellationReasonCode,
+    notes?: string,
+  ) => {
     try {
       await updateStatus({
         loadId: loadId as Id<'loadInformation'>,
-        status: selectedStatus,
+        status: 'Canceled',
+        cancellationReason: reasonCode,
+        cancellationNotes: notes,
+        canceledBy: userId,
       });
-      setIsEditingStatus(false);
+      toast.success('Load canceled');
+      setCancellationOpen(false);
     } catch (error) {
-      console.error('Failed to update status:', error);
-      alert('Failed to update status');
+      console.error('Failed to cancel load:', error);
+      toast.error('Failed to cancel load');
     }
   };
 
@@ -320,66 +391,6 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       });
     } catch {
       return '—';
-    }
-  };
-
-  // Status badge styling
-  const getStatusStyle = (status: string) => {
-    switch (status) {
-      case 'Open':
-        return 'bg-yellow-50 text-yellow-700 border-yellow-200';
-      case 'Assigned':
-        return 'bg-blue-50 text-blue-700 border-blue-200';
-      case 'Completed':
-        return 'bg-green-50 text-green-700 border-green-200';
-      case 'Expired':
-        return 'bg-orange-50 text-orange-700 border-orange-200';
-      case 'Canceled':
-        return 'bg-red-50 text-red-700 border-red-200';
-      default:
-        return 'bg-gray-50 text-gray-700 border-gray-200';
-    }
-  };
-
-  // Check if stop has evidence
-  const hasEvidence = (stop: StopWithEvidence) => {
-    return (stop.deliveryPhotos && stop.deliveryPhotos.length > 0) || 
-           stop.signatureImage || 
-           stop.driverNotes;
-  };
-
-  // Count evidence items for a stop
-  const getEvidenceCount = (stop: StopWithEvidence) => {
-    let count = 0;
-    if (stop.deliveryPhotos) count += stop.deliveryPhotos.length;
-    if (stop.signatureImage) count += 1;
-    return count;
-  };
-
-  // Get POD status for completed loads
-  const finalDeliveryStop = loadData.stops
-    .filter(s => s.stopType === 'DELIVERY')
-    .pop() as StopWithEvidence | undefined;
-
-  const hasPOD = finalDeliveryStop && (
-    (finalDeliveryStop.deliveryPhotos && finalDeliveryStop.deliveryPhotos.length > 0) ||
-    finalDeliveryStop.signatureImage
-  );
-
-  // Calculate totals
-  const totalPieces = loadData.stops.reduce((sum, stop) => sum + (stop.pieces || 0), 0);
-  const origin = loadData.stops.find(s => s.stopType === 'PICKUP');
-
-  // Open lightbox
-  const openLightbox = (stop: StopWithEvidence) => {
-    const photos: string[] = [];
-    if (stop.deliveryPhotos) photos.push(...stop.deliveryPhotos);
-    if (stop.signatureImage) photos.push(stop.signatureImage);
-    
-    if (photos.length > 0) {
-      setLightboxPhotos(photos);
-      setLightboxLabel(`Stop ${stop.sequenceNumber} - ${stop.city}, ${stop.state}`);
-      setLightboxOpen(true);
     }
   };
 
@@ -430,777 +441,1318 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
     }
   };
 
-  return (
-    <div className="space-y-6">
-      {/* ================================================================
-          HEADER
-          ================================================================ */}
-      <div className="flex items-start justify-between">
-        <div className="flex items-start gap-4">
-          <Link href="/loads">
-            <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
+  // ── Derived data ──────────────────────────────────────────────────────
+  const customerRate = invoiceData?.totalAmount ?? 0;
+  // Pay plan total — unified across driver + carrier payees. Sourced from
+  // the new pay engine's payItems ledger (which the LoadPayPlanCard also
+  // renders), so KPI and card stay in lockstep through every recalc.
+  const driverPay = (payPlanData?.totalCents ?? 0) / 100;
+  const margin = customerRate - driverPay;
+  const marginPct = customerRate > 0 ? (margin / customerRate) * 100 : 0;
+  const totalPieces = loadData.stops.reduce((sum, stop) => sum + (stop.pieces || 0), 0);
+  const origin = loadData.stops.find((s) => s.stopType === 'PICKUP') as StopWithEvidence | undefined;
+  const finalDeliveryStop = loadData.stops
+    .filter((s) => s.stopType === 'DELIVERY')
+    .pop() as StopWithEvidence | undefined;
+  const hasPOD = !!(
+    (finalDeliveryStop &&
+      ((finalDeliveryStop.deliveryPhotos?.length ?? 0) > 0 || finalDeliveryStop.signatureImage)) ||
+    loadDocsData?.some((d) => d.type === 'POD')
+  );
+  const statusId = resolveStatusId('load', loadData.status);
+
+  // Friendlier chip label per design v3 — combines the DB status with
+  // tracking state so the eyebrow reads "In transit" while the truck is
+  // moving (DB status stays `Assigned`). Picker menu is unaffected.
+  const trackingLower = (loadData.trackingStatus || '').toLowerCase();
+  const isInTransitChip = trackingLower === 'in transit';
+  const isDelayedChip = trackingLower === 'delayed';
+  const statusChipLabel = (() => {
+    switch (loadData.status) {
+      case 'Open':
+        return 'Open · waiting for assignment';
+      case 'Assigned':
+        if (isInTransitChip) return 'In transit';
+        if (isDelayedChip) return 'Assigned · delayed';
+        return 'Assigned · pickup pending';
+      case 'Completed':
+        return 'Delivered';
+      case 'Canceled':
+        return 'Cancelled';
+      case 'Expired':
+        return 'Expired';
+      default:
+        return undefined;
+    }
+  })();
+
+  // ── Progress (% of stops checked in, used by Live tracking + last QuickStat) ─
+  const stopsCheckedIn = loadData.stops.filter((s) => !!(s as StopWithEvidence).checkedInAt).length;
+  const transitProgressPct =
+    loadData.stops.length > 0 ? Math.round((stopsCheckedIn / loadData.stops.length) * 100) : 0;
+
+  // ── QuickStats (per-status 5-cell strip the v2 Overview owns) ─────────
+  // Replaces the hero's cold 4-up KPI grid. The first four cells are stable
+  // across statuses; the fifth swaps to the most relevant signal for the
+  // current state (countdown / progress / on-time).
+  const fmtMoney = (n: number) =>
+    `$${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  const baseQuickStats: QuickStat[] = [
+    { label: 'Miles', value: loadData.effectiveMiles ? loadData.effectiveMiles.toLocaleString() : '—' },
+    { label: 'Stops', value: loadData.stops.length },
+    { label: 'Line haul', value: customerRate ? fmtMoney(customerRate) : '—' },
+    {
+      label: 'Margin',
+      value: customerRate > 0 ? fmtMoney(margin) : '—',
+      delta: customerRate > 0 ? `${marginPct.toFixed(0)}%` : undefined,
+      deltaTone: customerRate > 0 ? (margin >= 0 ? 'up' : 'down') : 'neutral',
+    },
+  ];
+  const quickStats: QuickStat[] = (() => {
+    if (loadData.status === 'Open') {
+      return [...baseQuickStats, { label: 'Pickup', value: '—', delta: 'unscheduled', deltaTone: 'neutral' }];
+    }
+    if (loadData.status === 'Assigned' && !isInTransitChip) {
+      return [...baseQuickStats, { label: 'Pickup', value: 'pre-trip', delta: 'awaiting', deltaTone: 'neutral' }];
+    }
+    if (loadData.status === 'Completed') {
+      return [...baseQuickStats, { label: 'Status', value: 'Delivered', deltaTone: 'up' }];
+    }
+    return [
+      ...baseQuickStats,
+      { label: 'Status', value: `${transitProgressPct}%`, delta: 'in transit', deltaTone: 'up' },
+    ];
+  })();
+
+  // ── Section content ───────────────────────────────────────────────────
+
+  const shipmentItems: DSPropItem[] = [
+    { label: 'Order #', value: <span className="num font-medium">{loadData.orderNumber}</span> },
+    { label: 'Customer', value: loadData.customerName ?? '—' },
+    {
+      label: 'PO Number',
+      value: loadData.poNumber ? <span className="num">{loadData.poNumber}</span> : '—',
+    },
+    { label: 'Commodity', value: loadData.commodityDescription ?? '—' },
+    { label: 'Equipment', value: loadData.equipmentType ?? '—' },
+    {
+      label: 'Weight',
+      value: loadData.weight ? (
+        <span className="num">{`${loadData.weight} ${loadData.units ?? 'lbs'}`}</span>
+      ) : (
+        '—'
+      ),
+    },
+    { label: 'Pieces', value: <span className="num">{totalPieces}</span> },
+  ];
+
+  const assignedItems: DSPropItem[] = [];
+  if (loadData.assignedDriver) {
+    const driverId = loadData.assignedDriver._id;
+    const driverName = loadData.assignedDriver.name;
+    assignedItems.push({
+      label: 'Driver',
+      value: (
+        <span className="inline-flex items-center gap-2">
+          <Avatar name={driverName} size={20} />
+          <button
+            type="button"
+            onClick={() => router.push(`/fleet/drivers/${driverId}`)}
+            className="bg-transparent border-0 p-0 cursor-pointer focus-ring rounded-sm hover:underline text-foreground"
+          >
+            {driverName}
+          </button>
+        </span>
+      ),
+    });
+  }
+  if (loadData.assignedCarrier) {
+    assignedItems.push({ label: 'Carrier', value: loadData.assignedCarrier.companyName });
+  }
+  if (loadData.assignedTruck) {
+    const truckId = loadData.assignedTruck._id;
+    const truckUnitId = loadData.assignedTruck.unitId;
+    assignedItems.push({
+      label: 'Truck',
+      value: (
+        <button
+          type="button"
+          onClick={() => router.push(`/fleet/trucks/${truckId}`)}
+          className="num bg-transparent border-0 p-0 cursor-pointer focus-ring rounded-sm hover:underline text-foreground"
+        >
+          {truckUnitId}
+        </button>
+      ),
+    });
+  }
+  if (loadData.assignedTrailer) {
+    assignedItems.push({
+      label: 'Trailer',
+      value: <span className="num">{loadData.assignedTrailer.unitId}</span>,
+    });
+  }
+  if (assignedItems.length === 0) {
+    assignedItems.push({
+      label: 'Status',
+      value: <span className="text-[var(--text-tertiary)] italic">Not assigned</span>,
+    });
+  }
+
+  // Note: financial KPIs (customer rate / driver pay / margin) used to live
+  // in a "Financials" DSCard with DSProps. They're now rendered inside the
+  // pay-plan card's margin footer instead. `customerRate`, `driverPay`,
+  // `margin`, `marginPct` above are still computed because they feed the
+  // attention-band "Settlement preview" tile.
+
+  const pickupCheckedIn = !!origin?.checkedInAt;
+  const isCompleted = loadData.status === 'Completed';
+  const isCanceled = loadData.status === 'Canceled';
+
+  // ── Live tracking primitives (driven by stop state) ────────────────────
+  const originLabel = [origin?.city, origin?.state].filter(Boolean).join(', ') || 'Origin';
+  const destLabel = [finalDeliveryStop?.city, finalDeliveryStop?.state].filter(Boolean).join(', ') || 'Destination';
+  const finalEtaWindow = finalDeliveryStop
+    ? formatTimeWindow(
+        finalDeliveryStop.windowBeginDate || '',
+        finalDeliveryStop.windowBeginTime,
+        finalDeliveryStop.windowEndTime,
+      )
+    : null;
+  const etaLabel = finalEtaWindow?.display ?? '—';
+  // Idle-event detection isn't wired yet — surface a warn chip only when we
+  // can prove an idle from data. Until then this stays empty so we don't ship
+  // a fake number to dispatchers.
+  const idleEventDetected = false;
+
+  // ── AttentionBand (per-status headline + items) ────────────────────────
+  const orderToken = (
+    <span className="num text-foreground font-semibold">{loadData.orderNumber}</span>
+  );
+  let attentionHeadline: React.ReactNode = null;
+  const attentionItems: AttentionItem[] = [];
+  if (isCanceled) {
+    attentionHeadline = <>Load {orderToken} was cancelled.</>;
+    attentionItems.push({ tone: 'crit', icon: 'close', title: 'Cancelled', detail: 'No further activity expected.' });
+  } else if (loadData.status === 'Open') {
+    attentionHeadline = <>Load {orderToken} is waiting for assignment.</>;
+    attentionItems.push({
+      tone: 'warn',
+      icon: 'alert',
+      tab: 'overview',
+      title: 'No driver assigned',
+      detail: finalEtaWindow ? `Pickup ${finalEtaWindow.display}` : 'Pickup window unscheduled',
+    });
+    if (suggestedDrivers && suggestedDrivers.length > 0) {
+      attentionItems.push({
+        tone: 'info',
+        icon: 'users',
+        tab: 'overview',
+        title: `${suggestedDrivers.length} driver${suggestedDrivers.length === 1 ? '' : 's'} eligible`,
+        detail: 'Based on HOS + location',
+      });
+    }
+  } else if (loadData.status === 'Assigned' && !isInTransitChip) {
+    attentionHeadline = <>Load {orderToken} is assigned and waiting for pickup.</>;
+    attentionItems.push({
+      tone: 'ok',
+      icon: 'check',
+      tab: 'overview',
+      title: 'Driver, truck, trailer assigned',
+      detail: loadData.assignedDriver?.name ?? 'Carrier assigned',
+    });
+    if (origin?.windowBeginTime) {
+      const win = formatTimeWindow(origin.windowBeginDate || '', origin.windowBeginTime, origin.windowEndTime);
+      attentionItems.push({
+        tone: 'info',
+        icon: 'clock',
+        tab: 'stops',
+        title: `Pickup ${win.display}`,
+        detail: 'Driver heading to origin',
+      });
+    }
+  } else if (isCompleted) {
+    attentionHeadline = <>Load {orderToken} delivered. Ready to invoice.</>;
+    attentionItems.push({
+      tone: 'ok',
+      icon: 'check',
+      tab: 'docs',
+      title: hasPOD ? 'POD on file' : 'POD pending',
+      detail: finalDeliveryStop?.checkedInAt ? `Arrived ${formatTime(finalDeliveryStop.checkedInAt)}` : '',
+    });
+    attentionItems.push({
+      tone: 'info',
+      icon: 'doc-dollar',
+      tab: 'overview',
+      title: 'Settlement preview',
+      detail: customerRate > 0 ? `Margin ${fmtMoney(margin)} · ${marginPct.toFixed(0)}%` : 'Awaiting rate',
+    });
+  } else {
+    // In transit (default for Assigned + tracking active, or Delayed).
+    attentionHeadline = (
+      <>
+        Load {orderToken} is in transit, currently{' '}
+        <span style={{ color: isDelayedChip ? '#A66800' : '#0F8C5F', fontWeight: 500 }}>
+          {isDelayedChip ? 'delayed' : 'on time'}
+        </span>
+        {idleEventDetected ? '. One idle event flagged for review.' : '.'}
+      </>
+    );
+    attentionItems.push({
+      tone: isDelayedChip ? 'warn' : 'info',
+      icon: 'pulse',
+      tab: 'overview',
+      title: `In transit · ${transitProgressPct}% complete`,
+      detail: etaLabel !== '—' ? `ETA ${etaLabel}` : 'ETA pending',
+    });
+    if (idleEventDetected) {
+      attentionItems.push({
+        tone: 'warn',
+        icon: 'alert',
+        tab: 'activity',
+        title: 'Idle event flagged',
+        detail: 'Auto-flagged from telematics',
+      });
+    }
+    attentionItems.push({
+      tone: pickupCheckedIn ? 'ok' : 'warn',
+      icon: pickupCheckedIn ? 'check' : 'alert',
+      tab: 'docs',
+      title: pickupCheckedIn ? 'BOL — pickup signed' : 'BOL — pickup pending',
+      detail: origin?.checkedInAt ? formatTime(origin.checkedInAt) : 'Awaiting check-in',
+    });
+  }
+
+  // ── Two-column body card (left card varies by status) ──────────────────
+  const liveTrackingMarkers: ProgressMarker[] = [
+    ...(transitProgressPct > 0
+      ? [{ at: transitProgressPct, tone: 'info' as const, label: 'Now', detail: `${transitProgressPct}% complete` }]
+      : []),
+    { at: 100, tone: 'ok' as const, label: 'Arrival', detail: etaLabel !== '—' ? `ETA ${etaLabel}` : 'On schedule' },
+  ];
+
+  const assignedCard = (
+    <DSCard
+      title="Assigned"
+      action={
+        loadData.assignedDriver?._id &&
+        loadData.status !== 'Completed' &&
+        loadData.status !== 'Canceled' ? (
+          <WBtn size="sm" leading="users" onClick={() => setReassignDialogOpen(true)}>
+            Reassign
+          </WBtn>
+        ) : undefined
+      }
+    >
+      <DSProps items={assignedItems} />
+    </DSCard>
+  );
+
+  let leftHeroCard: React.ReactNode;
+  if (loadData.status === 'Open') {
+    leftHeroCard = (
+      <DSCard
+        title="Awaiting assignment"
+        action={
+          <Link href={`/dispatch/planner?order=${encodeURIComponent(loadData.orderNumber)}`}>
+            <WBtn size="sm" leading="users">Assign driver</WBtn>
           </Link>
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold tracking-tight">
-                Load #{loadData.orderNumber}
-              </h1>
-              {isEditingStatus ? (
-                <div className="flex items-center gap-2">
-                  <Select value={selectedStatus} onValueChange={(value: any) => setSelectedStatus(value)}>
-                    <SelectTrigger className="h-7 w-[130px] text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Open">Open</SelectItem>
-                      <SelectItem value="Assigned">Assigned</SelectItem>
-                      <SelectItem value="Canceled">Canceled</SelectItem>
-                      <SelectItem value="Completed">Completed</SelectItem>
-                      <SelectItem value="Expired">Expired</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Button size="sm" className="h-7 text-xs" onClick={handleStatusUpdate}>Save</Button>
-                  <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setIsEditingStatus(false)}>Cancel</Button>
-                </div>
-              ) : (
-                <Badge
-                  variant="outline"
-                  className={`cursor-pointer ${getStatusStyle(loadData.status)}`}
-                  onClick={() => {
-                    setSelectedStatus(loadData.status);
-                    setIsEditingStatus(true);
-                  }}
-                >
-                  {loadData.status}
-                  <Edit2 className="h-2.5 w-2.5 ml-1.5" />
-                </Badge>
-              )}
+        }
+      >
+        <div
+          className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg mb-2"
+          style={{ background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.22)' }}
+        >
+          <WIcon name="clock" size={16} color="#A66800" />
+          <div className="flex-1 min-w-0">
+            <div className="text-[12.5px] font-semibold text-foreground">
+              {finalEtaWindow ? finalEtaWindow.display : 'Pickup window unscheduled'}
             </div>
-            <div className="flex items-center gap-4 mt-1 text-sm text-muted-foreground">
-              <span>Internal ID: {loadData.internalId}</span>
-              <span className="text-muted-foreground/50">•</span>
-              <span>Customer: <span className="font-medium text-foreground">{loadData.customerName || 'Unknown'}</span></span>
-              <span className="text-muted-foreground/50">•</span>
-              <span>Fleet: {loadData.fleet}</span>
+            <div className="text-[11px] text-[var(--text-tertiary)]">
+              {finalEtaWindow?.tooltip ?? 'Schedule pickup to begin tracking'}
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Link href={`/loads/${loadId}/gps-logs`}>
-            <Button variant="outline">
-              <Radar className="mr-2 h-4 w-4" />
-              GPS Logs
-            </Button>
-          </Link>
-          <Button variant="outline">
-            <FileText className="mr-2 h-4 w-4" />
-            Export
-          </Button>
-          <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-            <Trash2 className="mr-2 h-4 w-4" />
-            Delete
-          </Button>
-        </div>
-      </div>
-
-      {/* ================================================================
-          70/30 SPLIT LAYOUT
-          ================================================================ */}
-      <div className="flex gap-6">
-        {/* ----------------------------------------------------------------
-            MAIN CONTENT (70%)
-            ---------------------------------------------------------------- */}
-        <div className="flex-1 min-w-0 space-y-4">
-          {/* ============================================================
-              INSIGHT CARDS (Table of Contents)
-              ============================================================ */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {/* Status Card */}
-            <div className={`p-3 rounded-lg border ${getStatusStyle(loadData.status)}`}>
-              <div className="flex items-center gap-2 mb-1">
-                <Package className="h-4 w-4" />
-                <span className="text-xs font-medium uppercase tracking-wide">Status</span>
-              </div>
-              <p className="text-sm font-semibold">{loadData.status}</p>
-              <p className="text-xs mt-0.5 opacity-80">
-                {loadData.trackingStatus || 'Pending'}
-              </p>
-            </div>
-
-            {/* Financials Card - Click to scroll to Pay */}
-            {(() => {
-              const customerRate = invoiceData?.totalAmount ?? 0;
-              const driverPay = payablesData?.total ?? 0;
-              const margin = customerRate - driverPay;
-              const marginPercent = customerRate > 0 ? (margin / customerRate) * 100 : 0;
-              const hasData = customerRate > 0 || driverPay > 0;
-              const isPositiveMargin = margin >= 0;
-              
-              return (
-                <div 
-                  className={cn(
-                    'p-3 rounded-lg border cursor-pointer transition-all hover:ring-2 hover:ring-offset-1',
-                    !hasData 
-                      ? 'border-slate-200 bg-slate-50 text-slate-600 hover:ring-slate-300'
-                      : isPositiveMargin
-                        ? 'border-green-200 bg-green-50 text-green-700 hover:ring-green-300'
-                        : 'border-red-200 bg-red-50 text-red-700 hover:ring-red-300'
-                  )}
-                  onClick={() => scrollToSection(paySectionRef)}
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    <DollarSign className="h-4 w-4" />
-                    <span className="text-xs font-medium uppercase tracking-wide">Financials</span>
-                  </div>
-                  {hasData ? (
-                    <>
-                      <p className="text-sm font-semibold">
-                        ${margin.toFixed(2)} <span className="text-[10px] font-normal opacity-70">margin</span>
-                      </p>
-                      <p className="text-xs mt-0.5 opacity-80">
-                        Click to view pay
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="text-sm font-semibold">$0.00</p>
-                      <p className="text-xs mt-0.5 opacity-80">Click to view pay</p>
-                    </>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* POD / Location Card - Click to scroll to Manifest */}
-            {loadData.status === 'Completed' ? (
-              <div 
-                className={cn(
-                  'p-3 rounded-lg border cursor-pointer transition-all hover:ring-2 hover:ring-offset-1',
-                  hasPOD 
-                    ? 'border-green-200 bg-green-50 text-green-700 hover:ring-green-300'
-                    : 'border-amber-200 bg-amber-50 text-amber-700 hover:ring-amber-300'
-                )}
-                onClick={() => scrollToSection(manifestSectionRef)}
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  {hasPOD ? <FileCheck className="h-4 w-4" /> : <Camera className="h-4 w-4" />}
-                  <span className="text-xs font-medium uppercase tracking-wide">POD</span>
-                </div>
-                {hasPOD ? (
-                  <>
-                    <p className="text-sm font-semibold flex items-center gap-1">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      Verified
-                    </p>
-                    <p className="text-xs mt-0.5 opacity-80">Click to view</p>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-sm font-semibold">Missing</p>
-                    <p className="text-xs mt-0.5 opacity-80">No photos</p>
-                  </>
-                )}
-              </div>
-            ) : (
-              <div 
-                className={cn(
-                  'p-3 rounded-lg border cursor-pointer transition-all hover:ring-2 hover:ring-offset-1 hover:ring-blue-300',
-                  'text-muted-foreground bg-muted border-border'
-                )}
-                onClick={() => scrollToSection(manifestSectionRef)}
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  <MapPin className="h-4 w-4" />
-                  <span className="text-xs font-medium uppercase tracking-wide">Location</span>
-                </div>
-                <p className="text-sm font-semibold text-foreground truncate">
-                  {origin?.city || 'Unknown'}, {origin?.state || ''}
-                </p>
-                <p className="text-xs mt-0.5 opacity-80">
-                  Click to view manifest
-                </p>
-              </div>
-            )}
-
-            {/* Manifest Card */}
-            <div className="p-3 rounded-lg border border-border bg-muted/30 text-muted-foreground">
-              <div className="flex items-center gap-2 mb-1">
-                <Ruler className="h-4 w-4" />
-                <span className="text-xs font-medium uppercase tracking-wide">Manifest</span>
-              </div>
-              <p className="text-sm font-semibold text-foreground">
-                {totalPieces} Pieces
-              </p>
-              <p className="text-xs mt-0.5">
-                {loadData.effectiveMiles || '—'} Miles
-              </p>
-            </div>
+        <DSProps items={shipmentItems.slice(0, 4)} />
+      </DSCard>
+    );
+  } else if (isCanceled) {
+    leftHeroCard = (
+      <DSCard title="Cancelled">
+        <p className="m-0 text-[12.5px] text-[var(--text-secondary)]">
+          This load was cancelled. See the activity log for the cancellation reason.
+        </p>
+      </DSCard>
+    );
+  } else {
+    // Assigned / In transit / Delivered all show Live tracking.
+    leftHeroCard = (
+      <DSCard
+        title="Live tracking"
+        action={
+          <div className="flex gap-1.5">
+            <WBtn size="sm" leading="map" onClick={() => setMapOpen(true)}>
+              Open map
+            </WBtn>
           </div>
-
-          {/* ============================================================
-              MASTER JOURNEY (Plan + Reality in One Table)
-              ============================================================ */}
-          <div ref={manifestSectionRef}>
-            <Card className="overflow-hidden !py-0 !gap-0">
-              {/* Section Header */}
-              <div className="flex items-center justify-between px-4 h-9 border-b bg-slate-50/50">
-                <h3 className="text-sm font-semibold flex items-center gap-2">
-                  <Clock className="h-4 w-4 text-muted-foreground" />
-                  Manifest
-                </h3>
-                <span className="text-xs text-muted-foreground">{loadData.stops.length} stops</span>
-              </div>
-              {/* Table Header */}
-              {loadData.stops.length > 0 && (
-                <div className="grid grid-cols-[90px_1fr_140px_90px_70px_50px] gap-2 px-4 h-8 items-center text-[10px] font-medium text-muted-foreground uppercase tracking-wider border-b bg-slate-50/30">
-                  <div>Stop</div>
-                  <div>Location</div>
-                  <div>Plan</div>
-                  <div>Actual</div>
-                  <div className="text-center">Perf</div>
-                  <div className="text-center">Docs</div>
-                </div>
-              )}
-              {/* Table Rows - 48px height each */}
-              <div className="divide-y divide-slate-100">
-                {loadData.stops.map((stop) => {
-                  const stopWithEvidence = stop as StopWithEvidence;
-                  const isCompleted = stop.status === 'Completed';
-                  const isActive = stop.status === 'In Transit';
-                  const isSelected = selectedStop?._id === stop._id;
-                  const evidenceCount = getEvidenceCount(stopWithEvidence);
-                  const hasNotes = !!stopWithEvidence.driverNotes;
-
-                  // Time variance for arrival
-                  // windowBeginTime can be either:
-                  // - Full ISO string: "2025-01-08T12:25:00-08:00" (from FourKites)
-                  // - Just time: "12:25" (from manual entry) - needs windowBeginDate
-                  let scheduledTime = stop.windowBeginTime;
-                  if (scheduledTime && !scheduledTime.includes('T') && stop.windowBeginDate) {
-                    // Combine date + time for manual entries (assume local timezone)
-                    scheduledTime = `${stop.windowBeginDate}T${scheduledTime}:00`;
-                  }
-                  const arrivalVariance = stopWithEvidence.checkedInAt
-                    ? getTimeVariance(scheduledTime, stopWithEvidence.checkedInAt)
-                    : null;
-
-                  // Format planned window
-                  const plannedWindow = formatTimeWindow(
-                    stop.windowBeginDate || '',
-                    stop.windowBeginTime,
-                    stop.windowEndTime
-                  );
-
-                  return (
-                    <div
-                      key={stop._id}
-                      className={cn(
-                        'grid grid-cols-[90px_1fr_140px_90px_70px_50px] gap-2 px-4 items-center h-12 cursor-pointer transition-colors',
-                        isSelected 
-                          ? 'bg-blue-50/80 border-l-[3px] border-l-blue-500 pl-[13px]' 
-                          : 'hover:bg-slate-50 border-l-[3px] border-l-transparent'
-                      )}
-                      onClick={() => setSelectedStop(stopWithEvidence)}
-                    >
-                      {/* Stop # & Type */}
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={cn(
-                            'flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold shrink-0',
-                            isCompleted
-                              ? 'bg-green-500 text-white'
-                              : isActive
-                                ? 'bg-blue-600 text-white'
-                                : 'bg-slate-100 text-slate-600 border border-slate-200'
-                          )}
-                        >
-                          {isCompleted ? <Check className="h-3 w-3" /> : stop.sequenceNumber}
-                        </span>
-                        <span
-                          className={cn(
-                            'text-[9px] font-bold uppercase px-1 py-0.5 rounded shrink-0',
-                            stop.stopType === 'PICKUP'
-                              ? 'bg-blue-50 text-blue-600'
-                              : 'bg-green-50 text-green-600'
-                          )}
-                        >
-                          {stop.stopType === 'PICKUP' ? 'Pickup' : 'Delivery'}
-                        </span>
-                      </div>
-
-                      {/* Location - Full Address with City, State */}
-                      <div className="text-sm text-slate-900 truncate">
-                        <span className="font-medium">{stop.address}</span>
-                        {stop.address && (stop.city || stop.state) && ', '}
-                        <span className="text-slate-500">{stop.city}{stop.city && stop.state && ', '}{stop.state}</span>
-                      </div>
-
-                      {/* Plan (Muted) */}
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <div className="text-[11px] text-slate-400 truncate cursor-help">
-                            {plannedWindow.display}
-                          </div>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          <p>{plannedWindow.tooltip}</p>
-                        </TooltipContent>
-                      </Tooltip>
-
-                      {/* Actual */}
-                      <div className="text-[11px] text-slate-700">
-                        {stopWithEvidence.checkedInAt ? (
-                          <span>{formatTime(stopWithEvidence.checkedInAt)}</span>
-                        ) : (
-                          <span className="text-slate-300">—</span>
-                        )}
-                      </div>
-
-                      {/* Performance Pill */}
-                      <div className="flex justify-center">
-                        {arrivalVariance ? (
-                          <span
-                            className={cn(
-                              'text-[9px] font-bold px-1.5 py-0.5 rounded whitespace-nowrap',
-                              arrivalVariance.isLate
-                                ? 'bg-red-50 text-red-600'
-                                : 'bg-green-50 text-green-600'
-                            )}
-                          >
-                            {arrivalVariance.label}
-                          </span>
-                        ) : (
-                          <span className="text-slate-300 text-[11px]">—</span>
-                        )}
-                      </div>
-
-                      {/* Docs Indicator */}
-                      <div className="flex items-center justify-center gap-0.5">
-                        {evidenceCount > 0 && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="flex items-center gap-0.5 text-slate-400">
-                                <Camera className="h-3.5 w-3.5" />
-                                <span className="text-[10px] font-medium">{evidenceCount}</span>
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <p>{evidenceCount} photo{evidenceCount > 1 ? 's' : ''}</p>
-                            </TooltipContent>
-                          </Tooltip>
-                        )}
-                        {hasNotes && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Paperclip className="h-3.5 w-3.5 text-amber-400" />
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <p>Has note</p>
-                            </TooltipContent>
-                          </Tooltip>
-                        )}
-                        {evidenceCount === 0 && !hasNotes && (
-                          <span className="text-slate-200 text-[11px]">—</span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {loadData.stops.length === 0 && (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Package className="h-6 w-6 mx-auto mb-1.5 opacity-50" />
-                  <p className="text-xs">No stops defined</p>
-                </div>
-              )}
-
-              {/* Bottom spacing */}
-              <div className="h-[5px]" />
-            </Card>
-          </div>
-
-          {/* ASSIGNMENT WARNING */}
-          {loadData.status === 'Open' && (
-            <div className="flex items-center justify-between gap-4 p-3 rounded-lg border border-amber-300 bg-amber-50">
-              <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-100">
-                  <Truck className="h-4 w-4 text-amber-600" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-amber-800">Load not assigned</p>
-                  <p className="text-xs text-amber-600">Assign a resource to calculate driver pay</p>
-                </div>
-              </div>
-              <Link href={`/dispatch/planner?order=${encodeURIComponent(loadData.orderNumber)}`}>
-                <Button size="sm" className="shrink-0">
-                  Assign Resource
-                </Button>
-              </Link>
-            </div>
+        }
+      >
+        <div className="text-[12.5px] text-[var(--text-secondary)] leading-[17px] mb-2.5">
+          {originLabel} → {destLabel}
+          {etaLabel !== '—' && (
+            <>
+              {' · '}
+              <span className="num">ETA {etaLabel}</span>
+            </>
           )}
+        </div>
+        <RouteProgressBar
+          percent={transitProgressPct}
+          from={originLabel}
+          to={destLabel}
+          markers={liveTrackingMarkers}
+        />
+      </DSCard>
+    );
+  }
 
-          {/* ============================================================
-              ROUTE TRACKING MAP
-              Unified view showing:
-              - Live driver location (green arrow) when tracking is active
-              - GPS trail/polyline of the route traveled
-              - Stop markers (pickup/delivery)
-              ============================================================ */}
-          <Card className="overflow-hidden !py-0 !gap-0">
-            {/* Section Header */}
-            <div className="flex items-center justify-between px-4 h-9 border-b bg-slate-50/50">
-              <h3 className="text-sm font-semibold flex items-center gap-2">
-                <Route className="h-4 w-4 text-muted-foreground" />
-                Route Tracking
-              </h3>
-              <span className="text-xs text-muted-foreground">Live + History</span>
-            </div>
-            <div className="p-0">
-              <LiveRouteMap
-                loadId={loadId as Id<'loadInformation'>}
-                organizationId={organizationId}
-                driverId={loadData.assignedDriver?._id as Id<'drivers'> | undefined}
-                height="350px"
-                stops={loadData.stops
-                  .filter(s => s.latitude && s.longitude)
-                  .map(s => ({
-                    id: s._id,
-                    lat: s.latitude!,
-                    lng: s.longitude!,
-                    type: s.stopType === 'PICKUP' ? 'pickup' : 'delivery',
-                    sequenceNumber: s.sequenceNumber,
-                    status: s.status as 'Pending' | 'In Transit' | 'Completed' | undefined,
-                    city: s.city,
-                    state: s.state,
-                  }))}
-                selectedStopId={selectedStop?._id}
-                onStopSelect={(stopId) => {
-                  if (stopId) {
-                    const stop = loadData.stops.find(s => s._id === stopId);
-                    if (stop) setSelectedStop(stop as StopWithEvidence);
-                  } else {
-                    setSelectedStop(null);
-                  }
+  // ── Stops (rows + chip maps used by both overview teaser and Stops tab) ─
+  type StopRow = StopWithEvidence & { id: string };
+  const stopRows: StopRow[] = loadData.stops.map((s) => ({
+    ...(s as StopWithEvidence),
+    id: s._id,
+  }));
+  const STOP_TYPE_TO_CHIP: Record<string, ChipStatus> = {
+    PICKUP: 'expiring',
+    DELIVERY: 'valid',
+    DETOUR: 'pending',
+  };
+  const STOP_STATUS_TO_CHIP: Record<string, ChipStatus> = {
+    Pending: 'pending',
+    'In Transit': 'active',
+    Completed: 'delivered',
+    Canceled: 'cancelled',
+  };
+
+  // Inline Stops mini-card on the overview (the dedicated "Stops" tab keeps
+  // the full card with all the columns; this is a curated subset to scan).
+  const overviewStopsCard = (
+    <DSCard
+      title="Stops"
+      bodyClassName="p-0"
+      action={
+        <WBtn size="sm" leading="arrow-up-right" onClick={() => setActiveSection('stops')}>
+          Open stops
+        </WBtn>
+      }
+    >
+      <DSMiniTable<StopRow>
+        columns={[
+          {
+            key: 'kind',
+            label: '',
+            width: '24px',
+            render: (r) => (
+              <span
+                className="inline-block rounded-full"
+                style={{
+                  width: 10,
+                  height: 10,
+                  background: r.stopType === 'PICKUP' ? '#10B981' : r.stopType === 'DETOUR' ? '#F59E0B' : '#2E5CFF',
                 }}
               />
-            </div>
-          </Card>
+            ),
+          },
+          {
+            key: 'where',
+            label: 'Location',
+            width: '1.4fr',
+            render: (r) => (
+              <span className="font-medium text-foreground truncate">
+                {[r.city, r.state].filter(Boolean).join(', ') || '—'}
+              </span>
+            ),
+          },
+          {
+            key: 'addr',
+            label: 'Address',
+            width: '1.6fr',
+            render: (r) => (
+              <span className="text-[var(--text-tertiary)] truncate">{r.address || '—'}</span>
+            ),
+          },
+          {
+            key: 'when',
+            // 240px fits the full "Fri, May 8 · 1:45 PM - 1:45 PM PDT" string
+            // formatTimeWindow returns. 120px clipped it mid-time.
+            label: 'When',
+            width: '240px',
+            render: (r) => {
+              const win = formatTimeWindow(r.windowBeginDate || '', r.windowBeginTime, r.windowEndTime);
+              return <span className="num text-[var(--text-tertiary)]">{win.display}</span>;
+            },
+          },
+          {
+            key: 'st',
+            label: 'Status',
+            width: '100px',
+            render: (r) => (
+              <Chip status={STOP_STATUS_TO_CHIP[r.status ?? 'Pending'] ?? 'inactive'} />
+            ),
+          },
+        ]}
+        rows={stopRows}
+        total={stopRows.length}
+        className="rounded-t-none border-0 border-t"
+      />
+    </DSCard>
+  );
 
-          {/* ============================================================
-              PAY SECTION - Shows Carrier Pay or Driver Pay based on assignment
-              ============================================================ */}
-          <div ref={paySectionRef}>
-            {loadData.assignedCarrier && !loadData.assignedDriver ? (
-              <CarrierPaySection
-                loadId={loadId as Id<'loadInformation'>}
-                organizationId={organizationId}
-              />
-            ) : (
-              <DriverPaySection
-                loadId={loadId as Id<'loadInformation'>}
-                organizationId={organizationId}
-                userId={userId}
-              />
-            )}
-          </div>
-
-          {/* ============================================================
-              HISTORY - Audit trail of changes, assignments, and holds
-              ============================================================ */}
-          <Card className="p-4">
-            <h3 className="text-sm font-semibold mb-3">History</h3>
-            <EntityAuditTimeline entityType="load" entityId={loadId} limit={25} />
-          </Card>
-        </div>
-
-        {/* ----------------------------------------------------------------
-            SIDEBAR (30%) - Stop Inspector + Static Cards
-            ---------------------------------------------------------------- */}
-        <div className="w-72 shrink-0 hidden lg:block">
-          <div className="sticky top-6 space-y-4">
-            {/* ============================================================
-                STOP INSPECTOR (Dynamic)
-                ============================================================ */}
-            {selectedStop && (
-              <Card className="p-4 border-blue-200 bg-blue-50/30">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold flex items-center gap-2">
-                    <Camera className="h-4 w-4 text-blue-600" />
-                    Stop Evidence
-                  </h3>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={() => setSelectedStop(null)}
-                  >
-                    <X className="h-3 w-3" />
-                  </Button>
-                </div>
-
-                {/* Stop Info */}
-                <div className="mb-3 pb-3 border-b border-blue-200">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={cn(
-                      'text-[10px] font-bold uppercase px-1.5 py-0.5 rounded',
-                      selectedStop.stopType === 'PICKUP'
-                        ? 'bg-blue-100 text-blue-700'
-                        : 'bg-green-100 text-green-700'
-                    )}>
-                      Stop {selectedStop.sequenceNumber} • {selectedStop.stopType === 'PICKUP' ? 'Pickup' : 'Delivery'}
-                    </span>
-                  </div>
-                  <p className="text-sm font-medium">
-                    {selectedStop.city}, {selectedStop.state}
-                  </p>
-
-                  {/* Timestamps */}
-                  {(selectedStop.checkedInAt || selectedStop.checkedOutAt) && (
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <span className="text-slate-500 block">Arrived</span>
-                        <span className="font-medium">{formatTime(selectedStop.checkedInAt)}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 block">Departed</span>
-                        <span className="font-medium">{formatTime(selectedStop.checkedOutAt)}</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Driver Note */}
-                {selectedStop.driverNotes && (
-                  <div className="mb-3">
-                    <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1">
-                      Driver Note
-                    </p>
-                    <div className="bg-white border border-slate-200 rounded p-2">
-                      <p className="text-xs text-slate-700 leading-relaxed">
-                        {selectedStop.driverNotes}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Photo Thumbnails */}
-                {((selectedStop.deliveryPhotos && selectedStop.deliveryPhotos.length > 0) || selectedStop.signatureImage) && (
-                  <div>
-                    <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-2">
-                      Photos
-                    </p>
-                    <div className="grid grid-cols-3 gap-2">
-                      {selectedStop.deliveryPhotos?.map((photo, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => openLightbox(selectedStop)}
-                          className="aspect-square rounded-lg overflow-hidden border border-slate-200 hover:border-blue-400 transition-colors bg-slate-100"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={photo}
-                            alt={`Photo ${idx + 1}`}
-                            className="h-full w-full object-cover"
-                            loading="lazy"
-                            onError={(e) => {
-                              // Show placeholder on error
-                              const target = e.target as HTMLImageElement;
-                              target.style.display = 'none';
-                              target.parentElement?.classList.add('flex', 'items-center', 'justify-center');
-                              const placeholder = document.createElement('div');
-                              placeholder.innerHTML = '<svg class="h-6 w-6 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>';
-                              target.parentElement?.appendChild(placeholder.firstChild!);
-                            }}
-                          />
-                        </button>
-                      ))}
-                      {selectedStop.signatureImage && (
-                        <button
-                          onClick={() => openLightbox(selectedStop)}
-                          className="aspect-square rounded-lg overflow-hidden border border-slate-200 hover:border-blue-400 transition-colors bg-white flex items-center justify-center"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={selectedStop.signatureImage}
-                            alt="Signature"
-                            className="h-full w-full object-contain p-2"
-                            loading="lazy"
-                          />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* No evidence */}
-                {!hasEvidence(selectedStop) && !selectedStop.checkedInAt && (
-                  <div className="text-center py-4 text-muted-foreground">
-                    <ImageIcon className="h-6 w-6 mx-auto mb-1.5 opacity-50" />
-                    <p className="text-xs">No evidence for this stop</p>
-                  </div>
-                )}
-              </Card>
-            )}
-
-            {/* ============================================================
-                STATIC CARDS
-                ============================================================ */}
-            {/* Cargo Details */}
-            <Card className="p-4">
-              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                <Package className="h-4 w-4 text-muted-foreground" />
-                Cargo Details
-              </h3>
-              <div className="space-y-2.5 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Commodity</span>
-                  <span className="font-medium text-right max-w-[140px] truncate">
-                    {loadData.commodityDescription || '—'}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Weight</span>
-                  <span className="font-medium">
-                    {loadData.weight ? `${loadData.weight} ${loadData.units || 'lbs'}` : '—'}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Equipment</span>
-                  <span className="font-medium">{loadData.equipmentType || '—'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">PO Number</span>
-                  <span className="font-medium">{loadData.poNumber || '—'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Miles</span>
-                  <span className="font-medium">{loadData.effectiveMiles || '—'}</span>
-                </div>
-              </div>
-            </Card>
-
-            {/* Assigned Resource */}
-            <Card className="p-4">
-              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                <Truck className="h-4 w-4 text-muted-foreground" />
-                Assigned Resource
-              </h3>
-              {(loadData.assignedDriver || loadData.assignedCarrier) ? (
-                <div className="space-y-2.5 text-sm">
-                  {loadData.assignedDriver && (
-                    <div className="flex justify-between">
-                      <span className="text-muted-foreground">Driver</span>
-                      <span className="font-medium truncate max-w-[140px]">
-                        {loadData.assignedDriver.name}
-                      </span>
-                    </div>
-                  )}
-                  {/* Reassign — only show for in-flight loads where a real
-                      driverId exists. Cancelled / completed loads can't be
-                      handed off; carrier-only assignments don't have a
-                      direct driverId on this surface. */}
-                  {loadData.assignedDriver?._id &&
-                    loadData.status !== 'Completed' &&
-                    loadData.status !== 'Canceled' && (
-                      <div className="pt-1">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="w-full"
-                          onClick={() => setReassignDialogOpen(true)}
-                        >
-                          Reassign Driver
-                        </Button>
-                      </div>
-                    )}
-                  {loadData.assignedCarrier && (
-                    <>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Carrier</span>
-                        <span className="font-medium truncate max-w-[140px]">
-                          {loadData.assignedCarrier.companyName}
-                        </span>
-                      </div>
-                      {(loadData.assignedCarrier as { driverName?: string }).driverName && (
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Carrier Driver</span>
-                          <span className="font-medium truncate max-w-[140px]">
-                            {(loadData.assignedCarrier as { driverName?: string }).driverName}
-                          </span>
-                        </div>
-                      )}
-                    </>
-                  )}
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Truck</span>
-                    <span className="font-medium">
-                      {loadData.assignedTruck?.unitId || '—'}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Trailer</span>
-                    <span className="font-medium">
-                      {loadData.assignedTrailer?.unitId || '—'}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">Not assigned</p>
-              )}
-            </Card>
-
-            {/* Timestamps */}
-            <Card className="p-4">
-              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                <Clock className="h-4 w-4 text-muted-foreground" />
-                Timestamps
-              </h3>
-              <div className="space-y-2.5 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Created</span>
-                  <span className="font-medium">{formatDateShort(loadData.createdAt)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Updated</span>
-                  <span className="font-medium">{formatDateShort(loadData.updatedAt)}</span>
-                </div>
-              </div>
-            </Card>
-
-            {/* Quick Actions */}
-            <Card className="p-4">
-              <h3 className="text-sm font-semibold mb-3">Quick Actions</h3>
-              <div className="space-y-2">
-                <Button variant="outline" size="sm" className="w-full justify-start">
-                  <Download className="mr-2 h-3.5 w-3.5" />
-                  Download BOL
-                </Button>
-                <Button variant="outline" size="sm" className="w-full justify-start">
-                  <Share2 className="mr-2 h-3.5 w-3.5" />
-                  Share Tracking
-                </Button>
-              </div>
-            </Card>
-
-            {/* Instructions */}
-            {loadData.generalInstructions && (
-              <Card className="p-4">
-                <h3 className="text-sm font-semibold mb-2">Instructions</h3>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  {loadData.generalInstructions}
-                </p>
-              </Card>
-            )}
-          </div>
-        </div>
+  const overviewContent = (
+    <div className="flex flex-col gap-3.5">
+      <AttentionBand
+        headline={attentionHeadline}
+        items={attentionItems}
+        onJump={(tab) => setActiveSection(tab)}
+      />
+      <QuickStats stats={quickStats} />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {leftHeroCard}
+        {assignedCard}
       </div>
+      {!isCanceled && overviewStopsCard}
+      <DSCard title="Shipment">
+        <DSProps items={shipmentItems} />
+      </DSCard>
+      {/* Pay plan card — inline per design (was previously a separate tab).
+          Subsumes the old "Financials" card (revenue / pay / margin are
+          rendered inside the pay plan's margin footer). */}
+      <LoadPayPlanCard
+        loadId={loadId as Id<'loadInformation'>}
+        organizationId={organizationId}
+        userId={userId}
+      />
+    </div>
+  );
 
-      {/* ================================================================
-          PHOTO LIGHTBOX
-          ================================================================ */}
+  // ── Stops (full table for the Stops tab) ──────────────────────────────
+  const stopCols: DSMiniColumn<StopRow>[] = [
+    {
+      key: 'seq',
+      label: '#',
+      width: '36px',
+      render: (r) => <span className="num">{r.sequenceNumber}</span>,
+    },
+    {
+      key: 'type',
+      label: 'Type',
+      width: '90px',
+      render: (r) => (
+        <Chip
+          status={STOP_TYPE_TO_CHIP[r.stopType] ?? 'inactive'}
+          label={r.stopType.toLowerCase()}
+        />
+      ),
+    },
+    {
+      key: 'place',
+      label: 'Location',
+      width: '1.6fr',
+      render: (r) => (
+        <span className="truncate">
+          <span className="font-medium text-foreground">{r.address || r.city || '—'}</span>
+          {r.address && (r.city || r.state) && (
+            <span className="text-[var(--text-tertiary)]">
+              {`, ${r.city ?? ''}${r.city && r.state ? ', ' : ''}${r.state ?? ''}`}
+            </span>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: 'plan',
+      // 240px fits the full "Fri, May 22 · 12:10 AM - 12:10 AM PDT" string
+      // formatTimeWindow returns. 160px clipped it to "Fri, May 22 · 12:1…".
+      label: 'Plan',
+      width: '240px',
+      render: (r) => {
+        const win = formatTimeWindow(r.windowBeginDate || '', r.windowBeginTime, r.windowEndTime);
+        return <span className="num text-[var(--text-tertiary)]">{win.display}</span>;
+      },
+    },
+    {
+      key: 'actual',
+      label: 'Actual',
+      width: '90px',
+      render: (r) =>
+        r.checkedInAt ? (
+          <span className="num">{formatTime(r.checkedInAt)}</span>
+        ) : (
+          <span className="text-[var(--text-tertiary)]">—</span>
+        ),
+    },
+    {
+      key: 'perf',
+      label: 'Perf',
+      width: '90px',
+      align: 'right',
+      render: (r) => {
+        let scheduled = r.windowBeginTime;
+        if (scheduled && !scheduled.includes('T') && r.windowBeginDate) {
+          scheduled = `${r.windowBeginDate}T${scheduled}:00`;
+        }
+        const v = r.checkedInAt ? getTimeVariance(scheduled, r.checkedInAt) : null;
+        if (!v) return <span className="text-[var(--text-tertiary)]">—</span>;
+        return (
+          <span
+            className="num text-[10.5px] font-bold px-1.5 py-0.5 rounded"
+            style={{
+              background: v.isLate ? 'rgba(239,68,68,0.10)' : 'rgba(16,185,129,0.10)',
+              color: v.isLate ? '#B43030' : '#0F8C5F',
+            }}
+          >
+            {v.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'st',
+      label: 'Status',
+      width: '110px',
+      render: (r) => <Chip status={STOP_STATUS_TO_CHIP[r.status ?? 'Pending'] ?? 'inactive'} />,
+    },
+  ];
+
+  const stopsContent = (
+    <DSCard
+      title={`Stops (${loadData.stops.length})`}
+      bodyClassName="p-0"
+      action={
+        <WBtn size="sm" leading="map" onClick={() => setMapOpen(true)}>
+          Open map
+        </WBtn>
+      }
+    >
+      <DSMiniTable
+        columns={stopCols}
+        rows={stopRows}
+        total={stopRows.length}
+        className="rounded-t-none border-0 border-t"
+        onRowClick={(row) => {
+          const stop = row as StopRow;
+          setSelectedStop(stop);
+          // Pass 1: clicking a stop row opens its photos in the lightbox
+          // when any are on file. Photos come from loadDocuments rows
+          // inferred to this stop, resolved to short-lived signed URLs
+          // (raw deliveryPhotos URLs require a public bucket, which is
+          // never enabled). Signature images pass through as-is.
+          const stopDocs = (loadDocsData ?? []).filter(
+            (d) => d.type !== 'EXTRA_DOC' && d.inferredStopId === stop._id,
+          );
+          const label = `Stop ${stop.sequenceNumber} — ${stop.city ?? ''}`;
+          void Promise.all(
+            stopDocs.map((d) =>
+              d.storageId
+                ? Promise.resolve(d.url)
+                : resolveDocUrl(d._id, d.externalUrl ?? null),
+            ),
+          ).then((resolved) => {
+            const photos: string[] = [
+              ...resolved.filter((u): u is string => !!u),
+              ...(stop.signatureImage ? [stop.signatureImage] : []),
+            ];
+            if (photos.length > 0) {
+              setLightboxPhotos(photos);
+              setLightboxLabel(label);
+              setLightboxOpen(true);
+            }
+          });
+        }}
+      />
+    </DSCard>
+  );
+
+  // ── Documents ────────────────────────────────────────────────────────
+  // Combines load-level placeholders (Rate confirmation, BOL pickup/
+  // delivery — wired once a real doc store lands) with per-stop POD
+  // evidence (photos + signatures + driver notes) so everything tied to
+  // this load shows up in one place. Click a row to open DocPreviewModal.
+  const docRows: DocRecord[] = [];
+
+  // Driver + ops documents from the unified loadDocuments table. This
+  // replaced the legacy stop.deliveryPhotos source: those raw R2 URLs
+  // require a public bucket (never enabled — presigned PUTs don't need
+  // it), and every deliveryPhotos entry is dual-written/backfilled into
+  // loadDocuments anyway. R2-backed rows record their documentId in
+  // docIdByRow and get a signed GET URL resolved on click.
+  (loadDocsData ?? []).forEach((doc) => {
+    if (doc.type === 'EXTRA_DOC') return; // deprecated legacy tag
+    const rowId = `doc-${doc._id}`;
+    const stopLabel =
+      doc.inferredStopSequence != null ? ` — Stop ${doc.inferredStopSequence}` : '';
+    const when = formatTime(new Date(doc.capturedAt ?? doc.uploadedAt).toISOString());
+    const isPdf = !!doc.contentType?.includes('pdf');
+    // Convex-storage docs (ops uploads) have a directly servable url; R2
+    // docs (in docIdByRow) get a signed-GET URL resolved at click time.
+    const directUrl = docIdByRow.has(rowId) ? '' : (doc.url ?? '');
+    docRows.push({
+      id: rowId,
+      name: `${doc.type}${stopLabel}${doc.fileName ? ` — ${doc.fileName}` : ''}`,
+      src: doc.uploadedBy.startsWith('driver:') ? 'Driver' : 'Ops',
+      when,
+      status: 'valid',
+      preview: isPdf ? { kind: 'pdf', url: directUrl } : { kind: 'image', url: directUrl },
+      downloadUrl: directUrl || undefined,
+      openUrl: directUrl || undefined,
+      activity: doc.capturedAt
+        ? [{ id: 'cap', text: <>Captured by driver · <span className="num">{when}</span></> }]
+        : undefined,
+    });
+  });
+
+  // Per-stop signatures and notes still come from the stop rows (they
+  // are not part of loadDocuments).
+  loadData.stops.forEach((s) => {
+    const sw = s as StopWithEvidence;
+    const stopLabel = `Stop ${sw.sequenceNumber} ${sw.stopType === 'PICKUP' ? 'pickup' : 'delivery'}`;
+    const when = sw.checkedInAt ? formatTime(sw.checkedInAt) : '—';
+    if (sw.signatureImage) {
+      docRows.push({
+        id: `${sw._id}-sig`,
+        name: `${stopLabel} — Signature`,
+        src: 'Driver',
+        when,
+        status: 'valid',
+        preview: { kind: 'image', url: sw.signatureImage },
+        downloadUrl: sw.signatureImage,
+        openUrl: sw.signatureImage,
+      });
+    }
+    if (sw.driverNotes) {
+      docRows.push({
+        id: `${sw._id}-note`,
+        name: `${stopLabel} — Driver note`,
+        src: 'Driver',
+        when,
+        status: 'valid',
+        preview: { kind: 'text', body: sw.driverNotes },
+      });
+    }
+  });
+
+  // No synthetic placeholder rows ('Rate confirmation' / 'BOL — pickup'
+  // / 'BOL — delivery'): the table now lists real documents from
+  // loadDocuments only. Missing-POD pressure is signaled by the
+  // attention band + status chips, not fake table entries.
+  const documentsContent = (
+    <DSCard
+      title={`Documents (${docRows.length})`}
+      bodyClassName="p-0"
+      action={<WBtn size="sm" leading="plus">Upload</WBtn>}
+    >
+      <DSMiniTable<DocRecord>
+        columns={[
+          { key: 'name', label: 'Document', width: '1.4fr' },
+          { key: 'src', label: 'Source', width: '110px' },
+          {
+            key: 'when',
+            label: 'Received',
+            width: '110px',
+            render: (r) => <span className="num">{r.when}</span>,
+          },
+          {
+            key: 'status',
+            label: 'Status',
+            width: '90px',
+            render: (r) => <Chip status={r.status} />,
+          },
+        ]}
+        rows={docRows}
+        total={docRows.length}
+        className="rounded-t-none border-0 border-t"
+        onRowClick={(row) => {
+          const documentId = docIdByRow.get(row.id);
+          if (!documentId) {
+            setPreviewDoc(row);
+            return;
+          }
+          // Open immediately (empty URL renders as loading canvas), then
+          // swap in the short-lived signed URL.
+          setPreviewDoc(row);
+          void resolveDocUrl(documentId, null).then((url) => {
+            if (!url) return;
+            setPreviewDoc((current) =>
+              current?.id === row.id
+                ? {
+                    ...current,
+                    preview:
+                      current.preview.kind === 'pdf'
+                        ? { kind: 'pdf', url }
+                        : { kind: 'image', url },
+                    downloadUrl: url,
+                    openUrl: url,
+                  }
+                : current,
+            );
+          });
+        }}
+      />
+    </DSCard>
+  );
+
+  // ── Communications (stub) ─────────────────────────────────────────────
+  const commsContent = (
+    <DSCard title="Communications">
+      <div className="flex flex-col items-center justify-center py-10 text-center">
+        <WIcon name="chat" size={20} color="var(--text-tertiary)" />
+        <p className="m-0 mt-2 text-[12.5px] text-[var(--text-tertiary)]">
+          Messaging on loads is coming soon.
+        </p>
+      </div>
+    </DSCard>
+  );
+
+  // ── Activity ──────────────────────────────────────────────────────────
+  type ActIcon = 'truck' | 'check' | 'pulse' | 'circle-dot';
+  const activityItems: Array<{
+    id: string;
+    icon: ActIcon;
+    text: string;
+    when: string;
+    tone?: 'warn';
+  }> = [];
+  loadData.stops.forEach((s) => {
+    const sw = s as StopWithEvidence;
+    if (sw.checkedInAt) {
+      activityItems.push({
+        id: `in-${sw._id}`,
+        icon: 'truck',
+        text: `${sw.stopType === 'PICKUP' ? 'Picked up' : 'Arrived'} at stop ${sw.sequenceNumber} — ${sw.city ?? ''}`,
+        when: formatTime(sw.checkedInAt),
+      });
+    }
+    if (sw.checkedOutAt) {
+      activityItems.push({
+        id: `out-${sw._id}`,
+        icon: 'check',
+        text: `Departed stop ${sw.sequenceNumber}`,
+        when: formatTime(sw.checkedOutAt),
+      });
+    }
+  });
+  if (activityItems.length === 0) {
+    activityItems.push({
+      id: 'created',
+      icon: 'circle-dot',
+      text: 'Load created',
+      when: formatDateShort(loadData.createdAt),
+    });
+  }
+
+  const activityContent = (
+    <div className="flex flex-col gap-3.5">
+      <DSCard title="Trip activity">
+        <DSActivity items={activityItems} emptyText="No activity yet." />
+      </DSCard>
+      {/* Audit trail — status changes, holds, assignments, POD uploads. */}
+      <DSCard title="History">
+        <EntityAuditTimeline entityType="load" entityId={loadId} limit={25} />
+      </DSCard>
+    </div>
+  );
+
+  // Pay-plan card now lives inline in the Overview tab — no dedicated Pay
+  // tab. See `LoadPayPlanCard` inside `overviewContent` above.
+
+  // ── Status-aware right rail ──────────────────────────────────────────
+  const trackingStatus = (loadData.trackingStatus || '').toLowerCase();
+  const isInTransit = trackingStatus === 'in transit';
+  let railCard: React.ReactNode = null;
+  if (loadData.status === 'Open') {
+    const win = origin
+      ? formatTimeWindow(origin.windowBeginDate || '', origin.windowBeginTime, origin.windowEndTime)
+      : null;
+    railCard = (
+      <DSCard
+        title="Awaiting assignment"
+        action={
+          <Link href={`/dispatch/planner?order=${encodeURIComponent(loadData.orderNumber)}`}>
+            <WBtn size="xs" variant="ghost">See all</WBtn>
+          </Link>
+        }
+        bodyClassName="flex flex-col gap-3"
+      >
+        <DSActivity
+          items={[
+            {
+              icon: 'clock',
+              tone: 'warn',
+              text: win ? `Pickup window ${win.display}` : 'Pickup window unset',
+              when: win?.tooltip ?? '',
+            },
+          ]}
+        />
+        <div className="flex flex-col gap-1">
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
+            Suggested drivers
+          </div>
+          {suggestedDrivers === undefined ? (
+            <p className="m-0 text-[12px] text-[var(--text-tertiary)]">Loading…</p>
+          ) : suggestedDrivers.length === 0 ? (
+            <p className="m-0 text-[12px] text-[var(--text-tertiary)]">No eligible drivers found.</p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {suggestedDrivers.map((d) => {
+                const fullName = [d.firstName, d.middleName, d.lastName].filter(Boolean).join(' ');
+                return (
+                  <Link
+                    key={d._id}
+                    href={`/fleet/drivers/${d._id}`}
+                    className="flex items-center gap-2 px-1.5 py-1.5 rounded-md hover:bg-[var(--bg-row-hover)]"
+                  >
+                    <Avatar name={fullName} size={24} />
+                    <span className="flex-1 min-w-0">
+                      <span className="block text-[12.5px] font-medium text-foreground truncate">
+                        {fullName}
+                      </span>
+                      <span className="block text-[11px] text-[var(--text-tertiary)] truncate">
+                        {d.reasons.length > 0
+                          ? d.reasons.join(' · ')
+                          : `Class ${d.licenseClass}${d.state ? ` · ${d.state}` : ''}`}
+                      </span>
+                    </span>
+                    <WIcon name="chevron-right" size={11} color="var(--text-tertiary)" />
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </DSCard>
+    );
+  } else if (loadData.status === 'Assigned' && !isInTransit) {
+    railCard = (
+      <DSCard title="Pre-pickup">
+        <DSActivity
+          items={[
+            { icon: 'check', tone: 'ok', text: 'Driver acknowledged dispatch', when: '' },
+          ]}
+        />
+      </DSCard>
+    );
+  } else if (isInTransit) {
+    const last = activityItems[activityItems.length - 1];
+    railCard = (
+      <DSCard title="Trip in progress">
+        <DSActivity
+          items={[
+            { icon: 'truck', text: last?.text ?? 'In transit', when: last?.when ?? 'now' },
+          ]}
+        />
+      </DSCard>
+    );
+  } else if (loadData.status === 'Completed') {
+    railCard = (
+      <DSCard title="Delivered">
+        <DSActivity
+          items={[
+            {
+              icon: 'check',
+              tone: 'ok',
+              text: hasPOD ? 'POD on file' : 'POD pending',
+              when: finalDeliveryStop?.checkedInAt ? formatTime(finalDeliveryStop.checkedInAt) : '',
+            },
+          ]}
+        />
+      </DSCard>
+    );
+  } else if (loadData.status === 'Canceled') {
+    railCard = (
+      <DSCard title="Cancelled">
+        <p className="m-0 text-[12.5px] text-[var(--text-secondary)]">This load was canceled.</p>
+      </DSCard>
+    );
+  }
+  // Risk signals — derives from the same attentionItems that drive the
+  // band, but presents them as a compact rail card so dispatchers see the
+  // running list of things to watch even after they scroll the headline
+  // out of view. Only emits when there's at least one non-ok signal.
+  const riskSignals = attentionItems.filter((it) => it.tone === 'warn' || it.tone === 'crit' || it.tone === 'info');
+  const riskCard =
+    riskSignals.length > 0 ? (
+      <DSCard title="Risk signals">
+        <div className="flex flex-col gap-2">
+          {riskSignals.map((it, i) => {
+            const tone = it.tone ?? 'info';
+            const fg =
+              tone === 'crit' ? '#B43030' : tone === 'warn' ? '#A66800' : tone === 'ok' ? '#0F8C5F' : '#1A47E6';
+            const bg =
+              tone === 'crit'
+                ? 'rgba(239,68,68,0.10)'
+                : tone === 'warn'
+                  ? 'rgba(245,158,11,0.10)'
+                  : tone === 'ok'
+                    ? 'rgba(16,185,129,0.10)'
+                    : 'rgba(46,92,255,0.08)';
+            return (
+              <div key={i} className="flex items-start gap-2.5">
+                <span
+                  aria-hidden
+                  className="inline-flex items-center justify-center rounded-md shrink-0 mt-0.5"
+                  style={{ width: 22, height: 22, background: bg, color: fg }}
+                >
+                  <WIcon name={it.icon ?? 'circle-dot'} size={11} />
+                </span>
+                <div className="min-w-0 flex-1 leading-[16px]">
+                  <div className="text-[12px] font-medium text-foreground truncate">{it.title}</div>
+                  {it.detail && (
+                    <div className="num text-[10.5px] mt-0.5 truncate" style={{ color: fg }}>
+                      {it.detail}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </DSCard>
+    ) : null;
+
+  // FPCommentsPeek tops the rail — always present so dispatchers can see
+  // chatter without expanding the thread. Wired to the `comm` tab until
+  // the inline thread lands.
+  const commentsPeek = (
+    <FPCommentsPeek
+      count={0}
+      latest={undefined}
+      onOpen={() => setActiveSection('comm')}
+    />
+  );
+
+  const rightRail = (
+    <div className="flex flex-col gap-3">
+      {commentsPeek}
+      {riskCard}
+      {railCard}
+    </div>
+  );
+
+  // ── Sections ─────────────────────────────────────────────────────────
+  const sections: FPSection[] = [
+    { id: 'overview', label: 'Overview', icon: 'home', content: overviewContent },
+    {
+      id: 'stops',
+      label: 'Stops',
+      icon: 'pin',
+      count: loadData.stops.length,
+      content: stopsContent,
+    },
+    {
+      id: 'docs',
+      label: 'Documents',
+      icon: 'file-text',
+      count: docRows.length,
+      content: documentsContent,
+    },
+    { id: 'comm', label: 'Communications', icon: 'chat', content: commsContent },
+    { id: 'activity', label: 'Activity', icon: 'pulse', content: activityContent },
+  ];
+
+  // ── Toolbar More menu ────────────────────────────────────────────────
+  // Mirrors design v3 ENTITY_ACTIONS.load. Stub items (Duplicate / Print /
+  // Export) toast for now; Cancel routes through the existing reason-code
+  // modal; Delete uses the hard-confirm "type the order number" pattern.
+  const loadActionGroups: RecordActionGroup[] = [
+    {
+      items: [
+        { id: 'duplicate', label: 'Duplicate load', icon: 'copy' },
+        { id: 'print', label: 'Print rate confirmation', icon: 'file-text' },
+        { id: 'export', label: 'Export to CSV', icon: 'download' },
+      ],
+    },
+    {
+      items: [
+        {
+          id: 'cancel',
+          label: 'Cancel load',
+          icon: 'close',
+          // The reason-code modal does its own confirmation, so we skip the
+          // generic confirm here and hand off directly.
+        },
+        {
+          id: 'archive',
+          label: 'Archive load',
+          icon: 'archive',
+          confirm: 'soft',
+          confirmTitle: 'Archive this load?',
+          confirmBody:
+            'Archived loads are hidden from default views but kept for records and reporting.',
+          confirmCta: 'Archive',
+        },
+      ],
+    },
+    {
+      items: [
+        {
+          id: 'delete',
+          label: 'Delete load',
+          icon: 'trash',
+          danger: true,
+          confirm: 'hard',
+          confirmTitle: 'Delete load permanently?',
+          confirmBody: (
+            <>
+              This permanently removes the load record. Trip history, documents, and audit log
+              entries remain. <strong>This action cannot be undone.</strong>
+            </>
+          ),
+          confirmCta: 'Delete permanently',
+        },
+      ],
+    },
+  ];
+
+  const handleMenuAction = async (itemId: string) => {
+    switch (itemId) {
+      case 'duplicate':
+        toast.message('Duplicate load — coming soon.');
+        return;
+      case 'print':
+        toast.message('Print rate confirmation — coming soon.');
+        return;
+      case 'export':
+        toast.message('Export to CSV — coming soon.');
+        return;
+      case 'cancel':
+        setCancellationOpen(true);
+        return;
+      case 'archive':
+        toast.message('Archive support is on the way.');
+        return;
+      case 'delete':
+        await handleDelete();
+        return;
+    }
+  };
+
+  // ── Header subtitle ──────────────────────────────────────────────────
+  const subtitleParts: string[] = [];
+  if (origin?.city || origin?.state) {
+    subtitleParts.push([origin?.city, origin?.state].filter(Boolean).join(', '));
+  }
+  if (finalDeliveryStop?.city || finalDeliveryStop?.state) {
+    subtitleParts.push(
+      [finalDeliveryStop?.city, finalDeliveryStop?.state].filter(Boolean).join(', '),
+    );
+  }
+  const subtitle = (
+    <span className="inline-flex items-center gap-2">
+      <span>{subtitleParts.join(' → ') || '—'}</span>
+      {loadData.equipmentType && (
+        <>
+          <span className="text-[var(--text-tertiary)]">·</span>
+          <span>{loadData.equipmentType}</span>
+        </>
+      )}
+    </span>
+  );
+
+  return (
+    <>
+      <DetailsFullPage
+        breadcrumb={
+          <span className="inline-flex items-center gap-1.5 text-[var(--text-secondary)]">
+            <button
+              type="button"
+              onClick={() => router.push('/loads')}
+              className="hover:text-foreground"
+            >
+              Loads
+            </button>
+            <span className="text-[var(--text-tertiary)]">/</span>
+            <span className="text-foreground font-medium">Load #{loadData.orderNumber}</span>
+          </span>
+        }
+        onBack={() => router.push('/loads')}
+        toolbarActions={
+          <>
+            <WBtn size="sm" variant="ghost" leading="export">
+              Export
+            </WBtn>
+            <WBtn size="sm" variant="ghost" leading="map" onClick={() => setMapOpen(true)}>
+              Track
+            </WBtn>
+            <RecordActionsMenu
+              recordLabel={loadData.orderNumber}
+              groups={loadActionGroups}
+              onAction={handleMenuAction}
+            />
+          </>
+        }
+        title={
+          <span className="inline-flex items-center gap-3">
+            <span>{`Load #${loadData.orderNumber}`}</span>
+            <StatusPicker
+              entity="load"
+              currentId={statusId}
+              onChange={handleStatusChange}
+              label={statusChipLabel}
+            />
+          </span>
+        }
+        subtitle={subtitle}
+        sections={sections}
+        activeId={activeSection}
+        onActiveChange={setActiveSection}
+        rightRail={rightRail}
+      />
+
+      <LiveTrackingModal
+        open={mapOpen}
+        onOpenChange={(next) => {
+          setMapOpen(next);
+          // Drop any stop selection when the modal closes so the next open
+          // fits the whole route instead of pin-zooming to a stale stop.
+          if (!next) setSelectedStop(null);
+        }}
+        loadId={loadId}
+        organizationId={organizationId}
+        orderNumber={loadData.orderNumber}
+        statusLabel={statusChipLabel}
+        isInTransit={isInTransitChip}
+        statusChip={
+          isInTransitChip
+            ? 'active'
+            : loadData.status === 'Completed'
+              ? 'delivered'
+              : loadData.status === 'Canceled'
+                ? 'cancelled'
+                : 'pending'
+        }
+        tripState={
+          loadData.status === 'Completed'
+            ? 'delivered'
+            : isInTransitChip
+              ? 'in-transit'
+              : 'pre-trip'
+        }
+        tripStartedAtMs={origin?.checkedInAt ? new Date(origin.checkedInAt).getTime() : null}
+        tripEndedAtMs={
+          finalDeliveryStop?.checkedInAt
+            ? new Date(finalDeliveryStop.checkedInAt).getTime()
+            : null
+        }
+        origin={originLabel}
+        destination={destLabel}
+        driver={
+          loadData.assignedDriver
+            ? {
+                _id: loadData.assignedDriver._id,
+                name: loadData.assignedDriver.name,
+                // Synthetic shortcode until the driver record exposes a stable
+                // human-readable ID — last 4 of the Convex id is good enough
+                // to disambiguate between drivers in the rail.
+                shortcode: `DRV-${loadData.assignedDriver._id.slice(-4).toUpperCase()}`,
+              }
+            : null
+        }
+        carrier={
+          !loadData.assignedDriver && loadData.assignedCarrier?.companyName
+            ? {
+                name: loadData.assignedCarrier.companyName,
+                mcNumber: loadData.assignedCarrier.mcNumber ?? undefined,
+              }
+            : null
+        }
+        equipment={{
+          truck: loadData.assignedTruck?.unitId,
+          trailer: loadData.assignedTrailer?.unitId,
+          equipmentType: loadData.equipmentType,
+        }}
+        distanceMi={loadData.effectiveMiles ?? null}
+        // Estimated duration: lean on a flat 60 mph average until route legs
+        // surface a real ETA. Round to the nearest 5 minutes.
+        durationLabel={(() => {
+          if (!loadData.effectiveMiles) return null;
+          const totalMin = Math.round((loadData.effectiveMiles / 60) * 60);
+          const h = Math.floor(totalMin / 60);
+          const m = Math.round((totalMin % 60) / 5) * 5;
+          if (h === 0) return `${m}m`;
+          return m === 0 ? `${h}h` : `${h}h ${m}m`;
+        })()}
+        events={(() => {
+          const out: TimelineEvent[] = [];
+          // Reverse chronological — the design shows newest at the top.
+          // Each stop check-in / check-out becomes a timeline event.
+          [...loadData.stops]
+            .sort((a, b) => a.sequenceNumber - b.sequenceNumber)
+            .forEach((s) => {
+              const sw = s as StopWithEvidence;
+              if (sw.checkedOutAt) {
+                out.push({
+                  id: `out-${sw._id}`,
+                  title: sw.stopType === 'PICKUP' ? 'Departed pickup' : 'Departed stop',
+                  detail: [sw.city, sw.state].filter(Boolean).join(', '),
+                  time: formatTime(sw.checkedOutAt),
+                  icon: 'arrow-up-right',
+                  tone: 'neutral',
+                });
+              }
+              if (sw.checkedInAt) {
+                out.push({
+                  id: `in-${sw._id}`,
+                  title:
+                    sw.stopType === 'PICKUP'
+                      ? `Arrived at pickup #${sw.sequenceNumber}`
+                      : `Arrived at delivery #${sw.sequenceNumber}`,
+                  detail: [sw.city, sw.state].filter(Boolean).join(', '),
+                  time: formatTime(sw.checkedInAt),
+                  icon: 'check',
+                  tone: 'ok',
+                });
+              }
+            });
+          if (isInTransitChip) {
+            out.unshift({
+              id: 'now',
+              title: 'Now',
+              detail: `In transit · ${transitProgressPct}% complete`,
+              time: 'now',
+              icon: 'pulse',
+              tone: 'info',
+              current: true,
+            });
+          }
+          return out.reverse();
+        })()}
+        gpsPings={gpsPings}
+        stops={loadData.stops
+          .filter((s) => s.latitude && s.longitude)
+          .map((s) => ({
+            id: s._id,
+            lat: s.latitude!,
+            lng: s.longitude!,
+            type: s.stopType === 'PICKUP' ? 'pickup' : 'delivery',
+            sequenceNumber: s.sequenceNumber,
+            status: s.status as 'Pending' | 'In Transit' | 'Completed' | undefined,
+            city: s.city,
+            state: s.state,
+          }))}
+        selectedStopId={selectedStop?._id}
+        onStopSelect={(stopId) => {
+          if (stopId) {
+            const stop = loadData.stops.find((s) => s._id === stopId);
+            if (stop) setSelectedStop(stop as StopWithEvidence);
+          } else {
+            setSelectedStop(null);
+          }
+        }}
+        onExport={() => toast.message('Export tracking — coming soon.')}
+        onShareEta={() => toast.message('Share ETA — coming soon.')}
+      />
+
+      <DocPreviewModal doc={previewDoc} onClose={() => setPreviewDoc(null)} />
+
       <PhotoLightbox
         photos={lightboxPhotos}
         isOpen={lightboxOpen}
@@ -1208,29 +1760,14 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
         stopLabel={lightboxLabel}
       />
 
-      {/* ================================================================
-          DELETE CONFIRMATION DIALOG
-          ================================================================ */}
-      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Load?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete this load? This action cannot be undone. All associated stops
-              will also be deleted.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} className="bg-red-600 hover:bg-red-700">
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <CancellationReasonModal
+        open={cancellationOpen}
+        onOpenChange={setCancellationOpen}
+        loadCount={1}
+        loads={[{ id: loadId, orderNumber: loadData.orderNumber }]}
+        onConfirm={handleCancellationConfirm}
+      />
 
-      {/* Mid-load handoff (Phase 6). Mounted lazily — only when the user
-          opens it and an assigned driver actually exists. */}
       {reassignDialogOpen && loadData.assignedDriver?._id && (
         <ReassignDriverDialog
           open={reassignDialogOpen}
@@ -1240,6 +1777,7 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
           fromDriverName={loadData.assignedDriver.name}
         />
       )}
-    </div>
+    </>
   );
 }
+

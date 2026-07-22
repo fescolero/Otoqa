@@ -147,12 +147,16 @@ function base64urlFromString(s: string): string {
 /**
  * Mint a short-lived (1h) Google OAuth2 access token for the FCM
  * messaging scope. Uses the service-account private key to sign a JWT
- * and exchanges it at Google's token endpoint. No caching — at the 1b
- * scope this runs once per sendWake invocation (bounded by the 5-min
- * per-session cooldown). If production volume justifies it, a future
- * PR can cache in a singleton `systemState` row.
+ * and exchanges it at Google's token endpoint.
+ *
+ * Caller (sendWake) should prefer getCachedOrMintFcmAccessToken below —
+ * this raw mint is what that helper falls back to when the cache is
+ * stale or empty. ~150ms per call (network + sign).
  */
-async function mintFcmAccessToken(): Promise<string> {
+async function mintFcmAccessToken(): Promise<{
+  accessToken: string;
+  expiresAtMs: number;
+}> {
   const sa = loadServiceAccount();
   const nowSec = Math.floor(Date.now() / 1000);
   const header = base64urlFromString(
@@ -209,7 +213,52 @@ async function mintFcmAccessToken(): Promise<string> {
   if (!data.access_token) {
     throw new Error('FCM token mint returned no access_token');
   }
-  return data.access_token;
+  // expires_in is seconds-from-now. Default 3600 if missing.
+  const expiresAtMs = Date.now() + (data.expires_in ?? 3600) * 1000;
+  return { accessToken: data.access_token, expiresAtMs };
+}
+
+// Safety margin — refresh the cached token this far before its stated
+// expiry so we never actually use an expired token (clock skew, in-flight
+// FCM POSTs, etc.).
+const FCM_TOKEN_REFRESH_MARGIN_MS = 60 * 1000;
+const FCM_TOKEN_CACHE_KEY = 'fcm_access_token';
+
+type CachedFcmToken = {
+  accessToken: string;
+  expiresAtMs: number;
+};
+
+/**
+ * Cache-aware variant of mintFcmAccessToken. Reads the cached token from
+ * the systemState singleton; if absent or within the refresh margin of
+ * expiry, mints fresh and patches. Concurrent expired-cache callers may
+ * both mint and patch — last write wins, which is fine because tokens
+ * are idempotent (same scope, same SA, equally valid).
+ */
+async function getCachedOrMintFcmAccessToken(ctx: any): Promise<string> {
+  const now = Date.now();
+
+  const cached = await ctx.runQuery(
+    internal.fcmWake.getCachedFcmToken,
+    {},
+  );
+  if (
+    cached &&
+    cached.expiresAtMs > now + FCM_TOKEN_REFRESH_MARGIN_MS
+  ) {
+    return cached.accessToken;
+  }
+
+  const fresh = await mintFcmAccessToken();
+  console.warn(
+    `[fcmWake.mintFcmAccessToken] minted ttlMs=${fresh.expiresAtMs - now}`,
+  );
+  await ctx.runMutation(internal.fcmWake.setCachedFcmToken, {
+    accessToken: fresh.accessToken,
+    expiresAtMs: fresh.expiresAtMs,
+  });
+  return fresh.accessToken;
 }
 
 /**
@@ -326,6 +375,97 @@ export const isFcmWakeEnabledForOrg = internalQuery({
       )
       .first();
     return row?.value === 'true';
+  },
+});
+
+// ---------------------------------------------------------------------------
+// FCM ACCESS TOKEN CACHE
+// Stored in systemState as a singleton row keyed 'fcm_access_token'. The
+// payload (JSON-encoded in the `value` field) is { accessToken, expiresAtMs }.
+// ---------------------------------------------------------------------------
+
+export const getCachedFcmToken = internalQuery({
+  args: {},
+  returns: v.union(
+    v.object({
+      accessToken: v.string(),
+      expiresAtMs: v.number(),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query('systemState')
+      .withIndex('by_key', (q) => q.eq('key', FCM_TOKEN_CACHE_KEY))
+      .first();
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as CachedFcmToken;
+      if (
+        typeof parsed.accessToken !== 'string' ||
+        typeof parsed.expiresAtMs !== 'number'
+      ) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  },
+});
+
+export const setCachedFcmToken = internalMutation({
+  args: {
+    accessToken: v.string(),
+    expiresAtMs: v.number(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const payload: CachedFcmToken = {
+      accessToken: args.accessToken,
+      expiresAtMs: args.expiresAtMs,
+    };
+    const row = await ctx.db
+      .query('systemState')
+      .withIndex('by_key', (q) => q.eq('key', FCM_TOKEN_CACHE_KEY))
+      .first();
+    if (row) {
+      await ctx.db.patch(row._id, {
+        value: JSON.stringify(payload),
+        expiresAt: args.expiresAtMs,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.insert('systemState', {
+        key: FCM_TOKEN_CACHE_KEY,
+        value: JSON.stringify(payload),
+        expiresAt: args.expiresAtMs,
+        updatedAt: now,
+      });
+    }
+    return null;
+  },
+});
+
+/**
+ * Invalidate the cached token. Called when FCM returns a 401 — that
+ * means the cached token has been revoked (key rotation, SA disabled),
+ * and serving it again would just keep failing for up to an hour until
+ * the cache TTL expires.
+ */
+export const invalidateCachedFcmToken = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query('systemState')
+      .withIndex('by_key', (q) => q.eq('key', FCM_TOKEN_CACHE_KEY))
+      .first();
+    if (row) {
+      await ctx.db.delete(row._id);
+    }
+    return null;
   },
 });
 
@@ -573,7 +713,7 @@ export const sendWake = internalAction({
 
     let outcome: WakeOutcome;
     try {
-      const accessToken = await mintFcmAccessToken();
+      const accessToken = await getCachedOrMintFcmAccessToken(ctx);
       const url = `https://fcm.googleapis.com/v1/projects/${claim.projectId}/messages:send`;
       const body = {
         message: {
@@ -673,6 +813,15 @@ export const sendWake = internalAction({
       if (res.ok) {
         outcome = { kind: 'success' };
       } else {
+        // 401 = cached token has been revoked (SA disabled, key rotated).
+        // Invalidate the cache so the next sendWake mints fresh instead
+        // of serving the dead token for up to 1h until natural expiry.
+        if (res.status === 401) {
+          console.warn(
+            `[fcmWake.sendWake] fcm_token_revoked sessionId=${sessionId} — invalidating cache`,
+          );
+          await ctx.runMutation(internal.fcmWake.invalidateCachedFcmToken, {});
+        }
         let errJson: unknown = null;
         try {
           errJson = await res.json();
@@ -715,5 +864,180 @@ export const sendWake = internalAction({
       });
     }
     return null;
+  },
+});
+
+// ============================================================================
+// SESSION-ENDED PUSH — server-side notify mobile that a session is over
+// ============================================================================
+//
+// Companion to `sendWake` but with reversed intent. When a driver session
+// ends *server-side* (dispatch override, auto-timeout cron, handoff,
+// another device closing it), the local mobile tracker has no way to
+// know — without this push it keeps emitting GPS pings indefinitely,
+// which the dispatcher map renders as "still tracking after shift end."
+//
+// This action sends a data-only FCM push to the session's stored
+// pushToken with payload:
+//
+//   data: {
+//     type: 'session_ended',
+//     sessionId: <id>,
+//     endedAt: <ms>,
+//     endReason: <string>,
+//   }
+//
+// MOBILE CONTRACT (consumer side — see mobile/lib/fcmHandler.ts):
+//   On receipt of `type=session_ended`, the mobile app MUST:
+//     1. Stop the foreground location service.
+//     2. Drain its outbound ping queue.
+//     3. Clear local TrackingState.isActive.
+//   The reactive getActiveSession subscription is a backup safety net
+//   (catches missed pushes within ~1-2s), not a replacement.
+//
+// Differences from `sendWake`:
+//   • No cooldown / backoff logic — session end is fire-once. If it
+//     fails, the next sweep doesn't matter (no future pings should
+//     reach us anyway once the session is closed and ingestBatch
+//     rejects them).
+//   • No claimSendSlot dance — no concurrent-fire concern (called
+//     exactly once, from endSessionInternal).
+//   • iOS: same Phase-4 limitation as sendWake. APNs tokens can't go
+//     through FCM HTTP v1; skipped silently with a log.
+//
+// On failure, we log loudly but don't retry — the server-side ping
+// rejection in driverLocations.ts::ingestBatch is the actual guarantee
+// of correct data. This push is purely a UX improvement that stops the
+// driver's phone from burning battery + bandwidth on doomed sends.
+export const sendSessionEnded = internalAction({
+  args: { sessionId: v.id('driverSessions') },
+  returns: v.null(),
+  handler: async (ctx, { sessionId }) => {
+    const session = await ctx.runQuery(internal.fcmWake.getSessionForEndedPush, {
+      sessionId,
+    });
+    if (!session) {
+      console.warn(
+        `[fcmWake.sendSessionEnded] no_session sessionId=${sessionId}`,
+      );
+      return null;
+    }
+    if (!session.pushToken || !session.pushTokenPlatform) {
+      console.info(
+        `[fcmWake.sendSessionEnded] no_token sessionId=${sessionId} — skipping`,
+      );
+      return null;
+    }
+    if (session.pushTokenPlatform === 'ios') {
+      // Phase 4 — iOS requires APNs (or FCM for iOS via Firebase iOS
+      // SDK). For now, drop with a log so we can grep for affected
+      // sessions when iOS support lands.
+      console.info(
+        `[fcmWake.sendSessionEnded] ios_skipped sessionId=${sessionId} — APNs not wired`,
+      );
+      return null;
+    }
+
+    let projectId: string;
+    try {
+      projectId = loadServiceAccount().project_id;
+    } catch (err) {
+      console.warn(
+        `[fcmWake.sendSessionEnded] service_account_error sessionId=${sessionId} err=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+
+    try {
+      const accessToken = await getCachedOrMintFcmAccessToken(ctx);
+      const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
+      const reqBody = {
+        message: {
+          token: session.pushToken,
+          data: {
+            type: 'session_ended',
+            sessionId: sessionId,
+            endedAt: String(session.endedAt ?? Date.now()),
+            endReason: session.endReason ?? 'unknown',
+          },
+          android: {
+            // HIGH priority so the mobile data-handler runs even if the
+            // app was backgrounded / dozed at end time.
+            priority: 'HIGH' as const,
+          },
+        },
+      };
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(reqBody),
+      });
+
+      if (res.ok) {
+        console.info(
+          `[fcmWake.sendSessionEnded] dispatched sessionId=${sessionId} reason=${session.endReason ?? 'unknown'}`,
+        );
+      } else {
+        // 401 = token revoked. Invalidate so the next caller mints fresh.
+        if (res.status === 401) {
+          await ctx.runMutation(internal.fcmWake.invalidateCachedFcmToken, {});
+        }
+        const errBody = await res.text().catch(() => '');
+        console.warn(
+          `[fcmWake.sendSessionEnded] fcm_failed sessionId=${sessionId} status=${res.status} body=${errBody.slice(0, 200)}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[fcmWake.sendSessionEnded] config_or_network_error sessionId=${sessionId} err=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    return null;
+  },
+});
+
+/**
+ * Lean read used only by `sendSessionEnded` — returns just the push
+ * fields the action needs without leaking the full session document.
+ */
+export const getSessionForEndedPush = internalQuery({
+  args: { sessionId: v.id('driverSessions') },
+  returns: v.union(
+    v.null(),
+    v.object({
+      pushToken: v.optional(v.string()),
+      pushTokenPlatform: v.optional(
+        v.union(v.literal('ios'), v.literal('android')),
+      ),
+      endedAt: v.optional(v.float64()),
+      endReason: v.optional(
+        v.union(
+          v.literal('driver_manual'),
+          v.literal('dispatch_override'),
+          v.literal('auto_timeout'),
+          v.literal('next_session_opened'),
+          v.literal('handoff_complete'),
+          v.literal('role_switch'),
+        ),
+      ),
+    }),
+  ),
+  handler: async (ctx, { sessionId }) => {
+    const s = await ctx.db.get(sessionId);
+    if (!s) return null;
+    return {
+      pushToken: s.pushToken,
+      pushTokenPlatform: s.pushTokenPlatform,
+      endedAt: s.endedAt,
+      endReason: s.endReason,
+    };
   },
 });

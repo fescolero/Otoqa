@@ -341,7 +341,12 @@ export function trackConvexAuthEvent(
     | 'auth_timeout'
     | 'debouncing_false'
     | 'auth_false_propagated'
-    | 'foreground_return',
+    | 'foreground_return'
+    // User tapped Retry on a stuck loading/error gate.
+    | 'manual_reauth'
+    // Recovery fired without user action — network came back, or the
+    // periodic backstop tripped while the app was stuck booting.
+    | 'auto_recovery',
   context?: PostHogEventProperties,
 ) {
   capture(`convex_auth_${event}`, context);
@@ -520,7 +525,9 @@ export function trackBGTaskError(context: { step: string; error: string }) {
  *
  * Outcomes:
  *   - 'success' — HTTP call succeeded, pings synced
- *   - 'failure' — HTTP call threw or returned non-OK
+ *   - 'failure' — HTTP call threw or returned non-OK after retries, or
+ *     sync prep (getUnsyncedLocations / payload build) threw before the
+ *     HTTP call; the two are distinguishable by `error` message
  *   - 'skipped_no_pings' — BG task ran but queue was empty (sync caught up)
  *   - 'skipped_no_key' — MOBILE_LOCATION_API_KEY env var missing
  *   - 'skipped_no_sqlite' — local SQLite unavailable (rare init issue)
@@ -538,16 +545,46 @@ export function trackBgSyncOutcome(context: {
   syncDurationMs?: number;
   /**
    * Number of retries fired inside the bounded retry loop in LOCATION_TASK
-   * Step 6. 0 = success on the first attempt (no retry needed); 1-2 =
-   * transient blip absorbed by the inline retry instead of waiting for
-   * the next BG fire. Only meaningful when outcome is 'success' or
-   * 'failure'; absent on the 'skipped_*' branches (the retry loop only
-   * runs once we have pings to send).
+   * Step 6 before the loop exited (success, terminal 4xx, or budget
+   * exhausted). 0 = no retry fired: first attempt succeeded, first
+   * attempt hit a terminal 4xx, or sync prep failed before the loop.
+   * On 'success', >0 means a transient blip was absorbed inline instead
+   * of waiting for the next BG fire. On 'failure', the max value means
+   * the retry budget was exhausted; an intermediate value means retries
+   * were consumed and then a terminal 4xx ended the loop early (e.g.
+   * 503 then 401 → 1). Present on every 'success'/'failure' event;
+   * absent on the 'skipped_*' branches (the retry loop only runs once
+   * we have pings to send).
+   *
+   * Named before the retryCount convention (offline_queue_item_* above)
+   * was noticed; keep as-is — ~2 months of PostHog data exists under
+   * this name, so renaming would break saved insights.
    */
   syncRetries?: number;
   error?: string;
 }) {
   capture('bg_sync_outcome', context);
+}
+
+/**
+ * Fired when sync-stall-alert.ts posts the "GPS sync is stalled" local
+ * notification (consecutive BG sync failures with a growing queue — see
+ * the 2026-07-11 background-data-restriction incident). This event
+ * rides the same blocked upload path it reports on, so it typically
+ * reaches PostHog only after the driver acts and the queue flushes —
+ * treat its ingestion time as flush time, not alert time.
+ */
+export function trackSyncStallAlert(context: {
+  queueDepth: number;
+  consecutiveFailures: number;
+  /** What tripped the alert: hard sync failures, or "successful" syncs
+   *  that inserted nothing and were all duplicates (marking not
+   *  persisting — the queue re-sends the same rows forever). */
+  trigger: 'failures' | 'zero_progress';
+  oldestUnsyncedAgeSec?: number;
+  lastError?: string;
+}) {
+  capture('sync_stall_alert', context);
 }
 
 export function trackBGTaskReregistered(context: {
@@ -701,6 +738,46 @@ export function trackFcmWakeResumeSuccess(context: {
   preFlushQueueSize: number;
 }) {
   capture('fcm_wake_resume_success', context);
+}
+
+// ============================================
+// SESSION-ENDED PUSH EVENTS
+// Companion to the fcm_wake_* family. Fired by mobile/lib/fcm-handler.ts
+// when the server tells us a driver session has been closed remotely.
+// ============================================
+
+export function trackFcmSessionEndedReceived(context: {
+  sessionId: string;
+  endReason: string;
+  deliveryPath: 'foreground' | 'background';
+}) {
+  capture('fcm_session_ended_received', context);
+}
+
+/**
+ * Fired after the local foreground location service has been torn
+ * down in response to a session_ended push. `wasActive` distinguishes
+ * the productive case (mobile was still tracking → we stopped it
+ * before more wasted pings landed) from the idempotent case (mobile
+ * already stopped → push was redundant but harmless).
+ */
+export function trackFcmSessionEndedStopped(context: {
+  sessionId: string;
+  wasActive: boolean;
+  drainedQueueSize: number;
+}) {
+  capture('fcm_session_ended_stopped', context);
+}
+
+export function trackFcmSessionEndedIgnored(context: {
+  reason:
+    | 'invalid_payload'
+    | 'flag_disabled'
+    | 'stop_error'
+    | 'session_mismatch';
+  detail?: string;
+}) {
+  capture('fcm_session_ended_ignored', context);
 }
 
 // ============================================

@@ -4,6 +4,10 @@ import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { resolveAuthenticatedDriver } from './driverMobile';
+import {
+  deleteCompletedRowsForSession,
+  transferCompletedRowsToSession,
+} from './loadTrackingState';
 
 /**
  * Driver Session System — Phase 1 foundation.
@@ -101,6 +105,32 @@ async function endSessionInternal(
     totalActiveMinutes,
   });
 
+  // Drop tracking rows kept alive only to timestamp a final facility exit
+  // (loadCompleted): the session is over, so no more pings will resolve
+  // them. Session timelines fall back to the manual checkout time.
+  // Exception — next_session_opened means the SAME driver is starting a new
+  // shift and keeps pinging: startSession re-binds those rows to the new
+  // session instead (transferCompletedRowsToSession), so the pending final
+  // DEPARTED can still resolve.
+  if (args.endReason !== 'next_session_opened') {
+    await deleteCompletedRowsForSession(ctx, session._id);
+  }
+
+  // Session-based hourly pay: one payable per completed shift for drivers
+  // whose profile has a SESSION_DURATION rule. Scheduled (not inline) so
+  // shift end stays fast; idempotent; daily backstop cron catches misses.
+  await ctx.scheduler.runAfter(0, internal.sessionPay.paySession, {
+    sessionId: session._id,
+  });
+
+  // NEW PAY ENGINE (shadow): the same shift through the new engine — emits
+  // payItems per `session.*`-triggered rule, keyed by sessionId. Runs in
+  // parallel with legacy paySession during migration; not yet the source of
+  // truth. Idempotent via payItems.by_session.
+  await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForSession.calculatePayForSession, {
+    sessionId: session._id,
+  });
+
   // Clear the driver's current truck pairing on session end. This forces
   // a fresh QR scan to start the next shift — the driver might be on a
   // different unit tomorrow, and we never want to silently bind a stale
@@ -130,6 +160,29 @@ async function endSessionInternal(
       endReason: args.endReason ?? 'unknown',
       affectedLegIds,
     });
+  }
+
+  // Notify the driver's mobile app that the session is over so the
+  // foreground location tracker stops emitting pings. Without this, a
+  // server-side end (dispatch override, auto-timeout, handoff, another
+  // device closing the session) leaves the mobile app's local
+  // TrackingState.isActive=true and it keeps streaming GPS for hours.
+  //
+  // Scheduled (not awaited) so the end-shift mutation returns quickly
+  // even if FCM is slow. The push is best-effort — the strict ping
+  // rejection in driverLocations.ts::ingestBatch is the actual data
+  // correctness guarantee.
+  //
+  // Skip when the driver themselves ended the shift via the mobile UI
+  // (`driver_manual` / `role_switch`) — in those cases mobile already
+  // called stopSessionTracking() locally before invoking the mutation,
+  // so the push would be redundant and just churn FCM quota.
+  if (!INTENTIONAL_DRIVER_END_REASONS.includes(args.endReason)) {
+    await ctx.scheduler.runAfter(
+      0,
+      internal.fcmWake.sendSessionEnded,
+      { sessionId: session._id },
+    );
   }
 }
 
@@ -178,6 +231,13 @@ export const startSession = mutation({
       startedAt: now,
       status: 'active',
     });
+
+    // Same-driver rollover: any tracking row still waiting on a final
+    // facility exit follows the driver to the new session so their
+    // continuing pings can resolve the DEPARTED timestamp.
+    if (existing) {
+      await transferCompletedRowsToSession(ctx, existing._id, sessionId, now);
+    }
 
     // Denormalize current truck on the driver for list views.
     if (driver.currentTruckId !== args.truckId) {
@@ -404,6 +464,197 @@ export const listForDriver = query({
 });
 
 /**
+ * One row of a session's stop timeline: geofence-detected timestamps next
+ * to the driver's manual taps, all as ms epoch (manual ISO strings parsed).
+ */
+export type SessionStopTimelineRow = {
+  loadId: Id<'loadInformation'>;
+  sequenceNumber: number;
+  stopId: Id<'loadStops'> | null;
+  stopType: 'PICKUP' | 'DELIVERY' | 'DETOUR' | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  loadInternalId: string | null;
+  approachingAt: number | null;
+  arrivedAt: number | null;
+  departedAt: number | null;
+  checkedInAt: number | null;
+  checkedOutAt: number | null;
+  dwellMinutes: number | null;
+};
+
+/**
+ * Core of getSessionStopTimeline, exported as a plain function so tests can
+ * drive it through convex-test's ctx. Caller owns auth.
+ *
+ * Manual taps are only attributed to this session when they fall inside its
+ * [startedAt, endedAt] window — a stop shared across shifts (handoff,
+ * multi-day load) must not leak another session's taps into this one's
+ * display or dwell math. Dwell prefers geofence bounds and falls back to
+ * the (windowed) manual taps:
+ * (departedAt ?? checkedOutAt) − (arrivedAt ?? checkedInAt).
+ */
+export async function buildSessionStopTimeline(
+  ctx: QueryCtx,
+  session: Doc<'driverSessions'>
+): Promise<SessionStopTimelineRow[]> {
+  const events = await ctx.db
+    .query('geofenceEvents')
+    .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+    .collect();
+
+  // Loads this session touched: geofence events plus legs stamped with the
+  // sessionId on first check-in (covers stops with manual taps but no GPS
+  // coverage).
+  const legs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+    .collect();
+  const loadIds = new Set<Id<'loadInformation'>>([
+    ...events.map((e) => e.loadId),
+    ...legs.map((l) => l.loadId),
+  ]);
+
+  // Geofence timestamps grouped by loadId, then stopSequenceNumber.
+  type StopTimes = { approachingAt?: number; arrivedAt?: number; departedAt?: number };
+  const eventTimesByLoad = new Map<Id<'loadInformation'>, Map<number, StopTimes>>();
+  for (const event of events) {
+    let byStop = eventTimesByLoad.get(event.loadId);
+    if (!byStop) {
+      byStop = new Map();
+      eventTimesByLoad.set(event.loadId, byStop);
+    }
+    const times = byStop.get(event.stopSequenceNumber) ?? {};
+    if (event.eventType === 'APPROACHING') times.approachingAt = event.triggeredAt;
+    else if (event.eventType === 'ARRIVED') times.arrivedAt = event.triggeredAt;
+    else times.departedAt = event.triggeredAt;
+    byStop.set(event.stopSequenceNumber, times);
+  }
+
+  const sessionEnd = session.endedAt ?? Number.POSITIVE_INFINITY;
+  // Parse a manual-tap ISO string to ms, attributed to this session only
+  // when inside its window; taps from other shifts read as null here.
+  const parseWindowedMs = (iso: string | undefined): number | null => {
+    if (!iso) return null;
+    const ms = new Date(iso).getTime();
+    if (!Number.isFinite(ms)) return null;
+    return ms >= session.startedAt && ms <= sessionEnd ? ms : null;
+  };
+
+  const rows: SessionStopTimelineRow[] = [];
+  for (const loadId of loadIds) {
+    const [load, stops] = await Promise.all([
+      ctx.db.get(loadId),
+      ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', loadId))
+        .collect(),
+    ]);
+    const stopsBySeq = new Map(stops.map((s) => [s.sequenceNumber, s]));
+    const timesByStop = eventTimesByLoad.get(loadId) ?? new Map<number, StopTimes>();
+
+    // Every stop sequence that has geofence events OR manual taps inside
+    // the session window gets a row.
+    const sequences = new Set<number>(timesByStop.keys());
+    for (const stop of stops) {
+      if (parseWindowedMs(stop.checkedInAt) !== null || parseWindowedMs(stop.checkedOutAt) !== null) {
+        sequences.add(stop.sequenceNumber);
+      }
+    }
+
+    for (const sequenceNumber of sequences) {
+      const stop = stopsBySeq.get(sequenceNumber);
+      const times = timesByStop.get(sequenceNumber) ?? {};
+      const checkedInAt = parseWindowedMs(stop?.checkedInAt);
+      const checkedOutAt = parseWindowedMs(stop?.checkedOutAt);
+
+      const dwellStart = times.arrivedAt ?? checkedInAt;
+      const dwellEnd = times.departedAt ?? checkedOutAt;
+      const dwellMinutes =
+        dwellStart != null && dwellEnd != null && dwellEnd >= dwellStart
+          ? Math.round((dwellEnd - dwellStart) / 60_000)
+          : null;
+
+      rows.push({
+        loadId,
+        sequenceNumber,
+        stopId: stop?._id ?? null,
+        stopType: stop?.stopType ?? null,
+        address: stop?.address ?? null,
+        city: stop?.city ?? null,
+        state: stop?.state ?? null,
+        loadInternalId: load?.internalId ?? null,
+        approachingAt: times.approachingAt ?? null,
+        arrivedAt: times.arrivedAt ?? null,
+        departedAt: times.departedAt ?? null,
+        checkedInAt,
+        checkedOutAt,
+        dwellMinutes,
+      });
+    }
+  }
+
+  // Chronological by the earliest timestamp each stop has (every row has at
+  // least one by construction).
+  const firstTime = (r: SessionStopTimelineRow) =>
+    Math.min(
+      ...[r.approachingAt, r.arrivedAt, r.checkedInAt, r.checkedOutAt, r.departedAt].filter(
+        (t): t is number => t !== null
+      )
+    );
+  rows.sort((a, b) => firstTime(a) - firstTime(b));
+  return rows;
+}
+
+/**
+ * Per-stop timestamp timeline for one session: geofence-detected
+ * APPROACHING/ARRIVED/DEPARTED times (immutable, from geofenceEvents) next
+ * to the driver's manual check-in/check-out taps (from loadStops), plus
+ * dwell minutes. The detected-vs-reported pairing is the audit record
+ * detention disputes need — neither source overwrites the other.
+ *
+ * Reads are bounded: ≤3 events per stop via by_session, plus the session's
+ * legs and their stops. Subscribing to it does NOT invalidate on GPS ping
+ * writes (geofenceEvents gains at most 3 rows per stop per shift).
+ * Auth: caller must be a dispatcher in the session's org.
+ */
+export const getSessionStopTimeline = query({
+  args: {
+    sessionId: v.id('driverSessions'),
+  },
+  returns: v.array(
+    v.object({
+      loadId: v.id('loadInformation'),
+      sequenceNumber: v.number(),
+      stopId: v.union(v.id('loadStops'), v.null()),
+      stopType: v.union(
+        v.literal('PICKUP'),
+        v.literal('DELIVERY'),
+        v.literal('DETOUR'),
+        v.null()
+      ),
+      address: v.union(v.string(), v.null()),
+      city: v.union(v.string(), v.null()),
+      state: v.union(v.string(), v.null()),
+      loadInternalId: v.union(v.string(), v.null()),
+      approachingAt: v.union(v.number(), v.null()),
+      arrivedAt: v.union(v.number(), v.null()),
+      departedAt: v.union(v.number(), v.null()),
+      checkedInAt: v.union(v.number(), v.null()),
+      checkedOutAt: v.union(v.number(), v.null()),
+      dwellMinutes: v.union(v.number(), v.null()),
+    })
+  ),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.organizationId !== callerOrgId) return [];
+    return buildSessionStopTimeline(ctx, session);
+  },
+});
+
+/**
  * Dispatcher "who's on shift right now" feed. Used by the active-sessions
  * dashboard reactive lane. GPS ping writes do NOT invalidate this query —
  * it only reads driverSessions, which is written ~5 times per shift.
@@ -540,9 +791,22 @@ export const endSessionAutoTimeout = internalMutation({
  */
 const SESSION_AUTO_TIMEOUT_MS = 18 * 60 * 60 * 1000;
 
+// Batch ceiling for one sweep mutation. Sized small so the mutation
+// stays well under Convex's per-mutation read+schedule budgets even in
+// pile-up scenarios (FCM outage → many sessions go stale together).
+const SWEEP_BATCH_SIZE = 200;
+
+// Delay before rescheduling the next sweep batch. CANNOT be 0: the
+// scheduled endSessionAutoTimeout actions need time to actually flip
+// status from 'active' to 'auto_timeout' before the next sweep picks up
+// the next page; otherwise the next sweep sees the same 200 stale
+// sessions and re-schedules them. 60s is generous — the end-action
+// itself takes ~100ms.
+const SWEEP_RESCHEDULE_DELAY_MS = 60_000;
+
 export const sweepStaleSessionsForAutoTimeout = internalMutation({
   args: {},
-  returns: v.object({ scheduled: v.number() }),
+  returns: v.object({ scheduled: v.number(), batchCapHit: v.boolean() }),
   handler: async (ctx) => {
     const cutoff = Date.now() - SESSION_AUTO_TIMEOUT_MS;
     const stale = await ctx.db
@@ -550,7 +814,7 @@ export const sweepStaleSessionsForAutoTimeout = internalMutation({
       .withIndex('by_status_started', (q) =>
         q.eq('status', 'active').lt('startedAt', cutoff)
       )
-      .collect();
+      .take(SWEEP_BATCH_SIZE);
 
     for (const session of stale) {
       await ctx.scheduler.runAfter(0, internal.driverSessions.endSessionAutoTimeout, {
@@ -558,12 +822,27 @@ export const sweepStaleSessionsForAutoTimeout = internalMutation({
       });
     }
 
+    const batchCapHit = stale.length >= SWEEP_BATCH_SIZE;
+
     if (stale.length > 0) {
       console.log(
-        `[driverSessions.sweepStaleSessions] Scheduled ${stale.length} auto-timeout endings`
+        `[driverSessions.sweepStaleSessions] Scheduled ${stale.length} auto-timeout endings` +
+          (batchCapHit ? ' (batch cap hit — rescheduling for next page)' : ''),
       );
     }
-    return { scheduled: stale.length };
+
+    // If we hit the cap there are likely more stale sessions waiting.
+    // Wait 60s so the scheduled end-actions can flip status before
+    // running the next page — otherwise we'd see the same 200 again.
+    if (batchCapHit) {
+      await ctx.scheduler.runAfter(
+        SWEEP_RESCHEDULE_DELAY_MS,
+        internal.driverSessions.sweepStaleSessionsForAutoTimeout,
+        {},
+      );
+    }
+
+    return { scheduled: stale.length, batchCapHit };
   },
 });
 

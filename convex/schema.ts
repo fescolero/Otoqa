@@ -1,8 +1,46 @@
 import { defineSchema, defineTable } from 'convex/server';
 import { v } from 'convex/values';
 import { scheduleRuleValidator } from './lib/validators';
+import { fuelTypeValidator } from './lib/fuelTypes';
+import {
+  chargeComponents,
+  fuelSurchargeCalculators,
+  payeeBankAccounts,
+  payeeTaxStatus,
+  payProfiles,
+  payRules,
+  payeeProfileAssignments,
+  recurringItemDefinitions,
+  payItems,
+  settlements,
+  settlementDisputes,
+  payoutBatches,
+  taxEngineRuns,
+  glExportRuns,
+} from './payEngine/schema';
 
 export default defineSchema({
+  // ==========================================================================
+  // PAY ENGINE (new architecture) — see convex/payEngine/schema.ts
+  // Lives alongside legacy rateProfiles/rateRules/loadPayables/driverSettlements
+  // etc. during migration. New tables that would collide with legacy names use
+  // the `pay*` prefix (payProfiles, payRules); other names are unique already.
+  // ==========================================================================
+  chargeComponents,
+  fuelSurchargeCalculators,
+  payeeBankAccounts,
+  payeeTaxStatus,
+  payProfiles,
+  payRules,
+  payeeProfileAssignments,
+  recurringItemDefinitions,
+  payItems,
+  settlements,
+  settlementDisputes,
+  payoutBatches,
+  taxEngineRuns,
+  glExportRuns,
+
   // Organization settings for multi-tenant configuration
   // Unified for both Brokers and Carriers (distinguished by orgType)
   organizations: defineTable({
@@ -24,6 +62,86 @@ export default defineSchema({
     industry: v.optional(v.string()),
     domain: v.optional(v.string()),
     logoStorageId: v.optional(v.id('_storage')), // Company Logo from Convex Storage
+    // Client-side analysis of the uploaded logo (lib/logo-analysis.ts) —
+    // drives the contrasting tile background in OrgMark. Cleared with the
+    // logo.
+    logoTraits: v.optional(
+      v.object({
+        tone: v.union(v.literal('dark'), v.literal('light'), v.literal('colorful')),
+        hasAlpha: v.boolean(),
+        analyzedAt: v.number(),
+      }),
+    ),
+
+    // === COMPANY PROFILE (Settings → General) ===
+    dba: v.optional(v.string()), // Doing-business-as name
+    entityType: v.optional(v.string()), // LLC, C-Corp, S-Corp, Sole proprietor, Partnership
+    scacCode: v.optional(v.string()), // NMFTA Standard Carrier Alpha Code
+    // Where paper mail / checks go. Absent = same as billingAddress.
+    mailingAddress: v.optional(
+      v.object({
+        addressLine1: v.string(),
+        addressLine2: v.optional(v.string()),
+        city: v.string(),
+        state: v.string(),
+        zip: v.string(),
+        country: v.string(),
+      }),
+    ),
+    // Display name for the billing contact (email/phone live on
+    // billingEmail / billingPhone, which platform invoicing reads).
+    billingContactName: v.optional(v.string()),
+    // Additional role contacts (dispatch, safety, after-hours, …) shown on
+    // Settings → General. The billing contact is NOT stored here.
+    contacts: v.optional(
+      v.array(
+        v.object({
+          id: v.string(),
+          role: v.string(),
+          name: v.string(),
+          email: v.string(),
+          phone: v.string(),
+        }),
+      ),
+    ),
+    // Regional display preferences (org-wide defaults; consumed via
+    // lib/org-format.ts, provided by the app shell).
+    dateFormat: v.optional(v.string()), // e.g. "MM/DD/YYYY"
+    distanceUnit: v.optional(v.string()), // "mi" | "km"
+    weekStart: v.optional(v.string()), // "sunday" | "monday"
+    numberFormat: v.optional(v.string()), // e.g. "1,234.56"
+    // Customer-invoice number prefix (convex/invoices.ts claimInvoiceNumber).
+    // Absent = default "INV-".
+    invoicePrefix: v.optional(v.string()),
+    // Latest FMCSA authority check result (convex/fmcsaVerification.ts).
+    // Nightly cron + on-demand from Settings → General.
+    authorityVerification: v.optional(
+      v.object({
+        checkedAt: v.number(),
+        usdotStatus: v.union(
+          v.literal('verified'),
+          v.literal('not_found'),
+          v.literal('error'),
+        ),
+        mcStatus: v.union(
+          v.literal('verified'),
+          v.literal('mismatch'),
+          v.literal('unchecked'),
+        ),
+        // Which provider produced the result: 'qcmobile' is the live API,
+        // 'open-data' is the data.transportation.gov MCMIS extract.
+        source: v.optional(v.union(v.literal('qcmobile'), v.literal('open-data'))),
+        allowedToOperate: v.optional(v.boolean()),
+        legalName: v.optional(v.string()),
+        safetyRating: v.optional(v.string()),
+        error: v.optional(v.string()),
+      }),
+    ),
+
+    // PAY ENGINE — default currency for new pay-engine entities (profiles,
+    // settlements, payItems). Fallback when no more specific source applies.
+    // Optional for backward compatibility; treat as 'USD' when missing.
+    defaultCurrency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
 
     // Billing Information
     billingEmail: v.string(),
@@ -42,6 +160,12 @@ export default defineSchema({
     subscriptionStatus: v.string(), // e.g. "Active"
     billingCycle: v.string(), // e.g. "Annual"
     nextBillingDate: v.optional(v.string()),
+
+    // PLATFORM BILLING — what Otoqa charges this org per load written into
+    // the system (metered, invoiced monthly). Optional: treat as the default
+    // rate (see convex/platformUsageHelpers.ts DEFAULT_BILLING_RATE_PER_LOAD)
+    // when missing. Set per org from the Convex dashboard.
+    billingRatePerLoad: v.optional(v.number()),
 
     // Default timezone for payroll calculations
     // IANA format: "America/New_York", "America/Los_Angeles", etc.
@@ -348,6 +472,18 @@ export default defineSchema({
     .index('by_org', ['organizationId'])
     .index('by_phone', ['phone']),
 
+  // WorkOS org member directory, synced from WorkOS on login (see
+  // app/callback/route.ts). Used to resolve raw WorkOS user IDs to display
+  // names server-side (audit log performers, record created-by fields).
+  orgMembers: defineTable({
+    organizationId: v.string(), // WorkOS organization ID
+    workosUserId: v.string(),
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+    email: v.optional(v.string()),
+    updatedAt: v.number(),
+  }).index('by_org_user', ['organizationId', 'workosUserId']),
+
   // Notification preferences for organizations
   notificationPreferences: defineTable({
     organizationId: v.id('organizations'),
@@ -390,6 +526,50 @@ export default defineSchema({
     .index('by_assignment', ['assignmentId'])
     .index('by_carrier', ['carrierOrgId']),
 
+  // Saved table views for entity list pages (Drivers / Loads / etc.).
+  // System defaults are code-only and surfaced by the page module — only
+  // user-owned and org-shared views land in this table.
+  savedViews: defineTable({
+    workosOrgId: v.string(),
+    /** Entity slug — e.g. 'drivers' | 'loads' | 'trucks' | 'carriers'. */
+    entity: v.string(),
+    name: v.string(),
+    scope: v.union(v.literal('user'), v.literal('org')),
+    /** WorkOS userId — set for scope='user'; absent for scope='org'. */
+    ownerId: v.optional(v.string()),
+    /** Filter predicate as opaque JSON; the page module owns the shape. */
+    filters: v.optional(v.any()),
+    sort: v.optional(
+      v.object({
+        key: v.string(),
+        dir: v.union(v.literal('asc'), v.literal('desc')),
+      }),
+    ),
+    /** Visible column keys (omit to inherit page defaults). */
+    visibleColumns: v.optional(v.array(v.string())),
+    /** True if this view should be auto-selected for its scope. Only one
+     *  per (org, entity, scope) should be flagged. */
+    isDefault: v.optional(v.boolean()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org_entity', ['workosOrgId', 'entity'])
+    .index('by_owner_entity', ['ownerId', 'entity']),
+
+  // Comments thread per record. entityType is a slug — e.g. 'driver',
+  // 'load', 'truck'. entityId is the Convex id of that record (string-coerced
+  // because it varies by entity type).
+  comments: defineTable({
+    workosOrgId: v.string(),
+    entityType: v.string(),
+    entityId: v.string(),
+    body: v.string(),
+    authorId: v.string(),
+    authorName: v.string(),
+    createdAt: v.number(),
+    editedAt: v.optional(v.number()),
+  }).index('by_entity', ['workosOrgId', 'entityType', 'entityId']),
+
   // User preferences for individual UI/UX settings
   userPreferences: defineTable({
     userId: v.string(), // WorkOS User ID from identity.subject
@@ -398,6 +578,11 @@ export default defineSchema({
     unitSystem: v.union(v.literal('Imperial'), v.literal('Metric')),
     theme: v.union(v.literal('light'), v.literal('dark'), v.literal('system')),
     timezone: v.string(),
+    // Otoqa Web design — UI shell prefs (optional for backward compat).
+    density: v.optional(v.union(v.literal('compact'), v.literal('comfortable'))),
+    sidebarMode: v.optional(
+      v.union(v.literal('hover'), v.literal('pinned'), v.literal('rail')),
+    ),
     updatedAt: v.number(),
   }).index('by_user_org', ['userId', 'workosOrgId']),
 
@@ -448,12 +633,14 @@ export default defineSchema({
     email: v.string(),
     phone: v.string(),
     dateOfBirth: v.optional(v.string()), // Date of birth (YYYY-MM-DD)
+    citizenship: v.optional(v.string()),
 
     // License Information (non-sensitive)
     licenseNumber: v.optional(v.string()), // Driver's license number
     licenseState: v.string(),
     licenseExpiration: v.string(),
     licenseClass: v.string(), // Class A, B, C
+    gender: v.optional(v.string()), // M / F / X — appears on the license
 
     // Medical
     medicalExpiration: v.optional(v.string()),
@@ -585,12 +772,18 @@ export default defineSchema({
     lastLocationLat: v.optional(v.float64()),
     lastLocationLng: v.optional(v.float64()),
     lastLocationUpdatedAt: v.optional(v.float64()),
+
+    // Telematics — opt-in mapping to the org's Samsara fleet. When present,
+    // the Samsara backup-ingest cron attributes GPS pings for this Samsara
+    // vehicle to this truck (and from there to the open driverSession).
+    samsaraVehicleId: v.optional(v.string()),
   })
     .index('by_organization', ['organizationId'])
     .index('by_unit_id', ['unitId'])
     .index('by_vin', ['vin'])
     .index('by_status', ['status'])
-    .index('by_deleted', ['isDeleted']),
+    .index('by_deleted', ['isDeleted'])
+    .index('by_samsara_vehicle', ['samsaraVehicleId']),
 
   trailers: defineTable({
     // Identity & Basic Info
@@ -993,7 +1186,182 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_organization', ['workosOrgId'])
-    .index('by_provider', ['workosOrgId', 'provider']),
+    .index('by_provider', ['workosOrgId', 'provider'])
+    // Cross-org sweep by provider only — powers the FourKites push cron's
+    // listFourKitesOrgsWithIntegration, the FourKites pull-sync dispatcher,
+    // and the Samsara cron's getActiveSamsaraIntegrations. Without this
+    // they fall back to .collect() across every orgIntegrations row and
+    // JS-filter on `provider`, which scales linearly with total
+    // integration count rather than per-provider count.
+    .index('by_provider_only', ['provider']),
+
+  /**
+   * fourKitesPushState — per-load cursor for the Dispatcher Update push.
+   * Hot-write companion to loadInformation so the 60s push cron doesn't
+   * churn the load row's reactive subscriptions. One row per FourKites-
+   * sourced load that has ever been pushed.
+   *
+   * lastPushedRecordedAt is the dedup key: we only push a load again when
+   * the latest driverLocations.recordedAt for that load exceeds this value.
+   */
+  fourKitesPushState: defineTable({
+    loadId: v.id('loadInformation'),
+    workosOrgId: v.string(),
+
+    // Dedup against pushing the same ping twice.
+    lastPushedAt: v.optional(v.number()),
+    lastPushedRecordedAt: v.optional(v.number()),
+
+    // Running counter of successful pushes. Lets us compare "what we sent"
+    // vs "what FK shows on their dashboard" to attribute drops between
+    // our pipeline and FK's deduplication. Optional so existing rows
+    // backfill lazily (treated as 0/unknown when missing).
+    pushCount: v.optional(v.number()),
+
+    // AUDIT-ONLY: the JSON body of the most recent successful Dispatcher
+    // Update entry we sent for this load (single-update view, not the
+    // batched body). Lets us hand a customer / FK support the literal
+    // payload bytes for verification without round-tripping through FK.
+    // Typical size: 200-500 bytes per load. Kept short by storing only
+    // the latest — we don't accumulate history.
+    //
+    // SAFE TO REMOVE LATER: this field is purely for the initial
+    // integration debugging window. Once the FK push has been verified
+    // stable for the customer, this column can be dropped (or stop
+    // being populated) without affecting any runtime logic — the cron,
+    // dedup cursor, and error reporting all work without it.
+    lastRequestBody: v.optional(v.string()),
+
+    // Observability — last successful FourKites requestId + error trail.
+    lastRequestId: v.optional(v.string()),
+    lastError: v.optional(v.string()),
+    lastErrorAt: v.optional(v.number()),
+    consecutiveFailures: v.optional(v.number()),
+
+    updatedAt: v.number(),
+  })
+    .index('by_load', ['loadId'])
+    .index('by_org', ['workosOrgId']),
+
+  /**
+   * fourKitesPushAuditLog — AUDIT-ONLY. One row per successful Dispatcher
+   * Update POST per load. Lets us produce an exact (not reconstructed)
+   * historical replay of what we sent for any load, for handing to FK
+   * support when investigating "you got N updates, we display M."
+   *
+   * Volume: ~one row per cron tick per active load = up to ~1.5K rows/day
+   * at current fleet size. Pruned to 14 days by a daily cron — see
+   * pruneFourKitesPushAuditLog in fourKitesDispatcherPushMutations.ts.
+   *
+   * SAFE TO REMOVE LATER: this table is purely for the initial integration
+   * debugging window. Once FK push has been verified stable, the table,
+   * the writes in recordPushResults, the read in getPushAuditLogForLoad,
+   * and the prune cron can all be deleted without affecting runtime push
+   * behavior. Grep for AUDIT-ONLY across the codebase to find every site.
+   */
+  fourKitesPushAuditLog: defineTable({
+    loadId: v.id('loadInformation'),
+    workosOrgId: v.string(),
+    pushedAt: v.number(),         // when we POSTed (server time)
+    pushedRecordedAt: v.number(), // recordedAt of the ping we sent
+    requestId: v.optional(v.string()), // FK's accept-receipt id
+    requestBody: v.string(),      // JSON body of the single-update entry
+  })
+    // by_load_time: per-load chronological audit ("show me everything
+    // we sent for load X between t1 and t2").
+    .index('by_load_time', ['loadId', 'pushedAt'])
+    // by_pushed_at: for the prune cron (delete rows older than N days).
+    .index('by_pushed_at', ['pushedAt']),
+
+  /**
+   * fourKitesPushTickHealth — per-org rollup of the LAST push cron tick.
+   * One row per workosOrgId, upserted at the end of every pushOneOrg run
+   * regardless of outcome. Makes "what happened on the last tick" a single
+   * indexed read instead of scrolling logs or scanning fourKitesPushState.
+   *
+   * Distinguishes the four meaningful states:
+   *   - empty           : no candidates, OR all candidates already up-to-date
+   *   - ok              : every batch accepted by FK
+   *   - partial         : some batches accepted, others rejected/transient
+   *   - all_failed      : no batches accepted (rate limit, transient, auth)
+   *
+   * `lastErrorBody` carries the truncated FK response body on transient /
+   * rate_limit failures — currently the only signal we have for "FK is
+   * returning something unexpected" since those branches don't touch
+   * fourKitesPushState.
+   */
+  fourKitesPushTickHealth: defineTable({
+    workosOrgId: v.string(),
+
+    lastTickAt: v.number(),
+    lastTickKind: v.union(
+      v.literal('empty'),
+      v.literal('ok'),
+      v.literal('partial'),
+      v.literal('all_failed'),
+    ),
+
+    // Funnel counters
+    candidateCount: v.number(),
+    skippedNoPing: v.number(),
+    skippedAlreadyPushed: v.number(),
+    plansBuilt: v.number(),
+
+    // Batch outcome counters
+    batchesSent: v.number(),
+    batchOk: v.number(),
+    batchValidationFail: v.number(),
+    batchAuthFail: v.number(),
+    batchRateLimit: v.number(),
+    batchTransient: v.number(),
+
+    // Diagnostic — populated on any non-ok terminal batch
+    lastErrorKind: v.optional(v.string()),
+    lastErrorStatus: v.optional(v.number()),
+    lastErrorBody: v.optional(v.string()), // truncated 500
+    lastErrorAt: v.optional(v.number()),
+
+    // Resets to 0 whenever a tick produces at least one ok batch
+    consecutiveTransientTicks: v.number(),
+
+    // Wall-clock duration of the tick (ms)
+    tickDurationMs: v.number(),
+  }).index('by_org', ['workosOrgId']),
+
+  /**
+   * samsaraSyncState — hot-write per-integration runtime state for the
+   * Samsara GPS backup-ingest cron (polled every ~10s). Kept separate from
+   * orgIntegrations so that cursor updates don't churn the credential row
+   * (and any reactive subscriptions to it). One row per Samsara
+   * orgIntegrations row.
+   */
+  samsaraSyncState: defineTable({
+    integrationId: v.id('orgIntegrations'),
+    workosOrgId: v.string(),
+
+    // Cursor returned by the previous /fleet/vehicles/stats/feed call.
+    // Undefined on first poll; cleared back to undefined if Samsara returns
+    // a 4xx that indicates the cursor is stale.
+    pollCursor: v.optional(v.string()),
+
+    // Observability — last successful poll, last error, ingest counts.
+    lastPolledAt: v.optional(v.number()),
+    lastTickPingsIngested: v.optional(v.number()),
+    lastErrorAt: v.optional(v.number()),
+    lastErrorMessage: v.optional(v.string()),
+
+    // Overlap guard for pollOneIntegration. Stamped at the start of a
+    // tick by tryClaimPollSlot; next tick exits early if this is within
+    // SAMSARA_POLL_LOCK_TIMEOUT_MS (30s). Prevents the next 10s cron tick
+    // from racing the cursor update of a still-running previous tick.
+    // Falls open after the timeout so a genuinely hung action can't lock
+    // the integration forever.
+    lastTickStartedAt: v.optional(v.number()),
+
+    updatedAt: v.number(),
+  })
+    .index('by_integration', ['integrationId'])
+    .index('by_org', ['workosOrgId']),
 
   loadInformation: defineTable({
     // External Integration
@@ -1087,6 +1455,26 @@ export default defineSchema({
     primaryCarrierId: v.optional(v.string()),
     isHazmat: v.optional(v.boolean()), // Triggers ATTR_HAZMAT pay rule
     requiresTarp: v.optional(v.boolean()), // Triggers ATTR_TARP pay rule
+    isOversize: v.optional(v.boolean()), // Triggers ATTR_OVERSIZE pay rule
+
+    // PAY ENGINE — load-level pay profile override. Higher precedence than
+    // payeeProfileAssignments, lower than leg.payProfileOverrideId. Customer
+    // contract drives this (e.g. Davis-Bacon-tagged load forces the prevailing
+    // wage profile regardless of who drives it).
+    payProfileOverrideId: v.optional(v.id('payProfiles')),
+
+    // PAY ENGINE — contract tag for JURISDICTION-strategy profile selection.
+    // Examples: "DAVIS_BACON", "UNION_LOCAL_70", "PREVAILING_WAGE_CA".
+    contractTag: v.optional(v.string()),
+
+    // PAY ENGINE — multi-state work allocation for tax withholding. Used when
+    // the load's work spans multiple states (e.g. CA→NV→AZ). Each entry's
+    // portionBps reflects share of work performed; entries sum to 10000.
+    // If absent, calc falls back to leg.workState (single state).
+    workStateAllocation: v.optional(v.array(v.object({
+      state: v.string(),       // e.g. "US-CA"
+      portionBps: v.number(),  // basis points; entries sum to 10000
+    }))),
 
     // Denormalized First Stop Date (for efficient date range filtering)
     // Source of truth: loadStops where sequenceNumber = 1, windowBeginDate
@@ -1336,6 +1724,14 @@ export default defineSchema({
     missingDataReason: v.optional(v.string()), // e.g., "No Contract Lane found for HCR 925L0"
     erpInvoiceId: v.optional(v.string()), // QuickBooks/Wave ID
     invoiceDateNumeric: v.optional(v.number()), // Unix timestamp, set when BILLED (for indexed reporting)
+    statsFinalized: v.optional(v.boolean()), // true once recordInvoiceFinalized has counted this invoice — guards double-count
+
+    // Denormalized full-text search haystack: invoiceNumber + load orderNumber
+    // + customer name, lowercased. Maintained on invoice create + number
+    // assignment (see refreshInvoiceSearchText). Powers the dashboard search
+    // across the whole dataset — a post-fetch page filter can only see the
+    // current page, so deep records were unfindable.
+    searchText: v.optional(v.string()),
 
     // WorkOS Integration
     createdBy: v.string(), // WorkOS user ID
@@ -1347,7 +1743,17 @@ export default defineSchema({
     .index('by_organization', ['workosOrgId'])
     .index('by_status', ['workosOrgId', 'status'])
     .index('by_org_created', ['workosOrgId', 'createdAt'])
-    .index('by_org_status_created', ['workosOrgId', 'status', 'createdAt']),
+    .index('by_org_status_created', ['workosOrgId', 'status', 'createdAt'])
+    // Service-date (reporting) basis — profitability/cost queries filter by the
+    // invoice's service month (invoiceDateNumeric) so they agree with the
+    // period-stats-backed Overview/P&L, not by createdAt (billing day).
+    .index('by_org_status_invoice_date', ['workosOrgId', 'status', 'invoiceDateNumeric'])
+    // Full-text search over invoiceNumber / order # / customer name, scoped to
+    // an org + status tab. Results come back relevance-ordered (not by date).
+    .searchIndex('search_text', {
+      searchField: 'searchText',
+      filterFields: ['workosOrgId', 'status'],
+    }),
 
   invoiceLineItems: defineTable({
     invoiceId: v.id('loadInvoices'),
@@ -1366,6 +1772,41 @@ export default defineSchema({
 
     createdAt: v.number(),
   }).index('by_invoice', ['invoiceId']),
+
+  // Receivables payment ledger — one row per customer payment (audit trail +
+  // partial-payment support). Mirrors the payItems convention: append rows,
+  // void (not delete) for corrections. `loadInvoices.paidAmount` etc. are the
+  // maintained aggregates over the ACTIVE rows here.
+  invoicePayments: defineTable({
+    workosOrgId: v.string(),
+    invoiceId: v.id('loadInvoices'),
+    loadId: v.id('loadInformation'), // denormalized for reporting/cost joins
+    customerId: v.id('customers'), // denormalized for per-customer payment reporting
+    amount: v.number(),
+    miles: v.optional(v.number()), // miles the customer paid on (for mileage reconciliation)
+    paymentDate: v.optional(v.string()), // ISO 8601
+    reference: v.optional(v.string()), // check #, wire/ACH ref
+    note: v.optional(v.string()),
+    status: v.union(v.literal('ACTIVE'), v.literal('VOID')),
+    // Idempotency key for imported rows: a stable hash of the source row
+    // (reference|amount|date). Re-importing the same reconciliation file skips
+    // rows whose importKey already exists on the invoice, so no double-count.
+    importKey: v.optional(v.string()),
+    createdBy: v.string(), // WorkOS user ID
+    createdAt: v.number(),
+  })
+    .index('by_invoice', ['invoiceId'])
+    .index('by_org_created', ['workosOrgId', 'createdAt']),
+
+  // Per-org invoice numbering sequence (INV-YYYY-NNNN). One row per org+year;
+  // nextSeq is claimed inside the billing/backfill mutations, so Convex's
+  // serializable transactions guarantee race-free, gap-free numbers.
+  invoiceCounters: defineTable({
+    workosOrgId: v.string(),
+    year: v.number(),
+    nextSeq: v.number(),
+    updatedAt: v.number(),
+  }).index('by_org_year', ['workosOrgId', 'year']),
 
   // ==========================================
   // DRIVER PAY ENGINE
@@ -1425,7 +1866,8 @@ export default defineSchema({
     triggerEvent: v.union(
       v.literal('MILE_LOADED'),
       v.literal('MILE_EMPTY'),
-      v.literal('TIME_DURATION'), // Total hours
+      v.literal('TIME_DURATION'), // Leg door-to-door hours (legacy hourly)
+      v.literal('SESSION_DURATION'), // Driver shift check-in → check-out hours
       v.literal('TIME_WAITING'), // Detention
       v.literal('COUNT_STOPS'),
       v.literal('FLAT_LOAD'), // Flat rate per entire load
@@ -1539,6 +1981,10 @@ export default defineSchema({
     ),
     periodStartDayOfMonth: v.optional(v.number()), // For MONTHLY: 1-28 (avoid 29-31 edge cases)
     // SEMIMONTHLY is always 1st and 16th (industry standard, no config needed)
+    // For BIWEEKLY: the date the FIRST period starts ("YYYY-MM-DD"). Every
+    // 14-day cycle counts forward from here — this is what controls which
+    // week is the "on" week. Absent = legacy fixed anchor (Jan 1, 2024).
+    biweeklyAnchor: v.optional(v.string()),
 
     // Timezone (optional - inherits from organization.defaultTimezone if not set)
     timezone: v.optional(v.string()), // IANA timezone: "America/New_York" (overrides org default)
@@ -1554,8 +2000,23 @@ export default defineSchema({
     autoCarryover: v.boolean(), // Auto-move held items to next period
     includeStandaloneAdjustments: v.boolean(), // Pull in unassigned bonuses/deductions
 
+    // === PAY ENGINE (new architecture) ===
+    // Plan currency — must match settlements + payItems produced under this plan.
+    // Optional for backward compat; new pay engine requires this set.
+    currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+    // Policy for when load data changes after its period is closed/verified.
+    // CASCADE_TO_NEXT is the safe default and recommended for new orgs.
+    amendmentPolicy: v.optional(v.union(
+      v.literal('REJECT_LATE_CHANGES'),  // amendments after period close are blocked
+      v.literal('CASCADE_TO_NEXT'),       // reversal + replacement on next settlement
+      v.literal('REOPEN_ALLOWED'),        // explicit reopen with admin permission
+    )),
+
     // === Metadata ===
     isActive: v.boolean(),
+    // Org default — new drivers inherit it; at most one per org (enforced in
+    // mutations); can't be archived while default.
+    isDefault: v.optional(v.boolean()),
     createdAt: v.float64(),
     createdBy: v.string(),
     updatedAt: v.optional(v.float64()),
@@ -1576,6 +2037,29 @@ export default defineSchema({
     carrierId: v.optional(v.string()),
     truckId: v.optional(v.id('trucks')),
     trailerId: v.optional(v.id('trailers')),
+
+    // PAY ENGINE — team-driver support. When present, pay calc fans out one
+    // payItem per entry with quantity scaled by splitBps/10000.
+    // Single-driver legs use driverId only and leave this undefined.
+    // splitBps across entries must sum to 10000 (100%).
+    drivers: v.optional(v.array(v.object({
+      driverId: v.id('drivers'),
+      splitBps: v.number(),
+      role: v.optional(v.union(
+        v.literal('CO_DRIVER'),
+        v.literal('TRAINEE'),
+        v.literal('TRAINER'),
+      )),
+    }))),
+
+    // PAY ENGINE — leg-level pay profile override (highest precedence in
+    // profile selection). Set by operations for one-off exceptions.
+    payProfileOverrideId: v.optional(v.id('payProfiles')),
+
+    // PAY ENGINE — primary work jurisdiction for this leg. Used by
+    // JURISDICTION profile-selection strategy and for tax allocation.
+    workState: v.optional(v.string()),   // e.g. "US-CA"
+    workCountry: v.optional(v.string()), // e.g. "US"
 
     sequence: v.float64(), // 1, 2, 3...
 
@@ -1622,6 +2106,17 @@ export default defineSchema({
     scheduledStartMs: v.optional(v.float64()),
     scheduledEndMs: v.optional(v.float64()),
 
+    // PAY ENGINE — latest-wins coalesce key for calculatePayForLeg.
+    // Upstream sites that schedule a pay-engine recalc (legacy
+    // calculateDriverPay/calculateCarrierPay + the manual recalculate
+    // mutations) patch this field with Date.now() immediately before
+    // ctx.scheduler.runAfter(0, ...calculatePayForLeg, { ..., requestedAt }).
+    // Each scheduled job exits early if `args.requestedAt < leg.latestRecalcRequestedAt`
+    // — i.e. a NEWER recalc has been queued and our work would be
+    // immediately stale. Prevents the OCC collisions observed on
+    // payItems when assignment fires driver + carrier cascades together.
+    latestRecalcRequestedAt: v.optional(v.float64()),
+
     workosOrgId: v.string(),
     createdAt: v.float64(),
     updatedAt: v.float64(),
@@ -1631,7 +2126,12 @@ export default defineSchema({
     .index('by_driver_status_scheduled_start', ['driverId', 'status', 'scheduledStartMs'])
     .index('by_carrier_partnership', ['carrierPartnershipId', 'status'])
     .index('by_org', ['workosOrgId'])
-    .index('by_truck', ['truckId']),
+    .index('by_truck', ['truckId'])
+    // Active Sessions live-ops and the session stop-timeline query use this
+    // to render "every leg in this shift, in order". Without it, per-session
+    // leg queries fall back to scanning the driver's entire leg history
+    // (cheap for a fresh driver, embarrassing for a long-tenured one).
+    .index('by_session', ['sessionId']),
 
   /**
    * Load Payables - Calculated pay line items
@@ -1656,11 +2156,51 @@ export default defineSchema({
       v.literal('MANUAL'), // Added/Edited by User
     ),
 
+    // Statement section this line belongs to. Optional for backward compat —
+    // rows without it are classified by fallback (negative amount → DEDUCTION,
+    // rebillable manual accessorial → REIMBURSEMENT, else EARNING).
+    category: v.optional(v.union(
+      v.literal('EARNING'),
+      v.literal('REIMBURSEMENT'),
+      v.literal('DEDUCTION'),
+    )),
+
     // If TRUE, Rules Engine will NEVER delete/overwrite this row
     isLocked: v.boolean(),
 
     // Settlement Assignment
     settlementId: v.optional(v.id('driverSettlements')), // Which pay period this belongs to
+
+    // Set when the payable's work date fell in an already-settled period and
+    // autoCarryover swept it into a later statement (prior-period pay).
+    carriedOverAt: v.optional(v.float64()),
+
+    // Session-based hourly pay: one payable per completed driver shift
+    // (SESSION_DURATION rules). Links back to the shift for traceability,
+    // idempotent generation, and work-start resolution (session.startedAt).
+    sessionId: v.optional(v.id('driverSessions')),
+
+    // Review-time line edit (Settlement Review modal). When a reviewer
+    // corrects a SYSTEM line's hours/rate, we override in place and lock the
+    // line so the rules engine won't overwrite it, preserving the original
+    // for audit. `original*` are stamped once, on the first edit.
+    editedAt: v.optional(v.float64()),
+    editedBy: v.optional(v.string()),
+    editReason: v.optional(v.string()),
+    originalQuantity: v.optional(v.float64()),
+    originalRate: v.optional(v.float64()),
+    originalTotalAmount: v.optional(v.float64()),
+    // Shift lines (SESSION_DURATION): reviewer-corrected clock window + unpaid
+    // break. Paid hours derive from (overrideEndAt − overrideStartAt − break);
+    // the driver session record stays the untouched GPS truth.
+    breakMinutes: v.optional(v.float64()),
+    overrideStartAt: v.optional(v.float64()),
+    overrideEndAt: v.optional(v.float64()),
+    // Rules-drift flag: when a later recalc would compute a different amount
+    // than this locked reviewer edit, rulesAmount holds the engine's current
+    // value and rulesChangedAt marks when it diverged. Cleared when back in sync.
+    rulesAmount: v.optional(v.float64()),
+    rulesChangedAt: v.optional(v.float64()),
 
     // Rebillable to Customer (for manual accessorials)
     isRebillable: v.optional(v.boolean()), // Should this be added to customer invoice?
@@ -1690,7 +2230,8 @@ export default defineSchema({
     .index('by_settlement', ['settlementId'])
     .index('by_driver_unassigned', ['driverId', 'settlementId']) // For gathering unassigned payables
     .index('by_org_created', ['workosOrgId', 'createdAt'])
-    .index('by_driver_created', ['driverId', 'createdAt']),
+    .index('by_driver_created', ['driverId', 'createdAt'])
+    .index('by_session', ['sessionId']), // one payable per shift — idempotency check
 
   /**
    * Driver push-notification tokens.
@@ -1758,6 +2299,11 @@ export default defineSchema({
     // for driver POD photos that go through the R2 presigned-URL flow).
     storageId: v.optional(v.id('_storage')),
     externalUrl: v.optional(v.string()),
+    // R2 object key (orgs/{orgId}/loads/{loadId}/{type}/...). Preferred
+    // over externalUrl going forward: keys survive bucket/domain moves
+    // and are what signed GET + DeleteObject operate on. Legacy rows
+    // carry only externalUrl — derive the key from its pathname.
+    externalKey: v.optional(v.string()),
     fileName: v.optional(v.string()),
     contentType: v.optional(v.string()),
 
@@ -1818,6 +2364,27 @@ export default defineSchema({
       v.literal('MANUAL'), // Added/Edited by User
     ),
 
+    // Statement section this line belongs to. Optional for backward compat —
+    // rows without it are classified by fallback (negative amount → DEDUCTION,
+    // else EARNING).
+    category: v.optional(v.union(
+      v.literal('EARNING'),
+      v.literal('REIMBURSEMENT'),
+      v.literal('DEDUCTION'),
+    )),
+
+    // Review-time line edit (Settlement Review modal) — override in place,
+    // lock, preserve original for audit. Mirrors loadPayables.
+    editedAt: v.optional(v.float64()),
+    editedBy: v.optional(v.string()),
+    editReason: v.optional(v.string()),
+    originalQuantity: v.optional(v.float64()),
+    originalRate: v.optional(v.float64()),
+    originalTotalAmount: v.optional(v.float64()),
+    // Rules-drift flag (mirrors loadPayables).
+    rulesAmount: v.optional(v.float64()),
+    rulesChangedAt: v.optional(v.float64()),
+
     // If TRUE, Rules Engine will NEVER delete/overwrite this row
     isLocked: v.boolean(),
 
@@ -1864,7 +2431,12 @@ export default defineSchema({
       v.literal('APPROVED'), // Locked for payment processing
       v.literal('PAID'), // Payment completed
       v.literal('DISPUTED'), // Carrier disputed
+      v.literal('VOID'), // Cancelled/reversed
     ),
+
+    // Statement Identification (e.g., "CST-2026-001"). Optional for backward
+    // compat — settlements created before numbering existed have none.
+    statementNumber: v.optional(v.string()),
 
     // Totals (denormalized for quick display)
     totalGross: v.float64(), // Sum of all payables
@@ -1881,16 +2453,39 @@ export default defineSchema({
     carrierName: v.optional(v.string()),
     carrierMcNumber: v.optional(v.string()),
 
+    // Reviewer-acknowledged blockers (Settlement Review verify-to-clear). Each
+    // entry records who cleared which blocker and when, so an acknowledged
+    // hard blocker no longer gates approval but stays auditable.
+    acknowledgedBlockers: v.optional(v.array(v.object({
+      key: v.string(),
+      by: v.string(),
+      at: v.float64(),
+      note: v.optional(v.string()),
+    }))),
+
+    // Audit Trail
+    notes: v.optional(v.string()),
+    voidedBy: v.optional(v.string()),
+    voidedAt: v.optional(v.float64()),
+    voidReason: v.optional(v.string()),
+
     createdAt: v.float64(),
     createdBy: v.string(),
     updatedAt: v.optional(v.float64()),
     approvedAt: v.optional(v.float64()),
     approvedBy: v.optional(v.string()),
+    // Reopen audit — set when an APPROVED statement is unlocked back to DRAFT
+    // to correct a mistake (cleared again on the next approval).
+    reopenedAt: v.optional(v.float64()),
+    reopenedBy: v.optional(v.string()),
+    reopenReason: v.optional(v.string()),
   })
     .index('by_carrier_partnership', ['carrierPartnershipId'])
     .index('by_org', ['workosOrgId'])
     .index('by_status', ['status'])
-    .index('by_period', ['periodStart', 'periodEnd']),
+    .index('by_org_status', ['workosOrgId', 'status'])
+    .index('by_period', ['periodStart', 'periodEnd'])
+    .index('by_statement_number', ['workosOrgId', 'statementNumber']),
 
   /**
    * Driver Settlements - Pay Period Statements
@@ -1931,10 +2526,27 @@ export default defineSchema({
     approvedBy: v.optional(v.string()),
     approvedAt: v.optional(v.float64()),
 
+    // Reopen audit — set when an APPROVED settlement is unlocked back to DRAFT
+    // to correct a mistake (cleared again on the next approval).
+    reopenedAt: v.optional(v.float64()),
+    reopenedBy: v.optional(v.string()),
+    reopenReason: v.optional(v.string()),
+
     // Payment Tracking
     paidAt: v.optional(v.float64()),
+    paidBy: v.optional(v.string()), // WorkOS userId who recorded the payment
     paidMethod: v.optional(v.string()), // ACH, Check, Wire, etc.
     paidReference: v.optional(v.string()), // Check number, transaction ID
+
+    // Reviewer-acknowledged blockers (Settlement Review verify-to-clear). Each
+    // entry records who cleared which blocker and when, so an acknowledged
+    // hard blocker no longer gates approval but stays auditable.
+    acknowledgedBlockers: v.optional(v.array(v.object({
+      key: v.string(),
+      by: v.string(),
+      at: v.float64(),
+      note: v.optional(v.string()),
+    }))),
 
     // Audit Trail
     notes: v.optional(v.string()),
@@ -1953,6 +2565,20 @@ export default defineSchema({
     .index('by_period', ['driverId', 'periodStart', 'periodEnd'])
     .index('by_statement_number', ['workosOrgId', 'statementNumber'])
     .index('by_pay_plan', ['payPlanId', 'periodStart']),
+
+  /**
+   * Statement-number counters (aggregate pattern, like organizationStats).
+   * One doc per org × scope × year. Replaces the collect-all-settlements
+   * scan that made statement numbering O(total statements) per generation —
+   * the root cause of bulk-generate timeouts.
+   */
+  settlementCounters: defineTable({
+    workosOrgId: v.string(),
+    scope: v.union(v.literal('DRIVER'), v.literal('CARRIER')),
+    year: v.number(),
+    lastNumber: v.number(),
+    updatedAt: v.float64(),
+  }).index('by_org_scope_year', ['workosOrgId', 'scope', 'year']),
 
   // Organization statistics for fast count queries (aggregate table pattern)
   organizationStats: defineTable({
@@ -1984,6 +2610,66 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index('by_org', ['workosOrgId']),
 
+  /**
+   * loadStatusCounts — eventually-exact cache for the Dispatch Planner badges
+   * (countLoadsByStatusFiltered). Rebuilt from source by a change-gated job
+   * (see convex/loadStatusCounts.ts), so it CANNOT drift — only lag (≤ the
+   * rebuild cadence). Replaces the per-query facet/date scan that hit the 4096
+   * read limit. Design: docs/eventually-exact-load-counts-design.md.
+   *
+   * One row per (org, epoch, scope, scopeValue, bucket, status). Queries pin
+   * (org, activeEpoch, scope, scopeValue) and range over `bucket`:
+   *   - bucket = 'YYYY-MM-DD' → day grain, materialized only within the
+   *     rolling 18-month window (loads inside the window).
+   *   - bucket = '__total__'  → all-time roll-up (EVERY load, incl. no/old
+   *     firstStopDate). No-date queries read this; date queries range the day
+   *     buckets (digits sort before '_', so a date range excludes '__total__').
+   *   - scope 'HCRTRIP' is materialized at '__total__' ONLY (the rare HCR∧TRIP
+   *     + date drills back to a bounded scan).
+   */
+  loadStatusCounts: defineTable({
+    workosOrgId: v.string(),
+    epoch: v.number(),
+    scope: v.union(
+      v.literal('ALL'),
+      v.literal('HCR'),
+      v.literal('TRIP'),
+      v.literal('HCRTRIP'),
+    ),
+    scopeValue: v.string(), // '*' for ALL; canonical HCR/TRIP; `${hcr}\x00${trip}` for HCRTRIP
+    bucket: v.string(), // 'YYYY-MM-DD' | '__total__'
+    status: v.union(
+      v.literal('Open'),
+      v.literal('Assigned'),
+      v.literal('Completed'),
+      v.literal('Canceled'),
+      v.literal('Expired'),
+    ),
+    count: v.number(),
+  }).index('by_scope_bucket', [
+    'workosOrgId',
+    'epoch',
+    'scope',
+    'scopeValue',
+    'bucket',
+  ]),
+
+  /**
+   * loadStatusCountsMeta — one control row per org for the cache above.
+   * `activeEpoch` is the generation queries read; a rebuild writes a NEW epoch
+   * and flips `activeEpoch` atomically when complete, so readers never see a
+   * half-built generation. `buildingEpoch`/`buildStartedAt` guard against
+   * concurrent/overlapping rebuilds.
+   */
+  loadStatusCountsMeta: defineTable({
+    workosOrgId: v.string(),
+    activeEpoch: v.optional(v.number()),
+    buildingEpoch: v.optional(v.number()),
+    buildStartedAt: v.optional(v.number()),
+    lastBuiltAt: v.optional(v.number()),
+    lastBuildRows: v.optional(v.number()), // observability: cache rows written last build
+  }).index('by_org', ['workosOrgId']),
+
   // Accounting period statistics for fast reporting queries (aggregate table pattern)
   // Revenue-side metrics are pre-computed; cost-side metrics are queried on-demand
   accountingPeriodStats: defineTable({
@@ -1996,6 +2682,12 @@ export default defineSchema({
     invoiceCount: v.number(), // Count of invoices finalized in this period
     paidInvoiceCount: v.number(), // Count of invoices paid in this period
 
+    // A/R (pre-computed, event-driven updates) — powers the uncapped receivables
+    // aging so the summary doesn't have to scan every invoice. Optional for
+    // backfill: rows written before this field default to 0 until the next recalc.
+    totalOutstanding: v.optional(v.number()), // Sum of max(0, totalAmount - paidAmount) for finalized invoices in this period
+    outstandingCount: v.optional(v.number()), // Count of finalized invoices in this period still carrying a balance (recalc-maintained)
+
     // Drift detection
     lastRecalculated: v.optional(v.number()),
 
@@ -2004,6 +2696,42 @@ export default defineSchema({
   })
     .index('by_org', ['workosOrgId'])
     .index('by_org_period', ['workosOrgId', 'periodKey']),
+
+  // Platform-billing usage metering (aggregate table pattern, like
+  // accountingPeriodStats). Otoqa bills each org a flat rate for every load
+  // written into the system, invoiced monthly. One row per org × period
+  // ("YYYY-MM", UTC). Loads created after the metering cutover count for the
+  // month they were ENTERED (createdAt); pre-cutover history is attributed
+  // to the SERVICE month (firstStopDate) — see platformUsage.ts. Incremented
+  // on every loadInformation insert (platformUsageHelpers.recordLoadWritten)
+  // and undercount-corrected nightly from source. Loads count for the cycle
+  // they were created in — later edits/cancellations do not remove the
+  // charge, so this counter is never decremented.
+  platformUsageStats: defineTable({
+    workosOrgId: v.string(),
+    periodKey: v.string(), // "2026-07" (monthly granularity, UTC)
+    loadsWritten: v.number(), // Count of loads created in this period
+
+    // Drift detection
+    lastRecalculated: v.optional(v.number()),
+
+    // Timestamps
+    updatedAt: v.number(),
+  })
+    .index('by_org', ['workosOrgId'])
+    .index('by_org_period', ['workosOrgId', 'periodKey']),
+
+  // Per-customer A/R aging snapshot — ONE row per org holding a compact JSON map
+  // customerId -> periodKey -> [outstandingBalance, outstandingCount]. Powers the
+  // per-customer aging table without scanning (or capping) every invoice; buckets
+  // are computed live at read time from the per-period balances. Recomputed by
+  // the same recalc that maintains accountingPeriodStats (a daily snapshot).
+  customerAgingSnapshots: defineTable({
+    workosOrgId: v.string(),
+    data: v.string(), // JSON: Record<customerId, Record<periodKey, [balance, count]>>
+    lastRecalculated: v.number(),
+    updatedAt: v.number(),
+  }).index('by_org', ['workosOrgId']),
 
   // ==========================================
   // DRIVER LOCATION TRACKING
@@ -2037,12 +2765,98 @@ export default defineSchema({
     // Timestamps
     recordedAt: v.float64(), // Device timestamp (when GPS captured)
     createdAt: v.float64(), // Server timestamp (when synced)
+
+    // Optional source tag. Undefined on legacy rows (treat as MOBILE on read).
+    // Internal-only — NEVER serialized in the partner API. Used for analytics
+    // (mobile vs. telematics-backup coverage, gap detection) and debugging.
+    source: v.optional(v.union(v.literal('MOBILE'), v.literal('SAMSARA'))),
   })
     .index('by_driver_time', ['driverId', 'recordedAt'])
     .index('by_org_time', ['organizationId', 'recordedAt'])
     .index('by_load', ['loadId', 'recordedAt'])
     .index('by_session_time', ['sessionId', 'recordedAt'])
-    .index('by_org_created', ['organizationId', 'createdAt']),
+    .index('by_org_created', ['organizationId', 'createdAt'])
+    // Cross-org range on createdAt for the archival cron. The archival query
+    // wants the globally-oldest rows regardless of org, which by_org_created
+    // can't serve (org is the leading key, so createdAt isn't globally
+    // ordered). Without this, getLocationsOlderThan fell back to a full-table
+    // .filter() scan and neared the per-query document/bytes read limit.
+    .index('by_created', ['createdAt']),
+
+  /**
+   * systemState — generic singleton key/value store for cross-action
+   * cached state that doesn't belong on any per-org or per-load row.
+   * Keyed by `key` (string). Values are JSON-encoded into `value` so
+   * we can host heterogeneous cache shapes without per-key schema churn.
+   *
+   * Current consumers:
+   *   - fcm_access_token: cached Google OAuth2 token for FCM HTTP v1
+   *     (see fcmWake.ts). Mints are free at Google but cost ~150ms each,
+   *     and at ~1000 active drivers we'd see ~200/min worst case
+   *     without caching.
+   *
+   * Race notes: concurrent writers (two sendWake actions both seeing an
+   * expired token) both mint and patch; last write wins. Tokens are
+   * idempotent (same scope, same SA → equally valid) so the duplicate
+   * mint just wastes one free Google call. Acceptable.
+   */
+  systemState: defineTable({
+    key: v.string(),
+    value: v.string(), // JSON-encoded payload — shape varies per key
+    expiresAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index('by_key', ['key']),
+
+  /**
+   * driverLatestLocation — one row per driver, holding the latest GPS ping
+   * seen. Maintained by ingestBatch as a denormalized read cache so the
+   * dispatcher's helicopter-view reactive subscription doesn't have to
+   * scan the full driverLocations history every time a new ping lands.
+   *
+   * Why this exists: getActiveDriverLocations is used by two reactive
+   * client subscriptions (helicopter-view, live-route-map). Every
+   * driverLocations insert in the 30-minute window invalidates those
+   * subscriptions and forces a re-read of O(history) rows (~9k+ at scale).
+   * Reading from this denormalized table collapses that to O(active
+   * drivers).
+   *
+   * Upsert contract: ingestBatch groups inserted pings by driverId,
+   * picks the max-recordedAt ping per driver, and patches this row
+   * (or inserts on first ping). recordedAt is monotonic per driver —
+   * a stale ping never overwrites a fresher one. Daily GC prunes rows
+   * older than 30d to keep the table bounded against driver churn.
+   *
+   * Note: this table holds the LATEST ping regardless of whether it
+   * carries a loadId. Consumers that only care about load-tagged drivers
+   * (helicopter-view, dispatcher map) filter `loadId != null` at read.
+   */
+  driverLatestLocation: defineTable({
+    driverId: v.id('drivers'),
+    organizationId: v.string(),
+
+    // GPS Data — same shape as driverLocations row
+    latitude: v.float64(),
+    longitude: v.float64(),
+    accuracy: v.optional(v.float64()),
+    speed: v.optional(v.float64()),
+    heading: v.optional(v.float64()),
+
+    // Tracking context — copied from the source ping
+    loadId: v.optional(v.id('loadInformation')),
+    sessionId: v.optional(v.id('driverSessions')),
+    trackingType: v.union(
+      v.literal('LOAD_ROUTE'),
+      v.literal('SESSION_ROUTE'),
+    ),
+
+    // Timestamps
+    recordedAt: v.float64(), // device timestamp of the latest ping
+    updatedAt: v.number(),   // server timestamp of the last upsert
+  })
+    .index('by_driver', ['driverId'])
+    // Powers the helicopter-view subscription:
+    //   .withIndex('by_org_recordedAt', q => q.eq('organizationId', X).gte('recordedAt', cutoff))
+    .index('by_org_recordedAt', ['organizationId', 'recordedAt']),
 
   // ==========================================
   // DRIVER SESSION SYSTEM (Phase 1)
@@ -2092,6 +2906,13 @@ export default defineSchema({
     status: v.union(v.literal('active'), v.literal('completed')),
 
     totalActiveMinutes: v.optional(v.float64()), // computed on end
+
+    // Shift-level pay profile override. Session pay normally selects the
+    // driver's default assignment at shift start; this pins the shift to a
+    // specific payProfile instead (precedence: override → default). Set from
+    // the settlement review's shift line; honored by the NEW pay engine only
+    // (calculateSessionPay) — legacy paySession ignores it.
+    payProfileOverrideId: v.optional(v.id('payProfiles')),
     softCap10hAt: v.optional(v.float64()), // stamped when 10h banner shown
     softCap14hAt: v.optional(v.float64()), // stamped when 14h banner shown
 
@@ -2128,6 +2949,10 @@ export default defineSchema({
     .index('by_driver_status', ['driverId', 'status'])
     .index('by_org_active', ['organizationId', 'status'])
     .index('by_org_started', ['organizationId', 'startedAt'])
+    // Samsara backup ingest: find the currently-open session for a truck.
+    // Mirrors the by_driver_status convention used elsewhere in this table —
+    // status='active' is the canonical "session is open" predicate.
+    .index('by_truck_status', ['truckId', 'status'])
     // Powers the daily auto-timeout cron. Scans only active sessions sorted
     // by startedAt so we can short-circuit the moment we hit one inside the
     // 18-hour window (status='active' first → tightest selectivity).
@@ -2160,20 +2985,58 @@ export default defineSchema({
     driverId: v.id('drivers'),
     organizationId: v.string(),
 
-    currentStopSequenceNumber: v.float64(), // next unarrived stop
-    currentStopLat: v.float64(),
-    currentStopLng: v.float64(),
+    // Arrival watch — the next unarrived stop. Absent once the driver has
+    // checked in at the final stop (nothing left to approach).
+    currentStopSequenceNumber: v.optional(v.float64()),
+    currentStopLat: v.optional(v.float64()),
+    currentStopLng: v.optional(v.float64()),
 
     approachingFired: v.boolean(), // 5mi outer-ring event fired
     arrivedFired: v.boolean(), // 0.5mi inner-ring event fired
 
+    // Departure watch — the most recently checked-in stop, watched for a
+    // confirmed geofence exit (DEPARTED event). Set on check-in, cleared
+    // when DEPARTED fires. A single optional object (unlike the flat legacy
+    // currentStop* trio above, which has pre-existing rows) so partial
+    // states are unrepresentable.
+    //   armedAt      — check-in server time; pings recorded at/before it are
+    //                  historical (offline backlog) and must never drive
+    //                  exit decisions.
+    //   candidateAt  — recordedAt of the first qualifying ping outside the
+    //                  exit ring; a second, newer outside ping confirms the
+    //                  departure (GPS-jitter debounce), and the candidate
+    //                  timestamp — not the confirming one — becomes the
+    //                  event time.
+    departureWatch: v.optional(
+      v.object({
+        stopSequenceNumber: v.float64(),
+        lat: v.float64(),
+        lng: v.float64(),
+        armedAt: v.float64(),
+        candidateAt: v.optional(v.float64()),
+      })
+    ),
+
+    // Set on last-stop checkout when a departure watch is still pending:
+    // the row is kept alive solely to timestamp the final facility exit,
+    // then deleted by the evaluator (or by session-end cleanup).
+    loadCompleted: v.optional(v.boolean()),
+
     updatedAt: v.float64(),
-  }).index('by_load', ['loadId']),
+  })
+    .index('by_load', ['loadId'])
+    // Post-checkout pings are SESSION_ROUTE (no loadId); this index lets
+    // ingestBatch find pending departure watches for the sessions in a
+    // batch. Also powers session-end cleanup of loadCompleted rows.
+    .index('by_session', ['sessionId']),
 
   /**
-   * geofenceEvents — internal log of auto-generated APPROACHING/ARRIVED
-   * events from GPS pings. NOT exposed to external partners (they pull raw
-   * GPS positions and compute their own geofences).
+   * geofenceEvents — immutable log of auto-generated APPROACHING/ARRIVED/
+   * DEPARTED events from GPS pings. Append-only: these are the audit-grade
+   * "detected" timestamps shown alongside the driver's manual check-in/out
+   * "reported" times (loadStops.checkedInAt/checkedOutAt) — never edited.
+   * NOT exposed to external partners (they pull raw GPS positions and
+   * compute their own geofences).
    */
   geofenceEvents: defineTable({
     sessionId: v.id('driverSessions'),
@@ -2182,15 +3045,18 @@ export default defineSchema({
     driverId: v.id('drivers'),
     organizationId: v.string(),
 
-    eventType: v.union(v.literal('APPROACHING'), v.literal('ARRIVED')),
+    eventType: v.union(v.literal('APPROACHING'), v.literal('ARRIVED'), v.literal('DEPARTED')),
 
     triggeredAt: v.float64(),
     latitude: v.float64(),
     longitude: v.float64(),
     distanceMeters: v.float64(),
+    accuracy: v.optional(v.float64()), // GPS horizontal accuracy of the triggering ping (m)
   })
     .index('by_load_stop_event', ['loadId', 'stopSequenceNumber', 'eventType'])
-    .index('by_load', ['loadId', 'triggeredAt']),
+    .index('by_load', ['loadId', 'triggeredAt'])
+    // Session stop-timeline query (driver-detail Sessions tab).
+    .index('by_session', ['sessionId', 'triggeredAt']),
 
   /**
    * gpsArchiveLog — audit table for the nightly GPS archive cron.
@@ -2310,7 +3176,12 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_org', ['workosOrgId', 'status'])
-    .index('by_partner_key', ['partnerKeyId']),
+    .index('by_partner_key', ['partnerKeyId'])
+    // Used by the cross-org webhook delivery cron to scan only ACTIVE
+    // subscriptions without filtering in JS. Previously
+    // getActiveSubscriptions scanned every subscription in every org
+    // every 5min and JS-filtered.
+    .index('by_status', ['status']),
 
   webhookDeliveryQueue: defineTable({
     subscriptionId: v.id('webhookSubscriptions'),
@@ -2458,6 +3329,9 @@ export default defineSchema({
     carrierId: v.optional(v.id('carrierPartnerships')),
     truckId: v.optional(v.id('trucks')),
     vendorId: v.id('fuelVendors'),
+    // Missing on rows created before fuel-type separation — treated as
+    // DIESEL by reports. DEF lives in `defEntries`, never here.
+    fuelType: v.optional(fuelTypeValidator),
     gallons: v.number(),
     pricePerGallon: v.number(),
     totalCost: v.number(),
@@ -2905,4 +3779,37 @@ export default defineSchema({
   })
     .index('by_org', ['workosOrgId'])
     .index('by_org_key', ['workosOrgId', 'key']),
+
+  // ============================================================================
+  // CREATE-FORM DRAFTS — autosaved in-flight create flows
+  // ============================================================================
+  //
+  // Backs Phase 4 of the create-form rollout. Every 800ms after a user edits a
+  // long create form (Carrier / Customer / Driver / Load), the page wrapper
+  // upserts the form's flat `vals` map (JSON-stringified) into this table. On
+  // return the user sees a "You have an unsaved draft from N ago" banner with
+  // Resume / Discard actions.
+  //
+  // Uniqueness is per (userId, entity, draftKey). The draftKey is set on each
+  // long-form schema (e.g. `'carrier-create'`) — bump it whenever a breaking
+  // schema change ships (renamed field, removed field, changed enum values,
+  // changed field kind). See `docs/schema-evolution.md` for the playbook.
+  //
+  // The 30-day nightly cron (`expireOld` in `convex/createDrafts.ts`) is the
+  // backstop against unbounded growth. Most drafts are short-lived (saved or
+  // explicitly discarded) so the cron's working set stays small.
+  createDrafts: defineTable({
+    workosOrgId: v.string(),
+    userId: v.string(),            // WorkOS user id from useAuth().user.id
+    entity: v.string(),            // 'carrier' | 'customer' | 'driver' | 'load'
+    draftKey: v.string(),          // Matches `schema.draftKey`; bump on breaking schema changes.
+    vals: v.string(),              // JSON.stringify(vals). Plain string by design — see comment above.
+    updatedAt: v.number(),
+  })
+    // Primary lookup path — getByEntity / upsert / discard all hit this index.
+    .index('by_user_entity', ['userId', 'entity', 'draftKey'])
+    // List a user's drafts across all entities (list-page banner / cleanup tools).
+    .index('by_org_user', ['workosOrgId', 'userId'])
+    // Cron-side scan — find expired drafts without a full collect.
+    .index('by_updatedAt', ['updatedAt']),
 });

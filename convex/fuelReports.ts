@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg } from './lib/auth';
+import { DEFAULT_FUEL_TYPE, type FuelProduct } from './lib/fuelTypes';
 
 export const fuelByDriver = query({
   args: {
@@ -157,14 +158,27 @@ export const fuelByVendor = query({
   },
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.organizationId);
-    const entries = await ctx.db
-      .query('fuelEntries')
-      .withIndex('by_organization_and_date', (q) =>
-        q.eq('organizationId', args.organizationId)
-          .gte('entryDate', args.dateRangeStart)
-          .lte('entryDate', args.dateRangeEnd)
-      )
-      .collect();
+    // Vendor spend covers every product bought at the pump — fuel AND
+    // DEF — so the card's total matches the report's headline spend.
+    const [fuelEntriesList, defEntriesList] = await Promise.all([
+      ctx.db
+        .query('fuelEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+      ctx.db
+        .query('defEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+    ]);
+    const entries = [...fuelEntriesList, ...defEntriesList];
 
     const byVendor: Record<string, { gallons: number; totalCost: number; entries: number }> = {};
 
@@ -193,6 +207,64 @@ export const fuelByVendor = query({
     );
 
     return results.sort((a, b) => b.totalCost - a.totalCost);
+  },
+});
+
+export const fuelByType = query({
+  args: {
+    organizationId: v.string(),
+    dateRangeStart: v.number(),
+    dateRangeEnd: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await assertCallerOwnsOrg(ctx, args.organizationId);
+    const [entries, defEntriesList] = await Promise.all([
+      ctx.db
+        .query('fuelEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+      ctx.db
+        .query('defEntries')
+        .withIndex('by_organization_and_date', (q) =>
+          q.eq('organizationId', args.organizationId)
+            .gte('entryDate', args.dateRangeStart)
+            .lte('entryDate', args.dateRangeEnd)
+        )
+        .collect(),
+    ]);
+
+    // Rows created before the fuelType field existed count as diesel.
+    // DEF has no fuelType column at all — its table IS the type.
+    const byType: Record<string, { gallons: number; totalCost: number; entries: number }> = {};
+    const bump = (key: FuelProduct, gallons: number, totalCost: number) => {
+      if (!byType[key]) {
+        byType[key] = { gallons: 0, totalCost: 0, entries: 0 };
+      }
+      byType[key].gallons += gallons;
+      byType[key].totalCost += totalCost;
+      byType[key].entries += 1;
+    };
+
+    for (const entry of entries) {
+      bump(entry.fuelType ?? DEFAULT_FUEL_TYPE, entry.gallons, entry.totalCost);
+    }
+    for (const entry of defEntriesList) {
+      bump('DEF', entry.gallons, entry.totalCost);
+    }
+
+    return Object.entries(byType)
+      .map(([fuelType, data]) => ({
+        fuelType: fuelType as FuelProduct,
+        gallons: Math.round(data.gallons * 100) / 100,
+        totalCost: Math.round(data.totalCost * 100) / 100,
+        avgPricePerGallon: data.gallons > 0 ? Math.round((data.totalCost / data.gallons) * 1000) / 1000 : 0,
+        entries: data.entries,
+      }))
+      .sort((a, b) => b.totalCost - a.totalCost);
   },
 });
 
@@ -235,37 +307,56 @@ export const costPerMile = query({
       }
     }
 
+    // Odometer-derived miles per truck (the preferred source). Computed up
+    // front so we can tell whether ANY truck needs the loads-based fallback
+    // before deciding to read loadInformation at all.
+    const odometerMilesByTruck: Record<string, number> = {};
+    for (const [truckId, data] of Object.entries(byTruck)) {
+      if (data.odometerReadings.length >= 2) {
+        const sorted = data.odometerReadings.sort((a, b) => a.date - b.date);
+        odometerMilesByTruck[truckId] = sorted[sorted.length - 1].reading - sorted[0].reading;
+      } else {
+        odometerMilesByTruck[truckId] = 0;
+      }
+    }
+
+    // Loads-based fallback miles per truck. Previously this scanned the FULL
+    // loadInformation table once PER truck inside the result loop — O(trucks ×
+    // org loads) reads, which is what neared the per-query bytes/documents
+    // read limit. Now it's a single date-bounded scan (the by_organization
+    // index implicitly orders by _creationTime, so the range trims the read to
+    // the report window) grouped by truck, and only when a truck actually
+    // lacks usable odometer data.
+    const loadMilesByTruck: Record<string, number> = {};
+    const needsLoadFallback = Object.values(odometerMilesByTruck).some((m) => m <= 0);
+    if (needsLoadFallback) {
+      const loads = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_organization', (q) =>
+          q
+            .eq('workosOrgId', args.organizationId)
+            .gte('_creationTime', args.dateRangeStart)
+            .lte('_creationTime', args.dateRangeEnd)
+        )
+        .collect();
+
+      for (const load of loads) {
+        const loadTruckId = (load as Record<string, unknown>).truckId as string | undefined;
+        if (!loadTruckId || !load.effectiveMiles) continue;
+        loadMilesByTruck[loadTruckId] = (loadMilesByTruck[loadTruckId] ?? 0) + load.effectiveMiles;
+      }
+    }
+
     const results = await Promise.all(
       Object.entries(byTruck).map(async ([truckId, data]) => {
         const truck = await ctx.db.get(truckId as Id<'trucks'>);
 
-        let totalMiles = 0;
-        let milesSource: 'odometer' | 'loads' | 'none' = 'none';
-
-        if (data.odometerReadings.length >= 2) {
-          const sorted = data.odometerReadings.sort((a, b) => a.date - b.date);
-          totalMiles = sorted[sorted.length - 1].reading - sorted[0].reading;
-          milesSource = 'odometer';
-        }
+        let totalMiles = odometerMilesByTruck[truckId] ?? 0;
+        let milesSource: 'odometer' | 'loads' | 'none' =
+          data.odometerReadings.length >= 2 ? 'odometer' : 'none';
 
         if (totalMiles <= 0) {
-          const loads = await ctx.db
-            .query('loadInformation')
-            .withIndex('by_organization', (q) => q.eq('workosOrgId', args.organizationId))
-            .collect();
-
-          const truckLoads = loads.filter(
-            (l) =>
-              (l as Record<string, unknown>).truckId === truckId &&
-              l._creationTime >= args.dateRangeStart &&
-              l._creationTime <= args.dateRangeEnd
-          );
-
-          for (const load of truckLoads) {
-            if (load.effectiveMiles) {
-              totalMiles += load.effectiveMiles;
-            }
-          }
+          totalMiles += loadMilesByTruck[truckId] ?? 0;
           if (totalMiles > 0) milesSource = 'loads';
         }
 

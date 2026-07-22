@@ -9,7 +9,9 @@ import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
+import { recordLoadWritten } from "./platformUsageHelpers";
 import { setLoadTag, getLoadFacets } from "./lib/loadFacets";
+import { refreshInvoiceSearchText } from "./invoiceSearchText";
 import { syncLegsAffectedByStop } from "./_helpers/timeUtils";
 import {
   buildLoadInternalId,
@@ -90,10 +92,13 @@ export const createInvoice = internalMutation({
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
-    
+
+    // Seed the search haystack (order # + customer; no number until billed).
+    await refreshInvoiceSearchText(ctx, invoiceId);
+
     // ✅ Update organization stats (aggregate table pattern)
     await updateInvoiceCount(ctx, args.workosOrgId, undefined, args.status);
-    
+
     return invoiceId;
   },
 });
@@ -158,6 +163,14 @@ export const createLoad = internalMutation({
     
     // ✅ Update organization stats (aggregate table pattern)
     await updateLoadCount(ctx, args.data.workosOrgId, undefined, args.data.status);
+
+    // ✅ Platform billing: every load written into the system is billable.
+    // args.data is v.any() — only trust createdAt when it's a real number.
+    await recordLoadWritten(
+      ctx,
+      args.data.workosOrgId,
+      typeof args.data.createdAt === "number" ? args.data.createdAt : Date.now(),
+    );
     
     // ✅ Trigger auto-assignment for FourKites loads
     // FourKites loads come in with parsedHcr already set
@@ -300,6 +313,9 @@ export const importLoadFromShipment = internalMutation({
     // ✅ Update organization stats for load creation
     await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
+    // ✅ Platform billing: every load written into the system is billable
+    await recordLoadWritten(ctx, workosOrgId, Date.now());
+
     const internalId = buildLoadInternalId(shipment);
     for (const stop of shipment.stops || []) {
       try {
@@ -341,7 +357,7 @@ export const importLoadFromShipment = internalMutation({
 
     // Create invoice with DRAFT status (lane matched)
     // Store contract lane reference - amounts will be calculated dynamically
-    await ctx.db.insert("loadInvoices", {
+    const draftInvoiceId = await ctx.db.insert("loadInvoices", {
       loadId,
       customerId: contractLane.customerCompanyId,
       contractLaneId: contractLane._id, // Reference for dynamic calculation
@@ -353,6 +369,9 @@ export const importLoadFromShipment = internalMutation({
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+
+    // Seed the search haystack (order # + customer; no number until billed).
+    await refreshInvoiceSearchText(ctx, draftInvoiceId);
 
     // ✅ Update organization stats for invoice creation
     await updateInvoiceCount(ctx, workosOrgId, undefined, "DRAFT");
@@ -486,6 +505,9 @@ export const importUnmappedLoad = internalMutation({
     // ✅ Update organization stats for unmapped load creation
     await updateLoadCount(ctx, workosOrgId, undefined, "Open");
 
+    // ✅ Platform billing: every load written into the system is billable
+    await recordLoadWritten(ctx, workosOrgId, Date.now());
+
     const internalId = buildLoadInternalId(shipment);
     for (const stop of shipment.stops || []) {
       try {
@@ -526,7 +548,7 @@ export const importUnmappedLoad = internalMutation({
 
     // Create invoice with MISSING_DATA status (no lane match)
     // No contractLaneId - amounts will be $0 when calculated
-    await ctx.db.insert("loadInvoices", {
+    const missingInvoiceId = await ctx.db.insert("loadInvoices", {
       loadId,
       customerId,
       contractLaneId: undefined, // No contract lane
@@ -539,6 +561,9 @@ export const importUnmappedLoad = internalMutation({
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+
+    // Seed the search haystack (order # + customer; no number until billed).
+    await refreshInvoiceSearchText(ctx, missingInvoiceId);
 
     // ✅ Update organization stats for unmapped invoice creation
     await updateInvoiceCount(ctx, workosOrgId, undefined, "MISSING_DATA");

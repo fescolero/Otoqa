@@ -11,6 +11,7 @@ import {
   useMap,
 } from '@vis.gl/react-google-maps';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -211,6 +212,8 @@ export function HelicopterView({
   onDriverSelect,
 }: HelicopterViewProps) {
   const apiKey = useGoogleMapsKey();
+  const mapId = useThemedMapId();
+  const colorScheme = useMapColorScheme();
   const [selectedDriverId, setSelectedDriverId] = useState<Id<'drivers'> | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -308,7 +311,8 @@ export function HelicopterView({
         <Map
           defaultCenter={center}
           defaultZoom={5}
-          mapId="helicopter-view-map"
+          mapId={mapId}
+          colorScheme={colorScheme}
           gestureHandling="greedy"
           disableDefaultUI={false}
           zoomControl={true}

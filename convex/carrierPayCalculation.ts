@@ -362,23 +362,25 @@ export const calculateCarrierPay = internalMutation({
       invoiceTotal = invoice.totalAmount;
     }
 
-    // 6. Delete existing SYSTEM payables for this leg (that are NOT locked)
-    const existingPayables = await ctx.db
+    // 6. Replace SYSTEM lines for this leg — locked reviewer edits win over
+    //    recalc (never deleted or duplicated); indexed by ruleId so step 7
+    //    skips re-inserting and flags rules drift instead.
+    const allLegPayables = await ctx.db
       .query('loadCarrierPayables')
       .withIndex('by_leg', (q) => q.eq('legId', args.legId))
-      .filter((q) => 
-        q.and(
-          q.eq(q.field('sourceType'), 'SYSTEM'),
-          q.eq(q.field('isLocked'), false)
-        )
-      )
+      .filter((q) => q.eq(q.field('sourceType'), 'SYSTEM'))
       .collect();
 
-    for (const payable of existingPayables) {
-      await ctx.db.delete(payable._id);
+    const lockedByRule = new Map<string, Doc<'loadCarrierPayables'>>();
+    for (const p of allLegPayables) {
+      if (p.isLocked) {
+        if (p.ruleId) lockedByRule.set(p.ruleId as string, p);
+      } else {
+        await ctx.db.delete(p._id);
+      }
     }
 
-    // 7. Evaluate each rule and insert payables
+    // 7. Evaluate each rule and insert payables (or flag drift on a locked edit)
     let totalPay = 0;
     const warnings: string[] = [];
 
@@ -387,6 +389,24 @@ export const calculateCarrierPay = internalMutation({
 
       if (warning) {
         warnings.push(warning);
+      }
+
+      // Drift = rules now differ from the SYSTEM value captured at edit time
+      // (originalTotalAmount), i.e. a real rule change since the edit — not the
+      // override merely disagreeing with the rule. See driverPayCalculation.
+      const locked = lockedByRule.get(rule._id as string);
+      if (locked) {
+        const fresh = amount > 0 ? +amount.toFixed(2) : 0;
+        const baseline = locked.originalTotalAmount ?? locked.totalAmount;
+        if (Math.abs(fresh - baseline) > 0.005) {
+          if (locked.rulesAmount !== fresh || locked.rulesChangedAt == null) {
+            await ctx.db.patch(locked._id, { rulesAmount: fresh, rulesChangedAt: now, updatedAt: now });
+          }
+        } else if (locked.rulesChangedAt != null) {
+          await ctx.db.patch(locked._id, { rulesAmount: undefined, rulesChangedAt: undefined, updatedAt: now });
+        }
+        totalPay += locked.totalAmount;
+        continue;
       }
 
       // Only insert if amount > 0
@@ -400,6 +420,7 @@ export const calculateCarrierPay = internalMutation({
           rate: rule.rateAmount,
           totalAmount: amount,
           sourceType: 'SYSTEM',
+          category: rule.category === 'DEDUCTION' ? 'DEDUCTION' : 'EARNING',
           isLocked: false,
           ruleId: rule._id,
           warningMessage: warning ?? undefined,
@@ -439,6 +460,24 @@ export const calculateCarrierPay = internalMutation({
     if (leg.sequence === 1 && load.primaryCarrierPartnershipId !== carrierPartnershipId) {
       await ctx.db.patch(leg.loadId, { primaryCarrierPartnershipId: carrierPartnershipId });
     }
+
+    // 10. Cascade to the new pay engine — mirrors the driver cascade in
+    //     driverPayCalculation.calculateDriverPay. Scheduled (not awaited)
+    //     so a missing carrier payProfileAssignment on the new engine
+    //     can't break legacy carrier pay.
+    //
+    //     Latest-wins coalesce: see schema.ts:dispatchLegs.latestRecalcRequestedAt.
+    //     Patching this BEFORE scheduling guarantees that if driver pay
+    //     cascade fires concurrently for the same leg, only the
+    //     latest-requested calc actually does work; the older job exits
+    //     early in calculatePayForLeg.
+    const recalcRequestedAt = Date.now();
+    await ctx.db.patch(args.legId, { latestRecalcRequestedAt: recalcRequestedAt });
+    await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForLeg.calculatePayForLeg, {
+      legId: args.legId,
+      userId: args.userId,
+      requestedAt: recalcRequestedAt,
+    });
 
     return {
       success: true,

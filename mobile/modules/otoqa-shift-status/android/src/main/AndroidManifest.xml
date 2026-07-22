@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    POST_NOTIFICATIONS is declared by the host app (app.json android.permissions)
+    and requested at runtime by the app's permission flow. This manifest is
+    intentionally empty — the module adds no permissions on its own, same
+    convention as otoqa-motion.
+  -->
+</manifest>

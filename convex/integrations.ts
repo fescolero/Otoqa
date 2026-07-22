@@ -249,6 +249,21 @@ export const deleteIntegration = mutation({
       throw new Error('Integration not found');
     }
 
+    // Samsara has a companion `samsaraSyncState` row (one per integration).
+    // If we delete the integration without cleaning the sync state, the next
+    // re-connect would orphan a stale state row with a stale cursor — and
+    // the cron's drift-fix logic would log "missing companion samsaraSyncState
+    // row" forever. Delete both atomically.
+    if (args.provider === 'samsara') {
+      const syncState = await ctx.db
+        .query('samsaraSyncState')
+        .withIndex('by_integration', (q) => q.eq('integrationId', integration._id))
+        .first();
+      if (syncState) {
+        await ctx.db.delete(syncState._id);
+      }
+    }
+
     await ctx.db.delete(integration._id);
 
     // No changesBefore snapshot: the integration doc contains raw credentials.

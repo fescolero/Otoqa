@@ -59,216 +59,250 @@ function getDayOfWeekNumber(
   return dayMap[day];
 }
 
-/**
- * Calculate the most recent period start for WEEKLY frequency
- */
-function calculateWeeklyPeriodStart(
-  referenceDate: Date,
-  startDayOfWeek: number,
-  timezone: string
-): Date {
-  const date = new Date(referenceDate);
-  const currentDay = date.getDay();
-  const daysToSubtract = (currentDay - startDayOfWeek + 7) % 7;
-  date.setDate(date.getDate() - daysToSubtract);
-  date.setHours(0, 0, 0, 0);
-  return date;
+// ── timezone-aware calendar math ────────────────────────────────────────────
+//
+// Period boundaries are "midnight on day X in the plan's timezone" (plan
+// override > org default > America/New_York) — NOT server-UTC midnights,
+// which read a day off for anyone west of Greenwich. All calendar arithmetic
+// happens in WALL-CLOCK space: a "wall" Date carries the tz-local calendar
+// values in its UTC fields, so getUTCDay/setUTCDate do calendar math free of
+// the server's own timezone. Conversions happen only at the edges:
+// instant → wall ("what day is it there?") and wall midnight → instant
+// ("when is midnight there?").
+
+const dtfCache = new Map<string, Intl.DateTimeFormat>();
+function tzFormatter(timeZone: string): Intl.DateTimeFormat {
+  let f = dtfCache.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    dtfCache.set(timeZone, f);
+  }
+  return f;
+}
+
+/** Wall-clock components of an instant in `timeZone`, as a UTC-field Date. */
+function wallFromInstant(ms: number, timeZone: string): Date {
+  try {
+    const parts: Record<string, string> = {};
+    for (const p of tzFormatter(timeZone).formatToParts(new Date(ms))) {
+      if (p.type !== 'literal') parts[p.type] = p.value;
+    }
+    return new Date(Date.UTC(
+      +parts.year, +parts.month - 1, +parts.day,
+      +parts.hour === 24 ? 0 : +parts.hour, +parts.minute, +parts.second,
+    ));
+  } catch {
+    // Unknown/unsupported zone — fall back to UTC wall clock.
+    return new Date(ms);
+  }
+}
+
+/** Instant (UTC ms) of the wall-clock time in `wall`'s UTC fields,
+ *  interpreted in `timeZone`. Second pass corrects across DST edges. */
+function instantFromWall(wall: Date, timeZone: string): number {
+  const wallMs = wall.getTime();
+  let guess = wallMs;
+  for (let i = 0; i < 2; i++) {
+    const offset = wallFromInstant(guess, timeZone).getTime() - guess;
+    guess = wallMs - offset;
+  }
+  return guess;
+}
+
+/** Parse a "YYYY-MM-DD" anchor into a wall-clock midnight, or null. */
+function parseAnchorDate(anchor: string | undefined): Date | null {
+  if (!anchor) return null;
+  const m = anchor.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+}
+
+/** Weekday name from an anchor date — lets BIWEEKLY derive its start day. */
+const DOW_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'] as const;
+function dayOfWeekFromAnchor(anchor: string): (typeof DOW_NAMES)[number] | null {
+  const d = parseAnchorDate(anchor);
+  return d ? DOW_NAMES[d.getUTCDay()] : null;
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** Most recent WEEKLY period start (wall space). */
+function weeklyWallStart(wallRef: Date, startDayOfWeek: number): Date {
+  const d = new Date(wallRef);
+  const daysToSubtract = (d.getUTCDay() - startDayOfWeek + 7) % 7;
+  d.setUTCDate(d.getUTCDate() - daysToSubtract);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
 }
 
 /**
- * Calculate the most recent period start for BIWEEKLY frequency
- * Uses a reference anchor date to maintain consistent 2-week intervals
+ * Most recent BIWEEKLY period start (wall space).
+ *
+ * With an explicit anchor ("first period starts" date) every 14-day cycle
+ * counts forward from it — this is what lets an org control which week is
+ * the "on" week; references before the anchor resolve to the anchor itself.
+ * Without one, falls back to the legacy fixed anchor (Jan 1, 2024, adjusted
+ * to the configured weekday) so pre-existing plans keep their boundaries.
  */
-function calculateBiweeklyPeriodStart(
-  referenceDate: Date,
-  startDayOfWeek: number,
-  timezone: string
-): Date {
-  // Use a fixed anchor date (Jan 1, 2024 was a Monday)
-  const anchorDate = new Date('2024-01-01T00:00:00');
-  const anchorDayOfWeek = anchorDate.getDay();
-
-  // Adjust anchor to the configured start day
-  const daysToAdjust = (startDayOfWeek - anchorDayOfWeek + 7) % 7;
-  anchorDate.setDate(anchorDate.getDate() + daysToAdjust);
-
-  // Calculate weeks since anchor
-  const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-  const weeksSinceAnchor = Math.floor((referenceDate.getTime() - anchorDate.getTime()) / msPerWeek);
-
-  // Round down to nearest even number of weeks (bi-weekly)
-  const biweeklyPeriods = Math.floor(weeksSinceAnchor / 2);
-
-  const periodStart = new Date(anchorDate);
-  periodStart.setDate(periodStart.getDate() + biweeklyPeriods * 14);
-  periodStart.setHours(0, 0, 0, 0);
-
-  return periodStart;
-}
-
-/**
- * Calculate the period start for SEMIMONTHLY frequency
- * Fixed: 1st-15th and 16th-end of month
- */
-function calculateSemimonthlyPeriodStart(referenceDate: Date): Date {
-  const date = new Date(referenceDate);
-  const dayOfMonth = date.getDate();
-
-  if (dayOfMonth <= 15) {
-    // First half: 1st of current month
-    date.setDate(1);
+function biweeklyWallStart(wallRef: Date, startDayOfWeek: number, biweeklyAnchor?: string): Date {
+  const explicit = parseAnchorDate(biweeklyAnchor);
+  let anchor: Date;
+  if (explicit) {
+    anchor = explicit;
   } else {
-    // Second half: 16th of current month
-    date.setDate(16);
+    anchor = new Date(Date.UTC(2024, 0, 1)); // a Monday
+    const adj = (startDayOfWeek - anchor.getUTCDay() + 7) % 7;
+    anchor.setUTCDate(anchor.getUTCDate() + adj);
   }
-
-  date.setHours(0, 0, 0, 0);
-  return date;
+  const ref = new Date(wallRef);
+  ref.setUTCHours(0, 0, 0, 0);
+  const daysSince = Math.floor((ref.getTime() - anchor.getTime()) / MS_PER_DAY);
+  const cycles = Math.max(0, Math.floor(daysSince / 14));
+  const d = new Date(anchor);
+  d.setUTCDate(d.getUTCDate() + cycles * 14);
+  return d;
 }
 
-/**
- * Calculate the period start for MONTHLY frequency
- */
-function calculateMonthlyPeriodStart(
-  referenceDate: Date,
-  startDayOfMonth: number
-): Date {
-  const date = new Date(referenceDate);
-  const currentDay = date.getDate();
-
-  // Clamp to valid day (handle months with fewer days)
-  const lastDayOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  const effectiveStartDay = Math.min(startDayOfMonth, lastDayOfMonth);
-
-  if (currentDay < effectiveStartDay) {
-    // Go to previous month
-    date.setMonth(date.getMonth() - 1);
-  }
-
-  // Set to the start day
-  const lastDayOfTargetMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-  date.setDate(Math.min(startDayOfMonth, lastDayOfTargetMonth));
-  date.setHours(0, 0, 0, 0);
-
-  return date;
+/** SEMIMONTHLY period start (wall space) — fixed 1st / 16th. */
+function semimonthlyWallStart(wallRef: Date): Date {
+  const d = new Date(wallRef);
+  d.setUTCDate(d.getUTCDate() <= 15 ? 1 : 16);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
 }
 
-/**
- * Calculate period end based on frequency and start
- */
-function calculatePeriodEnd(
-  periodStart: Date,
+/** MONTHLY period start (wall space), clamped to short months. */
+function monthlyWallStart(wallRef: Date, startDayOfMonth: number): Date {
+  const d = new Date(wallRef);
+  const lastDayOfMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  if (d.getUTCDate() < Math.min(startDayOfMonth, lastDayOfMonth)) {
+    d.setUTCDate(1); // avoid month-length rollover surprises
+    d.setUTCMonth(d.getUTCMonth() - 1);
+  }
+  const lastDayOfTargetMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(startDayOfMonth, lastDayOfTargetMonth));
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+/** EXCLUSIVE period end (= next period's start) in wall space. */
+function wallPeriodEndExclusive(
+  wallStart: Date,
   frequency: 'WEEKLY' | 'BIWEEKLY' | 'SEMIMONTHLY' | 'MONTHLY',
-  startDayOfMonth?: number
 ): Date {
-  const endDate = new Date(periodStart);
-
+  const d = new Date(wallStart);
   switch (frequency) {
     case 'WEEKLY':
-      endDate.setDate(endDate.getDate() + 7);
+      d.setUTCDate(d.getUTCDate() + 7);
       break;
     case 'BIWEEKLY':
-      endDate.setDate(endDate.getDate() + 14);
+      d.setUTCDate(d.getUTCDate() + 14);
       break;
     case 'SEMIMONTHLY':
-      if (periodStart.getDate() === 1) {
-        // First half ends on 15th
-        endDate.setDate(16);
+      if (wallStart.getUTCDate() === 1) {
+        d.setUTCDate(16);
       } else {
-        // Second half ends on 1st of next month
-        endDate.setMonth(endDate.getMonth() + 1);
-        endDate.setDate(1);
+        d.setUTCDate(1);
+        d.setUTCMonth(d.getUTCMonth() + 1);
       }
       break;
     case 'MONTHLY':
-      endDate.setMonth(endDate.getMonth() + 1);
+      d.setUTCMonth(d.getUTCMonth() + 1);
       break;
   }
-
-  // Subtract 1ms to get 23:59:59.999 of the previous day
-  endDate.setTime(endDate.getTime() - 1);
-  return endDate;
+  return d;
 }
 
 /**
- * Calculate the pay date based on period end and lag days
- */
-function calculatePayDate(periodEnd: Date, paymentLagDays: number): Date {
-  const payDate = new Date(periodEnd);
-  payDate.setDate(payDate.getDate() + paymentLagDays + 1); // +1 because period end is 23:59:59
-  payDate.setHours(0, 0, 0, 0);
-  return payDate;
-}
-
-/**
- * Calculate current period for a pay plan
+ * Calculate the current period for a pay plan. Boundaries land at midnight
+ * in `timezone` (defaults to the plan's own override, then America/New_York
+ * — callers with ctx should pass the org-resolved zone).
  */
 export function calculateCurrentPeriod(
   plan: Doc<'payPlans'>,
-  referenceDate: Date = new Date()
+  referenceDate: Date = new Date(),
+  timezone?: string,
 ): { periodStart: Date; periodEnd: Date; payDate: Date } {
-  let periodStart: Date;
+  const tz = timezone ?? plan.timezone ?? 'America/New_York';
+  const wallRef = wallFromInstant(referenceDate.getTime(), tz);
 
+  let wallStart: Date;
   switch (plan.frequency) {
     case 'WEEKLY':
       if (!plan.periodStartDayOfWeek) {
         throw new Error('WEEKLY frequency requires periodStartDayOfWeek');
       }
-      periodStart = calculateWeeklyPeriodStart(
-        referenceDate,
-        getDayOfWeekNumber(plan.periodStartDayOfWeek),
-        plan.timezone || 'America/New_York'
-      );
+      wallStart = weeklyWallStart(wallRef, getDayOfWeekNumber(plan.periodStartDayOfWeek));
       break;
     case 'BIWEEKLY':
-      if (!plan.periodStartDayOfWeek) {
-        throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek');
+      if (!plan.periodStartDayOfWeek && !plan.biweeklyAnchor) {
+        throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek or biweeklyAnchor');
       }
-      periodStart = calculateBiweeklyPeriodStart(
-        referenceDate,
-        getDayOfWeekNumber(plan.periodStartDayOfWeek),
-        plan.timezone || 'America/New_York'
+      wallStart = biweeklyWallStart(
+        wallRef,
+        plan.periodStartDayOfWeek ? getDayOfWeekNumber(plan.periodStartDayOfWeek) : 0,
+        plan.biweeklyAnchor,
       );
       break;
     case 'SEMIMONTHLY':
-      periodStart = calculateSemimonthlyPeriodStart(referenceDate);
+      wallStart = semimonthlyWallStart(wallRef);
       break;
     case 'MONTHLY':
-      periodStart = calculateMonthlyPeriodStart(
-        referenceDate,
-        plan.periodStartDayOfMonth || 1
-      );
+      wallStart = monthlyWallStart(wallRef, plan.periodStartDayOfMonth || 1);
       break;
     default:
       throw new Error(`Unknown frequency: ${plan.frequency}`);
   }
 
-  const periodEnd = calculatePeriodEnd(periodStart, plan.frequency, plan.periodStartDayOfMonth);
-  const payDate = calculatePayDate(periodEnd, plan.paymentLagDays);
+  const wallEndExclusive = wallPeriodEndExclusive(wallStart, plan.frequency);
+  const wallPay = new Date(wallEndExclusive);
+  wallPay.setUTCDate(wallPay.getUTCDate() + plan.paymentLagDays);
 
-  return { periodStart, periodEnd, payDate };
+  return {
+    periodStart: new Date(instantFromWall(wallStart, tz)),
+    // 23:59:59.999 local on the period's last day.
+    periodEnd: new Date(instantFromWall(wallEndExclusive, tz) - 1),
+    payDate: new Date(instantFromWall(wallPay, tz)),
+  };
 }
 
 /**
- * Calculate next N periods for preview
+ * Instant of `cutoffTime` (HH:MM) on the period's LAST day, in `timezone`.
+ * Used by settlement generation to decide whether boundary-hour work still
+ * belongs to the closing period.
+ */
+export function cutoffInstant(periodEndMs: number, cutoffTime: string, timezone: string): number {
+  const wall = wallFromInstant(periodEndMs, timezone); // last day, 23:59:59.999 wall clock
+  const [h, m] = cutoffTime.split(':').map(Number);
+  wall.setUTCHours(h || 0, m || 0, 0, 0);
+  return instantFromWall(wall, timezone);
+}
+
+/**
+ * Calculate next N periods for preview.
  */
 export function calculateNextPeriods(
   plan: Doc<'payPlans'>,
-  count: number = 3
+  count: number = 3,
+  timezone?: string,
 ): Array<{ periodStart: Date; periodEnd: Date; payDate: Date; label: string }> {
+  const tz = timezone ?? plan.timezone ?? 'America/New_York';
   const periods: Array<{ periodStart: Date; periodEnd: Date; payDate: Date; label: string }> = [];
   let referenceDate = new Date();
 
   for (let i = 0; i < count; i++) {
-    const period = calculateCurrentPeriod(plan, referenceDate);
+    const period = calculateCurrentPeriod(plan, referenceDate, tz);
 
-    const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const formatDate = (d: Date) =>
+      d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tz });
     const label = `${formatDate(period.periodStart)} - ${formatDate(period.periodEnd)}`;
 
-    periods.push({
-      ...period,
-      label,
-    });
+    periods.push({ ...period, label });
 
     // Move reference to after this period for next iteration
     referenceDate = new Date(period.periodEnd.getTime() + 1);
@@ -276,6 +310,51 @@ export function calculateNextPeriods(
 
   return periods;
 }
+
+// Doc-shaped return fields for queries that spread a payPlans document
+// (list / get). ONE source of truth — when a field is added to the payPlans
+// schema, add it here once and every doc-spreading validator picks it up;
+// hand-duplicated copies drifted from the schema before (currency /
+// amendmentPolicy were saved by mutations but rejected by the validators).
+const PAY_PLAN_DOC_FIELDS = {
+  workosOrgId: v.string(),
+  name: v.string(),
+  description: v.optional(v.string()),
+  frequency: v.union(
+    v.literal('WEEKLY'),
+    v.literal('BIWEEKLY'),
+    v.literal('SEMIMONTHLY'),
+    v.literal('MONTHLY')
+  ),
+  periodStartDayOfWeek: v.optional(v.union(
+    v.literal('SUNDAY'), v.literal('MONDAY'), v.literal('TUESDAY'),
+    v.literal('WEDNESDAY'), v.literal('THURSDAY'), v.literal('FRIDAY'),
+    v.literal('SATURDAY')
+  )),
+  periodStartDayOfMonth: v.optional(v.number()),
+  biweeklyAnchor: v.optional(v.string()),
+  timezone: v.optional(v.string()),
+  cutoffTime: v.string(),
+  paymentLagDays: v.number(),
+  payableTrigger: v.union(
+    v.literal('DELIVERY_DATE'),
+    v.literal('COMPLETION_DATE'),
+    v.literal('APPROVAL_DATE')
+  ),
+  autoCarryover: v.boolean(),
+  includeStandaloneAdjustments: v.boolean(),
+  currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+  amendmentPolicy: v.optional(v.union(
+    v.literal('REJECT_LATE_CHANGES'),
+    v.literal('CASCADE_TO_NEXT'),
+    v.literal('REOPEN_ALLOWED'),
+  )),
+  isActive: v.boolean(),
+  isDefault: v.optional(v.boolean()),
+  createdAt: v.float64(),
+  createdBy: v.string(),
+  updatedAt: v.optional(v.float64()),
+};
 
 // ============================================
 // QUERIES
@@ -293,35 +372,7 @@ export const list = query({
     v.object({
       _id: v.id('payPlans'),
       _creationTime: v.number(),
-      workosOrgId: v.string(),
-      name: v.string(),
-      description: v.optional(v.string()),
-      frequency: v.union(
-        v.literal('WEEKLY'),
-        v.literal('BIWEEKLY'),
-        v.literal('SEMIMONTHLY'),
-        v.literal('MONTHLY')
-      ),
-      periodStartDayOfWeek: v.optional(v.union(
-        v.literal('SUNDAY'), v.literal('MONDAY'), v.literal('TUESDAY'),
-        v.literal('WEDNESDAY'), v.literal('THURSDAY'), v.literal('FRIDAY'),
-        v.literal('SATURDAY')
-      )),
-      periodStartDayOfMonth: v.optional(v.number()),
-      timezone: v.optional(v.string()),
-      cutoffTime: v.string(),
-      paymentLagDays: v.number(),
-      payableTrigger: v.union(
-        v.literal('DELIVERY_DATE'),
-        v.literal('COMPLETION_DATE'),
-        v.literal('APPROVAL_DATE')
-      ),
-      autoCarryover: v.boolean(),
-      includeStandaloneAdjustments: v.boolean(),
-      isActive: v.boolean(),
-      createdAt: v.float64(),
-      createdBy: v.string(),
-      updatedAt: v.optional(v.float64()),
+      ...PAY_PLAN_DOC_FIELDS,
       driverCount: v.number(),
     })
   ),
@@ -349,9 +400,9 @@ export const list = query({
       plans.map(async (plan) => {
         const drivers = await ctx.db
           .query('drivers')
+          .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
           .filter((q) =>
             q.and(
-              q.eq(q.field('organizationId'), args.workosOrgId),
               q.eq(q.field('payPlanId'), plan._id),
               // isDeleted is optional, so check for both false and undefined
               q.neq(q.field('isDeleted'), true)
@@ -384,35 +435,7 @@ export const get = query({
     v.object({
       _id: v.id('payPlans'),
       _creationTime: v.number(),
-      workosOrgId: v.string(),
-      name: v.string(),
-      description: v.optional(v.string()),
-      frequency: v.union(
-        v.literal('WEEKLY'),
-        v.literal('BIWEEKLY'),
-        v.literal('SEMIMONTHLY'),
-        v.literal('MONTHLY')
-      ),
-      periodStartDayOfWeek: v.optional(v.union(
-        v.literal('SUNDAY'), v.literal('MONDAY'), v.literal('TUESDAY'),
-        v.literal('WEDNESDAY'), v.literal('THURSDAY'), v.literal('FRIDAY'),
-        v.literal('SATURDAY')
-      )),
-      periodStartDayOfMonth: v.optional(v.number()),
-      timezone: v.optional(v.string()),
-      cutoffTime: v.string(),
-      paymentLagDays: v.number(),
-      payableTrigger: v.union(
-        v.literal('DELIVERY_DATE'),
-        v.literal('COMPLETION_DATE'),
-        v.literal('APPROVAL_DATE')
-      ),
-      autoCarryover: v.boolean(),
-      includeStandaloneAdjustments: v.boolean(),
-      isActive: v.boolean(),
-      createdAt: v.float64(),
-      createdBy: v.string(),
-      updatedAt: v.optional(v.float64()),
+      ...PAY_PLAN_DOC_FIELDS,
       resolvedTimezone: v.string(),
       currentPeriod: v.object({
         periodStart: v.float64(),
@@ -438,8 +461,8 @@ export const get = query({
     if (plan.workosOrgId !== callerOrgId) return null;
 
     const resolvedTimezone = await resolveTimezone(ctx, plan);
-    const currentPeriod = calculateCurrentPeriod(plan);
-    const nextPeriods = calculateNextPeriods(plan, 3);
+    const currentPeriod = calculateCurrentPeriod(plan, new Date(), resolvedTimezone);
+    const nextPeriods = calculateNextPeriods(plan, 3, resolvedTimezone);
 
     return {
       ...plan,
@@ -495,7 +518,7 @@ export const getForDriver = query({
     const plan = await ctx.db.get(driver.payPlanId);
     if (!plan) return null;
 
-    const currentPeriod = calculateCurrentPeriod(plan);
+    const currentPeriod = calculateCurrentPeriod(plan, new Date(), await resolveTimezone(ctx, plan));
 
     return {
       _id: plan._id,
@@ -543,7 +566,7 @@ export const getCurrentPeriodForPlan = query({
     if (!plan || !plan.isActive) return null;
     if (plan.workosOrgId !== callerOrgId) return null;
 
-    const currentPeriod = calculateCurrentPeriod(plan);
+    const currentPeriod = calculateCurrentPeriod(plan, new Date(), await resolveTimezone(ctx, plan));
 
     // Calculate period number (periods since start of year)
     const yearStart = new Date(currentPeriod.periodStart.getFullYear(), 0, 1);
@@ -610,9 +633,9 @@ export const getDriversForPlan = query({
 
     const drivers = await ctx.db
       .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
       .filter((q) =>
         q.and(
-          q.eq(q.field('organizationId'), args.workosOrgId),
           q.eq(q.field('payPlanId'), args.planId),
           // isDeleted is optional, so check for NOT true (includes undefined and false)
           q.neq(q.field('isDeleted'), true)
@@ -649,78 +672,57 @@ export const previewPeriods = query({
       v.literal('SATURDAY')
     )),
     periodStartDayOfMonth: v.optional(v.number()),
+    biweeklyAnchor: v.optional(v.string()),
     paymentLagDays: v.number(),
+    // Plan-level timezone override being edited; org default when absent.
+    timezone: v.optional(v.string()),
   },
-  returns: v.array(
-    v.object({
-      periodStart: v.float64(),
-      periodEnd: v.float64(),
-      payDate: v.float64(),
-      label: v.string(),
-    })
-  ),
+  returns: v.object({
+    // The zone the boundaries were computed in — the client formats dates in
+    // this same zone so what the user picks is what they read back.
+    timezone: v.string(),
+    periods: v.array(
+      v.object({
+        periodStart: v.float64(),
+        periodEnd: v.float64(),
+        payDate: v.float64(),
+        label: v.string(),
+      })
+    ),
+  }),
   handler: async (ctx, args) => {
-    await requireCallerOrgId(ctx);
+    const callerOrgId = await requireCallerOrgId(ctx);
 
-    // Calculate periods directly without creating a full Doc object
-    const periods: Array<{ periodStart: Date; periodEnd: Date; payDate: Date; label: string }> = [];
-    let referenceDate = new Date();
-
-    for (let i = 0; i < 3; i++) {
-      let periodStart: Date;
-
-      switch (args.frequency) {
-        case 'WEEKLY':
-          if (!args.periodStartDayOfWeek) {
-            throw new Error('WEEKLY frequency requires periodStartDayOfWeek');
-          }
-          periodStart = calculateWeeklyPeriodStart(
-            referenceDate,
-            getDayOfWeekNumber(args.periodStartDayOfWeek),
-            'America/New_York'
-          );
-          break;
-        case 'BIWEEKLY':
-          if (!args.periodStartDayOfWeek) {
-            throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek');
-          }
-          periodStart = calculateBiweeklyPeriodStart(
-            referenceDate,
-            getDayOfWeekNumber(args.periodStartDayOfWeek),
-            'America/New_York'
-          );
-          break;
-        case 'SEMIMONTHLY':
-          periodStart = calculateSemimonthlyPeriodStart(referenceDate);
-          break;
-        case 'MONTHLY':
-          periodStart = calculateMonthlyPeriodStart(
-            referenceDate,
-            args.periodStartDayOfMonth || 1
-          );
-          break;
-        default:
-          throw new Error(`Unknown frequency: ${args.frequency}`);
-      }
-
-      const periodEnd = calculatePeriodEnd(periodStart, args.frequency, args.periodStartDayOfMonth);
-      const payDate = calculatePayDate(periodEnd, args.paymentLagDays);
-
-      const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      const label = `${formatDate(periodStart)} - ${formatDate(periodEnd)}`;
-
-      periods.push({ periodStart, periodEnd, payDate, label });
-
-      // Move reference to after this period for next iteration
-      referenceDate = new Date(periodEnd.getTime() + 1);
+    // Resolve like a saved plan would: override > org default > system default.
+    let timezone = args.timezone;
+    if (!timezone) {
+      const org = await ctx.db
+        .query('organizations')
+        .withIndex('by_organization', (q) => q.eq('workosOrgId', callerOrgId))
+        .first();
+      timezone = org?.defaultTimezone || 'America/New_York';
     }
 
-    return periods.map((p) => ({
-      periodStart: p.periodStart.getTime(),
-      periodEnd: p.periodEnd.getTime(),
-      payDate: p.payDate.getTime(),
-      label: p.label,
-    }));
+    // Draft plan shape — same math as saved plans, no doc required.
+    const draftPlan = {
+      frequency: args.frequency,
+      periodStartDayOfWeek: args.periodStartDayOfWeek,
+      periodStartDayOfMonth: args.periodStartDayOfMonth,
+      biweeklyAnchor: args.biweeklyAnchor,
+      paymentLagDays: args.paymentLagDays,
+      timezone,
+    } as Doc<'payPlans'>;
+
+    const periods = calculateNextPeriods(draftPlan, 3, timezone);
+    return {
+      timezone,
+      periods: periods.map((p) => ({
+        periodStart: p.periodStart.getTime(),
+        periodEnd: p.periodEnd.getTime(),
+        payDate: p.payDate.getTime(),
+        label: p.label,
+      })),
+    };
   },
 });
 
@@ -758,14 +760,32 @@ export const create = mutation({
     ),
     autoCarryover: v.boolean(),
     includeStandaloneAdjustments: v.boolean(),
+    biweeklyAnchor: v.optional(v.string()),
+    currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+    amendmentPolicy: v.optional(v.union(
+      v.literal('REJECT_LATE_CHANGES'),
+      v.literal('CASCADE_TO_NEXT'),
+      v.literal('REOPEN_ALLOWED'),
+    )),
+    isDefault: v.optional(v.boolean()),
     userId: v.string(),
   },
   returns: v.id('payPlans'),
   handler: async (ctx, args) => {
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
+    // BIWEEKLY can derive its weekday from the anchor date; the anchor is the
+    // authoritative control for which week is the "on" week.
+    let periodStartDayOfWeek = args.periodStartDayOfWeek;
+    if (args.frequency === 'BIWEEKLY' && !periodStartDayOfWeek && args.biweeklyAnchor) {
+      periodStartDayOfWeek = dayOfWeekFromAnchor(args.biweeklyAnchor) ?? undefined;
+    }
+    if (args.biweeklyAnchor && !parseAnchorDate(args.biweeklyAnchor)) {
+      throw new Error('biweeklyAnchor must be a YYYY-MM-DD date');
+    }
+
     // Validate frequency-specific fields
-    if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !args.periodStartDayOfWeek) {
+    if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !periodStartDayOfWeek) {
       throw new Error('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
     }
 
@@ -784,20 +804,35 @@ export const create = mutation({
 
     const now = Date.now();
 
+    // Single default per org: making this plan the default unsets any other.
+    if (args.isDefault) {
+      const siblings = await ctx.db
+        .query('payPlans')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
+        .collect();
+      for (const s of siblings) {
+        if (s.isDefault) await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+      }
+    }
+
     const planId = await ctx.db.insert('payPlans', {
       workosOrgId: args.workosOrgId,
       name: args.name,
       description: args.description,
       frequency: args.frequency,
-      periodStartDayOfWeek: args.periodStartDayOfWeek,
+      periodStartDayOfWeek,
       periodStartDayOfMonth: args.periodStartDayOfMonth,
+      biweeklyAnchor: args.biweeklyAnchor,
       timezone: args.timezone,
       cutoffTime: args.cutoffTime,
       paymentLagDays: args.paymentLagDays,
       payableTrigger: args.payableTrigger,
       autoCarryover: args.autoCarryover,
       includeStandaloneAdjustments: args.includeStandaloneAdjustments,
+      currency: args.currency,
+      amendmentPolicy: args.amendmentPolicy,
       isActive: true,
+      isDefault: args.isDefault,
       createdAt: now,
       createdBy: userId,
     });
@@ -849,6 +884,14 @@ export const update = mutation({
     )),
     autoCarryover: v.optional(v.boolean()),
     includeStandaloneAdjustments: v.optional(v.boolean()),
+    biweeklyAnchor: v.optional(v.string()),
+    currency: v.optional(v.union(v.literal('USD'), v.literal('CAD'), v.literal('MXN'))),
+    amendmentPolicy: v.optional(v.union(
+      v.literal('REJECT_LATE_CHANGES'),
+      v.literal('CASCADE_TO_NEXT'),
+      v.literal('REOPEN_ALLOWED'),
+    )),
+    isDefault: v.optional(v.boolean()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -858,8 +901,9 @@ export const update = mutation({
     if (!plan) throw new Error('Pay plan not found');
     if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
+    const now = Date.now();
     const updates: Partial<Doc<'payPlans'>> = {
-      updatedAt: Date.now(),
+      updatedAt: now,
     };
 
     if (args.name !== undefined) updates.name = args.name;
@@ -867,17 +911,35 @@ export const update = mutation({
     if (args.frequency !== undefined) updates.frequency = args.frequency;
     if (args.periodStartDayOfWeek !== undefined) updates.periodStartDayOfWeek = args.periodStartDayOfWeek;
     if (args.periodStartDayOfMonth !== undefined) updates.periodStartDayOfMonth = args.periodStartDayOfMonth;
+    if (args.biweeklyAnchor !== undefined) updates.biweeklyAnchor = args.biweeklyAnchor;
     if (args.timezone !== undefined) updates.timezone = args.timezone;
     if (args.cutoffTime !== undefined) updates.cutoffTime = args.cutoffTime;
     if (args.paymentLagDays !== undefined) updates.paymentLagDays = args.paymentLagDays;
     if (args.payableTrigger !== undefined) updates.payableTrigger = args.payableTrigger;
     if (args.autoCarryover !== undefined) updates.autoCarryover = args.autoCarryover;
     if (args.includeStandaloneAdjustments !== undefined) updates.includeStandaloneAdjustments = args.includeStandaloneAdjustments;
+    if (args.currency !== undefined) updates.currency = args.currency;
+    if (args.amendmentPolicy !== undefined) updates.amendmentPolicy = args.amendmentPolicy;
+    if (args.isDefault !== undefined) updates.isDefault = args.isDefault;
+
+    if (args.biweeklyAnchor && !parseAnchorDate(args.biweeklyAnchor)) {
+      throw new Error('biweeklyAnchor must be a YYYY-MM-DD date');
+    }
 
     // Validate frequency-specific fields with the final values
     const finalFrequency = args.frequency ?? plan.frequency;
-    const finalDayOfWeek = args.periodStartDayOfWeek ?? plan.periodStartDayOfWeek;
     const finalDayOfMonth = args.periodStartDayOfMonth ?? plan.periodStartDayOfMonth;
+    const finalAnchor = args.biweeklyAnchor ?? plan.biweeklyAnchor;
+    let finalDayOfWeek = args.periodStartDayOfWeek ?? plan.periodStartDayOfWeek;
+
+    // BIWEEKLY keeps its weekday in lockstep with the anchor date.
+    if (finalFrequency === 'BIWEEKLY' && finalAnchor) {
+      const derived = dayOfWeekFromAnchor(finalAnchor);
+      if (derived) {
+        finalDayOfWeek = derived;
+        updates.periodStartDayOfWeek = derived;
+      }
+    }
 
     if ((finalFrequency === 'WEEKLY' || finalFrequency === 'BIWEEKLY') && !finalDayOfWeek) {
       throw new Error('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
@@ -885,6 +947,19 @@ export const update = mutation({
 
     if (finalFrequency === 'MONTHLY' && !finalDayOfMonth) {
       throw new Error('MONTHLY frequency requires periodStartDayOfMonth');
+    }
+
+    // Single default per org: promoting this plan demotes any other default.
+    if (args.isDefault === true && !plan.isDefault) {
+      const siblings = await ctx.db
+        .query('payPlans')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', plan.workosOrgId))
+        .collect();
+      for (const s of siblings) {
+        if (s._id !== plan._id && s.isDefault) {
+          await ctx.db.patch(s._id, { isDefault: false, updatedAt: now });
+        }
+      }
     }
 
     await ctx.db.patch(args.planId, updates);
@@ -925,9 +1000,14 @@ export const archive = mutation({
     if (!plan) throw new Error('Pay plan not found');
     if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
 
+    if (plan.isDefault) {
+      throw new Error('Cannot archive the default pay plan. Set another plan as default first.');
+    }
+
     // Check if any drivers are using this plan
     const driversUsingPlan = await ctx.db
       .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
       .filter((q) => q.eq(q.field('payPlanId'), args.planId))
       .collect();
 
@@ -1132,6 +1212,7 @@ export const getDriversOnPlan = query({
 
     const drivers = await ctx.db
       .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', callerOrgId))
       .filter((q) => q.eq(q.field('payPlanId'), args.planId))
       .collect();
 

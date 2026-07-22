@@ -1,6 +1,15 @@
 import { v } from 'convex/values';
 import { internalQuery } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
+import { parseStopDateTime } from './_helpers/timeUtils';
+
+// Approach window: how far before the leg's pickup appointment partner
+// reads are allowed to surface session pings. Caps the otherwise-unbounded
+// "since session start" window so a driver who started shift hours before
+// pickup doesn't leak unrelated pre-approach pings (other loads, deadhead,
+// yard moves) to a broker querying this load. Tighter than the FourKites
+// 2–4h convention — partners only need to see the truck *arriving*.
+const APPROACH_WINDOW_MS = 30 * 60 * 1000;
 
 // ============================================
 // EXTERNAL TRACKING API - DATA LAYER
@@ -204,6 +213,11 @@ export const getPositions = internalQuery({
     since: v.optional(v.number()),  // epoch ms
     until: v.optional(v.number()),  // epoch ms
     limit: v.optional(v.number()),  // max 500, default 100
+    // Downsample to N-second buckets (pick ping nearest each bucket midpoint).
+    // 0 (default) = no downsampling, return raw device cadence. Capped at 600s
+    // server-side. Re-publishers feeding sub-minute visibility platforms
+    // should leave this at 0.
+    downsampleSeconds: v.optional(v.number()),
   },
   returns: v.object({
     positions: v.array(externalPositionValidator),
@@ -274,25 +288,68 @@ export const getPositions = internalQuery({
         .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
         .collect();
 
-      // 2) Build per-session windows. A leg without sessionId predates the
-      //    Driver Session System and contributes nothing to the session-pings
-      //    branch — its pings are picked up by the load-tagged read below.
+      // 2) Build per-session windows.
+      //    leg.sessionId is stamped on FIRST check-in. Three cases:
+      //      a) leg.sessionId present (post-check-in) — use it directly.
+      //      b) leg.sessionId absent but leg.driverId set (pre-check-in
+      //         on a dispatched load) — fall back to the driver's
+      //         currently-open session so partners see approach pings
+      //         BEFORE the driver taps Check In. The approach-window cap
+      //         below (pickupAppt - APPROACH_WINDOW_MS) prevents any
+      //         leak of unrelated earlier-shift pings.
+      //      c) leg.sessionId absent AND leg.driverId absent — truly
+      //         orphan leg or legacy pre-Phase-1 data; load-tagged read
+      //         below picks up anything historical.
       const sessionWindows: Array<{
         sessionId: Id<'driverSessions'>;
         from: number;
         to: number;
       }> = [];
       for (const leg of legs) {
-        if (!leg.sessionId) continue;
-        const session = await ctx.db.get(leg.sessionId);
+        let session: Doc<'driverSessions'> | null = null;
+
+        if (leg.sessionId) {
+          session = await ctx.db.get(leg.sessionId);
+        } else if (leg.driverId) {
+          // Pre-check-in fallback — find the driver's currently-open
+          // session. by_driver_status index keyed on (driverId, status).
+          session = await ctx.db
+            .query('driverSessions')
+            .withIndex('by_driver_status', (q: any) =>
+              q.eq('driverId', leg.driverId!).eq('status', 'active'),
+            )
+            .first();
+        }
+
         if (!session) continue;
-        // Window: session start/end clipped to the requested [since, until]
-        // range. We want pre-check-in pings, so we open from session.startedAt
-        // — not leg.startedAt — to capture the approach.
-        const from = Math.max(since, session.startedAt);
+
+        // Resolve this leg's pickup appointment. Prefer the denormalized
+        // scheduledStartMs cache; fall back to live read for legacy rows
+        // not yet backfilled (see schema note on dispatchLegs).
+        let pickupAnchorMs: number | null = leg.scheduledStartMs ?? null;
+        if (pickupAnchorMs === null) {
+          const startStop = await ctx.db.get(leg.startStopId);
+          if (startStop) {
+            pickupAnchorMs = parseStopDateTime(
+              startStop.windowBeginDate,
+              startStop.windowBeginTime,
+            );
+          }
+        }
+
+        // Approach-window floor: at most APPROACH_WINDOW_MS before pickup.
+        // No anchor (no scheduledStartMs and unparseable stop window) falls
+        // back to session.startedAt — preserves legacy behavior so partners
+        // don't lose all pings on un-backfilled or detour-only legs.
+        const approachFloor =
+          pickupAnchorMs !== null
+            ? pickupAnchorMs - APPROACH_WINDOW_MS
+            : Number.NEGATIVE_INFINITY;
+
+        const from = Math.max(since, session.startedAt, approachFloor);
         const to = Math.min(effectiveUntil, session.endedAt ?? effectiveUntil);
         if (from > to) continue;
-        sessionWindows.push({ sessionId: leg.sessionId, from, to });
+        sessionWindows.push({ sessionId: session._id, from, to });
       }
 
       // 3) Pull session-scoped pings. .take(5000) per session is a safety
@@ -356,8 +413,14 @@ export const getPositions = internalQuery({
       rawPositions = merged;
     }
 
-    // Downsample to 5-minute intervals
-    const downsampled = downsampleTo5Min(rawPositions);
+    // Optional downsampling. 0 = raw device cadence (default for sub-minute
+    // visibility platforms). Capped at 600s to bound bucket-count blowup on
+    // hostile inputs.
+    const requestedDownsampleSec = args.downsampleSeconds ?? 0;
+    const downsampleMs = Math.max(0, Math.min(requestedDownsampleSec, 600)) * 1000;
+    const downsampled = downsampleMs > 0
+      ? downsampleToInterval(rawPositions, downsampleMs)
+      : rawPositions;
 
     // Paginate
     const page = downsampled.slice(0, maxLimit);
@@ -383,6 +446,96 @@ export const getPositions = internalQuery({
 });
 
 /**
+ * Per-load latest-position resolver, shared by getLatestPosition (single)
+ * and getLatestPositionsForLoads (batched). Pure ctx.db reads — safe to
+ * call N times in parallel from one query.
+ */
+async function resolveLatestPositionForLoad(
+  ctx: { db: any },
+  loadId: string,
+  isSandbox: boolean,
+): Promise<any | null> {
+  let position;
+  if (isSandbox) {
+    position = await ctx.db
+      .query('sandboxPositions')
+      .withIndex('by_load', (q: any) =>
+        q.eq('sandboxLoadId', loadId as Id<'sandboxLoads'>)
+      )
+      .order('desc')
+      .first();
+  } else {
+    const loadIdId = loadId as Id<'loadInformation'>;
+
+    const loadTaggedLatest = await ctx.db
+      .query('driverLocations')
+      .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
+      .order('desc')
+      .first();
+
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
+      .collect();
+
+    const sessionLatestArr = await Promise.all(
+      legs.map(async (leg: any) => {
+        let sessionId: Id<'driverSessions'> | null = leg.sessionId ?? null;
+        if (!sessionId && leg.driverId) {
+          const openSession = await ctx.db
+            .query('driverSessions')
+            .withIndex('by_driver_status', (q: any) =>
+              q.eq('driverId', leg.driverId!).eq('status', 'active'),
+            )
+            .first();
+          sessionId = openSession?._id ?? null;
+        }
+        if (!sessionId) return null;
+
+        let pickupAnchorMs: number | null = leg.scheduledStartMs ?? null;
+        if (pickupAnchorMs === null) {
+          const startStop = await ctx.db.get(leg.startStopId);
+          if (startStop) {
+            pickupAnchorMs = parseStopDateTime(
+              startStop.windowBeginDate,
+              startStop.windowBeginTime,
+            );
+          }
+        }
+        const approachFloor =
+          pickupAnchorMs !== null ? pickupAnchorMs - APPROACH_WINDOW_MS : 0;
+        return ctx.db
+          .query('driverLocations')
+          .withIndex('by_session_time', (q: any) =>
+            q.eq('sessionId', sessionId!).gte('recordedAt', approachFloor),
+          )
+          .order('desc')
+          .first();
+      }),
+    );
+
+    const candidates = [loadTaggedLatest, ...sessionLatestArr].filter(
+      (p): p is NonNullable<typeof p> => p !== null && p !== undefined,
+    );
+    position = candidates.reduce<typeof candidates[number] | undefined>(
+      (best, cur) => (best === undefined || cur.recordedAt > best.recordedAt ? cur : best),
+      undefined,
+    );
+  }
+
+  if (!position) return null;
+
+  return {
+    latitude: round(position.latitude, 6)!,
+    longitude: round(position.longitude, 6)!,
+    speed: round(position.speed, 2),
+    heading: round(position.heading, 2),
+    accuracy: round(position.accuracy, 2),
+    recordedAt: new Date(position.recordedAt).toISOString(),
+  };
+}
+
+/**
  * Get the latest position for a load.
  */
 export const getLatestPosition = internalQuery({
@@ -392,64 +545,43 @@ export const getLatestPosition = internalQuery({
   },
   returns: v.union(externalPositionValidator, v.null()),
   handler: async (ctx, args) => {
-    let position;
-    if (args.isSandbox) {
-      position = await ctx.db
-        .query('sandboxPositions')
-        .withIndex('by_load', (q: any) =>
-          q.eq('sandboxLoadId', args.loadId as Id<'sandboxLoads'>)
-        )
-        .order('desc')
-        .first();
-    } else {
-      // Production path: latest of (load-tagged latest, session-tagged
-      // latest across all legs' sessions). Same union pattern as getPositions
-      // but reduced to a single max — reads at most legCount + 1 candidate
-      // pings rather than the full history.
-      const loadIdId = args.loadId as Id<'loadInformation'>;
+    return resolveLatestPositionForLoad(ctx, args.loadId, args.isSandbox);
+  },
+});
 
-      const loadTaggedLatest = await ctx.db
-        .query('driverLocations')
-        .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
-        .order('desc')
-        .first();
-
-      const legs = await ctx.db
-        .query('dispatchLegs')
-        .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
-        .collect();
-
-      const sessionLatestArr = await Promise.all(
-        legs
-          .filter((leg) => leg.sessionId)
-          .map((leg) =>
-            ctx.db
-              .query('driverLocations')
-              .withIndex('by_session_time', (q: any) => q.eq('sessionId', leg.sessionId!))
-              .order('desc')
-              .first(),
-          ),
-      );
-
-      const candidates = [loadTaggedLatest, ...sessionLatestArr].filter(
-        (p): p is NonNullable<typeof p> => p !== null && p !== undefined,
-      );
-      position = candidates.reduce<typeof candidates[number] | undefined>(
-        (best, cur) => (best === undefined || cur.recordedAt > best.recordedAt ? cur : best),
-        undefined,
-      );
-    }
-
-    if (!position) return null;
-
-    return {
-      latitude: round(position.latitude, 6)!,
-      longitude: round(position.longitude, 6)!,
-      speed: round(position.speed, 2),
-      heading: round(position.heading, 2),
-      accuracy: round(position.accuracy, 2),
-      recordedAt: new Date(position.recordedAt).toISOString(),
-    };
+/**
+ * Batched variant of getLatestPosition — resolves N loads in one query
+ * roundtrip. The caller (notably the FourKites push cron) was previously
+ * doing one ctx.runQuery per load from a Node action, eating ~7ms × N in
+ * Node↔V8 RPC overhead. By moving the iteration inside a single V8 query
+ * we collapse that to one roundtrip; per-load reads happen in parallel
+ * via Promise.all.
+ *
+ * Caller must chunk to keep the per-query read budget bounded (Convex
+ * limit: 16k docs per query). At ~5–10 reads per load, a chunk size of
+ * 200 stays under 2k reads in steady state.
+ */
+export const getLatestPositionsForLoads = internalQuery({
+  args: {
+    loadIds: v.array(v.string()),
+    isSandbox: v.boolean(),
+  },
+  returns: v.array(
+    v.object({
+      loadId: v.string(),
+      position: v.union(externalPositionValidator, v.null()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const positions = await Promise.all(
+      args.loadIds.map((loadId) =>
+        resolveLatestPositionForLoad(ctx, loadId, args.isSandbox),
+      ),
+    );
+    return args.loadIds.map((loadId, i) => ({
+      loadId,
+      position: positions[i],
+    }));
   },
 });
 
@@ -691,10 +823,8 @@ export const listTrackedLoads = internalQuery({
 });
 
 // ============================================
-// 5-MINUTE DOWNSAMPLING
+// DOWNSAMPLING (configurable interval)
 // ============================================
-
-const FIVE_MINUTES_MS = 5 * 60 * 1000;
 
 interface RawPosition {
   latitude: number;
@@ -706,36 +836,35 @@ interface RawPosition {
 }
 
 /**
- * Downsample positions to 5-minute intervals.
- * From each 5-minute window, select the point closest to the window midpoint.
+ * Downsample positions to N-millisecond clock-aligned buckets. From each
+ * bucket, pick the ping nearest the bucket midpoint. Default behavior in
+ * getPositions is *no* downsampling (raw cadence) — this is only invoked
+ * when the partner explicitly requests bucketing.
  */
-function downsampleTo5Min(positions: RawPosition[]): RawPosition[] {
-  if (positions.length === 0) return [];
-
-  // Align windows to clock (e.g., 12:00, 12:05, 12:10)
-  const firstTimestamp = positions[0].recordedAt;
-  const windowStart = Math.floor(firstTimestamp / FIVE_MINUTES_MS) * FIVE_MINUTES_MS;
+function downsampleToInterval(
+  positions: RawPosition[],
+  intervalMs: number,
+): RawPosition[] {
+  if (positions.length === 0 || intervalMs <= 0) return positions;
 
   const buckets = new Map<number, RawPosition[]>();
-
   for (const p of positions) {
-    const bucketKey = Math.floor(p.recordedAt / FIVE_MINUTES_MS) * FIVE_MINUTES_MS;
-    if (!buckets.has(bucketKey)) {
-      buckets.set(bucketKey, []);
+    const bucketKey = Math.floor(p.recordedAt / intervalMs) * intervalMs;
+    let arr = buckets.get(bucketKey);
+    if (!arr) {
+      arr = [];
+      buckets.set(bucketKey, arr);
     }
-    buckets.get(bucketKey)!.push(p);
+    arr.push(p);
   }
 
-  // From each bucket, select point closest to midpoint
   const result: RawPosition[] = [];
   const sortedKeys = Array.from(buckets.keys()).sort((a, b) => a - b);
-
   for (const bucketKey of sortedKeys) {
     const points = buckets.get(bucketKey)!;
-    const midpoint = bucketKey + FIVE_MINUTES_MS / 2;
+    const midpoint = bucketKey + intervalMs / 2;
     let closest = points[0];
     let closestDist = Math.abs(closest.recordedAt - midpoint);
-
     for (let i = 1; i < points.length; i++) {
       const dist = Math.abs(points[i].recordedAt - midpoint);
       if (dist < closestDist) {
@@ -743,9 +872,7 @@ function downsampleTo5Min(positions: RawPosition[]): RawPosition[] {
         closestDist = dist;
       }
     }
-
     result.push(closest);
   }
-
   return result;
 }

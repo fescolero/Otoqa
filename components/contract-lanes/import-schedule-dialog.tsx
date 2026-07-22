@@ -7,6 +7,7 @@ import { Id } from '@/convex/_generated/dataModel';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
+import { chunkArray } from '@/lib/chunked-bulk';
 import { Upload, Settings2, Loader2, TableProperties, Import, ChevronLeft, ChevronRight, MessageSquare, PanelRightClose, X } from 'lucide-react';
 import { ScheduleConfigureStep } from './schedule-configure-step';
 import { ScheduleReviewTable } from './schedule-review-table';
@@ -337,20 +338,37 @@ export function ImportScheduleDialog({
         calculatedMiles: r.lane._calculatedMiles || undefined,
       }));
 
-      const result = await bulkUpsert({
-        customerId,
-        workosOrgId,
-        userId,
-        newLanes,
-        updateLanes,
-        restoreLaneIds: toRestore,
-      });
+      // A single mutation inserting/patching every lane (each insert also writes
+      // HCR/TRIP facets) would blow Convex's ~1s budget on a large schedule, so
+      // process each independent array in budget-sized chunks and aggregate.
+      const totals = { created: 0, updated: 0, restored: 0 };
+      const applyBatch = async (batch: {
+        newLanes?: typeof newLanes;
+        updateLanes?: typeof updateLanes;
+        restoreLaneIds?: typeof toRestore;
+      }) => {
+        const r = await bulkUpsert({
+          customerId,
+          workosOrgId,
+          userId,
+          newLanes: batch.newLanes ?? [],
+          updateLanes: batch.updateLanes ?? [],
+          restoreLaneIds: batch.restoreLaneIds ?? [],
+        });
+        totals.created += r.created;
+        totals.updated += r.updated;
+        totals.restored += r.restored;
+      };
+
+      for (const chunk of chunkArray(newLanes, 50)) await applyBatch({ newLanes: chunk });
+      for (const chunk of chunkArray(updateLanes, 50)) await applyBatch({ updateLanes: chunk });
+      for (const chunk of chunkArray(toRestore, 50)) await applyBatch({ restoreLaneIds: chunk });
 
       const parts = [];
-      if (result.created > 0) parts.push(`${result.created} created`);
-      if (result.updated > 0) parts.push(`${result.updated} updated`);
-      if (result.restored > 0) parts.push(`${result.restored} restored`);
-      toast.success(`Import complete: ${parts.join(', ')}`);
+      if (totals.created > 0) parts.push(`${totals.created} created`);
+      if (totals.updated > 0) parts.push(`${totals.updated} updated`);
+      if (totals.restored > 0) parts.push(`${totals.restored} restored`);
+      toast.success(`Import complete: ${parts.join(', ') || 'no changes'}`);
 
       onOpenChange(false);
       resetState();

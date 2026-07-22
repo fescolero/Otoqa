@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { Upload, FileSpreadsheet, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { chunkArray } from '@/lib/chunked-bulk';
 import { Id } from '@/convex/_generated/dataModel';
 
 interface ImportCsvDialogProps {
@@ -143,12 +144,15 @@ export function ImportCsvDialog({
 
     setIsProcessing(true);
     try {
-      const result = await bulkImportLanes({
-        customerId,
-        workosOrgId,
-        userId,
-        lanes: preview,
-      });
+      // Each lane does a dedup index-scan + insert + facet writes, so a large
+      // CSV in one mutation would exceed Convex's ~1s budget. Chunk sequentially
+      // — dedup still works because committed chunks are visible to later ones.
+      const result = { imported: 0, skipped: 0 };
+      for (const chunk of chunkArray(preview, 30)) {
+        const r = await bulkImportLanes({ customerId, workosOrgId, userId, lanes: chunk });
+        result.imported += r.imported;
+        result.skipped += r.skipped;
+      }
 
       toast.success(`Successfully imported ${result.imported} contract lane(s)`);
       if (result.skipped > 0) {
