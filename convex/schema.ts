@@ -1129,6 +1129,11 @@ export default defineSchema({
     heldAt: v.optional(v.float64()),
     heldBy: v.optional(v.string()),
 
+    // Auto-expiry warning: set by autoExpireStaleLoads when an Assigned load
+    // becomes expiry-eligible; the load is only expired on a later sweep if
+    // still eligible. Cleared when the load stops being eligible.
+    expiryWarnedAt: v.optional(v.number()),
+
     // Delivery Tracking
     deliveredAt: v.optional(v.number()), // Unix timestamp, set when status -> Completed
 

@@ -75,6 +75,7 @@ export type AuditAction =
   | 'held'
   | 'released'
   | 'expired'
+  | 'expiry_warned'
   | 'archived';
 
 // Derived from the schema so a new auditLog column can't silently drift out

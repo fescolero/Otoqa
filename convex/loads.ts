@@ -2357,10 +2357,43 @@ export const getByCarrierPartnership = query({
 // ==========================================
 
 /**
+ * Assigned loads flagged by the auto-expiry warning sweep: still Assigned,
+ * pickup date passed, no tracking — they will expire on the next sweep
+ * unless someone acts. Feeds the dashboard "expiring soon" alert.
+ */
+export const getExpiryWarnedLoads = query({
+  args: {},
+  handler: async (ctx) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
+    const assigned = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_status', (q) => q.eq('workosOrgId', callerOrgId).eq('status', 'Assigned'))
+      .take(1000);
+
+    return assigned
+      .filter((load) => load.expiryWarnedAt !== undefined)
+      .sort((a, b) => (a.expiryWarnedAt ?? 0) - (b.expiryWarnedAt ?? 0))
+      .slice(0, 50)
+      .map((load) => ({
+        _id: load._id,
+        internalId: load.internalId,
+        orderNumber: load.orderNumber,
+        firstStopDate: load.firstStopDate,
+        expiryWarnedAt: load.expiryWarnedAt!,
+      }));
+  },
+});
+
+/**
  * Auto-expire loads whose first stop date has passed with no tracking activity.
  * Targets loads that are Open or Assigned where:
  *   - firstStopDate is in the past (before today)
  *   - trackingStatus is still 'Pending' (no GPS/tracking data received)
+ *
+ * Assigned loads get one warning sweep (expiryWarnedAt + audit row +
+ * dashboard alert) before a later sweep expires them; Open loads expire
+ * immediately.
  *
  * Processes in batches to stay within transaction limits.
  * Called by cron job (daily).
@@ -2410,6 +2443,13 @@ export const autoExpireStaleLoads = internalMutation({
 
       const status = statusesToCheck[statusIdx];
       let expired = 0;
+      let warned = 0;
+
+      // Assigned loads get one warning sweep before expiry: the first
+      // eligible sweep flags the load (dashboard "expiring soon" card +
+      // audit row) and only a later sweep — after the grace period — expires
+      // it. Open (unassigned) loads still expire immediately.
+      const EXPIRY_WARNING_GRACE_MS = 20 * 60 * 60 * 1000; // < daily cron cadence
 
       const loads = await ctx.db
         .query('loadInformation')
@@ -2417,8 +2457,36 @@ export const autoExpireStaleLoads = internalMutation({
         .take(BATCH_SIZE * 5);
 
       for (const load of loads) {
-        if (!load.firstStopDate || load.firstStopDate >= todayStr) continue;
-        if (load.trackingStatus !== 'Pending') continue;
+        const eligible =
+          !!load.firstStopDate && load.firstStopDate < todayStr && load.trackingStatus === 'Pending';
+        if (!eligible) {
+          // Dates moved out or tracking started — retract any pending warning.
+          if (load.expiryWarnedAt !== undefined) {
+            await ctx.db.patch(load._id, { expiryWarnedAt: undefined });
+          }
+          continue;
+        }
+
+        if (status === 'Assigned') {
+          if (load.expiryWarnedAt === undefined) {
+            await ctx.db.patch(load._id, { expiryWarnedAt: now });
+            await logAudit(ctx, {
+              organizationId: load.workosOrgId,
+              entityType: 'load',
+              entityId: load._id,
+              entityName: load.internalId,
+              action: 'expiry_warned',
+              performedBy: 'system',
+              performedByName: 'System (auto-expiry)',
+              description: `Expiry warning for assigned load ${load.internalId}: pickup date ${load.firstStopDate} passed with no tracking activity — will auto-expire on the next sweep unless tracking starts or dates are updated`,
+            });
+            warned++;
+            continue;
+          }
+          if (now - load.expiryWarnedAt < EXPIRY_WARNING_GRACE_MS) {
+            continue;
+          }
+        }
 
         // Route through applyLoadStatusUpdate so the Expired branch's leg
         // cascade fires. Direct ctx.db.patch here previously bypassed the
@@ -2427,6 +2495,7 @@ export const autoExpireStaleLoads = internalMutation({
           loadId: load._id,
           status: 'Expired',
         });
+        await ctx.db.patch(load._id, { expiryWarnedAt: undefined });
         await updateLoadCount(ctx, load.workosOrgId, result.previousStatus, result.nextStatus);
         await logAudit(ctx, {
           organizationId: load.workosOrgId,
@@ -2443,8 +2512,10 @@ export const autoExpireStaleLoads = internalMutation({
         if (expired >= BATCH_SIZE) break;
       }
 
-      if (expired > 0) {
-        console.log(`⏰ Auto-expired ${expired} stale ${status} loads for org ${args.orgId}`);
+      if (expired > 0 || warned > 0) {
+        console.log(
+          `⏰ Auto-expiry sweep for org ${args.orgId}: expired ${expired}, warned ${warned} (${status})`
+        );
       }
 
       if (expired >= BATCH_SIZE) {

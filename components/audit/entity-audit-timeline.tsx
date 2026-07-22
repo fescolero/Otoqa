@@ -4,7 +4,18 @@ import { api } from '@/convex/_generated/api';
 import type { AuditAction, AuditEntityType } from '@/convex/lib/audit';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { format } from 'date-fns';
-import { CheckCircle2, Edit, Trash2, RotateCcw, UserPlus, UserMinus, Loader2, History, Clock } from 'lucide-react';
+import {
+  CheckCircle2,
+  Edit,
+  Trash2,
+  RotateCcw,
+  UserPlus,
+  UserMinus,
+  Loader2,
+  History,
+  Clock,
+  AlertTriangle,
+} from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 /**
@@ -68,6 +79,7 @@ const ACTION_STYLES: Partial<Record<AuditAction, ActionStyle>> = {
   driver_removed: { icon: UserMinus, ...RED },
   resource_unassigned: { icon: UserMinus, ...RED },
   expired: { icon: Clock, ...AMBER },
+  expiry_warned: { icon: AlertTriangle, ...AMBER },
 };
 
 const DEFAULT_STYLE: ActionStyle = { icon: History, bg: 'bg-muted', fg: 'text-muted-foreground' };

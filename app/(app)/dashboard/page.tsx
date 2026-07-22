@@ -9,6 +9,7 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { RecentActivityFeed } from '@/components/audit/recent-activity-feed';
+import { ExpiringLoadsAlert } from '@/components/loads/expiring-loads-alert';
 
 export default function Page() {
   return (
@@ -42,6 +43,7 @@ export default function Page() {
             <p className="text-muted-foreground">Chart 3</p>
           </div>
         </div>
+        <ExpiringLoadsAlert />
         <RecentActivityFeed hours={24} />
       </div>
     </>
