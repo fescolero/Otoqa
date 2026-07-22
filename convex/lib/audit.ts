@@ -81,6 +81,7 @@ export const AUDIT_ACTIONS = [
   'held',
   'released',
   'expired',
+  'expiry_warned',
   'archived',
 ] as const;
 
