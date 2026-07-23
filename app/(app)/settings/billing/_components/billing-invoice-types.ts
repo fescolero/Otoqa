@@ -16,6 +16,8 @@ export interface BillingInvoiceCycle {
   rate: number;
   amount: number;
   status: 'due' | 'paid';
+  /** Due date has passed without settlement — badge reads PAST DUE. */
+  pastDue?: boolean;
   /** Display dates, already formatted ("Jul 1, 2026"). */
   issuedOn: string;
   dueOn: string;
@@ -42,6 +44,20 @@ export const OTOQA_BILLER = {
   tagline: 'Transportation Management Platform',
   email: 'billing@otoqa.com',
 } as const;
+
+/** Resolved badge state for an invoice — shared by preview and PDF. */
+export type InvoiceBadge = 'paid' | 'due' | 'pastdue';
+
+export const invoiceBadge = (cycle: {
+  status: 'due' | 'paid';
+  pastDue?: boolean;
+}): InvoiceBadge => (cycle.status === 'paid' ? 'paid' : cycle.pastDue ? 'pastdue' : 'due');
+
+export const INVOICE_BADGE_LABEL: Record<InvoiceBadge, string> = {
+  paid: 'PAID',
+  due: 'DUE',
+  pastdue: 'PAST DUE',
+};
 
 /** Shared money formatter so the HTML preview and the PDF can never differ. */
 export const invoiceMoney = (n: number) =>

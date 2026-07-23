@@ -318,6 +318,17 @@ export const diagnoseUsageAttribution = internalAction({
 // ─── Read API ──────────────────────────────────────────────────────────────
 
 /**
+ * Deterministic platform invoice number: INV-<ORG6>-<YYYYMM>.
+ * ORG6 is the last 6 alphanumerics of the WorkOS org id (uppercased) — stable
+ * per org, unique across orgs, and reproducible without storing invoice rows.
+ * Server-side so the page, CSV export, and PDF can never disagree.
+ */
+export function platformInvoiceNumber(workosOrgId: string, periodKey: string): string {
+  const frag = workosOrgId.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase();
+  return `INV-${frag}-${periodKey.replace('-', '')}`;
+}
+
+/**
  * Everything Settings → Billing & usage needs in one query:
  * the org's rate + billing contact, the open (accruing) cycle, and the
  * closed cycles newest-last with derived amounts.
@@ -393,6 +404,7 @@ export const getBillingOverview = query({
       const loadsWritten = byPeriod.get(key) ?? 0;
       return {
         periodKey: key,
+        invoiceNo: platformInvoiceNumber(args.workosOrgId, key),
         loadsWritten,
         amount: loadsWritten * rate,
         status: (isLatest ? 'due' : 'paid') as 'due' | 'paid',

@@ -83,8 +83,9 @@ const dateLabel = (ms: number) =>
 const dateLabelShort = (ms: number) =>
   new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 
-/** "INV-" + period key, mirroring the derived server placeholder. */
-const invoiceNo = (periodKey: string) => `INV-${periodKey}`;
+// Invoice numbers come from the server (getBillingOverview.closedCycles[].
+// invoiceNo — INV-<org fragment>-<YYYYMM>) so every surface shows the same
+// auto-generated, org-unique number.
 
 // ─── Payment placeholders — static until a payment processor lands ────────
 // Flip PAYMENT_STATE to 'action-needed' to preview the dunning flow.
@@ -548,6 +549,10 @@ interface HistoryRow {
   loads: number;
   amount: number;
   status?: 'paid' | 'due';
+  /** Due date has passed without settlement — display as Past due. */
+  pastDue?: boolean;
+  /** Server-generated invoice number (closed rows only). */
+  invoiceNo?: string;
   subLabel: string;
 }
 
@@ -675,7 +680,9 @@ function BillHistoryTable({
             </div>
             {/* Status */}
             <div style={{ padding: '11px 14px' }}>
-              <BillStatus status={current ? 'accruing' : (r.status ?? 'paid')} />
+              <BillStatus
+                status={current ? 'accruing' : r.pastDue ? 'pastdue' : (r.status ?? 'paid')}
+              />
             </div>
             {/* Invoice */}
             <div style={{ padding: '11px 16px 11px 14px', textAlign: 'right' }}>
@@ -686,7 +693,7 @@ function BillHistoryTable({
               ) : (
                 <button
                   className="focus-ring"
-                  title={`Preview & download ${invoiceNo(r.key)}`}
+                  title={`Preview & download ${r.invoiceNo ?? 'invoice'}`}
                   onClick={() => onPreview(r.key)}
                   style={{
                     display: 'inline-flex',
@@ -1676,6 +1683,9 @@ export default function BillingPage() {
     null,
   );
   const historyRef = useRef<HTMLDivElement>(null);
+  // Captured once at mount — used for past-due display checks (render must
+  // stay pure; day-level precision is all this needs).
+  const [nowMs] = useState(() => Date.now());
 
   const overview = useQuery(
     api.platformUsage.getBillingOverview,
@@ -1710,13 +1720,15 @@ export default function BillingPage() {
         loads: c.loadsWritten,
         amount: c.amount,
         status: c.status,
+        pastDue: c.status === 'due' && c.dueMs < nowMs,
+        invoiceNo: c.invoiceNo,
         subLabel:
           c.status === 'due'
             ? `Issued ${dateLabel(c.issuedMs)} · due ${dateLabel(c.dueMs)}`
             : `Paid ${dateLabel(c.paidMs ?? c.issuedMs)}`,
       })),
     ];
-  }, [cycles, current, rate]);
+  }, [cycles, current, rate, nowMs]);
 
   // Year-to-date (current year's closed cycles + open cycle).
   const ytd = useMemo(() => {
@@ -1742,11 +1754,12 @@ export default function BillingPage() {
         return {
           periodKey: c.periodKey,
           label: monthLabel(c.periodKey),
-          invoiceNo: invoiceNo(c.periodKey),
+          invoiceNo: c.invoiceNo,
           loads: c.loadsWritten,
           rate,
           amount: c.amount,
           status: c.status,
+          pastDue: c.status === 'due' && c.dueMs < nowMs,
           issuedOn: dateLabel(c.issuedMs),
           dueOn: dateLabel(c.dueMs),
           // Same fallback the history table uses ("Paid <issued>" when no
@@ -1756,7 +1769,7 @@ export default function BillingPage() {
           periodEnd: dateLabel(Date.UTC(y, m, 0)),
         };
       }),
-    [cycles, rate],
+    [cycles, rate, nowMs],
   );
 
   // Effective preview key: only valid while we're still on the org it was
@@ -1794,7 +1807,7 @@ export default function BillingPage() {
       method: PAYMENT_METHODS[0].name,
       reason: PAYMENT_ISSUE_REASON,
       amount: dueCycle?.amount ?? 0,
-      invoice: dueCycle ? invoiceNo(dueCycle.periodKey) : '—',
+      invoice: dueCycle?.invoiceNo ?? '—',
       cycle: dueCycle ? monthLabel(dueCycle.periodKey) : '—',
       failedOn: dueCycle ? dateLabel(dueCycle.dueMs) : '—',
       nextRetry: dueCycle ? dateLabel(dueCycle.dueMs + 3 * 86400000) : '—',
@@ -1818,11 +1831,17 @@ export default function BillingPage() {
         {
           header: 'Status',
           accessor: (r) =>
-            r.kind === 'current' ? 'Accruing' : r.status === 'due' ? 'Due' : 'Paid',
+            r.kind === 'current'
+              ? 'Accruing'
+              : r.pastDue
+                ? 'Past due'
+                : r.status === 'due'
+                  ? 'Due'
+                  : 'Paid',
         },
         {
           header: 'Invoice',
-          accessor: (r) => (r.kind === 'current' ? 'Not yet invoiced' : invoiceNo(r.key)),
+          accessor: (r) => (r.kind === 'current' ? 'Not yet invoiced' : (r.invoiceNo ?? '')),
         },
       ],
       `otoqa-usage-${current.periodKey}`,
