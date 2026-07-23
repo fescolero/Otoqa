@@ -201,6 +201,10 @@ describe('platform usage metering', () => {
     // Invoice BILL TO fields
     expect(overview.billingAddress).toMatchObject({ addressLine1: '1 St', city: 'Town', state: 'CA' });
     expect(overview.billingPhone).toBeNull();
+    // Contract fields fall back to null until set on the org
+    expect(overview.contractNumber).toBeNull();
+    expect(overview.licenseStart).toBeNull();
+    expect(overview.licenseEnd).toBeNull();
 
     // Current (open) cycle
     expect(overview.currentCycle.periodKey).toBe(getPeriodKey(Date.now()));

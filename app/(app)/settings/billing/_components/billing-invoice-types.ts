@@ -35,6 +35,19 @@ export interface BillingInvoiceBillTo {
 }
 
 /**
+ * Contract identity shown in the invoice details panel. Values are
+ * pre-formatted for display; missing org fields render as "—".
+ */
+export interface BillingInvoiceContract {
+  contractNumber: string;
+  licenseStart: string;
+  licenseEnd: string;
+}
+
+/** Payment terms — invoices issue on the 1st and are due on the 15th. */
+export const INVOICE_TERMS = 'Net 15';
+
+/**
  * The issuing entity on platform invoices — Otoqa itself.
  * TODO: replace with Otoqa's real remittance details (legal name, address,
  * billing email) before sending these invoices to customers.
@@ -62,15 +75,6 @@ export const INVOICE_BADGE_LABEL: Record<InvoiceBadge, string> = {
 /** Shared money formatter so the HTML preview and the PDF can never differ. */
 export const invoiceMoney = (n: number) =>
   '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-/**
- * Billing-model footer copy — single source for both renderings (the
- * preview the user reads must match the PDF they send to accounting).
- */
-export const billingModelNote = (rate: number) =>
-  `Metered — ${invoiceMoney(rate)} per load written into Otoqa, invoiced monthly. ` +
-  'Every load created during the cycle is billable regardless of its later status; ' +
-  'edits and cancellations do not remove the charge.';
 
 export const invoiceContactNote = () =>
   `Thank you for using Otoqa. For questions regarding this invoice, please contact ${OTOQA_BILLER.email}.`;

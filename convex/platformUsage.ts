@@ -431,6 +431,10 @@ export const getBillingOverview = query({
       // For the invoice BILL TO block.
       billingAddress: org?.billingAddress ?? null,
       billingPhone: org?.billingPhone ?? null,
+      // Contract identity for the invoice details panel.
+      contractNumber: org?.platformContractNumber ?? null,
+      licenseStart: org?.platformLicenseStart ?? null,
+      licenseEnd: org?.platformLicenseEnd ?? null,
       currentCycle,
       closedCycles,
     };
