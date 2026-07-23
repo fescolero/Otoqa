@@ -318,14 +318,23 @@ export const diagnoseUsageAttribution = internalAction({
 // ─── Read API ──────────────────────────────────────────────────────────────
 
 /**
- * Deterministic platform invoice number: INV-<ORG6>-<YYYYMM>.
- * ORG6 is the last 6 alphanumerics of the WorkOS org id (uppercased) — stable
- * per org, unique across orgs, and reproducible without storing invoice rows.
- * Server-side so the page, CSV export, and PDF can never disagree.
+ * Deterministic platform invoice number: INV-<ORG6>-<SEQ>.
+ *
+ * ORG6 is the last 6 alphanumerics of the WorkOS org id (uppercased) —
+ * stable per org, unique across orgs. SEQ is a 4-digit sequence in a
+ * monthly series anchored at Jan 2024 (0001), so consecutive cycles get
+ * consecutive numbers like a real invoice series, the same cycle always
+ * reproduces the same number (no invoice storage needed yet), and a
+ * history rebuild can never renumber anything. Server-side so the page,
+ * CSV export, and PDF can never disagree.
  */
+const INVOICE_SERIES_EPOCH_YEAR = 2024; // Jan 2024 = 0001
+
 export function platformInvoiceNumber(workosOrgId: string, periodKey: string): string {
   const frag = workosOrgId.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase();
-  return `INV-${frag}-${periodKey.replace('-', '')}`;
+  const [y, m] = periodKey.split('-').map(Number);
+  const seq = Math.max(1, (y - INVOICE_SERIES_EPOCH_YEAR) * 12 + m);
+  return `INV-${frag}-${String(seq).padStart(4, '0')}`;
 }
 
 /**

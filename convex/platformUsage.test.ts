@@ -217,11 +217,15 @@ describe('platform usage metering', () => {
     expect(overview.closedCycles.map((c) => c.amount)).toEqual([30, 0, 60]);
     // Placeholder statuses: latest closed cycle is due, older ones paid
     expect(overview.closedCycles.map((c) => c.status)).toEqual(['paid', 'paid', 'due']);
-    // Invoice numbers: INV-<last 6 alphanumerics of org id, uppercased>-<YYYYMM>
+    // Invoice numbers: INV-<last 6 alphanumerics of org id, uppercased>-<4-digit
+    // sequence in a monthly series anchored at Jan 2024>
     const expectedFrag = ORG.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase();
-    expect(overview.closedCycles[0].invoiceNo).toBe(
-      `INV-${expectedFrag}-${overview.closedCycles[0].periodKey.replace('-', '')}`,
-    );
+    const [cy, cm] = overview.closedCycles[0].periodKey.split('-').map(Number);
+    const expectedSeq = String((cy - 2024) * 12 + cm).padStart(4, '0');
+    expect(overview.closedCycles[0].invoiceNo).toBe(`INV-${expectedFrag}-${expectedSeq}`);
+    // Consecutive cycles carry consecutive sequence numbers.
+    const seqs = overview.closedCycles.map((c) => Number(c.invoiceNo.split('-')[2]));
+    expect(seqs[2] - seqs[0]).toBe(2);
   });
 
   it('attributes pre-cutover history by service month and metered loads by entry month', async () => {
