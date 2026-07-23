@@ -14,27 +14,36 @@ import { Button } from '@/components/ui/button';
 import { ChevronLeft, ChevronRight, Download, FileX2, Printer, X } from 'lucide-react';
 import { downloadPdfBlob, generatePdfWithToast, openPdfBlob } from '@/lib/pdf-actions';
 import {
+  INVOICE_BADGE_LABEL,
   OTOQA_BILLER,
   billingModelNote,
+  invoiceBadge,
   invoiceContactNote,
   invoiceMoney as money,
   type BillingInvoiceBillTo,
   type BillingInvoiceCycle,
 } from './billing-invoice-types';
 
+// Soft badge tints that read on both light and dark surfaces (same palette
+// as the app's Chip presets). The PDF keeps its own print-on-white tints.
+const BADGE_TINTS = {
+  paid: { bg: 'rgba(16,185,129,0.10)', fg: '#0F8C5F' },
+  due: { bg: 'rgba(245,158,11,0.12)', fg: '#A66800' },
+  pastdue: { bg: 'rgba(239,68,68,0.10)', fg: '#B43030' },
+} as const;
+
 /** Muted body text at the invoice's small type size. */
 function Muted({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="text-slate-600" style={{ fontSize: 11.5 }}>
-      {children}
-    </div>
-  );
+  return <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{children}</div>;
 }
 
 /** Uppercase section label (FROM / BILL TO / footer blocks). */
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-slate-500 uppercase mb-1.5" style={{ fontSize: 10, letterSpacing: 0.5 }}>
+    <div
+      className="uppercase mb-1.5"
+      style={{ fontSize: 10, letterSpacing: 0.5, color: 'var(--text-tertiary)' }}
+    >
       {children}
     </div>
   );
@@ -171,9 +180,18 @@ export function BillingInvoiceSheet({
               </div>
             )}
             {cycle && (
+              /* Theme-aware document surface: renders as paper in light mode
+                 and as a card in dark mode. The downloaded PDF stays white. */
               <div
-                className="mx-auto bg-white text-slate-900 shadow-sm border border-slate-200 rounded-sm"
-                style={{ maxWidth: 680, padding: 40, fontSize: 13 }}
+                className="mx-auto shadow-sm rounded-sm"
+                style={{
+                  maxWidth: 680,
+                  padding: 40,
+                  fontSize: 13,
+                  background: 'var(--bg-surface)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-hairline)',
+                }}
               >
                 {/* Header */}
                 <div className="flex items-start justify-between mb-6">
@@ -193,12 +211,8 @@ export function BillingInvoiceSheet({
                     <div className="font-bold mt-2" style={{ fontSize: 14 }}>
                       {OTOQA_BILLER.name}
                     </div>
-                    <div className="text-slate-500" style={{ fontSize: 11.5 }}>
-                      {OTOQA_BILLER.tagline}
-                    </div>
-                    <div className="text-slate-500" style={{ fontSize: 11.5 }}>
-                      {OTOQA_BILLER.email}
-                    </div>
+                    <Muted>{OTOQA_BILLER.tagline}</Muted>
+                    <Muted>{OTOQA_BILLER.email}</Muted>
                   </div>
                   <div className="text-right">
                     <div style={{ fontSize: 26, letterSpacing: 0.5 }}>INVOICE</div>
@@ -206,11 +220,11 @@ export function BillingInvoiceSheet({
                       className="inline-block rounded px-2 py-0.5 font-semibold"
                       style={{
                         fontSize: 11,
-                        background: cycle.status === 'paid' ? '#dcfce7' : '#fef3c7',
-                        color: cycle.status === 'paid' ? '#166534' : '#92400e',
+                        background: BADGE_TINTS[invoiceBadge(cycle)].bg,
+                        color: BADGE_TINTS[invoiceBadge(cycle)].fg,
                       }}
                     >
-                      {cycle.status === 'paid' ? 'PAID' : 'DUE'}
+                      {INVOICE_BADGE_LABEL[invoiceBadge(cycle)]}
                     </span>
                   </div>
                 </div>
@@ -227,7 +241,9 @@ export function BillingInvoiceSheet({
                     ],
                   ].map(([k, vLabel]) => (
                     <div key={k}>
-                      <div className="text-slate-500 mb-0.5">{k}</div>
+                      <div className="mb-0.5" style={{ color: 'var(--text-tertiary)' }}>
+                        {k}
+                      </div>
                       <div className="font-semibold font-mono">{vLabel}</div>
                     </div>
                   ))}
@@ -260,8 +276,12 @@ export function BillingInvoiceSheet({
                 <table className="w-full mb-6" style={{ fontSize: 11.5 }}>
                   <thead>
                     <tr
-                      className="bg-slate-50 text-slate-500 uppercase text-left"
-                      style={{ fontSize: 10 }}
+                      className="uppercase text-left"
+                      style={{
+                        fontSize: 10,
+                        background: 'var(--bg-surface-2)',
+                        color: 'var(--text-tertiary)',
+                      }}
                     >
                       <th className="py-2 px-2 font-semibold">Description</th>
                       <th className="py-2 px-2 font-semibold text-right">Rate</th>
@@ -270,17 +290,24 @@ export function BillingInvoiceSheet({
                     </tr>
                   </thead>
                   <tbody>
-                    <tr className="border-b border-slate-100 align-top">
+                    <tr
+                      className="align-top"
+                      style={{ borderBottom: '1px solid var(--border-hairline)' }}
+                    >
                       <td className="py-2.5 px-2">
                         <div>
                           Platform usage — {cycle.label} ({cycle.periodStart} – {cycle.periodEnd})
                         </div>
-                        <div className="text-slate-500" style={{ fontSize: 10.5 }}>
+                        <div style={{ fontSize: 10.5, color: 'var(--text-tertiary)' }}>
                           Loads written into Otoqa during the billing cycle
                         </div>
                         <span
                           className="inline-block rounded px-1.5 mt-1"
-                          style={{ fontSize: 9.5, background: '#dbeafe', color: '#1e40af' }}
+                          style={{
+                            fontSize: 9.5,
+                            background: 'rgba(46,92,255,0.10)',
+                            color: 'var(--accent)',
+                          }}
                         >
                           metered
                         </span>
@@ -302,8 +329,12 @@ export function BillingInvoiceSheet({
                       <span className="font-mono">{money(cycle.amount)}</span>
                     </div>
                     <div
-                      className="flex justify-between py-2 px-3 font-bold bg-slate-50 border-t-2 border-slate-200"
-                      style={{ fontSize: 13 }}
+                      className="flex justify-between py-2 px-3 font-bold"
+                      style={{
+                        fontSize: 13,
+                        background: 'var(--bg-surface-2)',
+                        borderTop: '2px solid var(--border-hairline-strong)',
+                      }}
                     >
                       <span>{cycle.status === 'paid' ? 'Total' : 'Total Due'}</span>
                       <span className="font-mono">{money(cycle.amount)}</span>
@@ -313,18 +344,18 @@ export function BillingInvoiceSheet({
 
                 {/* Footer */}
                 <div
-                  className="flex gap-10 pt-5 border-t border-dashed border-slate-200"
-                  style={{ fontSize: 11.5 }}
+                  className="flex gap-10 pt-5"
+                  style={{ fontSize: 11.5, borderTop: '1px dashed var(--border-hairline-strong)' }}
                 >
                   <div className="flex-1">
                     <SectionLabel>Billing model</SectionLabel>
-                    <div className="text-slate-700" style={{ lineHeight: 1.5 }}>
+                    <div style={{ lineHeight: 1.5, color: 'var(--text-secondary)' }}>
                       {billingModelNote(cycle.rate)}
                     </div>
                   </div>
                   <div className="flex-1">
                     <SectionLabel>Notes</SectionLabel>
-                    <div className="text-slate-700" style={{ lineHeight: 1.5 }}>
+                    <div style={{ lineHeight: 1.5, color: 'var(--text-secondary)' }}>
                       {invoiceContactNote()}
                     </div>
                   </div>

@@ -1,8 +1,10 @@
 import React from 'react';
 import { Document, Page, Text, View, StyleSheet } from '@react-pdf/renderer';
 import {
+  INVOICE_BADGE_LABEL,
   OTOQA_BILLER,
   billingModelNote,
+  invoiceBadge,
   invoiceContactNote,
   invoiceMoney as money,
   type BillingInvoiceBillTo,
@@ -63,6 +65,10 @@ const styles = StyleSheet.create({
   statusPaid: {
     backgroundColor: '#dcfce7',
     color: '#166534',
+  },
+  statusPastDue: {
+    backgroundColor: '#fee2e2',
+    color: '#b91c1c',
   },
   metaSection: {
     flexDirection: 'row',
@@ -226,9 +232,16 @@ export const BillingInvoicePDFTemplate: React.FC<BillingInvoicePDFTemplateProps>
         <View>
           <Text style={styles.invoiceTitle}>INVOICE</Text>
           <View
-            style={[styles.statusBadge, cycle.status === 'paid' ? styles.statusPaid : styles.statusDue]}
+            style={[
+              styles.statusBadge,
+              invoiceBadge(cycle) === 'paid'
+                ? styles.statusPaid
+                : invoiceBadge(cycle) === 'pastdue'
+                  ? styles.statusPastDue
+                  : styles.statusDue,
+            ]}
           >
-            <Text>{cycle.status === 'paid' ? 'PAID' : 'DUE'}</Text>
+            <Text>{INVOICE_BADGE_LABEL[invoiceBadge(cycle)]}</Text>
           </View>
         </View>
       </View>
