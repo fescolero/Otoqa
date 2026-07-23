@@ -8,6 +8,7 @@ import {
   deleteCompletedRowsForSession,
   transferCompletedRowsToSession,
 } from './loadTrackingState';
+import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 
 /**
  * Driver Session System — Phase 1 foundation.
@@ -130,6 +131,21 @@ async function endSessionInternal(
   await ctx.scheduler.runAfter(0, internal.payEngine.calculatePayForSession.calculatePayForSession, {
     sessionId: session._id,
   });
+
+  // Release deferred on-load pay. calculatePayForLeg holds DRIVER items
+  // while the leg's shift is still open (completed-work gate) so the whole
+  // shift — session layers plus its loads' premium lines — lands on the
+  // settlement at once. The session is closed now (patched above), so
+  // re-price every completed leg it carried. The scheduled calcs run after
+  // this mutation commits and therefore see status='completed'.
+  const sessionLegs = await ctx.db
+    .query('dispatchLegs')
+    .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+    .collect();
+  for (const leg of sessionLegs) {
+    if (leg.status !== 'COMPLETED') continue;
+    await scheduleLegPayRecalc(ctx, leg._id, args.endedByUserId ?? 'system:session_end');
+  }
 
   // Clear the driver's current truck pairing on session end. This forces
   // a fresh QR scan to start the next shift — the driver might be on a

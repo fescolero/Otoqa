@@ -22,6 +22,7 @@ import type { OverlapInfo } from './_helpers/timeUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
 import { transferFrontierToDriver } from './loadTrackingState';
+import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { getLoadFacets } from './lib/loadFacets';
 
 /**
@@ -1735,6 +1736,9 @@ export const completeLeg = internalMutation({
       endReason: args.endReason,
       updatedAt: args.endedAt,
     });
+    // Completion is a pricing event (completed-work gate in
+    // calculatePayForLeg): schedule the recalc that writes the leg's items.
+    await scheduleLegPayRecalc(ctx, args.legId, 'system:leg_completed');
     return null;
   },
 });
@@ -1829,6 +1833,9 @@ export const handoffLoad = mutation({
       endReason: 'handoff',
       updatedAt: now,
     });
+    // Completion is a pricing event (completed-work gate): re-price the
+    // from-driver's finished portion.
+    await scheduleLegPayRecalc(ctx, oldLeg._id, caller.userId);
 
     // Determine new leg sequence.
     const allLegs = await ctx.db

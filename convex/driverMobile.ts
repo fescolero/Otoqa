@@ -5,6 +5,7 @@ import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
 import { calculateDistanceMeters } from './lib/geo';
 import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrackingState';
+import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
 // ============================================
@@ -1134,6 +1135,10 @@ export const checkOutFromStop = mutation({
           endReason: 'completed',
           updatedAt: serverNow,
         });
+        // Completion is a pricing event (completed-work gate): re-price the
+        // leg now that actual times are final. If the driver's shift is
+        // still open the calc defers again and endSession re-fires it.
+        await scheduleLegPayRecalc(ctx, matchingActiveLeg._id, String(driver._id));
       }
 
       // Release the geofence frontier. Historical geofenceEvents stay; if a

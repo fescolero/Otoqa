@@ -10,6 +10,7 @@ import { parseStopDateTime, syncLegsAffectedByStop } from './_helpers/timeUtils'
 import { updateLoadCount } from './stats_helpers';
 import { recordLoadWritten } from './platformUsageHelpers';
 import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
+import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import {
   setLoadTag,
   removeAllTagsForLoad,
@@ -91,6 +92,9 @@ async function applyLoadStatusUpdate(
           status: 'COMPLETED' as const,
           updatedAt: now,
         });
+        // Completion is a pricing event (completed-work gate in
+        // calculatePayForLeg): the leg's items are only written now.
+        await scheduleLegPayRecalc(ctx, leg._id, 'system:load_completed');
       }
     }
   } else if (args.status === 'Assigned') {
@@ -129,6 +133,10 @@ async function applyLoadStatusUpdate(
             await ctx.db.delete(payable._id);
           }
         }
+
+        // Pay-engine mirror of the legacy delete above: a gated recalc on
+        // a CANCELED leg voids its unlocked payItems.
+        await scheduleLegPayRecalc(ctx, leg._id, args.canceledBy ?? 'system:load_canceled');
       }
     }
   } else if (args.status === 'Expired') {
@@ -161,6 +169,10 @@ async function applyLoadStatusUpdate(
             await ctx.db.delete(payable._id);
           }
         }
+
+        // Pay-engine mirror of the legacy delete above: a gated recalc on
+        // a CANCELED leg voids its unlocked payItems.
+        await scheduleLegPayRecalc(ctx, leg._id, 'system:load_expired');
       }
     }
   } else if (args.status === 'Open') {

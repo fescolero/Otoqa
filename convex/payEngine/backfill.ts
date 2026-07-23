@@ -2,11 +2,16 @@
 // so the new ledger is complete and work-start anchored, in two paginated,
 // self-rescheduling, staggered sweeps:
 //
-//   backfillLegPay     — re-runs calculatePayForLeg over completed legs. For
+//   backfillLegPay     — re-runs calculatePayForLeg over an org's legs. For
 //                        carriers this fills/re-anchors mileage payItems; for
 //                        drivers it VOIDS the now-stale per-leg hourly items
 //                        (their rules are session-sourced, so the leg calc emits
-//                        nothing). Idempotent (append-only / void-prior).
+//                        nothing). Sweeps ALL leg statuses: the completed-work
+//                        gate in calculatePayForLeg voids items on legs that
+//                        aren't COMPLETED (or whose shift is still open), so
+//                        this doubles as the cleanup for items written on
+//                        assignment before the gate existed. Idempotent
+//                        (append-only / void-prior).
 //   backfillSessionPay — runs calculatePayForSession over completed driver
 //                        sessions, creating one shift payItem set each.
 //
@@ -35,7 +40,9 @@ export const backfillLegPay = internalMutation({
 
     let i = 0;
     for (const leg of page.page) {
-      if (leg.status !== 'COMPLETED') continue;
+      // Skip legs that can't carry items either way: never assigned means
+      // no payee to void for (LEG_UNASSIGNED exits before the void loop).
+      if (!leg.driverId && !leg.drivers?.length && !leg.carrierPartnershipId) continue;
       await ctx.scheduler.runAfter(i * STAGGER_MS, internal.payEngine.calculatePayForLeg.calculatePayForLeg, {
         legId: leg._id, userId: 'backfill',
       });
