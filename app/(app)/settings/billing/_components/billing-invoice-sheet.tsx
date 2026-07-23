@@ -11,16 +11,34 @@
 import { useCallback } from 'react';
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, ChevronRight, Download, Printer, X } from 'lucide-react';
-import { toast } from 'sonner';
+import { ChevronLeft, ChevronRight, Download, FileX2, Printer, X } from 'lucide-react';
+import { downloadPdfBlob, generatePdfWithToast, openPdfBlob } from '@/lib/pdf-actions';
 import {
   OTOQA_BILLER,
+  billingModelNote,
+  invoiceContactNote,
+  invoiceMoney as money,
   type BillingInvoiceBillTo,
   type BillingInvoiceCycle,
 } from './billing-invoice-types';
 
-const money = (n: number) =>
-  '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** Muted body text at the invoice's small type size. */
+function Muted({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-slate-600" style={{ fontSize: 11.5 }}>
+      {children}
+    </div>
+  );
+}
+
+/** Uppercase section label (FROM / BILL TO / footer blocks). */
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-slate-500 uppercase mb-1.5" style={{ fontSize: 10, letterSpacing: 0.5 }}>
+      {children}
+    </div>
+  );
+}
 
 interface BillingInvoiceSheetProps {
   isOpen: boolean;
@@ -72,41 +90,14 @@ export function BillingInvoiceSheet({
 
   const handlePrint = useCallback(async () => {
     if (!cycle) return;
-    try {
-      toast.loading('Generating PDF for printing...');
-      const blob = await generateBlob();
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
-      toast.dismiss();
-      toast.success('PDF opened in new tab');
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) {
-      toast.dismiss();
-      toast.error('Failed to generate PDF');
-      console.error('PDF generation error:', error);
-    }
+    const blob = await generatePdfWithToast(generateBlob, 'Generating PDF for printing...');
+    if (blob) openPdfBlob(blob);
   }, [cycle, generateBlob]);
 
   const handleDownloadPDF = useCallback(async () => {
     if (!cycle) return;
-    try {
-      toast.loading('Generating PDF...');
-      const blob = await generateBlob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${cycle.invoiceNo}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      toast.dismiss();
-      toast.success('PDF downloaded successfully');
-    } catch (error) {
-      toast.dismiss();
-      toast.error('Failed to generate PDF');
-      console.error('PDF generation error:', error);
-    }
+    const blob = await generatePdfWithToast(generateBlob, 'Generating PDF...');
+    if (blob) downloadPdfBlob(blob, `${cycle.invoiceNo}.pdf`);
   }, [cycle, generateBlob]);
 
   return (
@@ -123,7 +114,7 @@ export function BillingInvoiceSheet({
                 Invoice preview{cycle ? ` · ${cycle.label}` : ''}
               </SheetTitle>
 
-              {cycles.length > 1 && (
+              {cycles.length > 1 && currentIndex >= 0 && (
                 <div className="flex items-center gap-1 ml-4 shrink-0">
                   <Button
                     variant="ghost"
@@ -169,6 +160,16 @@ export function BillingInvoiceSheet({
 
           {/* Preview — white paper document, mirroring the PDF layout */}
           <div className="flex-1 overflow-auto bg-muted/40 p-6">
+            {!cycle && (
+              /* Stale key — the cycle left the history window (month rollover,
+                 org switch) while the sheet was open. */
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center text-muted-foreground">
+                  <FileX2 className="w-8 h-8 mx-auto mb-3" strokeWidth={1.5} />
+                  <p className="text-sm">This invoice is no longer available.</p>
+                </div>
+              </div>
+            )}
             {cycle && (
               <div
                 className="mx-auto bg-white text-slate-900 shadow-sm border border-slate-200 rounded-sm"
@@ -235,45 +236,23 @@ export function BillingInvoiceSheet({
                 {/* Addresses */}
                 <div className="flex gap-10 mb-6">
                   <div className="flex-1">
-                    <div
-                      className="text-slate-500 uppercase mb-1.5"
-                      style={{ fontSize: 10, letterSpacing: 0.5 }}
-                    >
-                      From
-                    </div>
+                    <SectionLabel>From</SectionLabel>
                     <div className="font-semibold" style={{ fontSize: 12 }}>
                       {OTOQA_BILLER.name}
                     </div>
-                    <div className="text-slate-600" style={{ fontSize: 11.5 }}>
-                      {OTOQA_BILLER.tagline}
-                    </div>
-                    <div className="text-slate-600" style={{ fontSize: 11.5 }}>
-                      {OTOQA_BILLER.email}
-                    </div>
+                    <Muted>{OTOQA_BILLER.tagline}</Muted>
+                    <Muted>{OTOQA_BILLER.email}</Muted>
                   </div>
                   <div className="flex-1">
-                    <div
-                      className="text-slate-500 uppercase mb-1.5"
-                      style={{ fontSize: 10, letterSpacing: 0.5 }}
-                    >
-                      Bill to
-                    </div>
+                    <SectionLabel>Bill to</SectionLabel>
                     <div className="font-semibold" style={{ fontSize: 12 }}>
                       {billTo.companyName}
                     </div>
                     {billTo.addressLines.map((line, i) => (
-                      <div key={i} className="text-slate-600" style={{ fontSize: 11.5 }}>
-                        {line}
-                      </div>
+                      <Muted key={i}>{line}</Muted>
                     ))}
-                    <div className="text-slate-600" style={{ fontSize: 11.5 }}>
-                      {billTo.billingEmail}
-                    </div>
-                    {billTo.billingPhone && (
-                      <div className="text-slate-600" style={{ fontSize: 11.5 }}>
-                        {billTo.billingPhone}
-                      </div>
-                    )}
+                    <Muted>{billTo.billingEmail}</Muted>
+                    {billTo.billingPhone && <Muted>{billTo.billingPhone}</Muted>}
                   </div>
                 </div>
 
@@ -338,22 +317,15 @@ export function BillingInvoiceSheet({
                   style={{ fontSize: 11.5 }}
                 >
                   <div className="flex-1">
-                    <div className="text-slate-500 uppercase mb-1.5" style={{ fontSize: 10 }}>
-                      Billing model
-                    </div>
+                    <SectionLabel>Billing model</SectionLabel>
                     <div className="text-slate-700" style={{ lineHeight: 1.5 }}>
-                      Metered — {money(cycle.rate)} per load written into Otoqa, invoiced monthly.
-                      Every load created during the cycle is billable regardless of its later
-                      status.
+                      {billingModelNote(cycle.rate)}
                     </div>
                   </div>
                   <div className="flex-1">
-                    <div className="text-slate-500 uppercase mb-1.5" style={{ fontSize: 10 }}>
-                      Notes
-                    </div>
+                    <SectionLabel>Notes</SectionLabel>
                     <div className="text-slate-700" style={{ lineHeight: 1.5 }}>
-                      Thank you for using Otoqa. For questions regarding this invoice, please
-                      contact {OTOQA_BILLER.email}.
+                      {invoiceContactNote()}
                     </div>
                   </div>
                 </div>

@@ -42,3 +42,19 @@ export const OTOQA_BILLER = {
   tagline: 'Transportation Management Platform',
   email: 'billing@otoqa.com',
 } as const;
+
+/** Shared money formatter so the HTML preview and the PDF can never differ. */
+export const invoiceMoney = (n: number) =>
+  '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/**
+ * Billing-model footer copy — single source for both renderings (the
+ * preview the user reads must match the PDF they send to accounting).
+ */
+export const billingModelNote = (rate: number) =>
+  `Metered — ${invoiceMoney(rate)} per load written into Otoqa, invoiced monthly. ` +
+  'Every load created during the cycle is billable regardless of its later status; ' +
+  'edits and cancellations do not remove the charge.';
+
+export const invoiceContactNote = () =>
+  `Thank you for using Otoqa. For questions regarding this invoice, please contact ${OTOQA_BILLER.email}.`;

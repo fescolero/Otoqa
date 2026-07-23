@@ -2,6 +2,9 @@ import React from 'react';
 import { Document, Page, Text, View, StyleSheet } from '@react-pdf/renderer';
 import {
   OTOQA_BILLER,
+  billingModelNote,
+  invoiceContactNote,
+  invoiceMoney as money,
   type BillingInvoiceBillTo,
   type BillingInvoiceCycle,
 } from './billing-invoice-types';
@@ -196,9 +199,6 @@ const styles = StyleSheet.create({
   },
 });
 
-const money = (n: number) =>
-  '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
 interface BillingInvoicePDFTemplateProps {
   cycle: BillingInvoiceCycle;
   billTo: BillingInvoiceBillTo;
@@ -322,19 +322,12 @@ export const BillingInvoicePDFTemplate: React.FC<BillingInvoicePDFTemplateProps>
       <View style={styles.footerSection}>
         <View style={styles.footerBlock}>
           <Text style={styles.footerLabel}>BILLING MODEL</Text>
-          <Text style={styles.footerText}>
-            Metered — {money(cycle.rate)} per load written into Otoqa, invoiced monthly. Every load
-            created during the cycle is billable regardless of its later status; edits and
-            cancellations do not remove the charge.
-          </Text>
+          <Text style={styles.footerText}>{billingModelNote(cycle.rate)}</Text>
         </View>
 
         <View style={styles.footerBlock}>
           <Text style={styles.footerLabel}>NOTES</Text>
-          <Text style={styles.footerText}>
-            Thank you for using Otoqa. For questions regarding this invoice, please contact{' '}
-            {OTOQA_BILLER.email}.
-          </Text>
+          <Text style={styles.footerText}>{invoiceContactNote()}</Text>
         </View>
       </View>
 

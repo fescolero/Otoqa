@@ -1669,7 +1669,12 @@ function BillingSkeleton() {
 export default function BillingPage() {
   const organizationId = useOrganizationId();
   const [view, setView] = useState<'overview' | 'methods'>('overview');
-  const [invoicePreviewKey, setInvoicePreviewKey] = useState<string | null>(null);
+  // Org-tagged so a preview opened in one org can never render another
+  // org's colliding periodKey after a switch; resolved to an effective key
+  // below (derived — no reset effects needed).
+  const [invoicePreview, setInvoicePreview] = useState<{ orgId: string; key: string } | null>(
+    null,
+  );
   const historyRef = useRef<HTMLDivElement>(null);
 
   const overview = useQuery(
@@ -1744,13 +1749,28 @@ export default function BillingPage() {
           status: c.status,
           issuedOn: dateLabel(c.issuedMs),
           dueOn: dateLabel(c.dueMs),
-          paidOn: c.paidMs ? dateLabel(c.paidMs) : undefined,
+          // Same fallback the history table uses ("Paid <issued>" when no
+          // settlement date) so the invoice never disagrees with the table.
+          paidOn: dateLabel(c.paidMs ?? c.issuedMs),
           periodStart: dateLabel(Date.UTC(y, m - 1, 1)),
           periodEnd: dateLabel(Date.UTC(y, m, 0)),
         };
       }),
     [cycles, rate],
   );
+
+  // Effective preview key: only valid while we're still on the org it was
+  // opened for AND the cycle is still in the history window — otherwise the
+  // sheet closes itself (org switch, month rollover sliding the window).
+  const invoicePreviewKey =
+    invoicePreview &&
+    invoicePreview.orgId === organizationId &&
+    invoiceCycles.some((c) => c.periodKey === invoicePreview.key)
+      ? invoicePreview.key
+      : null;
+  const openInvoicePreview = (key: string) => {
+    if (organizationId) setInvoicePreview({ orgId: organizationId, key });
+  };
 
   const invoiceBillTo = useMemo<BillingInvoiceBillTo>(() => {
     const a = overview?.billingAddress;
@@ -1839,7 +1859,7 @@ export default function BillingPage() {
               onClick={() => {
                 // Open the latest closed cycle's invoice; with no closed
                 // cycles yet, fall back to scrolling to the history table.
-                if (invoiceCycles.length > 0) setInvoicePreviewKey(invoiceCycles[0].periodKey);
+                if (invoiceCycles.length > 0) openInvoicePreview(invoiceCycles[0].periodKey);
                 else historyRef.current?.scrollIntoView({ behavior: 'smooth' });
               }}
             >
@@ -1899,7 +1919,7 @@ export default function BillingPage() {
                   <BillHistoryTable
                     rows={historyRows}
                     rate={rate}
-                    onPreview={(key) => setInvoicePreviewKey(key)}
+                    onPreview={openInvoicePreview}
                   />
                 </BillCard>
               </div>
@@ -1984,10 +2004,10 @@ export default function BillingPage() {
 
       <BillingInvoiceSheet
         isOpen={invoicePreviewKey !== null}
-        onClose={() => setInvoicePreviewKey(null)}
+        onClose={() => setInvoicePreview(null)}
         cycles={invoiceCycles}
         activeKey={invoicePreviewKey}
-        onNavigate={(key) => setInvoicePreviewKey(key)}
+        onNavigate={openInvoicePreview}
         billTo={invoiceBillTo}
       />
     </div>
