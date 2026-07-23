@@ -694,7 +694,7 @@ function BillHistoryTable({
               ) : (
                 <button
                   className="focus-ring"
-                  title={`Preview & download ${r.invoiceNo ?? 'invoice'}`}
+                  title={`Preview ${r.invoiceNo ?? 'invoice'} — download from the preview`}
                   onClick={() => onPreview(r.key)}
                   style={{
                     display: 'inline-flex',
@@ -720,8 +720,8 @@ function BillHistoryTable({
                     e.currentTarget.style.color = 'var(--text-secondary)';
                   }}
                 >
-                  <WIcon name="import" size={12} />
-                  <span className="num">PDF</span>
+                  <WIcon name="eye" size={12} />
+                  <span className="num">View</span>
                 </button>
               )}
             </div>
