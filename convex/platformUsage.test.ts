@@ -198,6 +198,9 @@ describe('platform usage metering', () => {
     expect(overview.rate).toBe(3);
     expect(overview.billingEmail).toBe('ap@test.co');
     expect(overview.companyName).toBe('Test Freight LLC');
+    // Invoice BILL TO fields
+    expect(overview.billingAddress).toMatchObject({ addressLine1: '1 St', city: 'Town', state: 'CA' });
+    expect(overview.billingPhone).toBeNull();
 
     // Current (open) cycle
     expect(overview.currentCycle.periodKey).toBe(getPeriodKey(Date.now()));

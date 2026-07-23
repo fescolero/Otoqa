@@ -407,6 +407,9 @@ export const getBillingOverview = query({
       rate,
       billingEmail: org?.billingEmail ?? '',
       companyName: org?.name ?? '',
+      // For the invoice BILL TO block.
+      billingAddress: org?.billingAddress ?? null,
+      billingPhone: org?.billingPhone ?? null,
       currentCycle,
       closedCycles,
     };

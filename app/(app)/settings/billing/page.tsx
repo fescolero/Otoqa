@@ -33,6 +33,11 @@ import { useOrganizationId } from '@/contexts/organization-context';
 import { Chip, SettingsHeader, WBtn, WIcon, type ChipStatus } from '@/components/web';
 import { exportToCSV } from '@/lib/csv-export';
 import { formatCurrency, formatNumber } from '@/lib/utils/format';
+import { BillingInvoiceSheet } from './_components/billing-invoice-sheet';
+import type {
+  BillingInvoiceBillTo,
+  BillingInvoiceCycle,
+} from './_components/billing-invoice-types';
 
 type BillingOverview = NonNullable<
   FunctionReturnType<typeof api.platformUsage.getBillingOverview>
@@ -546,7 +551,15 @@ interface HistoryRow {
   subLabel: string;
 }
 
-function BillHistoryTable({ rows, rate }: { rows: HistoryRow[]; rate: number }) {
+function BillHistoryTable({
+  rows,
+  rate,
+  onPreview,
+}: {
+  rows: HistoryRow[];
+  rate: number;
+  onPreview: (periodKey: string) => void;
+}) {
   const cols = [
     { key: 'period', label: 'Billing cycle', width: '1.4fr', align: 'left' as const },
     { key: 'loads', label: 'Loads entered', width: '150px', align: 'right' as const },
@@ -673,7 +686,8 @@ function BillHistoryTable({ rows, rate }: { rows: HistoryRow[]; rate: number }) 
               ) : (
                 <button
                   className="focus-ring"
-                  title={`Download ${invoiceNo(r.key)} (PDF generation coming soon)`}
+                  title={`Preview & download ${invoiceNo(r.key)}`}
+                  onClick={() => onPreview(r.key)}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -1655,6 +1669,12 @@ function BillingSkeleton() {
 export default function BillingPage() {
   const organizationId = useOrganizationId();
   const [view, setView] = useState<'overview' | 'methods'>('overview');
+  // Org-tagged so a preview opened in one org can never render another
+  // org's colliding periodKey after a switch; resolved to an effective key
+  // below (derived — no reset effects needed).
+  const [invoicePreview, setInvoicePreview] = useState<{ orgId: string; key: string } | null>(
+    null,
+  );
   const historyRef = useRef<HTMLDivElement>(null);
 
   const overview = useQuery(
@@ -1711,6 +1731,63 @@ export default function BillingPage() {
   // The server marks at most one closed cycle 'due' (the latest).
   const dueCycle = useMemo(() => cycles.find((c) => c.status === 'due'), [cycles]);
   const outstanding = dueCycle?.amount ?? 0;
+
+  // Invoiceable cycles for the preview sheet — newest first, matching the
+  // history table. Only closed cycles are invoiceable (the open cycle has
+  // no invoice yet).
+  const invoiceCycles = useMemo<BillingInvoiceCycle[]>(
+    () =>
+      [...cycles].reverse().map((c) => {
+        const [y, m] = c.periodKey.split('-').map(Number);
+        return {
+          periodKey: c.periodKey,
+          label: monthLabel(c.periodKey),
+          invoiceNo: invoiceNo(c.periodKey),
+          loads: c.loadsWritten,
+          rate,
+          amount: c.amount,
+          status: c.status,
+          issuedOn: dateLabel(c.issuedMs),
+          dueOn: dateLabel(c.dueMs),
+          // Same fallback the history table uses ("Paid <issued>" when no
+          // settlement date) so the invoice never disagrees with the table.
+          paidOn: dateLabel(c.paidMs ?? c.issuedMs),
+          periodStart: dateLabel(Date.UTC(y, m - 1, 1)),
+          periodEnd: dateLabel(Date.UTC(y, m, 0)),
+        };
+      }),
+    [cycles, rate],
+  );
+
+  // Effective preview key: only valid while we're still on the org it was
+  // opened for AND the cycle is still in the history window — otherwise the
+  // sheet closes itself (org switch, month rollover sliding the window).
+  const invoicePreviewKey =
+    invoicePreview &&
+    invoicePreview.orgId === organizationId &&
+    invoiceCycles.some((c) => c.periodKey === invoicePreview.key)
+      ? invoicePreview.key
+      : null;
+  const openInvoicePreview = (key: string) => {
+    if (organizationId) setInvoicePreview({ orgId: organizationId, key });
+  };
+
+  const invoiceBillTo = useMemo<BillingInvoiceBillTo>(() => {
+    const a = overview?.billingAddress;
+    return {
+      companyName: overview?.companyName || '—',
+      billingEmail: overview?.billingEmail ?? '',
+      billingPhone: overview?.billingPhone,
+      addressLines: a
+        ? [
+            a.addressLine1,
+            ...(a.addressLine2 ? [a.addressLine2] : []),
+            `${a.city}, ${a.state} ${a.zip}`,
+            a.country,
+          ].filter(Boolean)
+        : [],
+    };
+  }, [overview]);
 
   const issue: IssueDetail = useMemo(
     () => ({
@@ -1778,7 +1855,13 @@ export default function BillingPage() {
               size="sm"
               accent
               leading="receipt"
-              onClick={() => historyRef.current?.scrollIntoView({ behavior: 'smooth' })}
+              disabled={!overview}
+              onClick={() => {
+                // Open the latest closed cycle's invoice; with no closed
+                // cycles yet, fall back to scrolling to the history table.
+                if (invoiceCycles.length > 0) openInvoicePreview(invoiceCycles[0].periodKey);
+                else historyRef.current?.scrollIntoView({ behavior: 'smooth' });
+              }}
             >
               View invoices
             </WBtn>
@@ -1833,7 +1916,11 @@ export default function BillingPage() {
                     </WBtn>
                   }
                 >
-                  <BillHistoryTable rows={historyRows} rate={rate} />
+                  <BillHistoryTable
+                    rows={historyRows}
+                    rate={rate}
+                    onPreview={openInvoicePreview}
+                  />
                 </BillCard>
               </div>
             </div>
@@ -1914,6 +2001,15 @@ export default function BillingPage() {
           </div>
         )}
       </div>
+
+      <BillingInvoiceSheet
+        isOpen={invoicePreviewKey !== null}
+        onClose={() => setInvoicePreview(null)}
+        cycles={invoiceCycles}
+        activeKey={invoicePreviewKey}
+        onNavigate={openInvoicePreview}
+        billTo={invoiceBillTo}
+      />
     </div>
   );
 }
