@@ -36,6 +36,7 @@ import { formatCurrency, formatNumber } from '@/lib/utils/format';
 import { BillingInvoiceSheet } from './_components/billing-invoice-sheet';
 import type {
   BillingInvoiceBillTo,
+  BillingInvoiceContract,
   BillingInvoiceCycle,
 } from './_components/billing-invoice-types';
 
@@ -1785,6 +1786,20 @@ export default function BillingPage() {
     if (organizationId) setInvoicePreview({ orgId: organizationId, key });
   };
 
+  // Contract identity for the invoice details panel. License dates are
+  // stored as YYYY-MM-DD on the org (dashboard-set); missing values show "—".
+  const invoiceContract = useMemo<BillingInvoiceContract>(() => {
+    const fmtYmd = (ymd: string | null | undefined) => {
+      const m = ymd?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      return m ? dateLabel(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : '—';
+    };
+    return {
+      contractNumber: overview?.contractNumber || '—',
+      licenseStart: fmtYmd(overview?.licenseStart),
+      licenseEnd: fmtYmd(overview?.licenseEnd),
+    };
+  }, [overview]);
+
   const invoiceBillTo = useMemo<BillingInvoiceBillTo>(() => {
     const a = overview?.billingAddress;
     return {
@@ -2028,6 +2043,7 @@ export default function BillingPage() {
         activeKey={invoicePreviewKey}
         onNavigate={openInvoicePreview}
         billTo={invoiceBillTo}
+        contract={invoiceContract}
       />
     </div>
   );

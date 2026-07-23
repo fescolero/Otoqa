@@ -15,12 +15,13 @@ import { ChevronLeft, ChevronRight, Download, FileX2, Printer, X } from 'lucide-
 import { downloadPdfBlob, generatePdfWithToast, openPdfBlob } from '@/lib/pdf-actions';
 import {
   INVOICE_BADGE_LABEL,
+  INVOICE_TERMS,
   OTOQA_BILLER,
-  billingModelNote,
   invoiceBadge,
   invoiceContactNote,
   invoiceMoney as money,
   type BillingInvoiceBillTo,
+  type BillingInvoiceContract,
   type BillingInvoiceCycle,
 } from './billing-invoice-types';
 
@@ -37,7 +38,7 @@ function Muted({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{children}</div>;
 }
 
-/** Uppercase section label (FROM / BILL TO / footer blocks). */
+/** Uppercase section label (BILL TO / DETAILS / footer blocks). */
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -45,6 +46,19 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
       style={{ fontSize: 10, letterSpacing: 0.5, color: 'var(--text-tertiary)' }}
     >
       {children}
+    </div>
+  );
+}
+
+/** One label→value line in the invoice details panel. */
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div
+      className="flex items-baseline justify-between gap-6 py-1"
+      style={{ fontSize: 11.5, borderBottom: '1px solid var(--border-hairline)' }}
+    >
+      <span style={{ color: 'var(--text-tertiary)' }}>{label}</span>
+      <span className="font-semibold font-mono text-right">{value}</span>
     </div>
   );
 }
@@ -58,6 +72,7 @@ interface BillingInvoiceSheetProps {
   activeKey: string | null;
   onNavigate: (periodKey: string) => void;
   billTo: BillingInvoiceBillTo;
+  contract: BillingInvoiceContract;
 }
 
 export function BillingInvoiceSheet({
@@ -67,6 +82,7 @@ export function BillingInvoiceSheet({
   activeKey,
   onNavigate,
   billTo,
+  contract,
 }: BillingInvoiceSheetProps) {
   const currentIndex = activeKey ? cycles.findIndex((c) => c.periodKey === activeKey) : -1;
   const cycle = currentIndex >= 0 ? cycles[currentIndex] : null;
@@ -94,8 +110,10 @@ export function BillingInvoiceSheet({
     if (!cycle) throw new Error('No cycle selected');
     const { pdf } = await import('@react-pdf/renderer');
     const { BillingInvoicePDFTemplate } = await import('./billing-invoice-pdf-template');
-    return pdf(<BillingInvoicePDFTemplate cycle={cycle} billTo={billTo} />).toBlob();
-  }, [billTo, cycle]);
+    return pdf(
+      <BillingInvoicePDFTemplate cycle={cycle} billTo={billTo} contract={contract} />,
+    ).toBlob();
+  }, [billTo, contract, cycle]);
 
   const handlePrint = useCallback(async () => {
     if (!cycle) return;
@@ -229,36 +247,8 @@ export function BillingInvoiceSheet({
                   </div>
                 </div>
 
-                {/* Meta */}
-                <div className="flex gap-10 mb-6" style={{ fontSize: 11.5 }}>
-                  {[
-                    ['Invoice No', cycle.invoiceNo],
-                    ['Billing cycle', cycle.label],
-                    ['Issued', cycle.issuedOn],
-                    [
-                      cycle.status === 'paid' ? 'Paid' : 'Due date',
-                      cycle.status === 'paid' ? (cycle.paidOn ?? '-') : cycle.dueOn,
-                    ],
-                  ].map(([k, vLabel]) => (
-                    <div key={k}>
-                      <div className="mb-0.5" style={{ color: 'var(--text-tertiary)' }}>
-                        {k}
-                      </div>
-                      <div className="font-semibold font-mono">{vLabel}</div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Addresses */}
+                {/* Bill to + invoice details */}
                 <div className="flex gap-10 mb-6">
-                  <div className="flex-1">
-                    <SectionLabel>From</SectionLabel>
-                    <div className="font-semibold" style={{ fontSize: 12 }}>
-                      {OTOQA_BILLER.name}
-                    </div>
-                    <Muted>{OTOQA_BILLER.tagline}</Muted>
-                    <Muted>{OTOQA_BILLER.email}</Muted>
-                  </div>
                   <div className="flex-1">
                     <SectionLabel>Bill to</SectionLabel>
                     <div className="font-semibold" style={{ fontSize: 12 }}>
@@ -269,6 +259,23 @@ export function BillingInvoiceSheet({
                     ))}
                     <Muted>{billTo.billingEmail}</Muted>
                     {billTo.billingPhone && <Muted>{billTo.billingPhone}</Muted>}
+                  </div>
+                  <div className="flex-1">
+                    <SectionLabel>Details</SectionLabel>
+                    <DetailRow label="Invoice No" value={cycle.invoiceNo} />
+                    <DetailRow label="Invoice date" value={cycle.issuedOn} />
+                    <DetailRow label="Due date" value={cycle.dueOn} />
+                    {cycle.status === 'paid' && (
+                      <DetailRow label="Paid" value={cycle.paidOn ?? '—'} />
+                    )}
+                    <DetailRow label="Terms" value={INVOICE_TERMS} />
+                    <DetailRow label="Contract #" value={contract.contractNumber} />
+                    <DetailRow label="License start" value={contract.licenseStart} />
+                    <DetailRow label="License end" value={contract.licenseEnd} />
+                    <DetailRow
+                      label="Billing period"
+                      value={`${cycle.periodStart} – ${cycle.periodEnd}`}
+                    />
                   </div>
                 </div>
 
@@ -344,20 +351,12 @@ export function BillingInvoiceSheet({
 
                 {/* Footer */}
                 <div
-                  className="flex gap-10 pt-5"
+                  className="pt-5"
                   style={{ fontSize: 11.5, borderTop: '1px dashed var(--border-hairline-strong)' }}
                 >
-                  <div className="flex-1">
-                    <SectionLabel>Billing model</SectionLabel>
-                    <div style={{ lineHeight: 1.5, color: 'var(--text-secondary)' }}>
-                      {billingModelNote(cycle.rate)}
-                    </div>
-                  </div>
-                  <div className="flex-1">
-                    <SectionLabel>Notes</SectionLabel>
-                    <div style={{ lineHeight: 1.5, color: 'var(--text-secondary)' }}>
-                      {invoiceContactNote()}
-                    </div>
+                  <SectionLabel>Notes</SectionLabel>
+                  <div style={{ lineHeight: 1.5, color: 'var(--text-secondary)' }}>
+                    {invoiceContactNote()}
                   </div>
                 </div>
               </div>

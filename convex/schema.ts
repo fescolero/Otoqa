@@ -166,6 +166,12 @@ export default defineSchema({
     // rate (see convex/platformUsageHelpers.ts DEFAULT_BILLING_RATE_PER_LOAD)
     // when missing. Set per org from the Convex dashboard.
     billingRatePerLoad: v.optional(v.number()),
+    // Contract identity shown on platform invoices (Settings → Billing &
+    // usage → invoice PDF). Set per org from the Convex dashboard; the
+    // invoice shows "—" for any missing value.
+    platformContractNumber: v.optional(v.string()),
+    platformLicenseStart: v.optional(v.string()), // YYYY-MM-DD
+    platformLicenseEnd: v.optional(v.string()), // YYYY-MM-DD
 
     // Default timezone for payroll calculations
     // IANA format: "America/New_York", "America/Los_Angeles", etc.

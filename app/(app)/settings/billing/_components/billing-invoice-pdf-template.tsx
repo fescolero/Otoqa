@@ -2,12 +2,13 @@ import React from 'react';
 import { Document, Page, Text, View, StyleSheet } from '@react-pdf/renderer';
 import {
   INVOICE_BADGE_LABEL,
+  INVOICE_TERMS,
   OTOQA_BILLER,
-  billingModelNote,
   invoiceBadge,
   invoiceContactNote,
   invoiceMoney as money,
   type BillingInvoiceBillTo,
+  type BillingInvoiceContract,
   type BillingInvoiceCycle,
 } from './billing-invoice-types';
 
@@ -70,19 +71,22 @@ const styles = StyleSheet.create({
     backgroundColor: '#fee2e2',
     color: '#b91c1c',
   },
-  metaSection: {
+  detailRow: {
     flexDirection: 'row',
-    gap: 40,
-    marginBottom: 20,
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    paddingTop: 3,
+    paddingBottom: 3,
+    borderBottom: '1 solid #f1f5f9',
     fontSize: 9,
   },
-  metaLabel: {
+  detailLabel: {
     color: '#666666',
-    marginBottom: 2,
   },
-  metaValue: {
+  detailValue: {
     fontWeight: 'bold',
     fontFamily: 'Courier',
+    textAlign: 'right',
   },
   addressSection: {
     flexDirection: 'row',
@@ -208,11 +212,20 @@ const styles = StyleSheet.create({
 interface BillingInvoicePDFTemplateProps {
   cycle: BillingInvoiceCycle;
   billTo: BillingInvoiceBillTo;
+  contract: BillingInvoiceContract;
 }
+
+const DetailRow = ({ label, value }: { label: string; value: string }) => (
+  <View style={styles.detailRow}>
+    <Text style={styles.detailLabel}>{label}</Text>
+    <Text style={styles.detailValue}>{value}</Text>
+  </View>
+);
 
 export const BillingInvoicePDFTemplate: React.FC<BillingInvoicePDFTemplateProps> = ({
   cycle,
   billTo,
+  contract,
 }) => (
   <Document>
     <Page size="LETTER" style={styles.page}>
@@ -246,37 +259,8 @@ export const BillingInvoicePDFTemplate: React.FC<BillingInvoicePDFTemplateProps>
         </View>
       </View>
 
-      {/* Meta */}
-      <View style={styles.metaSection}>
-        <View>
-          <Text style={styles.metaLabel}>Invoice No:</Text>
-          <Text style={styles.metaValue}>{cycle.invoiceNo}</Text>
-        </View>
-        <View>
-          <Text style={styles.metaLabel}>Billing cycle:</Text>
-          <Text style={styles.metaValue}>{cycle.label}</Text>
-        </View>
-        <View>
-          <Text style={styles.metaLabel}>Issued:</Text>
-          <Text style={styles.metaValue}>{cycle.issuedOn}</Text>
-        </View>
-        <View>
-          <Text style={styles.metaLabel}>{cycle.status === 'paid' ? 'Paid:' : 'Due Date:'}</Text>
-          <Text style={styles.metaValue}>
-            {cycle.status === 'paid' ? (cycle.paidOn ?? '-') : cycle.dueOn}
-          </Text>
-        </View>
-      </View>
-
-      {/* Addresses */}
+      {/* Bill to + invoice details */}
       <View style={styles.addressSection}>
-        <View style={styles.addressBlock}>
-          <Text style={styles.addressLabel}>FROM</Text>
-          <Text style={[styles.addressText, { fontWeight: 'bold' }]}>{OTOQA_BILLER.name}</Text>
-          <Text style={styles.addressText}>{OTOQA_BILLER.tagline}</Text>
-          <Text style={styles.addressText}>{OTOQA_BILLER.email}</Text>
-        </View>
-
         <View style={styles.addressBlock}>
           <Text style={styles.addressLabel}>BILL TO</Text>
           <Text style={[styles.addressText, { fontWeight: 'bold' }]}>{billTo.companyName}</Text>
@@ -287,6 +271,19 @@ export const BillingInvoicePDFTemplate: React.FC<BillingInvoicePDFTemplateProps>
           ))}
           <Text style={styles.addressText}>{billTo.billingEmail}</Text>
           {billTo.billingPhone ? <Text style={styles.addressText}>{billTo.billingPhone}</Text> : null}
+        </View>
+
+        <View style={styles.addressBlock}>
+          <Text style={styles.addressLabel}>DETAILS</Text>
+          <DetailRow label="Invoice No" value={cycle.invoiceNo} />
+          <DetailRow label="Invoice date" value={cycle.issuedOn} />
+          <DetailRow label="Due date" value={cycle.dueOn} />
+          {cycle.status === 'paid' ? <DetailRow label="Paid" value={cycle.paidOn ?? '—'} /> : null}
+          <DetailRow label="Terms" value={INVOICE_TERMS} />
+          <DetailRow label="Contract #" value={contract.contractNumber} />
+          <DetailRow label="License start" value={contract.licenseStart} />
+          <DetailRow label="License end" value={contract.licenseEnd} />
+          <DetailRow label="Billing period" value={`${cycle.periodStart} – ${cycle.periodEnd}`} />
         </View>
       </View>
 
@@ -333,11 +330,6 @@ export const BillingInvoicePDFTemplate: React.FC<BillingInvoicePDFTemplateProps>
 
       {/* Footer */}
       <View style={styles.footerSection}>
-        <View style={styles.footerBlock}>
-          <Text style={styles.footerLabel}>BILLING MODEL</Text>
-          <Text style={styles.footerText}>{billingModelNote(cycle.rate)}</Text>
-        </View>
-
         <View style={styles.footerBlock}>
           <Text style={styles.footerLabel}>NOTES</Text>
           <Text style={styles.footerText}>{invoiceContactNote()}</Text>
