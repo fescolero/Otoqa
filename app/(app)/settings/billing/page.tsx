@@ -84,7 +84,7 @@ const dateLabelShort = (ms: number) =>
   new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 
 // Invoice numbers come from the server (getBillingOverview.closedCycles[].
-// invoiceNo — INV-<org fragment>-<YYYYMM>) so every surface shows the same
+// invoiceNo — INV-<org fragment>-<sequence>) so every surface shows the same
 // auto-generated, org-unique number.
 
 // ─── Payment placeholders — static until a payment processor lands ────────
