@@ -126,6 +126,22 @@ describe('calculatePayForLeg completed-work gate', () => {
     expect(await liveItems(t, w.loadId, w.driverId)).toHaveLength(0);
   });
 
+  it('handles an orphan leg (parent load deleted) by voiding, not throwing', async () => {
+    const t = convexTest(schema);
+    const w = await seedWorld(t, 'COMPLETED');
+    await recalc(t, w.legId);
+    expect(await liveItems(t, w.loadId, w.driverId)).toHaveLength(1);
+
+    // Hard-delete the parent load (pre-cascade orphans look like this).
+    await t.run(async (ctx) => ctx.db.delete(w.loadId));
+
+    const result = await recalc(t, w.legId);
+    expect(result.warnings).toContain('LOAD_NOT_FOUND');
+    expect(result.emitted).toBe(0);
+    expect(result.voided).toBe(1);
+    expect(await liveItems(t, w.loadId, w.driverId)).toHaveLength(0);
+  });
+
   it('suppresses the fresh spec when a locked reviewer edit survives (no double-pay)', async () => {
     const t = convexTest(schema);
     const w = await seedWorld(t, 'COMPLETED');

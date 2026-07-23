@@ -31,6 +31,7 @@ import { calculatePay } from './calculatePay';
 import type { PayItemSpec, PayeeType } from './calculatePay';
 import { assembleCalculatePayInput } from './assembleInput';
 import { makeForwardAnchorResolver } from './periodAnchor';
+import { voidUnlockedLegPayItems } from './legRecalc';
 import { rawCents, rawMicroCents } from '../lib/money';
 
 export const calculatePayForLeg = internalMutation({
@@ -74,8 +75,16 @@ export const calculatePayForLeg = internalMutation({
       };
     }
 
+    // Orphan leg — the parent load was hard-deleted (legs are retained for
+    // their ledger anchors; older deletes predate the deleteLoad void
+    // cascade). There's no load to price against, so treat it like a
+    // canceled leg: void any unlocked items and exit cleanly. Throwing here
+    // just spams the log every time a sweep visits the orphan.
     const load = await ctx.db.get(leg.loadId);
-    if (!load) throw new Error(`calculatePayForLeg: load ${leg.loadId} not found`);
+    if (!load) {
+      const voided = await voidUnlockedLegPayItems(ctx, leg.loadId, leg._id, 'Parent load deleted');
+      return { legId, emitted: 0, voided, warnings: ['LOAD_NOT_FOUND'], runId };
+    }
 
     const workosOrgId = load.workosOrgId;
 
