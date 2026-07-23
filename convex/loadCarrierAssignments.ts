@@ -7,6 +7,7 @@ import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from '
 import { getLoadFacets } from './lib/loadFacets';
 import { computeLegScheduledTimes } from './_helpers/timeUtils';
 import { logAudit } from './lib/audit';
+import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 
 /**
  * Load Carrier Assignments API
@@ -1068,6 +1069,27 @@ export const completeLoad = mutation({
       trackingStatus: 'Completed',
       updatedAt: now,
     });
+
+    // Cascade to the load's legs — this path bypasses
+    // loads.applyLoadStatusUpdate, so without this the carrier's dispatch
+    // leg stays PENDING forever and the completed-work gate in
+    // calculatePayForLeg would never write its pay items (carrier pay
+    // stranded). Mirrors the Completed branch of applyLoadStatusUpdate.
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
+      .collect();
+    for (const leg of legs) {
+      if (leg.status !== 'COMPLETED' && leg.status !== 'CANCELED') {
+        await ctx.db.patch(leg._id, {
+          status: 'COMPLETED',
+          endedAt: now,
+          endReason: 'completed',
+          updatedAt: now,
+        });
+        await scheduleLegPayRecalc(ctx, leg._id, 'system:carrier_load_completed');
+      }
+    }
 
     return { success: true };
   },

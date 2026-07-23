@@ -22,6 +22,7 @@ import { v } from 'convex/values';
 import type { Id, Doc } from '../_generated/dataModel';
 import { centsFromNumber, microCentsFromNumber, rawCents, rawMicroCents } from '../lib/money';
 import { FINALIZED_SETTLEMENT_STATUSES } from './schema';
+import { makeForwardAnchorResolver } from './periodAnchor';
 
 type ManualTable = 'loadPayables' | 'loadCarrierPayables';
 
@@ -80,25 +81,8 @@ async function resolveForwardAnchor(
   naturalAnchor: number,
   now: number,
 ): Promise<{ anchor: number; rolledForward: boolean }> {
-  const settlements = await ctx.db
-    .query('settlements')
-    .withIndex('by_payee_period', (q) => q.eq('payeeType', payeeType).eq('payeeId', payeeId))
-    .collect();
-  const containing = settlements.find(
-    (s) => naturalAnchor >= s.periodStart && naturalAnchor <= s.periodEnd,
-  );
-  if (!containing || !FINALIZED_SETTLEMENT_STATUSES.has(containing.status)) {
-    return { anchor: naturalAnchor, rolledForward: false };
-  }
-  const nextOpen = settlements
-    .filter((s) => !FINALIZED_SETTLEMENT_STATUSES.has(s.status) && s.periodStart > containing.periodStart)
-    .sort((a, b) => a.periodStart - b.periodStart)[0];
-  // No open period yet: anchor just past the finalized window (never inside it),
-  // so the next generated open period picks it up rather than orphaning it.
-  return {
-    anchor: nextOpen ? nextOpen.periodStart : Math.max(now, containing.periodEnd + 1),
-    rolledForward: true,
-  };
+  const resolve = await makeForwardAnchorResolver(ctx, payeeType, payeeId);
+  return resolve(naturalAnchor, now);
 }
 
 /**

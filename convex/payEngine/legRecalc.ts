@@ -28,3 +28,37 @@ export async function scheduleLegPayRecalc(
     requestedAt,
   });
 }
+
+/**
+ * Inline void of a load's unlocked engine payItems — for the paths where a
+ * scheduled recalc can't do the cleanup: unassignment clears the leg's
+ * payee (calculatePayForLeg exits LEG_UNASSIGNED before its void loop) and
+ * load deletion removes the load doc the recalc would need to re-read.
+ * Locked rows (reviewer edits / approval-frozen) survive, same as a recalc.
+ * Pass a legId to scope the void to one leg; omit for the whole load.
+ */
+export async function voidUnlockedLegPayItems(
+  ctx: MutationCtx,
+  loadId: Id<'loadInformation'>,
+  legId: Id<'dispatchLegs'> | null,
+  reason: string,
+): Promise<number> {
+  const now = Date.now();
+  const items = await ctx.db
+    .query('payItems')
+    .withIndex('by_load_payee', (q) => q.eq('sourceRef.loadId', loadId))
+    .collect();
+  let voided = 0;
+  for (const it of items) {
+    if (it.isVoided || it.isLocked) continue;
+    if (legId && it.sourceRef.legId !== legId) continue;
+    await ctx.db.patch(it._id, {
+      isVoided: true,
+      voidedAt: now,
+      voidReason: reason,
+      updatedAt: now,
+    });
+    voided++;
+  }
+  return voided;
+}

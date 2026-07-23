@@ -10,7 +10,7 @@ import { parseStopDateTime, syncLegsAffectedByStop } from './_helpers/timeUtils'
 import { updateLoadCount } from './stats_helpers';
 import { recordLoadWritten } from './platformUsageHelpers';
 import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
-import { scheduleLegPayRecalc } from './payEngine/legRecalc';
+import { scheduleLegPayRecalc, voidUnlockedLegPayItems } from './payEngine/legRecalc';
 import {
   setLoadTag,
   removeAllTagsForLoad,
@@ -206,6 +206,10 @@ async function applyLoadStatusUpdate(
             await ctx.db.delete(payable._id);
           }
         }
+
+        // Pay-engine mirror. Inline (not a scheduled recalc): the payee was
+        // just cleared, so a recalc would exit LEG_UNASSIGNED without voiding.
+        await voidUnlockedLegPayItems(ctx, args.loadId, leg._id, 'Load reopened — leg unassigned');
       }
     }
   }
@@ -1910,6 +1914,10 @@ export const deleteLoad = mutation({
         });
       }
     }
+
+    // Pay-engine cleanup. Inline (not a scheduled recalc): the load doc is
+    // hard-deleted below, and calculatePayForLeg re-reads it and would throw.
+    await voidUnlockedLegPayItems(ctx, args.loadId, null, 'Load deleted');
 
     const stops = await ctx.db
       .query('loadStops')

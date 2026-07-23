@@ -126,6 +126,57 @@ describe('calculatePayForLeg completed-work gate', () => {
     expect(await liveItems(t, w.loadId, w.driverId)).toHaveLength(0);
   });
 
+  it('suppresses the fresh spec when a locked reviewer edit survives (no double-pay)', async () => {
+    const t = convexTest(schema);
+    const w = await seedWorld(t, 'COMPLETED');
+    await recalc(t, w.legId);
+    const [item] = await liveItems(t, w.loadId, w.driverId);
+
+    // Reviewer locks the line (approval freeze / edit both set isLocked).
+    await t.run(async (ctx) => ctx.db.patch(item._id, { isLocked: true }));
+
+    const result = await recalc(t, w.legId);
+    expect(result.emitted).toBe(0); // locked survivor wins — no duplicate
+    expect(result.voided).toBe(0);
+    const live = await liveItems(t, w.loadId, w.driverId);
+    expect(live).toHaveLength(1);
+    expect(live[0]._id).toBe(item._id);
+  });
+
+  it('rolls the anchor onto the next open period when the natural period is finalized', async () => {
+    const t = convexTest(schema);
+    const w = await seedWorld(t, 'COMPLETED');
+    const workAt = await t.run(async (ctx) => (await ctx.db.get(w.legId))!.createdAt);
+    const DAY = 86_400_000;
+    // Natural period finalized (VERIFIED) + a later open period.
+    await t.run(async (ctx) => {
+      const base = {
+        workosOrgId: ORG, payeeType: 'DRIVER' as const, payeeId: w.driverId as string,
+        currency: 'USD' as const,
+        totals: {
+          earningsCents: 0n, bonusesCents: 0n, creditsCents: 0n, deductionsCents: 0n,
+          taxWithholdingCents: 0n, garnishmentsCents: 0n, adjustmentsCents: 0n,
+          grossCents: 0n, netCents: 0n, holdbackTotalCents: 0n, itemCount: 0,
+        },
+        componentTotals: [], createdAt: workAt, updatedAt: workAt, createdBy: USER,
+      };
+      await ctx.db.insert('settlements', {
+        ...base, statementNumber: 'SET-1', status: 'VERIFIED',
+        periodStart: workAt - DAY, periodEnd: workAt + DAY,
+      });
+      await ctx.db.insert('settlements', {
+        ...base, statementNumber: 'SET-2', status: 'OPEN',
+        periodStart: workAt + DAY + 1, periodEnd: workAt + 15 * DAY,
+      });
+    });
+
+    await recalc(t, w.legId);
+    const live = await liveItems(t, w.loadId, w.driverId);
+    expect(live).toHaveLength(1);
+    // Anchored into the next OPEN period, not the finalized one it would orphan in.
+    expect(live[0].periodAnchorAt).toBe(workAt + DAY + 1);
+  });
+
   it('defers a completed leg while its shift is open, pays after it ends', async () => {
     const t = convexTest(schema);
     const w = await seedWorld(t, 'COMPLETED');

@@ -1116,6 +1116,10 @@ export const updateStatus = internalMutation({
       status: args.status,
       updatedAt: Date.now(),
     });
+    // Status transitions are pricing events (completed-work gate in
+    // calculatePayForLeg): reaching COMPLETED writes the leg's items,
+    // leaving it voids them. Without this, a caller could strand pay.
+    await scheduleLegPayRecalc(ctx, args.legId, 'system:leg_status_update');
   },
 });
 

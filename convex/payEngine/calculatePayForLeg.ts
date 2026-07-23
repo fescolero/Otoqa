@@ -26,10 +26,11 @@
 
 import { internalMutation } from '../_generated/server';
 import { v } from 'convex/values';
-import type { Id } from '../_generated/dataModel';
+import type { Doc, Id } from '../_generated/dataModel';
 import { calculatePay } from './calculatePay';
 import type { PayItemSpec, PayeeType } from './calculatePay';
 import { assembleCalculatePayInput } from './assembleInput';
+import { makeForwardAnchorResolver } from './periodAnchor';
 import { rawCents, rawMicroCents } from '../lib/money';
 
 export const calculatePayForLeg = internalMutation({
@@ -147,6 +148,9 @@ export const calculatePayForLeg = internalMutation({
 
       // Void prior unlocked payItems for this (leg, payee). by_load_payee
       // returns all payItems for the load; we filter in-code by legId.
+      // LOCKED rows survive (reviewer edits / approval freeze) — collect the
+      // earning ones by ruleId so their fresh specs are suppressed below
+      // (edit-wins, no double-pay — mirrors calculatePayForSession).
       const priorItems = await ctx.db
         .query('payItems')
         .withIndex('by_load_payee', q =>
@@ -154,10 +158,14 @@ export const calculatePayForLeg = internalMutation({
             .eq('payeeType', payee.payeeType)
             .eq('payeeId', payee.payeeId))
         .collect();
+      const lockedByRule = new Map<string, Doc<'payItems'>>();
       for (const old of priorItems) {
         if (old.isVoided) continue;
-        if (old.isLocked) continue;
         if (old.sourceRef.legId !== leg._id) continue;
+        if (old.isLocked) {
+          if (old.sourceData?._variant === 'EARNING') lockedByRule.set(old.sourceData.ruleId, old);
+          continue;
+        }
         await ctx.db.patch(old._id, {
           isVoided: true,
           voidedAt: now,
@@ -169,9 +177,40 @@ export const calculatePayForLeg = internalMutation({
         totalVoided++;
       }
 
-      // Insert the freshly calculated payItems.
+      // Insert the freshly calculated payItems. Anchors roll forward past a
+      // FINALIZED period (periodAnchor.ts): a deferred item released after
+      // its period's statement was approved lands on the payee's next open
+      // statement instead of orphaning on none.
+      const resolveAnchor = specs.length
+        ? await makeForwardAnchorResolver(ctx, payee.payeeType, payee.payeeId)
+        : null;
       for (const spec of specs) {
-        await ctx.db.insert('payItems', specToPayItemRow(spec, workosOrgId, userId, now));
+        const ruleId = spec.sourceData._variant === 'EARNING' ? spec.sourceData.ruleId : undefined;
+        const locked = ruleId ? lockedByRule.get(ruleId) : undefined;
+        if (locked) {
+          // Edit wins — no duplicate row. Maintain the drift flag for edited
+          // rows (reviewerEdit.engineAmountCents → the "rules changed" flag).
+          if (locked.reviewerEdit) {
+            const engineAmount = rawCents(spec.amountCents);
+            if (locked.amountCents !== engineAmount) {
+              await ctx.db.patch(locked._id, {
+                reviewerEdit: { ...locked.reviewerEdit, engineAmountCents: engineAmount, engineDivergedAt: now },
+                updatedAt: now,
+              });
+            } else if (locked.reviewerEdit.engineAmountCents != null) {
+              await ctx.db.patch(locked._id, {
+                reviewerEdit: { ...locked.reviewerEdit, engineAmountCents: undefined, engineDivergedAt: undefined },
+                updatedAt: now,
+              });
+            }
+          }
+          continue;
+        }
+        const { anchor } = resolveAnchor!(spec.periodAnchorAt, now);
+        await ctx.db.insert('payItems', {
+          ...specToPayItemRow(spec, workosOrgId, userId, now),
+          periodAnchorAt: anchor,
+        });
         totalEmitted++;
       }
     }

@@ -18,6 +18,7 @@ import {
   type ChargeComponentLite,
 } from './calculatePay';
 import { specToPayItemRow } from './calculatePayForLeg';
+import { makeForwardAnchorResolver } from './periodAnchor';
 import { asMicroCents, asCents, rawCents } from '../lib/money';
 
 export const calculatePayForSession = internalMutation({
@@ -164,6 +165,12 @@ export const calculatePayForSession = internalMutation({
       : undefined;
     let inserted = 0;
     let driftFlagged = 0;
+    // Anchors roll forward past a FINALIZED period (periodAnchor.ts): session
+    // pay for a shift that ended after its period's statement was approved
+    // lands on the driver's next open statement instead of orphaning on none.
+    const resolveAnchor = result.payItems.length
+      ? await makeForwardAnchorResolver(ctx, 'DRIVER', driverId)
+      : null;
     for (const spec of result.payItems) {
       const ruleId = spec.sourceData._variant === 'EARNING' ? spec.sourceData.ruleId : undefined;
       const locked = ruleId ? lockedByRule.get(ruleId) : undefined;
@@ -186,7 +193,11 @@ export const calculatePayForSession = internalMutation({
         }
         continue;
       }
-      await ctx.db.insert('payItems', { ...specToPayItemRow(spec, session.organizationId, args.userId ?? 'system', now), warning });
+      await ctx.db.insert('payItems', {
+        ...specToPayItemRow(spec, session.organizationId, args.userId ?? 'system', now),
+        periodAnchorAt: resolveAnchor!(spec.periodAnchorAt, now).anchor,
+        warning,
+      });
       inserted++;
     }
 
