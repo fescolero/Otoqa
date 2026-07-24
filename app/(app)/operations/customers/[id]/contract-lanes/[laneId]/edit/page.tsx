@@ -152,7 +152,9 @@ export default function EditContractLanePage() {
 
   return (
     <>
-        <div className="flex flex-1 flex-col gap-6 p-6 pb-24">
+        {/* The shell's <main> is overflow-hidden — this column is the page's
+            scroll region, with the action bar pinned below it. */}
+        <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-6 pb-24">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Edit Contract Lane</h1>
             <p className="text-muted-foreground">Update contract lane for {customer.name}</p>
