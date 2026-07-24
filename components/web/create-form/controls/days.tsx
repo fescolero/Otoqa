@@ -13,7 +13,9 @@
 
 import * as React from 'react';
 
-const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+// Three-letter labels — single letters made Sat/Sun and Tue/Thu
+// indistinguishable.
+const DAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DAY_NAMES = [
   'Sunday',
   'Monday',
@@ -40,7 +42,7 @@ export function DaysControl({ id, value, onChange, disabled }: DaysControlProps)
 
   return (
     <div id={id} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-      {DAY_LETTERS.map((d, i) => {
+      {DAY_ABBR.map((d, i) => {
         const on = sel.includes(i);
         return (
           <button
@@ -53,9 +55,9 @@ export function DaysControl({ id, value, onChange, disabled }: DaysControlProps)
             aria-pressed={on}
             aria-label={DAY_NAMES[i]}
             style={{
-              width: 34,
               height: 34,
-              borderRadius: '50%',
+              padding: '0 14px',
+              borderRadius: 999,
               border: '1px solid ' + (on ? 'var(--accent)' : 'var(--border-hairline-strong)'),
               background: on ? 'var(--accent)' : 'var(--bg-surface)',
               color: on ? '#fff' : 'var(--text-secondary)',

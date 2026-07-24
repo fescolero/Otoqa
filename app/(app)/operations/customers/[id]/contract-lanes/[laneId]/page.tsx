@@ -35,7 +35,6 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 
 const DAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const DAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 const APPT_LABELS: Record<string, string> = {
   APPT: 'Appointment',
@@ -505,16 +504,16 @@ export default function ContractLaneDetailPage() {
 
               <DSCard title="Operating schedule">
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
-                  {DAY_LETTERS.map((letter, i) => {
+                  {DAY_ABBR.map((abbr, i) => {
                     const on = days.includes(i);
                     return (
                       <span
                         key={i}
-                        title={DAY_ABBR[i]}
+                        title={abbr}
                         style={{
-                          width: 30,
                           height: 30,
-                          borderRadius: '50%',
+                          padding: '0 11px',
+                          borderRadius: 999,
                           display: 'inline-flex',
                           alignItems: 'center',
                           justifyContent: 'center',
@@ -525,7 +524,7 @@ export default function ContractLaneDetailPage() {
                           border: on ? 'none' : '1px solid var(--border-hairline)',
                         }}
                       >
-                        {letter}
+                        {abbr}
                       </span>
                     );
                   })}
