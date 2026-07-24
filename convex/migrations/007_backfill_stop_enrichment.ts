@@ -47,12 +47,33 @@ const self: any = (internal as any)['migrations/007_backfill_stop_enrichment'];
 type _Ref = FunctionReference<'mutation' | 'query', 'internal'>;
 void (null as unknown as _Ref);
 
+interface CustomerStats {
+  loadsTouched: number;
+  addressesFilled: number;
+  facilitiesLinked: number;
+  coordsSnapped: number;
+}
+
 interface BatchStats {
   loadsScanned: number;
   loadsTouched: number;
   addressesFilled: number;
   facilitiesLinked: number;
   coordsSnapped: number;
+  // Keyed by customer name so the summary can attribute the work.
+  byCustomer: Record<string, CustomerStats>;
+}
+
+function customerBucket(stats: BatchStats, name: string): CustomerStats {
+  if (!stats.byCustomer[name]) {
+    stats.byCustomer[name] = {
+      loadsTouched: 0,
+      addressesFilled: 0,
+      facilitiesLinked: 0,
+      coordsSnapped: 0,
+    };
+  }
+  return stats.byCustomer[name];
 }
 
 async function findLaneForLoad(
@@ -105,6 +126,7 @@ async function enrichLoad(
   const laneAddresses = laneAddressesByPosition(lane?.stops, shapes);
   const laneBindings = laneBindingsByPosition(lane?.stops, shapes);
 
+  const bucket = customerBucket(stats, load.customerName || '(unknown customer)');
   let touched = false;
   for (let i = 0; i < stops.length; i++) {
     const stop = stops[i];
@@ -113,6 +135,7 @@ async function enrichLoad(
     if (!(stop.address && stop.address.trim()) && laneAddresses[i]) {
       patch.address = laneAddresses[i];
       stats.addressesFilled++;
+      bucket.addressesFilled++;
     }
 
     if (!stop.facilityId && facilities.length > 0) {
@@ -130,6 +153,7 @@ async function enrichLoad(
       if (link) {
         patch.facilityId = link.facilityId;
         stats.facilitiesLinked++;
+        bucket.facilitiesLinked++;
         // Coordinates only move on stops a driver hasn't reached, on loads
         // still in flight — completed stops are pay-bearing history.
         const stopMutable =
@@ -140,6 +164,7 @@ async function enrichLoad(
           patch.latitude = link.latitude;
           patch.longitude = link.longitude;
           stats.coordsSnapped++;
+          bucket.coordsSnapped++;
         }
       }
     }
@@ -151,7 +176,10 @@ async function enrichLoad(
       }
     }
   }
-  if (touched) stats.loadsTouched++;
+  if (touched) {
+    stats.loadsTouched++;
+    bucket.loadsTouched++;
+  }
 }
 
 export const processBatch = internalMutation({
@@ -165,6 +193,15 @@ export const processBatch = internalMutation({
     addressesFilled: v.number(),
     facilitiesLinked: v.number(),
     coordsSnapped: v.number(),
+    byCustomer: v.record(
+      v.string(),
+      v.object({
+        loadsTouched: v.number(),
+        addressesFilled: v.number(),
+        facilitiesLinked: v.number(),
+        coordsSnapped: v.number(),
+      }),
+    ),
     isDone: v.boolean(),
     nextCursor: v.union(v.string(), v.null()),
   }),
@@ -179,6 +216,7 @@ export const processBatch = internalMutation({
       addressesFilled: 0,
       facilitiesLinked: 0,
       coordsSnapped: 0,
+      byCustomer: {},
     };
     for (const load of result.page) {
       stats.loadsScanned++;
@@ -200,6 +238,16 @@ const summaryValidator = v.object({
   facilitiesLinked: v.number(),
   coordsSnapped: v.number(),
   batches: v.number(),
+  // Per-customer attribution, sorted by loads touched descending.
+  byCustomer: v.array(
+    v.object({
+      customer: v.string(),
+      loadsTouched: v.number(),
+      addressesFilled: v.number(),
+      facilitiesLinked: v.number(),
+      coordsSnapped: v.number(),
+    }),
+  ),
 });
 
 async function drive(ctx: ActionCtx, dryRun: boolean) {
@@ -211,6 +259,7 @@ async function drive(ctx: ActionCtx, dryRun: boolean) {
     coordsSnapped: 0,
     batches: 0,
   };
+  const byCustomer: Record<string, CustomerStats> = {};
   let cursor: string | null = null;
   const MAX_ITERATIONS = 20_000;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -225,10 +274,27 @@ async function drive(ctx: ActionCtx, dryRun: boolean) {
     total.addressesFilled += batch.addressesFilled;
     total.facilitiesLinked += batch.facilitiesLinked;
     total.coordsSnapped += batch.coordsSnapped;
+    for (const [name, c] of Object.entries(batch.byCustomer as Record<string, CustomerStats>)) {
+      const acc = (byCustomer[name] ??= {
+        loadsTouched: 0,
+        addressesFilled: 0,
+        facilitiesLinked: 0,
+        coordsSnapped: 0,
+      });
+      acc.loadsTouched += c.loadsTouched;
+      acc.addressesFilled += c.addressesFilled;
+      acc.facilitiesLinked += c.facilitiesLinked;
+      acc.coordsSnapped += c.coordsSnapped;
+    }
     if (batch.isDone) break;
     cursor = batch.nextCursor;
   }
-  return total;
+  return {
+    ...total,
+    byCustomer: Object.entries(byCustomer)
+      .map(([customer, c]) => ({ customer, ...c }))
+      .sort((a, b) => b.loadsTouched - a.loadsTouched),
+  };
 }
 
 export const dryRun = internalAction({
