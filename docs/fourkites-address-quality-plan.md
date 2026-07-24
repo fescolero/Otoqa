@@ -1,6 +1,10 @@
 # FourKites Address Quality & Geofence Reliability — Implementation Plan
 
 **Status:** Approved design, pending implementation
+**Revised:** 2026-07-24 codebase review — added: soft-mode outer bound (pay-engine
+protection), mobile projection allowlist, flag-read helper, recurring/manual-load
+matching (2.7), pin-correction backfill (2.8), NASS-code + schedule-import facility
+seeding (2.5), `externalCode` on facilities.
 **Branch:** `claude/fourkites-address-quality-joymkn`
 **Reference incident:** Load 116569618 (Redding → Yreka, 2026-07-23) — driver physically at
 the stop was blocked from checking in/out by the 500 m geofence.
@@ -43,6 +47,21 @@ the real facility. The driver check-in geofence anchors to those coordinates wit
   `mobile/lib/feature-flags.ts`) for staged rollout.
 - Customer detail page already has a Locations tab stub
   (`app/(app)/operations/customers/[id]/customer-detail-content.tsx:664`).
+- Schedule import (`convex/scheduleImport.ts`) already extracts per-stop **NASS codes**
+  (stable USPS facility identifiers) from HCR schedule PDFs and already **geocodes every
+  lane stop** via Google during verification (`verifyAndEnrichStops`) — both are currently
+  discarded after use (NASS codes aren't persisted; coordinates only feed
+  `_calculatedMiles`). Direct seeds for the facility registry.
+
+### Related gaps in non-FourKites paths (found in review)
+
+- **Recurring loads** create stops with **no coordinates at all**
+  (`convex/recurringLoads.ts:455-479`): no geofence, no arrival events, degraded live
+  tracking. This is also why only some drivers hit the geofence problem.
+- **Manual load creation** (`convex/loads.ts:1530`) accepts `latitude/longitude` per stop
+  but the web create form never sends them, so manual stops are coordinate-less too.
+- **Detour stops** are fine (driver GPS coordinates, synthesized address label —
+  `convex/driverMobile.ts:2017-2031`).
 
 ---
 
@@ -93,8 +112,14 @@ the real facility. The driver check-in geofence anchors to those coordinates wit
   into the load stop's `address`. This fills the web/mobile address display for every
   contract load with data dispatch already typed — no external calls.
 - Schema: add `locationName: v.optional(v.string())` to `loadStops`.
-- Display: web stops table (`components/load-detail.tsx:899`) and mobile trip screen
-  (`mobile/app/(app)/trip/[id].tsx:1058-1071`) fall back to `locationName` before "—".
+- **Mobile projection:** `getLoadWithStops` (`convex/driverMobile.ts:628-762`) returns an
+  explicit field allowlist (validator + `stops.map`) — every new stop field
+  (`locationName`, later `facilityId` / `checkinOutsideGeofence`) must be added there or
+  mobile never sees it. Note: the trip screen already reads `stop.locationName`
+  (`trip/[id].tsx:1058`) — a field that has never existed — so adding it lights up
+  existing UI with no mobile release.
+- Display: web stops table (`components/load-detail.tsx:899`) falls back to
+  `locationName` before "—".
 
 ### 1.2 Re-sync guard
 - `convex/fourKitesPullSyncAction.ts` STEP 6: build the patch object field-by-field,
@@ -108,12 +133,22 @@ the real facility. The driver check-in geofence anchors to those coordinates wit
     GPS-accuracy margin. Accept an optional `accuracy` arg from mobile and add it to the
     allowance (capped, e.g. +100 m).
   - Behavior by org feature flag `checkin_geofence_mode`: `off` | `soft` (default) | `hard`.
-    - `soft`: never block. Persist `checkinDistanceMeters` and
-      `checkinOutsideGeofence: true` on the stop when past the limit; return a warning
-      message so mobile can toast it.
+    - `soft`: allow past the inner limit, but persist `checkinDistanceMeters` and
+      `checkinOutsideGeofence: true` on the stop and return a warning message so mobile
+      can toast it. **Soft mode is NOT unbounded:** beyond `OUTER_RING_METERS` (~8 km)
+      check-in is still refused. Rationale: `checkedInAt/checkedOutAt` feed the pay
+      engine (TIME_WAITING dwell sums and TIME_DURATION leg duration —
+      `convex/payEngine/calculatePay.ts:180-187,473`), so an accidental check-in from
+      far away would start dwell/detention clocks and distort pay. 8 km is generous
+      enough to never block a driver at a real stop with a bad pin, tight enough to
+      stop "checked in from the yard 40 miles away".
     - `hard`: current blocking behavior (kept for Phase 3's verified-facility mode).
+  - Flag read: `featureFlags.ts` only exposes a public `getForOrg` query — add a small
+    internal helper that reads the org's flag row directly from `ctx.db` so the check-in
+    mutation can consult it without a query round-trip.
   - Schema: add `checkinDistanceMeters` / `checkinOutsideGeofence` optionals to `loadStops`.
-- Mobile: show the warning non-blockingly on check-in success.
+- Mobile: show the warning non-blockingly on check-in success (and add the new fields to
+  the `getLoadWithStops` projection, per 1.1).
 
 ### 1.4 Coordinate-based navigation (mobile)
 - `openMaps` (`mobile/app/(app)/trip/[id].tsx:277`): prefer `latitude,longitude` when the
@@ -156,6 +191,7 @@ facilities: defineTable({
   verificationState: v.union(v.literal('UNVERIFIED'), v.literal('VERIFIED')),
   verifiedBy: v.optional(v.string()),
   verifiedAt: v.optional(v.number()),
+  externalCode: v.optional(v.string()),      // e.g. USPS NASS code from schedule import
   needsReview: v.optional(v.boolean()),      // set by auto-demotion (Phase 3)
   overrideCount: v.optional(v.number()),     // rolling override tally (Phase 3)
   notes: v.optional(v.string()),
@@ -165,7 +201,8 @@ facilities: defineTable({
   .index('by_customer', ['customerId', 'isDeleted'])
   .index('by_org', ['workosOrgId', 'isDeleted'])
 ```
-- `loadStops` gains `facilityId: v.optional(v.id('facilities'))`.
+- `loadStops` gains `facilityId: v.optional(v.id('facilities'))` plus a `by_facility`
+  index (needed by 2.8 backfill and Phase 3 evidence aggregation).
 - `contractLanes.stops[]` entries gain `facilityId: v.optional(v.id('facilities'))`.
 
 ### 2.2 Convex functions (`convex/facilities.ts`)
@@ -188,6 +225,16 @@ facilities: defineTable({
 ### 2.5 Lane binding UI
 - `components/contract-lanes/stop-input.tsx`: add a facility picker (filtered to the
   lane's customer) writing `facilityId` onto the lane stop entry. Optional per stop.
+- `contractLanes.stops[]` entries also gain `nassCode: v.optional(v.string())` — the
+  schedule import already extracts NASS codes per stop (`convex/scheduleImport.ts:113`)
+  and currently discards them. Persisting them enables exact facility matching by code
+  (`facilities.externalCode`) instead of position/proximity for schedule-imported lanes.
+- **Schedule-import assist:** `verifyAndEnrichStops` already geocodes every lane stop
+  with Google and throws the coordinates away (`scheduleImport.ts:648-651`). Keep them
+  through the import flow and offer "create missing facilities from this schedule"
+  during review — pre-filled with NASS code, address, and geocoded pin, each row
+  user-confirmed before insert. This respects manual-only (a human approves every row)
+  while eliminating the data-entry chore for a whole contract's facilities at once.
 
 ### 2.6 Import matching (`convex/fourKitesUtils.ts` + `fourKitesSyncHelpers.ts`)
 - New pure helper `matchStopToFacility(stop, laneStops, facilities)` with unit tests:
@@ -201,6 +248,24 @@ facilities: defineTable({
   pin into `latitude/longitude` (snap); when UNVERIFIED, keep FK coordinates but still link.
 - `importUnmappedLoad`: no facility logic. `promoteUnmappedLoad`: re-run matching across
   the load's stops after the customer is known.
+
+### 2.7 Matching beyond FourKites
+The matcher is a pure helper — wire it into every stop-creation path, not just the FK sync:
+- **Recurring loads** (`convex/recurringLoads.ts:455`): template stops have address/city
+  but no coordinates today. Match against the template customer's facilities at
+  generation time; a match supplies `facilityId` + pin coordinates, turning geofencing
+  and arrival events ON for recurring loads for the first time.
+- **Manual load creation** (`convex/loads.ts:1529`): run the matcher per stop on insert;
+  additionally, the web create form should send coordinates from `AddressAutocomplete`
+  (the backend already accepts `stop.latitude/longitude`; the form currently never
+  supplies them).
+
+### 2.8 Pin-correction propagation
+Import-time snapping alone leaves stale coordinates on already-imported future stops when
+a user later verifies or moves a facility pin. On facility pin change / verification:
+backfill `latitude/longitude` to linked stops (`facilityId` index) on loads that are not
+completed and stops that are still `Pending`. Never touch completed stops (they're
+historical records feeding pay).
 
 **Exit criteria:** dispatch can maintain facilities per customer; contract-lane loads link
 stops to facilities on import; verified pins override FK coordinates; re-sync can't clobber
@@ -270,7 +335,7 @@ wrong pins self-surface and self-demote; evidence loop closes.
 |-------|-------|----------|
 | 0 | Dashboard run + notes | < 1 hr |
 | 1 | 5 small fixes + tests | 1–2 days |
-| 2 | Schema, CRUD, 2 UI surfaces, matcher | 2–4 days |
+| 2 | Schema, CRUD, 2 UI surfaces, matcher across all creation paths, schedule-import seeding, pin backfill | 3–5 days |
 | 3 | Clustering, hard mode, override UX, demotion | 2–3 days |
 
 ## 10. Open parameters (defaults chosen, tune during rollout)
