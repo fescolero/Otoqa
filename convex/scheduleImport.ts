@@ -215,6 +215,9 @@ function convertOcrToExtractedLanes(ocr: OcrResult) {
       zip: hi(s.zip || s.facility?.zip || null),
       stopOrder: hi(idx + 1),
       stopType: hi(idx === 0 ? 'Pickup' : 'Delivery'),
+      // USPS facility identifier — persisted onto lane stops so facility
+      // registry rows (facilities.externalCode) can match exactly.
+      nassCode: hi(s.nass_code || s.facility?.nass_code || null),
     }));
 
     const miles = trip.trip_miles ?? trip.trip_summary?.trip_miles ?? null;

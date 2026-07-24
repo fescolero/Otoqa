@@ -11,6 +11,7 @@ import { updateLoadCount } from './stats_helpers';
 import { recordLoadWritten } from './platformUsageHelpers';
 import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
 import { scheduleLegPayRecalc, voidUnlockedLegPayItems } from './payEngine/legRecalc';
+import { getActiveFacilities, resolveStopFacilityLink } from './lib/facilityLink';
 import {
   setLoadTag,
   removeAllTagsForLoad,
@@ -1126,6 +1127,35 @@ export const getLoads = query({
   },
 });
 
+// Slim stop list for route displays (e.g. the dispatch schedule drawer) —
+// getLoad pulls the whole load graph (legs, driver, carrier, equipment)
+// which those surfaces don't need.
+export const getLoadStops = query({
+  args: { loadId: v.id('loadInformation') },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return null;
+
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+
+    return stops.map((s) => ({
+      _id: s._id,
+      sequenceNumber: s.sequenceNumber,
+      stopType: s.stopType,
+      city: s.city ?? null,
+      state: s.state ?? null,
+      windowBeginTime: s.windowBeginTime ?? null,
+      checkedInAt: s.checkedInAt ?? null,
+      checkedOutAt: s.checkedOutAt ?? null,
+    }));
+  },
+});
+
 // ✅ 2. GET SINGLE LOAD (Read)
 export const getLoad = query({
   args: { loadId: v.id('loadInformation') },
@@ -1526,7 +1556,22 @@ export const createLoad = mutation({
     // ✅ Platform billing: every load written into the system is billable
     await recordLoadWritten(ctx, args.workosOrgId, now);
 
+    // Facility registry: link manual stops to the customer's facilities
+    // (proximity when the form supplied coordinates, address agreement
+    // otherwise). A match supplies the verified pin so geofencing and
+    // arrival events work on manually created loads.
+    const customerFacilities = await getActiveFacilities(ctx, args.customerId);
     for (const stop of args.stops) {
+      const facilityLink = resolveStopFacilityLink(
+        {
+          city: stop.city,
+          state: stop.state,
+          postalCode: stop.postalCode,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+        },
+        customerFacilities,
+      );
       await ctx.db.insert('loadStops', {
         workosOrgId: args.workosOrgId,
         createdBy: createdBy,
@@ -1545,6 +1590,7 @@ export const createLoad = mutation({
         postalCode: stop.postalCode,
         latitude: stop.latitude,
         longitude: stop.longitude,
+        ...(facilityLink ?? {}),
         timeZone: stop.timeZone, // IANA timezone (e.g., "America/Los_Angeles")
         windowBeginDate: stop.windowBeginDate,
         windowBeginTime: stop.windowBeginTime, // Full ISO with timezone OR "HH:mm"

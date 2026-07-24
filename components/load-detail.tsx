@@ -81,6 +81,12 @@ interface StopWithEvidence {
   deliveryPhotos?: string[];
   signatureImage?: string;
   driverNotes?: string;
+  // Geofence audit (Phase 3): the check-in landed outside the stop's
+  // fence (soft flag), or the driver used "Check in anyway" (override).
+  checkinDistanceMeters?: number;
+  checkinOutsideGeofence?: boolean;
+  checkinOverride?: boolean;
+  checkinOverrideReason?: string;
 }
 
 // ============================================================================
@@ -1039,6 +1045,36 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       label: 'Status',
       width: '110px',
       render: (r) => <Chip status={STOP_STATUS_TO_CHIP[r.status ?? 'Pending'] ?? 'inactive'} />,
+    },
+    {
+      key: 'fence',
+      label: 'Geofence',
+      width: '110px',
+      render: (r) => {
+        // Tooltip carries distance + reason so dispatch can judge whether
+        // the pin is wrong without leaving the table.
+        if (r.checkinOverride) {
+          return (
+            <span
+              className="cursor-help"
+              title={`Driver checked in ${r.checkinDistanceMeters ?? '?'}m from the pin via "Check in anyway"${r.checkinOverrideReason ? ` — ${r.checkinOverrideReason}` : ''}. Repeated overrides flag the facility for review.`}
+            >
+              <Chip status="danger" label="Override" />
+            </span>
+          );
+        }
+        if (r.checkinOutsideGeofence) {
+          return (
+            <span
+              className="cursor-help"
+              title={`Checked in ${r.checkinDistanceMeters ?? '?'}m from the pinned location — the pin may be off.`}
+            >
+              <Chip status="warning" label={`${r.checkinDistanceMeters ?? '?'}m off`} />
+            </span>
+          );
+        }
+        return <span className="text-[var(--text-tertiary)]">—</span>;
+      },
     },
   ];
 

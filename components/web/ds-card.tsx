@@ -268,17 +268,26 @@ interface DSStatProps {
   value: React.ReactNode;
   delta?: { value: React.ReactNode; tone?: 'up' | 'down' | 'neutral' };
   className?: string;
+  /** 'sm' is for dense chrome (e.g. the DetailsFullPage hero KPI strip). */
+  size?: 'md' | 'sm';
 }
 
-export function DSStat({ label, value, delta, className }: DSStatProps) {
+export function DSStat({ label, value, delta, className, size = 'md' }: DSStatProps) {
   const deltaColor =
     delta?.tone === 'up'   ? '#0F8C5F' :
     delta?.tone === 'down' ? '#B43030' :
                              'var(--text-tertiary)';
   return (
-    <div className={cn('flex flex-col gap-1', className)}>
+    <div className={cn('flex flex-col', size === 'sm' ? 'gap-0.5' : 'gap-1', className)}>
       <span className="tw-label">{label}</span>
-      <span className="num text-[24px] leading-7 font-semibold tracking-[-0.01em] text-foreground">{value}</span>
+      <span
+        className={cn(
+          'num font-semibold tracking-[-0.01em] text-foreground',
+          size === 'sm' ? 'text-[18px] leading-6' : 'text-[24px] leading-7',
+        )}
+      >
+        {value}
+      </span>
       {delta && (
         <span className="text-[11.5px] font-medium" style={{ color: deltaColor }}>
           {delta.value}

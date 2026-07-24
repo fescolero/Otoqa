@@ -17,9 +17,12 @@ import {
   buildLoadInternalId,
   buildStopRecord,
   computeLaneBilling,
+  laneAddressesByPosition,
   mapTrackingStatus,
   metersToMiles,
 } from "./fourKitesUtils";
+import { laneBindingsByPosition } from "./lib/facilityMatch";
+import { getActiveFacilities, resolveStopFacilityLink } from "./lib/facilityLink";
 
 // Read-only lane lookup using the compound index (reads ~1 doc instead of full table scan)
 export const findContractLane = internalQuery({
@@ -317,18 +320,50 @@ export const importLoadFromShipment = internalMutation({
     await recordLoadWritten(ctx, workosOrgId, Date.now());
 
     const internalId = buildLoadInternalId(shipment);
-    for (const stop of shipment.stops || []) {
+    // FK stop payloads usually carry no street address; the contract lane's
+    // stop plan does (typed by dispatch or extracted from the HCR schedule).
+    // Inherit by position when the two lists align (see laneAddressesByPosition).
+    const shipmentStops = shipment.stops || [];
+    const laneAddresses = laneAddressesByPosition(contractLane.stops, shipmentStops);
+    // Facility registry: lane bindings win by position; unbound stops fall
+    // back to proximity matching against the customer's facilities. A
+    // VERIFIED facility's pin replaces FK's (often centroid) coordinates.
+    const facilities = await getActiveFacilities(ctx, contractLane.customerCompanyId);
+    const laneBindings = laneBindingsByPosition(contractLane.stops, shipmentStops);
+    for (let i = 0; i < shipmentStops.length; i++) {
+      const stop = shipmentStops[i];
       try {
-        await ctx.db.insert(
-          "loadStops",
-          buildStopRecord({
-            workosOrgId,
-            loadId: loadId as Id<"loadInformation">,
-            internalId,
-            stop,
-            commodityDescription: shipment.commodity,
-          }) as any,
+        const record = buildStopRecord({
+          workosOrgId,
+          loadId: loadId as Id<"loadInformation">,
+          internalId,
+          stop,
+          commodityDescription: shipment.commodity,
+          fallbackAddress: laneAddresses[i],
+        });
+        // FK sends a stable USPS facility code per stop (externalAddressID:
+        // the ZIP for post offices, a 3-digit plant code for LPCs). Use it
+        // as a matching key when the lane binding doesn't already name one.
+        const fkFacilityCode = stop.externalAddressID ?? stop.stopReferenceId;
+        const binding = {
+          ...(laneBindings[i] ?? {}),
+          ...(laneBindings[i]?.nassCode || !fkFacilityCode
+            ? {}
+            : { nassCode: String(fkFacilityCode) }),
+        };
+        const link = resolveStopFacilityLink(
+          {
+            city: stop.city,
+            state: stop.state,
+            postalCode: stop.postalCode,
+            latitude: stop.latitude,
+            longitude: stop.longitude,
+          },
+          facilities,
+          Object.keys(binding).length > 0 ? binding : undefined,
         );
+        if (link) Object.assign(record, link);
+        await ctx.db.insert("loadStops", record as any);
       } catch (stopErr) {
         console.error(`Failed to create stop for shipment ${shipment.id}:`, stopErr);
         // Don't throw - continue with other stops
@@ -639,6 +674,44 @@ export const promoteUnmappedLoad = internalMutation({
 
       // ✅ Update organization stats (MISSING_DATA → DRAFT)
       await updateInvoiceCount(ctx, load.workosOrgId, "MISSING_DATA", "DRAFT");
+    }
+
+    // Facility matching was skipped while the load was UNMAPPED (its
+    // placeholder customer has no facilities). Now that the real customer
+    // is known, re-run it over stops the driver hasn't reached yet.
+    try {
+      const promotedStops = await ctx.db
+        .query("loadStops")
+        .withIndex("by_load", (q) => q.eq("loadId", loadId))
+        .collect();
+      const facilities = await getActiveFacilities(ctx, contractLane.customerCompanyId);
+      const laneBindings = laneBindingsByPosition(
+        contractLane.stops,
+        promotedStops.map((s) => ({ sequence: s.sequenceNumber, city: s.city })),
+      );
+      for (let i = 0; i < promotedStops.length; i++) {
+        const stop = promotedStops[i];
+        if (stop.facilityId || stop.checkedInAt || (stop.status && stop.status !== "Pending")) {
+          continue;
+        }
+        const link = resolveStopFacilityLink(
+          {
+            city: stop.city,
+            state: stop.state,
+            postalCode: stop.postalCode,
+            latitude: stop.latitude,
+            longitude: stop.longitude,
+          },
+          facilities,
+          laneBindings[i],
+        );
+        if (link) {
+          await ctx.db.patch(stop._id, { ...link, updatedAt: Date.now() });
+        }
+      }
+    } catch (facilityErr) {
+      // Facility linking is best-effort — never fail a promotion over it.
+      console.error(`[promoteUnmappedLoad] Facility re-match failed for ${loadId}:`, facilityErr);
     }
 
     // Stamp the contract lane with import match metadata

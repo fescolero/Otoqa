@@ -3,7 +3,17 @@ import { query, mutation, QueryCtx, MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { getLoadFacets } from './lib/loadFacets';
-import { calculateDistanceMeters } from './lib/geo';
+import {
+  calculateDistanceMeters,
+  evaluateCheckInDistance,
+  parseCheckInGeofenceMode,
+  CHECKIN_GEOFENCE_FLAG_KEY,
+} from './lib/geo';
+import { getOrgFlagValue } from './lib/featureFlagReads';
+import {
+  OVERRIDE_DEMOTION_THRESHOLD,
+  OVERRIDE_DEMOTION_WINDOW_MS,
+} from './lib/facilityEvidence';
 import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrackingState';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
@@ -17,8 +27,10 @@ import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 // CONSTANTS
 // ============================================
 
-// Maximum distance (in meters) driver can be from stop to check in
-const MAX_CHECKIN_DISTANCE_METERS = 500; // ~0.3 miles
+// Check-in distance validation lives in lib/geo.ts (evaluateCheckInDistance):
+// inner limit = INNER_RING_METERS (804 m, same ring the geofence evaluator
+// uses for ARRIVED) + capped GPS-accuracy allowance; behavior per org via the
+// `checkin_geofence_mode` flag (off | soft | hard, default soft).
 
 // Clerk issuer URL prefix for validating driver tokens
 const CLERK_ISSUER_PREFIX = 'https://clerk.';
@@ -781,8 +793,15 @@ export const checkInAtStop = mutation({
     // Timestamp from driver's device (when button was pressed, may be offline)
     driverTimestamp: v.string(), // ISO 8601 string
     notes: v.optional(v.string()),
-    // Skip distance validation (for testing or special cases)
+    // Reported horizontal accuracy of the GPS fix (meters). Widens the
+    // geofence limit by up to a capped allowance — a coarse fix shouldn't
+    // fail a driver who is actually at the stop.
+    accuracy: v.optional(v.number()),
+    // Driver override ("Check in anyway") after a hard-mode rejection, or
+    // testing/special cases. Recorded as checkinOverride when the position
+    // actually breached the fence.
     skipDistanceCheck: v.optional(v.boolean()),
+    overrideReason: v.optional(v.string()),
     // Driver flagged this stop as redirected to a different location
     isRedirected: v.optional(v.boolean()),
   },
@@ -790,6 +809,12 @@ export const checkInAtStop = mutation({
     success: v.boolean(),
     message: v.string(),
     distanceFromStop: v.optional(v.number()), // meters
+    // Set on soft-mode check-ins past the inner limit — mobile shows it as
+    // a non-blocking heads-up.
+    warning: v.optional(v.string()),
+    // On a hard-mode rejection: the driver may re-send with
+    // skipDistanceCheck ("Check in anyway"); the override is recorded.
+    canOverride: v.optional(v.boolean()),
   }),
   handler: async (ctx, args) => {
     // Verify the JWT phone claim matches args.driverId
@@ -858,18 +883,95 @@ export const checkInAtStop = mutation({
     }
 
     // GPS Distance Validation (if stop has coordinates)
-    // Redirected stops always skip the geofence since the driver is at a different location
-    const skipGeofence = args.skipDistanceCheck || args.isRedirected;
+    // Redirected stops always skip the geofence entirely — the driver is
+    // knowingly at a different location and the stop is flagged as such.
     let distanceFromStop: number | undefined;
-    if (stop.latitude && stop.longitude && !skipGeofence) {
+    let outsideGeofence = false;
+    let isOverride = false;
+    let warning: string | undefined;
+    if (stop.latitude && stop.longitude && !args.isRedirected) {
       distanceFromStop = calculateDistanceMeters(args.latitude, args.longitude, stop.latitude, stop.longitude);
 
-      if (distanceFromStop > MAX_CHECKIN_DISTANCE_METERS) {
-        return {
-          success: false,
-          message: `Too far from stop location (${Math.round(distanceFromStop)}m away, max ${MAX_CHECKIN_DISTANCE_METERS}m)`,
-          distanceFromStop,
-        };
+      // Facility-anchored stops enforce the facility's own radius, and only
+      // VERIFIED (non-needs-review) facilities are eligible for hard
+      // blocking — an unverified pin is exactly the thing that used to
+      // block drivers standing at real stops.
+      const facility = stop.facilityId ? await ctx.db.get(stop.facilityId) : null;
+      const facilityContext =
+        facility && !facility.isDeleted
+          ? {
+              verified: facility.verificationState === 'VERIFIED',
+              radiusMeters: facility.radiusMeters,
+              needsReview: facility.needsReview,
+            }
+          : undefined;
+
+      const mode = parseCheckInGeofenceMode(
+        await getOrgFlagValue(ctx, driver.organizationId, CHECKIN_GEOFENCE_FLAG_KEY),
+      );
+      const verdict = evaluateCheckInDistance({
+        mode,
+        distanceMeters: distanceFromStop,
+        accuracyMeters: args.accuracy,
+        facility: facilityContext,
+      });
+
+      if (args.skipDistanceCheck) {
+        // "Check in anyway": the driver consciously proceeded past the
+        // fence. Record the override when the position actually breached
+        // the limit; overrides feed the facility's demotion counter and
+        // are excluded from verification evidence.
+        if (verdict.outsideGeofence) {
+          isOverride = true;
+          outsideGeofence = true;
+        }
+      } else {
+        if (!verdict.allowed) {
+          return {
+            success: false,
+            message: `Too far from stop location (${Math.round(distanceFromStop)}m away, max ${Math.round(verdict.limitMeters)}m)`,
+            distanceFromStop,
+            canOverride: verdict.canOverride,
+          };
+        }
+        if (verdict.outsideGeofence) {
+          // Soft behavior past the inner limit: allow, but record the
+          // exception for dispatch and warn the driver. Imported stop pins
+          // can be city-centroid geocodes hundreds of meters off.
+          outsideGeofence = true;
+          warning = `Checked in ${Math.round(distanceFromStop)}m from the pinned location — dispatch has been notified in case the pin is off.`;
+        }
+      }
+
+      // Override bookkeeping: lifetime tally + rolling-window demotion.
+      // Counting overrides via linked stops (by_facility) keeps the window
+      // honest without storing timestamp arrays on the facility.
+      if (isOverride && facility && !facility.isDeleted) {
+        const windowStart = Date.now() - OVERRIDE_DEMOTION_WINDOW_MS;
+        const linkedStops = await ctx.db
+          .query('loadStops')
+          .withIndex('by_facility', (q) => q.eq('facilityId', facility._id))
+          .collect();
+        const recentOverrides = linkedStops.filter((s) => {
+          if (!s.checkinOverride || !s.checkedInAt) return false;
+          const t = new Date(s.checkedInAt).getTime();
+          return Number.isFinite(t) && t >= windowStart;
+        }).length;
+
+        const demote =
+          facility.verificationState === 'VERIFIED' &&
+          !facility.needsReview &&
+          recentOverrides + 1 >= OVERRIDE_DEMOTION_THRESHOLD;
+        await ctx.db.patch(facility._id, {
+          overrideCount: (facility.overrideCount ?? 0) + 1,
+          ...(demote ? { needsReview: true } : {}),
+          updatedAt: Date.now(),
+        });
+        if (demote) {
+          console.warn(
+            `[checkInAtStop] Facility ${facility._id} (${facility.name}) demoted to needs-review after ${recentOverrides + 1} overrides in 30 days`,
+          );
+        }
       }
     }
 
@@ -918,6 +1020,16 @@ export const checkInAtStop = mutation({
       status: 'In Transit',
       driverNotes: args.notes || stop.driverNotes,
       ...(args.isRedirected ? { isRedirected: true } : {}),
+      ...(distanceFromStop !== undefined
+        ? { checkinDistanceMeters: Math.round(distanceFromStop) }
+        : {}),
+      ...(outsideGeofence ? { checkinOutsideGeofence: true } : {}),
+      ...(isOverride
+        ? {
+            checkinOverride: true,
+            checkinOverrideReason: args.overrideReason || 'Driver confirmed at location',
+          }
+        : {}),
       updatedAt: serverNow, // Server timestamp for audit
     });
 
@@ -954,7 +1066,7 @@ export const checkInAtStop = mutation({
       });
     }
 
-    return { success: true, message: 'Checked in successfully', distanceFromStop };
+    return { success: true, message: 'Checked in successfully', distanceFromStop, warning };
   },
 });
 

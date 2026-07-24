@@ -40,6 +40,21 @@ import {
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useAuth } from '@workos-inc/authkit-nextjs/components';
+import { useOrganizationId } from '@/contexts/organization-context';
+import { FacilitiesSection } from '@/components/customers/facilities-section';
+import { ImportCsvDialog } from '@/components/contract-lanes/import-csv-dialog';
+import { ImportScheduleDialog } from '@/components/contract-lanes/import-schedule-dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 function chipStatusFor(status: string): ChipStatus {
   switch (status) {
@@ -113,6 +128,61 @@ interface LaneRow {
   status: ChipStatus;
 }
 
+// ─── Contracts chip filter ─────────────────────────────────────────────
+// Mirrors design v2's ChipBtn (details-customer.jsx): pill + count badge,
+// green tone for Active, amber for Expiring.
+type LaneFilter = 'all' | 'active' | 'expiring' | 'inactive';
+
+function laneFilterBucket(status: ChipStatus): Exclude<LaneFilter, 'all'> {
+  if (status === 'active' || status === 'valid') return 'active';
+  if (status === 'expiring') return 'expiring';
+  return 'inactive';
+}
+
+function ChipFilterBtn({
+  label,
+  n,
+  active,
+  onClick,
+  tone,
+}: {
+  label: string;
+  n: number;
+  active: boolean;
+  onClick: () => void;
+  tone?: 'ok' | 'warn';
+}) {
+  const palette =
+    tone === 'ok'
+      ? { fg: '#0F8C5F', bg: 'rgba(16,185,129,0.10)' }
+      : tone === 'warn'
+        ? { fg: '#A66800', bg: 'rgba(245,158,11,0.12)' }
+        : { fg: 'var(--text-secondary)', bg: 'var(--bg-surface)' };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="focus-ring inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-semibold cursor-pointer transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]"
+      style={{
+        background: active ? palette.bg : 'transparent',
+        border: '1px solid ' + (active ? 'transparent' : 'var(--border-hairline-strong)'),
+        color: active ? palette.fg : 'var(--text-secondary)',
+      }}
+    >
+      <span>{label}</span>
+      <span
+        className="num inline-flex items-center rounded-full px-[5px] h-4 text-[10.5px] font-semibold"
+        style={{
+          background: active ? 'rgba(255,255,255,0.55)' : 'var(--bg-surface-2)',
+          color: active ? palette.fg : 'var(--text-tertiary)',
+        }}
+      >
+        {n}
+      </span>
+    </button>
+  );
+}
+
 function formatRate(rate: number, rateType: 'Per Mile' | 'Flat Rate' | 'Per Stop', currency: 'USD' | 'CAD' | 'MXN'): string {
   const symbol = currency === 'CAD' ? 'C$' : currency === 'MXN' ? 'MX$' : '$';
   const unit = rateType === 'Per Mile' ? '/mi' : rateType === 'Per Stop' ? '/stop' : '';
@@ -130,6 +200,45 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   const customer = useQuery(api.customers.get, { id: customerIdTyped });
   const updateCustomer = useMutation(api.customers.update);
   const contractLanes = useQuery(api.contractLanes.listByCustomer, { customerCompanyId: customerIdTyped });
+
+  // Contract-lane import dialogs (CSV + OCR schedule) moved here from the
+  // retired standalone contract-lanes list page — the Contracts tab is now
+  // the single home for lane management.
+  const { user } = useAuth();
+  const workosOrgId = useOrganizationId();
+  const [csvImportOpen, setCsvImportOpen] = React.useState(false);
+  const [scheduleImportOpen, setScheduleImportOpen] = React.useState(false);
+
+  // Contracts table multi-select + bulk delete (soft delete via
+  // contractLanes.deactivate — restorable by an admin).
+  const deactivateLane = useMutation(api.contractLanes.deactivate);
+  const [selectedLaneIds, setSelectedLaneIds] = React.useState<Set<string | number>>(new Set());
+  const [laneDeleteConfirmOpen, setLaneDeleteConfirmOpen] = React.useState(false);
+  const [isDeletingLanes, setIsDeletingLanes] = React.useState(false);
+  const [laneFilter, setLaneFilter] = React.useState<LaneFilter>('all');
+
+  const handleDeleteSelectedLanes = async (laneIds: string[]) => {
+    if (!user) return;
+    setIsDeletingLanes(true);
+    try {
+      for (const id of laneIds) {
+        await deactivateLane({ id: id as Id<'contractLanes'>, userId: user.id });
+      }
+      toast.success(`Deleted ${laneIds.length} contract lane(s).`);
+      setSelectedLaneIds(new Set());
+      setLaneDeleteConfirmOpen(false);
+    } catch (err) {
+      console.error('Failed to delete contract lanes:', err);
+      toast.error('Failed to delete contract lanes. Please try again.');
+    } finally {
+      setIsDeletingLanes(false);
+    }
+  };
+
+  // Controlled section state so toolbar/rail affordances can jump
+  // straight to the Contracts tab (replaces links to the retired list
+  // page).
+  const [activeSection, setActiveSection] = React.useState('overview');
 
   // Prev / next traversal across the customers list.
   const all = useAuthQuery(api.customers.list, {});
@@ -245,12 +354,6 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
         : undefined,
     },
   ];
-
-  const eyebrow = status === 'Active'
-    ? <Chip status="active" label="Active" />
-    : status === 'Prospect'
-      ? <Chip status="pending" label="Prospect" />
-      : <Chip status="inactive" label={status} />;
 
   const titleNode = (
     <span className="inline-flex items-center gap-3">
@@ -524,6 +627,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'contract',
       label: 'Contract',
       width: '1.1fr',
+      sortValue: (r) => r.hcr ?? r.contract,
       render: (r) => (
         <span className="min-w-0 flex flex-col leading-tight">
           <span className="num text-[12.5px] font-medium" style={{ color: 'var(--accent)' }}>
@@ -539,12 +643,19 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'lane',
       label: 'Lane',
       width: '1.8fr',
+      sortValue: (r) => r.laneLabel,
       render: (r) => <span className="text-[12.5px] text-foreground truncate">{r.laneLabel}</span>,
     },
     {
       key: 'term',
       label: 'Term',
       width: '1.4fr',
+      // Order by contract start; `start` is either epoch ms or YYYY-MM-DD.
+      sortValue: (r) => {
+        if (typeof r.start === 'number') return r.start;
+        const ms = Date.parse(r.start);
+        return Number.isNaN(ms) ? null : ms;
+      },
       render: (r) => (
         <span className="num text-[11.5px] text-[var(--text-secondary)]">
           {formatDate(r.start)} — {formatDate(r.end)}
@@ -557,6 +668,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       width: '110px',
       align: 'right',
       tnum: true,
+      sortValue: (r) => r.rate,
       render: (r) => (
         <span className="num text-[12.5px] text-foreground">
           {formatRate(r.rate, r.rateType, r.currency)}
@@ -567,6 +679,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'priority',
       label: 'Priority',
       width: '90px',
+      sortValue: (r) => r.priority ?? null,
       render: (r) => (r.priority
         ? <Chip status={r.priority === 'Primary' ? 'active' : 'draft'} label={r.priority} />
         : <span className="text-[11.5px] text-[var(--text-tertiary)]">—</span>
@@ -576,36 +689,65 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'status',
       label: 'Status',
       width: '110px',
+      sortValue: (r) => r.status,
       render: (r) => <Chip status={r.status} />,
     },
   ];
+
+  const laneCounts = {
+    all: laneRows.length,
+    active: laneRows.filter((r) => laneFilterBucket(r.status) === 'active').length,
+    expiring: laneRows.filter((r) => laneFilterBucket(r.status) === 'expiring').length,
+    inactive: laneRows.filter((r) => laneFilterBucket(r.status) === 'inactive').length,
+  };
+  const filteredLaneRows =
+    laneFilter === 'all'
+      ? laneRows
+      : laneRows.filter((r) => laneFilterBucket(r.status) === laneFilter);
+
+  // Selection can hold ids of rows no longer shown (deleted in another
+  // tab, or hidden by the chip filter) — count and act only on ids the
+  // user can currently see.
+  const selectedVisibleLaneIds = filteredLaneRows
+    .filter((r) => selectedLaneIds.has(r.id))
+    .map((r) => r.id as string);
+  const selectedLaneCount = selectedVisibleLaneIds.length;
 
   const contractsContent = (
     <DSCard
       title={`Contracts (${laneRows.length})`}
       // Cap the card to the remaining viewport so the table's body scrolls
       // internally instead of bleeding past the bottom of the page. Measured
-      // empirically: in practice the card's top sits at y≈433 once the
-      // global topbar, sub-toolbar, hero w/ KPIs, section tabs and outer
-      // page padding are stacked — so an offset of 460 leaves a small
+      // empirically against the compact hero: the card's top sits at y≈355
+      // once the global topbar, sub-toolbar, hero w/ KPIs, section tabs and
+      // outer page padding are stacked — so an offset of 382 leaves a small
       // breathing gap above the floating tweaks pill / user-badge.
-      className="flex flex-col max-h-[calc(100vh-460px)]"
+      className="flex flex-col max-h-[calc(100vh-382px)]"
       bodyClassName="p-0 flex-1 min-h-0 flex flex-col"
       action={
         <span className="flex items-center gap-2">
+          <WBtn
+            size="sm"
+            leading="file-text"
+            onClick={() => setScheduleImportOpen(true)}
+            disabled={!user || !workosOrgId}
+          >
+            Import schedule
+          </WBtn>
+          <WBtn
+            size="sm"
+            leading="upload"
+            onClick={() => setCsvImportOpen(true)}
+            disabled={!user || !workosOrgId}
+          >
+            Import CSV
+          </WBtn>
           <WBtn
             size="sm"
             leading="plus"
             onClick={() => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/create`)}
           >
             New lane
-          </WBtn>
-          <WBtn
-            size="sm"
-            leading="arrow-up-right"
-            onClick={() => router.push(`/operations/customers/${customerIdTyped}/contract-lanes`)}
-          >
-            View all
           </WBtn>
         </span>
       }
@@ -630,14 +772,49 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
           </span>
         </div>
       ) : (
-        <DSMiniTable
-          columns={laneColumns}
-          rows={laneRows}
-          total={laneRows.length}
-          onRowClick={(r) => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/${r.laneId}`)}
-          className="rounded-t-none border-0 border-t flex-1 min-h-0"
-          fillHeight
-        />
+        <>
+          <div className="flex flex-wrap items-center gap-1.5 px-4 py-2.5 border-t border-[var(--border-hairline)] bg-[var(--bg-surface-2)]">
+            <ChipFilterBtn label="All" n={laneCounts.all} active={laneFilter === 'all'} onClick={() => setLaneFilter('all')} />
+            <ChipFilterBtn label="Active" n={laneCounts.active} active={laneFilter === 'active'} onClick={() => setLaneFilter('active')} tone="ok" />
+            <ChipFilterBtn label="Expiring" n={laneCounts.expiring} active={laneFilter === 'expiring'} onClick={() => setLaneFilter('expiring')} tone="warn" />
+            <ChipFilterBtn label="Inactive" n={laneCounts.inactive} active={laneFilter === 'inactive'} onClick={() => setLaneFilter('inactive')} />
+          </div>
+          {selectedLaneCount > 0 && (
+            <div className="flex items-center gap-3 px-4 py-2 border-t border-[var(--border-hairline)] bg-[var(--accent-tint)]">
+              <span className="text-[12.5px] font-medium text-[var(--accent)]">
+                {selectedLaneCount} selected
+              </span>
+              <span className="flex-1" />
+              <WBtn
+                size="sm"
+                danger
+                leading="trash"
+                onClick={() => setLaneDeleteConfirmOpen(true)}
+                disabled={!user || isDeletingLanes}
+              >
+                {isDeletingLanes ? 'Deleting…' : 'Delete selected'}
+              </WBtn>
+              <WBtn size="sm" variant="ghost" onClick={() => setSelectedLaneIds(new Set())}>
+                Clear
+              </WBtn>
+            </div>
+          )}
+          {filteredLaneRows.length === 0 ? (
+            <p className="m-0 px-4 py-4 text-[12.5px] text-[var(--text-tertiary)] border-t border-[var(--border-hairline)]">
+              No contracts in this state.
+            </p>
+          ) : (
+            <DSMiniTable
+              columns={laneColumns}
+              rows={filteredLaneRows}
+              total={filteredLaneRows.length}
+              onRowClick={(r) => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/${r.laneId}`)}
+              className="rounded-t-none border-0 border-t flex-1 min-h-0"
+              fillHeight
+              selection={{ selected: selectedLaneIds, onChange: setSelectedLaneIds }}
+            />
+          )}
+        </>
       )}
     </DSCard>
   );
@@ -662,10 +839,16 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   );
 
   // ─── Section: Locations ──────────────────────────────────────────────
+  // Billing address (editable props) + the facility registry. Facilities
+  // are the customer's physical stop locations — imported loads link
+  // stops to them, and verified pins anchor driver check-in geofencing.
   const locationsContent = (
-    <DSCard title="Locations">
-      <DSPropsEditable items={addressItems} onCommit={commitField} />
-    </DSCard>
+    <div className="grid gap-4">
+      <DSCard title="Billing address">
+        <DSPropsEditable items={addressItems} onCommit={commitField} />
+      </DSCard>
+      <FacilitiesSection customerId={customerIdTyped} />
+    </div>
   );
 
   // ─── Section: Invoices ───────────────────────────────────────────────
@@ -765,6 +948,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
 
   return (
+    <>
     <DetailsFullPage
       breadcrumb={
         <span className="inline-flex items-center gap-1.5 text-[var(--text-secondary)]">
@@ -784,17 +968,61 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
         <>
           <WBtn size="sm" variant="ghost" leading="chat">Message</WBtn>
           <WBtn size="sm" variant="ghost" leading="package">New quote</WBtn>
-          <WBtn size="sm" variant="ghost" leading="doc-dollar" onClick={() => router.push(`/operations/customers/${customerIdTyped}/contract-lanes`)}>
+          <WBtn size="sm" variant="ghost" leading="doc-dollar" onClick={() => setActiveSection('contracts')}>
             Contract lanes
           </WBtn>
         </>
       }
       title={titleNode}
-      eyebrow={eyebrow}
       subtitle={subtitle}
       kpis={kpis}
       sections={sections}
       rightRail={rightRail}
+      activeId={activeSection}
+      onActiveChange={setActiveSection}
     />
+    {user && workosOrgId && (
+      <>
+        <ImportCsvDialog
+          open={csvImportOpen}
+          onOpenChange={setCsvImportOpen}
+          customerId={customerIdTyped}
+          workosOrgId={workosOrgId}
+          userId={user.id}
+        />
+        <ImportScheduleDialog
+          open={scheduleImportOpen}
+          onOpenChange={setScheduleImportOpen}
+          customerId={customerIdTyped}
+          workosOrgId={workosOrgId}
+          userId={user.id}
+        />
+      </>
+    )}
+    <AlertDialog open={laneDeleteConfirmOpen} onOpenChange={setLaneDeleteConfirmOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Delete {selectedLaneCount} contract lane{selectedLaneCount === 1 ? '' : 's'}?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            The selected lanes are removed from {name}&apos;s contracts and no new
+            loads will generate from them. An admin can restore them later — nothing
+            is permanently erased.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isDeletingLanes}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => handleDeleteSelectedLanes(selectedVisibleLaneIds)}
+            disabled={isDeletingLanes || selectedLaneCount === 0}
+            className="bg-[#B43030] text-white hover:bg-[#9c2828]"
+          >
+            {isDeletingLanes ? 'Deleting…' : 'Delete lanes'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }

@@ -35,6 +35,11 @@ import {
   StopsListControl,
   type StopsListItem,
 } from './controls/stops-list';
+import {
+  LaneStopsControl,
+  type LaneStopItem,
+} from './controls/lane-stops';
+import { DaysControl } from './controls/days';
 import type {
   FormField,
   FormValues,
@@ -60,7 +65,10 @@ export function renderField({
 
   const error = errors[field.id] ?? null;
   const v = vals[field.id];
-  const composite = field.kind === 'address' || field.kind === 'stops-list';
+  const composite =
+    field.kind === 'address' ||
+    field.kind === 'stops-list' ||
+    field.kind === 'lane-stops';
 
   // Duplicate check runs against the current value; not debounced here
   // because the schema author's predicate is the one that should
@@ -218,6 +226,27 @@ export function renderField({
         <StopsListControl
           id={field.id}
           value={Array.isArray(v) ? (v as StopsListItem[]) : []}
+          onChange={(next) => set(field.id, next)}
+        />
+      );
+      break;
+
+    case 'lane-stops':
+      control = (
+        <LaneStopsControl
+          id={field.id}
+          value={Array.isArray(v) ? (v as LaneStopItem[]) : []}
+          onChange={(next) => set(field.id, next)}
+          facilities={field.facilities}
+        />
+      );
+      break;
+
+    case 'days':
+      control = (
+        <DaysControl
+          id={field.id}
+          value={Array.isArray(v) ? (v as number[]) : []}
           onChange={(next) => set(field.id, next)}
         />
       );

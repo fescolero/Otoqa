@@ -57,6 +57,7 @@ import type * as externalTrackingAuthCrypto from "../externalTrackingAuthCrypto.
 import type * as externalTrackingPartnerKeys from "../externalTrackingPartnerKeys.js";
 import type * as externalTrackingWebhooks from "../externalTrackingWebhooks.js";
 import type * as facetMaintenance from "../facetMaintenance.js";
+import type * as facilities from "../facilities.js";
 import type * as fcmWake from "../fcmWake.js";
 import type * as featureFlags from "../featureFlags.js";
 import type * as forceResync from "../forceResync.js";
@@ -96,6 +97,9 @@ import type * as lanes from "../lanes.js";
 import type * as lazyLoadPromotion from "../lazyLoadPromotion.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_auth from "../lib/auth.js";
+import type * as lib_facilityLink from "../lib/facilityLink.js";
+import type * as lib_facilityMatch from "../lib/facilityMatch.js";
+import type * as lib_featureFlagReads from "../lib/featureFlagReads.js";
 import type * as lib_geo from "../lib/geo.js";
 import type * as lib_loadFacets from "../lib/loadFacets.js";
 import type * as lib_money from "../lib/money.js";
@@ -119,6 +123,7 @@ import type * as migrations_003_update_wildcard_line_items from "../migrations/0
 import type * as migrations_004_bootstrap_facet_definitions from "../migrations/004_bootstrap_facet_definitions.js";
 import type * as migrations_005_backfill_load_tags from "../migrations/005_backfill_load_tags.js";
 import type * as migrations_006_cleanup_junk_facets from "../migrations/006_cleanup_junk_facets.js";
+import type * as migrations_007_backfill_stop_enrichment from "../migrations/007_backfill_stop_enrichment.js";
 import type * as migrations_007_strip_parsed_columns from "../migrations/007_strip_parsed_columns.js";
 import type * as migrations_008_backfill_stop_denorm from "../migrations/008_backfill_stop_denorm.js";
 import type * as migrations_009_backfill_load_documents from "../migrations/009_backfill_load_documents.js";
@@ -245,6 +250,7 @@ declare const fullApi: ApiFromModules<{
   externalTrackingPartnerKeys: typeof externalTrackingPartnerKeys;
   externalTrackingWebhooks: typeof externalTrackingWebhooks;
   facetMaintenance: typeof facetMaintenance;
+  facilities: typeof facilities;
   fcmWake: typeof fcmWake;
   featureFlags: typeof featureFlags;
   forceResync: typeof forceResync;
@@ -284,6 +290,9 @@ declare const fullApi: ApiFromModules<{
   lazyLoadPromotion: typeof lazyLoadPromotion;
   "lib/audit": typeof lib_audit;
   "lib/auth": typeof lib_auth;
+  "lib/facilityLink": typeof lib_facilityLink;
+  "lib/facilityMatch": typeof lib_facilityMatch;
+  "lib/featureFlagReads": typeof lib_featureFlagReads;
   "lib/geo": typeof lib_geo;
   "lib/loadFacets": typeof lib_loadFacets;
   "lib/money": typeof lib_money;
@@ -307,6 +316,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/004_bootstrap_facet_definitions": typeof migrations_004_bootstrap_facet_definitions;
   "migrations/005_backfill_load_tags": typeof migrations_005_backfill_load_tags;
   "migrations/006_cleanup_junk_facets": typeof migrations_006_cleanup_junk_facets;
+  "migrations/007_backfill_stop_enrichment": typeof migrations_007_backfill_stop_enrichment;
   "migrations/007_strip_parsed_columns": typeof migrations_007_strip_parsed_columns;
   "migrations/008_backfill_stop_denorm": typeof migrations_008_backfill_stop_denorm;
   "migrations/009_backfill_load_documents": typeof migrations_009_backfill_load_documents;

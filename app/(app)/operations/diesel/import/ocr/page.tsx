@@ -23,9 +23,6 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import Link from 'next/link';
 import { AlertCircle, ArrowLeft, CheckCircle, Download, Loader2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
-import * as pdfjsLib from 'pdfjs-dist';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 type Confidence = 'high' | 'medium' | 'low';
 
@@ -266,6 +263,10 @@ function buildStructuredPageText(items: unknown[]): string {
 }
 
 async function renderPdfToImages(file: File): Promise<OcrPageInput[]> {
+  // pdfjs-dist references DOMMatrix at module scope, so it must be imported
+  // lazily in the browser — a top-level import crashes server rendering.
+  const pdfjsLib = await import('pdfjs-dist');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
   const pages: OcrPageInput[] = [];

@@ -39,7 +39,9 @@ export type FieldKind =
   | 'textarea'    // wraps <Textarea>
   | 'file'        // wraps an uploader bound to a per-entity generateUploadUrl
   | 'address'     // composite (full row) — wraps <AddressAutocomplete>
-  | 'stops-list'; // composite (full row) — repeating pickup/delivery list (Phase 3.6)
+  | 'stops-list'  // composite (full row) — repeating pickup/delivery list (Phase 3.6)
+  | 'lane-stops'  // composite (full row) — contract-lane stop cards w/ facility binding
+  | 'days';       // S M T W T F S weekday toggles — value is number[] (0 = Sunday)
 
 /**
  * Whether the field blocks save when empty. Anything other than
@@ -138,6 +140,12 @@ export interface FormField {
   };
   /** file: MIME / extension hint for the picker. */
   accept?: string;
+  /**
+   * lane-stops: customer facility rows for the per-stop facility
+   * binding dropdown. Injected by the page wrapper through the schema
+   * factory (like select `options`) — plain data, no Convex imports.
+   */
+  facilities?: import('./controls/lane-stops').LaneFacilityOption[];
   /**
    * file: bound by the page wrapper via `bindUploaders(schema, {...})`.
    * Shell-side default is `undefined`; the field renders as disabled

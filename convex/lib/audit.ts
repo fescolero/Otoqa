@@ -41,7 +41,8 @@ export type AuditEntityType =
   | 'routeAssignment'
   | 'recurringLoad'
   | 'integration'
-  | 'carrierProfileAssignment';
+  | 'carrierProfileAssignment'
+  | 'facility';
 
 export type AuditAction =
   | 'created'

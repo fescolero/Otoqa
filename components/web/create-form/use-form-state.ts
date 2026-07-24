@@ -47,6 +47,8 @@ function emptyForKind(field: FormField): unknown {
     case 'toggle':
       return false;
     case 'stops-list':
+    case 'lane-stops':
+    case 'days':
       return [];
     default:
       return '';
