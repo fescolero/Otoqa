@@ -536,6 +536,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'contract',
       label: 'Contract',
       width: '1.1fr',
+      sortValue: (r) => r.hcr ?? r.contract,
       render: (r) => (
         <span className="min-w-0 flex flex-col leading-tight">
           <span className="num text-[12.5px] font-medium" style={{ color: 'var(--accent)' }}>
@@ -551,12 +552,19 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'lane',
       label: 'Lane',
       width: '1.8fr',
+      sortValue: (r) => r.laneLabel,
       render: (r) => <span className="text-[12.5px] text-foreground truncate">{r.laneLabel}</span>,
     },
     {
       key: 'term',
       label: 'Term',
       width: '1.4fr',
+      // Order by contract start; `start` is either epoch ms or YYYY-MM-DD.
+      sortValue: (r) => {
+        if (typeof r.start === 'number') return r.start;
+        const ms = Date.parse(r.start);
+        return Number.isNaN(ms) ? null : ms;
+      },
       render: (r) => (
         <span className="num text-[11.5px] text-[var(--text-secondary)]">
           {formatDate(r.start)} — {formatDate(r.end)}
@@ -569,6 +577,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       width: '110px',
       align: 'right',
       tnum: true,
+      sortValue: (r) => r.rate,
       render: (r) => (
         <span className="num text-[12.5px] text-foreground">
           {formatRate(r.rate, r.rateType, r.currency)}
@@ -579,6 +588,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'priority',
       label: 'Priority',
       width: '90px',
+      sortValue: (r) => r.priority ?? null,
       render: (r) => (r.priority
         ? <Chip status={r.priority === 'Primary' ? 'active' : 'draft'} label={r.priority} />
         : <span className="text-[11.5px] text-[var(--text-tertiary)]">—</span>
@@ -588,6 +598,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       key: 'status',
       label: 'Status',
       width: '110px',
+      sortValue: (r) => r.status,
       render: (r) => <Chip status={r.status} />,
     },
   ];

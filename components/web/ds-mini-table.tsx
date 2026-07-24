@@ -48,6 +48,10 @@ export interface DSMiniColumn<R extends { id: string | number }> {
   /** Override how the raw value is read for the editor — useful when the
    *  cell renders a Chip but the editor needs the underlying string. */
   getValue?: (row: R) => string | string[];
+  /** Presence makes the column header clickable for client-side sorting
+   *  (asc → desc → off). Return the value rows should be ordered by;
+   *  null/undefined always sorts last. */
+  sortValue?: (row: R) => string | number | null | undefined;
 }
 
 export interface DSRowAction {
@@ -103,6 +107,47 @@ export function DSMiniTable<R extends { id: string | number }>({
   const grid = columns.map((c) => c.width ?? '1fr').join(' ') + (rowActions ? ' 32px' : '');
   const scrolling = bodyMaxHeight != null || fillHeight;
 
+  // Client-side sort over the rows the caller passed in. Only columns
+  // with a `sortValue` accessor participate; clicking cycles
+  // asc → desc → off (back to the caller's order).
+  const [sort, setSort] = React.useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
+  const cycleSort = (key: string) =>
+    setSort((prev) =>
+      prev?.key !== key
+        ? { key, dir: 'asc' }
+        : prev.dir === 'asc'
+          ? { key, dir: 'desc' }
+          : null,
+    );
+  const sortedRows = React.useMemo(() => {
+    if (!sort) return rows;
+    const col = columns.find((c) => c.key === sort.key);
+    if (!col?.sortValue) return rows;
+    const sv = col.sortValue;
+    const mul = sort.dir === 'asc' ? 1 : -1;
+    return rows
+      .map((row, i) => ({ row, i }))
+      .sort((a, b) => {
+        const va = sv(a.row);
+        const vb = sv(b.row);
+        // Missing values sink to the bottom in either direction.
+        if (va == null && vb == null) return a.i - b.i;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        let cmp: number;
+        if (typeof va === 'number' && typeof vb === 'number') {
+          cmp = va - vb;
+        } else {
+          cmp = String(va).localeCompare(String(vb), undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          });
+        }
+        return cmp !== 0 ? cmp * mul : a.i - b.i;
+      })
+      .map((x) => x.row);
+  }, [rows, columns, sort]);
+
   return (
     <div
       className={cn(
@@ -119,11 +164,37 @@ export function DSMiniTable<R extends { id: string | number }>({
         )}
         style={{ gridTemplateColumns: grid }}
       >
-        {columns.map((c) => (
-          <div key={c.key} className={cn('px-1', c.align === 'right' && 'text-right')}>
-            {c.label}
-          </div>
-        ))}
+        {columns.map((c) => {
+          if (!c.sortValue) {
+            return (
+              <div key={c.key} className={cn('px-1', c.align === 'right' && 'text-right')}>
+                {c.label}
+              </div>
+            );
+          }
+          const active = sort?.key === c.key;
+          return (
+            <button
+              key={c.key}
+              type="button"
+              onClick={() => cycleSort(c.key)}
+              aria-label={
+                typeof c.label === 'string'
+                  ? `Sort by ${c.label}${active ? ` (${sort!.dir === 'asc' ? 'ascending' : 'descending'})` : ''}`
+                  : undefined
+              }
+              className={cn(
+                'focus-ring px-1 inline-flex items-center gap-1 cursor-pointer select-none',
+                'tw-label bg-transparent border-0 font-[inherit] text-left',
+                c.align === 'right' && 'justify-end text-right',
+                active ? 'text-foreground' : 'text-[var(--text-tertiary)] hover:text-foreground',
+              )}
+            >
+              <span className="truncate">{c.label}</span>
+              {active && <WIcon name={sort!.dir === 'asc' ? 'sort-asc' : 'sort-desc'} size={11} />}
+            </button>
+          );
+        })}
         {rowActions && <div />}
       </div>
 
@@ -138,7 +209,7 @@ export function DSMiniTable<R extends { id: string | number }>({
         )}
         style={bodyMaxHeight != null ? { maxHeight: bodyMaxHeight } : undefined}
       >
-        {rows.map((row) => (
+        {sortedRows.map((row) => (
           <DSRow
             key={row.id}
             columns={columns}
