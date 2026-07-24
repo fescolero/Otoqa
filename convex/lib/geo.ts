@@ -65,47 +65,81 @@ export function parseCheckInGeofenceMode(raw: unknown): CheckInGeofenceMode {
 export interface CheckInDistanceVerdict {
   allowed: boolean;
   // True when the driver is past the inner limit but still allowed (soft
-  // mode) — persisted on the stop as a dispatch-visible exception.
+  // behavior) — persisted on the stop as a dispatch-visible exception.
   outsideGeofence: boolean;
-  // The inner limit that applied (arrival ring + capped accuracy allowance).
+  // The inner limit that applied (facility radius or arrival ring, plus
+  // capped accuracy allowance).
   limitMeters: number;
+  // True when the rejection is override-eligible: the anchor is a VERIFIED
+  // facility pin, so the driver may consciously check in anyway (recorded
+  // as an override that feeds the facility's demotion counter).
+  canOverride: boolean;
+}
+
+export interface CheckInFacilityContext {
+  verified: boolean;
+  radiusMeters?: number;
+  // Auto-demotion flag: too many recent overrides. A needs-review facility
+  // is treated as soft until a human re-verifies the pin.
+  needsReview?: boolean;
 }
 
 /**
  * Decide whether a manual check-in at `distanceMeters` from the stop pin is
- * allowed. Pure so tests can sweep the mode × distance × accuracy matrix.
+ * allowed. Pure so tests can sweep the mode × distance × accuracy ×
+ * facility matrix.
  *
- * The inner limit is the arrival ring (INNER_RING_METERS, ~0.5 mi) — the
- * same threshold the passive geofence evaluator uses to fire ARRIVED — plus
- * a capped allowance for the fix's reported accuracy. Soft mode still
- * refuses beyond OUTER_RING_METERS (~5 mi): check-in timestamps feed dwell
- * and duration pay, so "checked in from another town" must stay impossible.
+ * The inner limit is the facility's radius when the stop is anchored to a
+ * facility pin, else the arrival ring (INNER_RING_METERS, ~0.5 mi — the
+ * same threshold the passive geofence evaluator uses to fire ARRIVED),
+ * plus a capped allowance for the fix's reported accuracy.
+ *
+ * Hard blocking applies ONLY when the org opted in (`mode === 'hard'`) AND
+ * the anchor is a VERIFIED, non-needs-review facility — a pin nobody
+ * verified is exactly the thing that blocked drivers at real stops, so it
+ * never hard-blocks. Every other validated case behaves softly: allowed
+ * with an exception flag past the inner limit, refused only beyond
+ * OUTER_RING_METERS (~5 mi), because check-in timestamps feed dwell and
+ * duration pay and "checked in from another town" must stay impossible.
  */
 export function evaluateCheckInDistance(params: {
   mode: CheckInGeofenceMode;
   distanceMeters: number;
   accuracyMeters?: number;
+  facility?: CheckInFacilityContext;
 }): CheckInDistanceVerdict {
-  const { mode, distanceMeters } = params;
+  const { mode, distanceMeters, facility } = params;
   const accuracy =
     typeof params.accuracyMeters === 'number' && params.accuracyMeters > 0
       ? Math.min(params.accuracyMeters, CHECKIN_ACCURACY_ALLOWANCE_CAP_METERS)
       : 0;
-  const limitMeters = INNER_RING_METERS + accuracy;
+  const baseLimit =
+    facility?.radiusMeters && facility.radiusMeters > 0
+      ? facility.radiusMeters
+      : INNER_RING_METERS;
+  const limitMeters = baseLimit + accuracy;
 
   if (mode === 'off') {
-    return { allowed: true, outsideGeofence: false, limitMeters };
+    return { allowed: true, outsideGeofence: false, limitMeters, canOverride: false };
   }
 
   const outside = distanceMeters > limitMeters;
-  if (mode === 'hard') {
-    return { allowed: !outside, outsideGeofence: outside, limitMeters };
+  const hardEligible = facility?.verified === true && facility.needsReview !== true;
+
+  if (mode === 'hard' && hardEligible) {
+    return {
+      allowed: !outside,
+      outsideGeofence: outside,
+      limitMeters,
+      canOverride: outside,
+    };
   }
 
-  // soft
+  // Soft behavior (mode 'soft', or 'hard' without a verified anchor).
   return {
     allowed: distanceMeters <= OUTER_RING_METERS,
     outsideGeofence: outside,
     limitMeters,
+    canOverride: false,
   };
 }

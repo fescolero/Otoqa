@@ -1,6 +1,11 @@
 # FourKites Address Quality & Geofence Reliability — Implementation Plan
 
-**Status:** Approved design, pending implementation
+**Status:** Phases 1–3 implemented on this branch (2026-07-24). Phase 0
+(`dumpRawShipment` on 116569618) still needs a dashboard run; its findings
+may add FK fields to the Phase 1 address mapping. Implementation note:
+hard mode semantics landed as designed — the `hard` flag value only
+hard-blocks stops anchored to VERIFIED, non-needs-review facilities;
+everything else stays soft even in hard mode.
 **Revised:** 2026-07-24 codebase review — added: soft-mode outer bound (pay-engine
 protection), flag-read helper, recurring/manual-load matching (2.7), pin-correction
 backfill (2.8), NASS-code + schedule-import facility seeding (2.5), `externalCode` on

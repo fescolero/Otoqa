@@ -312,6 +312,7 @@ export default function TripDetailScreen() {
   const runCheckAction = async (
     stopId: Id<'loadStops'>,
     type: 'in' | 'out',
+    checkInOverride?: boolean,
   ) => {
     if (!driverId) return;
     if (isSubmitting) return;
@@ -339,6 +340,7 @@ export default function TripDetailScreen() {
               stopSequence: currentStop?.sequenceNumber,
               totalStops,
               organizationId: organizationId || undefined,
+              ...(checkInOverride ? { skipDistanceCheck: true } : {}),
             })
           : await checkOut({
               stopId: resolvedStopId,
@@ -383,6 +385,22 @@ export default function TripDetailScreen() {
           // Soft-geofence heads-up: checked in far from the pinned location.
           Alert.alert('Checked in', result.warning);
         }
+      } else if (type === 'in' && result.canOverride) {
+        // Hard-mode geofence rejection at a verified facility. The driver
+        // may consciously proceed — the server records the override and it
+        // feeds the facility's needs-review counter.
+        Alert.alert(
+          "Outside the stop's geofence",
+          `${result.message}\n\nIf you're sure you're at the right location, you can check in anyway — dispatch will be notified.`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Check in anyway',
+              style: 'destructive',
+              onPress: () => runCheckAction(stopId, 'in', true),
+            },
+          ],
+        );
       } else {
         Alert.alert(
           type === 'in' ? "Couldn't check in" : "Couldn't check out",
@@ -516,7 +534,10 @@ export default function TripDetailScreen() {
   };
 
   // Submit check-in/out
-  const submitCheckIn = async () => {
+  // NOTE: checkInOverride must be the literal `true` — this function is
+  // also used as a press handler, where the first argument is an event.
+  const submitCheckIn = async (checkInOverride?: boolean) => {
+    const isOverride = checkInOverride === true;
     if (!checkInModal.stopId || !driverId) return;
 
     setIsSubmitting(true);
@@ -572,6 +593,7 @@ export default function TripDetailScreen() {
               totalStops,
               organizationId: organizationId || undefined,
               ...(isRedirected ? { isRedirected: true } : {}),
+              ...(isOverride ? { skipDistanceCheck: true } : {}),
             })
           : await checkOut({
               stopId: resolvedStopId,
@@ -622,6 +644,19 @@ export default function TripDetailScreen() {
           );
           closeModal();
         }
+      } else if (checkInModal.type === 'in' && result.canOverride) {
+        Alert.alert(
+          "Outside the stop's geofence",
+          `${result.message}\n\nIf you're sure you're at the right location, you can check in anyway — dispatch will be notified.`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Check in anyway',
+              style: 'destructive',
+              onPress: () => submitCheckIn(true),
+            },
+          ],
+        );
       } else {
         Alert.alert(
           checkInModal.type === 'in' ? "Couldn't check in" : "Couldn't check out",
@@ -1623,7 +1658,7 @@ export default function TripDetailScreen() {
                     isSubmitting && styles.modalCompleteButtonDisabled,
                     pressed && { opacity: 0.8 },
                   ]}
-                  onPress={submitCheckIn}
+                  onPress={() => submitCheckIn()}
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? (

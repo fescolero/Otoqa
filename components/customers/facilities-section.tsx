@@ -75,9 +75,11 @@ function formFromFacility(f: Facility): FacilityForm {
 
 export function FacilitiesSection({ customerId }: { customerId: Id<'customers'> }) {
   const facilities = useAuthQuery(api.facilities.listByCustomer, { customerId });
+  const evidence = useAuthQuery(api.facilities.evidenceByCustomer, { customerId });
   const createFacility = useMutation(api.facilities.create);
   const updateFacility = useMutation(api.facilities.update);
   const removeFacility = useMutation(api.facilities.remove);
+  const applySuggestedPin = useMutation(api.facilities.applySuggestedPin);
 
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Facility | null>(null);
@@ -174,6 +176,18 @@ export function FacilitiesSection({ customerId }: { customerId: Id<'customers'> 
     }
   };
 
+  const applyEvidence = async (f: Facility) => {
+    try {
+      const result = await applySuggestedPin({ facilityId: f._id });
+      toast.success(
+        `Pin verified from ${result.evidence.count} driver fixes${result.backfilled ? ` — pushed to ${result.backfilled} upcoming stop${result.backfilled === 1 ? '' : 's'}` : ''}`,
+      );
+    } catch (err) {
+      console.error(err);
+      toast.error('Could not apply the suggested pin');
+    }
+  };
+
   const remove = async (f: Facility) => {
     if (!window.confirm(`Remove facility "${f.name}"? Future imports will stop matching it; past loads keep their records.`)) {
       return;
@@ -254,13 +268,47 @@ export function FacilitiesSection({ customerId }: { customerId: Id<'customers'> 
           {
             key: 'state',
             label: 'Status',
-            width: '110px',
-            render: (f) => (
-              <Chip
-                status={f.verificationState === 'VERIFIED' ? 'active' : 'pending'}
-                label={f.verificationState === 'VERIFIED' ? 'Verified' : 'Unverified'}
-              />
-            ),
+            width: '120px',
+            render: (f) =>
+              f.needsReview ? (
+                // Auto-demoted: repeated driver overrides say this pin is
+                // wrong. Soft geofencing applies until someone re-verifies.
+                <Chip status="warning" label="Needs review" />
+              ) : (
+                <Chip
+                  status={f.verificationState === 'VERIFIED' ? 'active' : 'pending'}
+                  label={f.verificationState === 'VERIFIED' ? 'Verified' : 'Unverified'}
+                />
+              ),
+          },
+          {
+            key: 'evidence',
+            label: 'Evidence',
+            width: '190px',
+            render: (f) => {
+              const e = evidence?.[f._id];
+              if (!e) return <span className="text-[var(--text-tertiary)]">—</span>;
+              if (e.qualifies && (f.verificationState !== 'VERIFIED' || f.needsReview || e.distanceFromPinMeters > 50)) {
+                return (
+                  <WBtn
+                    size="xs"
+                    variant="soft"
+                    onClick={() => applyEvidence(f)}
+                    title={`Median of ${e.count} driver fixes across ${e.distinctDays} days, spread ${e.spreadMeters}m, ${e.distanceFromPinMeters}m from the current pin. Applies the pin and verifies.`}
+                  >
+                    Use {e.count}-fix pin ✓
+                  </WBtn>
+                );
+              }
+              return (
+                <span
+                  className="num text-[var(--text-tertiary)]"
+                  title={`${e.count} driver fixes across ${e.distinctDays} days, spread ${e.spreadMeters}m`}
+                >
+                  {e.count} fixes · {e.distinctDays}d
+                </span>
+              );
+            },
           },
           {
             key: 'actions',

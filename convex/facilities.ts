@@ -9,10 +9,16 @@
  * See docs/fourkites-address-quality-plan.md §5.
  */
 import { v } from 'convex/values';
-import { mutation, query, MutationCtx } from './_generated/server';
+import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
+import { calculateDistanceMeters } from './lib/geo';
+import {
+  computeFacilityEvidence,
+  type EvidencePoint,
+  type FacilityEvidence,
+} from './lib/facilityEvidence';
 
 const verificationStateValidator = v.union(
   v.literal('UNVERIFIED'),
@@ -63,6 +69,134 @@ async function backfillPinToPendingStops(
   }
   return updated;
 }
+
+/**
+ * Gather verification evidence for one facility from its linked stops:
+ * the GPS fixes drivers produced at real check-ins/checkouts. Overridden
+ * and redirected stops are excluded so a wrong pin's own workaround
+ * check-ins can't build evidence for the wrong location.
+ */
+async function gatherEvidence(
+  ctx: QueryCtx | MutationCtx,
+  facilityId: Id<'facilities'>,
+): Promise<FacilityEvidence | null> {
+  const linkedStops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_facility', (q) => q.eq('facilityId', facilityId))
+    .collect();
+
+  const points: EvidencePoint[] = [];
+  for (const stop of linkedStops) {
+    if (stop.checkinOverride || stop.isRedirected) continue;
+    const dayKey = stop.checkedInAt?.slice(0, 10);
+    if (typeof stop.checkinLatitude === 'number' && typeof stop.checkinLongitude === 'number') {
+      points.push({ latitude: stop.checkinLatitude, longitude: stop.checkinLongitude, dayKey });
+    }
+    if (typeof stop.checkoutLatitude === 'number' && typeof stop.checkoutLongitude === 'number') {
+      points.push({ latitude: stop.checkoutLatitude, longitude: stop.checkoutLongitude, dayKey });
+    }
+  }
+  return computeFacilityEvidence(points);
+}
+
+/**
+ * Verification evidence for every active facility of a customer, for the
+ * Locations tab: "Suggested pin from N check-ins — apply & verify".
+ */
+export const evidenceByCustomer = query({
+  args: {
+    customerId: v.id('customers'),
+  },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const customer = await ctx.db.get(args.customerId);
+    if (!customer || customer.workosOrgId !== callerOrgId) return {};
+
+    const facilities = await ctx.db
+      .query('facilities')
+      .withIndex('by_customer', (q) =>
+        q.eq('customerId', args.customerId).eq('isDeleted', false),
+      )
+      .collect();
+
+    const result: Record<
+      string,
+      FacilityEvidence & { distanceFromPinMeters: number }
+    > = {};
+    for (const facility of facilities) {
+      const evidence = await gatherEvidence(ctx, facility._id);
+      if (!evidence) continue;
+      result[facility._id] = {
+        ...evidence,
+        distanceFromPinMeters: Math.round(
+          calculateDistanceMeters(
+            evidence.medianLatitude,
+            evidence.medianLongitude,
+            facility.latitude,
+            facility.longitude,
+          ),
+        ),
+      };
+    }
+    return result;
+  },
+});
+
+/**
+ * Apply the evidence-suggested pin: median of real driver fixes becomes
+ * the facility pin, observed spread + margin becomes the radius, and the
+ * facility is VERIFIED. Evidence is recomputed server-side — the client's
+ * copy is display-only. The human clicking this IS the verification
+ * decision (manual-only preserved, data-assisted).
+ */
+export const applySuggestedPin = mutation({
+  args: {
+    facilityId: v.id('facilities'),
+  },
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
+    const facility = await requireOwnedFacility(ctx, args.facilityId, callerOrgId);
+
+    const evidence = await gatherEvidence(ctx, facility._id);
+    if (!evidence || !evidence.qualifies) {
+      throw new Error('Not enough check-in evidence to suggest a pin for this facility');
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(facility._id, {
+      latitude: evidence.medianLatitude,
+      longitude: evidence.medianLongitude,
+      radiusMeters: evidence.suggestedRadiusMeters,
+      verificationState: 'VERIFIED',
+      verifiedBy: userId,
+      verifiedAt: now,
+      needsReview: false,
+      updatedAt: now,
+    });
+    const after = (await ctx.db.get(facility._id))!;
+    const backfilled = await backfillPinToPendingStops(ctx, after);
+
+    await logAudit(ctx, {
+      organizationId: callerOrgId,
+      entityType: 'facility',
+      entityId: facility._id,
+      entityName: facility.name,
+      action: 'status_changed',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Verified facility ${facility.name} from ${evidence.count} check-in fixes across ${evidence.distinctDays} days (spread ${evidence.spreadMeters}m, radius ${evidence.suggestedRadiusMeters}m${backfilled ? `, pin pushed to ${backfilled} pending stop${backfilled === 1 ? '' : 's'}` : ''})`,
+      changesBefore: JSON.stringify({
+        latitude: facility.latitude,
+        longitude: facility.longitude,
+        radiusMeters: facility.radiusMeters,
+        verificationState: facility.verificationState,
+      }),
+    });
+
+    return { backfilled, evidence };
+  },
+});
 
 export const listByCustomer = query({
   args: {

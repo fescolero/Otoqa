@@ -1641,6 +1641,11 @@ export default defineSchema({
     // evaluateCheckInDistance).
     checkinDistanceMeters: v.optional(v.number()),
     checkinOutsideGeofence: v.optional(v.boolean()),
+    // Hard-mode override: the driver consciously checked in past a
+    // VERIFIED facility's fence ("Check in anyway"). Feeds the facility's
+    // demotion counter and is excluded from verification evidence.
+    checkinOverride: v.optional(v.boolean()),
+    checkinOverrideReason: v.optional(v.string()),
 
     // Redirect (driver sent to different location than scheduled)
     isRedirected: v.optional(v.boolean()),

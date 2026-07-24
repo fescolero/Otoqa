@@ -146,6 +146,10 @@ interface CheckInOptions {
   totalStops?: number;
   organizationId?: string;
   isRedirected?: boolean;
+  // "Check in anyway" after a hard-mode geofence rejection. The server
+  // records the override against the stop and its facility.
+  skipDistanceCheck?: boolean;
+  overrideReason?: string;
 }
 
 interface CheckInResult {
@@ -156,6 +160,8 @@ interface CheckInResult {
   trackingMessage?: string;
   // Soft-geofence heads-up from the server (checked in far from the pin).
   warning?: string;
+  // Hard-mode rejection that the driver may consciously override.
+  canOverride?: boolean;
 }
 
 type LocationGetter = () => Promise<{
@@ -207,6 +213,12 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         notes: options.notes,
         ...(typeof location.accuracy === 'number' ? { accuracy: location.accuracy } : {}),
         ...(options.isRedirected ? { isRedirected: true } : {}),
+        ...(options.skipDistanceCheck
+          ? {
+              skipDistanceCheck: true,
+              overrideReason: options.overrideReason || 'Driver confirmed at location',
+            }
+          : {}),
       };
 
       if (shouldQueue) {
