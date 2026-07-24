@@ -264,12 +264,6 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
     },
   ];
 
-  const eyebrow = status === 'Active'
-    ? <Chip status="active" label="Active" />
-    : status === 'Prospect'
-      ? <Chip status="pending" label="Prospect" />
-      : <Chip status="inactive" label={status} />;
-
   const titleNode = (
     <span className="inline-flex items-center gap-3">
       <Avatar name={name} size={36} />
@@ -824,7 +818,6 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
         </>
       }
       title={titleNode}
-      eyebrow={eyebrow}
       subtitle={subtitle}
       kpis={kpis}
       sections={sections}
