@@ -45,6 +45,16 @@ import { useOrganizationId } from '@/contexts/organization-context';
 import { FacilitiesSection } from '@/components/customers/facilities-section';
 import { ImportCsvDialog } from '@/components/contract-lanes/import-csv-dialog';
 import { ImportScheduleDialog } from '@/components/contract-lanes/import-schedule-dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 function chipStatusFor(status: string): ChipStatus {
   switch (status) {
@@ -143,6 +153,31 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   const workosOrgId = useOrganizationId();
   const [csvImportOpen, setCsvImportOpen] = React.useState(false);
   const [scheduleImportOpen, setScheduleImportOpen] = React.useState(false);
+
+  // Contracts table multi-select + bulk delete (soft delete via
+  // contractLanes.deactivate — restorable by an admin).
+  const deactivateLane = useMutation(api.contractLanes.deactivate);
+  const [selectedLaneIds, setSelectedLaneIds] = React.useState<Set<string | number>>(new Set());
+  const [laneDeleteConfirmOpen, setLaneDeleteConfirmOpen] = React.useState(false);
+  const [isDeletingLanes, setIsDeletingLanes] = React.useState(false);
+
+  const handleDeleteSelectedLanes = async (laneIds: string[]) => {
+    if (!user) return;
+    setIsDeletingLanes(true);
+    try {
+      for (const id of laneIds) {
+        await deactivateLane({ id: id as Id<'contractLanes'>, userId: user.id });
+      }
+      toast.success(`Deleted ${laneIds.length} contract lane(s).`);
+      setSelectedLaneIds(new Set());
+      setLaneDeleteConfirmOpen(false);
+    } catch (err) {
+      console.error('Failed to delete contract lanes:', err);
+      toast.error('Failed to delete contract lanes. Please try again.');
+    } finally {
+      setIsDeletingLanes(false);
+    }
+  };
 
   // Controlled section state so toolbar/rail affordances can jump
   // straight to the Contracts tab (replaces links to the retired list
@@ -603,6 +638,14 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
     },
   ];
 
+  // Selection can hold ids of rows that have since disappeared (deleted in
+  // another tab, filtered by the reactive query) — count and act only on
+  // ids still visible.
+  const selectedVisibleLaneIds = laneRows
+    .filter((r) => selectedLaneIds.has(r.id))
+    .map((r) => r.id as string);
+  const selectedLaneCount = selectedVisibleLaneIds.length;
+
   const contractsContent = (
     <DSCard
       title={`Contracts (${laneRows.length})`}
@@ -662,14 +705,37 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
           </span>
         </div>
       ) : (
-        <DSMiniTable
-          columns={laneColumns}
-          rows={laneRows}
-          total={laneRows.length}
-          onRowClick={(r) => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/${r.laneId}`)}
-          className="rounded-t-none border-0 border-t flex-1 min-h-0"
-          fillHeight
-        />
+        <>
+          {selectedLaneCount > 0 && (
+            <div className="flex items-center gap-3 px-4 py-2 border-t border-[var(--border-hairline)] bg-[var(--accent-tint)]">
+              <span className="text-[12.5px] font-medium text-[var(--accent)]">
+                {selectedLaneCount} selected
+              </span>
+              <span className="flex-1" />
+              <WBtn
+                size="sm"
+                danger
+                leading="trash"
+                onClick={() => setLaneDeleteConfirmOpen(true)}
+                disabled={!user || isDeletingLanes}
+              >
+                {isDeletingLanes ? 'Deleting…' : 'Delete selected'}
+              </WBtn>
+              <WBtn size="sm" variant="ghost" onClick={() => setSelectedLaneIds(new Set())}>
+                Clear
+              </WBtn>
+            </div>
+          )}
+          <DSMiniTable
+            columns={laneColumns}
+            rows={laneRows}
+            total={laneRows.length}
+            onRowClick={(r) => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/${r.laneId}`)}
+            className="rounded-t-none border-0 border-t flex-1 min-h-0"
+            fillHeight
+            selection={{ selected: selectedLaneIds, onChange: setSelectedLaneIds }}
+          />
+        </>
       )}
     </DSCard>
   );
@@ -854,6 +920,30 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
         />
       </>
     )}
+    <AlertDialog open={laneDeleteConfirmOpen} onOpenChange={setLaneDeleteConfirmOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Delete {selectedLaneCount} contract lane{selectedLaneCount === 1 ? '' : 's'}?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            The selected lanes are removed from {name}&apos;s contracts and no new
+            loads will generate from them. An admin can restore them later — nothing
+            is permanently erased.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isDeletingLanes}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => handleDeleteSelectedLanes(selectedVisibleLaneIds)}
+            disabled={isDeletingLanes || selectedLaneCount === 0}
+            className="bg-[#B43030] text-white hover:bg-[#9c2828]"
+          >
+            {isDeletingLanes ? 'Deleting…' : 'Delete lanes'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     </>
   );
 }

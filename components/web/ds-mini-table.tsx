@@ -10,6 +10,7 @@
 import * as React from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { cn } from '@/lib/utils';
+import { Checkbox } from './checkbox';
 import { EditableField, type EditableSelectOption } from './editable-field';
 import { WIcon, type IconName } from './icons';
 
@@ -87,6 +88,14 @@ interface DSMiniTableProps<R extends { id: string | number }> {
   /** Called when a row is clicked anywhere outside the editor / row-action
    *  surfaces. The row gets a pointer cursor when this is set. */
   onRowClick?: (row: R) => void;
+  /** Opt-in multi-select: renders a leading checkbox column plus a
+   *  select-all header checkbox (indeterminate when only some rows are
+   *  selected). The caller owns the id set — pair with a selection bar
+   *  above the table for bulk actions. */
+  selection?: {
+    selected: ReadonlySet<string | number>;
+    onChange: (next: Set<string | number>) => void;
+  };
 }
 
 export function DSMiniTable<R extends { id: string | number }>({
@@ -102,9 +111,13 @@ export function DSMiniTable<R extends { id: string | number }>({
   bodyMaxHeight,
   fillHeight,
   onRowClick,
+  selection,
 }: DSMiniTableProps<R>) {
   const showViewAll = onViewAll && total != null && total > rows.length;
-  const grid = columns.map((c) => c.width ?? '1fr').join(' ') + (rowActions ? ' 32px' : '');
+  const grid =
+    (selection ? '28px ' : '') +
+    columns.map((c) => c.width ?? '1fr').join(' ') +
+    (rowActions ? ' 32px' : '');
   const scrolling = bodyMaxHeight != null || fillHeight;
 
   // Client-side sort over the rows the caller passed in. Only columns
@@ -164,6 +177,21 @@ export function DSMiniTable<R extends { id: string | number }>({
         )}
         style={{ gridTemplateColumns: grid }}
       >
+        {selection && (
+          <div className="flex items-center px-1">
+            <Checkbox
+              ariaLabel="Select all rows"
+              checked={sortedRows.length > 0 && sortedRows.every((r) => selection.selected.has(r.id))}
+              indeterminate={
+                sortedRows.some((r) => selection.selected.has(r.id)) &&
+                !sortedRows.every((r) => selection.selected.has(r.id))
+              }
+              onChange={(next) =>
+                selection.onChange(next ? new Set(sortedRows.map((r) => r.id)) : new Set())
+              }
+            />
+          </div>
+        )}
         {columns.map((c) => {
           if (!c.sortValue) {
             return (
@@ -219,6 +247,17 @@ export function DSMiniTable<R extends { id: string | number }>({
             editable={editable}
             onCellCommit={onCellCommit}
             onRowClick={onRowClick}
+            selected={selection ? selection.selected.has(row.id) : undefined}
+            onToggleSelect={
+              selection
+                ? (next) => {
+                    const nextSet = new Set(selection.selected);
+                    if (next) nextSet.add(row.id);
+                    else nextSet.delete(row.id);
+                    selection.onChange(nextSet);
+                  }
+                : undefined
+            }
           />
         ))}
       </div>
@@ -250,6 +289,8 @@ function DSRow<R extends { id: string | number }>({
   editable,
   onCellCommit,
   onRowClick,
+  selected,
+  onToggleSelect,
 }: {
   columns: DSMiniColumn<R>[];
   row: R;
@@ -258,6 +299,8 @@ function DSRow<R extends { id: string | number }>({
   editable?: boolean;
   onCellCommit?: (row: R, key: string, next: string | string[]) => void;
   onRowClick?: (row: R) => void;
+  selected?: boolean;
+  onToggleSelect?: (next: boolean) => void;
 }) {
   const [hover, setHover] = React.useState(false);
   const isClickable = !!onRowClick && !editable;
@@ -283,9 +326,24 @@ function DSRow<R extends { id: string | number }>({
         'border-b last:border-b-0 border-[var(--border-hairline)]',
         'hover:bg-[var(--bg-row-hover)]',
         isClickable && 'cursor-pointer',
+        selected && 'bg-[var(--accent-tint)]',
       )}
       style={{ gridTemplateColumns: grid, minHeight: 36 }}
     >
+      {onToggleSelect && (
+        // stopPropagation: toggling the checkbox must not fire onRowClick.
+        <div
+          className="flex items-center px-1"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <Checkbox
+            ariaLabel="Select row"
+            checked={!!selected}
+            onChange={onToggleSelect}
+          />
+        </div>
+      )}
       {columns.map((c) => (
         <DSCell
           key={c.key}
