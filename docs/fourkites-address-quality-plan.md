@@ -2,9 +2,11 @@
 
 **Status:** Approved design, pending implementation
 **Revised:** 2026-07-24 codebase review — added: soft-mode outer bound (pay-engine
-protection), mobile projection allowlist, flag-read helper, recurring/manual-load
-matching (2.7), pin-correction backfill (2.8), NASS-code + schedule-import facility
-seeding (2.5), `externalCode` on facilities.
+protection), flag-read helper, recurring/manual-load matching (2.7), pin-correction
+backfill (2.8), NASS-code + schedule-import facility seeding (2.5), `externalCode` on
+facilities. Simplified: no `locationName` field and no mobile projection changes — FK
+name/street text goes into the existing `address` field; all other new stop fields are
+dispatch-only.
 **Branch:** `claude/fourkites-address-quality-joymkn`
 **Reference incident:** Load 116569618 (Redding → Yreka, 2026-07-23) — driver physically at
 the stop was blocked from checking in/out by the 500 m geofence.
@@ -105,21 +107,21 @@ the real facility. The driver check-in geofence anchors to those coordinates wit
 
 ### 1.1 Import field mapping
 - `buildStopRecord` (`convex/fourKitesUtils.ts`): stop hard-coding `address: ""`. Persist
-  whatever Phase 0 confirms exists — at minimum `stopName` into a new optional
-  `loadStops.locationName` field; street address into `address` when present.
+  whatever Phase 0 confirms exists into the **existing `address` field** (e.g.
+  "Yreka Post Office, 401 S Broadway" when FK sends both `stopName` and a street; just
+  the name or just the street otherwise). No new field: `address` is already in the
+  schema, already projected to mobile, and already rendered on web and mobile — so this
+  requires zero display or projection changes anywhere.
 - **Lane address inheritance:** in `importLoadFromShipment`, when the load matched a lane,
   copy `contractLane.stops[i].address` (matched by position with count + city agreement)
   into the load stop's `address`. This fills the web/mobile address display for every
   contract load with data dispatch already typed — no external calls.
-- Schema: add `locationName: v.optional(v.string())` to `loadStops`.
-- **Mobile projection:** `getLoadWithStops` (`convex/driverMobile.ts:628-762`) returns an
-  explicit field allowlist (validator + `stops.map`) — every new stop field
-  (`locationName`, later `facilityId` / `checkinOutsideGeofence`) must be added there or
-  mobile never sees it. Note: the trip screen already reads `stop.locationName`
-  (`trip/[id].tsx:1058`) — a field that has never existed — so adding it lights up
-  existing UI with no mobile release.
-- Display: web stops table (`components/load-detail.tsx:899`) falls back to
-  `locationName` before "—".
+- **Mobile projection: deliberately unchanged.** `getLoadWithStops`
+  (`convex/driverMobile.ts:628-762`) is an explicit field allowlist; none of the new
+  stop fields introduced by this plan (`facilityId`, `checkinDistanceMeters`,
+  `checkinOutsideGeofence`, `checkinOverride`) are added to it — they are all
+  server/dispatch-facing. Decision 2026-07-24: mobile shows nothing new; the improved
+  `address` string flows through the projection that already exists.
 
 ### 1.2 Re-sync guard
 - `convex/fourKitesPullSyncAction.ts` STEP 6: build the patch object field-by-field,
@@ -147,8 +149,8 @@ the real facility. The driver check-in geofence anchors to those coordinates wit
     internal helper that reads the org's flag row directly from `ctx.db` so the check-in
     mutation can consult it without a query round-trip.
   - Schema: add `checkinDistanceMeters` / `checkinOutsideGeofence` optionals to `loadStops`.
-- Mobile: show the warning non-blockingly on check-in success (and add the new fields to
-  the `getLoadWithStops` projection, per 1.1).
+- Mobile: show the warning non-blockingly on check-in success (the warning arrives in
+  the mutation's return message — no projection changes needed).
 
 ### 1.4 Coordinate-based navigation (mobile)
 - `openMaps` (`mobile/app/(app)/trip/[id].tsx:277`): prefer `latitude,longitude` when the
