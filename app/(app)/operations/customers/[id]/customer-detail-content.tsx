@@ -128,6 +128,61 @@ interface LaneRow {
   status: ChipStatus;
 }
 
+// ─── Contracts chip filter ─────────────────────────────────────────────
+// Mirrors design v2's ChipBtn (details-customer.jsx): pill + count badge,
+// green tone for Active, amber for Expiring.
+type LaneFilter = 'all' | 'active' | 'expiring' | 'inactive';
+
+function laneFilterBucket(status: ChipStatus): Exclude<LaneFilter, 'all'> {
+  if (status === 'active' || status === 'valid') return 'active';
+  if (status === 'expiring') return 'expiring';
+  return 'inactive';
+}
+
+function ChipFilterBtn({
+  label,
+  n,
+  active,
+  onClick,
+  tone,
+}: {
+  label: string;
+  n: number;
+  active: boolean;
+  onClick: () => void;
+  tone?: 'ok' | 'warn';
+}) {
+  const palette =
+    tone === 'ok'
+      ? { fg: '#0F8C5F', bg: 'rgba(16,185,129,0.10)' }
+      : tone === 'warn'
+        ? { fg: '#A66800', bg: 'rgba(245,158,11,0.12)' }
+        : { fg: 'var(--text-secondary)', bg: 'var(--bg-surface)' };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="focus-ring inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-semibold cursor-pointer transition-colors duration-[var(--dur-fast)] ease-[var(--ease-out)]"
+      style={{
+        background: active ? palette.bg : 'transparent',
+        border: '1px solid ' + (active ? 'transparent' : 'var(--border-hairline-strong)'),
+        color: active ? palette.fg : 'var(--text-secondary)',
+      }}
+    >
+      <span>{label}</span>
+      <span
+        className="num inline-flex items-center rounded-full px-[5px] h-4 text-[10.5px] font-semibold"
+        style={{
+          background: active ? 'rgba(255,255,255,0.55)' : 'var(--bg-surface-2)',
+          color: active ? palette.fg : 'var(--text-tertiary)',
+        }}
+      >
+        {n}
+      </span>
+    </button>
+  );
+}
+
 function formatRate(rate: number, rateType: 'Per Mile' | 'Flat Rate' | 'Per Stop', currency: 'USD' | 'CAD' | 'MXN'): string {
   const symbol = currency === 'CAD' ? 'C$' : currency === 'MXN' ? 'MX$' : '$';
   const unit = rateType === 'Per Mile' ? '/mi' : rateType === 'Per Stop' ? '/stop' : '';
@@ -160,6 +215,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   const [selectedLaneIds, setSelectedLaneIds] = React.useState<Set<string | number>>(new Set());
   const [laneDeleteConfirmOpen, setLaneDeleteConfirmOpen] = React.useState(false);
   const [isDeletingLanes, setIsDeletingLanes] = React.useState(false);
+  const [laneFilter, setLaneFilter] = React.useState<LaneFilter>('all');
 
   const handleDeleteSelectedLanes = async (laneIds: string[]) => {
     if (!user) return;
@@ -638,10 +694,21 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
     },
   ];
 
-  // Selection can hold ids of rows that have since disappeared (deleted in
-  // another tab, filtered by the reactive query) — count and act only on
-  // ids still visible.
-  const selectedVisibleLaneIds = laneRows
+  const laneCounts = {
+    all: laneRows.length,
+    active: laneRows.filter((r) => laneFilterBucket(r.status) === 'active').length,
+    expiring: laneRows.filter((r) => laneFilterBucket(r.status) === 'expiring').length,
+    inactive: laneRows.filter((r) => laneFilterBucket(r.status) === 'inactive').length,
+  };
+  const filteredLaneRows =
+    laneFilter === 'all'
+      ? laneRows
+      : laneRows.filter((r) => laneFilterBucket(r.status) === laneFilter);
+
+  // Selection can hold ids of rows no longer shown (deleted in another
+  // tab, or hidden by the chip filter) — count and act only on ids the
+  // user can currently see.
+  const selectedVisibleLaneIds = filteredLaneRows
     .filter((r) => selectedLaneIds.has(r.id))
     .map((r) => r.id as string);
   const selectedLaneCount = selectedVisibleLaneIds.length;
@@ -706,6 +773,12 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
         </div>
       ) : (
         <>
+          <div className="flex flex-wrap items-center gap-1.5 px-4 py-2.5 border-t border-[var(--border-hairline)] bg-[var(--bg-surface-2)]">
+            <ChipFilterBtn label="All" n={laneCounts.all} active={laneFilter === 'all'} onClick={() => setLaneFilter('all')} />
+            <ChipFilterBtn label="Active" n={laneCounts.active} active={laneFilter === 'active'} onClick={() => setLaneFilter('active')} tone="ok" />
+            <ChipFilterBtn label="Expiring" n={laneCounts.expiring} active={laneFilter === 'expiring'} onClick={() => setLaneFilter('expiring')} tone="warn" />
+            <ChipFilterBtn label="Inactive" n={laneCounts.inactive} active={laneFilter === 'inactive'} onClick={() => setLaneFilter('inactive')} />
+          </div>
           {selectedLaneCount > 0 && (
             <div className="flex items-center gap-3 px-4 py-2 border-t border-[var(--border-hairline)] bg-[var(--accent-tint)]">
               <span className="text-[12.5px] font-medium text-[var(--accent)]">
@@ -726,15 +799,21 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
               </WBtn>
             </div>
           )}
-          <DSMiniTable
-            columns={laneColumns}
-            rows={laneRows}
-            total={laneRows.length}
-            onRowClick={(r) => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/${r.laneId}`)}
-            className="rounded-t-none border-0 border-t flex-1 min-h-0"
-            fillHeight
-            selection={{ selected: selectedLaneIds, onChange: setSelectedLaneIds }}
-          />
+          {filteredLaneRows.length === 0 ? (
+            <p className="m-0 px-4 py-4 text-[12.5px] text-[var(--text-tertiary)] border-t border-[var(--border-hairline)]">
+              No contracts in this state.
+            </p>
+          ) : (
+            <DSMiniTable
+              columns={laneColumns}
+              rows={filteredLaneRows}
+              total={filteredLaneRows.length}
+              onRowClick={(r) => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/${r.laneId}`)}
+              className="rounded-t-none border-0 border-t flex-1 min-h-0"
+              fillHeight
+              selection={{ selected: selectedLaneIds, onChange: setSelectedLaneIds }}
+            />
+          )}
         </>
       )}
     </DSCard>
