@@ -49,6 +49,20 @@ describe('composeStopAddress', () => {
     expect(composeStopAddress({})).toBeUndefined();
     expect(composeStopAddress({ stopName: '  ', address: '' })).toBeUndefined();
   });
+
+  it('suppresses a stopName that merely repeats the city (USPS delivery pattern)', () => {
+    // Real payload shape: stopName "LAKEHEAD" for city "LAKEHEAD" — no info.
+    expect(composeStopAddress({ stopName: 'LAKEHEAD', city: 'LAKEHEAD' })).toBeUndefined();
+    expect(composeStopAddress({ stopName: 'Lakehead', city: 'LAKEHEAD' })).toBeUndefined();
+    // A real facility label survives even with a city present.
+    expect(
+      composeStopAddress({ stopName: 'LOG REDDING CA LPC', city: 'REDDING' }),
+    ).toBe('LOG REDDING CA LPC');
+    // City-duplicate name with a street still yields the street.
+    expect(
+      composeStopAddress({ stopName: 'WEED', city: 'WEED', address: '205 Main St' }),
+    ).toBe('205 Main St');
+  });
 });
 
 describe('buildStopRecord address', () => {

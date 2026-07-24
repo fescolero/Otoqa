@@ -341,6 +341,16 @@ export const importLoadFromShipment = internalMutation({
           commodityDescription: shipment.commodity,
           fallbackAddress: laneAddresses[i],
         });
+        // FK sends a stable USPS facility code per stop (externalAddressID:
+        // the ZIP for post offices, a 3-digit plant code for LPCs). Use it
+        // as a matching key when the lane binding doesn't already name one.
+        const fkFacilityCode = stop.externalAddressID ?? stop.stopReferenceId;
+        const binding = {
+          ...(laneBindings[i] ?? {}),
+          ...(laneBindings[i]?.nassCode || !fkFacilityCode
+            ? {}
+            : { nassCode: String(fkFacilityCode) }),
+        };
         const link = resolveStopFacilityLink(
           {
             city: stop.city,
@@ -350,7 +360,7 @@ export const importLoadFromShipment = internalMutation({
             longitude: stop.longitude,
           },
           facilities,
-          laneBindings[i],
+          Object.keys(binding).length > 0 ? binding : undefined,
         );
         if (link) Object.assign(record, link);
         await ctx.db.insert("loadStops", record as any);

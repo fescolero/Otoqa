@@ -107,10 +107,18 @@ export interface FourKitesStopShape {
   sequence?: number;
   stopType?: string;
   // Address-bearing fields. FourKites tenants vary in which of these are
-  // populated (often none — the whole reason the facility registry exists).
+  // populated. Raw-payload dump (shipment 687686124 / order 116569618,
+  // 2026-07-24): no street-address field exists in this tenant's feed;
+  // stopName is a facility label ("LOG REDDING CA LPC") or just the city
+  // in caps ("LAKEHEAD").
   stopName?: string;
   name?: string;
   address?: string;
+  // Stable USPS facility identifiers from the same dump: the ZIP for post
+  // offices ("96051"), a 3-digit plant code for LPCs ("960"). Used as a
+  // facility-matching key against facilities.externalCode.
+  stopReferenceId?: string;
+  externalAddressID?: string;
   city?: string;
   state?: string;
   postalCode?: string;
@@ -131,9 +139,18 @@ function cleanText(value: unknown): string | undefined {
  * Compose a display address from whatever address-bearing fields FourKites
  * sent: "<facility name>, <street>" when both exist, either alone otherwise.
  * Returns undefined when FK sent nothing usable.
+ *
+ * A stopName that merely repeats the city ("LAKEHEAD" for Lakehead, CA — the
+ * common case for USPS delivery stops) is treated as nothing: it adds no
+ * information next to the city column, and returning undefined lets the
+ * contract lane's real street address fill in instead.
  */
 export function composeStopAddress(stop: FourKitesStopShape): string | undefined {
-  const name = cleanText(stop.stopName) ?? cleanText(stop.name);
+  let name = cleanText(stop.stopName) ?? cleanText(stop.name);
+  const city = cleanText(stop.city);
+  if (name && city && name.toLowerCase() === city.toLowerCase()) {
+    name = undefined;
+  }
   const street = cleanText(stop.address);
   if (name && street && name.toLowerCase() !== street.toLowerCase()) {
     return `${name}, ${street}`;

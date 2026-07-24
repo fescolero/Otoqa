@@ -97,6 +97,25 @@ the real facility. The driver check-in geofence anchors to those coordinates wit
 
 ## 3. Phase 0 — Diagnostics (no code, do first)
 
+> **FINDINGS (2026-07-24, dev run against shipment 687686124 / order 116569618):**
+> - **No street-address field exists** in this tenant's feed — the empty
+>   address column was a feed limitation, not dirty data. Lane inheritance
+>   + facilities are the correct fix.
+> - `stopName` is a facility label for plants ("LOG REDDING CA LPC") but
+>   just the city in caps for delivery stops ("LAKEHEAD") — the import now
+>   suppresses city-duplicate names so lane addresses win.
+> - `externalAddressID`/`stopReferenceId` are **stable USPS facility codes**
+>   (ZIP for post offices, 3-digit plant code like "960" for LPCs). The
+>   import now uses them as a facility-match key against
+>   facilities.externalCode when no lane binding exists.
+> - Pins are per-facility geocodes (distinct 6-decimal coords per stop),
+>   not city centroids — plausible-looking but unverified; per-stop
+>   `checkinDistanceMeters` will quantify their real error in production.
+> - Per-stop `arrivalTime`/`departureTime` (FK-detected) exist and are not
+>   yet consumed — possible future enrichment.
+> - referenceNumbers `["1","96036","CarrierCode:000227710"]` classify as
+>   HCR 96036 / Trip 1, as designed.
+
 - Run `internal.fourKitesDiag.dumpRawShipment` from the Convex dashboard for
   `externalLoadId` 116569618 (and one non-HCR shipment if available).
 - Record: does FK send street address lines? `stopName`? a location name/code? country?
