@@ -20,9 +20,6 @@ import type {
   DedupResult,
   WizardStep,
 } from './schedule-import-types';
-import * as pdfjsLib from 'pdfjs-dist';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 interface ImportScheduleDialogProps {
   open: boolean;
@@ -89,6 +86,10 @@ export function ImportScheduleDialog({
   const bulkUpsert = useMutation(api.contractLanes.bulkUpsert);
 
   const renderPdfToImages = useCallback(async (file: File): Promise<string[]> => {
+    // pdfjs-dist references DOMMatrix at module scope, so it must be imported
+    // lazily in the browser — a top-level import crashes server rendering.
+    const pdfjsLib = await import('pdfjs-dist');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
     const images: string[] = [];
