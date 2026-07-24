@@ -45,6 +45,10 @@ export const dumpRawShipment = internalAction({
     pagesScanned: v.number(),
     foundOnPage: v.union(v.number(), v.null()),
     note: v.string(),
+    // When the target shipment isn't found, the first raw shipment from
+    // page 1 is returned here instead — Phase 0's real question is "what
+    // fields does FK send?", and any current shipment answers it.
+    sampleJson: v.optional(v.string()),
   }),
   handler: async (
     ctx,
@@ -56,6 +60,7 @@ export const dumpRawShipment = internalAction({
     pagesScanned: number;
     foundOnPage: number | null;
     note: string;
+    sampleJson?: string;
   }> => {
     const pushContext: { apiKey: string } | null = await ctx.runQuery(
       internal.fourKitesDispatcherPushMutations.getFourKitesPushContext,
@@ -115,9 +120,12 @@ export const dumpRawShipment = internalAction({
       };
     }
 
-    // ─── Attempt 2: paginate /shipments and match by id ────────────────
+    // ─── Attempt 2: paginate /shipments and match by id OR loadNumber ──
+    // loadNumber matching matters in practice: the value humans have is
+    // the Order # (imported from FK's loadNumber), not the shipment id.
     const maxPages = args.maxPages ?? 50;
     const perPage = 100;
+    let sampleJson: string | undefined;
     for (let page = 1; page <= maxPages; page++) {
       const listUrl = `${FOURKITES_BASE}?page=${page}&perPage=${perPage}`;
       const resp = await fetch(listUrl, { method: 'GET', headers });
@@ -149,15 +157,20 @@ export const dumpRawShipment = internalAction({
           bodyJson: '',
           pagesScanned: page,
           foundOnPage: null,
-          note: `paginated fallback exhausted at page ${page}; shipment not found`,
+          note: `paginated fallback exhausted at page ${page}; shipment not found${sampleJson ? ' — sampleJson carries the first shipment from page 1 for field inspection' : ''}`,
+          sampleJson,
         };
+      }
+      if (page === 1 && !sampleJson) {
+        sampleJson = JSON.stringify(shipments[0], null, 2);
       }
       const match = shipments.find(
         (s) =>
           s?.fourKitesShipmentID === args.externalLoadId ||
           s?.id === args.externalLoadId ||
           String(s?.fourKitesShipmentID ?? '') === args.externalLoadId ||
-          String(s?.id ?? '') === args.externalLoadId,
+          String(s?.id ?? '') === args.externalLoadId ||
+          String(s?.loadNumber ?? '') === args.externalLoadId,
       );
       if (match) {
         return {
@@ -166,7 +179,7 @@ export const dumpRawShipment = internalAction({
           bodyJson: JSON.stringify(match, null, 2),
           pagesScanned: page,
           foundOnPage: page,
-          note: 'fallback paginated — matched by id within list response',
+          note: 'fallback paginated — matched by id or loadNumber within list response',
         };
       }
     }
@@ -177,7 +190,8 @@ export const dumpRawShipment = internalAction({
       bodyJson: '',
       pagesScanned: maxPages,
       foundOnPage: null,
-      note: `paginated fallback ran ${maxPages} pages without finding externalLoadId=${args.externalLoadId}`,
+      note: `paginated fallback ran ${maxPages} pages without finding externalLoadId=${args.externalLoadId}${sampleJson ? ' — sampleJson carries the first shipment from page 1 for field inspection' : ''}`,
+      sampleJson,
     };
   },
 });
