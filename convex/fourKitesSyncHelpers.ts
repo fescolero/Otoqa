@@ -17,6 +17,7 @@ import {
   buildLoadInternalId,
   buildStopRecord,
   computeLaneBilling,
+  laneAddressesByPosition,
   mapTrackingStatus,
   metersToMiles,
 } from "./fourKitesUtils";
@@ -317,7 +318,13 @@ export const importLoadFromShipment = internalMutation({
     await recordLoadWritten(ctx, workosOrgId, Date.now());
 
     const internalId = buildLoadInternalId(shipment);
-    for (const stop of shipment.stops || []) {
+    // FK stop payloads usually carry no street address; the contract lane's
+    // stop plan does (typed by dispatch or extracted from the HCR schedule).
+    // Inherit by position when the two lists align (see laneAddressesByPosition).
+    const shipmentStops = shipment.stops || [];
+    const laneAddresses = laneAddressesByPosition(contractLane.stops, shipmentStops);
+    for (let i = 0; i < shipmentStops.length; i++) {
+      const stop = shipmentStops[i];
       try {
         await ctx.db.insert(
           "loadStops",
@@ -327,6 +334,7 @@ export const importLoadFromShipment = internalMutation({
             internalId,
             stop,
             commodityDescription: shipment.commodity,
+            fallbackAddress: laneAddresses[i],
           }) as any,
         );
       } catch (stopErr) {

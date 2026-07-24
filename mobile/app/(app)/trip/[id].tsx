@@ -274,8 +274,21 @@ export default function TripDetailScreen() {
   // the `http://maps.apple.com/` URL is intercepted by the system and opens
   // Apple Maps directly; on Android the `geo:` intent hands off to whichever
   // maps app the user has configured (Google Maps, Waze, etc.).
-  const openMaps = async (address: string, city?: string, state?: string) => {
-    const query = [address, city, state].filter(Boolean).join(', ');
+  //
+  // Coordinates win over address text: FourKites-imported stops often have
+  // an empty address and only city/state, and navigating to "Yreka, CA"
+  // sends the driver to the middle of town instead of the stop pin.
+  const openMaps = async (target: {
+    address?: string;
+    city?: string;
+    state?: string;
+    latitude?: number;
+    longitude?: number;
+  }) => {
+    const query =
+      typeof target.latitude === 'number' && typeof target.longitude === 'number'
+        ? `${target.latitude},${target.longitude}`
+        : [target.address, target.city, target.state].filter(Boolean).join(', ');
     const encoded = encodeURIComponent(query);
     const url = Platform.select({
       ios: `http://maps.apple.com/?q=${encoded}`,
@@ -366,6 +379,9 @@ export default function TripDetailScreen() {
         } else if (result.queued) {
           // Surface offline-queue feedback only; success is silent.
           Alert.alert('Queued', result.message);
+        } else if (result.warning) {
+          // Soft-geofence heads-up: checked in far from the pinned location.
+          Alert.alert('Checked in', result.warning);
         }
       } else {
         Alert.alert(
@@ -600,7 +616,10 @@ export default function TripDetailScreen() {
             );
           }, 500);
         } else {
-          Alert.alert(result.queued ? 'Queued' : 'Success', result.message);
+          Alert.alert(
+            result.queued ? 'Queued' : 'Success',
+            result.warning ? `${result.message}\n\n${result.warning}` : result.message,
+          );
           closeModal();
         }
       } else {
@@ -810,10 +829,15 @@ export default function TripDetailScreen() {
               }
               const nextStop =
                 displayStops.find((s) => !s.checkedOutAt) ?? displayStops[0];
-              if (nextStop?.address) {
+              if (
+                nextStop &&
+                (nextStop.address ||
+                  (typeof nextStop.latitude === 'number' &&
+                    typeof nextStop.longitude === 'number'))
+              ) {
                 opts.push({
                   label: 'Open in Maps',
-                  action: () => openMaps(nextStop.address, nextStop.city, nextStop.state),
+                  action: () => openMaps(nextStop),
                 });
               }
               if (opts.length === 0) {
@@ -1297,8 +1321,13 @@ export default function TripDetailScreen() {
               // to the first stop if everything's done (edge case).
               const target =
                 displayStops.find((s) => !s.checkedOutAt) ?? displayStops[0];
-              if (target?.address) {
-                openMaps(target.address, target.city, target.state);
+              if (
+                target &&
+                (target.address ||
+                  (typeof target.latitude === 'number' &&
+                    typeof target.longitude === 'number'))
+              ) {
+                openMaps(target);
               }
             }}
             onDocuments={() => setShowDocumentsSheet(true)}

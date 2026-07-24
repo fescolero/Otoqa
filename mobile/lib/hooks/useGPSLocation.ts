@@ -135,6 +135,7 @@ export function useGPSLocation() {
   const getFreshLocation = useCallback(async (): Promise<{
     latitude: number;
     longitude: number;
+    accuracy?: number;
   }> => {
     const current = locationRef.current;
     const requestStart = Date.now();
@@ -150,7 +151,11 @@ export function useGPSLocation() {
         accuracy_m: current.accuracy,
         age_ms: Date.now() - current.timestamp,
       });
-      return { latitude: current.latitude, longitude: current.longitude };
+      return {
+        latitude: current.latitude,
+        longitude: current.longitude,
+        accuracy: current.accuracy ?? undefined,
+      };
     }
 
     // Recent balanced fix is acceptable (still within 500m check-in radius)
@@ -160,7 +165,11 @@ export function useGPSLocation() {
         accuracy_m: current.accuracy,
         age_ms: Date.now() - current.timestamp,
       });
-      return { latitude: current.latitude, longitude: current.longitude };
+      return {
+        latitude: current.latitude,
+        longitude: current.longitude,
+        accuracy: current.accuracy ?? undefined,
+      };
     }
 
     // Need a fresh fix -- try Balanced first (fast)
@@ -214,6 +223,7 @@ export function useGPSLocation() {
     return {
       latitude: balancedFix.coords.latitude,
       longitude: balancedFix.coords.longitude,
+      accuracy: balancedFix.coords.accuracy ?? undefined,
     };
   }, []);
 

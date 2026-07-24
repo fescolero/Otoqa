@@ -15,7 +15,7 @@ import * as Updates from 'expo-updates';
 import { PostHogProvider, usePostHog } from 'posthog-react-native';
 import { convex, ConvexAuthProvider } from '../lib/convex';
 import { queryClient, setupQueryPersistence } from '../lib/query-client';
-import { setupNetworkListener, processQueue, setMutationProcessor } from '../lib/offline-queue';
+import { setupNetworkListener, processQueue, setMutationProcessor, NonRetryableError } from '../lib/offline-queue';
 import { registerBackgroundSync } from '../lib/background-sync';
 import {
   resolveBackend,
@@ -148,9 +148,16 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
       const { type, payload, photoPath } = mutation;
 
       switch (type) {
-        case 'checkIn':
-          await checkInMutation(payload as any);
+        case 'checkIn': {
+          // checkInAtStop signals rejection via { success: false } rather
+          // than throwing — surface it as a permanent failure instead of
+          // letting the queue mark the entry completed.
+          const result = await checkInMutation(payload as any);
+          if (result && result.success === false) {
+            throw new NonRetryableError(result.message || 'Check-in was rejected');
+          }
           break;
+        }
 
         case 'checkOut': {
           let podPhotoUrl: string | undefined;
@@ -187,10 +194,13 @@ function ConvexInitializer({ children }: { children: React.ReactNode }) {
             }
           }
 
-          await checkOutMutation({
+          const checkOutResult = await checkOutMutation({
             ...checkOutArgs,
             ...(podPhotoUrl ? { podPhotoUrl, podPhotoKey } : {}),
           });
+          if (checkOutResult && checkOutResult.success === false) {
+            throw new NonRetryableError(checkOutResult.message || 'Check-out was rejected');
+          }
           break;
         }
 

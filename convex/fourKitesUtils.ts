@@ -106,6 +106,11 @@ export interface FourKitesStopShape {
   id?: string;
   sequence?: number;
   stopType?: string;
+  // Address-bearing fields. FourKites tenants vary in which of these are
+  // populated (often none — the whole reason the facility registry exists).
+  stopName?: string;
+  name?: string;
+  address?: string;
   city?: string;
   state?: string;
   postalCode?: string;
@@ -114,6 +119,73 @@ export interface FourKitesStopShape {
   timeZone?: string;
   schedule?: { appointmentTime?: string };
   pallets?: Array<{ parts?: Array<{ quantity?: string }> }>;
+}
+
+function cleanText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Compose a display address from whatever address-bearing fields FourKites
+ * sent: "<facility name>, <street>" when both exist, either alone otherwise.
+ * Returns undefined when FK sent nothing usable.
+ */
+export function composeStopAddress(stop: FourKitesStopShape): string | undefined {
+  const name = cleanText(stop.stopName) ?? cleanText(stop.name);
+  const street = cleanText(stop.address);
+  if (name && street && name.toLowerCase() !== street.toLowerCase()) {
+    return `${name}, ${street}`;
+  }
+  return street ?? name;
+}
+
+function normalizeCity(value: unknown): string | undefined {
+  return cleanText(value)?.toLowerCase();
+}
+
+/**
+ * Align a contract lane's stop plan to a shipment's stops by position so
+ * lane-typed street addresses can backfill FK's empty ones.
+ *
+ * Returns one entry per shipment stop (lane address or undefined). The
+ * alignment is all-or-nothing: if the counts differ, or any position's city
+ * disagrees (when both sides have one), NO addresses are inherited — a
+ * silent positional mismatch would caption every stop with the wrong
+ * facility, which is worse than showing nothing.
+ */
+export function laneAddressesByPosition(
+  laneStops: unknown,
+  shipmentStops: FourKitesStopShape[],
+): Array<string | undefined> {
+  const none = shipmentStops.map(() => undefined);
+  if (!Array.isArray(laneStops) || laneStops.length !== shipmentStops.length) {
+    return none;
+  }
+
+  const orderedLane = [...laneStops].sort(
+    (a, b) => (a?.stopOrder ?? 0) - (b?.stopOrder ?? 0),
+  );
+  const orderedShipment = [...shipmentStops].sort(
+    (a, b) => (a.sequence ?? 0) - (b.sequence ?? 0),
+  );
+
+  // Verify per-position city agreement before trusting the alignment.
+  for (let i = 0; i < orderedShipment.length; i++) {
+    const laneCity = normalizeCity(orderedLane[i]?.city);
+    const shipCity = normalizeCity(orderedShipment[i]?.city);
+    if (laneCity && shipCity && laneCity !== shipCity) {
+      return none;
+    }
+  }
+
+  // Map addresses back to the original shipment array order.
+  const bySortedIndex = new Map<FourKitesStopShape, string | undefined>();
+  orderedShipment.forEach((stop, i) => {
+    bySortedIndex.set(stop, cleanText(orderedLane[i]?.address));
+  });
+  return shipmentStops.map((stop) => bySortedIndex.get(stop));
 }
 
 export function buildLoadInternalId(shipment: { loadNumber?: string; id: string }): string {
@@ -130,8 +202,11 @@ export function buildStopRecord(params: {
   internalId: string;
   stop: FourKitesStopShape;
   commodityDescription?: string;
+  // Street address from the matched contract lane's stop plan (see
+  // laneAddressesByPosition) — used when FK sent no address text of its own.
+  fallbackAddress?: string;
 }): Record<string, unknown> {
-  const { workosOrgId, loadId, internalId, stop, commodityDescription } = params;
+  const { workosOrgId, loadId, internalId, stop, commodityDescription, fallbackAddress } = params;
   const stopId = stop.fourKitesStopID || stop.id;
   const appointmentTime = stop.schedule?.appointmentTime;
   const day = appointmentTime?.split("T")[0] || "TBD";
@@ -148,7 +223,7 @@ export function buildStopRecord(params: {
     sequenceNumber: stop.sequence,
     stopType: stop.stopType,
     loadingType: "APPT",
-    address: "",
+    address: composeStopAddress(stop) ?? fallbackAddress ?? "",
     city: stop.city,
     state: stop.state,
     postalCode: stop.postalCode,
@@ -166,6 +241,60 @@ export function buildStopRecord(params: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/**
+ * Build the patch applied to an existing loadStops row on re-sync.
+ *
+ * Convex `db.patch` DELETES any field whose value is `undefined`, so this
+ * must only include keys whose incoming value is actually present — a
+ * sparse FourKites payload must never wipe previously-good coordinates,
+ * city, or timezone. Window fields keep their old value when FK sends no
+ * appointment. Address is fill-only: set it when the row has none and FK
+ * now provides text, but never overwrite existing text (which may have
+ * been inherited from the contract lane or corrected by dispatch).
+ */
+export function buildStopSyncPatch(
+  stop: FourKitesStopShape,
+  dbStop: {
+    address?: string;
+    windowBeginTime?: string;
+    windowEndTime?: string;
+    windowBeginDate?: string;
+    windowEndDate?: string;
+  },
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+
+  const appointmentTime = stop.schedule?.appointmentTime;
+  const appointmentDay = appointmentTime?.split("T")[0];
+  patch.windowBeginTime = appointmentTime || dbStop.windowBeginTime;
+  patch.windowEndTime = appointmentTime || dbStop.windowEndTime;
+  patch.windowBeginDate = appointmentDay || dbStop.windowBeginDate;
+  patch.windowEndDate = appointmentDay || dbStop.windowEndDate;
+
+  if (typeof stop.city === "string" && stop.city.trim()) {
+    patch.city = stop.city;
+  }
+  if (typeof stop.timeZone === "string" && stop.timeZone.trim()) {
+    patch.timeZone = stop.timeZone;
+  }
+  if (
+    typeof stop.latitude === "number" &&
+    Number.isFinite(stop.latitude) &&
+    typeof stop.longitude === "number" &&
+    Number.isFinite(stop.longitude)
+  ) {
+    patch.latitude = stop.latitude;
+    patch.longitude = stop.longitude;
+  }
+
+  const incomingAddress = composeStopAddress(stop);
+  if (incomingAddress && !(dbStop.address && dbStop.address.trim())) {
+    patch.address = incomingAddress;
+  }
+
+  return patch;
 }
 
 // ---------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { fetchShipments } from "./fourKitesApiClient";
 import {
+  buildStopSyncPatch,
   isCancelledStatus,
   mapTrackingStatus,
   resolveFourKitesCredentials,
@@ -258,24 +259,16 @@ export const processOrg = internalAction({
             for (const stop of shipment.stops || []) {
               try {
                 const stopId = stop.fourKitesStopID || stop.id;
-                const appointmentTime = stop.schedule?.appointmentTime;
-                const appointmentDay = appointmentTime?.split('T')[0];
 
-                const dbStop = existingStops.find((s: { externalStopId?: string; _id: any; windowBeginTime?: string; windowEndTime?: string; windowBeginDate?: string; windowEndDate?: string }) => s.externalStopId === String(stopId));
+                const dbStop = existingStops.find((s: { externalStopId?: string; _id: any; address?: string; windowBeginTime?: string; windowEndTime?: string; windowBeginDate?: string; windowEndDate?: string }) => s.externalStopId === String(stopId));
 
                 if (dbStop) {
+                  // buildStopSyncPatch only includes fields FK actually sent —
+                  // Convex deletes fields patched with `undefined`, so a
+                  // sparse payload must not wipe coordinates/city/timezone.
                   await ctx.runMutation(internal.fourKitesSyncHelpers.updateStop, {
                     stopId: dbStop._id,
-                    data: {
-                      windowBeginTime: appointmentTime || dbStop.windowBeginTime,
-                      windowEndTime: appointmentTime || dbStop.windowEndTime,
-                      windowBeginDate: appointmentDay || dbStop.windowBeginDate,
-                      windowEndDate: appointmentDay || dbStop.windowEndDate,
-                      city: stop.city,
-                      latitude: stop.latitude,
-                      longitude: stop.longitude,
-                      timeZone: stop.timeZone,
-                    },
+                    data: buildStopSyncPatch(stop, dbStop),
                   });
                 }
               } catch (stopErr) {

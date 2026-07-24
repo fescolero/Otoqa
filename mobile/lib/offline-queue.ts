@@ -1,3 +1,4 @@
+import { Alert } from 'react-native';
 import { queueStorage } from './storage';
 import { v4 as uuidv4 } from 'uuid';
 import NetInfo from '@react-native-community/netinfo';
@@ -47,6 +48,27 @@ export interface QueuedMutation {
 
 const QUEUE_KEY = 'OFFLINE_MUTATION_QUEUE';
 const PENDING_UPLOADS_DIR = `${FileSystem.documentDirectory}pending_uploads/`;
+
+/**
+ * Thrown by the mutation processor when the server ACCEPTED the call but
+ * REJECTED the action (mutations like checkInAtStop return
+ * `{ success: false, message }` instead of throwing). Retrying is pointless
+ * — the same payload gets the same verdict — so the queue marks the entry
+ * permanently failed and tells the driver, instead of silently completing
+ * it (the old behavior: a geofence-rejected offline check-in vanished while
+ * the driver believed it synced).
+ */
+export class NonRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NonRetryableError';
+  }
+}
+
+const MUTATION_TYPE_LABELS: Partial<Record<MutationType, string>> = {
+  checkIn: 'check-in',
+  checkOut: 'check-out',
+};
 
 // Ensure pending uploads directory exists
 async function ensurePendingUploadsDir() {
@@ -210,16 +232,26 @@ export async function processQueue(): Promise<void> {
         });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const nonRetryable = error instanceof Error && error.name === 'NonRetryableError';
         await updateMutation(mutation.id, {
           status: 'failed',
-          retryCount: mutation.retryCount + 1,
+          // Business-rule rejections get the same verdict on every replay —
+          // exhaust the retries so the entry never re-runs.
+          retryCount: nonRetryable ? mutation.maxRetries : mutation.retryCount + 1,
           errorMessage,
         });
         failed++;
         trackOfflineQueueItemFailed(mutation.type, {
-          retryCount: mutation.retryCount + 1,
+          retryCount: nonRetryable ? mutation.maxRetries : mutation.retryCount + 1,
           error: errorMessage,
         });
+        if (nonRetryable) {
+          const label = MUTATION_TYPE_LABELS[mutation.type] ?? mutation.type;
+          Alert.alert(
+            `Queued ${label} didn't sync`,
+            `${errorMessage}\n\nThis action was recorded on your phone but the server rejected it. Reach out to dispatch if it should have gone through.`,
+          );
+        }
       }
     }
 

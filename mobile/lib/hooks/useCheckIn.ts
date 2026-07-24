@@ -154,9 +154,15 @@ interface CheckInResult {
   queued?: boolean;
   trackingFailed?: boolean;
   trackingMessage?: string;
+  // Soft-geofence heads-up from the server (checked in far from the pin).
+  warning?: string;
 }
 
-type LocationGetter = () => Promise<{ latitude: number; longitude: number }>;
+type LocationGetter = () => Promise<{
+  latitude: number;
+  longitude: number;
+  accuracy?: number;
+}>;
 
 export function useCheckIn(getFreshLocation?: LocationGetter) {
   const checkInMutation = useMutation(api.driverMobile.checkInAtStop);
@@ -181,6 +187,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
     return {
       latitude: location.coords.latitude,
       longitude: location.coords.longitude,
+      accuracy: location.coords.accuracy ?? undefined,
     };
   };
 
@@ -198,6 +205,7 @@ export function useCheckIn(getFreshLocation?: LocationGetter) {
         longitude: location.longitude,
         driverTimestamp,
         notes: options.notes,
+        ...(typeof location.accuracy === 'number' ? { accuracy: location.accuracy } : {}),
         ...(options.isRedirected ? { isRedirected: true } : {}),
       };
 

@@ -1625,6 +1625,13 @@ export default defineSchema({
     checkoutLongitude: v.optional(v.number()),
     dwellTime: v.optional(v.number()), // Minutes
 
+    // Check-in geofence audit (dispatch-facing; deliberately NOT projected
+    // to mobile). Distance from the stop pin at check-in, and whether it
+    // exceeded the inner limit under soft mode (see lib/geo.ts
+    // evaluateCheckInDistance).
+    checkinDistanceMeters: v.optional(v.number()),
+    checkinOutsideGeofence: v.optional(v.boolean()),
+
     // Redirect (driver sent to different location than scheduled)
     isRedirected: v.optional(v.boolean()),
     redirectNotes: v.optional(v.string()),
