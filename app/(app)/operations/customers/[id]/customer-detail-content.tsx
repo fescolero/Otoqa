@@ -40,6 +40,7 @@ import {
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { FacilitiesSection } from '@/components/customers/facilities-section';
 
 function chipStatusFor(status: string): ChipStatus {
   switch (status) {
@@ -662,10 +663,16 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   );
 
   // ─── Section: Locations ──────────────────────────────────────────────
+  // Billing address (editable props) + the facility registry. Facilities
+  // are the customer's physical stop locations — imported loads link
+  // stops to them, and verified pins anchor driver check-in geofencing.
   const locationsContent = (
-    <DSCard title="Locations">
-      <DSPropsEditable items={addressItems} onCommit={commitField} />
-    </DSCard>
+    <div className="grid gap-4">
+      <DSCard title="Billing address">
+        <DSPropsEditable items={addressItems} onCommit={commitField} />
+      </DSCard>
+      <FacilitiesSection customerId={customerIdTyped} />
+    </div>
   );
 
   // ─── Section: Invoices ───────────────────────────────────────────────

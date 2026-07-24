@@ -8,6 +8,9 @@ import { Card } from '@/components/ui/card';
 import { Plus, Trash2 } from 'lucide-react';
 import { AddressAutocomplete, AddressData } from '@/components/ui/address-autocomplete';
 import { useState } from 'react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 
 type Stop = {
   address: string;
@@ -18,15 +21,27 @@ type Stop = {
   stopType: 'Pickup' | 'Delivery';
   type: 'APPT' | 'FCFS' | 'Live';
   arrivalTime: string;
+  // Facility binding — loads imported on this lane snap this stop to the
+  // bound facility's verified pin (see facilities registry).
+  facilityId?: Id<'facilities'>;
+  nassCode?: string;
 };
 
 interface StopInputProps {
   stops: Stop[];
   onChange: (stops: Stop[]) => void;
+  /** Enables the facility picker, scoped to this customer's facilities. */
+  customerId?: Id<'customers'>;
 }
 
-export function StopInput({ stops, onChange }: StopInputProps) {
+const NO_FACILITY = '__none__';
+
+export function StopInput({ stops, onChange, customerId }: StopInputProps) {
   const [addressStates, setAddressStates] = useState<(AddressData | null)[]>(new Array(stops.length).fill(null));
+  const facilities = useAuthQuery(
+    api.facilities.listByCustomer,
+    customerId ? { customerId } : 'skip',
+  );
 
   const addStop = () => {
     const newStop: Stop = {
@@ -60,6 +75,33 @@ export function StopInput({ stops, onChange }: StopInputProps) {
     onChange(newStops);
   };
 
+  // Binding a facility fills the address fields from the registry row —
+  // one source of truth for where the stop physically is.
+  const bindFacility = (index: number, facilityIdValue: string) => {
+    const newStops = [...stops];
+    if (facilityIdValue === NO_FACILITY) {
+      const { facilityId: _dropped, ...rest } = newStops[index];
+      newStops[index] = rest;
+      onChange(newStops);
+      return;
+    }
+    const facility = facilities?.find((f) => f._id === facilityIdValue);
+    newStops[index] = {
+      ...newStops[index],
+      facilityId: facilityIdValue as Id<'facilities'>,
+      ...(facility
+        ? {
+            address: facility.addressLine1 || newStops[index].address,
+            city: facility.city,
+            state: facility.state,
+            zip: facility.postalCode || newStops[index].zip,
+            ...(facility.externalCode ? { nassCode: facility.externalCode } : {}),
+          }
+        : {}),
+    };
+    onChange(newStops);
+  };
+
   const handleAddressSelect = (index: number, data: AddressData) => {
     const newStops = [...stops];
     newStops[index] = {
@@ -89,6 +131,32 @@ export function StopInput({ stops, onChange }: StopInputProps) {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {customerId && (facilities?.length ?? 0) > 0 && (
+              <div className="space-y-2 lg:col-span-4">
+                <Label>Facility</Label>
+                <Select
+                  value={stop.facilityId ?? NO_FACILITY}
+                  onValueChange={(value) => bindFacility(index, value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Bind to a facility (optional)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_FACILITY}>No facility binding</SelectItem>
+                    {facilities?.map((f) => (
+                      <SelectItem key={f._id} value={f._id}>
+                        {f.name} — {f.city}, {f.state}
+                        {f.verificationState === 'VERIFIED' ? ' ✓' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Imported loads snap this stop to the facility&apos;s pin for driver geofencing.
+                </p>
+              </div>
+            )}
+
             <div className="space-y-2 lg:col-span-4">
               <Label className={stop.address ? 'text-foreground' : 'text-destructive'}>
                 Address

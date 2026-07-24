@@ -311,6 +311,7 @@ export function ImportScheduleDialog({
           stopType: ((s.stopType?.value as 'Pickup' | 'Delivery') || 'Pickup'),
           type: 'APPT' as const,
           arrivalTime: '',
+          nassCode: (s.nassCode?.value as string) || undefined,
         })),
         miles: (lane.miles?.value as number) || undefined,
         calculatedMiles: lane._calculatedMiles || undefined,

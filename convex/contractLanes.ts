@@ -116,6 +116,8 @@ export const create = mutation({
         stopType: v.union(v.literal('Pickup'), v.literal('Delivery')),
         type: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
         arrivalTime: v.string(),
+        facilityId: v.optional(v.id('facilities')),
+        nassCode: v.optional(v.string()),
       }),
     ),
     miles: v.optional(v.number()),
@@ -256,6 +258,8 @@ export const update = mutation({
           stopType: v.union(v.literal('Pickup'), v.literal('Delivery')),
           type: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
           arrivalTime: v.string(),
+          facilityId: v.optional(v.id('facilities')),
+          nassCode: v.optional(v.string()),
         }),
       ),
     ),
@@ -449,6 +453,8 @@ const stopValidator = v.object({
   stopType: v.union(v.literal('Pickup'), v.literal('Delivery')),
   type: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
   arrivalTime: v.string(),
+  facilityId: v.optional(v.id('facilities')),
+  nassCode: v.optional(v.string()),
 });
 
 export const checkExistingLanes = query({

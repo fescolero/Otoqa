@@ -174,4 +174,17 @@ describe('buildStopSyncPatch', () => {
       false,
     );
   });
+
+  it('never moves coordinates or city on a facility-linked stop', () => {
+    const linked = { ...dbStop, facilityId: 'fac_1' };
+    const patch = buildStopSyncPatch(
+      { city: 'Elsewhere', latitude: 40.1, longitude: -122.3, timeZone: 'America/Los_Angeles' },
+      linked,
+    );
+    expect('latitude' in patch).toBe(false);
+    expect('longitude' in patch).toBe(false);
+    expect('city' in patch).toBe(false);
+    // Timezone is not facility-owned — still updates.
+    expect(patch.timeZone).toBe('America/Los_Angeles');
+  });
 });

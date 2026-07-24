@@ -26,6 +26,8 @@ type Stop = {
   stopType: 'Pickup' | 'Delivery';
   type: 'APPT' | 'FCFS' | 'Live';
   arrivalTime: string;
+  facilityId?: Id<'facilities'>;
+  nassCode?: string;
 };
 
 export default function EditContractLanePage() {
@@ -232,7 +234,7 @@ export default function EditContractLanePage() {
                   <Label className="mb-2 block text-destructive">
                     Stops
                   </Label>
-                  <StopInput stops={stops} onChange={setStops} />
+                  <StopInput stops={stops} onChange={setStops} customerId={customerId} />
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                   <div className="space-y-2">

@@ -258,6 +258,7 @@ export function buildStopSyncPatch(
   stop: FourKitesStopShape,
   dbStop: {
     address?: string;
+    facilityId?: unknown;
     windowBeginTime?: string;
     windowEndTime?: string;
     windowBeginDate?: string;
@@ -273,13 +274,18 @@ export function buildStopSyncPatch(
   patch.windowBeginDate = appointmentDay || dbStop.windowBeginDate;
   patch.windowEndDate = appointmentDay || dbStop.windowEndDate;
 
-  if (typeof stop.city === "string" && stop.city.trim()) {
+  // Facility-linked stops: the facility pin is authoritative — FourKites
+  // must not move the stop's coordinates or rewrite its city.
+  const facilityLinked = dbStop.facilityId != null;
+
+  if (!facilityLinked && typeof stop.city === "string" && stop.city.trim()) {
     patch.city = stop.city;
   }
   if (typeof stop.timeZone === "string" && stop.timeZone.trim()) {
     patch.timeZone = stop.timeZone;
   }
   if (
+    !facilityLinked &&
     typeof stop.latitude === "number" &&
     Number.isFinite(stop.latitude) &&
     typeof stop.longitude === "number" &&

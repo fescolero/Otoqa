@@ -7,6 +7,7 @@ import { logAudit } from './lib/audit';
 import { updateLoadCount } from './stats_helpers';
 import { recordLoadWritten } from './platformUsageHelpers';
 import { setLoadTag, getLoadFacets } from './lib/loadFacets';
+import { getActiveFacilities, resolveStopFacilityLink } from './lib/facilityLink';
 import {
   addDaysToUtcDateString,
   getUtcDateStringFromMs,
@@ -439,10 +440,18 @@ export const generateLoadFromTemplate = internalMutation({
       updatedAt: now,
     });
 
-    // 4. Create stops with date-adjusted times
+    // 4. Create stops with date-adjusted times.
+    // Template stops carry no coordinates, so generated loads historically
+    // had no geofencing or arrival events at all. A facility match (by
+    // address agreement — both sides are user-entered) supplies the pin.
+    const facilities = await getActiveFacilities(ctx, template.customerId);
     for (let i = 0; i < template.stops.length; i++) {
       const stop = template.stops[i];
-      
+      const facilityLink = resolveStopFacilityLink(
+        { city: stop.city, state: stop.state, postalCode: stop.postalCode },
+        facilities,
+      );
+
       // Calculate the stop date based on deliveryDayOffset
       // Pickup stops use targetDate, delivery stops use targetDate + offset
       let stopDate = args.targetDate;
@@ -453,6 +462,7 @@ export const generateLoadFromTemplate = internalMutation({
       }
 
       await ctx.db.insert('loadStops', {
+        ...(facilityLink ?? {}),
         workosOrgId: template.workosOrgId,
         createdBy: 'recurring-generator',
         loadId,

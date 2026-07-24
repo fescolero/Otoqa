@@ -942,6 +942,12 @@ export default defineSchema({
         stopType: v.union(v.literal('Pickup'), v.literal('Delivery')),
         type: v.union(v.literal('APPT'), v.literal('FCFS'), v.literal('Live')),
         arrivalTime: v.string(), // HH:MM format
+        // Facility binding: loads imported on this lane snap this stop to
+        // the bound facility (position-matched, guarded by count + city).
+        facilityId: v.optional(v.id('facilities')),
+        // USPS NASS code from the HCR schedule import — enables exact
+        // facility matching by facilities.externalCode.
+        nassCode: v.optional(v.string()),
       }),
     ),
     miles: v.optional(v.number()),
@@ -1590,6 +1596,10 @@ export default defineSchema({
     latitude: v.optional(v.number()),
     longitude: v.optional(v.number()),
     timeZone: v.optional(v.string()), // IANA timezone e.g., "America/Los_Angeles"
+    // Link to the facility registry (dispatch-facing; not projected to
+    // mobile). When set and the facility is VERIFIED, latitude/longitude
+    // hold the facility's pin and re-syncs must not overwrite them.
+    facilityId: v.optional(v.id('facilities')),
 
     // Reference
     referenceName: v.optional(v.string()),
@@ -1683,7 +1693,56 @@ export default defineSchema({
     .index('by_organization', ['workosOrgId'])
     .index('by_sequence', ['loadId', 'sequenceNumber'])
     .index('by_stop_type', ['loadId', 'stopType'])
-    .index('by_load_detours', ['loadId', 'isDetour']),
+    .index('by_load_detours', ['loadId', 'isDetour'])
+    .index('by_facility', ['facilityId']),
+
+  // ==========================================
+  // FACILITIES (verified stop locations)
+  // ==========================================
+  // Customer-scoped registry of physical stop locations. Manual-only: rows
+  // are created/edited from the customer detail page's Locations tab, never
+  // by imports. Imports LINK stops to facilities (loadStops.facilityId) via
+  // lane binding or proximity matching, and a VERIFIED facility's pin
+  // overrides the import feed's coordinates — FourKites pins are often
+  // city-centroid geocodes hundreds of meters from the real dock.
+  facilities: defineTable({
+    workosOrgId: v.string(),
+    customerId: v.id('customers'),
+
+    name: v.string(),
+    // External facility code, e.g. the USPS NASS code carried by HCR
+    // schedules. Enables exact matching for schedule-imported lanes.
+    externalCode: v.optional(v.string()),
+
+    // Address (display + matching veto)
+    addressLine1: v.optional(v.string()),
+    city: v.string(),
+    state: v.string(),
+    postalCode: v.optional(v.string()),
+
+    // The pin. Authoritative for geofencing once verified.
+    latitude: v.number(),
+    longitude: v.number(),
+    // Check-in enforcement radius. Unset = INNER_RING_METERS default.
+    radiusMeters: v.optional(v.number()),
+
+    verificationState: v.union(v.literal('UNVERIFIED'), v.literal('VERIFIED')),
+    verifiedBy: v.optional(v.string()),
+    verifiedAt: v.optional(v.number()),
+
+    // Phase 3: override-driven demotion
+    needsReview: v.optional(v.boolean()),
+    overrideCount: v.optional(v.number()),
+
+    notes: v.optional(v.string()),
+
+    isDeleted: v.boolean(),
+    createdBy: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_customer', ['customerId', 'isDeleted'])
+    .index('by_org', ['workosOrgId', 'isDeleted']),
 
   // ==========================================
   // ACCOUNTING (Financial Data Separation)

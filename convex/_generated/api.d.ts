@@ -57,6 +57,7 @@ import type * as externalTrackingAuthCrypto from "../externalTrackingAuthCrypto.
 import type * as externalTrackingPartnerKeys from "../externalTrackingPartnerKeys.js";
 import type * as externalTrackingWebhooks from "../externalTrackingWebhooks.js";
 import type * as facetMaintenance from "../facetMaintenance.js";
+import type * as facilities from "../facilities.js";
 import type * as fcmWake from "../fcmWake.js";
 import type * as featureFlags from "../featureFlags.js";
 import type * as forceResync from "../forceResync.js";
@@ -96,6 +97,9 @@ import type * as lanes from "../lanes.js";
 import type * as lazyLoadPromotion from "../lazyLoadPromotion.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_auth from "../lib/auth.js";
+import type * as lib_facilityLink from "../lib/facilityLink.js";
+import type * as lib_facilityMatch from "../lib/facilityMatch.js";
+import type * as lib_featureFlagReads from "../lib/featureFlagReads.js";
 import type * as lib_geo from "../lib/geo.js";
 import type * as lib_loadFacets from "../lib/loadFacets.js";
 import type * as lib_money from "../lib/money.js";
@@ -245,6 +249,7 @@ declare const fullApi: ApiFromModules<{
   externalTrackingPartnerKeys: typeof externalTrackingPartnerKeys;
   externalTrackingWebhooks: typeof externalTrackingWebhooks;
   facetMaintenance: typeof facetMaintenance;
+  facilities: typeof facilities;
   fcmWake: typeof fcmWake;
   featureFlags: typeof featureFlags;
   forceResync: typeof forceResync;
@@ -284,6 +289,9 @@ declare const fullApi: ApiFromModules<{
   lazyLoadPromotion: typeof lazyLoadPromotion;
   "lib/audit": typeof lib_audit;
   "lib/auth": typeof lib_auth;
+  "lib/facilityLink": typeof lib_facilityLink;
+  "lib/facilityMatch": typeof lib_facilityMatch;
+  "lib/featureFlagReads": typeof lib_featureFlagReads;
   "lib/geo": typeof lib_geo;
   "lib/loadFacets": typeof lib_loadFacets;
   "lib/money": typeof lib_money;

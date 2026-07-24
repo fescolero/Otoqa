@@ -31,6 +31,8 @@ export type ExtractedStop = {
   zip: ExtractedField<string | null>;
   stopOrder: ExtractedField<number>;
   stopType: ExtractedField<string | null>;
+  /** USPS NASS facility code from the HCR schedule (when extracted). */
+  nassCode?: ExtractedField<string | null>;
   _verification?: StopVerification;
 };
 
