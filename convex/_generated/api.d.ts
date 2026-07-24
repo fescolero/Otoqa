@@ -123,6 +123,7 @@ import type * as migrations_003_update_wildcard_line_items from "../migrations/0
 import type * as migrations_004_bootstrap_facet_definitions from "../migrations/004_bootstrap_facet_definitions.js";
 import type * as migrations_005_backfill_load_tags from "../migrations/005_backfill_load_tags.js";
 import type * as migrations_006_cleanup_junk_facets from "../migrations/006_cleanup_junk_facets.js";
+import type * as migrations_007_backfill_stop_enrichment from "../migrations/007_backfill_stop_enrichment.js";
 import type * as migrations_007_strip_parsed_columns from "../migrations/007_strip_parsed_columns.js";
 import type * as migrations_008_backfill_stop_denorm from "../migrations/008_backfill_stop_denorm.js";
 import type * as migrations_009_backfill_load_documents from "../migrations/009_backfill_load_documents.js";
@@ -315,6 +316,7 @@ declare const fullApi: ApiFromModules<{
   "migrations/004_bootstrap_facet_definitions": typeof migrations_004_bootstrap_facet_definitions;
   "migrations/005_backfill_load_tags": typeof migrations_005_backfill_load_tags;
   "migrations/006_cleanup_junk_facets": typeof migrations_006_cleanup_junk_facets;
+  "migrations/007_backfill_stop_enrichment": typeof migrations_007_backfill_stop_enrichment;
   "migrations/007_strip_parsed_columns": typeof migrations_007_strip_parsed_columns;
   "migrations/008_backfill_stop_denorm": typeof migrations_008_backfill_stop_denorm;
   "migrations/009_backfill_load_documents": typeof migrations_009_backfill_load_documents;
