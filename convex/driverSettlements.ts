@@ -1827,8 +1827,20 @@ export const generateStatementFromPlan = mutation({
 
     const { periodStart, periodEnd } = calculateCurrentPeriod(plan, refDate, timezone);
 
-    // Generate statement number
-    const statementNumber = await generateStatementNumber(ctx, args.workosOrgId);
+    // Reuse this window's existing statement (midpoint-overlap — see
+    // settlementCoveringWindow): a second "New pay run" click, or a change in
+    // boundary conventions, must top up the existing DRAFT, never fork a
+    // duplicate period.
+    const priorRows = await ctx.db
+      .query('driverSettlements')
+      .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
+      .collect();
+    const existing = settlementCoveringWindow(priorRows, periodStart.getTime(), periodEnd.getTime());
+    if (existing && existing.status !== 'DRAFT') {
+      throw new Error(
+        `Settlement ${existing.statementNumber} already covers this period (status ${existing.status})`,
+      );
+    }
 
     // Find all unassigned payables
     const allUnassigned = await ctx.db
@@ -1931,21 +1943,30 @@ export const generateStatementFromPlan = mutation({
         periodNumber = 1;
     }
 
-    // Create the settlement with Pay Plan link
-    const settlementId = await ctx.db.insert('driverSettlements', {
-      driverId: args.driverId,
-      workosOrgId: args.workosOrgId,
-      periodStart: periodStart.getTime(),
-      periodEnd: periodEnd.getTime(),
-      payPlanId: plan._id,
-      periodNumber,
-      payPlanName: plan.name,
-      status: 'DRAFT',
-      statementNumber,
-      createdAt: now,
-      createdBy: userId,
-      updatedAt: now,
-    });
+    // Create the settlement with Pay Plan link — or top up the existing DRAFT.
+    let settlementId: Id<'driverSettlements'>;
+    let statementNumber: string;
+    if (existing) {
+      settlementId = existing._id;
+      statementNumber = existing.statementNumber;
+      await ctx.db.patch(settlementId, { updatedAt: now });
+    } else {
+      statementNumber = await generateStatementNumber(ctx, args.workosOrgId);
+      settlementId = await ctx.db.insert('driverSettlements', {
+        driverId: args.driverId,
+        workosOrgId: args.workosOrgId,
+        periodStart: periodStart.getTime(),
+        periodEnd: periodEnd.getTime(),
+        payPlanId: plan._id,
+        periodNumber,
+        payPlanName: plan.name,
+        status: 'DRAFT',
+        statementNumber,
+        createdAt: now,
+        createdBy: userId,
+        updatedAt: now,
+      });
+    }
 
     // Assign payables to settlement
     for (const payableId of payablesToAssign) {
@@ -1964,7 +1985,7 @@ export const generateStatementFromPlan = mutation({
       performedBy: userId,
       performedByName: userName,
       performedByEmail: userEmail,
-      description: `Generated settlement ${statementNumber} for ${driver.firstName} ${driver.lastName} from plan "${plan.name}" (${periodStart.toLocaleDateString('en-US')} - ${periodEnd.toLocaleDateString('en-US')})`,
+      description: `${existing ? 'Topped up' : 'Generated'} settlement ${statementNumber} for ${driver.firstName} ${driver.lastName} from plan "${plan.name}" (${periodStart.toLocaleDateString('en-US')} - ${periodEnd.toLocaleDateString('en-US')})`,
     });
 
     return {
@@ -1998,6 +2019,32 @@ function planPeriodNumber(plan: Doc<'payPlans'>, periodStart: Date): number {
     default:
       return 1;
   }
+}
+
+/**
+ * The driver's existing settlement for a computed period WINDOW — matched by
+ * midpoint containment, not exact boundaries. The boundary engine has changed
+ * conventions (server-clock math → org-timezone wall clock, 0301fdd), so rows
+ * created under an older convention sit hours off the engine's current output
+ * for the SAME pay period. Exact periodStart/periodEnd equality therefore
+ * forked parallel statements for one period (duplicate SET rows). A row
+ * containing the window's MIDPOINT is the same period under any boundary
+ * drift, while an ADJACENT period — which can overlap a drifted row by
+ * boundary hours — never contains it. Earliest-created wins so the original
+ * statement number stays the canonical row.
+ */
+function settlementCoveringWindow(
+  rows: Array<Doc<'driverSettlements'>>,
+  startMs: number,
+  endMs: number,
+): Doc<'driverSettlements'> | null {
+  const mid = startMs + (endMs - startMs) / 2;
+  const matches = rows.filter(
+    (s) => s.status !== 'VOID' && s.periodStart <= mid && mid <= s.periodEnd,
+  );
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => a.createdAt - b.createdAt);
+  return matches[0];
 }
 
 /**
@@ -2048,15 +2095,14 @@ export const generateOrRefreshForDriver = internalMutation({
 
     const { periodStart, periodEnd } = calculateCurrentPeriod(plan, refDate, timezone);
 
-    const existing = await ctx.db
+    // All of the driver's statements once — the current-period lookup and the
+    // late-pay routing below both match against this history.
+    const history = await ctx.db
       .query('driverSettlements')
-      .withIndex('by_period', (q) =>
-        q
-          .eq('driverId', args.driverId)
-          .eq('periodStart', periodStart.getTime())
-          .eq('periodEnd', periodEnd.getTime()),
-      )
-      .first();
+      .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
+      .collect();
+    // Midpoint-overlap, not exact boundaries — see settlementCoveringWindow.
+    const existing = settlementCoveringWindow(history, periodStart.getTime(), periodEnd.getTime());
 
     // Only a DRAFT may be topped up; anything past DRAFT is owned by the
     // approval workflow. (Late-landing pay for a locked current period is
@@ -2090,19 +2136,10 @@ export const generateOrRefreshForDriver = internalMutation({
     const backfill = new Map<number, { periodStart: Date; periodEnd: Date; ids: Array<Id<'loadPayables'>> }>();
     const carryOver: Array<Id<'loadPayables'>> = [];
 
-    // Driver's settlement history, fetched lazily on the first late payable.
-    let history: Array<Doc<'driverSettlements'>> | null = null;
-    const coveringSettlement = async (ts: number) => {
-      if (history === null) {
-        history = await ctx.db
-          .query('driverSettlements')
-          .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
-          .collect();
-      }
-      return history.find(
+    const coveringSettlement = (ts: number) =>
+      history.find(
         (s) => s.status !== 'VOID' && ts >= s.periodStart && ts <= s.periodEnd,
       );
-    };
 
     for (const payable of allUnassigned) {
       let isLoadHeld = false;
@@ -2144,7 +2181,7 @@ export const generateOrRefreshForDriver = internalMutation({
       }
 
       // Late pay — work started before the current period.
-      const covering = await coveringSettlement(triggerTimestamp);
+      const covering = coveringSettlement(triggerTimestamp);
       if (covering?.status === 'DRAFT') {
         const list = assignToPrior.get(covering._id) ?? [];
         list.push(payable._id);
@@ -2154,14 +2191,28 @@ export const generateOrRefreshForDriver = internalMutation({
         if (plan.autoCarryover && currentWritable) carryOver.push(payable._id);
         // else: left unassigned for manual handling.
       } else {
-        // No statement covers that period — backfill one for the period the
-        // work was done in. (Historical backfill skips the cutoff test: the
-        // cutoff only disambiguates the live period boundary.)
+        // No statement CONTAINS the work timestamp — but a row created under
+        // an older boundary convention may still be this period's statement,
+        // its drifted window missing the timestamp by boundary hours. Match
+        // the computed window's midpoint before creating a parallel row.
         const p = calculateCurrentPeriod(plan, new Date(triggerTimestamp), timezone!);
-        const key = p.periodStart.getTime();
-        const group = backfill.get(key) ?? { periodStart: p.periodStart, periodEnd: p.periodEnd, ids: [] };
-        group.ids.push(payable._id);
-        backfill.set(key, group);
+        const drifted = settlementCoveringWindow(history, p.periodStart.getTime(), p.periodEnd.getTime());
+        if (drifted?.status === 'DRAFT') {
+          const list = assignToPrior.get(drifted._id) ?? [];
+          list.push(payable._id);
+          assignToPrior.set(drifted._id, list);
+        } else if (drifted) {
+          // That period is settled/locked — same carry-forward rule as above.
+          if (plan.autoCarryover && currentWritable) carryOver.push(payable._id);
+        } else {
+          // Genuinely no statement for that period — backfill one for the
+          // period the work was done in. (Historical backfill skips the
+          // cutoff test: it only disambiguates the live period boundary.)
+          const key = p.periodStart.getTime();
+          const group = backfill.get(key) ?? { periodStart: p.periodStart, periodEnd: p.periodEnd, ids: [] };
+          group.ids.push(payable._id);
+          backfill.set(key, group);
+        }
       }
     }
 
@@ -2332,6 +2383,7 @@ export const bulkGenerateByPlan = mutation({
 
 import { paginationOptsValidator } from 'convex/server';
 import { internal } from './_generated/api';
+import { FINALIZED_SETTLEMENT_STATUSES } from './payEngine/schema';
 import {
   ageDays,
   applyAcknowledgements,
@@ -2662,5 +2714,132 @@ export const getViewStats = query({
       paidMtd,
       oldestBlockedId,
     };
+  },
+});
+
+// ============================================
+// PERIOD-DRIFT DUPLICATE CLEANUP
+// ============================================
+
+/**
+ * One-shot cleanup for period-boundary drift duplicates (see
+ * settlementCoveringWindow): before the midpoint-overlap dedup landed, the
+ * generation sweep forked parallel DRAFT statements for the same pay period
+ * whenever the boundary engine's output shifted. Clusters each driver's DRAFT
+ * rows by midpoint-overlap, keeps the earliest-created row of each cluster,
+ * re-points the duplicates' payables at the keeper, deletes the duplicates,
+ * and removes their mirrored new-ledger settlements (unstamping payItems so
+ * the next aggregation re-attaches them to the keeper's mirror). Only DRAFT
+ * rows are ever touched; finalized statements and mirrors are left alone.
+ * Idempotent — a second run finds nothing to do.
+ *
+ * Run: npx convex run driverSettlements:dedupeOverlappingDrafts '{"workosOrgId":"org_..."}'
+ */
+export const dedupeOverlappingDrafts = internalMutation({
+  args: { workosOrgId: v.string() },
+  returns: v.object({
+    duplicatesRemoved: v.number(),
+    payablesRepointed: v.number(),
+    mirrorsRemoved: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const drafts = await ctx.db
+      .query('driverSettlements')
+      .withIndex('by_org_status', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('status', 'DRAFT'),
+      )
+      .collect();
+
+    const byDriver = new Map<string, Array<Doc<'driverSettlements'>>>();
+    for (const s of drafts) {
+      const k = s.driverId as string;
+      byDriver.set(k, [...(byDriver.get(k) ?? []), s]);
+    }
+
+    let duplicatesRemoved = 0;
+    let payablesRepointed = 0;
+    let mirrorsRemoved = 0;
+
+    const samePeriod = (a: Doc<'driverSettlements'>, b: Doc<'driverSettlements'>) => {
+      const aMid = a.periodStart + (a.periodEnd - a.periodStart) / 2;
+      const bMid = b.periodStart + (b.periodEnd - b.periodStart) / 2;
+      return (
+        (bMid >= a.periodStart && bMid <= a.periodEnd) ||
+        (aMid >= b.periodStart && aMid <= b.periodEnd)
+      );
+    };
+
+    for (const rows of byDriver.values()) {
+      if (rows.length < 2) continue;
+      rows.sort((a, b) => a.periodStart - b.periodStart || a.createdAt - b.createdAt);
+      const clusters: Array<Array<Doc<'driverSettlements'>>> = [];
+      for (const row of rows) {
+        const home = clusters.find((c) => c.some((m) => samePeriod(m, row)));
+        if (home) home.push(row);
+        else clusters.push([row]);
+      }
+
+      for (const cluster of clusters) {
+        if (cluster.length < 2) continue;
+        const [keeper, ...dupes] = [...cluster].sort((a, b) => a.createdAt - b.createdAt);
+        for (const dupe of dupes) {
+          const payables = await ctx.db
+            .query('loadPayables')
+            .withIndex('by_settlement', (q) => q.eq('settlementId', dupe._id))
+            .collect();
+          for (const p of payables) {
+            await ctx.db.patch(p._id, { settlementId: keeper._id, updatedAt: now });
+          }
+          payablesRepointed += payables.length;
+
+          // Mirrored new-ledger row (generationCron copies legacy periods
+          // verbatim, keyed by exact periodStart). If the dupe shares its
+          // periodStart with the keeper, that mirror is also the keeper's —
+          // leave it for the re-aggregation below.
+          if (dupe.periodStart !== keeper.periodStart) {
+            const mirror = await ctx.db
+              .query('settlements')
+              .withIndex('by_payee_period', (q) =>
+                q
+                  .eq('payeeType', 'DRIVER')
+                  .eq('payeeId', dupe.driverId as string)
+                  .eq('periodStart', dupe.periodStart),
+              )
+              .first();
+            if (mirror && !FINALIZED_SETTLEMENT_STATUSES.has(mirror.status)) {
+              const items = await ctx.db
+                .query('payItems')
+                .withIndex('by_settlement', (q) => q.eq('settlementId', mirror._id))
+                .collect();
+              for (const it of items) {
+                await ctx.db.patch(it._id, { settlementId: undefined, updatedAt: now });
+              }
+              await ctx.db.delete(mirror._id);
+              mirrorsRemoved++;
+            }
+          }
+
+          await ctx.db.delete(dupe._id);
+          duplicatesRemoved++;
+        }
+
+        // Refresh the keeper's mirror right away (the generation cron would
+        // get there on its next tick anyway).
+        await ctx.scheduler.runAfter(
+          0,
+          internal.payEngine.aggregateSettlement.aggregateDriverSettlement,
+          {
+            workosOrgId: args.workosOrgId,
+            payeeId: keeper.driverId as string,
+            periodStart: keeper.periodStart,
+            periodEnd: keeper.periodEnd,
+            userId: 'system:dedupe_drafts',
+          },
+        );
+      }
+    }
+
+    return { duplicatesRemoved, payablesRepointed, mirrorsRemoved };
   },
 });
