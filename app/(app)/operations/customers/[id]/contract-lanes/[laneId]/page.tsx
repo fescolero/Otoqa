@@ -15,10 +15,22 @@
 
 import * as React from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { useQuery } from 'convex/react';
+import { useAuth } from '@workos-inc/authkit-nextjs/components';
+import { useQuery, useMutation } from 'convex/react';
 import { Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 
 import { Chip, DSCard, DSProps, WBtn, WIcon } from '@/components/web';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 
@@ -167,8 +179,27 @@ export default function ContractLaneDetailPage() {
   const customerId = params.id as Id<'customers'>;
   const laneId = params.laneId as Id<'contractLanes'>;
 
+  const { user } = useAuth();
   const customer = useQuery(api.customers.get, { id: customerId });
   const lane = useQuery(api.contractLanes.get, { id: laneId });
+  const deactivateLane = useMutation(api.contractLanes.deactivate);
+
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = React.useState(false);
+  const [isDeleting, setIsDeleting] = React.useState(false);
+
+  const handleDelete = async () => {
+    if (!user) return;
+    setIsDeleting(true);
+    try {
+      await deactivateLane({ id: laneId, userId: user.id });
+      toast.success('Contract lane deleted.');
+      router.push(`/operations/customers/${customerId}`);
+    } catch (err) {
+      console.error('Failed to delete contract lane:', err);
+      toast.error('Failed to delete contract lane. Please try again.');
+      setIsDeleting(false);
+    }
+  };
 
   if (customer === undefined || lane === undefined) {
     return (
@@ -278,6 +309,15 @@ export default function ContractLaneDetailPage() {
         </WBtn>
         <WBtn
           size="sm"
+          danger
+          leading="trash"
+          onClick={() => setConfirmDeleteOpen(true)}
+          disabled={!user || isDeleting}
+        >
+          {isDeleting ? 'Deleting…' : 'Delete'}
+        </WBtn>
+        <WBtn
+          size="sm"
           variant="primary"
           leading="edit"
           onClick={() => router.push(`${customerPath}/contract-lanes/${laneId}/edit`)}
@@ -285,6 +325,29 @@ export default function ContractLaneDetailPage() {
           Edit contract
         </WBtn>
       </div>
+
+      <AlertDialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {lane.contractName}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The lane is removed from {customer.name}&apos;s contracts and no new
+              loads will generate from it. An admin can restore it later — nothing
+              is permanently erased.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="bg-[#B43030] text-white hover:bg-[#9c2828]"
+            >
+              Delete lane
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <div className="scroll-thin" style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         <div style={{ maxWidth: 1120, margin: '0 auto', padding: '24px 32px 48px' }}>
