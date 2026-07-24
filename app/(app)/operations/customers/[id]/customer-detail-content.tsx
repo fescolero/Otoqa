@@ -603,11 +603,11 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       title={`Contracts (${laneRows.length})`}
       // Cap the card to the remaining viewport so the table's body scrolls
       // internally instead of bleeding past the bottom of the page. Measured
-      // empirically: in practice the card's top sits at y≈433 once the
-      // global topbar, sub-toolbar, hero w/ KPIs, section tabs and outer
-      // page padding are stacked — so an offset of 460 leaves a small
+      // empirically against the compact hero: the card's top sits at y≈355
+      // once the global topbar, sub-toolbar, hero w/ KPIs, section tabs and
+      // outer page padding are stacked — so an offset of 382 leaves a small
       // breathing gap above the floating tweaks pill / user-badge.
-      className="flex flex-col max-h-[calc(100vh-460px)]"
+      className="flex flex-col max-h-[calc(100vh-382px)]"
       bodyClassName="p-0 flex-1 min-h-0 flex flex-col"
       action={
         <span className="flex items-center gap-2">

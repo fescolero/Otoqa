@@ -142,22 +142,24 @@ export function DetailsFullPage({
       </div>
 
       <div className="flex-1 overflow-auto scroll-thin">
-        {/* Hero */}
-        <header className="px-6 py-6 flex flex-col gap-4 border-b border-[var(--border-hairline)]">
+        {/* Hero — deliberately compact: the hero is chrome above every
+            detail page, so each vertical pixel here is taken from the
+            record content below the tabs. */}
+        <header className="px-6 py-4 flex flex-col gap-2.5 border-b border-[var(--border-hairline)]">
           {eyebrow && <div className="flex items-center gap-2">{eyebrow}</div>}
-          <h1 className="m-0 text-[32px] leading-10 font-semibold tracking-[-0.015em] text-foreground">{title}</h1>
+          <h1 className="m-0 text-[24px] leading-8 font-semibold tracking-[-0.015em] text-foreground">{title}</h1>
           {subtitle && <p className="m-0 text-[13px] text-[var(--text-secondary)]">{subtitle}</p>}
           {kpis && kpis.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 mt-2 rounded-xl border border-[var(--border-hairline)] bg-card overflow-hidden">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 mt-1 rounded-xl border border-[var(--border-hairline)] bg-card overflow-hidden">
               {kpis.map((k, i) => (
                 <div
                   key={i}
                   className={cn(
-                    'p-4',
+                    'px-4 py-2.5',
                     i > 0 && 'border-l border-[var(--border-hairline)]',
                   )}
                 >
-                  <DSStat label={k.label} value={k.value} delta={k.delta} />
+                  <DSStat label={k.label} value={k.value} delta={k.delta} size="sm" />
                 </div>
               ))}
             </div>

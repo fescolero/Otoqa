@@ -55,6 +55,7 @@
     "@types/google.maps": "^3.58.1",
     "@vis.gl/react-google-maps": "^1.7.1",
     "@workos-inc/authkit-nextjs": "^2.7.1",
+    "@workos-inc/node": "^8.2.0",
     "@workos-inc/widgets": "^1.5.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
