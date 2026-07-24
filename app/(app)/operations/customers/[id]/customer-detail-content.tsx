@@ -40,7 +40,11 @@ import {
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useAuth } from '@workos-inc/authkit-nextjs/components';
+import { useOrganizationId } from '@/contexts/organization-context';
 import { FacilitiesSection } from '@/components/customers/facilities-section';
+import { ImportCsvDialog } from '@/components/contract-lanes/import-csv-dialog';
+import { ImportScheduleDialog } from '@/components/contract-lanes/import-schedule-dialog';
 
 function chipStatusFor(status: string): ChipStatus {
   switch (status) {
@@ -131,6 +135,19 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   const customer = useQuery(api.customers.get, { id: customerIdTyped });
   const updateCustomer = useMutation(api.customers.update);
   const contractLanes = useQuery(api.contractLanes.listByCustomer, { customerCompanyId: customerIdTyped });
+
+  // Contract-lane import dialogs (CSV + OCR schedule) moved here from the
+  // retired standalone contract-lanes list page — the Contracts tab is now
+  // the single home for lane management.
+  const { user } = useAuth();
+  const workosOrgId = useOrganizationId();
+  const [csvImportOpen, setCsvImportOpen] = React.useState(false);
+  const [scheduleImportOpen, setScheduleImportOpen] = React.useState(false);
+
+  // Controlled section state so toolbar/rail affordances can jump
+  // straight to the Contracts tab (replaces links to the retired list
+  // page).
+  const [activeSection, setActiveSection] = React.useState('overview');
 
   // Prev / next traversal across the customers list.
   const all = useAuthQuery(api.customers.list, {});
@@ -596,17 +613,26 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
         <span className="flex items-center gap-2">
           <WBtn
             size="sm"
+            leading="file-text"
+            onClick={() => setScheduleImportOpen(true)}
+            disabled={!user || !workosOrgId}
+          >
+            Import schedule
+          </WBtn>
+          <WBtn
+            size="sm"
+            leading="upload"
+            onClick={() => setCsvImportOpen(true)}
+            disabled={!user || !workosOrgId}
+          >
+            Import CSV
+          </WBtn>
+          <WBtn
+            size="sm"
             leading="plus"
             onClick={() => router.push(`/operations/customers/${customerIdTyped}/contract-lanes/create`)}
           >
             New lane
-          </WBtn>
-          <WBtn
-            size="sm"
-            leading="arrow-up-right"
-            onClick={() => router.push(`/operations/customers/${customerIdTyped}/contract-lanes`)}
-          >
-            View all
           </WBtn>
         </span>
       }
@@ -772,6 +798,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
   const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
 
   return (
+    <>
     <DetailsFullPage
       breadcrumb={
         <span className="inline-flex items-center gap-1.5 text-[var(--text-secondary)]">
@@ -791,7 +818,7 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
         <>
           <WBtn size="sm" variant="ghost" leading="chat">Message</WBtn>
           <WBtn size="sm" variant="ghost" leading="package">New quote</WBtn>
-          <WBtn size="sm" variant="ghost" leading="doc-dollar" onClick={() => router.push(`/operations/customers/${customerIdTyped}/contract-lanes`)}>
+          <WBtn size="sm" variant="ghost" leading="doc-dollar" onClick={() => setActiveSection('contracts')}>
             Contract lanes
           </WBtn>
         </>
@@ -802,6 +829,27 @@ export function CustomerDetailContent({ customerId }: { customerId: string }) {
       kpis={kpis}
       sections={sections}
       rightRail={rightRail}
+      activeId={activeSection}
+      onActiveChange={setActiveSection}
     />
+    {user && workosOrgId && (
+      <>
+        <ImportCsvDialog
+          open={csvImportOpen}
+          onOpenChange={setCsvImportOpen}
+          customerId={customerIdTyped}
+          workosOrgId={workosOrgId}
+          userId={user.id}
+        />
+        <ImportScheduleDialog
+          open={scheduleImportOpen}
+          onOpenChange={setScheduleImportOpen}
+          customerId={customerIdTyped}
+          workosOrgId={workosOrgId}
+          userId={user.id}
+        />
+      </>
+    )}
+    </>
   );
 }
