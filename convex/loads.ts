@@ -1012,9 +1012,31 @@ export const getLoads = query({
         };
       }
     } else {
-      // Unfiltered (or only date-range): existing loadInformation path.
+      // Unfiltered (or only status/date-range): existing loadInformation path.
+      //
+      // Status is served from the by_org_status_first_stop index rather than
+      // a .filter() over by_org_first_stop_date. A paginated .filter() keeps
+      // reading documents until the page fills (or the range is exhausted),
+      // so a selective status like 'Expired' on a large org scanned nearly
+      // the whole table — the source of the "Nearing bytes read limit" /
+      // "Nearing documents read limit" Convex Health warnings on this query.
+      // Both indexes order by firstStopDate within their prefix, so the
+      // result ordering is unchanged.
       let loadsQuery;
-      if (args.startDate && args.endDate) {
+      if (args.status) {
+        const status = args.status as Doc<'loadInformation'>['status'];
+        loadsQuery = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_status_first_stop', (q) => {
+            const base = q.eq('workosOrgId', args.workosOrgId).eq('status', status);
+            if (args.startDate && args.endDate) {
+              return base.gte('firstStopDate', args.startDate!).lte('firstStopDate', args.endDate!);
+            }
+            if (args.startDate) return base.gte('firstStopDate', args.startDate!);
+            if (args.endDate) return base.lte('firstStopDate', args.endDate!);
+            return base;
+          });
+      } else if (args.startDate && args.endDate) {
         loadsQuery = ctx.db
           .query('loadInformation')
           .withIndex('by_org_first_stop_date', (q) =>
@@ -1041,9 +1063,6 @@ export const getLoads = query({
           .withIndex('by_org_first_stop_date', (q) => q.eq('workosOrgId', args.workosOrgId));
       }
 
-      if (args.status) {
-        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('status'), args.status));
-      }
       if (args.trackingStatus) {
         loadsQuery = loadsQuery.filter((q) => q.eq(q.field('trackingStatus'), args.trackingStatus));
       }

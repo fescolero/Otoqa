@@ -117,13 +117,21 @@ export const backfillExpiredLoadAuditRows = internalMutation({
     for (const load of page.page) {
       // A single bad document must not kill the whole continuation chain.
       try {
+        // Point read on by_org_entity_action (≤1 doc). Collecting the whole
+        // by_org_entity history here read every audit row (with their
+        // changesBefore/After JSON blobs) for 100 loads per batch, which is
+        // what neared the per-mutation bytes/documents read limits.
         const existing = await ctx.db
           .query('auditLog')
-          .withIndex('by_org_entity', (q) =>
-            q.eq('organizationId', load.workosOrgId).eq('entityType', 'load').eq('entityId', load._id),
+          .withIndex('by_org_entity_action', (q) =>
+            q
+              .eq('organizationId', load.workosOrgId)
+              .eq('entityType', 'load')
+              .eq('entityId', load._id)
+              .eq('action', 'expired'),
           )
-          .collect();
-        if (existing.some((row) => row.action === 'expired')) continue;
+          .first();
+        if (existing) continue;
 
         await ctx.db.insert('auditLog', {
           organizationId: load.workosOrgId,

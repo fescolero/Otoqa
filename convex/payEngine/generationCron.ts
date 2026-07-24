@@ -45,8 +45,10 @@ export const processOrg = internalMutation({
         .query('driverSettlements')
         .withIndex('by_org_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', status))
         .collect();
+      // 400ms stagger — concurrent aggregations that create settlements
+      // contend on the org's settlementCounters doc; see aggregateSettlement.
       for (const s of rows) {
-        await ctx.scheduler.runAfter(i * 120, internal.payEngine.aggregateSettlement.aggregateDriverSettlement, {
+        await ctx.scheduler.runAfter(i * 400, internal.payEngine.aggregateSettlement.aggregateDriverSettlement, {
           workosOrgId: args.workosOrgId,
           payeeId: s.driverId as string,
           periodStart: s.periodStart,
@@ -64,7 +66,7 @@ export const processOrg = internalMutation({
         .withIndex('by_org_status', (q) => q.eq('workosOrgId', args.workosOrgId).eq('status', status))
         .collect();
       for (const s of rows) {
-        await ctx.scheduler.runAfter(i * 120, internal.payEngine.aggregateSettlement.aggregateCarrierSettlement, {
+        await ctx.scheduler.runAfter(i * 400, internal.payEngine.aggregateSettlement.aggregateCarrierSettlement, {
           workosOrgId: args.workosOrgId,
           payeeId: s.carrierPartnershipId as string,
           periodStart: s.periodStart,

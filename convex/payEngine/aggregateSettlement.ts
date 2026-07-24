@@ -347,9 +347,13 @@ export const aggregateAllCarrierSettlements = internalMutation({
       .query('carrierPartnerships')
       .withIndex('by_broker', (q) => q.eq('brokerOrgId', args.workosOrgId).eq('status', 'ACTIVE'))
       .collect();
+    // 400ms stagger: aggregations that CREATE a settlement contend on the
+    // org-wide settlementCounters doc (nextStatementNumber read+patch), and
+    // Convex Health showed OCC retries there at the previous 120-150ms
+    // spacing. Generation is async/hourly, so the wider spread is free.
     let i = 0;
     for (const p of partnerships) {
-      await ctx.scheduler.runAfter(i * 150, internal.payEngine.aggregateSettlement.aggregateCarrierSettlement, {
+      await ctx.scheduler.runAfter(i * 400, internal.payEngine.aggregateSettlement.aggregateCarrierSettlement, {
         workosOrgId: args.workosOrgId, payeeId: p._id as string,
         periodStart: args.periodStart, periodEnd: args.periodEnd, userId: args.userId,
       });
@@ -367,10 +371,12 @@ export const aggregateAllDriverSettlements = internalMutation({
       .query('drivers')
       .withIndex('by_organization', (q) => q.eq('organizationId', args.workosOrgId))
       .collect();
+    // 400ms stagger — same settlementCounters-contention rationale as the
+    // carrier fan-out above.
     let i = 0;
     for (const d of drivers) {
       if (d.isDeleted) continue;
-      await ctx.scheduler.runAfter(i * 120, internal.payEngine.aggregateSettlement.aggregateDriverSettlement, {
+      await ctx.scheduler.runAfter(i * 400, internal.payEngine.aggregateSettlement.aggregateDriverSettlement, {
         workosOrgId: args.workosOrgId, payeeId: d._id as string,
         periodStart: args.periodStart, periodEnd: args.periodEnd, userId: args.userId,
       });

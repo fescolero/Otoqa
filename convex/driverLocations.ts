@@ -64,13 +64,17 @@ export type PingInput = {
 
 /**
  * Insert a batch of GPS pings with org scoping, session/load consistency
- * validation, batch-boundary dedup, and scheduled geofence evaluation.
+ * validation, exact-key dedup, and scheduled geofence evaluation.
  *
- * Dedup strategy: a per-ping dedup read cost 50× more than what's needed
- * for the common case. Instead we group pings by their dedup key (sessionId
- * when present, else loadId), query the latest stored ping for that key
- * once, and only fall back to per-ping dedup if the new batch overlaps
- * the stored window (the "genuine retry" scenario, which is rare).
+ * Dedup strategy: one exact (sessionId|loadId, recordedAt) index probe per
+ * ping, issued concurrently. Each probe's read set is a single index key,
+ * so concurrent ingest mutations for the same session (mobile HTTP batches
+ * vs. the org-wide Samsara poll) never intersect unless they carry the
+ * literal same timestamp — which is the one case where OCC serialization
+ * is wanted. The previous "latest stored ping" shortcut read the head of
+ * the by_session_time index instead, which conflicted with EVERY concurrent
+ * insert of a newer ping and was the dominant source of the write-conflict
+ * retries on driverLocations reported by Convex Health.
  */
 /**
  * Structured outcome of a batch insert. The mobile client uses these to
@@ -464,69 +468,50 @@ export async function ingestBatch(
     }
   };
 
-  // Session-keyed groups
+  // Session-keyed groups — exact-key probes, all issued concurrently.
+  // A probe that finds nothing only adds the single (sessionId, recordedAt)
+  // key to the read set, so concurrent batches with different timestamps
+  // commit without OCC retries. Intra-batch duplicates are still inserted
+  // (probes run before inserts) — matching the documented observe-only
+  // stance on cross-device dups above.
   for (const [sessionId, group] of sessionGroups) {
-    const earliest = Math.min(...group.map((p) => p.recordedAt));
-    const latestStored = await ctx.db
-      .query('driverLocations')
-      .withIndex('by_session_time', (q) => q.eq('sessionId', sessionId))
-      .order('desc')
-      .first();
-
-    if (!latestStored || latestStored.recordedAt < earliest) {
-      // Clean boundary — bulk insert without per-ping dedup.
-      for (const loc of group) await insertPing(loc);
-    } else {
-      // Overlap detected. Per-ping dedup only for pings inside the window.
-      for (const loc of group) {
-        if (loc.recordedAt > latestStored.recordedAt) {
-          await insertPing(loc);
-          continue;
-        }
-        const existing = await ctx.db
+    const probes = await Promise.all(
+      group.map((loc) =>
+        ctx.db
           .query('driverLocations')
           .withIndex('by_session_time', (q) =>
             q.eq('sessionId', sessionId).eq('recordedAt', loc.recordedAt)
           )
-          .first();
-        if (existing) {
-          skippedDuplicate++;
-          continue;
-        }
-        await insertPing(loc);
+          .first()
+      )
+    );
+    for (let i = 0; i < group.length; i++) {
+      if (probes[i]) {
+        skippedDuplicate++;
+        continue;
       }
+      await insertPing(group[i]);
     }
   }
 
   // Legacy loadId-only groups (no sessionId — pre-rollout flow)
   for (const [loadId, group] of legacyLoadGroups) {
-    const earliest = Math.min(...group.map((p) => p.recordedAt));
-    const latestStored = await ctx.db
-      .query('driverLocations')
-      .withIndex('by_load', (q) => q.eq('loadId', loadId))
-      .order('desc')
-      .first();
-
-    if (!latestStored || latestStored.recordedAt < earliest) {
-      for (const loc of group) await insertPing(loc);
-    } else {
-      for (const loc of group) {
-        if (loc.recordedAt > latestStored.recordedAt) {
-          await insertPing(loc);
-          continue;
-        }
-        const existing = await ctx.db
+    const probes = await Promise.all(
+      group.map((loc) =>
+        ctx.db
           .query('driverLocations')
           .withIndex('by_load', (q) =>
             q.eq('loadId', loadId).eq('recordedAt', loc.recordedAt)
           )
-          .first();
-        if (existing) {
-          skippedDuplicate++;
-          continue;
-        }
-        await insertPing(loc);
+          .first()
+      )
+    );
+    for (let i = 0; i < group.length; i++) {
+      if (probes[i]) {
+        skippedDuplicate++;
+        continue;
       }
+      await insertPing(group[i]);
     }
   }
 

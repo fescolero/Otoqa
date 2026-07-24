@@ -627,6 +627,11 @@ export default defineSchema({
     // Primary indices for common queries
     .index('by_organization', ['organizationId', 'timestamp']) // List all org activity
     .index('by_org_entity', ['organizationId', 'entityType', 'entityId', 'timestamp']) // Org-scoped history for a specific entity
+    // "Does entity X already have an action-Y row?" as a ≤1-doc point read.
+    // Audit rows are heavy (changesBefore/After JSON blobs), so answering
+    // that via a by_org_entity history .collect() neared the per-mutation
+    // bytes-read limit in backfills (see auditLogMigration.ts).
+    .index('by_org_entity_action', ['organizationId', 'entityType', 'entityId', 'action'])
     .index('by_user', ['organizationId', 'performedBy', 'timestamp']) // User activity within org
     .index('by_action', ['organizationId', 'action', 'timestamp']) // Filter by action type
     .index('by_entity_type', ['organizationId', 'entityType', 'timestamp']), // All drivers, vehicles, etc.
