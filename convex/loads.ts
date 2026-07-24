@@ -1127,6 +1127,35 @@ export const getLoads = query({
   },
 });
 
+// Slim stop list for route displays (e.g. the dispatch schedule drawer) —
+// getLoad pulls the whole load graph (legs, driver, carrier, equipment)
+// which those surfaces don't need.
+export const getLoadStops = query({
+  args: { loadId: v.id('loadInformation') },
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return null;
+
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+    stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+
+    return stops.map((s) => ({
+      _id: s._id,
+      sequenceNumber: s.sequenceNumber,
+      stopType: s.stopType,
+      city: s.city ?? null,
+      state: s.state ?? null,
+      windowBeginTime: s.windowBeginTime ?? null,
+      checkedInAt: s.checkedInAt ?? null,
+      checkedOutAt: s.checkedOutAt ?? null,
+    }));
+  },
+});
+
 // ✅ 2. GET SINGLE LOAD (Read)
 export const getLoad = query({
   args: { loadId: v.id('loadInformation') },

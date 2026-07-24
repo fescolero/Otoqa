@@ -951,6 +951,17 @@ function DetailDrawer({
   const [reassignOpen, setReassignOpen] = React.useState(false);
   const s = TRIP_STATUS[trip.status] ?? TRIP_STATUS.assigned;
   const durHrs = (trip.endMs - trip.startMs) / HOUR_MS;
+
+  // The schedule leg only carries start/end city, so multi-stop loads
+  // rendered as a 2-stop route (and a hard-coded stop count). Fetch the
+  // load's real stop list for the drawer; fall back to leg start/end
+  // while loading or when no load is linked.
+  const loadStops = useAuthQuery(
+    api.loads.getLoadStops,
+    trip.loadId ? { loadId: trip.loadId } : 'skip',
+  );
+  const routeStops = loadStops && loadStops.length >= 2 ? loadStops : null;
+  const showActuals = trip.status === 'completed';
   // Reassign is a driver-to-driver handoff, so it needs a driver row and a
   // load that isn't already delivered. Carrier bars and completed legs keep
   // the button visible but disabled.
@@ -1082,22 +1093,61 @@ function DetailDrawer({
         >
           Route
         </div>
-        <RouteStop
-          time={formatHHMM(trip.startMs)}
-          city={trip.from}
-          kind="pickup"
-          arrivedAt={trip.status === 'completed' ? trip.startCheckedInAt : null}
-          departedAt={trip.status === 'completed' ? trip.startCheckedOutAt : null}
-        />
-        <RouteConn duration={durHrs} />
-        <RouteStop
-          time={formatHHMM(trip.endMs)}
-          city={trip.to}
-          kind="delivery"
-          last
-          arrivedAt={trip.status === 'completed' ? trip.endCheckedInAt : null}
-          departedAt={trip.status === 'completed' ? trip.endCheckedOutAt : null}
-        />
+        {routeStops ? (
+          routeStops.map((stop, i) => {
+            const isFirst = i === 0;
+            const isLast = i === routeStops.length - 1;
+            return (
+              <React.Fragment key={stop._id}>
+                {i > 0 && (
+                  // Segment durations are unknown for intermediate hops —
+                  // only a plain 2-stop route can label the connector with
+                  // the leg's total drive time.
+                  <RouteConn duration={routeStops.length === 2 ? durHrs : undefined} />
+                )}
+                <RouteStop
+                  time={
+                    isFirst
+                      ? formatHHMM(trip.startMs)
+                      : isLast
+                        ? formatHHMM(trip.endMs)
+                        : (formatISOHHMM(stop.windowBeginTime) ?? '—')
+                  }
+                  city={cityState(stop.city, stop.state)}
+                  kind={
+                    stop.stopType === 'PICKUP'
+                      ? 'pickup'
+                      : stop.stopType === 'DELIVERY'
+                        ? 'delivery'
+                        : 'detour'
+                  }
+                  last={isLast}
+                  arrivedAt={showActuals ? stop.checkedInAt : null}
+                  departedAt={showActuals ? stop.checkedOutAt : null}
+                />
+              </React.Fragment>
+            );
+          })
+        ) : (
+          <>
+            <RouteStop
+              time={formatHHMM(trip.startMs)}
+              city={trip.from}
+              kind="pickup"
+              arrivedAt={showActuals ? trip.startCheckedInAt : null}
+              departedAt={showActuals ? trip.startCheckedOutAt : null}
+            />
+            <RouteConn duration={durHrs} />
+            <RouteStop
+              time={formatHHMM(trip.endMs)}
+              city={trip.to}
+              kind="delivery"
+              last
+              arrivedAt={showActuals ? trip.endCheckedInAt : null}
+              departedAt={showActuals ? trip.endCheckedOutAt : null}
+            />
+          </>
+        )}
 
         <div style={{ height: 16 }} />
 
@@ -1110,7 +1160,7 @@ function DetailDrawer({
           }}
         >
           <Stat label="Duration" value={`${durHrs.toFixed(1)} hrs`} />
-          <Stat label="Stops" value="2" />
+          <Stat label="Stops" value={String(routeStops ? routeStops.length : 2)} />
         </div>
 
         {trip.conflict && (
@@ -1235,13 +1285,15 @@ function RouteStop({
 }: {
   time: string;
   city: string;
-  kind: 'pickup' | 'delivery';
+  kind: 'pickup' | 'delivery' | 'detour';
   last?: boolean;
   arrivedAt?: string | null;
   departedAt?: string | null;
 }) {
   const arrived = formatISOHHMM(arrivedAt ?? null);
   const departed = formatISOHHMM(departedAt ?? null);
+  const kindColor =
+    kind === 'pickup' ? '#3B82F6' : kind === 'delivery' ? '#10B981' : '#9BA3B4';
   return (
     <div className="flex gap-3 relative">
       <div style={{ width: 64, fontSize: 11.5, color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums', paddingTop: 1 }}>
@@ -1253,7 +1305,7 @@ function RouteStop({
             width: 10,
             height: 10,
             borderRadius: 999,
-            border: `2px solid ${kind === 'pickup' ? '#3B82F6' : '#10B981'}`,
+            border: `2px solid ${kindColor}`,
             background: 'var(--bg-surface)',
             marginTop: 4,
           }}
@@ -1266,7 +1318,7 @@ function RouteStop({
             fontWeight: 600,
             textTransform: 'uppercase',
             letterSpacing: 0.06,
-            color: kind === 'pickup' ? '#3B82F6' : '#10B981',
+            color: kindColor,
           }}
         >
           {kind}
@@ -1299,7 +1351,7 @@ function RouteStop({
   );
 }
 
-function RouteConn({ duration }: { duration: number }) {
+function RouteConn({ duration }: { duration?: number }) {
   return (
     <div className="flex gap-3">
       <div style={{ width: 64 }} />
@@ -1316,7 +1368,7 @@ function RouteConn({ duration }: { duration: number }) {
         />
       </div>
       <div style={{ flex: 1, fontSize: 11, color: 'var(--text-tertiary)', padding: '6px 0' }}>
-        {duration.toFixed(1)} hr drive
+        {duration != null ? `${duration.toFixed(1)} hr drive` : ' '}
       </div>
     </div>
   );
