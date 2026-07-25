@@ -1,5 +1,8 @@
 {
-  "cli": { "version": ">= 16.0.0", "appVersionSource": "remote" },
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "remote"
+  },
   "build": {
     "development": {
       "developmentClient": true,
@@ -7,20 +10,22 @@
       "channel": "development",
       "env": {
         "EXPO_PUBLIC_CONVEX_URL": "https://greedy-vole-262.convex.cloud",
-        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk",
-        "EXPO_PUBLIC_WORKOS_CLIENT_ID": ""
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk"
       },
-      "android": { "buildType": "apk" }
+      "android": {
+        "buildType": "apk"
+      }
     },
     "preview": {
       "distribution": "internal",
       "channel": "preview",
       "env": {
         "EXPO_PUBLIC_CONVEX_URL": "https://greedy-vole-262.convex.cloud",
-        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk",
-        "EXPO_PUBLIC_WORKOS_CLIENT_ID": ""
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk"
       },
-      "android": { "buildType": "apk" }
+      "android": {
+        "buildType": "apk"
+      }
     }
   }
 }
