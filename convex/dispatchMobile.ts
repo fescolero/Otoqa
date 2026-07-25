@@ -9,6 +9,7 @@ import {
 import { isPermitted } from './lib/permissions';
 import { getLoadFacets } from './lib/loadFacets';
 import { carrierStatementsForOrg, carrierStatementDetailsForOrg } from './mobileSettlements';
+import { logAudit } from './lib/audit';
 import type { Doc, Id } from './_generated/dataModel';
 
 /**
@@ -561,5 +562,89 @@ export const registerPushToken = mutation({
       });
     }
     return { success: true };
+  },
+});
+
+/**
+ * Re-time a stop's appointment window (split-plan §5.4). Capability-gated
+ * (canDispatch), org-scoped through the stop's assignment, audit-logged,
+ * and returns knock-on warnings (later stops whose windows now collide).
+ * Immediately resolves an open MISSED_APPOINTMENT alert when the new
+ * window is back in the future (the sweep would catch it within a minute;
+ * this keeps the feed honest in real time).
+ */
+export const adjustStopWindow = mutation({
+  args: {
+    stopId: v.id('loadStops'),
+    windowBeginTime: v.optional(v.string()), // ISO 8601
+    windowEndTime: v.string(), // ISO 8601
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const identity = await ctx.auth.getUserIdentity();
+
+    const stop = await ctx.db.get(args.stopId);
+    if (!stop) throw new Error('Stop not found');
+    const assignments = await ctx.db
+      .query('loadCarrierAssignments')
+      .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+      .collect();
+    const assignment = assignments.find(
+      (a) =>
+        a.carrierOrgId === resolved.externalId &&
+        (a.status === 'AWARDED' || a.status === 'IN_PROGRESS'),
+    );
+    if (!assignment) throw new Error('Stop not found');
+
+    const end = Date.parse(args.windowEndTime);
+    if (!Number.isFinite(end)) throw new Error('Invalid window end time');
+    const begin = args.windowBeginTime ? Date.parse(args.windowBeginTime) : null;
+    if (args.windowBeginTime && !Number.isFinite(begin!)) throw new Error('Invalid window begin time');
+    if (begin != null && begin >= end) throw new Error('Window must end after it begins');
+
+    await ctx.db.patch(args.stopId, {
+      windowEndTime: args.windowEndTime,
+      windowEndDate: args.windowEndTime.slice(0, 10),
+      ...(args.windowBeginTime
+        ? { windowBeginTime: args.windowBeginTime, windowBeginDate: args.windowBeginTime.slice(0, 10) }
+        : {}),
+      updatedAt: Date.now(),
+    });
+
+    // Knock-on check: later stops whose window now starts before this one ends.
+    const siblings = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
+      .collect();
+    const warnings = siblings
+      .filter((s) => s.sequenceNumber > stop.sequenceNumber && s.windowBeginTime)
+      .filter((s) => Date.parse(s.windowBeginTime!) < end)
+      .map((s) => `Stop ${s.sequenceNumber} (${s.address}) now opens before this window ends.`);
+
+    // Window moved into the future → the missed-appointment condition cleared.
+    if (end > Date.now()) {
+      const open = await ctx.db
+        .query('dispatchAlerts')
+        .withIndex('by_dedupe', (q) =>
+          q.eq('assignmentId', assignment._id).eq('kind', 'MISSED_APPOINTMENT').eq('status', 'open'),
+        )
+        .first();
+      if (open) await ctx.db.patch(open._id, { status: 'resolved', resolvedAt: Date.now() });
+    }
+
+    const load = await ctx.db.get(stop.loadId);
+    await logAudit(ctx, {
+      organizationId: assignment.brokerOrgId,
+      entityType: 'loadStop',
+      entityId: args.stopId,
+      entityName: `Load ${load?.internalId ?? ''} stop ${stop.sequenceNumber}`,
+      action: 'window_adjusted',
+      performedBy: identity!.subject,
+      performedByName: identity!.name ?? undefined,
+      performedByEmail: identity!.email ?? undefined,
+      description: `Appointment window moved to ${args.windowBeginTime ?? stop.windowBeginTime ?? '—'} → ${args.windowEndTime} by carrier dispatch.`,
+    });
+
+    return { success: true, warnings };
   },
 });

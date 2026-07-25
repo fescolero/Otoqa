@@ -17,6 +17,7 @@ import type { MutationCtx } from '../_generated/server';
  */
 
 export type AuditEntityType =
+  | 'loadStop'
   | 'truck'
   | 'trailer'
   | 'driver'
@@ -45,6 +46,7 @@ export type AuditEntityType =
   | 'facility';
 
 export type AuditAction =
+  | 'window_adjusted'
   | 'created'
   | 'updated'
   | 'deleted'

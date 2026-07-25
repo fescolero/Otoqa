@@ -279,3 +279,98 @@ describe('push pipeline (§5.7)', () => {
     ).rejects.toThrow('Unauthenticated');
   });
 });
+
+describe('appointment window adjustment (§5.4)', () => {
+  it('re-times a stop, resolves the open missed-appointment alert, and audits', async () => {
+    const { t, ready } = setup();
+    const { loadId, driverId } = await ready;
+    const stopId = await t.run(async (ctx) => {
+      await ctx.db.insert('driverLocations', {
+        driverId,
+        organizationId: WORKOS_ORG,
+        latitude: 37.5,
+        longitude: -121.9,
+        trackingType: 'LOAD_ROUTE',
+        recordedAt: Date.now(),
+        createdAt: Date.now(),
+      });
+      return await ctx.db.insert('loadStops', {
+        loadId,
+        internalId: 'L-7001',
+        sequenceNumber: 1,
+        stopType: 'PICKUP',
+        loadingType: 'APPT',
+        address: '9 Dock Rd',
+        windowEndTime: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        workosOrgId: 'org_broker_Y',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+    await t.mutation(internal.dispatchAlerts.sweep, {});
+    expect((await openAlerts(t)).map((a) => a.kind)).toContain('MISSED_APPOINTMENT');
+
+    const newEnd = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const res = await t
+      .withIdentity(DISPATCHER as never)
+      .mutation(api.dispatchMobile.adjustStopWindow, { stopId, windowEndTime: newEnd });
+    expect(res.success).toBe(true);
+
+    expect((await openAlerts(t)).map((a) => a.kind)).not.toContain('MISSED_APPOINTMENT');
+    const stop = await t.run((ctx) => ctx.db.get(stopId));
+    expect(stop?.windowEndTime).toBe(newEnd);
+    const audits = await t.run((ctx) => ctx.db.query('auditLog').collect());
+    expect(audits.some((a) => a.action === 'window_adjusted')).toBe(true);
+  });
+
+  it('warns on knock-on overlap, validates ordering, denies billing role', async () => {
+    const { t, ready } = setup();
+    const { loadId } = await ready;
+    const mk = (seq: number, beginOffsetH: number) =>
+      t.run((ctx) =>
+        ctx.db.insert('loadStops', {
+          loadId,
+          internalId: 'L-7001',
+          sequenceNumber: seq,
+          stopType: seq === 1 ? 'PICKUP' : 'DELIVERY',
+          loadingType: 'APPT',
+          address: `${seq} Dock Rd`,
+          windowBeginTime: new Date(Date.now() + beginOffsetH * 3600_000).toISOString(),
+          windowEndTime: new Date(Date.now() + (beginOffsetH + 1) * 3600_000).toISOString(),
+          workosOrgId: 'org_broker_Y',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
+      );
+    const s1 = await mk(1, 1);
+    await mk(2, 2);
+
+    // Push stop 1's end past stop 2's begin → knock-on warning.
+    const res = await t.withIdentity({ subject: OWNER }).mutation(api.dispatchMobile.adjustStopWindow, {
+      stopId: s1,
+      windowEndTime: new Date(Date.now() + 3 * 3600_000).toISOString(),
+    });
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain('2 Dock Rd');
+
+    await expect(
+      t.withIdentity({ subject: OWNER }).mutation(api.dispatchMobile.adjustStopWindow, {
+        stopId: s1,
+        windowBeginTime: new Date(Date.now() + 5 * 3600_000).toISOString(),
+        windowEndTime: new Date(Date.now() + 4 * 3600_000).toISOString(),
+      }),
+    ).rejects.toThrow('Window must end after it begins');
+
+    await expect(
+      t
+        .withIdentity({ subject: 'al_billing', org_id: WORKOS_ORG, role: 'billing', permissions: [
+          ...permissionsForLevel('loads', 'view'),
+          ...permissionsForLevel('accounting', 'manage'),
+        ] } as never)
+        .mutation(api.dispatchMobile.adjustStopWindow, {
+          stopId: s1,
+          windowEndTime: new Date(Date.now() + 3 * 3600_000).toISOString(),
+        }),
+    ).rejects.toThrow('Not authorized: missing canDispatch');
+  });
+});

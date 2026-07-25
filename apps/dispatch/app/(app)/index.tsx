@@ -1,6 +1,7 @@
 /** Board — live AWARDED/IN_PROGRESS assignments via dispatchMobile.listActiveAssignments. */
 import { ActivityIndicator, FlatList, Pressable, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
@@ -38,9 +39,14 @@ export default function BoardScreen() {
                 <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
                   #{item.load?.internalId ?? '—'}
                 </Text>
-                <Text style={{ color: item.status === 'IN_PROGRESS' ? colors.primary : colors.warning, fontSize: typography.xs, fontWeight: typography.bold }}>
-                  {item.status === 'IN_PROGRESS' ? 'In transit' : 'Awarded'}
-                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                  <Pressable onPress={() => router.push({ pathname: '/adjust', params: { assignmentId: item._id } })} hitSlop={8}>
+                    <Ionicons name='time-outline' size={18} color={colors.foregroundMuted} />
+                  </Pressable>
+                  <Text style={{ color: item.status === 'IN_PROGRESS' ? colors.primary : colors.warning, fontSize: typography.xs, fontWeight: typography.bold }}>
+                    {item.status === 'IN_PROGRESS' ? 'In transit' : 'Awarded'}
+                  </Text>
+                </View>
               </View>
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
                 {item.load?.customerName ?? 'Customer'} · {item.stops.length} stop{item.stops.length === 1 ? '' : 's'}
