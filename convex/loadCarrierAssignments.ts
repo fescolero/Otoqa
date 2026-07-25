@@ -3,7 +3,12 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { updateLoadCount } from './stats_helpers';
-import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
+import {
+  assertCallerOwnsOrg,
+  assertCallerInCarrierOrg,
+  requireCallerOrgId,
+  requireCallerIdentity,
+} from './lib/auth';
 import { getLoadFacets } from './lib/loadFacets';
 import { computeLegScheduledTimes } from './_helpers/timeUtils';
 import { logAudit } from './lib/audit';
@@ -763,6 +768,10 @@ export const acceptOffer = mutation({
       throw new Error('Assignment does not belong to this carrier');
     }
 
+    // Caller must actually belong to the carrier org on the assignment —
+    // the arg check above only proves they know the org id.
+    await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
+
     if (assignment.status !== 'OFFERED') {
       throw new Error(`Cannot accept assignment with status: ${assignment.status}`);
     }
@@ -793,6 +802,9 @@ export const declineOffer = mutation({
     if (assignment.carrierOrgId !== args.carrierOrgId) {
       throw new Error('Assignment does not belong to this carrier');
     }
+
+    // Caller must actually belong to the carrier org on the assignment.
+    await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
 
     if (assignment.status !== 'OFFERED') {
       throw new Error(`Cannot decline assignment with status: ${assignment.status}`);
@@ -957,6 +969,10 @@ export const assignDriver = mutation({
       throw new Error('Assignment does not belong to this carrier');
     }
 
+    // Caller must actually belong to the carrier org on the assignment —
+    // the arg check above only proves they know the org id.
+    await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
+
     if (
       assignment.status !== 'AWARDED' &&
       assignment.status !== 'IN_PROGRESS'
@@ -1015,6 +1031,9 @@ export const startLoad = mutation({
       throw new Error('Assignment does not belong to this carrier');
     }
 
+    // Caller must actually belong to the carrier org on the assignment.
+    await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
+
     if (assignment.status !== 'AWARDED') {
       throw new Error('Can only start awarded loads');
     }
@@ -1052,6 +1071,9 @@ export const completeLoad = mutation({
     if (assignment.carrierOrgId !== args.carrierOrgId) {
       throw new Error('Assignment does not belong to this carrier');
     }
+
+    // Caller must actually belong to the carrier org on the assignment.
+    await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
 
     if (assignment.status !== 'IN_PROGRESS') {
       throw new Error('Can only complete in-progress loads');

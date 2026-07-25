@@ -6,11 +6,13 @@
 
 ---
 
-## 0. ⚠ Immediate security hotfix (independent of the split — do first)
+## 0. ⚠ Immediate security hotfix — ✅ SHIPPED
 
-Adversarial review found that six `convex/loadCarrierAssignments.ts` mutations are **unauthenticated public mutations** on the deployed backend: `assignDriver`, `startLoad`, `completeLoad`, `cancelAssignment` (`:925-1116` — no `ctx.auth` check; org "verification" is comparing a client-supplied `carrierOrgId`, and `cancelAssignment` doesn't even take one — free-text `canceledBy`/`canceledByParty`), plus `acceptOffer`/`declineOffer` (`:751-795`). Anyone with the Convex URL and an assignment ID can assign/complete/cancel loads.
+Adversarial review found unauthenticated public mutations in `convex/loadCarrierAssignments.ts`. Implementation-time correction: `cancelAssignment` was **already authenticated** (`requireCallerIdentity` + broker/carrier org match) — the review's sixth finding was stale. The genuinely unauthenticated surface was **five** mutations: `assignDriver`, `startLoad`, `completeLoad` (no `ctx.auth` check; org "verification" was comparing a client-supplied `carrierOrgId` string), plus `acceptOffer`/`declineOffer`. Anyone with the Convex URL and an assignment ID could assign/complete loads or accept/decline offers.
 
-**Hotfix now:** add authenticated-caller + org-membership checks to all six, shaped to preserve old-build behavior (see §4.3 parity rules — Clerk OWNER/ADMIN incl. phone fallback). This ships before/independently of Phase 0. The web app calls none of the four dispatch mutations (verified), and the driver persona's screens don't either, so blast radius is owner-mode parity only.
+**Shipped:** `assertCallerInCarrierOrg(ctx, externalOrgId)` in `convex/lib/auth.ts` — dual-path, parity-shaped per §4.2/§4.3: org-claim tokens (WorkOS web/staff) match the claim; Clerk mobile callers resolve via `userIdentityLinks` by `clerkUserId` **and** the phone fallback (mirroring `getUserRoles` Methods 1+2), role OWNER/ADMIN, non-deleted org, same org-match set as `requireCarrierAuth` (`clerkOrgId`/`workosOrgId`/`_id`). Wired into all five mutations against the **stored** `assignment.carrierOrgId` (not the client arg); all pre-existing arg/status checks unchanged. Covered by `convex/loadCarrierAssignments.auth.test.ts` (13 tests: fail-closed matrix — unauthenticated, unlinked, cross-org, MEMBER, deleted-org, mismatched claim; old-build parity — Clerk OWNER by link, Clerk ADMIN by phone fallback, WorkOS org claim; behavior parity — original error messages and status-transition rules). Full suite green (725 tests / 69 files).
+
+> Field note: the dual-lockfile hazard (OQ-10) bit during this work — `bun.lock` freezes `convex@1.31.2`, which is incompatible with `convex-test@0.0.49` (peer `^1.32`); `package-lock.json` resolves `convex@1.35.1` and is the lockfile that actually works. Until OQ-10 standardizes, **install with `npm ci`**, not bun.
 
 ---
 

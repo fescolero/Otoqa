@@ -1,5 +1,6 @@
 import type { QueryCtx, MutationCtx, ActionCtx } from '../_generated/server';
 import { isPermitted, type PermissionClaims } from './permissions';
+import { normalizePhoneForMatch } from '../_helpers/mobileAuth';
 
 /**
  * Shared authorization helpers for Convex functions.
@@ -137,4 +138,87 @@ export async function assertOrgPermission(
     throw new Error(`Your role doesn't have the ${slug} permission`);
   }
   return result;
+}
+
+/**
+ * Asserts the caller belongs to the carrier org identified by an EXTERNAL
+ * org id — the clerkOrgId/workosOrgId value stored on
+ * `loadCarrierAssignments.carrierOrgId`. Serves BOTH caller populations of
+ * the carrier-side assignment mutations:
+ *
+ *   1. Org-claim tokens (WorkOS web/staff, org-scoped Clerk sessions):
+ *      the token's org claim must equal the external id.
+ *   2. Clerk mobile tokens (owner mode; no org claim): resolve via
+ *      `userIdentityLinks` — first by `clerkUserId`, then by verified
+ *      phone — mirroring `carrierMobile.getUserRoles` Methods 1 and 2
+ *      exactly (split-plan §4.2 parity rule). The link role must be
+ *      OWNER or ADMIN (the roles that unlock owner mode in shipped
+ *      builds), the org must not be soft-deleted, and its
+ *      clerkOrgId/workosOrgId/_id must equal the external id (the same
+ *      match set as `requireCarrierAuth`).
+ *
+ * Fail-closed: throws on any miss. Returns identity fields for audit
+ * logging. Needs db access, so unlike the claim-only helpers above it
+ * cannot run in an action ctx.
+ */
+export async function assertCallerInCarrierOrg(
+  ctx: QueryCtx | MutationCtx,
+  carrierExternalOrgId: string,
+): Promise<{ userId: string; userName: string | undefined; userEmail: string | undefined }> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error('Unauthenticated');
+
+  const result = {
+    userId: identity.subject,
+    userName: identity.name ?? undefined,
+    userEmail: identity.email ?? undefined,
+  };
+
+  // Path 1: org claim on the token.
+  const claims = identity as unknown as IdentityWithOrg;
+  const claimOrg = claims.org_id ?? claims.organizationId;
+  if (claimOrg && claimOrg === carrierExternalOrgId) {
+    return result;
+  }
+
+  const orgMatches = (org: {
+    _id: string;
+    clerkOrgId?: string;
+    workosOrgId?: string;
+    isDeleted?: boolean;
+  }) =>
+    !org.isDeleted &&
+    (org.clerkOrgId === carrierExternalOrgId ||
+      org.workosOrgId === carrierExternalOrgId ||
+      org._id === carrierExternalOrgId);
+
+  // Path 2a: Clerk identity link by user id.
+  const link = await ctx.db
+    .query('userIdentityLinks')
+    .withIndex('by_clerk', (q) => q.eq('clerkUserId', identity.subject))
+    .first();
+  if (link && (link.role === 'OWNER' || link.role === 'ADMIN')) {
+    const org = await ctx.db.get(link.organizationId);
+    if (org && orgMatches(org)) return result;
+  }
+
+  // Path 2b: Clerk phone fallback — same variant set as getUserRoles.
+  const rawPhone =
+    (identity as unknown as { phoneNumber?: string; phone_number?: string }).phoneNumber ??
+    (identity as unknown as { phoneNumber?: string; phone_number?: string }).phone_number;
+  if (typeof rawPhone === 'string' && rawPhone) {
+    const normalized = normalizePhoneForMatch(rawPhone);
+    for (const variant of [normalized, `+1${normalized}`, `1${normalized}`]) {
+      const phoneLink = await ctx.db
+        .query('userIdentityLinks')
+        .withIndex('by_phone', (q) => q.eq('phone', variant))
+        .first();
+      if (phoneLink && (phoneLink.role === 'OWNER' || phoneLink.role === 'ADMIN')) {
+        const org = await ctx.db.get(phoneLink.organizationId);
+        if (org && orgMatches(org)) return result;
+      }
+    }
+  }
+
+  throw new Error('Not authorized for this carrier');
 }
