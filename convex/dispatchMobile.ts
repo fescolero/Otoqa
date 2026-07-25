@@ -1,4 +1,5 @@
-import { query } from './_generated/server';
+import { query, type QueryCtx } from './_generated/server';
+import { v } from 'convex/values';
 import {
   CAPABILITY_SLUGS,
   getCallerPermissionClaims,
@@ -6,6 +7,8 @@ import {
   type DispatchCapability,
 } from './lib/auth';
 import { isPermitted } from './lib/permissions';
+import { getLoadFacets } from './lib/loadFacets';
+import type { Doc, Id } from './_generated/dataModel';
 
 /**
  * Otoqa Dispatch — mobile session bootstrap (split-plan §3.3 / §4.2).
@@ -54,7 +57,13 @@ const NO_SESSION: DispatchSession = {
   orgName: null,
   orgType: null,
   persona: null,
-  capabilities: { canDispatch: false, canViewSettlements: false, canManageDrivers: false },
+  capabilities: {
+    canDispatch: false,
+    canViewOperations: false,
+    canViewFleet: false,
+    canViewSettlements: false,
+    canManageDrivers: false,
+  },
 };
 
 export const getSession = query({
@@ -111,7 +120,270 @@ export const getSession = query({
       orgName: membership.org.name,
       orgType: membership.org.orgType ?? null,
       persona: 'owner_operator',
-      capabilities: { canDispatch: true, canViewSettlements: true, canManageDrivers: true },
+      capabilities: {
+        canDispatch: true,
+        canViewOperations: true,
+        canViewFleet: true,
+        canViewSettlements: true,
+        canManageDrivers: true,
+      },
     };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Read wrappers (split-plan §4.5) — the Dispatch app's data layer.
+//
+// FAIL-LOUD by design: the legacy carrierMobile reads authenticate via
+// requireCarrierAuth (Clerk-only, returns []) — a WorkOS staff caller
+// would see silently empty screens. Every read here resolves the org
+// from the token dual-path and THROWS on any auth/capability miss.
+// Args carry no org id: the org always derives from the caller.
+//
+// The legacy endpoints stay byte-identical for shipped Driver builds
+// (§4.4 behavior freeze); these are new endpoints, free to be lean.
+// Scoping mirrors the originals:
+//   - loadCarrierAssignments.by_carrier keys on the EXTERNAL org id
+//   - drivers.by_organization stores the org Convex id for
+//     mobile-created carrier orgs and the workosOrgId for web-created
+//     ones — so driver reads query BOTH and merge.
+// ─────────────────────────────────────────────────────────────────────
+
+interface ResolvedOrg {
+  org: Doc<'organizations'>;
+  /** Id used by loadCarrierAssignments.carrierOrgId. */
+  externalId: string;
+  /** Every id drivers.organizationId might carry for this org. */
+  driverOrgIds: string[];
+}
+
+/** Dual-path org + capability resolution. Throws on every miss. */
+async function resolveOrgForRead(
+  ctx: QueryCtx,
+  capability: DispatchCapability,
+): Promise<ResolvedOrg> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error('Unauthenticated');
+
+  const claims = identity as unknown as { org_id?: string; organizationId?: string };
+  const claimOrg = claims.org_id ?? claims.organizationId;
+
+  if (claimOrg) {
+    const permissionClaims = await getCallerPermissionClaims(ctx);
+    if (!isPermitted(permissionClaims, CAPABILITY_SLUGS[capability])) {
+      throw new Error(`Not authorized: missing ${capability}`);
+    }
+    const org = await ctx.db
+      .query('organizations')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', claimOrg))
+      .first();
+    if (!org || org.isDeleted) throw new Error('Organization not provisioned for dispatch');
+    return {
+      org,
+      externalId: org.clerkOrgId ?? claimOrg,
+      driverOrgIds: [org._id as string, claimOrg],
+    };
+  }
+
+  const membership = await resolveClerkCarrierMembership(ctx);
+  if (!membership) throw new Error(`Not authorized: missing ${capability}`);
+  const org = membership.org as Doc<'organizations'>;
+  return {
+    org,
+    externalId: (org.clerkOrgId ?? org.workosOrgId ?? org._id) as string,
+    driverOrgIds: [org._id as string, org.workosOrgId].filter(
+      (x): x is string => typeof x === 'string',
+    ),
+  };
+}
+
+/** Active + deleted-filtered drivers across both org-id spellings. */
+async function orgDrivers(ctx: QueryCtx, resolved: ResolvedOrg): Promise<Doc<'drivers'>[]> {
+  const seen = new Set<string>();
+  const out: Doc<'drivers'>[] = [];
+  for (const orgId of resolved.driverOrgIds) {
+    const rows = await ctx.db
+      .query('drivers')
+      .withIndex('by_organization', (q) => q.eq('organizationId', orgId))
+      .collect();
+    for (const d of rows) {
+      if (seen.has(d._id)) continue;
+      seen.add(d._id);
+      if (d.employmentStatus === 'Active' && !d.isDeleted) out.push(d);
+    }
+  }
+  return out;
+}
+
+async function latestLocation(ctx: QueryCtx, driverId: Id<'drivers'>) {
+  return await ctx.db
+    .query('driverLocations')
+    .withIndex('by_driver_time', (q) => q.eq('driverId', driverId))
+    .order('desc')
+    .first();
+}
+
+async function assignmentsByStatus(
+  ctx: QueryCtx,
+  externalId: string,
+  status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
+) {
+  return await ctx.db
+    .query('loadCarrierAssignments')
+    .withIndex('by_carrier', (q) => q.eq('carrierOrgId', externalId).eq('status', status))
+    .collect();
+}
+
+/** Board data — AWARDED + IN_PROGRESS assignments, enriched like getActiveLoads. */
+export const listActiveAssignments = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const assignments = [
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')),
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS')),
+    ];
+
+    return Promise.all(
+      assignments.map(async (assignment) => {
+        const load = await ctx.db.get(assignment.loadId);
+        const stops = load
+          ? await ctx.db
+              .query('loadStops')
+              .withIndex('by_load', (q) => q.eq('loadId', load._id))
+              .collect()
+          : [];
+        const driver = assignment.assignedDriverId
+          ? await ctx.db.get(assignment.assignedDriverId)
+          : null;
+        const driverLocation = assignment.assignedDriverId
+          ? await latestLocation(ctx, assignment.assignedDriverId)
+          : null;
+        const facets = load
+          ? await getLoadFacets(ctx, load._id)
+          : { hcr: undefined, trip: undefined, all: [] };
+        return {
+          ...assignment,
+          load: load
+            ? {
+                _id: load._id,
+                internalId: load.internalId,
+                customerName: load.customerName,
+                trackingStatus: load.trackingStatus,
+                effectiveMiles: load.effectiveMiles,
+                equipmentType: load.equipmentType,
+                tripNumber: facets.trip,
+                hcr: facets.hcr,
+                facets: facets.all,
+              }
+            : null,
+          stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
+          driver: driver
+            ? { _id: driver._id, firstName: driver.firstName, lastName: driver.lastName, phone: driver.phone }
+            : null,
+          driverLocation,
+        };
+      }),
+    );
+  },
+});
+
+/** History — COMPLETED assignments, newest first. */
+export const listCompletedAssignments = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const completed = await assignmentsByStatus(ctx, resolved.externalId, 'COMPLETED');
+    completed.sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
+    const page = completed.slice(0, Math.min(args.limit ?? 50, 200));
+    return Promise.all(
+      page.map(async (assignment) => {
+        const load = await ctx.db.get(assignment.loadId);
+        return {
+          ...assignment,
+          load: load ? { _id: load._id, internalId: load.internalId, customerName: load.customerName } : null,
+        };
+      }),
+    );
+  },
+});
+
+/** Fleet list — active drivers + last ping + current load (mirrors getDrivers). */
+export const listDrivers = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewFleet');
+    const drivers = await orgDrivers(ctx, resolved);
+    const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
+
+    return Promise.all(
+      drivers.map(async (driver) => {
+        const lastLocation = await latestLocation(ctx, driver._id);
+        const currentAssignment = inProgress.find((a) => a.assignedDriverId === driver._id) ?? null;
+        const load = currentAssignment ? await ctx.db.get(currentAssignment.loadId) : null;
+        return {
+          _id: driver._id,
+          firstName: driver.firstName,
+          lastName: driver.lastName,
+          phone: driver.phone,
+          employmentStatus: driver.employmentStatus,
+          currentTruckId: driver.currentTruckId,
+          lastLocation,
+          currentLoad: load ? { _id: load._id, internalId: load.internalId } : null,
+        };
+      }),
+    );
+  },
+});
+
+/** Assign-sheet candidates — active drivers with no in-progress load. */
+export const listAvailableDrivers = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewFleet');
+    const drivers = await orgDrivers(ctx, resolved);
+    const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
+    const busy = new Set(
+      inProgress.filter((a) => a.assignedDriverId).map((a) => String(a.assignedDriverId)),
+    );
+    return drivers
+      .filter((d) => !busy.has(String(d._id)))
+      .map((d) => ({
+        _id: d._id,
+        firstName: d.firstName,
+        lastName: d.lastName,
+        phone: d.phone,
+        currentTruckId: d.currentTruckId,
+      }));
+  },
+});
+
+/** Live map — drivers pinged within 24h + their in-progress load (mirrors getDriverLocations). */
+export const listDriverLocations = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewFleet');
+    const drivers = await orgDrivers(ctx, resolved);
+    const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
+    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+
+    const out = [];
+    for (const driver of drivers) {
+      const lastLocation = await latestLocation(ctx, driver._id);
+      if (!lastLocation || lastLocation.recordedAt < oneDayAgo) continue;
+      const currentAssignment = inProgress.find((a) => a.assignedDriverId === driver._id) ?? null;
+      const load = currentAssignment ? await ctx.db.get(currentAssignment.loadId) : null;
+      out.push({
+        driver: {
+          _id: driver._id,
+          firstName: driver.firstName,
+          lastName: driver.lastName,
+          phone: driver.phone,
+        },
+        location: lastLocation,
+        load: load ? { _id: load._id, internalId: load.internalId, trackingStatus: load.trackingStatus } : null,
+      });
+    }
+    return out;
   },
 });

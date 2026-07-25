@@ -112,7 +112,13 @@ describe('getSession — WorkOS staff', () => {
       orgExternalId: CARRIER_WORKOS_ORG,
       orgConvexId,
       orgName: 'Carrier A LLC',
-      capabilities: { canDispatch: true, canViewSettlements: true, canManageDrivers: true },
+      capabilities: {
+        canDispatch: true,
+        canViewOperations: true,
+        canViewFleet: true,
+        canViewSettlements: true,
+        canManageDrivers: true,
+      },
     });
   });
 
@@ -129,6 +135,8 @@ describe('getSession — WorkOS staff', () => {
       .query(api.dispatchMobile.getSession, {});
     expect(s.capabilities).toEqual({
       canDispatch: true,
+      canViewOperations: true,
+      canViewFleet: true,
       canViewSettlements: false,
       canManageDrivers: false,
     });
@@ -147,6 +155,8 @@ describe('getSession — WorkOS staff', () => {
       .query(api.dispatchMobile.getSession, {});
     expect(s.capabilities).toEqual({
       canDispatch: false,
+      canViewOperations: true,
+      canViewFleet: true,
       canViewSettlements: true,
       canManageDrivers: false,
     });
@@ -160,6 +170,8 @@ describe('getSession — WorkOS staff', () => {
       .query(api.dispatchMobile.getSession, {});
     expect(s.capabilities).toEqual({
       canDispatch: true,
+      canViewOperations: true,
+      canViewFleet: true,
       canViewSettlements: true,
       canManageDrivers: true,
     });
@@ -179,7 +191,13 @@ describe('getSession — Clerk owner-operators', () => {
       persona: 'owner_operator',
       orgExternalId: CARRIER_CLERK_ORG,
       orgConvexId,
-      capabilities: { canDispatch: true, canViewSettlements: true, canManageDrivers: true },
+      capabilities: {
+        canDispatch: true,
+        canViewOperations: true,
+        canViewFleet: true,
+        canViewSettlements: true,
+        canManageDrivers: true,
+      },
     });
   });
 
@@ -204,7 +222,13 @@ describe('getSession — Clerk owner-operators', () => {
       provider: 'clerk',
       persona: null,
       orgExternalId: null,
-      capabilities: { canDispatch: false, canViewSettlements: false, canManageDrivers: false },
+      capabilities: {
+        canDispatch: false,
+        canViewOperations: false,
+        canViewFleet: false,
+        canViewSettlements: false,
+        canManageDrivers: false,
+      },
     });
   });
 

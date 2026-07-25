@@ -1,18 +1,48 @@
-/** Drivers — Phase 1 wires the fleet list (dispatchMobile read wrappers). */
-import { Text, View } from 'react-native';
-import { colors, typography } from '@otoqa/mobile-core';
+/** Drivers — live fleet list via dispatchMobile.listDrivers. */
+import { ActivityIndicator, FlatList, Text, View } from 'react-native';
+import { useQuery } from 'convex/react';
+import { api } from '@otoqa/convex-client';
+import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 
 export default function DriversScreen() {
+  const rows = useQuery(api.dispatchMobile.listDrivers, {});
+
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background, padding: 24, paddingTop: 70 }}>
-      <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
-        Drivers
-      </Text>
-      <View style={{ marginTop: 40, alignItems: 'center' }}>
-        <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', lineHeight: 20 }}>
+    <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 70 }}>
+      <View style={{ paddingHorizontal: 24 }}>
+        <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
+          Drivers
+        </Text>
+        {rows && (
+          <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
+            {rows.length} active
+          </Text>
+        )}
+      </View>
+      {rows === undefined ? (
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 48 }} />
+      ) : rows.length === 0 ? (
+        <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', marginTop: 48, lineHeight: 20 }}>
           No drivers yet.{'\n'}Drivers added to your organization appear here.
         </Text>
-      </View>
+      ) : (
+        <FlatList
+          data={rows}
+          keyExtractor={(r) => r._id}
+          contentContainerStyle={{ padding: 24, gap: 10 }}
+          renderItem={({ item }) => (
+            <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
+              <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
+                {item.firstName} {item.lastName}
+              </Text>
+              <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
+                {item.currentLoad ? `On load #${item.currentLoad.internalId}` : 'Available'}
+                {item.phone ? ` · ${item.phone}` : ''}
+              </Text>
+            </View>
+          )}
+        />
+      )}
     </View>
   );
 }

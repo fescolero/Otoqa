@@ -147,6 +147,8 @@ export async function assertOrgPermission(
  */
 export const CAPABILITY_SLUGS = {
   canDispatch: 'loads:edit',
+  canViewOperations: 'loads:view',
+  canViewFleet: 'fleet:view',
   canViewSettlements: 'accounting:view',
   canManageDrivers: 'fleet:edit',
 } as const;
