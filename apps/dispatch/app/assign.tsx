@@ -14,7 +14,7 @@ export default function AssignScreen() {
   const ranked = useQuery(api.dispatchMobile.suggestDriversForLoad, id ? { assignmentId: id } : 'skip');
   const assign = useMutation(api.dispatchMobile.assignDriverToLoad);
 
-  const pick = async (driverId: Id<'drivers'>, name: string) => {
+  const pick = async (driverId: Id<'drivers'>) => {
     const res = await assign({ assignmentId: id, driverId });
     if (res.success) {
       router.back();
@@ -52,7 +52,7 @@ export default function AssignScreen() {
                   {index === 0 && <Text style={{ color: colors.primary, fontSize: typography.xs }}>  BEST</Text>}
                 </Text>
                 <Pressable
-                  onPress={() => pick(item._id, `${item.firstName} ${item.lastName}`)}
+                  onPress={() => pick(item._id)}
                   style={{ backgroundColor: colors.primary, borderRadius: borderRadius.md, paddingHorizontal: 14, paddingVertical: 8 }}
                 >
                   <Text style={{ color: colors.primaryForeground, fontWeight: typography.semibold, fontSize: typography.sm }}>Assign</Text>

@@ -40,7 +40,7 @@ export default function PayScreen() {
           keyExtractor={(r) => r.id}
           contentContainerStyle={{ padding: 20, gap: 10 }}
           renderItem={({ item }) => (
-            <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
+            <Pressable onPress={() => router.push({ pathname: '/statement', params: { settlementId: item.id, source: item.source } })} style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                 <Text style={{ color: colors.foreground, fontWeight: typography.semibold }}>
                   {day(item.periodStart)} – {day(item.periodEnd)}
@@ -54,7 +54,7 @@ export default function PayScreen() {
                 {item.statementNumber ? ` · #${item.statementNumber}` : ''} · {item.status}
                 {item.paidAt ? ` ${day(item.paidAt)}` : item.payDate ? ` · pays ${day(item.payDate)}` : ''}
               </Text>
-            </View>
+            </Pressable>
           )}
         />
       )}
