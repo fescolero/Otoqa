@@ -33,7 +33,7 @@ export default defineConfig([
   },
   ...convexOverrides,
   {
-    files: ['mobile/**/*.{ts,tsx,js,jsx}'],
+    files: ['apps/driver/**/*.{ts,tsx,js,jsx}'],
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
       'react/no-unescaped-entities': 'off',

@@ -62,9 +62,11 @@ Otoqa/
 - Expo monorepo support is first-class (`expo/metro-config` auto-detects; [docs](https://docs.expo.dev/guides/monorepos/)). EAS builds run from each app directory ([EAS monorepo docs](https://docs.expo.dev/build-reference/build-with-monorepos/)).
 - Per-app: `app.json` (bundle id, **deep-link scheme — Dispatch needs `otoqa-dispatch` for the AuthKit PKCE browser return**, EAS projectId, OTA channel + runtimeVersion; Driver's runtimeVersion is the hardcoded string `"1.6.0"`, `appVersionSource: "remote"`), `eas.json`, icon/splash/store assets (scheduled in Phase 1 — new assets for Dispatch).
 
-### 2.1 Convex codegen (fixes existing drift)
+### 2.1 Convex codegen (fixes existing drift) — ✅ better than planned
 
-`packages/convex-client` re-exports root `convex/_generated`; both apps import from the package. One `npx convex codegen`, zero copies.
+Restructure-time discovery: the checked-in `mobile/convex/_generated` copy was imported by **nothing** — all 52 `_generated` import sites in the driver app already reached the repo-root `convex/_generated` via relative paths. The "drift" risk never had teeth; the dead copy is deleted. `packages/convex-client` now exists re-exporting the root codegen and is the import surface for `apps/dispatch` from day one; the driver app keeps its (root-targeting) relative imports unchanged.
+
+**Phase 0 restructure — ✅ landed:** `mobile/` → `apps/driver`; root bun workspaces (`bunfig.toml` pins `linker = "hoisted"` — bun's isolated/symlinked layout breaks convex-test's `_generated` discovery and Metro resolution); fresh root `bun.lock` (convex `^1.35.1` → resolves 1.42.x, convex-test compatible); `package-lock.json` and `apps/driver/bun.lock` removed; `metro.config.js` monorepo root corrected to `../..`; all 52 codegen import paths bumped one level; root config refs updated (eslint/tsconfig/.gitignore/scripts). Validation: 737 backend tests green; driver `tsc` error count *dropped* 44 → 20 (all pre-existing debt categories; zero path/codegen errors). **Still required before release: an EAS device build of `apps/driver` from the new layout** — hoisting changes node_modules topology and only a real build proves the native side.
 
 ---
 

@@ -1,0 +1,8 @@
+{
+  "name": "@otoqa/convex-client",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Single source of Convex generated types for the mobile apps — re-exports the root convex/_generated so app-local copies (and their drift) can be retired.",
+  "main": "index.ts",
+  "types": "index.ts"
+}

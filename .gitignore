@@ -64,7 +64,7 @@ scripts/entries.json
 
 # Claude Code session worktrees (local only)
 .claude/worktrees/
-mobile/.claude/
+apps/driver/.claude/
 
 # Native module build output
-mobile/modules/*/android/build/
+apps/driver/modules/*/android/build/

@@ -1,0 +1,11 @@
+# Workspace install behavior (split-plan D16).
+#
+# linker = "hoisted" forces the npm-style flat node_modules layout instead
+# of bun's isolated (pnpm-style, symlinked) layout. Two things break under
+# isolated installs here:
+#   - convex-test resolves the repo's convex/_generated directory by
+#     walking a flat node_modules (all 41 backend test files fail without
+#     this),
+#   - Metro/Expo resolution in apps/driver is tuned for hoisted trees.
+[install]
+linker = "hoisted"

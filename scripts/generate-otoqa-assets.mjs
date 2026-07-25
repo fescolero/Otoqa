@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUT_DIR = join(__dirname, '..', 'mobile', 'assets');
+const OUT_DIR = join(__dirname, '..', 'apps', 'driver', 'assets');
 
 // ─── Brand tokens (from logo-usage.jsx) ─────────────────────────────────
 const BRAND = {
@@ -224,4 +224,4 @@ await buildIosIcon();
 await buildAndroidAdaptive();
 await buildSplash('light');
 await buildSplash('dark');
-console.log('\nDone. Review in mobile/assets/ then commit.');
+console.log('\nDone. Review in apps/driver/assets/ then commit.');
