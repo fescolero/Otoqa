@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { v, type Infer } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import type { MutationCtx } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -1420,8 +1420,7 @@ export const getByIdWithRange = query({
 });
 
 // ✅ 3. CREATE LOAD (Write) - Architecture Aligned
-export const createLoad = mutation({
-  args: {
+export const createLoadArgs = {
     workosOrgId: v.string(),
     createdBy: v.string(),
     createdByName: v.optional(v.string()), // For auto-assignment audit
@@ -1484,13 +1483,22 @@ export const createLoad = mutation({
         referenceValue: v.optional(v.string()),
       }),
     ),
-  },
-  handler: async (ctx, args) => {
-    const {
-      userId: createdBy,
-      userName: createdByName,
-      userEmail: createdByEmail,
-    } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+};
+const createLoadArgsObj = v.object(createLoadArgs);
+
+/**
+ * Create-load model shared by the web mutation below and
+ * dispatchMobile.createLoad (split-plan §5.6) — ONE validation/creation
+ * path, no forked logic. Mechanical extraction of the original handler
+ * body; the web mutation's behavior is unchanged.
+ */
+export async function createLoadForOrg(
+  ctx: MutationCtx,
+  args: Infer<typeof createLoadArgsObj>,
+  performer: { userId: string; userName: string | undefined; userEmail: string | undefined },
+) {
+  {
+    const { userId: createdBy, userName: createdByName, userEmail: createdByEmail } = performer;
     const now = Date.now();
     if (args.stops.length === 0) throw new Error('At least one stop is required');
 
@@ -1699,6 +1707,14 @@ export const createLoad = mutation({
     });
 
     return loadId;
+  }
+}
+
+export const createLoad = mutation({
+  args: createLoadArgs,
+  handler: async (ctx, args) => {
+    const performer = await assertCallerOwnsOrg(ctx, args.workosOrgId);
+    return createLoadForOrg(ctx, args, performer);
   },
 });
 

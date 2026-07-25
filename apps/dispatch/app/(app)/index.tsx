@@ -15,9 +15,14 @@ export default function BoardScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 70 }}>
       <View style={{ paddingHorizontal: 24 }}>
-        <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
-          Board
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
+            Board
+          </Text>
+          <Pressable onPress={() => router.push('/create')} hitSlop={10}>
+            <Ionicons name='add-circle' size={26} color={colors.primary} />
+          </Pressable>
+        </View>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
           {session?.orgName ?? ''}{rows ? ` · ${rows.length} active` : ''}
         </Text>

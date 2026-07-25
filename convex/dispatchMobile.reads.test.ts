@@ -294,3 +294,92 @@ describe('ranked assignment (§5.1)', () => {
     expect(after?.assignedDriverName).toBe('Free Driver');
   });
 });
+
+describe('load creation (§5.6) — shared model, parity, self-assignment', () => {
+  const stop = (seq: number, type: 'PICKUP' | 'DELIVERY') => ({
+    sequenceNumber: seq,
+    stopType: type,
+    loadingType: 'APPT' as const,
+    address: `${seq} Parity St`,
+    windowBeginDate: '2026-08-01',
+    windowBeginTime: '2026-08-01T08:00:00-07:00',
+    windowEndDate: '2026-08-01',
+    windowEndTime: '2026-08-01T10:00:00-07:00',
+    commodityDescription: 'Produce',
+    commodityUnits: 'Pallets' as const,
+    pieces: 10,
+  });
+  const baseArgs = (internalId: string) => ({
+    internalId,
+    orderNumber: `ORD-${internalId}`,
+    fleet: 'Main',
+    units: 'Pallets' as const,
+    commodityDescription: 'Produce',
+    stops: [stop(1, 'PICKUP'), stop(2, 'DELIVERY')],
+  });
+
+  it('web path and mobile path produce identical load docs; mobile self-assigns AWARDED', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const customerId = await t.run(async (ctx) => {
+      const c = await ctx.db.query('customers').first();
+      return c!._id;
+    });
+
+    const webLoadId = await t
+      .withIdentity({ subject: 'web_admin', org_id: WORKOS_ORG, role: 'admin' } as never)
+      .mutation(api.loads.createLoad, {
+        ...baseArgs('L-WEB-1'),
+        customerId,
+        workosOrgId: WORKOS_ORG,
+        createdBy: 'web_admin',
+      });
+
+    const res = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.dispatchMobile.createLoad, { ...baseArgs('L-MOB-1'), customerId });
+
+    const [webLoad, mobLoad, assignment] = await t.run(async (ctx) => [
+      await ctx.db.get(webLoadId),
+      await ctx.db.get(res.loadId),
+      await ctx.db.get(res.assignmentId),
+    ]);
+    const strip = (l: Record<string, unknown> | null) => {
+      const { _id, _creationTime, createdAt, updatedAt, createdBy, internalId, orderNumber, ...rest } =
+        l as Record<string, unknown>;
+      return rest;
+    };
+    expect(strip(mobLoad)).toEqual(strip(webLoad));
+    expect(assignment).toMatchObject({
+      status: 'AWARDED',
+      carrierOrgId: CLERK_ORG,
+      brokerOrgId: WORKOS_ORG,
+    });
+    const stops = await t.run((ctx) =>
+      ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', res.loadId))
+        .collect(),
+    );
+    expect(stops).toHaveLength(2);
+  });
+
+  it('denies billing role; validates empty stops via the shared path', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const customerId = await t.run(async (ctx) => (await ctx.db.query('customers').first())!._id);
+    await expect(
+      t.withIdentity(staffBilling as never).mutation(api.dispatchMobile.createLoad, {
+        ...baseArgs('L-DENY'),
+        customerId,
+      }),
+    ).rejects.toThrow('Not authorized: missing canDispatch');
+    await expect(
+      t.withIdentity({ subject: OWNER }).mutation(api.dispatchMobile.createLoad, {
+        ...baseArgs('L-EMPTY'),
+        customerId,
+        stops: [],
+      }),
+    ).rejects.toThrow('At least one stop is required');
+  });
+});

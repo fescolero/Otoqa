@@ -10,7 +10,18 @@ import { isPermitted } from './lib/permissions';
 import { getLoadFacets } from './lib/loadFacets';
 import { carrierStatementsForOrg, carrierStatementDetailsForOrg } from './mobileSettlements';
 import { logAudit } from './lib/audit';
+import { createLoadArgs, createLoadForOrg } from './loads';
 import type { Doc, Id } from './_generated/dataModel';
+
+// The mobile create-load surface: the web validator set minus the fields
+// the server derives from the caller (org + performer identity).
+const {
+  workosOrgId: _srvOrg,
+  createdBy: _srvBy,
+  createdByName: _srvByName,
+  ...dispatchCreateLoadArgs
+} = createLoadArgs;
+void _srvOrg; void _srvBy; void _srvByName;
 
 /**
  * Otoqa Dispatch — mobile session bootstrap (split-plan §3.3 / §4.2).
@@ -646,5 +657,58 @@ export const adjustStopWindow = mutation({
     });
 
     return { success: true, warnings };
+  },
+});
+
+/** Customers picker for load creation (§5.6). */
+export const listCustomers = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    if (!resolved.org.workosOrgId) return [];
+    const rows = await ctx.db
+      .query('customers')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', resolved.org.workosOrgId!))
+      .collect();
+    return rows
+      .filter((c) => c.status === 'Active' && !c.isDeleted)
+      .map((c) => ({ _id: c._id, name: c.name, city: c.city, state: c.state }));
+  },
+});
+
+/**
+ * Create a load from the Dispatch app (split-plan §5.6) — the web's
+ * createLoadForOrg model function does ALL validation and creation (one
+ * path, zero drift), then the load is self-assigned to the caller's org
+ * (AWARDED) so it lands on the Board ready for a driver.
+ */
+export const createLoad = mutation({
+  args: dispatchCreateLoadArgs,
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const workosOrgId = resolved.org.workosOrgId;
+    if (!workosOrgId) {
+      throw new Error('Your organization is not provisioned for load creation yet');
+    }
+    const identity = await ctx.auth.getUserIdentity();
+    const performer = {
+      userId: identity!.subject,
+      userName: (identity!.name ?? undefined) as string | undefined,
+      userEmail: (identity!.email ?? undefined) as string | undefined,
+    };
+    const loadId = await createLoadForOrg(
+      ctx,
+      { ...args, workosOrgId, createdBy: performer.userId, createdByName: performer.userName },
+      performer,
+    );
+    const assignmentId = await ctx.db.insert('loadCarrierAssignments', {
+      loadId,
+      brokerOrgId: workosOrgId,
+      carrierOrgId: resolved.externalId,
+      status: 'AWARDED',
+      offeredAt: Date.now(),
+      createdBy: performer.userId,
+    });
+    return { loadId, assignmentId };
   },
 });
