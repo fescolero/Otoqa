@@ -1,4 +1,4 @@
-import { query, type QueryCtx } from './_generated/server';
+import { mutation, query, type QueryCtx } from './_generated/server';
 import { v } from 'convex/values';
 import {
   CAPABILITY_SLUGS,
@@ -409,5 +409,124 @@ export const getStatementDetails = query({
   handler: async (ctx, args) => {
     const resolved = await resolveOrgForRead(ctx, 'canViewSettlements');
     return carrierStatementDetailsForOrg(ctx, resolved.org, args.settlementId, args.source);
+  },
+});
+
+// ─── Ranked assignment (split-plan §5.1) ───
+
+const EARTH_MI = 3958.8;
+function milesBetween(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const dLat = ((bLat - aLat) * Math.PI) / 180;
+  const dLng = ((bLng - aLng) * Math.PI) / 180;
+  const la1 = (aLat * Math.PI) / 180;
+  const la2 = (bLat * Math.PI) / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+  return Math.round(2 * EARTH_MI * Math.asin(Math.sqrt(h)));
+}
+
+/**
+ * Ranked driver suggestions for one assignment — proximity to the first
+ * pickup, current workload, ping freshness. Blocked/warned candidates are
+ * RANKED WITH WARNINGS, never hidden (v8 design). No HOS chip yet (D11);
+ * equipment scoring arrives with the D12 endorsement fields.
+ */
+export const suggestDriversForLoad = query({
+  args: { assignmentId: v.id('loadCarrierAssignments') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const assignment = await ctx.db.get(args.assignmentId);
+    if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
+      throw new Error('Assignment not found');
+    }
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
+      .collect();
+    const pickup = stops
+      .filter((s) => s.stopType === 'PICKUP')
+      .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
+    const origin =
+      pickup?.latitude != null && pickup?.longitude != null
+        ? { lat: pickup.latitude, lng: pickup.longitude }
+        : null;
+
+    const drivers = await orgDrivers(ctx, resolved);
+    const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
+    const staleCutoff = Date.now() - 45 * 60 * 1000;
+
+    const candidates = await Promise.all(
+      drivers
+        .filter((d) => d._id !== assignment.assignedDriverId)
+        .map(async (d) => {
+          const loc = await latestLocation(ctx, d._id);
+          const activeCount = inProgress.filter((a) => a.assignedDriverId === d._id).length;
+          const mi =
+            origin && loc ? milesBetween(loc.latitude, loc.longitude, origin.lat, origin.lng) : null;
+          const warns: string[] = [];
+          if (activeCount > 0) warns.push(`On ${activeCount} active load${activeCount > 1 ? 's' : ''}`);
+          if (!loc) warns.push('No GPS data');
+          else if (loc.recordedAt < staleCutoff) warns.push('Ping older than 45 min');
+          if (mi != null && mi > 60) warns.push(`${mi} mi deadhead`);
+          let score = 100 + (activeCount === 0 ? 22 : -7 * activeCount);
+          if (mi != null) score -= mi * 0.9;
+          if (!loc) score -= 25;
+          else if (loc.recordedAt < staleCutoff) score -= 15;
+          return {
+            _id: d._id,
+            firstName: d.firstName,
+            lastName: d.lastName,
+            phone: d.phone,
+            milesFromPickup: mi,
+            activeLoads: activeCount,
+            lastPingAt: loc?.recordedAt ?? null,
+            warns,
+            score,
+          };
+        }),
+    );
+    return candidates.sort((a, b) => b.score - a.score);
+  },
+});
+
+/**
+ * Dual-path driver assignment for the Dispatch app. The legacy
+ * loadCarrierAssignments.assignDriver stays for old builds; its org-claim
+ * path can't serve WorkOS staff (assignments key on the CLERK org id).
+ * Conflict-aware per §4.6: returns alreadyAssigned instead of clobbering.
+ */
+export const assignDriverToLoad = mutation({
+  args: {
+    assignmentId: v.id('loadCarrierAssignments'),
+    driverId: v.id('drivers'),
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const assignment = await ctx.db.get(args.assignmentId);
+    if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
+      throw new Error('Assignment not found');
+    }
+    if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') {
+      throw new Error('Can only assign driver to awarded or in-progress loads');
+    }
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
+      throw new Error('Driver not found in your organization');
+    }
+    if (assignment.assignedDriverId && assignment.assignedDriverId !== args.driverId) {
+      const current = await ctx.db.get(assignment.assignedDriverId);
+      return {
+        success: false as const,
+        alreadyAssigned: {
+          driverId: assignment.assignedDriverId,
+          driverName: current ? `${current.firstName} ${current.lastName}` : 'another driver',
+        },
+      };
+    }
+    await ctx.db.patch(args.assignmentId, {
+      assignedDriverId: args.driverId,
+      assignedDriverName: `${driver.firstName} ${driver.lastName}`,
+      assignedDriverPhone: driver.phone,
+    });
+    return { success: true as const };
   },
 });

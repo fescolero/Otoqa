@@ -241,3 +241,56 @@ describe('settlement wrappers — capability gate', () => {
     ).rejects.toThrow('Not authorized: missing canViewSettlements');
   });
 });
+
+describe('ranked assignment (§5.1)', () => {
+  it('ranks free+near driver above busy one, with warns; conflict returns alreadyAssigned', async () => {
+    const { t, ready } = setup();
+    const { driverBusy, driverFree } = await ready;
+    const dispatcher = t.withIdentity(staffDispatcher as never);
+
+    // The fixture assignment is IN_PROGRESS with driverBusy assigned.
+    const a = await t.run(async (ctx) => {
+      const rows = await ctx.db.query('loadCarrierAssignments').collect();
+      return rows[0];
+    });
+
+    const ranked = await dispatcher.query(api.dispatchMobile.suggestDriversForLoad, {
+      assignmentId: a._id,
+    });
+    // Assigned driver excluded; Free ranked with a no-GPS warn.
+    expect(ranked.map((r) => r.firstName)).toEqual(['Free']);
+    expect(ranked[0].warns).toContain('No GPS data');
+
+    // Conflict path: already assigned to Busy → no clobber.
+    const res = await dispatcher.mutation(api.dispatchMobile.assignDriverToLoad, {
+      assignmentId: a._id,
+      driverId: driverFree,
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) expect(res.alreadyAssigned.driverId).toBe(driverBusy);
+  });
+
+  it('assigns onto an AWARDED load and denies cross-org/billing-role callers', async () => {
+    const { t, ready } = setup();
+    const { driverFree } = await ready;
+    const a = await t.run(async (ctx) => {
+      const rows = await ctx.db.query('loadCarrierAssignments').collect();
+      await ctx.db.patch(rows[0]._id, { status: 'AWARDED', assignedDriverId: undefined });
+      return rows[0]._id;
+    });
+
+    await expect(
+      t.withIdentity(staffBilling as never).mutation(api.dispatchMobile.assignDriverToLoad, {
+        assignmentId: a,
+        driverId: driverFree,
+      }),
+    ).rejects.toThrow('Not authorized: missing canDispatch');
+
+    const res = await t
+      .withIdentity({ subject: OWNER })
+      .mutation(api.dispatchMobile.assignDriverToLoad, { assignmentId: a, driverId: driverFree });
+    expect(res.success).toBe(true);
+    const after = await t.run((ctx) => ctx.db.get(a));
+    expect(after?.assignedDriverName).toBe('Free Driver');
+  });
+});

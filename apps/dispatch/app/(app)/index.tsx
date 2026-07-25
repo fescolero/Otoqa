@@ -1,5 +1,6 @@
 /** Board — live AWARDED/IN_PROGRESS assignments via dispatchMobile.listActiveAssignments. */
-import { ActivityIndicator, FlatList, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
@@ -7,6 +8,7 @@ import { useDispatchSession } from './_layout';
 
 export default function BoardScreen() {
   const session = useDispatchSession();
+  const router = useRouter();
   const rows = useQuery(api.dispatchMobile.listActiveAssignments, {});
 
   return (
@@ -31,7 +33,7 @@ export default function BoardScreen() {
           keyExtractor={(r) => r._id}
           contentContainerStyle={{ padding: 24, gap: 10 }}
           renderItem={({ item }) => (
-            <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
+            <Pressable onPress={() => router.push({ pathname: '/assign', params: { assignmentId: item._id } })} style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                 <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
                   #{item.load?.internalId ?? '—'}
@@ -46,7 +48,7 @@ export default function BoardScreen() {
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 2 }}>
                 {item.driver ? `${item.driver.firstName} ${item.driver.lastName}` : 'No driver assigned'}
               </Text>
-            </View>
+            </Pressable>
           )}
         />
       )}
