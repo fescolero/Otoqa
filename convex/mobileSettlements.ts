@@ -498,32 +498,43 @@ async function partnershipsForOrg(
  * All settlement statements cut for the authenticated carrier org, across
  * every broker partnership, newest first. Each row carries the broker's name.
  */
+/**
+ * Statement rows for a carrier org — shared by the legacy Clerk-authed
+ * query below and dispatchMobile.listStatements (dual-path). Mechanical
+ * extraction of the original handler body; row logic unchanged.
+ */
+export async function carrierStatementsForOrg(
+  ctx: QueryCtx,
+  org: Doc<'organizations'>,
+): Promise<MobileStatementRow[]> {
+  const partnerships = await partnershipsForOrg(ctx, org);
+
+  const rows: MobileStatementRow[] = [];
+  for (const p of partnerships) {
+    const brokerOrg = await ctx.db
+      .query('organizations')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', p.brokerOrgId))
+      .first();
+    const brokerName = brokerOrg?.name ?? 'Broker';
+    // Ledger choice is the BROKER org's flag — same numbers the broker sees.
+    const useNew = await orgReadsNewLedger(ctx, p.brokerOrgId);
+    const partnershipRows = useNew
+      ? await newCarrierRows(ctx, p)
+      : await legacyCarrierRows(ctx, p);
+    for (const r of partnershipRows) {
+      rows.push({ ...r, brokerName, partnershipId: p._id as string });
+    }
+  }
+  rows.sort((a, b) => b.periodStart - a.periodStart);
+  return rows.slice(0, STATEMENT_LIST_CAP);
+}
+
 export const getCarrierStatements = query({
   args: { carrierOrgId: v.string() },
   handler: async (ctx, args): Promise<MobileStatementRow[]> => {
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
     if (!auth) return [];
-
-    const partnerships = await partnershipsForOrg(ctx, auth.org);
-
-    const rows: MobileStatementRow[] = [];
-    for (const p of partnerships) {
-      const brokerOrg = await ctx.db
-        .query('organizations')
-        .withIndex('by_organization', (q) => q.eq('workosOrgId', p.brokerOrgId))
-        .first();
-      const brokerName = brokerOrg?.name ?? 'Broker';
-      // Ledger choice is the BROKER org's flag — same numbers the broker sees.
-      const useNew = await orgReadsNewLedger(ctx, p.brokerOrgId);
-      const partnershipRows = useNew
-        ? await newCarrierRows(ctx, p)
-        : await legacyCarrierRows(ctx, p);
-      for (const r of partnershipRows) {
-        rows.push({ ...r, brokerName, partnershipId: p._id as string });
-      }
-    }
-    rows.sort((a, b) => b.periodStart - a.periodStart);
-    return rows.slice(0, STATEMENT_LIST_CAP);
+    return carrierStatementsForOrg(ctx, auth.org);
   },
 });
 
@@ -622,6 +633,19 @@ async function newCarrierRows(
 }
 
 /** One carrier statement, itemized — only for a partnership the caller owns. */
+/** Itemized statement for a carrier org — shared with dispatchMobile. */
+export async function carrierStatementDetailsForOrg(
+  ctx: QueryCtx,
+  org: Doc<'organizations'>,
+  settlementId: string,
+  source: 'legacy' | 'ledger',
+) {
+  const candidates = orgIdCandidates(org);
+  return source === 'legacy'
+    ? legacyCarrierDetails(ctx, candidates, settlementId)
+    : newCarrierDetails(ctx, candidates, settlementId);
+}
+
 export const getCarrierStatementDetails = query({
   args: {
     carrierOrgId: v.string(),
@@ -631,10 +655,7 @@ export const getCarrierStatementDetails = query({
   handler: async (ctx, args) => {
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
     if (!auth) throw new Error('Statement not found');
-    const candidates = orgIdCandidates(auth.org);
-    return args.source === 'legacy'
-      ? legacyCarrierDetails(ctx, candidates, args.settlementId)
-      : newCarrierDetails(ctx, candidates, args.settlementId);
+    return carrierStatementDetailsForOrg(ctx, auth.org, args.settlementId, args.source);
   },
 });
 

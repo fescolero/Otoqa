@@ -3,7 +3,8 @@
  * ONLY when the server says canViewSettlements (D3/D9): staff dispatchers
  * never see the section at all, not a locked version of it.
  */
-import { Alert, Pressable, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import { useActiveAuth } from '../../lib/convex';
@@ -11,6 +12,7 @@ import { useDispatchSession } from './_layout';
 
 export default function MoreScreen() {
   const session = useDispatchSession();
+  const router = useRouter();
   const { signOut } = useActiveAuth();
   const personaLabel = session?.persona === 'owner_operator' ? 'Owner-operator' : 'Dispatcher';
 
@@ -29,7 +31,7 @@ export default function MoreScreen() {
           <Row
             icon="cash-outline"
             label="Pay & settlements"
-            onPress={() => Alert.alert('Pay', 'Settlement screens arrive in Phase 1.')}
+            onPress={() => router.push('/pay')}
           />
         </View>
       )}

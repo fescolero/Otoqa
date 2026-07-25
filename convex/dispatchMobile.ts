@@ -8,6 +8,7 @@ import {
 } from './lib/auth';
 import { isPermitted } from './lib/permissions';
 import { getLoadFacets } from './lib/loadFacets';
+import { carrierStatementsForOrg, carrierStatementDetailsForOrg } from './mobileSettlements';
 import type { Doc, Id } from './_generated/dataModel';
 
 /**
@@ -385,5 +386,28 @@ export const listDriverLocations = query({
       });
     }
     return out;
+  },
+});
+
+// ─── Settlements (owner-operators + staff with accounting:view, D9) ───
+
+/** Statement list for the caller's org — gated on canViewSettlements. */
+export const listStatements = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewSettlements');
+    return carrierStatementsForOrg(ctx, resolved.org);
+  },
+});
+
+/** One itemized statement — same gate, same shared logic as the legacy query. */
+export const getStatementDetails = query({
+  args: {
+    settlementId: v.string(),
+    source: v.union(v.literal('legacy'), v.literal('ledger')),
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewSettlements');
+    return carrierStatementDetailsForOrg(ctx, resolved.org, args.settlementId, args.source);
   },
 });

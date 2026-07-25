@@ -209,3 +209,35 @@ describe('read wrappers — fail loud', () => {
     ).rejects.toThrow('Not authorized');
   });
 });
+
+describe('settlement wrappers — capability gate', () => {
+  it('dispatcher role is denied settlements, loud', async () => {
+    const { t, ready } = setup();
+    await ready;
+    await expect(
+      t.withIdentity(staffDispatcher as never).query(api.dispatchMobile.listStatements, {}),
+    ).rejects.toThrow('Not authorized: missing canViewSettlements');
+  });
+
+  it('billing role and Clerk owner both pass the gate (empty org → [])', async () => {
+    const { t, ready } = setup();
+    await ready;
+    await expect(
+      t.withIdentity(staffBilling as never).query(api.dispatchMobile.listStatements, {}),
+    ).resolves.toEqual([]);
+    await expect(
+      t.withIdentity({ subject: OWNER }).query(api.dispatchMobile.listStatements, {}),
+    ).resolves.toEqual([]);
+  });
+
+  it('details behind the same gate', async () => {
+    const { t, ready } = setup();
+    await ready;
+    await expect(
+      t.withIdentity(staffDispatcher as never).query(api.dispatchMobile.getStatementDetails, {
+        settlementId: 'x',
+        source: 'legacy',
+      }),
+    ).rejects.toThrow('Not authorized: missing canViewSettlements');
+  });
+});
