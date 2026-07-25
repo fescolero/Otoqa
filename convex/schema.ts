@@ -476,6 +476,21 @@ export default defineSchema({
     .index('by_org_status', ['orgExternalId', 'status'])
     .index('by_dedupe', ['assignmentId', 'kind', 'status']),
 
+  // Expo push tokens for Dispatch-app users (split-plan §5.7). Keyed by the
+  // authenticated identity subject (works for Clerk AND WorkOS callers) +
+  // the org's external id for org-wide fan-out. Pruned automatically when
+  // Expo receipts report DeviceNotRegistered.
+  dispatchPushTokens: defineTable({
+    orgExternalId: v.string(),
+    userKey: v.string(), // identity.subject
+    token: v.string(), // ExponentPushToken[...]
+    platform: v.union(v.literal('ios'), v.literal('android')),
+    registeredAt: v.number(),
+    lastSeenAt: v.number(),
+  })
+    .index('by_org', ['orgExternalId'])
+    .index('by_token', ['token']),
+
   // User identity linking (Clerk <-> WorkOS)
   // Links mobile auth (Clerk) to web auth (WorkOS) via immutable user IDs
   userIdentityLinks: defineTable({

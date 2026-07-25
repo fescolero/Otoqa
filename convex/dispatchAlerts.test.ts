@@ -240,3 +240,42 @@ describe('event kinds + feed', () => {
     expect(after).toHaveLength(0);
   });
 });
+
+describe('push pipeline (§5.7)', () => {
+  it('registerPushToken upserts by token and re-homes to the caller', async () => {
+    const { t, ready } = setup();
+    await ready;
+    const owner = t.withIdentity({ subject: OWNER });
+    await owner.mutation(api.dispatchMobile.registerPushToken, {
+      token: 'ExponentPushToken[abc]',
+      platform: 'ios',
+    });
+    await owner.mutation(api.dispatchMobile.registerPushToken, {
+      token: 'ExponentPushToken[abc]',
+      platform: 'ios',
+    });
+    const staff = t.withIdentity(DISPATCHER as never);
+    await staff.mutation(api.dispatchMobile.registerPushToken, {
+      token: 'ExponentPushToken[abc]',
+      platform: 'android',
+    });
+    const rows = await t.run((ctx) => ctx.db.query('dispatchPushTokens').collect());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].userKey).toBe('al_dispatcher');
+    expect(rows[0].platform).toBe('android');
+  });
+
+  it('pruneToken removes a dead device; unauthenticated registration fails loud', async () => {
+    const { t, ready } = setup();
+    await ready;
+    await t.withIdentity({ subject: OWNER }).mutation(api.dispatchMobile.registerPushToken, {
+      token: 'ExponentPushToken[dead]',
+      platform: 'ios',
+    });
+    await t.mutation(internal.push.pruneToken, { token: 'ExponentPushToken[dead]' });
+    expect(await t.run((ctx) => ctx.db.query('dispatchPushTokens').collect())).toHaveLength(0);
+    await expect(
+      t.mutation(api.dispatchMobile.registerPushToken, { token: 'x', platform: 'ios' }),
+    ).rejects.toThrow('Unauthenticated');
+  });
+});

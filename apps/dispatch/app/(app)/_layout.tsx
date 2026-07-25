@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
 import { colors, typography } from '@otoqa/mobile-core';
 import { useActiveAuth } from '../../lib/convex';
+import { usePushRegistration } from '../../lib/hooks/usePushRegistration';
 
 export type DispatchSession = NonNullable<ReturnType<typeof useDispatchSession>>;
 
@@ -29,6 +30,8 @@ export default function AppLayout() {
   const { isLoading, isAuthenticated } = useConvexAuth();
   const { signOut } = useActiveAuth();
   const session = useQuery(api.dispatchMobile.getSession, isAuthenticated ? {} : 'skip');
+  // Register for §5.7 alert pushes once we have a working org session.
+  usePushRegistration(!!session?.authenticated && !!session.orgExternalId);
 
   if (isLoading || (isAuthenticated && session === undefined)) {
     return (

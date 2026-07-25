@@ -49,6 +49,15 @@ export async function raiseAlert(
     .first();
   if (dupe) return false;
   await ctx.db.insert('dispatchAlerts', { ...a, status: 'open', createdAt: Date.now() });
+  // High-severity alerts reach dispatchers' lock screens (§5.7). Fresh
+  // alerts only — dedupe above means one push per incident, not per tick.
+  if (a.severity === 'high') {
+    await ctx.scheduler.runAfter(0, internal.push.fanoutHighAlert, {
+      orgExternalId: a.orgExternalId,
+      title: 'Dispatch alert',
+      body: a.detail,
+    });
+  }
   return true;
 }
 

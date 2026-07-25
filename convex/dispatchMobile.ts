@@ -530,3 +530,36 @@ export const assignDriverToLoad = mutation({
     return { success: true as const };
   },
 });
+
+
+/** Upsert this device's Expo push token for high-severity alert fan-out (§5.7). */
+export const registerPushToken = mutation({
+  args: { token: v.string(), platform: v.union(v.literal('ios'), v.literal('android')) },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const identity = await ctx.auth.getUserIdentity();
+    const now = Date.now();
+    const existing = await ctx.db
+      .query('dispatchPushTokens')
+      .withIndex('by_token', (q) => q.eq('token', args.token))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        orgExternalId: resolved.externalId,
+        userKey: identity!.subject,
+        platform: args.platform,
+        lastSeenAt: now,
+      });
+    } else {
+      await ctx.db.insert('dispatchPushTokens', {
+        orgExternalId: resolved.externalId,
+        userKey: identity!.subject,
+        token: args.token,
+        platform: args.platform,
+        registeredAt: now,
+        lastSeenAt: now,
+      });
+    }
+    return { success: true };
+  },
+});
