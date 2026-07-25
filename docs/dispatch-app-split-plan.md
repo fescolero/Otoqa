@@ -1,6 +1,6 @@
 # Otoqa Dispatch App — Split & Implementation Plan
 
-> Status: **v1.0 — verified.** Three verification passes completed (log at end): codebase fact-check, external-documentation cross-check (13/13 claims confirmed), adversarial review (all findings incorporated).
+> Status: **v1.1 — verified + decisions signed off.** Three verification passes completed (log at end); all open questions answered by the product owner 2026-07-25 (decisions D9–D19) except the deliberately deferred OQ-11. §0 security hotfix shipped.
 > Scope: split mobile into **Otoqa Driver** (existing, cleaned up) and **Otoqa Dispatch** (new; serves in-house dispatchers *and* owner-operators), built against approved design bundle **Otoqa_Mobile8**.
 > Backend: the single shared Convex deployment (topology unchanged).
 
@@ -28,6 +28,17 @@ Adversarial review found unauthenticated public mutations in `convex/loadCarrier
 | D6 | Dispatch requests **no location permission**, no camera, no microphone until voice ships (Phase 3). Design's Permissions-row copy drops "Location" at build time. | Minimal manifest = fast review. Grounded in Guideline 5.1.1(iii) data minimization; unused-permission rejections are commonly reported (not Apple-documented as automatic). |
 | D7 | Design v8 (Otoqa_Mobile8) approved build-ready — with one copy correction: pay-period labels must be **dynamic** (see §5.7; the org pay model is WEEKLY/BIWEEKLY/MONTHLY per `schema.ts:2040-2061`, so "weekly · pays Wednesday" can't be hardcoded). | Reviewed against codebase + store guidelines. |
 | D8 | Monorepo restructure: workspace apps + shared packages; single source of Convex codegen. | `mobile/convex/_generated` already drifts from root (verified). |
+| D9 | **Capability sign-off (closes OQ-2):** staff **admin** → everything incl. settlements; an **accountant/billing** role → settlements view; **dispatcher** → assign work to existing drivers only (`loads:edit`, fleet *view*, **no** `fleet:edit`). All Clerk mobile users are one persona, displayed as **"Owner-operator"** (both OWNER- and ADMIN-linked keep settlements — owners don't share staff role granularity). | User decision 2026-07-25. |
+| D10 | **Chat is dropped entirely.** No in-app messaging in either app: §5.3 removed, the driver app's Messages tab is deleted permanently in the cleanup release (closes OQ-7), and the dispatch design's thread screens / "Message driver" actions are replaced with **Call driver**. Contact happens by phone/SMS outside the app. | User decision 2026-07-25. |
+| D11 | **HOS (closes OQ-3):** estimate from driver shift sessions for now; build toward an ELD integration later. The HOS chip ships when the estimate lands (Phase 2+), clearly labeled as an estimate. | User decision 2026-07-25. |
+| D12 | **Equipment/endorsements (closes OQ-4):** live on **both** truck (trailer type) and driver (endorsements). Gap: the driver record has no UI to view/edit endorsements — new work item (§5.1). Maintained by org admins; by the owner-operator in owner-op orgs. | User decision 2026-07-25. |
+| D13 | **Statement export = share the web-generated PDF** (closes OQ-6). | User decision 2026-07-25. |
+| D14 | **Staff SSO domains are per-tenant** — WorkOS org SSO config decides which domains are valid (closes OQ-8). Sign-in copy must be dynamic (no hardcoded `otoqa.com`; design change request). | User decision 2026-07-25. |
+| D15 | **App name: "Otoqa Dispatch"** (closes OQ-9). | User decision 2026-07-25. |
+| D16 | **Package manager: bun** workspaces (closes OQ-10). Phase 0 regenerates a fresh `bun.lock` (must resolve `convex ≥1.32` — the current one is stale/broken vs `convex-test`) and deletes `package-lock.json`. Until then: `npm ci`. | User decision 2026-07-25. |
+| D17 | **Crash/error monitoring: PostHog error tracking** for both apps (closes OQ-12) — already the integrated vendor; JS exception autocapture + native-crash capture via `@posthog/react-native-plugin`, with the Expo plugin uploading debug symbols during EAS builds. Sentry only if deep tracing is ever needed. | Verified: PostHog RN error-tracking + Expo symbol upload exist. |
+| D18 | **Analytics: shared PostHog project** with an app label property (`app: driver \| dispatch`) to distinguish (closes OQ-13). | User decision 2026-07-25. |
+| D19 | **Alerts get a web surface too** (closes OQ-14): web and mobile read the same `dispatchAlerts` Convex source, shipping in the same phase so dispatch stays in sync across surfaces. | User decision 2026-07-25. |
 
 ---
 
@@ -103,11 +114,13 @@ New query `dispatchMobile.getSession` (leaves `carrierMobile.getUserRoles` untou
 
 | Capability | WorkOS caller (staff) | Clerk caller (owner-operator) |
 |---|---|---|
-| `canDispatch` | `loads:edit` | identity-link role **OWNER or ADMIN** |
-| `canViewSettlements` | `accounting:view` (expected absent from the dispatcher preset — OQ-2 confirms) | **OWNER or ADMIN** |
-| `canManageDrivers` | `fleet:edit` | **OWNER or ADMIN** |
+| `canDispatch` | `loads:edit` (admin, dispatcher) | identity-link role **OWNER or ADMIN** |
+| `canViewSettlements` | `accounting:view` (admin, accountant/billing — **not** dispatcher) | **OWNER or ADMIN** (all mobile Clerk users are the "Owner-operator" persona, D9) |
+| `canManageDrivers` | `fleet:edit` (admin only — dispatchers get fleet *view*, per D9) | **OWNER or ADMIN** |
 
-> **Parity rule (regression-critical):** production today grants owner mode to Clerk identity-link **OWNER or ADMIN** (`carrierMobile.ts:1010`). The Clerk path of every guard MUST accept both — and MUST include the phone-fallback match (H1/H2 findings) — until owner mode is fully removed from field builds. Tightening (e.g., ADMIN loses settlements) happens only after the migration window closes, gated on OQ-2. **OQ-2 is therefore a Phase 0 blocker, not a background question.**
+Role presets to configure in WorkOS (D9): **admin** (everything), **accountant/billing** (`accounting:view` + read-only elsewhere as needed), **dispatcher** (`loads:edit`, `fleet:view` — no fleet editing, no accounting). Mobile UI labels the Clerk persona **"Owner-operator"** regardless of underlying OWNER/ADMIN link role.
+
+> **Parity rule (regression-critical):** production today grants owner mode to Clerk identity-link **OWNER or ADMIN** (`carrierMobile.ts:1010`). The Clerk path of every guard MUST accept both — and MUST include the phone-fallback match (H1/H2 findings). D9 confirms this is also the *permanent* rule (both keep settlements), so no post-cleanup tightening is needed on the Clerk path.
 
 ### 4.3 Enforcement (server-side, not just UI)
 
@@ -130,7 +143,7 @@ Every read the Dispatch MVP needs currently authenticates via Clerk-only `requir
 
 ### 4.6 Legacy-token caveat & concurrency
 
-- WorkOS tokens with no permissions claim pass every check (grandfathering). **OQ-2b (Phase 0 blocker):** confirm RBAC roles are seeded for all staff before Dispatch launch; optionally strict-mode the settlements guard.
+- WorkOS tokens with no permissions claim pass every check (grandfathering). **OQ-2b answered:** a default **member** role exists, so staff aren't role-less. One retained verification (cheap, Phase 0): confirm the WorkOS roles actually carry the seeded permission claims for every org — the grandfather clause keys on the *token's claims*, not on a role merely existing — then optionally strict-mode the settlements guard.
 - Multi-dispatcher concurrency: assignment mutations return `alreadyAssigned` so clients show "Assigned to X by Y just now" (no silent last-write-wins).
 
 ---
@@ -142,20 +155,21 @@ Every read the Dispatch MVP needs currently authenticates via Clerk-only `requir
 ### 5.1 Ranked assignment suggestions (Phase 1)
 
 - **Build:** `dispatchMobile.suggestDriversForLoad(loadId)` — proximity (haversine vs pickup), workload, equipment match, last-ping staleness → ranked candidates + structured `warns[]`; blocked candidates ranked-with-warning (design behavior).
-- **Data gaps:** no live HOS (OQ-3) → ship without the HOS chip; endorsements not modeled (OQ-4).
+- **HOS (per D11):** Phase 1 ships without the chip; a session-derived HOS *estimate* (driver shift sessions → hours-used approximation, labeled as estimate) lands Phase 2+, with an ELD integration as the eventual source of truth.
+- **Capability data (per D12 — new work item):** add endorsement fields to the **driver** record (hazmat etc.) and lean on existing **truck** equipment fields; build the missing web UI to view/edit driver endorsements (today the driver record has no surface for them, so the data can't exist). Until populated, equipment scoring uses truck data + load `equipmentType`, and the endorsement chip degrades gracefully.
 - **Back-test:** convex-test fixtures — determinism, tie-breaks, org-scoping, warns; authz matrix.
 
 ### 5.2 Notifications / exceptions engine (Phase 2)
 
 - **Verified signals to reuse:** check-in/out mutations (+dwell), geofence arrival/departure timestamps (tested), POD-missing predicate (`lib/settlementShared.ts:368-373`), detour flow with reason codes, `driverLatestLocation` recency.
 - **Build:** `dispatchAlerts` table (`by_org_status`, dedupe on open `{kind, loadId}`); 1-min detection cron (`internalMutation`, cursor + `runAfter(0,…)` continuation — the documented Convex batching pattern): missed check-in, missed appointment, tracking lost, POD missing, missed check-out. Event-driven kinds fire in-line (load cancelled; declined — via the now-guarded `declineOffer`, driver UI in Phase 3). Reactive `listOpen(orgId)` feed.
+- **Web surface ships in the same phase (D19):** a web alerts view reading the same `dispatchAlerts` table/queries, so web and mobile dispatchers see identical state from one source.
+- **Design change request (D10):** alert actions drop "Message driver" in favor of **Call driver**; the Notifications screen loses its Messages segment.
 - **Back-test:** per-scenario convex-test; batch continuation >1 page; dedupe; lifecycle.
 
-### 5.3 Chat — driver ↔ dispatch (Phase 2)
+### 5.3 Chat — REMOVED (D10)
 
-- **Build:** `threads` + `messages` + per-participant `lastReadAt`; `by_org_lastMessage`, `by_thread_created`; `usePaginatedQuery`; rate-limited via the already-registered `@convex-dev/rate-limiter`. Serves both apps (lights up the Driver app's stub Messages tab). Push depends on §5.7.
-- **Back-test:** thread idempotency, unread counts, pagination order, authz; 10k-message seed for index-only access.
-- **Web parity** for chat/alerts is deliberately out of scope for Phase 2 (OQ-14 decides timing).
+Dropped entirely per user decision: no in-app messaging in either app. Consequences applied throughout this plan: the driver Messages tab is deleted in the cleanup release (§6), the dispatch design drops thread screens and message actions (design change request), the push pipeline (§5.7) serves alerts only, and the voice agent's prerequisites shrink (§5.8). If messaging is ever revisited, it re-enters as a new plan, not a revival of this section.
 
 ### 5.4 Appointment window adjustment (Phase 2)
 
@@ -175,7 +189,7 @@ Every read the Dispatch MVP needs currently authenticates via Clerk-only `requir
 ### 5.7 Pay screens (Phase 1) + push pipeline (Phase 2)
 
 - **Pay:** `getCarrierStatements` / `getCarrierStatementDetails` behind `canViewSettlements`; "blocked on paperwork" reuses the settlement POD predicate. **Period copy is dynamic** — org pay model is WEEKLY/BIWEEKLY/MONTHLY with configurable start day (`schema.ts:2040-2061`; resolves former OQ-5): labels render from the org's actual config, never "weekly / pays Wednesday" hardcoded. Statement export: share the web-generated PDF artifact (OQ-6 confirms).
-- **Push (corrected scope — net-new):** no user-facing sends exist today (`driverPushTokens` is write-only; `fcmWake` is Android-only FCM data wakes). Build the documented Expo pipeline: Convex action → `exp.host/--/api/v2/push/send` + receipt checking ([docs](https://docs.expo.dev/push-notifications/sending-notifications/)); Android needs per-app `google-services.json` + FCM V1 service-account credentials uploaded to Expo; iOS APNs via EAS ([setup](https://docs.expo.dev/push-notifications/push-notifications-setup/)). New `dispatchPushTokens` keyed to the org user (works for both identity types). Benefits the Driver app too.
+- **Push (corrected scope — net-new; alerts-only after D10):** no user-facing sends exist today (`driverPushTokens` is write-only; `fcmWake` is Android-only FCM data wakes). Build the documented Expo pipeline: Convex action → `exp.host/--/api/v2/push/send` + receipt checking ([docs](https://docs.expo.dev/push-notifications/sending-notifications/)); Android needs per-app `google-services.json` + FCM V1 service-account credentials uploaded to Expo; iOS APNs via EAS ([setup](https://docs.expo.dev/push-notifications/push-notifications-setup/)). New `dispatchPushTokens` keyed to the org user (works for both identity types). Triggers: high-severity alerts only (chat removed). Benefits the Driver app too.
 - **Back-test:** settlement golden tests incl. one **biweekly and one monthly** org fixture; push receipt handling (mock transport); token lifecycle.
 
 ### 5.8 Phase 3 (mini-plans at kickoff)
@@ -183,7 +197,7 @@ Every read the Dispatch MVP needs currently authenticates via Clerk-only `requir
 | Feature | Prereq | Verified starting point |
 |---|---|---|
 | Bundled runs + auto-plan | 5.1 at scale | `autoAssignment.ts` rule engine + hourly cron |
-| Voice agent | 5.1–5.4 | STT: [`expo-speech-recognition`](https://github.com/jamsch/expo-speech-recognition) (maintained; streaming partials; New-Arch compatibility demonstrated in the field, not vendor-stated — validate in a spike). **Mic permission enters manifests here only.** |
+| Voice agent | 5.1, 5.2, 5.4 (chat removed from prereqs per D10) | STT: [`expo-speech-recognition`](https://github.com/jamsch/expo-speech-recognition) (maintained; streaming partials; New-Arch compatibility demonstrated in the field, not vendor-stated — validate in a spike). **Mic permission enters manifests here only.** |
 | Driver accept/decline | Driver-app UI | `acceptOffer`/`declineOffer` exist (guarded by §0 hotfix), zero callers |
 | Load-creation dictation | 5.6 + voice stack | — |
 | Cross-app sign-in handoff | deferred (D5) | Clerk sign-in tokens verified feasible |
@@ -200,8 +214,9 @@ Delete list (verified):
 - Owner analytics events; all remaining `carrierMobile` imports
 - Permissions: `NSMicrophoneUsageDescription` + `RECORD_AUDIO` + `requestMicrophonePermissionsAsync()` (unused-capability exposure)
 - Dead dep `expo-auth-session`; `owner/feature-unavailable.tsx`; owner "Coming Soon" placeholders (Guideline 2.1 exposure)
+- **The Messages tab, permanently (D10):** `(driver-tabs)/messages.tsx`, its tab-bar entry, and the `nav.messages` i18n keys — chat is dropped from the product, so the backendless inbox goes with the cleanup release
 
-**Regression safeguards:** store build (not OTA) + `runtimeVersion` bump; device smoke of the driver critical path (sign-in → scan → shift → check-in/out incl. offline-queued replay → detour → POD → pay → end) plus offline-boot and gate-timeout paths; behavior freeze per §4.4; Messages tab decision at cleanup time (OQ-7).
+**Regression safeguards:** store build (not OTA) + `runtimeVersion` bump; device smoke of the driver critical path (sign-in → scan → shift → check-in/out incl. offline-queued replay → detour → POD → pay → end) plus offline-boot and gate-timeout paths; behavior freeze per §4.4.
 
 ---
 
@@ -226,13 +241,13 @@ Delete list (verified):
 
 ## 8. Phases
 
-**Hotfix (now):** §0 — authenticate the six `loadCarrierAssignments` mutations with parity-shaped guards.
+**Hotfix — ✅ shipped:** §0 — the five unauthenticated `loadCarrierAssignments` mutations now carry parity-shaped guards (deploy promptly).
 
-**Phase 0 — Foundations:** workspace restructure (byte-equivalent Driver build gates everything); package-manager standardization (OQ-10); shared codegen package; **Clerk prod-instance migration workstream (§3.4)**; Clerk Native Applications + WorkOS redirect config; `dispatchMobile.getSession` + `requireCapability`; **blockers resolved: OQ-2 capability sign-off, OQ-2b RBAC seeding audit**.
+**Phase 0 — Foundations:** workspace restructure (byte-equivalent Driver build gates everything); **bun** workspace standardization with regenerated `bun.lock` (`convex ≥1.32`) + `package-lock.json` removal (D16); shared codegen package; **Clerk prod-instance migration workstream (§3.4)**; Clerk Native Applications + WorkOS redirect config; `dispatchMobile.getSession` + `requireCapability`; WorkOS role presets configured per D9; RBAC claims verification (§4.6).
 
-**Phase 1 — Dispatch MVP (store submission):** dual-path auth (§3); `dispatchMobile.*` read wrappers (§4.5); board-lite; drivers list/detail; load detail; ranked assign (5.1); live map (5.5); Pay gated with dynamic period copy (5.7); More/settings; first-run + brand-new-org empty states (no drivers/loads yet); crash monitoring + analytics wiring (OQ-12/13); store assets; review accounts.
+**Phase 1 — Dispatch MVP (store submission):** dual-path auth (§3); `dispatchMobile.*` read wrappers (§4.5); board-lite; drivers list/detail; load detail; ranked assign (5.1) + driver-endorsement fields/UI (D12); live map (5.5); Pay gated with dynamic period copy (5.7); More/settings; first-run + brand-new-org empty states; PostHog error tracking + app-label analytics (D17/D18); store assets ("Otoqa Dispatch", D15); review accounts.
 
-**Phase 2 — Operational core:** alerts engine (5.2), chat both apps (5.3), window adjustment (5.4), mobile load creation (5.6), Expo push pipeline + dispatch tokens (5.7), board horizon buckets. **Driver cleanup releases N → N+2 in parallel (§6).**
+**Phase 2 — Operational core:** alerts engine **with web surface** (5.2, D19), window adjustment (5.4), mobile load creation (5.6), Expo push pipeline + dispatch tokens (5.7, alerts-only), session-derived HOS estimate (D11), board horizon buckets. **Driver cleanup releases N → N+2 in parallel (§6).**
 
 **Phase 3 — Differentiators:** runs/auto-plan, voice agent (+ mic), driver accept/decline UI, dictation.
 
@@ -255,31 +270,35 @@ Phase exit criteria: convex-test green; device-matrix smoke (iOS+Android × both
 | **Clerk dev→prod instance migration breaks field users** | §3.4 workstream: dual issuers, phone-keyed re-link + backfill, staged rollout, comms |
 | Guard adoption breaks owner mode in old builds | Parity rules (§4.2/4.3): OWNER+ADMIN + phone fallback, behavior freeze (§4.4), parity tests |
 | WorkOS mobile adapter edge cases | Mirror web's proven adapter; contract tests; staff-only blast radius |
-| Legacy WorkOS tokens bypass RBAC | OQ-2b seeding audit (Phase 0 blocker); optional strict-mode on settlements |
+| Legacy WorkOS tokens bypass RBAC | §4.6 claims verification in Phase 0; optional strict-mode on settlements |
 | `_layout.tsx` gate regressions during cleanup | Subtractive-only diffs; gate-path smoke; rollback build |
 | Alert noise/duplication | Dedupe key + tests before push wiring |
 | Store rejection on OTP review access | OQ-1 resolved (prod test mode, window-scoped) + review-flag fallback |
 | Restructure breaks Driver CI | Phase 0 byte-equivalence gate |
 | Push pipeline is net-new | Phase 2 sized accordingly; receipts + token pruning day one |
-| Two-app crash blindness | OQ-12 (monitoring) resolved in Phase 1, before store launch |
+| Two-app crash blindness | PostHog error tracking (D17) lands in Phase 1, before store launch |
 
-## 11. Open questions
+## 11. Open questions — ALL RESOLVED except OQ-11
 
-**Resolved during verification:** ~~OQ-1~~ (Clerk prod test mode — see §7), ~~OQ-5~~ (pay periods are per-org WEEKLY/BIWEEKLY/MONTHLY — see D7/§5.7).
+Answered 2026-07-25 (recorded as decisions D9–D19; details in the decisions log):
 
-- **OQ-2 (Phase 0 blocker):** capability sign-off — which WorkOS preset roles carry `accounting:view`? Post-cleanup, do Clerk ADMIN links keep settlements? Dispatcher `fleet:edit`?
-- **OQ-2b (Phase 0 blocker):** RBAC seeded for all staff (no legacy no-claims tokens) before launch?
-- **OQ-3:** HOS source (ELD vs computed) — blocks the HOS chip.
-- **OQ-4:** Equipment/endorsement home (driver vs truck) + ownership.
-- **OQ-6:** Statement export = share web PDF artifact (recommended) — confirm.
-- **OQ-7:** Driver Messages tab between cleanup and chat: hide or keep empty-state?
-- **OQ-8:** Staff SSO domain allowlist (design hardcodes `otoqa.com`).
-- **OQ-9:** Final Dispatch display name ("Otoqa Dispatch" vs "Otoqa Dispatcher").
-- **OQ-10:** Package manager for the workspace (bun vs npm).
-- **OQ-11:** Customer-notification channel for window changes (Phase 2b scope).
-- **OQ-12:** Crash/error monitoring choice (nothing exists in mobile today — Sentry vs alternatives) for both apps.
-- **OQ-13:** PostHog: separate project/key for Dispatch, or shared key with app property? (Same key currently baked into every driver profile.)
-- **OQ-14:** Web parity timing for alerts/chat (web planner already assigns via `directAssign`/`offerLoad` — mobile and web assignment paths must stay consistent; decide owner and timing).
+| OQ | Answer |
+|---|---|
+| ~~OQ-1~~ | Clerk prod test mode works, window-scoped (§7). |
+| ~~OQ-2~~ | D9 — admin: everything; accountant/billing: settlements view; dispatcher: assign-only; Clerk users = "Owner-operator" persona, keep settlements. |
+| ~~OQ-2b~~ | Default member role exists; §4.6 keeps a cheap claims-on-token verification in Phase 0. |
+| ~~OQ-3~~ | D11 — session-derived estimate now, ELD later. |
+| ~~OQ-4~~ | D12 — both driver + truck; driver-endorsement UI is net-new work; admins (or the owner-op) maintain it. |
+| ~~OQ-5~~ | Pay periods are per-org WEEKLY/BIWEEKLY/MONTHLY (D7/§5.7). |
+| ~~OQ-6~~ | D13 — share the web PDF. |
+| ~~OQ-7~~ | D10 — chat dropped entirely; Messages tab deleted in cleanup. |
+| ~~OQ-8~~ | D14 — per-tenant domains via WorkOS; dynamic sign-in copy. |
+| ~~OQ-9~~ | D15 — "Otoqa Dispatch". |
+| ~~OQ-10~~ | D16 — bun workspaces; regenerate `bun.lock`, drop `package-lock.json`. |
+| **OQ-11** | **Still open (deliberately):** customer-notification channel for window changes — deferred feature, scope at Phase 2b. |
+| ~~OQ-12~~ | D17 — PostHog error tracking (verified RN + native-crash + Expo symbol support). |
+| ~~OQ-13~~ | D18 — shared PostHog project + app label. |
+| ~~OQ-14~~ | D19 — alerts ship with a web surface from the same Convex source; chat parity moot (D10). |
 
 ---
 
