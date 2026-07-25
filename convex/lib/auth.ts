@@ -141,6 +141,134 @@ export async function assertOrgPermission(
 }
 
 /**
+ * Mobile Dispatch capabilities (split-plan §4.2, decision D9) mapped to
+ * RBAC permission slugs for WorkOS staff callers. Clerk mobile callers
+ * (the "Owner-operator" persona) hold every capability by definition.
+ */
+export const CAPABILITY_SLUGS = {
+  canDispatch: 'loads:edit',
+  canViewSettlements: 'accounting:view',
+  canManageDrivers: 'fleet:edit',
+} as const;
+
+export type DispatchCapability = keyof typeof CAPABILITY_SLUGS;
+
+/**
+ * Resolve a Clerk mobile caller to their carrier-org membership, mirroring
+ * `carrierMobile.getUserRoles` Methods 1 and 2 exactly (split-plan §4.2
+ * parity rule): `userIdentityLinks` by `clerkUserId` first, then by
+ * verified phone number (same variant set). Only OWNER/ADMIN links on a
+ * non-deleted CARRIER/BROKER_CARRIER-capable org count — those are the
+ * roles that unlock owner mode in shipped builds. Returns null when the
+ * caller has no qualifying membership (e.g. MEMBER links, staff tokens).
+ */
+export async function resolveClerkCarrierMembership(
+  ctx: QueryCtx | MutationCtx,
+): Promise<{
+  org: {
+    _id: string;
+    name: string;
+    clerkOrgId?: string;
+    workosOrgId?: string;
+    orgType?: string;
+  };
+  role: 'OWNER' | 'ADMIN';
+} | null> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return null;
+
+  const qualify = async (link: {
+    role: 'OWNER' | 'ADMIN' | 'MEMBER';
+    organizationId: import('../_generated/dataModel').Id<'organizations'>;
+  }) => {
+    if (link.role !== 'OWNER' && link.role !== 'ADMIN') return null;
+    const org = await ctx.db.get(link.organizationId);
+    if (!org || org.isDeleted) return null;
+    return { org, role: link.role };
+  };
+
+  // Method 1: by Clerk user id.
+  const link = await ctx.db
+    .query('userIdentityLinks')
+    .withIndex('by_clerk', (q) => q.eq('clerkUserId', identity.subject))
+    .first();
+  if (link) {
+    const hit = await qualify(link);
+    if (hit) return hit;
+  }
+
+  // Method 2: by verified phone, same variants as getUserRoles.
+  const rawPhone =
+    (identity as unknown as { phoneNumber?: string; phone_number?: string }).phoneNumber ??
+    (identity as unknown as { phoneNumber?: string; phone_number?: string }).phone_number;
+  if (typeof rawPhone === 'string' && rawPhone) {
+    const normalized = normalizePhoneForMatch(rawPhone);
+    for (const variant of [normalized, `+1${normalized}`, `1${normalized}`]) {
+      const phoneLink = await ctx.db
+        .query('userIdentityLinks')
+        .withIndex('by_phone', (q) => q.eq('phone', variant))
+        .first();
+      if (phoneLink) {
+        const hit = await qualify(phoneLink);
+        if (hit) return hit;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * The Dispatch-app capability guard (split-plan §4.3) — dual-path,
+ * FAIL-LOUD. Unlike the fail-soft `requireCarrierAuth` used by legacy
+ * driver-app reads, every denial throws a typed error so staff never see
+ * silently-empty screens.
+ *
+ *   - WorkOS caller (org claim on the token): org claim must equal
+ *     `orgExternalId` AND the RBAC claims must carry the capability's
+ *     permission slug (`assertOrgPermission` — admin bypass and the
+ *     legacy-grandfather rule per lib/permissions.ts apply).
+ *   - Clerk caller (no org claim): must resolve to an OWNER/ADMIN
+ *     carrier membership (`resolveClerkCarrierMembership`) whose org
+ *     matches `orgExternalId` (clerkOrgId/workosOrgId/_id — the
+ *     requireCarrierAuth match set). Owner-operators hold every
+ *     capability (D9).
+ */
+export async function requireCapability(
+  ctx: QueryCtx | MutationCtx,
+  orgExternalId: string,
+  capability: DispatchCapability,
+): Promise<{ userId: string; userName: string | undefined; userEmail: string | undefined }> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error('Unauthenticated');
+
+  const claims = identity as unknown as IdentityWithOrg;
+  const claimOrg = claims.org_id ?? claims.organizationId;
+
+  if (claimOrg) {
+    // WorkOS/staff path — org claim + RBAC slug.
+    return await assertOrgPermission(ctx, orgExternalId, CAPABILITY_SLUGS[capability]);
+  }
+
+  // Clerk/owner-operator path.
+  const membership = await resolveClerkCarrierMembership(ctx);
+  if (
+    membership &&
+    (membership.org.clerkOrgId === orgExternalId ||
+      membership.org.workosOrgId === orgExternalId ||
+      membership.org._id === orgExternalId)
+  ) {
+    return {
+      userId: identity.subject,
+      userName: identity.name ?? undefined,
+      userEmail: identity.email ?? undefined,
+    };
+  }
+
+  throw new Error(`Not authorized: missing ${capability} for this organization`);
+}
+
+/**
  * Asserts the caller belongs to the carrier org identified by an EXTERNAL
  * org id — the clerkOrgId/workosOrgId value stored on
  * `loadCarrierAssignments.carrierOrgId`. Serves BOTH caller populations of

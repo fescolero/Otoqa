@@ -113,7 +113,11 @@ export const PRESET_ROLES: PresetRole[] = [
     slug: 'dispatcher',
     name: 'Dispatcher',
     description: 'Plans loads, assigns drivers, and runs the daily board.',
-    matrix: { loads: 'manage', fleet: 'edit', partners: 'edit', accounting: 'view', fuel: 'view', reports: 'view', settings: 'none', team: 'none' },
+    // D9 (dispatch-app-split-plan): dispatchers assign work to EXISTING
+    // drivers — fleet is view-only — and never see settlements/money, so
+    // accounting is none (not view). Changing this matrix changes what the
+    // mobile Dispatch app shows dispatchers.
+    matrix: { loads: 'manage', fleet: 'view', partners: 'edit', accounting: 'none', fuel: 'view', reports: 'view', settings: 'none', team: 'none' },
   },
   {
     slug: 'billing',
