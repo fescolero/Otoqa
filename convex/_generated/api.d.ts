@@ -44,6 +44,7 @@ import type * as diagnosticLoadReview from "../diagnosticLoadReview.js";
 import type * as diagnosticWildcardLanes from "../diagnosticWildcardLanes.js";
 import type * as diagnostics from "../diagnostics.js";
 import type * as dispatchLegs from "../dispatchLegs.js";
+import type * as dispatchMobile from "../dispatchMobile.js";
 import type * as driverLocations from "../driverLocations.js";
 import type * as driverMobile from "../driverMobile.js";
 import type * as driverPayCalculation from "../driverPayCalculation.js";
@@ -237,6 +238,7 @@ declare const fullApi: ApiFromModules<{
   diagnosticWildcardLanes: typeof diagnosticWildcardLanes;
   diagnostics: typeof diagnostics;
   dispatchLegs: typeof dispatchLegs;
+  dispatchMobile: typeof dispatchMobile;
   driverLocations: typeof driverLocations;
   driverMobile: typeof driverMobile;
   driverPayCalculation: typeof driverPayCalculation;

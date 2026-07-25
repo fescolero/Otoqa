@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Otoqa Dispatch",
+    "slug": "otoqa-dispatch",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "otoqa-dispatch",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "runtimeVersion": "1.0.0",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.otoqa.dispatch",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.otoqa.dispatch"
+    },
+    "plugins": ["expo-router", "expo-secure-store", "expo-web-browser"],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@otoqa/mobile-core",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Shared mobile design system (theme + design tokens) for the Otoqa apps. Source of truth copied from apps/driver/lib; the driver app migrates its imports here in a later release.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "peerDependencies": {
+    "react-native": "*"
+  }
+}
