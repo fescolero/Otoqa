@@ -159,7 +159,7 @@ interface ResolvedOrg {
 }
 
 /** Dual-path org + capability resolution. Throws on every miss. */
-async function resolveOrgForRead(
+export async function resolveOrgForRead(
   ctx: QueryCtx,
   capability: DispatchCapability,
 ): Promise<ResolvedOrg> {

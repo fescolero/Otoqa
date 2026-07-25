@@ -13,6 +13,7 @@ import { getLoadFacets } from './lib/loadFacets';
 import { computeLegScheduledTimes } from './_helpers/timeUtils';
 import { logAudit } from './lib/audit';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
+import { raiseAlert } from './dispatchAlerts';
 
 /**
  * Load Carrier Assignments API
@@ -814,6 +815,16 @@ export const declineOffer = mutation({
       status: 'DECLINED',
     });
 
+    // Dispatch alert (split-plan §5.2): the load is back in the backlog.
+    await raiseAlert(ctx, {
+      orgExternalId: assignment.carrierOrgId,
+      kind: 'OFFER_DECLINED',
+      severity: 'med',
+      assignmentId: args.assignmentId,
+      loadId: assignment.loadId,
+      detail: 'Offer declined — load needs a new assignment.',
+    });
+
     return { success: true };
   },
 });
@@ -1162,6 +1173,19 @@ export const cancelAssignment = mutation({
       cancellationReason: args.cancellationReason,
       cancellationNotes: args.cancellationNotes,
     });
+
+    // Dispatch alert (split-plan §5.2) — carrier-side heads-up.
+    if (assignment.carrierOrgId) {
+      await raiseAlert(ctx, {
+        orgExternalId: assignment.carrierOrgId,
+        kind: 'LOAD_CANCELED',
+        severity: 'high',
+        assignmentId: args.assignmentId,
+        loadId: assignment.loadId,
+        driverId: assignment.assignedDriverId,
+        detail: `Assignment canceled by ${args.canceledByParty} (${args.cancellationReason}).`,
+      });
+    }
 
     // Update load status back to Open
     await ctx.db.patch(assignment.loadId, {

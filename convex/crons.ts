@@ -299,4 +299,11 @@ crons.cron(
   {},
 );
 
+crons.interval(
+  'dispatch-alerts-sweep',
+  { minutes: 1 },
+  internal.dispatchAlerts.sweep,
+  {},
+);
+
 export default crons;

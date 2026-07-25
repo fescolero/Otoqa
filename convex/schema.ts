@@ -446,7 +446,35 @@ export default defineSchema({
     .index('by_broker', ['brokerOrgId', 'status'])
     .index('by_carrier', ['carrierOrgId', 'status'])
     .index('by_carrier_payment', ['carrierOrgId', 'paymentStatus'])
-    .index('by_assigned_driver', ['assignedDriverId', 'status']),
+    .index('by_assigned_driver', ['assignedDriverId', 'status'])
+    // Sweep index for the dispatch alerts cron (dispatchAlerts.ts).
+    .index('by_status', ['status']),
+
+  // Operational exceptions for the Dispatch app + web (split-plan §5.2).
+  // Keyed by the carrier's EXTERNAL org id (same value as
+  // loadCarrierAssignments.carrierOrgId) so feed queries match assignment
+  // scoping. Dedupe rule: at most ONE open alert per {kind, assignmentId} —
+  // enforced by raiseAlert via by_dedupe, so cron ticks never multiply.
+  dispatchAlerts: defineTable({
+    orgExternalId: v.string(),
+    kind: v.union(
+      v.literal('TRACKING_LOST'),
+      v.literal('MISSED_APPOINTMENT'),
+      v.literal('POD_MISSING'),
+      v.literal('LOAD_CANCELED'),
+      v.literal('OFFER_DECLINED'),
+    ),
+    severity: v.union(v.literal('high'), v.literal('med')),
+    assignmentId: v.id('loadCarrierAssignments'),
+    loadId: v.optional(v.id('loadInformation')),
+    driverId: v.optional(v.id('drivers')),
+    detail: v.string(),
+    status: v.union(v.literal('open'), v.literal('dismissed'), v.literal('resolved')),
+    createdAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+  })
+    .index('by_org_status', ['orgExternalId', 'status'])
+    .index('by_dedupe', ['assignmentId', 'kind', 'status']),
 
   // User identity linking (Clerk <-> WorkOS)
   // Links mobile auth (Clerk) to web auth (WorkOS) via immutable user IDs
