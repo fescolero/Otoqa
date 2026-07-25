@@ -13,6 +13,8 @@ Adversarial review found unauthenticated public mutations in `convex/loadCarrier
 **Shipped:** `assertCallerInCarrierOrg(ctx, externalOrgId)` in `convex/lib/auth.ts` — dual-path, parity-shaped per §4.2/§4.3: org-claim tokens (WorkOS web/staff) match the claim; Clerk mobile callers resolve via `userIdentityLinks` by `clerkUserId` **and** the phone fallback (mirroring `getUserRoles` Methods 1+2), role OWNER/ADMIN, non-deleted org, same org-match set as `requireCarrierAuth` (`clerkOrgId`/`workosOrgId`/`_id`). Wired into all five mutations against the **stored** `assignment.carrierOrgId` (not the client arg); all pre-existing arg/status checks unchanged. Covered by `convex/loadCarrierAssignments.auth.test.ts` (13 tests: fail-closed matrix — unauthenticated, unlinked, cross-org, MEMBER, deleted-org, mismatched claim; old-build parity — Clerk OWNER by link, Clerk ADMIN by phone fallback, WorkOS org claim; behavior parity — original error messages and status-transition rules). Full suite green (725 tests / 69 files).
 
 > Field note: the dual-lockfile hazard (OQ-10) bit during this work — `bun.lock` freezes `convex@1.31.2`, which is incompatible with `convex-test@0.0.49` (peer `^1.32`); `package-lock.json` resolves `convex@1.35.1` and is the lockfile that actually works. Until OQ-10 standardizes, **install with `npm ci`**, not bun.
+>
+> Deployment note (per product owner): the team runs **`convex dev`** — the live backend is the dev deployment. This hotfix goes live the next time `convex dev` syncs functions from a branch containing it; there is no separate `convex deploy` step today.
 
 ---
 
@@ -99,6 +101,7 @@ New query `dispatchMobile.getSession` (leaves `carrierMobile.getUserRoles` untou
 3. **Forced re-sign-in** for all drivers/owners when their build moves to prod keys — comms + staged rollout required.
 4. Dispatch registers against the **production** instance from day one (Native Applications entry there).
 5. Risk-table row added (§10).
+6. **Convex environment (same pattern, noted 2026-07-25):** the team runs `convex dev` — the dev deployment (`greedy-vole-262`) is the live backend for field users, mirroring the Clerk `pk_test` situation. When production infrastructure is stood up, a Convex **prod deployment** move (new URL in EAS env vars, env variables migrated, data migration plan, `convex deploy`-based release flow) belongs in this same workstream, sequenced with the Clerk migration.
 
 ---
 
