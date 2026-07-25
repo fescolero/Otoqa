@@ -8,7 +8,9 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "runtimeVersion": "1.0.0",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.otoqa.dispatch",
@@ -19,9 +21,22 @@
     "android": {
       "package": "com.otoqa.dispatch"
     },
-    "plugins": ["expo-router", "expo-secure-store", "expo-web-browser"],
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser",
+      "expo-updates"
+    ],
     "experiments": {
       "typedRoutes": true
+    },
+    "updates": {
+      "url": "https://u.expo.dev/ba5a70b6-1b02-4618-a217-6d1942af4245"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ba5a70b6-1b02-4618-a217-6d1942af4245"
+      }
     }
   }
 }
