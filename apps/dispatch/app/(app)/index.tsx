@@ -152,9 +152,14 @@ export default function BoardScreen() {
           <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
             Board
           </Text>
-          <Pressable onPress={() => router.push('/create')} hitSlop={10}>
-            <Ionicons name="add-circle" size={26} color={colors.primary} />
-          </Pressable>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+            <Pressable onPress={() => router.push('/plan')} hitSlop={10}>
+              <Ionicons name="sparkles" size={22} color={colors.primary} />
+            </Pressable>
+            <Pressable onPress={() => router.push('/create')} hitSlop={10}>
+              <Ionicons name="add-circle" size={26} color={colors.primary} />
+            </Pressable>
+          </View>
         </View>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
           {session?.orgName ?? ''}

@@ -537,11 +537,56 @@ function milesBetween(aLat: number, aLng: number, bLat: number, bLng: number): n
 }
 
 /**
- * Ranked driver suggestions for one assignment — proximity to the first
- * pickup, current workload, ping freshness. Blocked/warned candidates are
- * RANKED WITH WARNINGS, never hidden (v8 design). No HOS chip yet (D11);
- * equipment scoring arrives with the D12 endorsement fields.
+ * The §5.1 candidate-scoring core, shared by suggestDriversForLoad and
+ * suggestPlan: proximity to an origin point, current workload, ping
+ * freshness. Blocked/warned candidates are RANKED WITH WARNINGS, never
+ * hidden (v8 design). No HOS chip yet (D11); equipment scoring arrives
+ * with the D12 endorsement fields.
  */
+async function rankDriversForOrigin(
+  ctx: QueryCtx,
+  resolved: ResolvedOrg,
+  origin: { lat: number; lng: number } | null,
+  excludeDriverId?: Id<'drivers'>,
+) {
+  const drivers = await orgDrivers(ctx, resolved);
+  const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
+  const staleCutoff = Date.now() - 45 * 60 * 1000;
+
+  const candidates = await Promise.all(
+    drivers
+      .filter((d) => d._id !== excludeDriverId)
+      .map(async (d) => {
+        const loc = await latestLocation(ctx, d._id);
+        const activeCount = inProgress.filter((a) => a.assignedDriverId === d._id).length;
+        const mi =
+          origin && loc ? milesBetween(loc.latitude, loc.longitude, origin.lat, origin.lng) : null;
+        const warns: string[] = [];
+        if (activeCount > 0) warns.push(`On ${activeCount} active load${activeCount > 1 ? 's' : ''}`);
+        if (!loc) warns.push('No GPS data');
+        else if (loc.recordedAt < staleCutoff) warns.push('Ping older than 45 min');
+        if (mi != null && mi > 60) warns.push(`${mi} mi deadhead`);
+        let score = 100 + (activeCount === 0 ? 22 : -7 * activeCount);
+        if (mi != null) score -= mi * 0.9;
+        if (!loc) score -= 25;
+        else if (loc.recordedAt < staleCutoff) score -= 15;
+        return {
+          _id: d._id,
+          firstName: d.firstName,
+          lastName: d.lastName,
+          phone: d.phone,
+          milesFromPickup: mi,
+          activeLoads: activeCount,
+          lastPingAt: loc?.recordedAt ?? null,
+          warns,
+          score,
+        };
+      }),
+  );
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
+/** Ranked driver suggestions for one assignment (split-plan §5.1). */
 export const suggestDriversForLoad = query({
   args: { assignmentId: v.id('loadCarrierAssignments') },
   handler: async (ctx, args) => {
@@ -561,42 +606,7 @@ export const suggestDriversForLoad = query({
       pickup?.latitude != null && pickup?.longitude != null
         ? { lat: pickup.latitude, lng: pickup.longitude }
         : null;
-
-    const drivers = await orgDrivers(ctx, resolved);
-    const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
-    const staleCutoff = Date.now() - 45 * 60 * 1000;
-
-    const candidates = await Promise.all(
-      drivers
-        .filter((d) => d._id !== assignment.assignedDriverId)
-        .map(async (d) => {
-          const loc = await latestLocation(ctx, d._id);
-          const activeCount = inProgress.filter((a) => a.assignedDriverId === d._id).length;
-          const mi =
-            origin && loc ? milesBetween(loc.latitude, loc.longitude, origin.lat, origin.lng) : null;
-          const warns: string[] = [];
-          if (activeCount > 0) warns.push(`On ${activeCount} active load${activeCount > 1 ? 's' : ''}`);
-          if (!loc) warns.push('No GPS data');
-          else if (loc.recordedAt < staleCutoff) warns.push('Ping older than 45 min');
-          if (mi != null && mi > 60) warns.push(`${mi} mi deadhead`);
-          let score = 100 + (activeCount === 0 ? 22 : -7 * activeCount);
-          if (mi != null) score -= mi * 0.9;
-          if (!loc) score -= 25;
-          else if (loc.recordedAt < staleCutoff) score -= 15;
-          return {
-            _id: d._id,
-            firstName: d.firstName,
-            lastName: d.lastName,
-            phone: d.phone,
-            milesFromPickup: mi,
-            activeLoads: activeCount,
-            lastPingAt: loc?.recordedAt ?? null,
-            warns,
-            score,
-          };
-        }),
-    );
-    return candidates.sort((a, b) => b.score - a.score);
+    return await rankDriversForOrigin(ctx, resolved, origin, assignment.assignedDriverId);
   },
 });
 
@@ -640,6 +650,229 @@ export const assignDriverToLoad = mutation({
       assignedDriverPhone: driver.phone,
     });
     return { success: true as const };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Bundled runs + auto-plan (Phase 3, "§5.1 at scale").
+//
+// suggestPlan is a PROPOSAL — a pure query over the unassigned AWARDED
+// backlog. Nothing commits until the dispatcher reviews it and calls
+// applyPlan (deliberately no cron: auto-committing assignments without
+// human review is not the v8 design). Deterministic for a given data
+// snapshot so convex-test can pin the bundling behavior.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Chaining model: average line-haul speed for deadhead drive-time. */
+const PLAN_AVG_MPH = 45;
+/** Deadhead beyond this never chains — reposition, don't bundle. */
+const PLAN_MAX_DEADHEAD_MI = 150;
+/** Slack added between a drop and the next pickup (unload + check-out). */
+const PLAN_CHAIN_BUFFER_MS = 45 * 60 * 1000;
+
+interface PlanItem {
+  assignment: Doc<'loadCarrierAssignments'>;
+  load: Doc<'loadInformation'> | null;
+  stopCount: number;
+  /** First pickup window open / close (close falls back to open). */
+  startT: number;
+  startCloseT: number;
+  /** Last stop window close (falls back to its open). */
+  endT: number;
+  origin: { lat: number; lng: number } | null;
+  dest: { lat: number; lng: number } | null;
+}
+
+const lightLoad = (load: Doc<'loadInformation'> | null) =>
+  load
+    ? {
+        _id: load._id,
+        internalId: load.internalId,
+        customerName: load.customerName,
+        equipmentType: load.equipmentType,
+        effectiveMiles: load.effectiveMiles,
+      }
+    : null;
+
+/**
+ * Propose bundled runs over the unassigned AWARDED backlog.
+ *
+ * Bundling: loads sorted by pickup-window open (id tiebreak), then greedy
+ * chaining — a load joins an existing run when the run's last drop plus
+ * buffer plus deadhead drive-time (45 mph) still makes the load's pickup
+ * window before it closes, and the deadhead is ≤ 150 mi. Loads missing
+ * windows come back in `unplannable` with a reason instead of silently
+ * vanishing (§4.5 fail-loud).
+ *
+ * Ranking: the §5.1 scorer against each run's first pickup; a driver
+ * suggested for one run is excluded from later runs in the same plan so
+ * the proposal never double-books. Top 3 candidates returned per run —
+ * warned candidates ranked, never hidden.
+ */
+export const suggestPlan = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const backlog = (await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')).filter(
+      (a) => !a.assignedDriverId,
+    );
+
+    const shaped: (PlanItem | { assignment: Doc<'loadCarrierAssignments'>; load: Doc<'loadInformation'> | null; reason: string })[] =
+      await Promise.all(
+        backlog.map(async (assignment) => {
+          const load = await ctx.db.get(assignment.loadId);
+          const stops = (
+            await ctx.db
+              .query('loadStops')
+              .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
+              .collect()
+          ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+          const pickup = stops.filter((s) => s.stopType === 'PICKUP')[0] ?? stops[0];
+          const lastStop = stops[stops.length - 1];
+          const startT = pickup?.windowBeginTime ? Date.parse(pickup.windowBeginTime) : NaN;
+          const startCloseT = pickup?.windowEndTime ? Date.parse(pickup.windowEndTime) : startT;
+          const endT = lastStop?.windowEndTime
+            ? Date.parse(lastStop.windowEndTime)
+            : lastStop?.windowBeginTime
+              ? Date.parse(lastStop.windowBeginTime)
+              : NaN;
+          if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
+            return { assignment, load, reason: 'Missing appointment windows' };
+          }
+          return {
+            assignment,
+            load,
+            stopCount: stops.length,
+            startT,
+            startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
+            endT,
+            origin:
+              pickup?.latitude != null && pickup?.longitude != null
+                ? { lat: pickup.latitude, lng: pickup.longitude }
+                : null,
+            dest:
+              lastStop?.latitude != null && lastStop?.longitude != null
+                ? { lat: lastStop.latitude, lng: lastStop.longitude }
+                : null,
+          };
+        }),
+      );
+
+    const unplannable = shaped
+      .filter((s): s is Extract<typeof s, { reason: string }> => 'reason' in s)
+      .map((s) => ({ assignmentId: s.assignment._id, load: lightLoad(s.load), reason: s.reason }));
+    const plannable = shaped
+      .filter((s): s is PlanItem => !('reason' in s))
+      .sort((a, b) => a.startT - b.startT || (a.assignment._id < b.assignment._id ? -1 : 1));
+
+    // Greedy chaining onto the first run whose tail can feasibly reach it.
+    const runs: { items: PlanItem[]; deadheads: number[] }[] = [];
+    for (const it of plannable) {
+      let placed = false;
+      for (const run of runs) {
+        const tail = run.items[run.items.length - 1];
+        if (!tail.dest || !it.origin) continue;
+        const deadhead = milesBetween(tail.dest.lat, tail.dest.lng, it.origin.lat, it.origin.lng);
+        if (deadhead > PLAN_MAX_DEADHEAD_MI) continue;
+        const arrival = tail.endT + PLAN_CHAIN_BUFFER_MS + (deadhead / PLAN_AVG_MPH) * 3600_000;
+        if (arrival > it.startCloseT) continue;
+        run.items.push(it);
+        run.deadheads.push(deadhead);
+        placed = true;
+        break;
+      }
+      if (!placed) runs.push({ items: [it], deadheads: [] });
+    }
+
+    // Rank per run; never suggest one driver for two runs in one plan.
+    const taken = new Set<string>();
+    const proposed = [];
+    for (const run of runs) {
+      const head = run.items[0];
+      const candidates = (await rankDriversForOrigin(ctx, resolved, head.origin)).filter(
+        (c) => !taken.has(c._id),
+      );
+      const top = candidates.slice(0, 3);
+      if (top[0]) taken.add(top[0]._id);
+      proposed.push({
+        loads: run.items.map((it) => ({
+          assignmentId: it.assignment._id,
+          load: lightLoad(it.load),
+          stopCount: it.stopCount,
+          start: it.startT,
+          end: it.endT,
+        })),
+        deadheadMiles: run.deadheads,
+        start: head.startT,
+        end: run.items[run.items.length - 1].endT,
+        candidates: top,
+      });
+    }
+    return { runs: proposed, unplannable };
+  },
+});
+
+/**
+ * Commit (part of) a proposed plan: assign each pick's driver to every
+ * load in that run. Same guards as assignDriverToLoad — status, org-
+ * scoped driver — and the same conflict posture: a load someone else
+ * just assigned is SKIPPED and reported, never clobbered (§4.6). Not
+ * all-or-nothing by design: the dispatcher sees per-load results.
+ */
+export const applyPlan = mutation({
+  args: {
+    picks: v.array(
+      v.object({
+        driverId: v.id('drivers'),
+        assignmentIds: v.array(v.id('loadCarrierAssignments')),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const results: {
+      assignmentId: Id<'loadCarrierAssignments'>;
+      success: boolean;
+      reason?: string;
+    }[] = [];
+    for (const pick of args.picks) {
+      const driver = await ctx.db.get(pick.driverId);
+      if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
+        throw new Error('Driver not found in your organization');
+      }
+      for (const assignmentId of pick.assignmentIds) {
+        const assignment = await ctx.db.get(assignmentId);
+        if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
+          throw new Error('Assignment not found');
+        }
+        if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') {
+          results.push({
+            assignmentId,
+            success: false,
+            reason: `Load is ${assignment.status.toLowerCase().replace('_', ' ')}`,
+          });
+          continue;
+        }
+        if (assignment.assignedDriverId && assignment.assignedDriverId !== pick.driverId) {
+          const current = await ctx.db.get(assignment.assignedDriverId);
+          results.push({
+            assignmentId,
+            success: false,
+            reason: `Already assigned to ${
+              current ? `${current.firstName} ${current.lastName}` : 'another driver'
+            }`,
+          });
+          continue;
+        }
+        await ctx.db.patch(assignmentId, {
+          assignedDriverId: pick.driverId,
+          assignedDriverName: `${driver.firstName} ${driver.lastName}`,
+          assignedDriverPhone: driver.phone,
+        });
+        results.push({ assignmentId, success: true });
+      }
+    }
+    return { results };
   },
 });
 
