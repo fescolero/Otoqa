@@ -1,6 +1,8 @@
 # Otoqa Dispatch App — Split & Implementation Plan
 
-> Status: **v1.1 — verified + decisions signed off.** Three verification passes completed (log at end); all open questions answered by the product owner 2026-07-25 (decisions D9–D19) except the deliberately deferred OQ-11. §0 security hotfix shipped.
+> Status: **v1.2 — Phases 0–2 device-verified.** Three verification passes completed (log at end); all open questions answered by the product owner 2026-07-25 (decisions D9–D19) except the deliberately deferred OQ-11. §0 security hotfix shipped.
+>
+> **Device checkpoint 2026-07-26 (Android preview build, Clerk owner-operator path):** sign-in, Board with horizon buckets, Drivers, ranked assignment, Pay + statement detail, fleet map, notifications/alerts, window adjustment, and load creation all confirmed working on device. WorkOS staff sign-in deferred until dashboard access is available (client ID + `otoqa-dispatch://sso` redirect). Still pending user-side config: Android Google Maps API key, FCM V1/APNs push credentials, WorkOS dispatcher-role permission update. Next engineering: Phase 3 mini-plans (§5.3/5.5/5.6 dictation/runs) and driver-app cleanup release N (§6).
 > Scope: split mobile into **Otoqa Driver** (existing, cleaned up) and **Otoqa Dispatch** (new; serves in-house dispatchers *and* owner-operators), built against approved design bundle **Otoqa_Mobile8**.
 > Backend: the single shared Convex deployment (topology unchanged).
 
