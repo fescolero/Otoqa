@@ -29,6 +29,8 @@ import {
   type LoadingGate,
 } from '../../lib/analytics';
 import { useBootstrap, MODE_STORAGE_KEY } from '../../lib/hooks/useBootstrap';
+import { useOwnerModeEnabled } from '../../lib/hooks/useOwnerModeEnabled';
+import { DispatchMovedScreen } from '../../lib/dispatch-moved-screen';
 import { usePermissionGates } from '../../lib/hooks/usePermissionGates';
 import { usePushWake } from '../../lib/hooks/usePushWake';
 import { useLocationService } from '../../lib/hooks/useLocationService';
@@ -191,6 +193,11 @@ export default function AppLayout() {
     userRoles, profile, activeSession, carrierOrg,
     canBeDriver, canBeOwner, canSwitchModes, isRolesLoading,
   } = boot;
+
+  // §6 release N — is the owner tree still served by this app, or has the
+  // org been migrated to Otoqa Dispatch? Reactive flag read, default true.
+  // Same hoisting rule as every hook here: above all conditional returns.
+  const ownerModeEnabled = useOwnerModeEnabled(convexAuth.isAuthenticated);
 
   // Permission prompts (camera/location/notifications + ACTIVITY_RECOGNITION).
   usePermissionGates();
@@ -379,7 +386,10 @@ export default function AppLayout() {
   //     isActiveSessionLoading gate above shows the spinner)
   let desiredRoute: string | null = null;
   if (hasSelectedRole) {
-    if (mode === 'owner' && carrierOrg?._id) {
+    // ownerModeEnabled gate: when the org has migrated to Otoqa Dispatch,
+    // owner mode renders the interstitial below instead of the owner tree —
+    // don't navigate the (suppressed) Stack to /(app)/owner underneath it.
+    if (mode === 'owner' && carrierOrg?._id && ownerModeEnabled) {
       desiredRoute = '/(app)/owner';
     } else if (mode === 'driver') {
       if (activeSession === undefined) {
@@ -603,6 +613,24 @@ export default function AppLayout() {
       <NotRegisteredScreen
         title="Organization Not Found"
         message="Your carrier organization is not set up yet. Please contact support to complete registration."
+        onSignOut={handleSignOut}
+      />
+    );
+  }
+
+  // §6 release N — owner tools are moving to Otoqa Dispatch. When the
+  // owner_mode_in_driver_app flag is off, EVERY owner-mode entry (role
+  // picker, more-tab switcher, owner-only auto-select) lands on the
+  // migration interstitial instead of the owner tree. Driver mode is
+  // untouched. Sits after the roles/loading gates (canBeDriver is known)
+  // and before any owner-context render.
+  if (mode === 'owner' && !ownerModeEnabled) {
+    return (
+      <DispatchMovedScreen
+        canContinueAsDriver={canBeDriver}
+        onContinueAsDriver={() => {
+          void setMode('driver');
+        }}
         onSignOut={handleSignOut}
       />
     );

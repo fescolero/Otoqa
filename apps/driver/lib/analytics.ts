@@ -253,6 +253,15 @@ export function trackRoleSelected(role: 'driver' | 'owner') {
   capture('role_selected', { role });
 }
 
+// §6 driver cleanup — migration-window funnel for the owner-mode
+// interstitial. Watch this during releases N..N+2 to decide when the
+// flag can flip org-by-org and when the owner tree can be deleted.
+export function trackDispatchMigration(
+  action: 'interstitial_shown' | 'open_dispatch' | 'continue_as_driver' | 'sign_out',
+) {
+  capture('dispatch_migration', { action });
+}
+
 export function trackPhotoCapture(success: boolean, loadId?: string, error?: string) {
   capture('photo_capture', { success, load_id: loadId ?? null, error: error ?? null });
 }

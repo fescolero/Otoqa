@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { query, mutation, internalMutation } from './_generated/server';
-import { requireCallerOrgId } from './lib/auth';
+import { requireCallerOrgId, resolveClerkCarrierMembership } from './lib/auth';
 import { resolveAuthenticatedDriver } from './driverMobile';
 
 // ============================================================================
@@ -17,10 +17,22 @@ import { resolveAuthenticatedDriver } from './driverMobile';
 //   ar_wake_enabled             → 'true' | 'false'   (default: 'false')
 //   ar_shadow_mode              → 'true' | 'false'   (default: 'false')
 //   fcm_wake_enabled            → 'true' | 'false'   (default: 'false')
+//   owner_mode_in_driver_app    → 'true' | 'false'   (default: 'true')
+//     Split-plan §6 driver-cleanup migration window: 'false' replaces the
+//     driver app's owner mode with the "get Otoqa Dispatch" interstitial.
+//     Supports the global '*' scope for the flip-for-all step.
 //
 // Admins flip flags via the setFlag mutation from the Convex dashboard, or
 // via setFlagInternal from the terminal during canary rollouts.
 // ============================================================================
+
+/**
+ * Rows stored under this sentinel org id apply to EVERY org (org-specific
+ * rows override key-by-key). Written only via setFlagInternal / dashboard:
+ *   npx convex run featureFlags:setFlagInternal \
+ *     '{"workosOrgId":"*","key":"owner_mode_in_driver_app","value":"false"}'
+ */
+export const GLOBAL_FLAG_SCOPE = '*';
 
 /**
  * Returns every flag set for the caller's org as a flat map.
@@ -41,34 +53,58 @@ export const getForOrg = query({
   args: {},
   returns: v.record(v.string(), v.string()),
   handler: async (ctx) => {
-    let orgId: string | null = null;
+    let orgIds: string[] = [];
 
     // Web / WorkOS path: identity carries org_id directly.
     try {
-      orgId = await requireCallerOrgId(ctx);
+      orgIds = [await requireCallerOrgId(ctx)];
     } catch {
       // Fall through to mobile resolution below.
     }
 
     // Mobile / Clerk path: resolve driver via phone claim → driver.organizationId.
-    if (!orgId) {
+    if (orgIds.length === 0) {
       try {
         const driver = await resolveAuthenticatedDriver(ctx);
-        orgId = driver.organizationId;
+        orgIds = [driver.organizationId];
       } catch {
-        // Unauthenticated or unrecognized phone — return empty flags so the
-        // client defaults to in-code fallback.
-        return {};
+        // Not a driver — fall through to owner resolution below.
       }
     }
 
-    const rows = await ctx.db
-      .query('featureFlags')
-      .withIndex('by_org', (q) => q.eq('workosOrgId', orgId!))
-      .collect();
+    // Owner-only Clerk callers (no driver record) resolve via their
+    // OWNER/ADMIN identity link. Split-plan §6 release N depends on this:
+    // `owner_mode_in_driver_app` must reach exactly this population, and
+    // the driver-first order above keeps every previously-served caller
+    // on the org they already resolved to. Flag rows may be keyed by any
+    // spelling of the org id, so all candidates are queried.
+    if (orgIds.length === 0) {
+      const membership = await resolveClerkCarrierMembership(ctx);
+      if (membership) {
+        orgIds = [
+          membership.org.workosOrgId,
+          membership.org.clerkOrgId,
+          membership.org._id,
+        ].filter((x): x is string => typeof x === 'string' && x.length > 0);
+      }
+    }
+
+    // Unauthenticated or unrecognized caller — empty flags so the client
+    // defaults to in-code fallback.
+    if (orgIds.length === 0) return {};
+
+    // Global rows (workosOrgId '*') apply to every org and are overlaid by
+    // org-specific rows. This is what makes the §6 N+1 step — "flag off
+    // for ALL orgs" — a single-row flip instead of a per-org sweep.
     const flags: Record<string, string> = {};
-    for (const row of rows) {
-      flags[row.key] = row.value;
+    for (const scope of [GLOBAL_FLAG_SCOPE, ...orgIds]) {
+      const rows = await ctx.db
+        .query('featureFlags')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', scope))
+        .collect();
+      for (const row of rows) {
+        flags[row.key] = row.value;
+      }
     }
     return flags;
   },

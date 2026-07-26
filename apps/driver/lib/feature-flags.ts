@@ -46,6 +46,12 @@ export const FLAG_PING_INGESTED_SAMPLE_RATE = 'ping_ingested_sample_rate';
 export const FLAG_AR_WAKE_ENABLED = 'ar_wake_enabled';
 export const FLAG_AR_SHADOW_MODE = 'ar_shadow_mode';
 export const FLAG_FCM_WAKE_ENABLED = 'fcm_wake_enabled';
+// Split-plan §6 driver cleanup, release N. Default TRUE — owner mode stays
+// available until ops flips the flag to 'false' (per-org, or globally via
+// the '*' scope row). When false, owner-mode entry renders the "get Otoqa
+// Dispatch" migration interstitial instead of the owner tree. Read via
+// useOwnerModeEnabled (reactive) with the cached value as offline fallback.
+export const FLAG_OWNER_MODE_IN_DRIVER_APP = 'owner_mode_in_driver_app';
 
 // How long getQueueBackend is willing to wait on a fresh refresh when the
 // cache is empty, before falling back to the in-code default (sqlite).
