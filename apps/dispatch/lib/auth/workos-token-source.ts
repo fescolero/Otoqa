@@ -124,5 +124,10 @@ export function useWorkOSTokenSource(): TokenSource & {
     setIsAuthenticated(false);
   }, []);
 
-  return { isLoading, isAuthenticated, fetchAccessToken, signOut, signIn };
+  // Memoized so consumers (DispatchAuthProvider's signOut, Convex's useAuth)
+  // see a stable source object between renders — same contract as Clerk's.
+  return React.useMemo(
+    () => ({ isLoading, isAuthenticated, fetchAccessToken, signOut, signIn }),
+    [isLoading, isAuthenticated, fetchAccessToken, signOut, signIn],
+  );
 }

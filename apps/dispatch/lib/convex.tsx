@@ -44,16 +44,27 @@ export function useActiveAuth(): ActiveAuth {
 
 function useClerkTokenSource(): TokenSource {
   const { isLoaded, isSignedIn, getToken, signOut } = useClerkAuth();
-  return {
-    isLoading: !isLoaded,
-    isAuthenticated: !!isSignedIn,
-    // Same template + skipCache semantics as the driver app (lib/convex.tsx).
-    fetchAccessToken: async ({ forceRefreshToken }) =>
+  // ConvexProviderWithAuth keys its auth effect on fetchAccessToken's
+  // identity — an unmemoized closure restarts the token handshake every
+  // render and Convex never reaches isAuthenticated (sign-in bounce).
+  const fetchAccessToken = React.useCallback(
+    async ({ forceRefreshToken }: { forceRefreshToken: boolean }) =>
+      // Same template + skipCache semantics as the driver app (lib/convex.tsx).
       (await getToken({ template: 'convex', skipCache: forceRefreshToken })) ?? null,
-    signOut: async () => {
-      await signOut();
-    },
-  };
+    [getToken],
+  );
+  const stableSignOut = React.useCallback(async () => {
+    await signOut();
+  }, [signOut]);
+  return React.useMemo(
+    () => ({
+      isLoading: !isLoaded,
+      isAuthenticated: !!isSignedIn,
+      fetchAccessToken,
+      signOut: stableSignOut,
+    }),
+    [isLoaded, isSignedIn, fetchAccessToken, stableSignOut],
+  );
 }
 
 export function DispatchAuthProvider({ children }: { children: React.ReactNode }) {
