@@ -205,7 +205,7 @@ Dropped entirely per user decision: no in-app messaging in either app. Consequen
 |---|---|---|
 | Bundled runs + auto-plan | 5.1 at scale | `autoAssignment.ts` rule engine + hourly cron |
 | Voice agent | 5.1, 5.2, 5.4 (chat removed from prereqs per D10) | STT: [`expo-speech-recognition`](https://github.com/jamsch/expo-speech-recognition) (maintained; streaming partials; New-Arch compatibility demonstrated in the field, not vendor-stated — validate in a spike). **Mic permission enters manifests here only.** |
-| Driver accept/decline | Driver-app UI | `acceptOffer`/`declineOffer` exist (guarded by §0 hotfix), zero callers |
+| Driver accept/decline | ~~Driver-app UI~~ **SHIPPED 2026-07-26 in the Dispatch app** | The actor is the OWNER/ADMIN carrier persona (assertCallerInCarrierOrg), which post-D3 lives in Otoqa Dispatch — building it into the driver app's owner tree would target §6-deleted code. Shipped: `dispatchMobile.listOffers` (OFFERED + ACCEPTED inbox), `dispatchMobile.acceptOffer`/`declineOffer` (token-derived org per §4.5; parity-tested field-for-field against the legacy mutations; decline raises the §5.2 OFFER_DECLINED alert), Board "Offers" section with Accept/Decline + confirm, accepted offers shown as "awaiting award". 8 convex-tests. |
 | Load-creation dictation | 5.6 + voice stack | — |
 | Cross-app sign-in handoff | deferred (D5) | Clerk sign-in tokens verified feasible |
 

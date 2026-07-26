@@ -1,20 +1,25 @@
-/** Board — live assignments bucketed by horizon (v8 design): what's
- * rolling now, then AWARDED work by urgency of its next window —
- * Next 4 hours / Today / Later / Unscheduled. The backlog is never one
- * flat list. Buckets compute client-side from the stops the read
- * wrapper already returns. */
-import { ActivityIndicator, Pressable, SectionList, Text, View } from 'react-native';
+/** Board — live assignments bucketed by horizon (v8 design): pending
+ * broker OFFERS first (accept/decline — Phase 3), then what's rolling
+ * now, then AWARDED work by urgency of its next window — Next 4 hours /
+ * Today / Later / Unscheduled. The backlog is never one flat list.
+ * Buckets compute client-side from the stops the read wrapper already
+ * returns. */
+import { useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, SectionList, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import { useDispatchSession } from './_layout';
 
 type Row = NonNullable<ReturnType<typeof useQuery<typeof api.dispatchMobile.listActiveAssignments>>>[number];
+type OfferRow = NonNullable<ReturnType<typeof useQuery<typeof api.dispatchMobile.listOffers>>>[number];
+
+type Section = { title: string; hot: boolean; offers?: boolean; data: (Row | OfferRow)[] };
 
 /** Earliest window of a not-yet-checked-in stop — the load's "next action" time. */
-function nextWindow(r: Row): number | null {
+function nextWindow(r: Row | OfferRow): number | null {
   const t = r.stops
     .filter((s) => !s.checkedInAt && s.windowBeginTime)
     .map((s) => Date.parse(s.windowBeginTime!))
@@ -23,7 +28,7 @@ function nextWindow(r: Row): number | null {
   return t ?? null;
 }
 
-function bucketsOf(rows: Row[]) {
+function bucketsOf(rows: Row[]): Section[] {
   const now = Date.now();
   const in4h = now + 4 * 3600_000;
   const endOfDay = new Date().setHours(23, 59, 59, 999);
@@ -41,11 +46,104 @@ function bucketsOf(rows: Row[]) {
   ].filter((s) => s.data.length > 0);
 }
 
+function fmtTime(t: number | null): string {
+  return t ? new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '';
+}
+
+/** Offer card — Accept / Decline while OFFERED; "awaiting award" after. */
+function OfferCard({ offer }: { offer: OfferRow }) {
+  const acceptOffer = useMutation(api.dispatchMobile.acceptOffer);
+  const declineOffer = useMutation(api.dispatchMobile.declineOffer);
+  const [busy, setBusy] = useState(false);
+  const t = nextWindow(offer);
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      Alert.alert('Something went wrong', e instanceof Error ? e.message : 'Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmDecline = () =>
+    Alert.alert(
+      'Decline this offer?',
+      `Load #${offer.load?.internalId ?? ''} goes back to the broker. This can't be undone.`,
+      [
+        { text: 'Keep offer', style: 'cancel' },
+        {
+          text: 'Decline',
+          style: 'destructive',
+          onPress: () => void run(() => declineOffer({ assignmentId: offer._id })),
+        },
+      ],
+    );
+
+  return (
+    <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.primary, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+        <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
+          #{offer.load?.internalId ?? '—'}
+        </Text>
+        {offer.status === 'ACCEPTED' ? (
+          <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
+            Accepted · awaiting award
+          </Text>
+        ) : (
+          <Text style={{ color: colors.primary, fontSize: typography.xs, fontWeight: typography.bold }}>
+            New offer
+          </Text>
+        )}
+      </View>
+      <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
+        {offer.load?.customerName ?? 'Customer'} · {offer.stops.length} stop{offer.stops.length === 1 ? '' : 's'}
+        {t ? ` · ${fmtTime(t)}` : ''}
+        {offer.load?.effectiveMiles ? ` · ${Math.round(offer.load.effectiveMiles)} mi` : ''}
+      </Text>
+      {offer.carrierTotalAmount != null && (
+        <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold, marginTop: 2 }}>
+          ${offer.carrierTotalAmount.toLocaleString()}
+        </Text>
+      )}
+      {offer.status === 'OFFERED' && (
+        <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+          <Pressable
+            disabled={busy}
+            onPress={() => void run(() => acceptOffer({ assignmentId: offer._id }))}
+            style={{ flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, backgroundColor: colors.primary, paddingVertical: 10, borderRadius: borderRadius.md, opacity: busy ? 0.6 : 1 }}
+          >
+            <Ionicons name="checkmark" size={16} color={colors.primaryForeground} />
+            <Text style={{ color: colors.primaryForeground, fontSize: typography.sm, fontWeight: typography.semibold }}>Accept</Text>
+          </Pressable>
+          <Pressable
+            disabled={busy}
+            onPress={confirmDecline}
+            style={{ flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, borderWidth: 1, borderColor: colors.border, paddingVertical: 10, borderRadius: borderRadius.md, opacity: busy ? 0.6 : 1 }}
+          >
+            <Ionicons name="close" size={16} color={colors.destructive} />
+            <Text style={{ color: colors.destructive, fontSize: typography.sm, fontWeight: typography.semibold }}>Decline</Text>
+          </Pressable>
+        </View>
+      )}
+    </View>
+  );
+}
+
 export default function BoardScreen() {
   const session = useDispatchSession();
   const router = useRouter();
   const rows = useQuery(api.dispatchMobile.listActiveAssignments, {});
-  const sections = rows ? bucketsOf(rows) : [];
+  const offers = useQuery(api.dispatchMobile.listOffers, {});
+  const loading = rows === undefined || offers === undefined;
+  const sections: Section[] = loading
+    ? []
+    : [
+        ...(offers.length > 0 ? [{ title: 'Offers', hot: true, offers: true, data: offers as (Row | OfferRow)[] }] : []),
+        ...bucketsOf(rows),
+      ];
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 70 }}>
@@ -61,13 +159,14 @@ export default function BoardScreen() {
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
           {session?.orgName ?? ''}
           {rows ? ` · ${rows.length} active` : ''}
+          {offers && offers.length > 0 ? ` · ${offers.length} offer${offers.length === 1 ? '' : 's'}` : ''}
         </Text>
       </View>
-      {rows === undefined ? (
+      {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 48 }} />
-      ) : rows.length === 0 ? (
+      ) : sections.length === 0 ? (
         <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', marginTop: 48, lineHeight: 20 }}>
-          No loads on the board yet.{'\n'}Tap + to create one, or wait for awarded loads.
+          No loads on the board yet.{'\n'}Tap + to create one, or wait for offers and awarded loads.
         </Text>
       ) : (
         <SectionList
@@ -80,32 +179,36 @@ export default function BoardScreen() {
               {section.title} · {section.data.length}
             </Text>
           )}
-          renderItem={({ item }) => {
-            const t = nextWindow(item);
+          renderItem={({ item, section }) => {
+            if ((section as Section).offers) {
+              return <OfferCard offer={item as OfferRow} />;
+            }
+            const row = item as Row;
+            const t = nextWindow(row);
             return (
               <Pressable
-                onPress={() => router.push({ pathname: '/assign', params: { assignmentId: item._id } })}
+                onPress={() => router.push({ pathname: '/assign', params: { assignmentId: row._id } })}
                 style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
               >
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                   <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-                    #{item.load?.internalId ?? '—'}
+                    #{row.load?.internalId ?? '—'}
                   </Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                    <Pressable onPress={() => router.push({ pathname: '/adjust', params: { assignmentId: item._id } })} hitSlop={8}>
+                    <Pressable onPress={() => router.push({ pathname: '/adjust', params: { assignmentId: row._id } })} hitSlop={8}>
                       <Ionicons name="time-outline" size={18} color={colors.foregroundMuted} />
                     </Pressable>
-                    <Text style={{ color: item.status === 'IN_PROGRESS' ? colors.primary : colors.warning, fontSize: typography.xs, fontWeight: typography.bold }}>
-                      {item.status === 'IN_PROGRESS' ? 'In transit' : 'Awarded'}
+                    <Text style={{ color: row.status === 'IN_PROGRESS' ? colors.primary : colors.warning, fontSize: typography.xs, fontWeight: typography.bold }}>
+                      {row.status === 'IN_PROGRESS' ? 'In transit' : 'Awarded'}
                     </Text>
                   </View>
                 </View>
                 <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
-                  {item.load?.customerName ?? 'Customer'} · {item.stops.length} stop{item.stops.length === 1 ? '' : 's'}
-                  {t ? ` · ${new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : ''}
+                  {row.load?.customerName ?? 'Customer'} · {row.stops.length} stop{row.stops.length === 1 ? '' : 's'}
+                  {t ? ` · ${fmtTime(t)}` : ''}
                 </Text>
                 <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 2 }}>
-                  {item.driver ? `${item.driver.firstName} ${item.driver.lastName}` : 'No driver assigned'}
+                  {row.driver ? `${row.driver.firstName} ${row.driver.lastName}` : 'No driver assigned'}
                 </Text>
               </Pressable>
             );

@@ -10,6 +10,7 @@ import { isPermitted } from './lib/permissions';
 import { getLoadFacets } from './lib/loadFacets';
 import { carrierStatementsForOrg, carrierStatementDetailsForOrg } from './mobileSettlements';
 import { logAudit } from './lib/audit';
+import { raiseAlert } from './dispatchAlerts';
 import { createLoadArgs, createLoadForOrg } from './loads';
 import type { Doc, Id } from './_generated/dataModel';
 
@@ -242,7 +243,7 @@ async function latestLocation(ctx: QueryCtx, driverId: Id<'drivers'>) {
 async function assignmentsByStatus(
   ctx: QueryCtx,
   externalId: string,
-  status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
+  status: 'OFFERED' | 'ACCEPTED' | 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
 ) {
   return await ctx.db
     .query('loadCarrierAssignments')
@@ -321,6 +322,102 @@ export const listCompletedAssignments = query({
         };
       }),
     );
+  },
+});
+
+/**
+ * Offer inbox (split-plan §5, Phase 3 accept/decline) — OFFERED rows are
+ * actionable; ACCEPTED rows ride along so a responded offer shows as
+ * "awaiting broker award" instead of vanishing. Newest first. Enriched
+ * like the board rows minus driver fields (offers have no driver yet).
+ */
+export const listOffers = query({
+  args: {},
+  handler: async (ctx) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const offers = [
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'OFFERED')),
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'ACCEPTED')),
+    ];
+    offers.sort((a, b) => (b.offeredAt ?? 0) - (a.offeredAt ?? 0));
+    return Promise.all(
+      offers.map(async (assignment) => {
+        const load = await ctx.db.get(assignment.loadId);
+        const stops = load
+          ? await ctx.db
+              .query('loadStops')
+              .withIndex('by_load', (q) => q.eq('loadId', load._id))
+              .collect()
+          : [];
+        return {
+          ...assignment,
+          load: load
+            ? {
+                _id: load._id,
+                internalId: load.internalId,
+                customerName: load.customerName,
+                equipmentType: load.equipmentType,
+                effectiveMiles: load.effectiveMiles,
+              }
+            : null,
+          stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
+        };
+      }),
+    );
+  },
+});
+
+/**
+ * Accept a broker's load offer. Same transition semantics as the legacy
+ * loadCarrierAssignments.acceptOffer (parity-tested) with the Dispatch-app
+ * guard shape: org derives from the token via resolveOrgForRead — the
+ * client never supplies an org id (§4.5).
+ */
+export const acceptOffer = mutation({
+  args: { assignmentId: v.id('loadCarrierAssignments') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const assignment = await ctx.db.get(args.assignmentId);
+    if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
+      throw new Error('Offer not found');
+    }
+    if (assignment.status !== 'OFFERED') {
+      throw new Error(`Cannot accept assignment with status: ${assignment.status}`);
+    }
+    await ctx.db.patch(args.assignmentId, {
+      status: 'ACCEPTED',
+      acceptedAt: Date.now(),
+    });
+    return { success: true };
+  },
+});
+
+/**
+ * Decline a broker's load offer. Mirrors loadCarrierAssignments.declineOffer
+ * (parity-tested), including the §5.2 OFFER_DECLINED alert so every
+ * dispatcher on the org sees the load fell back to the broker.
+ */
+export const declineOffer = mutation({
+  args: { assignmentId: v.id('loadCarrierAssignments') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const assignment = await ctx.db.get(args.assignmentId);
+    if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
+      throw new Error('Offer not found');
+    }
+    if (assignment.status !== 'OFFERED') {
+      throw new Error(`Cannot decline assignment with status: ${assignment.status}`);
+    }
+    await ctx.db.patch(args.assignmentId, { status: 'DECLINED' });
+    await raiseAlert(ctx, {
+      orgExternalId: assignment.carrierOrgId,
+      kind: 'OFFER_DECLINED',
+      severity: 'med',
+      assignmentId: args.assignmentId,
+      loadId: assignment.loadId,
+      detail: 'Offer declined — load needs a new assignment.',
+    });
+    return { success: true };
   },
 });
 
