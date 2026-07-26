@@ -128,7 +128,10 @@ export const getSession = query({
     return {
       authenticated: true,
       provider: 'clerk',
-      orgExternalId: membership.org.clerkOrgId ?? membership.org.workosOrgId ?? null,
+      // Same fallback chain as resolveOrgForRead: mobile-created carrier
+      // orgs may carry neither external id, in which case the Convex doc
+      // id IS the org's external id (requireCapability accepts all three).
+      orgExternalId: membership.org.clerkOrgId ?? membership.org.workosOrgId ?? membership.org._id,
       orgConvexId: membership.org._id,
       orgName: membership.org.name,
       orgType: membership.org.orgType ?? null,
