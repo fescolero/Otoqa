@@ -10,7 +10,8 @@
       "channel": "development",
       "env": {
         "EXPO_PUBLIC_CONVEX_URL": "https://greedy-vole-262.convex.cloud",
-        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk"
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk",
+        "EXPO_PUBLIC_WORKOS_CLIENT_ID": "client_01KAETKWFMGC6VEVXXB51A40QC"
       },
       "android": {
         "buildType": "apk"
@@ -21,7 +22,8 @@
       "channel": "preview",
       "env": {
         "EXPO_PUBLIC_CONVEX_URL": "https://greedy-vole-262.convex.cloud",
-        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk"
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Z2xvd2luZy1zaGVlcGRvZy05Ny5jbGVyay5hY2NvdW50cy5kZXYk",
+        "EXPO_PUBLIC_WORKOS_CLIENT_ID": "client_01KAETKWFMGC6VEVXXB51A40QC"
       },
       "android": {
         "buildType": "apk"

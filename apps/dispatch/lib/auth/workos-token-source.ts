@@ -84,6 +84,13 @@ export function useWorkOSTokenSource(): TokenSource & {
   }, []);
 
   const signIn = React.useCallback(async (): Promise<boolean> => {
+    // Fail loud on a build without the client id — otherwise WorkOS
+    // returns an opaque "invalid client id" page in the browser.
+    if (!CLIENT_ID) {
+      throw new Error(
+        'Staff sign-in is not configured in this build (EXPO_PUBLIC_WORKOS_CLIENT_ID missing).',
+      );
+    }
     const request = new AuthSession.AuthRequest({
       clientId: CLIENT_ID,
       redirectUri: workosRedirectUri,

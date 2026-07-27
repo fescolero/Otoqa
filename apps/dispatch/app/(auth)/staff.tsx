@@ -6,7 +6,7 @@
  * hardcode a domain.
  */
 import * as React from 'react';
-import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import { useActiveAuth } from '../../lib/convex';
@@ -26,8 +26,15 @@ export default function StaffSignInScreen() {
       } else {
         setState('error');
       }
-    } catch {
-      setState('error');
+    } catch (e) {
+      // Config errors (missing client id in the build) get their own
+      // message — the "not part of the workspace" card would mislead.
+      if (e instanceof Error && e.message.includes('not configured')) {
+        Alert.alert('Sign-in unavailable', e.message);
+        setState('idle');
+      } else {
+        setState('error');
+      }
     }
   };
 
