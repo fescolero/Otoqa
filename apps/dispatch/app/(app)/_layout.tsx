@@ -4,7 +4,7 @@
  * One getSession query (dispatchMobile) drives everything: org context,
  * persona label, and capability flags (D3/D9). The UI renders ONLY from
  * these flags — never from which auth provider is active. Tabs match the
- * v8 design minus voice (Phase 3) and messages (dropped, D10).
+ * v8 design minus messages (dropped, D10); voice landed in Phase 3.
  */
 import * as React from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
@@ -84,6 +84,13 @@ export default function AppLayout() {
           options={{
             title: 'Drivers',
             tabBarIcon: ({ color, size }) => <Ionicons name="people-outline" size={size} color={color} />,
+          }}
+        />
+        <Tabs.Screen
+          name="voice"
+          options={{
+            title: 'Voice',
+            tabBarIcon: ({ color, size }) => <Ionicons name="mic-outline" size={size} color={color} />,
           }}
         />
         <Tabs.Screen

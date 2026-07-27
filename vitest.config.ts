@@ -3,9 +3,10 @@ import react from '@vitejs/plugin-react';
 import path from 'node:path';
 
 /**
- * Two test projects:
+ * Three test projects:
  *   - convex: edge-runtime (existing, untouched behavior)
  *   - web: jsdom + React Testing Library for components/web/* primitives
+ *   - dispatch: node, pure logic under apps/dispatch/lib (voice parser)
  *
  * Run all: `npm run test`. Run one: `npx vitest --project=web`.
  */
@@ -33,6 +34,14 @@ export default defineConfig({
           setupFiles: ['./vitest.setup.ts'],
           include: ['components/web/**/*.test.{ts,tsx}', 'lib/**/*.test.{ts,tsx}'],
           css: false,
+        },
+      },
+      {
+        test: {
+          name: 'dispatch',
+          globals: true,
+          environment: 'node',
+          include: ['apps/dispatch/lib/**/*.test.ts'],
         },
       },
     ],

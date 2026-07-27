@@ -25,7 +25,14 @@
       "expo-router",
       "expo-secure-store",
       "expo-web-browser",
-      "expo-updates"
+      "expo-updates",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Otoqa Dispatch uses the microphone for voice commands like assigning loads and moving appointments.",
+          "speechRecognitionPermission": "Otoqa Dispatch uses speech recognition to understand your voice commands."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
