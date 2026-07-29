@@ -2,6 +2,8 @@
 
 > Status: **v1.2 — Phases 0–2 device-verified.** Three verification passes completed (log at end); all open questions answered by the product owner 2026-07-25 (decisions D9–D19) except the deliberately deferred OQ-11. §0 security hotfix shipped.
 >
+> **⚠ OTA release rule (learned 2026-07-29):** `eas update` bundles `EXPO_PUBLIC_*` from the LOCAL `.env` files, NOT from `eas.json` (build-only). Publishing without `apps/dispatch/.env.local` ships a bundle with no Convex URL → crashes at startup → expo-updates silently rolls back → "nothing changed" with zero errors. Always `cp .env.example .env.local` (kept current) before `eas update --channel preview`. The Voice tab subtitle shows `v2 · ota <id>` vs `embedded js` to verify which bundle is actually running.
+>
 > **Device checkpoint 2026-07-26 (Android preview build, Clerk owner-operator path):** sign-in, Board with horizon buckets, Drivers, ranked assignment, Pay + statement detail, fleet map, notifications/alerts, window adjustment, and load creation all confirmed working on device. WorkOS staff sign-in deferred until dashboard access is available (client ID + `otoqa-dispatch://sso` redirect). Still pending user-side config: Android Google Maps API key, FCM V1/APNs push credentials, WorkOS dispatcher-role permission update. Next engineering: Phase 3 mini-plans (§5.3/5.5/5.6 dictation/runs) and driver-app cleanup release N (§6).
 > Scope: split mobile into **Otoqa Driver** (existing, cleaned up) and **Otoqa Dispatch** (new; serves in-house dispatchers *and* owner-operators), built against approved design bundle **Otoqa_Mobile8**.
 > Backend: the single shared Convex deployment (topology unchanged).
