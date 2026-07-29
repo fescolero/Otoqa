@@ -59,7 +59,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v2';
+const VOICE_BUILD = 'v3';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -73,13 +73,15 @@ try {
 
 const fmtT = (d: Date) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 const kindLabel = (k: string) => k.toLowerCase().replace(/_/g, ' ');
-const dayLabel = (d: Date) => {
+const shortDate = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const dayLabel = (d: Date, end?: Date | null) => {
+  if (end) return `${shortDate(d)} – ${shortDate(end)}`;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const diff = Math.round((d.getTime() - today.getTime()) / 86_400_000);
   if (diff === 0) return 'today';
   if (diff === -1) return 'yesterday';
-  return `on ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+  return `on ${shortDate(d)}`;
 };
 
 export default function VoiceScreen() {
@@ -192,18 +194,22 @@ export default function VoiceScreen() {
         const d = hit.match;
         // Day bounds are computed HERE — dispatch days are local-tz days
         // and only the device knows its zone; the server takes epoch ms.
+        // dateEnd (inclusive) extends the window for range questions.
         const day = intent.date ? new Date(`${intent.date}T00:00:00`) : new Date();
         day.setHours(0, 0, 0, 0);
         const dayStartMs = day.getTime();
+        const endDay = intent.dateEnd ? new Date(`${intent.dateEnd}T00:00:00`) : null;
+        endDay?.setHours(0, 0, 0, 0);
+        const dayEndMs = (endDay ? endDay.getTime() : dayStartMs) + 86_400_000;
         void (async () => {
           try {
             const loads = await convexClient.query(api.dispatchMobile.listDriverHistory, {
               driverId: d._id,
               dayStartMs,
-              dayEndMs: dayStartMs + 86_400_000,
+              dayEndMs,
             });
             const name = `${d.firstName} ${d.lastName}`;
-            const label = dayLabel(day);
+            const label = dayLabel(day, endDay);
             if (loads.length === 0) return say('agent', `${name} had no loads ${label}.`);
             const items = loads
               .map(
@@ -241,13 +247,17 @@ export default function VoiceScreen() {
           .join('; ');
         return say('agent', `${a.length} open alert${a.length === 1 ? '' : 's'}${high ? ` (${high} high)` : ''}: ${top}.`);
       }
+      case 'clarify':
+        // The pipeline holds the original command; the next utterance
+        // answers this question and completes it.
+        return say('agent', intent.question);
       case 'unknown':
       // Version-skew guard: a server-parsed intent kind this build doesn't
       // know must show help, never silently drop the turn.
       default:
         return say(
           'agent',
-          'Try: “assign load 1001 to Marcus”, “move load 1001 to 3 pm”, “accept offer 1001”, “what loads did Marcus have yesterday”, “what’s on the board”, or “any alerts”.',
+          'Try: “assign load 1001 to Marcus”, “move load 1001 to 3 pm”, “accept offer 1001”, “what loads did Marcus have yesterday / this week”, “what’s on the board”, or “any alerts”.',
         );
     }
   };
@@ -261,6 +271,9 @@ export default function VoiceScreen() {
   // and the deterministic parser. Refs, not state: the listeners
   // subscribe once and must always see the latest values.
   const [thinking, setThinking] = useState(false);
+  // Clarification continuation: when the agent asks for a missing piece,
+  // this holds the ORIGINAL command so the next utterance completes it.
+  const pendingClarifyRef = useRef<string | null>(null);
   const audioUriRef = useRef<string | null>(null);
   const finalTranscriptRef = useRef('');
   const endedRef = useRef(false);
@@ -273,17 +286,34 @@ export default function VoiceScreen() {
     const uri = audioUriRef.current;
     const deviceTranscript = finalTranscriptRef.current.trim();
 
+    const pending = pendingClarifyRef.current;
+    const dispatchIntent = (transcript: string, intent: VoiceIntent) => {
+      if (intent.kind === 'clarify') {
+        // Chain: keep accumulating context until the command completes.
+        pendingClarifyRef.current = pending ? `${pending} ${transcript}` : transcript;
+      } else {
+        pendingClarifyRef.current = null;
+      }
+      handleIntentRef.current(intent);
+    };
+
     if (uri && FileSystem) {
       setThinking(true);
       try {
         const audioBase64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-        const res = await transcribe({ audioBase64, mimeType: mimeForUri(uri) });
+        const res = await transcribe({
+          audioBase64,
+          mimeType: mimeForUri(uri),
+          ...(pending ? { contextText: pending } : {}),
+        });
         const transcript = res.transcript || deviceTranscript;
         setThinking(false);
         if (!transcript) return say('agent', "I didn't catch that — try again.");
         say('you', transcript);
-        return handleIntentRef.current(
-          (res.intent as VoiceIntent | null) ?? parseCommand(transcript),
+        return dispatchIntent(
+          transcript,
+          (res.intent as VoiceIntent | null) ??
+            parseCommand(pending ? `${pending} ${transcript}` : transcript),
         );
       } catch {
         setThinking(false);
@@ -292,7 +322,10 @@ export default function VoiceScreen() {
     }
     if (!deviceTranscript) return say('agent', "I didn't catch that — try again.");
     say('you', deviceTranscript);
-    handleIntentRef.current(parseCommand(deviceTranscript));
+    dispatchIntent(
+      deviceTranscript,
+      parseCommand(pending ? `${pending} ${deviceTranscript}` : deviceTranscript),
+    );
   };
 
   // Latest closures for the once-subscribed native listeners.
@@ -429,7 +462,7 @@ export default function VoiceScreen() {
           >
             {messages.length === 0 && (
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', marginTop: 24, lineHeight: 22 }}>
-                Try:{'\n'}“Assign load 1001 to Marcus”{'\n'}“Move load 1001 to 3 pm”{'\n'}“Accept offer 1001”{'\n'}“What loads did Marcus have yesterday?”{'\n'}“What’s on the board?” · “Any alerts?”
+                Try:{'\n'}“Assign load 1001 to Marcus”{'\n'}“Move load 1001 to 3 pm”{'\n'}“Accept offer 1001”{'\n'}“What loads did Marcus have this week?”{'\n'}“What’s on the board?” · “Any alerts?”
               </Text>
             )}
             {messages.map((m) => (

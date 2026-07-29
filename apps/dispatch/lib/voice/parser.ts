@@ -17,7 +17,8 @@ export type VoiceIntent =
   | { kind: 'move_window'; loadRef: string; time: SpokenTime }
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
-  | { kind: 'driver_history'; driverQuery: string; date: string | null }
+  | { kind: 'driver_history'; driverQuery: string; date: string | null; dateEnd: string | null }
+  | { kind: 'clarify'; question: string }
   | { kind: 'board_summary' }
   | { kind: 'alerts_summary' }
   | { kind: 'unknown'; text: string };
@@ -25,6 +26,39 @@ export type VoiceIntent =
 /** Local calendar date as YYYY-MM-DD (NOT UTC — dispatch days are local). */
 export const localDateStr = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+/**
+ * Day words → single day or inclusive range, matching the server prompt's
+ * semantics: "this week" = Monday of the current week through today;
+ * "last week" = Monday..Sunday of the previous week; default today.
+ */
+export function parseSpokenDayRange(
+  s: string,
+  now: Date,
+): { date: string; dateEnd: string | null } {
+  const monday = (d: Date) => {
+    const m = new Date(d);
+    m.setHours(0, 0, 0, 0);
+    m.setDate(m.getDate() - ((m.getDay() + 6) % 7)); // Sunday=0 → back 6
+    return m;
+  };
+  if (/\bthis week\b/i.test(s)) {
+    return { date: localDateStr(monday(now)), dateEnd: localDateStr(now) };
+  }
+  if (/\blast week\b/i.test(s)) {
+    const start = monday(now);
+    start.setDate(start.getDate() - 7);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 6);
+    return { date: localDateStr(start), dateEnd: localDateStr(end) };
+  }
+  if (/\byesterday\b/i.test(s)) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    return { date: localDateStr(d), dateEnd: null };
+  }
+  return { date: localDateStr(now), dateEnd: null };
+}
 
 export interface SpokenTime {
   hour: number; // 0-23
@@ -88,17 +122,21 @@ export function parseCommand(text: string, now: Date = new Date()): VoiceIntent 
   }
 
   // Driver history — "what loads did Jorge Romero have yesterday",
-  // "loads for Jorge today". Must run BEFORE the board keyword sweep or
-  // the word "loads" swallows it into board_summary.
+  // "loads for Jorge today", "Jorge's loads this week". Must run BEFORE
+  // the board keyword sweep or the word "loads" swallows it into
+  // board_summary.
   const history =
     s.match(/\bloads?\s+(?:did|does|has|is)\s+(.+?)\s+(?:have|had|got|get|run|running|do|doing|on)\b/i) ??
-    s.match(/\bloads?\s+for\s+(.+?)(?:\s+(?:yesterday|today))?$/i);
+    s.match(/\bloads?\s+for\s+(.+?)(?:\s+(?:yesterday|today|this week|last week))?$/i) ??
+    s.match(/\b(.+?)(?:'s|s')\s+loads?\b/i);
   if (history) {
-    const dayWord = s.match(/\b(yesterday|today)\b/i)?.[1]?.toLowerCase() ?? 'today';
-    const d = new Date(now);
-    if (dayWord === 'yesterday') d.setDate(d.getDate() - 1);
-    const driverQuery = clean(history[1]).replace(/\b(yesterday|today)\b/gi, '').trim();
-    if (driverQuery) return { kind: 'driver_history', driverQuery, date: localDateStr(d) };
+    const driverQuery = clean(history[1])
+      .replace(/\b(yesterday|today|this week|last week|what|show me|show)\b/gi, '')
+      .trim();
+    if (driverQuery) {
+      const range = parseSpokenDayRange(s, now);
+      return { kind: 'driver_history', driverQuery, date: range.date, dateEnd: range.dateEnd };
+    }
   }
 
   if (/\b(alerts?|exceptions?|problems?|attention|wrong)\b/i.test(s)) return { kind: 'alerts_summary' };
@@ -140,7 +178,13 @@ export function matchDriver<T extends { firstName: string; lastName: string }>(
   drivers: T[],
   spokenQuery: string,
 ): RefMatch<T> {
-  const q = clean(spokenQuery).toLowerCase().replace(/\s+/g, ' ');
+  // STT noise tolerance: drop leading role words and trailing possessives.
+  const q = clean(spokenQuery)
+    .toLowerCase()
+    .replace(/^(?:driver|drivers|our|my)\s+/, '')
+    .replace(/(?:'s|s')$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!q) return null;
   const norm = drivers.map((d) => ({
     d,

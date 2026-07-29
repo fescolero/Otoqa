@@ -47,13 +47,42 @@ describe('coerceIntent', () => {
       kind: 'driver_history',
       driverQuery: 'Jorge Romero',
       date: '2026-07-26',
+      dateEnd: null,
     });
     expect(coerceIntent({ kind: 'driver_loads', driverQuery: 'Jorge', date: 'yesterday' })).toEqual({
       kind: 'driver_history',
       driverQuery: 'Jorge',
       date: null, // malformed date dropped, driver kept
+      dateEnd: null,
     });
     expect(coerceIntent({ kind: 'driver_loads', date: '2026-07-26' })).toBeNull(); // no driver
+  });
+
+  it('driver_loads ranges: valid, inverted swapped, end-only promoted, collapsed', () => {
+    expect(
+      coerceIntent({ kind: 'driver_loads', driverQuery: 'J', date: '2026-07-20', dateEnd: '2026-07-26' }),
+    ).toEqual({ kind: 'driver_history', driverQuery: 'J', date: '2026-07-20', dateEnd: '2026-07-26' });
+    expect(
+      coerceIntent({ kind: 'driver_loads', driverQuery: 'J', date: '2026-07-26', dateEnd: '2026-07-20' }),
+    ).toEqual({ kind: 'driver_history', driverQuery: 'J', date: '2026-07-20', dateEnd: '2026-07-26' });
+    expect(coerceIntent({ kind: 'driver_loads', driverQuery: 'J', dateEnd: '2026-07-26' })).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'J',
+      date: '2026-07-26',
+      dateEnd: null,
+    });
+    expect(
+      coerceIntent({ kind: 'driver_loads', driverQuery: 'J', date: '2026-07-26', dateEnd: '2026-07-26' }),
+    ).toEqual({ kind: 'driver_history', driverQuery: 'J', date: '2026-07-26', dateEnd: null });
+  });
+
+  it('clarify: question required', () => {
+    expect(coerceIntent({ kind: 'clarify', question: 'What time should load 1001 move to?' })).toEqual({
+      kind: 'clarify',
+      question: 'What time should load 1001 move to?',
+    });
+    expect(coerceIntent({ kind: 'clarify' })).toBeNull();
+    expect(coerceIntent({ kind: 'clarify', question: '  ' })).toBeNull();
   });
 
   it('rejects malformed or unknown → null (caller falls back to the on-device parser)', () => {

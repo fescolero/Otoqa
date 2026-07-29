@@ -60,16 +60,42 @@ describe('parseCommand', () => {
       kind: 'driver_history',
       driverQuery: 'Jorge Romero',
       date: '2026-07-26',
+      dateEnd: null,
     });
     expect(parseCommand('loads for Jorge today', now)).toEqual({
       kind: 'driver_history',
       driverQuery: 'Jorge',
       date: '2026-07-27',
+      dateEnd: null,
     });
     expect(parseCommand('what loads does Marcus have', now)).toEqual({
       kind: 'driver_history',
       driverQuery: 'Marcus',
       date: '2026-07-27', // no day word → today
+      dateEnd: null,
+    });
+  });
+
+  it('driver history ranges and possessives', () => {
+    // 2026-07-29 is a Wednesday; Monday of that week is 2026-07-27.
+    const now = new Date('2026-07-29T10:00:00');
+    expect(parseCommand('what loads did Jorge Romero have this week', now)).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'Jorge Romero',
+      date: '2026-07-27',
+      dateEnd: '2026-07-29',
+    });
+    expect(parseCommand("show me Jorge's loads last week", now)).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'Jorge',
+      date: '2026-07-20',
+      dateEnd: '2026-07-26',
+    });
+    expect(parseCommand("jorge romero's loads yesterday", now)).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'jorge romero',
+      date: '2026-07-28',
+      dateEnd: null,
     });
   });
 
@@ -132,6 +158,11 @@ describe('matchDriver', () => {
   it('two Sams are ambiguous, unknown is null', () => {
     expect(matchDriver(drivers, 'sam')).toEqual({ ambiguous: [drivers[1], drivers[2]] });
     expect(matchDriver(drivers, 'taylor')).toBeNull();
+  });
+  it('strips role prefixes and possessives (STT noise)', () => {
+    expect(matchDriver(drivers, 'driver Marcus Vega')).toEqual({ match: drivers[0] });
+    expect(matchDriver(drivers, "Marcus Vega's")).toEqual({ match: drivers[0] });
+    expect(matchDriver(drivers, 'our ortiz')).toEqual({ match: drivers[1] });
   });
 });
 

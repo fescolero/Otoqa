@@ -55,6 +55,7 @@ export const INTENT_TOOL = {
           'driver_loads',
           'board_summary',
           'alerts_summary',
+          'clarify',
           'unknown',
         ],
       },
@@ -65,7 +66,18 @@ export const INTENT_TOOL = {
       driverQuery: { type: 'string', description: 'Driver name as spoken (assign / driver_loads).' },
       hour: { type: 'integer', description: '24h hour for move_window (0-23).' },
       minute: { type: 'integer', description: 'Minute for move_window (0-59).' },
-      date: { type: 'string', description: 'YYYY-MM-DD for driver_loads, resolved from context.' },
+      date: {
+        type: 'string',
+        description: 'YYYY-MM-DD for driver_loads: the single day, or the first day of a range.',
+      },
+      dateEnd: {
+        type: 'string',
+        description: 'YYYY-MM-DD, driver_loads only: last day (inclusive) when a RANGE was asked.',
+      },
+      question: {
+        type: 'string',
+        description: 'clarify only: one short question asking for the missing piece.',
+      },
     },
     required: ['kind'],
   },
@@ -75,14 +87,17 @@ export const haikuCommandSystem = (
   todayISO: string,
 ) => `You parse voice commands for a truck-dispatch app into the set_intent tool.
 Today's date is ${todayISO}.
-Commands you may see: assigning a load to a driver ("assign", "give", "put ... on"), moving an appointment window to a time, accepting or declining a broker offer, asking which loads a driver had or has on a day (driver_loads), asking what's on the board, asking about alerts/exceptions.
+Commands you may see: assigning a load to a driver ("assign", "give", "put ... on"), moving an appointment window to a time, accepting or declining a broker offer, asking which loads a driver had or has on a day or across days (driver_loads), asking what's on the board, asking about alerts/exceptions.
+The text is a SPEECH TRANSCRIPT and may contain recognition errors — interpret charitably ("have hit" is likely "have it", "for jorge" may arrive as "four jorge"). Ignore filler words and politeness.
 Rules:
 - loadRef: the load/trip number or HCR code as spoken, digits preferred ("load ten oh one" → "1001").
-- driverQuery: the driver's name only, no titles.
+- driverQuery: the driver's name only — strip titles and words like "driver". "Jorge's loads" → driverQuery "Jorge".
 - move_window: hour is 24-hour; a bare 1-7 with no am/pm means afternoon (add 12).
 - accept_offer/decline_offer: loadRef may be omitted when no number was said.
-- driver_loads: date is YYYY-MM-DD resolved from context ("yesterday", "last Friday"); omit when no day was mentioned (means today).
-- Anything else, or anything you are unsure about: kind "unknown". Never invent numbers or names.`;
+- driver_loads single day: date resolved from context ("yesterday", "last Friday"); omit when no day was mentioned (means today).
+- driver_loads range: set date AND dateEnd (inclusive). "this week" = Monday of the current week through today. "last week" = Monday through Sunday of the previous week. "last 3 days" = the 3 days ending today.
+- clarify: when the command's INTENT is clear but a required piece is missing — move_window without a time, assign without a driver or without a load — set kind "clarify" and ask ONE short question for the missing piece (e.g. "What time should load 1001 move to?"). Do not clarify things you can resolve yourself.
+- Anything else, or anything you are unsure about: kind "unknown". Never invent numbers, names, or dates.`;
 
 /** Client-facing intent — mirrors apps/dispatch/lib/voice/parser.ts. */
 export type CoercedIntent =
@@ -90,7 +105,8 @@ export type CoercedIntent =
   | { kind: 'move_window'; loadRef: string; time: { hour: number; minute: number } }
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
-  | { kind: 'driver_history'; driverQuery: string; date: string | null }
+  | { kind: 'driver_history'; driverQuery: string; date: string | null; dateEnd: string | null }
+  | { kind: 'clarify'; question: string }
   | { kind: 'board_summary' }
   | { kind: 'alerts_summary' };
 
@@ -190,13 +206,23 @@ export function coerceIntent(raw: unknown): CoercedIntent | null {
       return { kind: 'decline_offer', loadRef: str(r.loadRef) };
     case 'driver_loads': {
       const driverQuery = str(r.driverQuery);
-      const d = str(r.date);
       if (!driverQuery) return null;
-      return {
-        kind: 'driver_history',
-        driverQuery,
-        date: d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null,
+      const iso = (v: unknown) => {
+        const s = str(v);
+        return s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
       };
+      let date = iso(r.date);
+      let dateEnd = iso(r.dateEnd);
+      // A range needs a valid start; swap an inverted range rather than
+      // failing the whole intent.
+      if (dateEnd && !date) [date, dateEnd] = [dateEnd, null];
+      if (date && dateEnd && dateEnd < date) [date, dateEnd] = [dateEnd, date];
+      if (dateEnd === date) dateEnd = null;
+      return { kind: 'driver_history', driverQuery, date, dateEnd };
+    }
+    case 'clarify': {
+      const question = str(r.question);
+      return question ? { kind: 'clarify', question } : null;
     }
     case 'board_summary':
       return { kind: 'board_summary' };

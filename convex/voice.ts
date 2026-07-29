@@ -141,6 +141,13 @@ export const transcribeAndParse = action({
   args: {
     audioBase64: v.string(),
     mimeType: v.string(),
+    /**
+     * Clarification continuation: the original command whose clarify
+     * question this utterance answers. Prepended for the NLU pass so
+     * "3 pm" after "What time should load 1001 move to?" completes the
+     * original move command. Transcription itself is unaffected.
+     */
+    contextText: v.optional(v.string()),
   },
   handler: async (
     ctx,
@@ -151,7 +158,10 @@ export const transcribeAndParse = action({
     const transcript = await deepgramTranscribe(keyterms, args.audioBase64, args.mimeType);
     if (!transcript) return { transcript: '', intent: null };
     const todayISO = new Date().toISOString().slice(0, 10);
-    const raw = await haikuToolCall(haikuCommandSystem(todayISO), INTENT_TOOL, transcript);
+    const nluInput = args.contextText
+      ? `Earlier command: "${args.contextText}"\nFollow-up answer to your clarifying question: "${transcript}"\nCombine both into one complete command.`
+      : transcript;
+    const raw = await haikuToolCall(haikuCommandSystem(todayISO), INTENT_TOOL, nluInput);
     return { transcript, intent: coerceIntent(raw) };
   },
 });
