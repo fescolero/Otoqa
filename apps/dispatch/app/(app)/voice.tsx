@@ -56,6 +56,21 @@ type Pending =
   | { kind: 'move'; stopId: string; beginISO: string; endISO: string; label: string }
   | { kind: 'accept' | 'decline'; assignmentId: string; label: string };
 
+/** Bump on every voice-feature change — shown in the header so a glance
+ * tells which bundle is actually running (expo-updates rolls back bad
+ * OTAs silently; this makes delivery verifiable). */
+const VOICE_BUILD = 'v2';
+let updateTag = 'embedded js';
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Updates = require('expo-updates');
+  if (Updates.updateId && !Updates.isEmbeddedLaunch) {
+    updateTag = `ota ${String(Updates.updateId).slice(0, 8)}`;
+  }
+} catch {
+  // expo-updates unavailable (dev client) — leave the embedded tag.
+}
+
 const fmtT = (d: Date) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 const kindLabel = (k: string) => k.toLowerCase().replace(/_/g, ' ');
 const dayLabel = (d: Date) => {
@@ -389,7 +404,7 @@ export default function VoiceScreen() {
           Voice
         </Text>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
-          Speak a command — every action asks before it runs
+          Speak a command — every action asks before it runs · {VOICE_BUILD} · {updateTag}
         </Text>
       </View>
 
