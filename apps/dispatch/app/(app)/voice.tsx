@@ -227,6 +227,9 @@ export default function VoiceScreen() {
         return say('agent', `${a.length} open alert${a.length === 1 ? '' : 's'}${high ? ` (${high} high)` : ''}: ${top}.`);
       }
       case 'unknown':
+      // Version-skew guard: a server-parsed intent kind this build doesn't
+      // know must show help, never silently drop the turn.
+      default:
         return say(
           'agent',
           'Try: “assign load 1001 to Marcus”, “move load 1001 to 3 pm”, “accept offer 1001”, “what loads did Marcus have yesterday”, “what’s on the board”, or “any alerts”.',
