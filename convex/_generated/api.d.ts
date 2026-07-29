@@ -196,6 +196,7 @@ import type * as stats_helpers from "../stats_helpers.js";
 import type * as trailers from "../trailers.js";
 import type * as trucks from "../trucks.js";
 import type * as vinDecoder from "../vinDecoder.js";
+import type * as voice from "../voice.js";
 
 import type {
   ApiFromModules,
@@ -392,6 +393,7 @@ declare const fullApi: ApiFromModules<{
   trailers: typeof trailers;
   trucks: typeof trucks;
   vinDecoder: typeof vinDecoder;
+  voice: typeof voice;
 }>;
 
 /**

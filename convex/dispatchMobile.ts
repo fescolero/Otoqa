@@ -215,7 +215,7 @@ export async function resolveOrgForRead(
 }
 
 /** Active + deleted-filtered drivers across both org-id spellings. */
-async function orgDrivers(ctx: QueryCtx, resolved: ResolvedOrg): Promise<Doc<'drivers'>[]> {
+export async function orgDrivers(ctx: QueryCtx, resolved: ResolvedOrg): Promise<Doc<'drivers'>[]> {
   const seen = new Set<string>();
   const out: Doc<'drivers'>[] = [];
   for (const orgId of resolved.driverOrgIds) {

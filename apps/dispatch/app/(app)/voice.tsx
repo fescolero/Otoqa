@@ -14,7 +14,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useMutation, useQuery } from 'convex/react';
+import { useAction, useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import {
@@ -25,19 +25,30 @@ import {
   type VoiceIntent,
 } from '../../lib/voice/parser';
 
-// Lazy require: absent native module (old APK + OTA JS) must not crash.
+// Lazy requires: absent native modules (old APK + OTA JS) must not crash.
+/* eslint-disable @typescript-eslint/no-var-requires */
 let Speech: {
   requestPermissionsAsync(): Promise<{ granted: boolean }>;
-  start(opts: { lang: string; interimResults: boolean; continuous: boolean }): void;
+  start(opts: Record<string, unknown>): void;
   stop(): void;
-  addListener(event: string, cb: (e: never) => void): { remove(): void };
+  addListener(event: string, cb: (e: any) => void): { remove(): void };
 } | null = null;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   Speech = require('expo-speech-recognition').ExpoSpeechRecognitionModule;
 } catch {
   Speech = null;
 }
+let FileSystem: { readAsStringAsync(uri: string, opts: { encoding: 'base64' }): Promise<string> } | null =
+  null;
+try {
+  FileSystem = require('expo-file-system/legacy');
+} catch {
+  FileSystem = null;
+}
+/* eslint-enable @typescript-eslint/no-var-requires */
+
+const mimeForUri = (uri: string) =>
+  uri.toLowerCase().endsWith('.caf') ? 'audio/x-caf' : 'audio/wav';
 
 type Msg = { id: number; role: 'you' | 'agent'; text: string };
 type Pending =
@@ -57,6 +68,7 @@ export default function VoiceScreen() {
   const adjustWindow = useMutation(api.dispatchMobile.adjustStopWindow);
   const acceptOffer = useMutation(api.dispatchMobile.acceptOffer);
   const declineOffer = useMutation(api.dispatchMobile.declineOffer);
+  const transcribe = useAction(api.voice.transcribeAndParse);
 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -174,25 +186,78 @@ export default function VoiceScreen() {
     }
   };
 
-  // Keep the latest handler in a ref so the native listeners subscribe once.
-  const onFinal = (transcript: string) => {
+  // ── Capture pipeline ─────────────────────────────────────────────
+  // The one mic session feeds two paths: on-device recognition shows
+  // live partials (and is the offline fallback), while the persisted
+  // clip goes to convex/voice.transcribeAndParse — Deepgram Nova-3 with
+  // fleet keyterms + numerals, then Haiku intent. Server transcript
+  // wins when available; any failure degrades to the on-device text
+  // and the deterministic parser. Refs, not state: the listeners
+  // subscribe once and must always see the latest values.
+  const [thinking, setThinking] = useState(false);
+  const audioUriRef = useRef<string | null>(null);
+  const finalTranscriptRef = useRef('');
+  const endedRef = useRef(false);
+  const processedRef = useRef(true);
+
+  const process = async () => {
+    if (processedRef.current) return;
+    processedRef.current = true;
     setPartial('');
-    if (!transcript.trim()) return;
-    say('you', transcript);
-    handleIntent(parseCommand(transcript));
+    const uri = audioUriRef.current;
+    const deviceTranscript = finalTranscriptRef.current.trim();
+
+    if (uri && FileSystem) {
+      setThinking(true);
+      try {
+        const audioBase64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+        const res = await transcribe({ audioBase64, mimeType: mimeForUri(uri) });
+        const transcript = res.transcript || deviceTranscript;
+        setThinking(false);
+        if (!transcript) return say('agent', "I didn't catch that — try again.");
+        say('you', transcript);
+        return handleIntentRef.current(
+          (res.intent as VoiceIntent | null) ?? parseCommand(transcript),
+        );
+      } catch {
+        setThinking(false);
+        // Server pipeline unavailable — fall through to on-device.
+      }
+    }
+    if (!deviceTranscript) return say('agent', "I didn't catch that — try again.");
+    say('you', deviceTranscript);
+    handleIntentRef.current(parseCommand(deviceTranscript));
   };
-  const onFinalRef = useRef(onFinal);
-  onFinalRef.current = onFinal;
+
+  // Latest closures for the once-subscribed native listeners.
+  const handleIntentRef = useRef(handleIntent);
+  handleIntentRef.current = handleIntent;
+  const processRef = useRef(process);
+  processRef.current = process;
 
   useEffect(() => {
     if (!Speech) return;
     const subs = [
       Speech.addListener('result', (e: { results?: { transcript: string }[]; isFinal?: boolean }) => {
         const tr = e.results?.[0]?.transcript ?? '';
-        if (e.isFinal) onFinalRef.current(tr);
+        if (e.isFinal) finalTranscriptRef.current = tr;
         else setPartial(tr);
       }),
-      Speech.addListener('end', () => setListening(false)),
+      Speech.addListener('audioend', (e: { uri?: string | null }) => {
+        audioUriRef.current = e.uri ?? null;
+        // audioend can land after end — process as soon as both are true.
+        if (endedRef.current) void processRef.current();
+      }),
+      Speech.addListener('end', () => {
+        setListening(false);
+        endedRef.current = true;
+        if (audioUriRef.current) {
+          void processRef.current();
+        } else {
+          // Grace period for a trailing audioend; then on-device fallback.
+          setTimeout(() => void processRef.current(), 800);
+        }
+      }),
       Speech.addListener('error', (e: { error?: string; message?: string }) => {
         setListening(false);
         setPartial('');
@@ -219,8 +284,19 @@ export default function VoiceScreen() {
       return;
     }
     setPartial('');
+    audioUriRef.current = null;
+    finalTranscriptRef.current = '';
+    endedRef.current = false;
+    processedRef.current = false;
     setListening(true);
-    Speech.start({ lang: 'en-US', interimResults: true, continuous: false });
+    Speech.start({
+      lang: 'en-US',
+      interimResults: true,
+      continuous: false,
+      // Persist the session audio for the server pipeline (wav on
+      // Android, caf on iOS; int16 keeps the upload small).
+      recordingOptions: { persist: true, outputEncoding: 'pcmFormatInt16', outputSampleRate: 16000 },
+    });
   };
 
   const confirm = async () => {
@@ -340,9 +416,9 @@ export default function VoiceScreen() {
           </ScrollView>
 
           <View style={{ alignItems: 'center', paddingBottom: 26, paddingTop: 6 }}>
-            {(listening || partial) && (
+            {(listening || partial || thinking) && (
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginBottom: 10, paddingHorizontal: 32, textAlign: 'center' }} numberOfLines={2}>
-                {partial || 'Listening…'}
+                {thinking ? 'Transcribing…' : partial || 'Listening…'}
               </Text>
             )}
             <Pressable
