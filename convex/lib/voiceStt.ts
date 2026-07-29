@@ -87,6 +87,74 @@ export type CoercedIntent =
   | { kind: 'board_summary' }
   | { kind: 'alerts_summary' };
 
+// ── Load dictation (§5.6 Phase 3) ────────────────────────────────────
+
+/** The tool Haiku is forced to call for dictated load drafts. */
+export const LOAD_DRAFT_TOOL = {
+  name: 'set_load_draft',
+  description: 'Report the load details extracted from a dispatcher dictation.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      customerName: { type: 'string', description: 'Customer/shipper name as spoken.' },
+      commodity: { type: 'string', description: "What's on the trailer." },
+      pickupAddress: { type: 'string', description: 'Pickup address or city/state as spoken.' },
+      dropoffAddress: { type: 'string', description: 'Delivery address or city/state as spoken.' },
+      pickupDate: { type: 'string', description: 'Pickup date YYYY-MM-DD, resolved from context.' },
+      pickupHour: { type: 'integer', description: 'Pickup window start, 24h (0-23).' },
+      dropoffDate: { type: 'string', description: 'Delivery date YYYY-MM-DD, resolved from context.' },
+      dropoffHour: { type: 'integer', description: 'Delivery window start, 24h (0-23).' },
+    },
+    required: [],
+  },
+} as const;
+
+export const haikuLoadSystem = (todayISO: string) =>
+  `You extract load details from a truck dispatcher's dictation into the set_load_draft tool.
+Today's date is ${todayISO}. Resolve relative dates ("tomorrow", "Friday") to YYYY-MM-DD.
+Rules:
+- Addresses exactly as spoken (a bare city/state is fine). First location mentioned is the pickup unless stated otherwise.
+- Hours are 24-hour window STARTS; a bare 1-7 with no am/pm means afternoon (add 12).
+- Only report what was actually said — omit anything not mentioned. Never invent details.`;
+
+export interface LoadDraft {
+  customerName: string | null;
+  commodity: string | null;
+  pickupAddress: string | null;
+  dropoffAddress: string | null;
+  pickupDate: string | null;
+  pickupHour: number | null;
+  dropoffDate: string | null;
+  dropoffHour: number | null;
+}
+
+/**
+ * Validate + reshape Haiku's load-draft tool input. Every field
+ * optional; null when nothing usable was extracted. Never throws.
+ */
+export function coerceLoadDraft(raw: unknown): LoadDraft | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const hour = (v: unknown) =>
+    typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 23 ? v : null;
+  const date = (v: unknown) => {
+    const s = str(v);
+    return s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+  };
+  const draft: LoadDraft = {
+    customerName: str(r.customerName),
+    commodity: str(r.commodity),
+    pickupAddress: str(r.pickupAddress),
+    dropoffAddress: str(r.dropoffAddress),
+    pickupDate: date(r.pickupDate),
+    pickupHour: hour(r.pickupHour),
+    dropoffDate: date(r.dropoffDate),
+    dropoffHour: hour(r.dropoffHour),
+  };
+  return Object.values(draft).some((v) => v !== null) ? draft : null;
+}
+
 /**
  * Validate + reshape Haiku's tool input. Returns null for anything
  * malformed or "unknown" — the caller then falls back to the

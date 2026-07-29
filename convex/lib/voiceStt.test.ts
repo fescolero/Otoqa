@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildDeepgramUrl, coerceIntent, MAX_KEYTERMS } from './voiceStt';
+import { buildDeepgramUrl, coerceIntent, coerceLoadDraft, MAX_KEYTERMS } from './voiceStt';
 
 describe('buildDeepgramUrl', () => {
   it('pins nova-3 + numerals and carries keyterms', () => {
@@ -53,5 +53,55 @@ describe('coerceIntent', () => {
     expect(coerceIntent({ kind: 'move_window', hour: 9 })).toBeNull(); // no load
     expect(coerceIntent('assign')).toBeNull();
     expect(coerceIntent(null)).toBeNull();
+  });
+});
+
+describe('coerceLoadDraft', () => {
+  it('keeps valid fields, nulls the rest', () => {
+    expect(
+      coerceLoadDraft({
+        customerName: 'Acme Shippers',
+        pickupAddress: 'Fresno, CA',
+        dropoffAddress: 'Reno, NV',
+        pickupDate: '2026-07-28',
+        pickupHour: 8,
+        dropoffHour: 16,
+        commodity: 'Produce',
+      }),
+    ).toEqual({
+      customerName: 'Acme Shippers',
+      commodity: 'Produce',
+      pickupAddress: 'Fresno, CA',
+      dropoffAddress: 'Reno, NV',
+      pickupDate: '2026-07-28',
+      pickupHour: 8,
+      dropoffDate: null,
+      dropoffHour: 16,
+    });
+  });
+
+  it('drops malformed values instead of failing the draft', () => {
+    const d = coerceLoadDraft({
+      pickupAddress: 'Fresno',
+      pickupDate: 'tomorrow', // not YYYY-MM-DD → dropped
+      pickupHour: 25, // out of range → dropped
+      commodity: '  ',
+    });
+    expect(d).toEqual({
+      customerName: null,
+      commodity: null,
+      pickupAddress: 'Fresno',
+      dropoffAddress: null,
+      pickupDate: null,
+      pickupHour: null,
+      dropoffDate: null,
+      dropoffHour: null,
+    });
+  });
+
+  it('null when nothing usable was said', () => {
+    expect(coerceLoadDraft({})).toBeNull();
+    expect(coerceLoadDraft({ commodity: ' ' })).toBeNull();
+    expect(coerceLoadDraft(null)).toBeNull();
   });
 });

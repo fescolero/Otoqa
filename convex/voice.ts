@@ -23,9 +23,13 @@ import { resolveOrgForRead, orgDrivers } from './dispatchMobile';
 import {
   buildDeepgramUrl,
   coerceIntent,
+  coerceLoadDraft,
   HAIKU_SYSTEM,
+  haikuLoadSystem,
   INTENT_TOOL,
+  LOAD_DRAFT_TOOL,
   type CoercedIntent,
+  type LoadDraft,
 } from './lib/voiceStt';
 
 /**
@@ -52,7 +56,12 @@ export const voiceContext = internalQuery({
   },
 });
 
-async function parseWithHaiku(transcript: string): Promise<CoercedIntent | null> {
+/** Tool-forced Haiku call returning the raw tool input; null on any failure. */
+async function haikuToolCall(
+  system: string,
+  tool: typeof INTENT_TOOL | typeof LOAD_DRAFT_TOOL,
+  transcript: string,
+): Promise<unknown | null> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return null;
   try {
@@ -65,10 +74,10 @@ async function parseWithHaiku(transcript: string): Promise<CoercedIntent | null>
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 300,
-        system: HAIKU_SYSTEM,
-        tools: [INTENT_TOOL],
-        tool_choice: { type: 'tool', name: INTENT_TOOL.name },
+        max_tokens: 400,
+        system,
+        tools: [tool],
+        tool_choice: { type: 'tool', name: tool.name },
         messages: [{ role: 'user', content: transcript }],
       }),
     });
@@ -76,12 +85,38 @@ async function parseWithHaiku(transcript: string): Promise<CoercedIntent | null>
     const data = (await res.json()) as {
       content?: { type: string; input?: unknown }[];
     };
-    const block = data.content?.find((b) => b.type === 'tool_use');
-    return coerceIntent(block?.input);
+    return data.content?.find((b) => b.type === 'tool_use')?.input ?? null;
   } catch {
-    // NLU is best-effort — the client's deterministic parser covers this.
+    // NLU is best-effort — callers fall back to deterministic parsing.
     return null;
   }
+}
+
+/** Shared STT leg: keyterm-seeded Nova-3 over the uploaded clip. */
+async function deepgramTranscribe(
+  keyterms: string[],
+  audioBase64: string,
+  mimeType: string,
+): Promise<string> {
+  const key = process.env.DEEPGRAM_API_KEY;
+  if (!key) throw new Error('Voice transcription is not configured (DEEPGRAM_API_KEY missing).');
+
+  const binary = atob(audioBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const res = await fetch(buildDeepgramUrl(keyterms), {
+    method: 'POST',
+    headers: { Authorization: `Token ${key}`, 'Content-Type': mimeType },
+    body: bytes,
+  });
+  if (!res.ok) {
+    throw new Error(`Transcription failed (${res.status})`);
+  }
+  const data = (await res.json()) as {
+    results?: { channels?: { alternatives?: { transcript?: string }[] }[] };
+  };
+  return data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? '';
 }
 
 export const transcribeAndParse = action({
@@ -95,28 +130,36 @@ export const transcribeAndParse = action({
   ): Promise<{ transcript: string; intent: CoercedIntent | null }> => {
     // Resolves org + keyterms AND enforces auth before any vendor call.
     const { keyterms } = await ctx.runQuery(internal.voice.voiceContext, {});
-
-    const key = process.env.DEEPGRAM_API_KEY;
-    if (!key) throw new Error('Voice transcription is not configured (DEEPGRAM_API_KEY missing).');
-
-    const binary = atob(args.audioBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-    const res = await fetch(buildDeepgramUrl(keyterms), {
-      method: 'POST',
-      headers: { Authorization: `Token ${key}`, 'Content-Type': args.mimeType },
-      body: bytes,
-    });
-    if (!res.ok) {
-      throw new Error(`Transcription failed (${res.status})`);
-    }
-    const data = (await res.json()) as {
-      results?: { channels?: { alternatives?: { transcript?: string }[] }[] };
-    };
-    const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? '';
+    const transcript = await deepgramTranscribe(keyterms, args.audioBase64, args.mimeType);
     if (!transcript) return { transcript: '', intent: null };
+    const raw = await haikuToolCall(HAIKU_SYSTEM, INTENT_TOOL, transcript);
+    return { transcript, intent: coerceIntent(raw) };
+  },
+});
 
-    return { transcript, intent: await parseWithHaiku(transcript) };
+/**
+ * Load dictation (§5.6 Phase 3): "Acme load, pickup in Fresno tomorrow
+ * at 8, deliver Reno at 4, produce" → structured draft for the create
+ * form. PRE-FILL ONLY — the dispatcher reviews/edits and submits
+ * through the existing createLoad mutation; nothing commits from
+ * speech. Same STT leg (keyterms carry customer names), Haiku with the
+ * load-draft tool; draft null when extraction fails (client shows the
+ * transcript and leaves the form untouched).
+ */
+export const transcribeLoadDraft = action({
+  args: {
+    audioBase64: v.string(),
+    mimeType: v.string(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ transcript: string; draft: LoadDraft | null }> => {
+    const { keyterms } = await ctx.runQuery(internal.voice.voiceContext, {});
+    const transcript = await deepgramTranscribe(keyterms, args.audioBase64, args.mimeType);
+    if (!transcript) return { transcript: '', draft: null };
+    const todayISO = new Date().toISOString().slice(0, 10);
+    const raw = await haikuToolCall(haikuLoadSystem(todayISO), LOAD_DRAFT_TOOL, transcript);
+    return { transcript, draft: coerceLoadDraft(raw) };
   },
 });
