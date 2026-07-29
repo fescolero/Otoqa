@@ -22,6 +22,7 @@ import { internal } from './_generated/api';
 import { resolveOrgForRead, orgDrivers } from './dispatchMobile';
 import {
   buildDeepgramUrl,
+  buildNluInput,
   coerceIntent,
   coerceLoadDraft,
   haikuCommandSystem,
@@ -143,11 +144,25 @@ export const transcribeAndParse = action({
     mimeType: v.string(),
     /**
      * Clarification continuation: the original command whose clarify
-     * question this utterance answers. Prepended for the NLU pass so
+     * question this utterance answers. Included in the NLU input so
      * "3 pm" after "What time should load 1001 move to?" completes the
      * original move command. Transcription itself is unaffected.
      */
     contextText: v.optional(v.string()),
+    /**
+     * Conversational context (NLU v4): the last few on-screen turns.
+     * Used ONLY for reference resolution ("what about Sam", "assign it
+     * to Marcus") — the prompt forbids re-executing past actions, and
+     * the server caps/truncates regardless of what the client sends.
+     */
+    history: v.optional(
+      v.array(
+        v.object({
+          role: v.union(v.literal('you'), v.literal('agent')),
+          text: v.string(),
+        }),
+      ),
+    ),
   },
   handler: async (
     ctx,
@@ -158,9 +173,10 @@ export const transcribeAndParse = action({
     const transcript = await deepgramTranscribe(keyterms, args.audioBase64, args.mimeType);
     if (!transcript) return { transcript: '', intent: null };
     const todayISO = new Date().toISOString().slice(0, 10);
-    const nluInput = args.contextText
-      ? `Earlier command: "${args.contextText}"\nFollow-up answer to your clarifying question: "${transcript}"\nCombine both into one complete command.`
-      : transcript;
+    const nluInput = buildNluInput(transcript, args.history, args.contextText);
+    if (nluInput !== transcript) {
+      console.log(`[voice] NLU context: ${args.history?.length ?? 0} turns${args.contextText ? ' + clarify bridge' : ''}`);
+    }
     const raw = await haikuToolCall(haikuCommandSystem(todayISO), INTENT_TOOL, nluInput);
     return { transcript, intent: coerceIntent(raw) };
   },

@@ -59,7 +59,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v3';
+const VOICE_BUILD = 'v4';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -301,9 +301,14 @@ export default function VoiceScreen() {
       setThinking(true);
       try {
         const audioBase64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+        // Conversational context: the last few visible turns ride along so
+        // follow-ups resolve ("what about Sam", "assign it to Marcus").
+        // The server caps and truncates; reference resolution only.
+        const history = messages.slice(-8).map((m) => ({ role: m.role, text: m.text }));
         const res = await transcribe({
           audioBase64,
           mimeType: mimeForUri(uri),
+          ...(history.length > 0 ? { history } : {}),
           ...(pending ? { contextText: pending } : {}),
         });
         const transcript = res.transcript || deviceTranscript;

@@ -97,7 +97,51 @@ Rules:
 - driver_loads single day: date resolved from context ("yesterday", "last Friday"); omit when no day was mentioned (means today).
 - driver_loads range: set date AND dateEnd (inclusive). "this week" = Monday of the current week through today. "last week" = Monday through Sunday of the previous week. "last 3 days" = the 3 days ending today.
 - clarify: when the command's INTENT is clear but a required piece is missing — move_window without a time, assign without a driver or without a load — set kind "clarify" and ask ONE short question for the missing piece (e.g. "What time should load 1001 move to?"). Do not clarify things you can resolve yourself.
+Context rules (when "Recent conversation" is provided):
+- Use it ONLY to resolve references in the NEW utterance — pronouns and elliptical follow-ups. After a driver-loads answer, "what about Sam" = the same question for Sam with the same day/range; "same for last week" = the previous command with the new dates; "it" / "that load" = the load number mentioned most recently.
+- Parse only what the new utterance asks for. Never repeat an action that the conversation shows was already confirmed, executed, declined, or cancelled.
+- If a follow-up cannot be resolved from the conversation, use clarify or unknown — never guess the referent.
 - Anything else, or anything you are unsure about: kind "unknown". Never invent numbers, names, or dates.`;
+
+// ── Conversational context (NLU v4) ─────────────────────────────────
+
+export const MAX_HISTORY_TURNS = 8;
+export const MAX_TURN_CHARS = 200;
+
+export interface VoiceTurn {
+  role: 'you' | 'agent';
+  text: string;
+}
+
+/**
+ * Render the NLU input: recent on-screen turns (capped and truncated —
+ * context is a few hundred Haiku tokens, not a transcript dump), the
+ * pending-clarification bridge when present, then the new utterance.
+ * With no context at all, returns the bare transcript so single-shot
+ * behavior (and its logs) stay byte-identical to v3.
+ */
+export function buildNluInput(
+  transcript: string,
+  history?: VoiceTurn[] | null,
+  contextText?: string | null,
+): string {
+  const parts: string[] = [];
+  const turns = (history ?? []).slice(-MAX_HISTORY_TURNS);
+  if (turns.length > 0) {
+    parts.push('Recent conversation (oldest first):');
+    for (const t of turns) {
+      const text =
+        t.text.length > MAX_TURN_CHARS ? `${t.text.slice(0, MAX_TURN_CHARS)}…` : t.text;
+      parts.push(`${t.role === 'you' ? 'Dispatcher' : 'Assistant'}: ${text}`);
+    }
+  }
+  if (contextText) {
+    parts.push(`Earlier command awaiting completion: "${contextText}"`);
+  }
+  if (parts.length === 0) return transcript;
+  parts.push(`New dispatcher utterance: "${transcript}"`);
+  return parts.join('\n');
+}
 
 /** Client-facing intent — mirrors apps/dispatch/lib/voice/parser.ts. */
 export type CoercedIntent =

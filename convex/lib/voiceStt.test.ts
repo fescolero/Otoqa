@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { buildDeepgramUrl, coerceIntent, coerceLoadDraft, MAX_KEYTERMS } from './voiceStt';
+import {
+  buildDeepgramUrl,
+  buildNluInput,
+  coerceIntent,
+  coerceLoadDraft,
+  MAX_HISTORY_TURNS,
+  MAX_KEYTERMS,
+  MAX_TURN_CHARS,
+} from './voiceStt';
 
 describe('buildDeepgramUrl', () => {
   it('pins nova-3 + numerals and carries keyterms', () => {
@@ -74,6 +82,47 @@ describe('coerceIntent', () => {
     expect(
       coerceIntent({ kind: 'driver_loads', driverQuery: 'J', date: '2026-07-26', dateEnd: '2026-07-26' }),
     ).toEqual({ kind: 'driver_history', driverQuery: 'J', date: '2026-07-26', dateEnd: null });
+  });
+
+  it('buildNluInput: bare transcript with no context (v3-identical single-shot)', () => {
+    expect(buildNluInput('assign load 1001 to Marcus')).toBe('assign load 1001 to Marcus');
+    expect(buildNluInput('assign load 1001 to Marcus', [], null)).toBe('assign load 1001 to Marcus');
+  });
+
+  it('buildNluInput: renders roles oldest-first with the new utterance labeled', () => {
+    const out = buildNluInput(
+      'what about Sam',
+      [
+        { role: 'you', text: 'what loads did Jorge have yesterday' },
+        { role: 'agent', text: 'Jorge Romero — 2 loads yesterday: #1001; #1002.' },
+      ],
+      null,
+    );
+    expect(out).toBe(
+      [
+        'Recent conversation (oldest first):',
+        'Dispatcher: what loads did Jorge have yesterday',
+        'Assistant: Jorge Romero — 2 loads yesterday: #1001; #1002.',
+        'New dispatcher utterance: "what about Sam"',
+      ].join('\n'),
+    );
+  });
+
+  it('buildNluInput: caps turns, truncates long text, includes the clarify bridge', () => {
+    const turns = Array.from({ length: 20 }, (_, i) => ({
+      role: 'you' as const,
+      text: `turn ${i}`,
+    }));
+    const out = buildNluInput('3 pm', turns, 'move load 1001');
+    const lines = out.split('\n');
+    // header + MAX turns + bridge + new utterance
+    expect(lines).toHaveLength(1 + MAX_HISTORY_TURNS + 2);
+    expect(lines[1]).toBe(`Dispatcher: turn ${20 - MAX_HISTORY_TURNS}`); // oldest kept
+    expect(out).toContain('Earlier command awaiting completion: "move load 1001"');
+
+    const long = buildNluInput('x', [{ role: 'agent', text: 'a'.repeat(500) }], null);
+    expect(long).toContain(`${'a'.repeat(MAX_TURN_CHARS)}…`);
+    expect(long).not.toContain('a'.repeat(MAX_TURN_CHARS + 1));
   });
 
   it('clarify: question required', () => {
