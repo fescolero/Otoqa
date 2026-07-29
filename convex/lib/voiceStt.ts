@@ -52,6 +52,7 @@ export const INTENT_TOOL = {
           'move_window',
           'accept_offer',
           'decline_offer',
+          'driver_loads',
           'board_summary',
           'alerts_summary',
           'unknown',
@@ -61,21 +62,26 @@ export const INTENT_TOOL = {
         type: 'string',
         description: 'Load / trip number or HCR exactly as spoken, e.g. "1001", "L-1001", "HCR75960".',
       },
-      driverQuery: { type: 'string', description: 'Driver name as spoken (assign only).' },
+      driverQuery: { type: 'string', description: 'Driver name as spoken (assign / driver_loads).' },
       hour: { type: 'integer', description: '24h hour for move_window (0-23).' },
       minute: { type: 'integer', description: 'Minute for move_window (0-59).' },
+      date: { type: 'string', description: 'YYYY-MM-DD for driver_loads, resolved from context.' },
     },
     required: ['kind'],
   },
 } as const;
 
-export const HAIKU_SYSTEM = `You parse voice commands for a truck-dispatch app into the set_intent tool.
-Commands you may see: assigning a load to a driver ("assign", "give", "put ... on"), moving an appointment window to a time, accepting or declining a broker offer, asking what's on the board, asking about alerts/exceptions.
+export const haikuCommandSystem = (
+  todayISO: string,
+) => `You parse voice commands for a truck-dispatch app into the set_intent tool.
+Today's date is ${todayISO}.
+Commands you may see: assigning a load to a driver ("assign", "give", "put ... on"), moving an appointment window to a time, accepting or declining a broker offer, asking which loads a driver had or has on a day (driver_loads), asking what's on the board, asking about alerts/exceptions.
 Rules:
 - loadRef: the load/trip number or HCR code as spoken, digits preferred ("load ten oh one" → "1001").
 - driverQuery: the driver's name only, no titles.
 - move_window: hour is 24-hour; a bare 1-7 with no am/pm means afternoon (add 12).
 - accept_offer/decline_offer: loadRef may be omitted when no number was said.
+- driver_loads: date is YYYY-MM-DD resolved from context ("yesterday", "last Friday"); omit when no day was mentioned (means today).
 - Anything else, or anything you are unsure about: kind "unknown". Never invent numbers or names.`;
 
 /** Client-facing intent — mirrors apps/dispatch/lib/voice/parser.ts. */
@@ -84,6 +90,7 @@ export type CoercedIntent =
   | { kind: 'move_window'; loadRef: string; time: { hour: number; minute: number } }
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
+  | { kind: 'driver_history'; driverQuery: string; date: string | null }
   | { kind: 'board_summary' }
   | { kind: 'alerts_summary' };
 
@@ -181,6 +188,16 @@ export function coerceIntent(raw: unknown): CoercedIntent | null {
       return { kind: 'accept_offer', loadRef: str(r.loadRef) };
     case 'decline_offer':
       return { kind: 'decline_offer', loadRef: str(r.loadRef) };
+    case 'driver_loads': {
+      const driverQuery = str(r.driverQuery);
+      const d = str(r.date);
+      if (!driverQuery) return null;
+      return {
+        kind: 'driver_history',
+        driverQuery,
+        date: d && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null,
+      };
+    }
     case 'board_summary':
       return { kind: 'board_summary' };
     case 'alerts_summary':

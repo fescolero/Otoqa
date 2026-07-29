@@ -17,9 +17,14 @@ export type VoiceIntent =
   | { kind: 'move_window'; loadRef: string; time: SpokenTime }
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
+  | { kind: 'driver_history'; driverQuery: string; date: string | null }
   | { kind: 'board_summary' }
   | { kind: 'alerts_summary' }
   | { kind: 'unknown'; text: string };
+
+/** Local calendar date as YYYY-MM-DD (NOT UTC — dispatch days are local). */
+export const localDateStr = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 export interface SpokenTime {
   hour: number; // 0-23
@@ -54,7 +59,7 @@ export function parseSpokenTime(raw: string): SpokenTime | null {
 
 const REF = String.raw`(?:load\s+)?(?:number\s+|#\s*)?([\w-]+)`;
 
-export function parseCommand(text: string): VoiceIntent {
+export function parseCommand(text: string, now: Date = new Date()): VoiceIntent {
   const s = clean(text);
 
   const assign = s.match(new RegExp(String.raw`\b(?:assign|give|send|put)\b\s+${REF}\s+to\s+(.+)$`, 'i'));
@@ -80,6 +85,20 @@ export function parseCommand(text: string): VoiceIntent {
   );
   if (decline && /\b(?:decline|reject)\b/i.test(s)) {
     return { kind: 'decline_offer', loadRef: decline[1] && decline[1].toLowerCase() !== 'offer' ? decline[1] : null };
+  }
+
+  // Driver history — "what loads did Jorge Romero have yesterday",
+  // "loads for Jorge today". Must run BEFORE the board keyword sweep or
+  // the word "loads" swallows it into board_summary.
+  const history =
+    s.match(/\bloads?\s+(?:did|does|has|is)\s+(.+?)\s+(?:have|had|got|get|run|running|do|doing|on)\b/i) ??
+    s.match(/\bloads?\s+for\s+(.+?)(?:\s+(?:yesterday|today))?$/i);
+  if (history) {
+    const dayWord = s.match(/\b(yesterday|today)\b/i)?.[1]?.toLowerCase() ?? 'today';
+    const d = new Date(now);
+    if (dayWord === 'yesterday') d.setDate(d.getDate() - 1);
+    const driverQuery = clean(history[1]).replace(/\b(yesterday|today)\b/gi, '').trim();
+    if (driverQuery) return { kind: 'driver_history', driverQuery, date: localDateStr(d) };
   }
 
   if (/\b(alerts?|exceptions?|problems?|attention|wrong)\b/i.test(s)) return { kind: 'alerts_summary' };

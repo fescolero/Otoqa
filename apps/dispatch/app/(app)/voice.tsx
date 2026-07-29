@@ -14,7 +14,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useAction, useMutation, useQuery } from 'convex/react';
+import { useAction, useConvex, useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import {
@@ -58,6 +58,14 @@ type Pending =
 
 const fmtT = (d: Date) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 const kindLabel = (k: string) => k.toLowerCase().replace(/_/g, ' ');
+const dayLabel = (d: Date) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diff = Math.round((d.getTime() - today.getTime()) / 86_400_000);
+  if (diff === 0) return 'today';
+  if (diff === -1) return 'yesterday';
+  return `on ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+};
 
 export default function VoiceScreen() {
   const rows = useQuery(api.dispatchMobile.listActiveAssignments, {});
@@ -69,6 +77,7 @@ export default function VoiceScreen() {
   const acceptOffer = useMutation(api.dispatchMobile.acceptOffer);
   const declineOffer = useMutation(api.dispatchMobile.declineOffer);
   const transcribe = useAction(api.voice.transcribeAndParse);
+  const convexClient = useConvex();
 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -157,6 +166,45 @@ export default function VoiceScreen() {
           label: `${verb} the offer for #${target.load?.internalId}?`,
         });
       }
+      case 'driver_history': {
+        const hit = matchDriver(drivers ?? [], intent.driverQuery);
+        if (!hit) return say('agent', `I don't know a driver called “${intent.driverQuery}”.`);
+        if ('ambiguous' in hit)
+          return say(
+            'agent',
+            `Several drivers match: ${hit.ambiguous.map((d) => `${d.firstName} ${d.lastName}`).join(', ')}. Say the full name.`,
+          );
+        const d = hit.match;
+        // Day bounds are computed HERE — dispatch days are local-tz days
+        // and only the device knows its zone; the server takes epoch ms.
+        const day = intent.date ? new Date(`${intent.date}T00:00:00`) : new Date();
+        day.setHours(0, 0, 0, 0);
+        const dayStartMs = day.getTime();
+        void (async () => {
+          try {
+            const loads = await convexClient.query(api.dispatchMobile.listDriverHistory, {
+              driverId: d._id,
+              dayStartMs,
+              dayEndMs: dayStartMs + 86_400_000,
+            });
+            const name = `${d.firstName} ${d.lastName}`;
+            const label = dayLabel(day);
+            if (loads.length === 0) return say('agent', `${name} had no loads ${label}.`);
+            const items = loads
+              .map(
+                (l) =>
+                  `#${l.internalId ?? '—'}${l.customerName ? ` ${l.customerName}` : ''} (${
+                    l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'awarded'
+                  })`,
+              )
+              .join('; ');
+            say('agent', `${name} — ${loads.length} load${loads.length === 1 ? '' : 's'} ${label}: ${items}.`);
+          } catch (e) {
+            say('agent', e instanceof Error ? e.message : 'Could not look that up.');
+          }
+        })();
+        return;
+      }
       case 'board_summary': {
         const r = rows ?? [];
         const rolling = r.filter((x) => x.status === 'IN_PROGRESS').length;
@@ -181,7 +229,7 @@ export default function VoiceScreen() {
       case 'unknown':
         return say(
           'agent',
-          'Try: “assign load 1001 to Marcus”, “move load 1001 to 3 pm”, “accept offer 1001”, “what’s on the board”, or “any alerts”.',
+          'Try: “assign load 1001 to Marcus”, “move load 1001 to 3 pm”, “accept offer 1001”, “what loads did Marcus have yesterday”, “what’s on the board”, or “any alerts”.',
         );
     }
   };
@@ -363,7 +411,7 @@ export default function VoiceScreen() {
           >
             {messages.length === 0 && (
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', marginTop: 24, lineHeight: 22 }}>
-                Try:{'\n'}“Assign load 1001 to Marcus”{'\n'}“Move load 1001 to 3 pm”{'\n'}“Accept offer 1001”{'\n'}“What’s on the board?” · “Any alerts?”
+                Try:{'\n'}“Assign load 1001 to Marcus”{'\n'}“Move load 1001 to 3 pm”{'\n'}“Accept offer 1001”{'\n'}“What loads did Marcus have yesterday?”{'\n'}“What’s on the board?” · “Any alerts?”
               </Text>
             )}
             {messages.map((m) => (

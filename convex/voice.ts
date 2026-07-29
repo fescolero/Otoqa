@@ -24,7 +24,7 @@ import {
   buildDeepgramUrl,
   coerceIntent,
   coerceLoadDraft,
-  HAIKU_SYSTEM,
+  haikuCommandSystem,
   haikuLoadSystem,
   INTENT_TOOL,
   LOAD_DRAFT_TOOL,
@@ -132,7 +132,8 @@ export const transcribeAndParse = action({
     const { keyterms } = await ctx.runQuery(internal.voice.voiceContext, {});
     const transcript = await deepgramTranscribe(keyterms, args.audioBase64, args.mimeType);
     if (!transcript) return { transcript: '', intent: null };
-    const raw = await haikuToolCall(HAIKU_SYSTEM, INTENT_TOOL, transcript);
+    const todayISO = new Date().toISOString().slice(0, 10);
+    const raw = await haikuToolCall(haikuCommandSystem(todayISO), INTENT_TOOL, transcript);
     return { transcript, intent: coerceIntent(raw) };
   },
 });

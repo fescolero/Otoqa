@@ -43,6 +43,17 @@ describe('coerceIntent', () => {
       loadRef: '88',
     });
     expect(coerceIntent({ kind: 'board_summary' })).toEqual({ kind: 'board_summary' });
+    expect(coerceIntent({ kind: 'driver_loads', driverQuery: 'Jorge Romero', date: '2026-07-26' })).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'Jorge Romero',
+      date: '2026-07-26',
+    });
+    expect(coerceIntent({ kind: 'driver_loads', driverQuery: 'Jorge', date: 'yesterday' })).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'Jorge',
+      date: null, // malformed date dropped, driver kept
+    });
+    expect(coerceIntent({ kind: 'driver_loads', date: '2026-07-26' })).toBeNull(); // no driver
   });
 
   it('rejects malformed or unknown → null (caller falls back to the on-device parser)', () => {

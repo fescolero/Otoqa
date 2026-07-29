@@ -54,6 +54,25 @@ describe('parseCommand', () => {
     expect(parseCommand('reject the offer')).toEqual({ kind: 'decline_offer', loadRef: null });
   });
 
+  it('driver history variants, dated before the board keyword sweep', () => {
+    const now = new Date('2026-07-27T10:00:00');
+    expect(parseCommand('what loads did Jorge Romero have yesterday', now)).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'Jorge Romero',
+      date: '2026-07-26',
+    });
+    expect(parseCommand('loads for Jorge today', now)).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'Jorge',
+      date: '2026-07-27',
+    });
+    expect(parseCommand('what loads does Marcus have', now)).toEqual({
+      kind: 'driver_history',
+      driverQuery: 'Marcus',
+      date: '2026-07-27', // no day word → today
+    });
+  });
+
   it('summaries and unknown', () => {
     expect(parseCommand("what's on the board?")).toEqual({ kind: 'board_summary' });
     expect(parseCommand("what's rolling right now")).toEqual({ kind: 'board_summary' });

@@ -326,6 +326,64 @@ export const listCompletedAssignments = query({
 });
 
 /**
+ * A driver's loads on one calendar day (voice agent "what loads did X
+ * have yesterday", but UI-agnostic). Day bounds come from the CLIENT in
+ * epoch ms — dispatch days are local-timezone days and only the device
+ * knows its zone. A load counts as "on" the day when any stop window
+ * touches it or the assignment completed during it.
+ */
+export const listDriverHistory = query({
+  args: {
+    driverId: v.id('drivers'),
+    dayStartMs: v.number(),
+    dayEndMs: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
+      throw new Error('Driver not found in your organization');
+    }
+    const inDay = (t: number | null | undefined) =>
+      t != null && t >= args.dayStartMs && t < args.dayEndMs;
+
+    const all = [
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')),
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS')),
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'COMPLETED')),
+    ].filter((a) => a.assignedDriverId === args.driverId);
+
+    const out = [];
+    for (const assignment of all) {
+      const stops = (
+        await ctx.db
+          .query('loadStops')
+          .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
+          .collect()
+      ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+      const stopTouchesDay = stops.some((s) => {
+        const b = s.windowBeginTime ? Date.parse(s.windowBeginTime) : NaN;
+        const e = s.windowEndTime ? Date.parse(s.windowEndTime) : NaN;
+        return inDay(Number.isFinite(b) ? b : null) || inDay(Number.isFinite(e) ? e : null);
+      });
+      if (!stopTouchesDay && !inDay(assignment.completedAt)) continue;
+      const load = await ctx.db.get(assignment.loadId);
+      out.push({
+        _id: assignment._id,
+        status: assignment.status,
+        completedAt: assignment.completedAt ?? null,
+        internalId: load?.internalId ?? null,
+        customerName: load?.customerName ?? null,
+        firstStopTime: stops[0]?.windowBeginTime ?? null,
+        stopCount: stops.length,
+      });
+    }
+    out.sort((a, b) => (a.firstStopTime ?? '').localeCompare(b.firstStopTime ?? ''));
+    return out;
+  },
+});
+
+/**
  * Offer inbox (split-plan §5, Phase 3 accept/decline) — OFFERED rows are
  * actionable; ACCEPTED rows ride along so a responded offer shows as
  * "awaiting broker award" instead of vanishing. Newest first. Enriched
