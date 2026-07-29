@@ -194,7 +194,7 @@ export default function VoiceScreen() {
               .map(
                 (l) =>
                   `#${l.internalId ?? '—'}${l.customerName ? ` ${l.customerName}` : ''} (${
-                    l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'awarded'
+                    l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'scheduled'
                   })`,
               )
               .join('; ');

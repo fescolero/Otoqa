@@ -93,16 +93,10 @@ async function insertFixtures(ctx: MutationCtx) {
     updatedAt: now,
   });
 
-  const mkLoad = async (opts: {
-    internalId: string;
-    status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED';
-    driverId?: Id<'drivers'>;
-    stopWindowStart?: number;
-    completedAt?: number;
-  }) => {
+  const mkBareLoad = async (internalId: string, stopWindowStart?: number) => {
     const loadId = await ctx.db.insert('loadInformation', {
-      internalId: opts.internalId,
-      orderNumber: `ORD-${opts.internalId}`,
+      internalId,
+      orderNumber: `ORD-${internalId}`,
       status: 'Assigned',
       trackingStatus: 'Pending',
       customerId,
@@ -114,22 +108,34 @@ async function insertFixtures(ctx: MutationCtx) {
       createdAt: now,
       updatedAt: now,
     });
-    if (opts.stopWindowStart != null) {
-      await ctx.db.insert('loadStops', {
+    let stopId: Id<'loadStops'> | null = null;
+    if (stopWindowStart != null) {
+      stopId = await ctx.db.insert('loadStops', {
         loadId,
-        internalId: opts.internalId,
+        internalId,
         workosOrgId: BROKER_ORG,
         sequenceNumber: 1,
         stopType: 'PICKUP',
         loadingType: 'APPT',
         address: '1 Dock Rd',
-        windowBeginTime: new Date(opts.stopWindowStart).toISOString(),
-        windowEndTime: new Date(opts.stopWindowStart + 2 * 3600_000).toISOString(),
+        windowBeginTime: new Date(stopWindowStart).toISOString(),
+        windowEndTime: new Date(stopWindowStart + 2 * 3600_000).toISOString(),
         createdAt: now,
         updatedAt: now,
       });
     }
-    return ctx.db.insert('loadCarrierAssignments', {
+    return { loadId, stopId };
+  };
+
+  const mkLoad = async (opts: {
+    internalId: string;
+    status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED';
+    driverId?: Id<'drivers'>;
+    stopWindowStart?: number;
+    completedAt?: number;
+  }) => {
+    const { loadId } = await mkBareLoad(opts.internalId, opts.stopWindowStart);
+    await ctx.db.insert('loadCarrierAssignments', {
       loadId,
       brokerOrgId: BROKER_ORG,
       carrierOrgId: CLERK_ORG,
@@ -139,16 +145,71 @@ async function insertFixtures(ctx: MutationCtx) {
       ...(opts.driverId ? { assignedDriverId: opts.driverId } : {}),
       ...(opts.completedAt != null ? { completedAt: opts.completedAt } : {}),
     });
+    return loadId;
   };
 
+  // Legs need real stop references — reuse the load's single stop.
+  const mkLeg = async (opts: {
+    internalId: string;
+    status: 'PENDING' | 'ACTIVE' | 'COMPLETED' | 'CANCELED';
+    driverId: Id<'drivers'>;
+    workosOrgId?: string;
+    stopWindowStart?: number;
+    scheduledStartMs?: number;
+    endedAt?: number;
+    loadId?: Id<'loadInformation'>;
+  }) => {
+    let loadId = opts.loadId;
+    let stopId: Id<'loadStops'> | null = null;
+    if (!loadId) {
+      const made = await mkBareLoad(opts.internalId, opts.stopWindowStart ?? dayStart + 9 * 3600_000);
+      loadId = made.loadId;
+      stopId = made.stopId;
+    }
+    if (!stopId) {
+      stopId = (
+        await ctx.db
+          .query('loadStops')
+          .withIndex('by_load', (q) => q.eq('loadId', loadId!))
+          .first()
+      )?._id as Id<'loadStops'>;
+    }
+    return ctx.db.insert('dispatchLegs', {
+      loadId: loadId!,
+      driverId: opts.driverId,
+      sequence: 1,
+      startStopId: stopId,
+      endStopId: stopId,
+      legLoadedMiles: 100,
+      legEmptyMiles: 0,
+      status: opts.status,
+      workosOrgId: opts.workosOrgId ?? WORKOS_ORG,
+      createdAt: now,
+      updatedAt: now,
+      ...(opts.scheduledStartMs != null ? { scheduledStartMs: opts.scheduledStartMs } : {}),
+      ...(opts.endedAt != null ? { endedAt: opts.endedAt } : {}),
+    });
+  };
+
+  // ── Assignment-source fixtures ──────────────────────────────────
   // Jorge, stop window inside yesterday → counts.
-  await mkLoad({ internalId: 'H-WINDOW', status: 'IN_PROGRESS', driverId: jorge, stopWindowStart: dayStart + 9 * 3600_000 });
+  const windowLoadId = await mkLoad({ internalId: 'H-WINDOW', status: 'IN_PROGRESS', driverId: jorge, stopWindowStart: dayStart + 9 * 3600_000 });
   // Jorge, completed yesterday, stop window elsewhere → counts via completedAt.
   await mkLoad({ internalId: 'H-DONE', status: 'COMPLETED', driverId: jorge, stopWindowStart: dayStart - 5 * 3600_000, completedAt: dayStart + 15 * 3600_000 });
   // Jorge, today only → excluded from yesterday.
   await mkLoad({ internalId: 'H-TODAY', status: 'AWARDED', driverId: jorge, stopWindowStart: dayStart + DAY + 9 * 3600_000 });
   // Other driver, yesterday → excluded.
   await mkLoad({ internalId: 'H-OTHER', status: 'IN_PROGRESS', driverId: other, stopWindowStart: dayStart + 9 * 3600_000 });
+
+  // ── Leg-source fixtures (web-TMS assignments, no carrier row) ───
+  // Denormalized schedule inside yesterday → counts.
+  await mkLeg({ internalId: 'H-LEG-SCHED', status: 'COMPLETED', driverId: jorge, stopWindowStart: dayStart - 30 * 3600_000, scheduledStartMs: dayStart + 8 * 3600_000, endedAt: dayStart + 17 * 3600_000 });
+  // Historical row: no scheduled/actual times — stop-window fallback.
+  await mkLeg({ internalId: 'H-LEG-FALLBACK', status: 'ACTIVE', driverId: jorge, stopWindowStart: dayStart + 11 * 3600_000 });
+  // Canceled leg on the day → excluded.
+  await mkLeg({ internalId: 'H-LEG-CANCELED', status: 'CANCELED', driverId: jorge, stopWindowStart: dayStart + 9 * 3600_000 });
+  // Leg on the SAME load as the H-WINDOW assignment → deduped.
+  await mkLeg({ internalId: 'H-WINDOW', status: 'ACTIVE', driverId: jorge, loadId: windowLoadId });
 
   return { jorge, other };
 }
@@ -160,7 +221,7 @@ function setup() {
 }
 
 describe('listDriverHistory', () => {
-  it("returns the driver's loads touching the day (window or completion), nothing else", async () => {
+  it("merges assignment + leg sources for the day, deduped, canceled and other-driver excluded", async () => {
     const { t, fixtures } = setup();
     const { jorge } = await fixtures;
     const rows = await t.withIdentity({ subject: OWNER }).query(api.dispatchMobile.listDriverHistory, {
@@ -168,10 +229,18 @@ describe('listDriverHistory', () => {
       dayStartMs: dayStart,
       dayEndMs: dayStart + DAY,
     });
-    expect(rows.map((r) => r.internalId).sort()).toEqual(['H-DONE', 'H-WINDOW']);
+    expect(rows.map((r) => r.internalId).sort()).toEqual([
+      'H-DONE', // assignment, counted via completedAt
+      'H-LEG-FALLBACK', // leg, stop-window fallback (historical row)
+      'H-LEG-SCHED', // leg, denormalized scheduledStartMs
+      'H-WINDOW', // assignment + duplicate leg → ONE row
+    ]);
     const done = rows.find((r) => r.internalId === 'H-DONE')!;
     expect(done.status).toBe('COMPLETED');
     expect(done.completedAt).toBeGreaterThan(0);
+    // Leg statuses normalize to the assignment vocabulary.
+    expect(rows.find((r) => r.internalId === 'H-LEG-SCHED')!.status).toBe('COMPLETED');
+    expect(rows.find((r) => r.internalId === 'H-LEG-FALLBACK')!.status).toBe('IN_PROGRESS');
   });
 
   it('fails closed: MEMBER, unauthenticated, unknown driver', async () => {

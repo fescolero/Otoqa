@@ -329,8 +329,17 @@ export const listCompletedAssignments = query({
  * A driver's loads on one calendar day (voice agent "what loads did X
  * have yesterday", but UI-agnostic). Day bounds come from the CLIENT in
  * epoch ms — dispatch days are local-timezone days and only the device
- * knows its zone. A load counts as "on" the day when any stop window
- * touches it or the assignment completed during it.
+ * knows its zone.
+ *
+ * TWO sources, merged and deduped by load — a driver's work is recorded
+ * in either depending on which surface assigned it:
+ *   1. loadCarrierAssignments.assignedDriverId — the Dispatch app's
+ *      assign flow (broker-offered work).
+ *   2. dispatchLegs (by_driver) — the web TMS's assignment model, which
+ *      is where the driver app's actual trips live. Primary driver
+ *      only (team-driver legs index on the primary).
+ * A load counts as "on" the day when any stop window, scheduled leg
+ * time, or actual start/end/completion event touches it.
  */
 export const listDriverHistory = query({
   args: {
@@ -346,31 +355,45 @@ export const listDriverHistory = query({
     }
     const inDay = (t: number | null | undefined) =>
       t != null && t >= args.dayStartMs && t < args.dayEndMs;
-
-    const all = [
-      ...(await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')),
-      ...(await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS')),
-      ...(await assignmentsByStatus(ctx, resolved.externalId, 'COMPLETED')),
-    ].filter((a) => a.assignedDriverId === args.driverId);
-
-    const out = [];
-    for (const assignment of all) {
-      const stops = (
+    const stopsOf = async (loadId: Id<'loadInformation'>) =>
+      (
         await ctx.db
           .query('loadStops')
-          .withIndex('by_load', (q) => q.eq('loadId', assignment.loadId))
+          .withIndex('by_load', (q) => q.eq('loadId', loadId))
           .collect()
       ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-      const stopTouchesDay = stops.some((s) => {
+    const stopTouchesDay = (stops: Doc<'loadStops'>[]) =>
+      stops.some((s) => {
         const b = s.windowBeginTime ? Date.parse(s.windowBeginTime) : NaN;
         const e = s.windowEndTime ? Date.parse(s.windowEndTime) : NaN;
         return inDay(Number.isFinite(b) ? b : null) || inDay(Number.isFinite(e) ? e : null);
       });
-      if (!stopTouchesDay && !inDay(assignment.completedAt)) continue;
+
+    const out: {
+      _id: string;
+      status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED';
+      completedAt: number | null;
+      internalId: string | null;
+      customerName: string | null;
+      firstStopTime: string | null;
+      stopCount: number;
+    }[] = [];
+    const seenLoads = new Set<string>();
+
+    // Source 1: Dispatch-app assignments.
+    const assignments = [
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'AWARDED')),
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS')),
+      ...(await assignmentsByStatus(ctx, resolved.externalId, 'COMPLETED')),
+    ].filter((a) => a.assignedDriverId === args.driverId);
+    for (const assignment of assignments) {
+      const stops = await stopsOf(assignment.loadId);
+      if (!stopTouchesDay(stops) && !inDay(assignment.completedAt)) continue;
+      seenLoads.add(assignment.loadId);
       const load = await ctx.db.get(assignment.loadId);
       out.push({
         _id: assignment._id,
-        status: assignment.status,
+        status: assignment.status as 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
         completedAt: assignment.completedAt ?? null,
         internalId: load?.internalId ?? null,
         customerName: load?.customerName ?? null,
@@ -378,6 +401,45 @@ export const listDriverHistory = query({
         stopCount: stops.length,
       });
     }
+
+    // Source 2: web-TMS dispatch legs (the driver app's trip records).
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', args.driverId))
+      .collect();
+    const orgScopes = new Set<string>([...resolved.driverOrgIds, resolved.externalId]);
+    for (const leg of legs) {
+      if (leg.status === 'CANCELED') continue;
+      if (!orgScopes.has(leg.workosOrgId)) continue;
+      if (seenLoads.has(leg.loadId)) continue;
+      // Denormalized schedule + actual event times first; stop windows
+      // as the fallback for historical rows predating the backfill.
+      let stops: Doc<'loadStops'>[] | null = null;
+      let touches =
+        inDay(leg.scheduledStartMs) ||
+        inDay(leg.scheduledEndMs) ||
+        inDay(leg.startedAt) ||
+        inDay(leg.endedAt);
+      if (!touches) {
+        stops = await stopsOf(leg.loadId);
+        touches = stopTouchesDay(stops);
+      }
+      if (!touches) continue;
+      seenLoads.add(leg.loadId);
+      stops ??= await stopsOf(leg.loadId);
+      const load = await ctx.db.get(leg.loadId);
+      out.push({
+        _id: leg._id,
+        status:
+          leg.status === 'ACTIVE' ? 'IN_PROGRESS' : leg.status === 'PENDING' ? 'AWARDED' : 'COMPLETED',
+        completedAt: leg.endedAt ?? null,
+        internalId: load?.internalId ?? null,
+        customerName: load?.customerName ?? null,
+        firstStopTime: stops[0]?.windowBeginTime ?? null,
+        stopCount: stops.length,
+      });
+    }
+
     out.sort((a, b) => (a.firstStopTime ?? '').localeCompare(b.firstStopTime ?? ''));
     return out;
   },
