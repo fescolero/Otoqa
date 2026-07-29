@@ -63,7 +63,10 @@ async function haikuToolCall(
   transcript: string,
 ): Promise<unknown | null> {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return null;
+  if (!key) {
+    console.warn('[voice] ANTHROPIC_API_KEY not set — falling back to the on-device grammar');
+    return null;
+  }
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -81,13 +84,19 @@ async function haikuToolCall(
         messages: [{ role: 'user', content: transcript }],
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error(`[voice] Anthropic API error ${res.status}: ${await res.text()}`);
+      return null;
+    }
     const data = (await res.json()) as {
       content?: { type: string; input?: unknown }[];
     };
-    return data.content?.find((b) => b.type === 'tool_use')?.input ?? null;
-  } catch {
+    const input = data.content?.find((b) => b.type === 'tool_use')?.input ?? null;
+    console.log(`[voice] Haiku (${tool.name}) parsed:`, JSON.stringify(input));
+    return input;
+  } catch (e) {
     // NLU is best-effort — callers fall back to deterministic parsing.
+    console.error('[voice] Anthropic call failed:', e instanceof Error ? e.message : e);
     return null;
   }
 }
@@ -99,11 +108,17 @@ async function deepgramTranscribe(
   mimeType: string,
 ): Promise<string> {
   const key = process.env.DEEPGRAM_API_KEY;
-  if (!key) throw new Error('Voice transcription is not configured (DEEPGRAM_API_KEY missing).');
+  if (!key) {
+    console.error('[voice] DEEPGRAM_API_KEY not set on the deployment');
+    throw new Error('Voice transcription is not configured (DEEPGRAM_API_KEY missing).');
+  }
 
   const binary = atob(audioBase64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  console.log(
+    `[voice] Deepgram request: ${bytes.length} bytes ${mimeType}, ${Math.min(keyterms.length, 100)} keyterms`,
+  );
 
   const res = await fetch(buildDeepgramUrl(keyterms), {
     method: 'POST',
@@ -111,12 +126,15 @@ async function deepgramTranscribe(
     body: bytes,
   });
   if (!res.ok) {
+    console.error(`[voice] Deepgram error ${res.status}: ${await res.text()}`);
     throw new Error(`Transcription failed (${res.status})`);
   }
   const data = (await res.json()) as {
     results?: { channels?: { alternatives?: { transcript?: string }[] }[] };
   };
-  return data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? '';
+  const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? '';
+  console.log(`[voice] Deepgram transcript: "${transcript}"`);
+  return transcript;
 }
 
 export const transcribeAndParse = action({
