@@ -56,7 +56,7 @@ async function insertFixtures(ctx: MutationCtx) {
     createdAt: now,
     updatedAt: now,
   });
-  const customer = (name: string, status: string, isDeleted?: boolean) =>
+  const customer = (name: string, status: 'Active' | 'Inactive', isDeleted?: boolean) =>
     ctx.db.insert('customers', {
       name,
       companyType: 'Shipper',
