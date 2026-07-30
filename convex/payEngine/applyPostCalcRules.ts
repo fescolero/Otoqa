@@ -295,7 +295,9 @@ function applyMaximumCapWeekly(
       componentBucket: offsetComponent.bucket,
       componentSign: offsetComponent.sign,
       lifecycleStatus: 'APPLIED',
-      description: `${rule.name} — ${overHours.toFixed(2)} h over ${rule.thresholdQty} h (week ${wk + 1})`,
+      // "Maxed out" framing, never "taken away": the capped component pays
+      // on the first thresholdQty hours; the rest simply hit the maximum.
+      description: `${rule.name} — ${rule.thresholdQty} h/week max reached · ${overHours.toFixed(2)} h at max (week ${wk + 1})`,
       quantity: overHours,
       rateMicroCents: avgRateMicroCents,
       amountCents: overCents,
@@ -313,6 +315,10 @@ function applyMaximumCapWeekly(
         _variant: 'POST_CALC_ADJUSTMENT',
         postCalcRuleName: rule.name,
         profileIdSnapshot: input.profile._id,
+        // Display layers fold this offset into the capped component and
+        // label it "maxed out" — see capOffsetInfo in settlementReads.
+        capComponentId: rule.componentId,
+        capThresholdQty: rule.thresholdQty,
       },
       isLocked: false,
       isVoided: false,

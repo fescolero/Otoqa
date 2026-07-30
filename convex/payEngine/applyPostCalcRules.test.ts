@@ -237,9 +237,18 @@ describe('applyPostCalcRules: MAXIMUM_CAP_WEEKLY', () => {
     expect(offset.componentBucket).toBe('DEDUCTION');
     expect(offset.componentSign).toBe('DEBIT');
     expect(offset.kind).toBe('POST_CALC_ADJUSTMENT');
-    expect(offset.description).toContain('10.00 h over 40 h');
+    // "Maxed out" framing — never reads as pay being taken away.
+    expect(offset.description).toContain('40 h/week max reached');
+    expect(offset.description).toContain('10.00 h at max');
     expect(offset.sourceRef.kind).toBe('POST_CALC_RULE');
     expect(offset.sourceRef.id).toBe('postcalc:prof_test:H&W weekly cap:w0');
+    // Cap fold metadata — display layers use this to fold the offset into
+    // the capped component's row instead of showing a deduction.
+    expect(offset.sourceData._variant).toBe('POST_CALC_ADJUSTMENT');
+    if (offset.sourceData._variant === 'POST_CALC_ADJUSTMENT') {
+      expect(offset.sourceData.capComponentId).toBe(COMP_HW);
+      expect(offset.sourceData.capThresholdQty).toBe(40);
+    }
   });
 
   it('attributes overage chronologically — later hours are the capped ones', () => {

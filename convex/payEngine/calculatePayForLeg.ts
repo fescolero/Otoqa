@@ -258,6 +258,8 @@ export function specToPayItemRow(
         _variant: 'POST_CALC_ADJUSTMENT' as const,
         postCalcRuleName: spec.sourceData.postCalcRuleName,
         profileIdSnapshot: spec.sourceData.profileIdSnapshot as Id<'payProfiles'>,
+        capComponentId: spec.sourceData.capComponentId as Id<'chargeComponents'> | undefined,
+        capThresholdQty: spec.sourceData.capThresholdQty,
       };
 
   return {

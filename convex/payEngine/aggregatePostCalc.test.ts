@@ -89,7 +89,7 @@ async function capOffsets(t: T, driverId: Id<'drivers'>): Promise<Array<Doc<'pay
 describe('aggregateSettlement — MAXIMUM_CAP_WEEKLY offsets', () => {
   it('emits one visible offset for the over-cap week and folds it into totals', async () => {
     const t = convexTest(schema);
-    const { driverId } = await seed(t);
+    const { driverId, hwComp } = await seed(t);
     const result = await aggregate(t, driverId);
     expect(result.action).toBe('created');
 
@@ -98,9 +98,16 @@ describe('aggregateSettlement — MAXIMUM_CAP_WEEKLY offsets', () => {
     const offset = offsets[0];
     expect(offset.amountCents).toBe(5550n); // 10 h × $5.55
     expect(offset.quantity).toBe(10);
-    expect(offset.description).toContain('10.00 h over 40 h');
+    expect(offset.description).toContain('40 h/week max reached');
+    expect(offset.description).toContain('10.00 h at max');
     expect(offset.settlementId).toBe(result.settlementId);
     expect(offset.isLocked).toBe(false);
+    // Cap fold metadata for the "maxed out" display treatment.
+    expect(offset.sourceData?._variant).toBe('POST_CALC_ADJUSTMENT');
+    if (offset.sourceData?._variant === 'POST_CALC_ADJUSTMENT') {
+      expect(offset.sourceData.capComponentId).toBe(hwComp);
+      expect(offset.sourceData.capThresholdQty).toBe(40);
+    }
 
     // The offset component was lazily seeded from the catalog template.
     const comp = await t.run(async (ctx) => ctx.db.get(offset.componentId));
@@ -180,6 +187,32 @@ describe('aggregateSettlement — MAXIMUM_CAP_WEEKLY offsets', () => {
     expect(after).toHaveLength(1);
     expect(after[0].isVoided).toBe(false);
     expect(after[0].amountCents).toBe(5550n); // reviewer's number, not the recompute
+  });
+
+  it('converges sourceData on rows written before the cap-fold metadata existed', async () => {
+    const t = convexTest(schema);
+    const { driverId, hwComp, profileId } = await seed(t);
+    await aggregate(t, driverId);
+    const offset = (await capOffsets(t, driverId)).filter((o) => !o.isVoided)[0];
+
+    // Simulate a row from the earlier engine version: no cap metadata.
+    await t.run(async (ctx) => {
+      await ctx.db.patch(offset._id, {
+        sourceData: {
+          _variant: 'POST_CALC_ADJUSTMENT' as const,
+          postCalcRuleName: 'H&W weekly cap',
+          profileIdSnapshot: profileId,
+        },
+      });
+    });
+    await aggregate(t, driverId);
+    const after = (await capOffsets(t, driverId)).filter((o) => !o.isVoided)[0];
+    expect(after._id).toBe(offset._id);
+    expect(after.sourceData?._variant).toBe('POST_CALC_ADJUSTMENT');
+    if (after.sourceData?._variant === 'POST_CALC_ADJUSTMENT') {
+      expect(after.sourceData.capComponentId).toBe(hwComp);
+      expect(after.sourceData.capThresholdQty).toBe(40);
+    }
   });
 
   it('emits nothing (and stays clean) for a payee with no post-calc rules', async () => {

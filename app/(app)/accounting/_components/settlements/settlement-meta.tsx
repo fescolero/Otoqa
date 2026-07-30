@@ -233,6 +233,18 @@ export interface RateHoursRow {
   rate: number;
   hours: number;
   amount: number;
+  /** Weekly cap applied to this layer — "capped at N h/week". Hours/amount
+   *  above already reflect the cap (paid figures, not clocked figures). */
+  cappedNote?: string;
+}
+
+/** A weekly-cap offset to fold into its capped component's row: `hours` and
+ *  `amount` are positive magnitudes to subtract from the paid figures. */
+export interface RateHoursCap {
+  componentId: string;
+  hours: number;
+  amount: number;
+  thresholdQty?: number;
 }
 
 /**
@@ -245,11 +257,17 @@ export interface RateHoursRow {
  * statements). Layers are deliberately NOT summed into a grand hours figure:
  * stacked layers pay on the same clock hours, so adding them would
  * double-count time.
+ *
+ * `caps` (weekly hour caps) fold INTO their component's rows: the row then
+ * shows the hours actually PAID with a "capped at N h/week" note — maxed
+ * out, not deducted. Reconciliation holds: rows + otherTotal equals the
+ * earnings total including the (negative) cap lines.
  */
 export function buildRateHours(
-  lines: Array<{ label: string; hours?: number; rate?: number; amount: number }>,
+  lines: Array<{ label: string; hours?: number; rate?: number; amount: number; componentId?: string }>,
+  caps?: RateHoursCap[],
 ): { rows: RateHoursRow[]; otherTotal: number } | null {
-  const groups = new Map<string, RateHoursRow>();
+  const groups = new Map<string, RateHoursRow & { componentId?: string }>();
   let otherTotal = 0;
   for (const l of lines) {
     if (l.hours != null && l.hours > 0 && l.rate != null) {
@@ -260,13 +278,45 @@ export function buildRateHours(
         g.hours += l.hours;
         g.amount += l.amount;
       } else {
-        groups.set(key, { label, rate: l.rate, hours: l.hours, amount: l.amount });
+        groups.set(key, { label, rate: l.rate, hours: l.hours, amount: l.amount, componentId: l.componentId });
       }
     } else {
       otherTotal += l.amount;
     }
   }
   if (groups.size === 0) return null;
+
+  // Fold each cap into its component's rows, dominant row first. Anything a
+  // cap can't attach to (no matching row) still reduces otherTotal so the
+  // breakdown keeps summing to the capped earnings total.
+  for (const cap of caps ?? []) {
+    let hoursLeft = Math.max(0, cap.hours);
+    let amountLeft = Math.max(0, cap.amount);
+    const targets = [...groups.values()]
+      .filter((g) => g.componentId != null && g.componentId === cap.componentId)
+      .sort((a, b) => b.amount - a.amount);
+    for (const g of targets) {
+      if (hoursLeft <= 0 && amountLeft <= 0) break;
+      const takeHours = Math.min(g.hours, hoursLeft);
+      const takeAmount = Math.min(g.amount, amountLeft);
+      g.hours = Math.round((g.hours - takeHours) * 100) / 100;
+      g.amount = +(g.amount - takeAmount).toFixed(2);
+      g.cappedNote = cap.thresholdQty != null ? `capped at ${cap.thresholdQty} h/week` : 'weekly cap applied';
+      hoursLeft -= takeHours;
+      amountLeft -= takeAmount;
+    }
+    if (amountLeft > 0.005) otherTotal -= amountLeft;
+  }
+
   // Dominant layer first — mirrors the shift cards' ordering.
-  return { rows: [...groups.values()].sort((a, b) => b.amount - a.amount), otherTotal };
+  return {
+    rows: [...groups.values()]
+      .map((g) => {
+        const { componentId, ...row } = g;
+        void componentId;
+        return row;
+      })
+      .sort((a, b) => b.amount - a.amount),
+    otherTotal,
+  };
 }

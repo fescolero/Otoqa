@@ -251,6 +251,10 @@ export type PayItemSpec = {
         _variant: 'POST_CALC_ADJUSTMENT';
         postCalcRuleName: string;
         profileIdSnapshot: string;
+        /** Cap offsets: the capped component — display folds the offset into it. */
+        capComponentId?: string;
+        /** Cap offsets: the per-week hour threshold (for "40 h/week max" labels). */
+        capThresholdQty?: number;
       };
   isLocked: false;
   isVoided: false;

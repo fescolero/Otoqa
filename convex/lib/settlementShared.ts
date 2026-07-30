@@ -83,7 +83,10 @@ export function summarizeLines(
       reimbTotal += p.totalAmount;
     } else {
       earnTotal += p.totalAmount;
-      if (p.sourceType === 'SYSTEM') {
+      // Negative earning lines (weekly-cap "maxed out" offsets) reduce the
+      // dollars but carry no NEW worked time — their hours already live on
+      // the shift lines they cap, so counting them would inflate the totals.
+      if (p.sourceType === 'SYSTEM' && p.totalAmount >= 0) {
         systemQuantity += p.quantity;
         if (p.sessionId) {
           const k = p.sessionId as string;

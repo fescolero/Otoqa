@@ -95,6 +95,12 @@ interface DetailsPayable {
   /** Rules engine now computes a different amount than this locked edit. */
   rulesChanged?: boolean;
   rulesAmount?: number;
+  /** Which component this line counts as (new-ledger adapter). */
+  componentId?: string;
+  /** Weekly-cap offset: the capped component — the line renders as that
+   *  component "maxed out", folded into its breakdown row (never a deduction). */
+  capComponentId?: string;
+  capThresholdQty?: number;
 }
 
 interface PanelLine {
@@ -145,6 +151,8 @@ interface PanelLine {
   /** Rules drift: engine now computes a different amount than this edit. */
   rulesChanged?: boolean;
   rulesAmount?: number;
+  /** Which component this line counts as — cap-fold matching. */
+  componentId?: string;
   /** Editable system line (DRAFT/PENDING + SYSTEM). */
   editableLine?: boolean;
   /** Load id for per-load adjustments. */
@@ -1824,6 +1832,10 @@ export function SettlementPanel({
     const earn: PanelLine[] = [];
     const reimb: PanelLine[] = [];
     const deduct: PanelLine[] = [];
+    // Weekly-cap "maxed out" lines — rendered inside the earnings flow (a
+    // fringe cap is pay topping out, not pay being taken away) and folded
+    // into the capped component's per-rate breakdown row. Amount is negative.
+    const caps: Array<{ _id: string; label: string; amount: number; componentId: string; hours: number; thresholdQty?: number }> = [];
     // Reviewer-added MANUAL lines live in the right-rail Adjustments section,
     // not the day-grouped earnings flow. Amount is signed (deductions stored
     // negative).
@@ -1844,6 +1856,14 @@ export function SettlementPanel({
 
       if (p.sourceType === 'MANUAL') {
         adjustments.push({ _id: p._id, label: p.description, amount: p.totalAmount, loadLabel });
+        continue;
+      }
+
+      if (p.capComponentId) {
+        caps.push({
+          _id: p._id, label: p.description, amount: p.totalAmount,
+          componentId: p.capComponentId, hours: p.quantity, thresholdQty: p.capThresholdQty,
+        });
         continue;
       }
 
@@ -1897,6 +1917,7 @@ export function SettlementPanel({
         originalTotalAmount: p.originalTotalAmount,
         rulesChanged: p.rulesChanged,
         rulesAmount: p.rulesAmount,
+        componentId: p.componentId,
         editableLine: editable && category === 'EARNING',
         // Per-load Adjust available for load lines (mile/pct/flat, not shift).
         adjustableLoad: editable && !isShift && !!p.loadId,
@@ -1918,12 +1939,13 @@ export function SettlementPanel({
 
     // Statements read chronologically — days ascending, lines by time within.
     earn.sort((a, b) => a.at - b.at);
-    const earnTotal = earn.reduce((s, l) => s + l.amount, 0);
+    // Earnings are CAPPED earnings: cap lines carry negative amounts.
+    const earnTotal = earn.reduce((s, l) => s + l.amount, 0) + caps.reduce((s, c) => s + c.amount, 0);
     const reimbTotal = reimb.reduce((s, l) => s + l.amount, 0);
     const deductTotal = deduct.reduce((s, l) => s + l.amount, 0);
     const adjTotal = adjustments.reduce((s, a) => s + a.amount, 0);
     return {
-      earn, reimb, deduct, adjustments,
+      earn, reimb, deduct, adjustments, caps,
       earnTotal, reimbTotal, deductTotal, adjTotal,
       net: earnTotal + reimbTotal - deductTotal + adjTotal,
     };
@@ -1972,7 +1994,14 @@ export function SettlementPanel({
     () =>
       lines
         ? buildRateHours(
-            lines.earn.map((l) => ({ label: l.desc ?? l.label, hours: l.hours, rate: l.rate, amount: l.amount })),
+            lines.earn.map((l) => ({
+              label: l.desc ?? l.label, hours: l.hours, rate: l.rate, amount: l.amount, componentId: l.componentId,
+            })),
+            // Weekly caps fold into their component's row — the row then shows
+            // the hours actually PAID with a "capped at N h/week" note.
+            lines.caps.map((c) => ({
+              componentId: c.componentId, hours: c.hours, amount: Math.abs(c.amount), thresholdQty: c.thresholdQty,
+            })),
           )
         : null,
     [lines],
@@ -2577,6 +2606,24 @@ export function SettlementPanel({
                 No earning lines yet.
               </div>
             )}
+            {/* Weekly maximums — "maxed out" rows, part of the earnings story
+                (never deductions). Shift lines above keep their full clocked
+                hours; these reconcile them down to the capped subtotal. */}
+            {lines && lines.caps.length > 0 && lines.caps.map((c) => (
+              <div
+                key={c._id}
+                className="flex items-center gap-2.5"
+                style={{ padding: '9px 14px', borderTop: '1px solid var(--border-hairline)', background: 'var(--bg-surface-2)' }}
+              >
+                <WIcon name="gauge" size={13} color="#A66800" />
+                <span className="flex-1 min-w-0" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  {c.label}
+                </span>
+                <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-secondary)' }}>
+                  {fmtUSD(c.amount)}
+                </span>
+              </div>
+            ))}
             <StSubtotal label="Earnings subtotal" value={totals.earnTotal} />
           </div>
 
@@ -2660,6 +2707,9 @@ export function SettlementPanel({
                       </div>
                       <div className="num" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
                         {r.hours.toFixed(2)} h @ ${r.rate.toFixed(2)}/hr
+                        {r.cappedNote && (
+                          <span style={{ color: '#A66800' }}> · {r.cappedNote}</span>
+                        )}
                       </div>
                     </div>
                     <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 500 }}>

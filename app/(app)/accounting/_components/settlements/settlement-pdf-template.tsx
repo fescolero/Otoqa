@@ -11,7 +11,6 @@ import { Document, Page, StyleSheet, Text, View } from '@react-pdf/renderer';
 import {
   SETTLE_PRESETS,
   PLAN_META,
-  buildRateHours,
   chipKeyForRow,
   fmtUSD,
   type SettlementParty,
@@ -22,6 +21,7 @@ import {
   fmtPeriodYear,
   basisLabel,
   lineDisplay,
+  rateHoursFromEarn,
   type StatementSections,
   type CompanyBlock,
 } from './settlement-doc-panel';
@@ -106,18 +106,9 @@ export function SettlementPDF({
   const hasAdjustments = sections.reimb.length > 0 || sections.deduct.length > 0;
   // Hours-at-each-rate rows for the totals box (hourly plans) — same rollup
   // as the review panel's Net pay card, so the printed statement reads the
-  // same way: each rate is its own line, Earnings is their subtotal.
-  const rateHours =
-    row.planBasis === 'hourly'
-      ? buildRateHours(
-          sections.earn.map((p) => ({
-            label: p.description,
-            hours: p.sourceType === 'SYSTEM' ? p.quantity : undefined,
-            rate: p.rate,
-            amount: p.totalAmount,
-          })),
-        )
-      : null;
+  // same way: each rate is its own line (weekly caps folded in as PAID
+  // hours + "capped at N h/week"), Earnings is their subtotal.
+  const rateHours = row.planBasis === 'hourly' ? rateHoursFromEarn(sections.earn) : null;
 
   return (
     <Document>
@@ -234,6 +225,7 @@ export function SettlementPDF({
                       <Text style={pdfStyles.totalsRateLabel}>{r.label}</Text>
                       <Text style={pdfStyles.totalsRateSub}>
                         {r.hours.toFixed(2)} h @ ${r.rate.toFixed(2)}/hr
+                        {r.cappedNote ? ` · ${r.cappedNote}` : ''}
                       </Text>
                     </View>
                     <Text style={pdfStyles.cellMain}>{fmtUSD(r.amount)}</Text>
