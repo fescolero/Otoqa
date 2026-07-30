@@ -420,6 +420,15 @@ export const update = mutation({
 
     await ctx.db.patch(profileId, { ...cleaned, updatedAt: now, updatedBy: userId });
 
+    // Period rules apply at settlement aggregation, not per-shift calc — kick
+    // the org's open periods now so a new/changed cap shows on statements
+    // immediately instead of waiting for the hourly generation cron.
+    if ('postCalcRules' in cleaned) {
+      await ctx.scheduler.runAfter(0, internal.payEngine.generationCron.processOrg, {
+        workosOrgId: orgId,
+      });
+    }
+
     const changedKeys = Object.keys(cleaned);
     if (changedKeys.length > 0) {
       await ctx.db.insert('auditLog', {
