@@ -104,7 +104,10 @@ function OfferCard({ offer }: { offer: OfferRow }) {
     );
 
   return (
-    <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.primary, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}>
+    <Pressable
+      onLongPress={() => Alert.alert('Load payload (debug)', JSON.stringify(offer.load, null, 2))}
+      style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.primary, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
+    >
       <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
         <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
           {displayLoadId(offer.load?.internalId)}
@@ -150,7 +153,7 @@ function OfferCard({ offer }: { offer: OfferRow }) {
           </Pressable>
         </View>
       )}
-    </View>
+    </Pressable>
   );
 }
 
@@ -215,6 +218,7 @@ export default function BoardScreen() {
             return (
               <Pressable
                 onPress={() => router.push({ pathname: '/assign', params: { assignmentId: row._id } })}
+                onLongPress={() => Alert.alert('Load payload (debug)', JSON.stringify(row.load, null, 2))}
                 style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
               >
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
