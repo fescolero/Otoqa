@@ -16,6 +16,7 @@ import { useCarrierOwner } from '../_layout';
 import { colors, typography, borderRadius, spacing, shadows, isIOS } from '../../../lib/theme';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { Id } from '../../../../../convex/_generated/dataModel';
+import { displayLoadId } from '../../../lib/format';
 
 // ============================================
 // ASSIGN DRIVER PAGE
@@ -211,7 +212,7 @@ export default function AssignDriverScreen() {
         </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Assign Driver</Text>
-          <Text style={styles.headerSubtitle}>LOAD #{loadData.internalId}</Text>
+          <Text style={styles.headerSubtitle}>LOAD #{displayLoadId(loadData.internalId)}</Text>
         </View>
         <View style={styles.headerSpacer} />
       </View>

@@ -10,6 +10,7 @@ import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
 import { useLanguage } from '../../../../lib/LanguageContext';
 import { useQueryHealth } from '../../../../lib/hooks/useQueryHealth';
+import { displayLoadId } from '../../../../lib/format';
 
 // ============================================
 // OWNER DASHBOARD - Dispatcher View
@@ -301,7 +302,7 @@ export default function OwnerDashboard() {
               <View style={styles.loadHeader}>
                 <View style={styles.loadIdRow}>
                   <MaterialCommunityIcons name="truck-delivery" size={18} color={colors.foreground} />
-                  <Text style={styles.loadId}>Load #{loadData.load?.internalId || 'N/A'}</Text>
+                  <Text style={styles.loadId}>Load #{loadData.load?.internalId ? displayLoadId(loadData.load.internalId) : 'N/A'}</Text>
                 </View>
                 <View style={[styles.yellowBadge, { backgroundColor: loadData.driver ? '#4CAF50' : '#F59E0B' }]}>
                   <Text style={styles.yellowBadgeText} maxFontSizeMultiplier={1.2}>

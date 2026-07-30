@@ -54,6 +54,7 @@ import { AppState } from 'react-native';
 // for now; they'll migrate in a later pass.
 import { Icon } from '../../../lib/design-icons';
 import { useTheme } from '../../../lib/ThemeContext';
+import { displayLoadId } from '../../../lib/format';
 import {
   typeScale,
   radii as designRadii,
@@ -1996,7 +1997,7 @@ function LoadSummary({
           }}
           numberOfLines={1}
         >
-          #{load.orderNumber ?? load.internalId}
+          #{displayLoadId(load.orderNumber ?? load.internalId)}
         </Text>
         <View
           style={{

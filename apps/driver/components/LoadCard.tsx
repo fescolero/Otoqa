@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { colors, typography, spacing, borderRadius, shadows, isIOS } from '../lib/theme';
 import { GlassCard, GlassBadge } from './GlassCard';
+import { displayLoadId } from '../lib/format';
 
 // ============================================
 // LOAD CARDS
@@ -75,7 +76,7 @@ export function CurrentLoadCard({ load, onPress }: CurrentLoadCardProps) {
             <Text style={styles.currentLoadIcon}>🚛</Text>
             <View>
               <Text style={styles.currentLoadLabel}>Current Load</Text>
-              <Text style={styles.currentLoadId}>#{load.internalId}</Text>
+              <Text style={styles.currentLoadId}>#{displayLoadId(load.internalId)}</Text>
             </View>
           </View>
           <View style={styles.currentLoadRight}>
@@ -188,7 +189,7 @@ export function ScheduledLoadCard({ load, tripNumber, onPress }: ScheduledLoadCa
         <View style={styles.loadCardHeader}>
           <View style={styles.loadCardHeaderLeft}>
             <Text style={styles.loadCardIcon}>📦</Text>
-            <Text style={styles.loadCardTitle}>Load #{load.internalId}</Text>
+            <Text style={styles.loadCardTitle}>Load #{displayLoadId(load.internalId)}</Text>
           </View>
           <GlassBadge color={colors.secondary}>
             <Text style={styles.statusBadgeText} maxFontSizeMultiplier={1.2}>Scheduled</Text>

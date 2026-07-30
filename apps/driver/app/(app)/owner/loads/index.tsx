@@ -16,6 +16,7 @@ import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
 import { useState, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'expo-router';
 import { useQueryHealth } from '../../../../lib/hooks/useQueryHealth';
+import { displayLoadId } from '../../../../lib/format';
 
 type DateFilter = 'today' | 'tomorrow' | 'history';
 type StatusFilter = 'needsDriver' | 'active' | 'completed';
@@ -320,7 +321,7 @@ export default function ManageLoadsScreen() {
         <View style={styles.loadHeader}>
           <View style={styles.loadIdRow}>
             <MaterialCommunityIcons name="truck-delivery" size={18} color={colors.foreground} />
-            <Text style={styles.loadId}>Load #{item.load?.internalId || 'N/A'}</Text>
+            <Text style={styles.loadId}>Load #{item.load?.internalId ? displayLoadId(item.load.internalId) : 'N/A'}</Text>
           </View>
           <View style={[styles.assignmentBadge, { backgroundColor: driver ? colors.success : '#F59E0B' }]}>
             <Text style={styles.assignmentBadgeText} maxFontSizeMultiplier={1.2}>

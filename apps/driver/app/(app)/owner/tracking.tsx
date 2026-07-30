@@ -5,6 +5,7 @@ import { useQuery } from 'convex/react';
 import { api } from '../../../../../convex/_generated/api';
 import { useCarrierOwner } from '../_layout';
 import { colors, typography, borderRadius, shadows, spacing } from '../../../lib/theme';
+import { displayLoadId } from '../../../lib/format';
 import { Ionicons } from '@expo/vector-icons';
 import { useState, useCallback } from 'react';
 
@@ -136,7 +137,7 @@ export default function TrackingScreen() {
                   </View>
                   <View style={styles.loadBadge}>
                     <Text style={styles.loadBadgeText} maxFontSizeMultiplier={1.2}>
-                      {driverLoc.currentLoad?.internalId}
+                      {displayLoadId(driverLoc.currentLoad?.internalId)}
                     </Text>
                   </View>
                 </View>

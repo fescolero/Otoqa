@@ -23,6 +23,7 @@ import { colors, typography, borderRadius, shadows, spacing } from '../../../../
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useState, useCallback, useMemo } from 'react';
 import DatePickerModal from '../../../../../components/DatePickerModal';
+import { displayLoadId } from '../../../../../lib/format';
 
 // ============================================
 // DRIVER MANAGEMENT SCREEN
@@ -156,7 +157,7 @@ export default function DriversScreen() {
 
   // Get active load ID if driver has assignment
   const getDriverExtras = useCallback((driver: any) => {
-    const loadId = driver.currentLoad?.internalId ? `#${driver.currentLoad.internalId}` : null;
+    const loadId = driver.currentLoad?.internalId ? `#${displayLoadId(driver.currentLoad.internalId)}` : null;
     return { loadId };
   }, []);
 
