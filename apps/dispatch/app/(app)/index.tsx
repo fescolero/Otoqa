@@ -217,7 +217,11 @@ export default function BoardScreen() {
             const t = nextWindow(row);
             return (
               <Pressable
-                onPress={() => router.push({ pathname: '/assign', params: { assignmentId: row._id } })}
+                onPress={
+                  row.source === 'leg'
+                    ? undefined
+                    : () => router.push({ pathname: '/assign', params: { assignmentId: row._id } })
+                }
                 onLongPress={() => Alert.alert('Load payload (debug)', JSON.stringify(row.load, null, 2))}
                 style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}
               >
@@ -226,9 +230,11 @@ export default function BoardScreen() {
                     {displayLoadId(row.load?.internalId)}
                   </Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                    <Pressable onPress={() => router.push({ pathname: '/adjust', params: { assignmentId: row._id } })} hitSlop={8}>
-                      <Ionicons name="time-outline" size={18} color={colors.foregroundMuted} />
-                    </Pressable>
+                    {row.source !== 'leg' && (
+                      <Pressable onPress={() => router.push({ pathname: '/adjust', params: { assignmentId: row._id } })} hitSlop={8}>
+                        <Ionicons name="time-outline" size={18} color={colors.foregroundMuted} />
+                      </Pressable>
+                    )}
                     <Text style={{ color: row.status === 'IN_PROGRESS' ? colors.primary : colors.warning, fontSize: typography.xs, fontWeight: typography.bold }}>
                       {row.status === 'IN_PROGRESS' ? 'In transit' : 'Awarded'}
                     </Text>

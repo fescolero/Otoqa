@@ -2246,6 +2246,9 @@ export default defineSchema({
     .index('by_driver_status_scheduled_start', ['driverId', 'status', 'scheduledStartMs'])
     .index('by_carrier_partnership', ['carrierPartnershipId', 'status'])
     .index('by_org', ['workosOrgId'])
+    // Dispatch-app Board: org-scoped PENDING/ACTIVE legs without scanning
+    // the org's full leg history.
+    .index('by_org_status', ['workosOrgId', 'status'])
     .index('by_truck', ['truckId'])
     // Active Sessions live-ops and the session stop-timeline query use this
     // to render "every leg in this shift, in order". Without it, per-session

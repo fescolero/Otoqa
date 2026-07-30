@@ -251,7 +251,11 @@ async function assignmentsByStatus(
     .collect();
 }
 
-/** Board data — AWARDED + IN_PROGRESS assignments, enriched like getActiveLoads. */
+/** Board data — AWARDED + IN_PROGRESS assignments, enriched like
+ * getActiveLoads, PLUS web-TMS dispatch legs. Orgs that assign drivers in
+ * the web TMS create dispatchLegs, not loadCarrierAssignments — without
+ * the merge their Board is empty (same model gap listDriverHistory
+ * closes). Leg rows are read-only on the client (source: 'leg'). */
 export const listActiveAssignments = query({
   args: {},
   handler: async (ctx) => {
@@ -261,7 +265,7 @@ export const listActiveAssignments = query({
       ...(await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS')),
     ];
 
-    return Promise.all(
+    const assignmentRows = await Promise.all(
       assignments.map(async (assignment) => {
         const load = await ctx.db.get(assignment.loadId);
         const stops = load
@@ -281,6 +285,7 @@ export const listActiveAssignments = query({
           : { hcr: undefined, trip: undefined, all: [] };
         return {
           ...assignment,
+          source: 'assignment' as const,
           load: load
             ? {
                 _id: load._id,
@@ -302,6 +307,76 @@ export const listActiveAssignments = query({
         };
       }),
     );
+
+    // ── Web-TMS legs ──────────────────────────────────────────────────
+    const seenLoads = new Set<string>(assignments.map((a) => a.loadId as string));
+    const orgScopes = [...new Set([...resolved.driverOrgIds, resolved.externalId])];
+    const legs: Doc<'dispatchLegs'>[] = [];
+    for (const orgId of orgScopes) {
+      for (const status of ['PENDING', 'ACTIVE'] as const) {
+        legs.push(
+          ...(await ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_org_status', (q) => q.eq('workosOrgId', orgId).eq('status', status))
+            .collect()),
+        );
+      }
+    }
+    const now = Date.now();
+    const horizonLo = now - 12 * 3600_000;
+    const horizonHi = now + 48 * 3600_000;
+    const legRows = [];
+    for (const leg of legs) {
+      if (seenLoads.has(leg.loadId as string)) continue;
+      // ACTIVE always shows; PENDING only inside the board horizon (legs
+      // without a denormalized schedule ride along — rare backfill gap).
+      if (
+        leg.status === 'PENDING' &&
+        leg.scheduledStartMs != null &&
+        (leg.scheduledStartMs < horizonLo || leg.scheduledStartMs > horizonHi)
+      ) {
+        continue;
+      }
+      seenLoads.add(leg.loadId as string);
+      const load = await ctx.db.get(leg.loadId);
+      const stops = load
+        ? await ctx.db
+            .query('loadStops')
+            .withIndex('by_load', (q) => q.eq('loadId', load._id))
+            .collect()
+        : [];
+      const driver = leg.driverId ? await ctx.db.get(leg.driverId) : null;
+      const driverLocation = leg.driverId ? await latestLocation(ctx, leg.driverId) : null;
+      const facets = load
+        ? await getLoadFacets(ctx, load._id)
+        : { hcr: undefined, trip: undefined, all: [] as { key: string; value: string }[] };
+      legRows.push({
+        _id: leg._id as string,
+        source: 'leg' as const,
+        status: leg.status === 'ACTIVE' ? ('IN_PROGRESS' as const) : ('AWARDED' as const),
+        assignedDriverId: leg.driverId ?? null,
+        load: load
+          ? {
+              _id: load._id,
+              internalId: load.internalId,
+              customerName: load.customerName,
+              trackingStatus: load.trackingStatus,
+              effectiveMiles: load.effectiveMiles,
+              equipmentType: load.equipmentType,
+              tripNumber: facets.trip,
+              hcr: facets.hcr,
+              facets: facets.all,
+            }
+          : null,
+        stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
+        driver: driver
+          ? { _id: driver._id, firstName: driver.firstName, lastName: driver.lastName, phone: driver.phone }
+          : null,
+        driverLocation,
+      });
+    }
+
+    return [...assignmentRows, ...legRows];
   },
 });
 

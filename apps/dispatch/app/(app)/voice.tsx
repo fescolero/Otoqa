@@ -70,7 +70,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v10';
+const VOICE_BUILD = 'v11';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -168,7 +168,10 @@ export default function VoiceScreen() {
   const handleIntent = (intent: VoiceIntent) => {
     switch (intent.kind) {
       case 'assign': {
-        const loadHit = matchByRef(rows ?? [], (r) => r.load?.internalId, intent.loadRef);
+        // Web-TMS leg rows are read-only here — their driver is managed in
+        // the TMS, and assignLoad only accepts loadCarrierAssignments ids.
+        const assignable = (rows ?? []).filter((r) => r.source !== 'leg');
+        const loadHit = matchByRef(assignable, (r) => r.load?.internalId, intent.loadRef);
         if (!loadHit) return say('agent', `I can't find load ${intent.loadRef} on the board.`);
         if ('ambiguous' in loadHit)
           return say(
