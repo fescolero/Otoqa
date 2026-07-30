@@ -36,7 +36,7 @@ export const forInternalId = internalQuery({
         rawTagRows: tagRows.map((t) => ({
           facetKey: t.facetKey,
           value: t.value,
-          source: t.source,
+          canonicalValue: t.canonicalValue,
         })),
       });
     }
