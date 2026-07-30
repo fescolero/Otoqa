@@ -18,9 +18,12 @@ let Updates: {
   isEmbeddedLaunch: boolean;
   channel: string | null;
   runtimeVersion: string | null;
-  checkForUpdateAsync(): Promise<{ isAvailable: boolean }>;
+  checkForUpdateAsync(): Promise<{ isAvailable: boolean; reason?: string }>;
   fetchUpdateAsync(): Promise<{ isNew: boolean }>;
   reloadAsync(): Promise<void>;
+  readLogEntriesAsync(maxAge?: number): Promise<
+    { timestamp: number; message: string; code: string; level: string }[]
+  >;
 } | null = null;
 try {
   Updates = require('expo-updates');
@@ -35,6 +38,7 @@ export default function MoreScreen() {
   const { signOut } = useActiveAuth();
   const personaLabel = session?.persona === 'owner_operator' ? 'Owner-operator' : 'Dispatcher';
   const [updStatus, setUpdStatus] = useState('');
+  const [updLog, setUpdLog] = useState<string[] | null>(null);
 
   // Manual OTA check: surfaces download/apply errors that the silent
   // launch-time check (and its crash-rollback) never shows.
@@ -43,7 +47,8 @@ export default function MoreScreen() {
     setUpdStatus('Checking…');
     try {
       const check = await Updates.checkForUpdateAsync();
-      if (!check.isAvailable) return setUpdStatus('Already up to date.');
+      if (!check.isAvailable)
+        return setUpdStatus(`Already up to date.${check.reason ? ` (${check.reason})` : ''}`);
       setUpdStatus('Downloading…');
       const fetched = await Updates.fetchUpdateAsync();
       if (!fetched.isNew) return setUpdStatus('Downloaded, but not newer than the running bundle.');
@@ -54,12 +59,32 @@ export default function MoreScreen() {
     }
   };
 
+  // On-device expo-updates log: shows why an update didn't apply — the
+  // crash-rollback and download failures are invisible everywhere else.
+  const showUpdateLog = async () => {
+    if (!Updates?.readLogEntriesAsync) return setUpdLog(['Update log unavailable in this build.']);
+    try {
+      const entries = await Updates.readLogEntriesAsync(72 * 3600 * 1000);
+      if (entries.length === 0) return setUpdLog(['No update log entries in the last 72h.']);
+      setUpdLog(
+        entries.slice(-12).map((e) => {
+          const t = new Date(e.timestamp);
+          const hh = `${t.getMonth() + 1}/${t.getDate()} ${t.getHours()}:${String(t.getMinutes()).padStart(2, '0')}`;
+          return `${hh} [${e.code}] ${e.message}`.slice(0, 200);
+        }),
+      );
+    } catch (e) {
+      setUpdLog([`Could not read log: ${e instanceof Error ? e.message : String(e)}`]);
+    }
+  };
+
   const bundleTag = Updates
     ? Updates.isEmbeddedLaunch || !Updates.updateId
       ? 'embedded js'
       : `ota ${String(Updates.updateId).slice(0, 8)}`
     : 'dev';
-  const channelTag = Updates?.channel ? ` · ${Updates.channel}` : '';
+  const channelTag = Updates?.channel ? ` · ${Updates.channel}` : ' · no channel';
+  const runtimeTag = Updates?.runtimeVersion ? ` · rt ${Updates.runtimeVersion}` : '';
 
   return (
     <View style={s.screen}>
@@ -85,6 +110,13 @@ export default function MoreScreen() {
         <Text style={s.sectionLabel}>APP</Text>
         <Row icon="refresh-outline" label="Check for updates" onPress={() => void checkForUpdate()} />
         {updStatus !== '' && <Text style={s.updStatus}>{updStatus}</Text>}
+        <View style={{ height: 8 }} />
+        <Row icon="document-text-outline" label="Update log" onPress={() => void showUpdateLog()} />
+        {updLog && updLog.map((line, i) => (
+          <Text key={i} style={s.updStatus}>
+            {line}
+          </Text>
+        ))}
       </View>
 
       <View style={s.section}>
@@ -95,6 +127,7 @@ export default function MoreScreen() {
       <Text style={s.version}>
         Otoqa Dispatch · 1.0.0 · {bundleTag}
         {channelTag}
+        {runtimeTag}
       </Text>
     </View>
   );

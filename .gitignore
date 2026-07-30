@@ -33,6 +33,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env
 .env.local
+# dispatch app env is public EXPO_PUBLIC_* client config, committed so
+# eas update bundles it from any machine (see the file's header comment)
+!apps/dispatch/.env
 
 # vercel
 .vercel
