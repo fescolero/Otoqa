@@ -12,7 +12,7 @@ import { mutation, query, type QueryCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { currencyValidator } from './payEngine/schema';
-import type { Id } from './_generated/dataModel';
+import type { Doc, Id } from './_generated/dataModel';
 
 // ============================================================================
 // QUERIES
@@ -235,6 +235,39 @@ const initialRuleValidator = v.object({
   minThreshold: v.optional(v.number()),
 });
 
+// Period-level rules (weekly caps, minimum guarantees) — stored inline on the
+// profile and applied at settlement aggregation, not per-leg/session calc.
+const postCalcRuleValidator = v.object({
+  name: v.string(),
+  kind: v.union(
+    v.literal('MINIMUM_GUARANTEE_PERIOD'),
+    v.literal('MINIMUM_GUARANTEE_DAILY'),
+    v.literal('MAXIMUM_CAP_PERIOD'),
+    v.literal('MAXIMUM_CAP_WEEKLY'),
+    v.literal('OVERTIME_PREMIUM'),
+    v.literal('SHIFT_DIFFERENTIAL'),
+  ),
+  componentId: v.id('chargeComponents'),
+  thresholdCents: v.optional(v.int64()),
+  thresholdQty: v.optional(v.number()),
+  multiplierBps: v.optional(v.number()),
+  sortOrder: v.number(),
+});
+
+/** Every postCalcRule component must belong to the caller's org. */
+async function assertPostCalcComponentsOwned(
+  ctx: { db: { get(id: Id<'chargeComponents'>): Promise<Doc<'chargeComponents'> | null> } },
+  orgId: string,
+  rules: Array<{ componentId: Id<'chargeComponents'>; name: string }>,
+): Promise<void> {
+  for (const rule of rules) {
+    const component = await ctx.db.get(rule.componentId);
+    if (!component || component.workosOrgId !== orgId) {
+      throw new Error(`Period rule "${rule.name}" references a charge component outside this organization`);
+    }
+  }
+}
+
 export const create = mutation({
   args: {
     workosOrgId: v.string(),
@@ -248,10 +281,14 @@ export const create = mutation({
     contractTag: v.optional(v.string()),
     isDefault: v.optional(v.boolean()),
     initialRules: v.optional(v.array(initialRuleValidator)),
+    postCalcRules: v.optional(v.array(postCalcRuleValidator)),
   },
   handler: async (ctx, args) => {
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const now = Date.now();
+    if (args.postCalcRules?.length) {
+      await assertPostCalcComponentsOwned(ctx, args.workosOrgId, args.postCalcRules);
+    }
 
     // Only one profile can be the default per payee type — setting the flag
     // here clears it everywhere else so the invariant holds.
@@ -277,6 +314,7 @@ export const create = mutation({
       state: args.state,
       contractTag: args.contractTag,
       isDefault: args.isDefault,
+      postCalcRules: args.postCalcRules,
       isActive: true,
       createdAt: now,
       updatedAt: now,
@@ -349,6 +387,8 @@ export const update = mutation({
       state: v.optional(v.string()),
       contractTag: v.optional(v.string()),
       isDefault: v.optional(v.boolean()),
+      // Full-array replace — pass [] to clear all period rules.
+      postCalcRules: v.optional(v.array(postCalcRuleValidator)),
     }),
   },
   handler: async (ctx, { profileId, patch }) => {
@@ -359,6 +399,9 @@ export const update = mutation({
 
     const now = Date.now();
     const cleaned = stripUndefined(patch);
+    if (Array.isArray(cleaned.postCalcRules) && cleaned.postCalcRules.length > 0) {
+      await assertPostCalcComponentsOwned(ctx, orgId, cleaned.postCalcRules);
+    }
 
     // Keep the single-default invariant: promoting this profile demotes any
     // other default of the same payee type.
@@ -741,6 +784,10 @@ function describeProfileUpdate(
   }
   if ('country' in cleaned || 'state' in cleaned || 'contractTag' in cleaned) {
     parts.push('Updated jurisdiction');
+  }
+  if ('postCalcRules' in cleaned) {
+    const n = Array.isArray(cleaned.postCalcRules) ? cleaned.postCalcRules.length : 0;
+    parts.push(n === 0 ? 'Cleared period rules' : `Updated period rules (${n})`);
   }
   if (parts.length === 0) return `Updated ${Object.keys(cleaned).join(', ')}`;
   return parts.join(' · ');

@@ -22,7 +22,7 @@ the item's `chargeComponents.bucket` + `sign`, never the numeric sign.
 | Area | Files |
 |---|---|
 | Calc | `calculatePay.ts` (pure), `calculatePayForLeg.ts`, `calculatePayForSession.ts`, `applyPostCalcRules.ts`, `assembleInput.ts` |
-| Aggregation | `aggregateSettlement.ts` — pure `rollupSettlementTotals` + Convex wrappers (idempotent full-recompute; convergent `settlementId` stamping) |
+| Aggregation | `aggregateSettlement.ts` — pure `rollupSettlementTotals` + Convex wrappers (idempotent full-recompute; convergent `settlementId` stamping). Also runs `applyPostCalcRules.ts` (period-level rules from `payProfiles.postCalcRules` — weekly hour caps, minimum guarantees) and reconciles the emitted `POST_CALC_ADJUSTMENT` items by their stable `sourceRef.id` (patch-in-place / void-stale / reviewer-locked rows win) |
 | Read adapter | `settlementReads.ts` — flag-gated queries emitting the dashboard's `SettlementRow` / detail shapes from the new ledger |
 | Write layer | `settlementWrites.ts` (lifecycle: status / ack / adjust / remove / reverse), `editSessionPay.ts` (append-only reviewer line edits) |
 | Coverage | `manualCoverage.ts` (backfill + forward dual-write of legacy manual lines), `backfill.ts` (leg/session pay + stale-item sweeps) |

@@ -321,6 +321,7 @@ export const payProfiles = defineTable({
       v.literal('MINIMUM_GUARANTEE_PERIOD'),
       v.literal('MINIMUM_GUARANTEE_DAILY'),
       v.literal('MAXIMUM_CAP_PERIOD'),
+      v.literal('MAXIMUM_CAP_WEEKLY'),           // qty (hours) capped per 7-day window
       v.literal('OVERTIME_PREMIUM'),             // hours > threshold at multiplier
       v.literal('SHIFT_DIFFERENTIAL'),
     ),

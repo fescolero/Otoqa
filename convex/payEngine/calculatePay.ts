@@ -75,6 +75,7 @@ export type PostCalcRule = {
     | 'MINIMUM_GUARANTEE_PERIOD'
     | 'MINIMUM_GUARANTEE_DAILY'
     | 'MAXIMUM_CAP_PERIOD'
+    | 'MAXIMUM_CAP_WEEKLY'
     | 'OVERTIME_PREMIUM'
     | 'SHIFT_DIFFERENTIAL';
   componentId: string;
@@ -1051,9 +1052,10 @@ function compareValues(left: unknown, op: string, right: unknown): boolean {
 //      real use case lands.
 //
 //  - Post-calc rules
-//      MINIMUM_GUARANTEE_*, OVERTIME_PREMIUM, MAXIMUM_CAP_PERIOD, etc. fire
-//      at settlement-build time across all legs in the period — not during
-//      per-leg calc. Lives in the settlement-build module (not yet written).
+//      Fire at settlement-build time across all items in the period — not
+//      during per-leg calc. MINIMUM_GUARANTEE_PERIOD and MAXIMUM_CAP_WEEKLY
+//      are live (applyPostCalcRules.ts, wired via aggregateSettlement.ts);
+//      the remaining kinds warn POST_CALC_KIND_UNIMPLEMENTED.
 //
 //  - Driver "away from home days" trigger source
 //      For per-diem rules. Needs the broader leg/home-terminal computation
