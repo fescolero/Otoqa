@@ -30,6 +30,7 @@ import {
 import { RatesTable } from '@/components/web/pay-profiles/rates-table';
 import { ModelTag } from '@/components/web/pay-profiles/model-tag';
 import { AddLineItemModal } from '@/components/web/pay-profiles/add-line-item-modal';
+import { PeriodRulesCard } from '@/components/web/pay-profiles/period-rules-card';
 import { useOrganizationId } from '@/contexts/organization-context';
 
 type TabId = 'rates' | 'bonus' | 'deductions' | 'tax' | 'history';
@@ -177,6 +178,10 @@ export default function PayProfileEditorPage() {
                 onAddLineItem={() => setAddLineOpen(true)}
               />
             </DSCard>
+          )}
+
+          {activeTab === 'rates' && (
+            <PeriodRulesCard profile={profile} workosOrgId={workosOrgId} />
           )}
 
           {activeTab === 'history' && (

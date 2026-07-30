@@ -519,6 +519,22 @@ export const CHARGE_COMPONENT_TEMPLATES: ChargeComponentTemplate[] = [
   // DEDUCTION — voluntary and recurring deductions (priority 5+)
   // ==========================================================================
   {
+    code: 'PAY_CAP_OFFSET',
+    displayName: 'Pay Cap Offset',
+    description: 'System offset for pay over a post-calc cap (e.g. weekly H&W hour cap)',
+    bucket: 'DEDUCTION',
+    sign: 'DEBIT',
+    // Tax-neutral: the offset reverses whatever it caps (usually non-taxable
+    // fringe); the tax engine treats the capped component + offset as a net.
+    taxability: 'NONE',
+    deductionPriority: 1,
+    countsTowardCcpaLimit: false,
+    appliesTo: ['PAY'],
+    reporting: { glAccount: '5640-DEDUCT-CAP' },
+    templateId: 'stdlib.DEDUCTION.PAY_CAP_OFFSET',
+    isActive: true,
+  },
+  {
     code: 'TRUCK_LEASE',
     displayName: 'Truck Lease Payment',
     description: 'Truck lease per period — typically recurring',
