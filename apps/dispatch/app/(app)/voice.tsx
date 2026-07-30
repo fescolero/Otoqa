@@ -70,7 +70,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v9';
+const VOICE_BUILD = 'v10';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -270,12 +270,16 @@ export default function VoiceScreen() {
             const label = dayLabel(day, endDay);
             if (loads.length === 0) return say('agent', `${name} had no loads ${label}.`);
             const items = loads
-              .map(
-                (l) =>
-                  `${displayLoadId(l.internalId)}${l.customerName ? ` ${l.customerName}` : ''} (${
-                    l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'scheduled'
-                  })`,
-              )
+              .map((l) => {
+                const tags = [l.tripNumber ? `Trip ${l.tripNumber}` : null, l.hcr ? `HCR ${l.hcr}` : null]
+                  .filter(Boolean)
+                  .join(', ');
+                return `${displayLoadId(l.internalId)}${tags ? ` (${tags})` : ''}${
+                  l.customerName ? ` ${l.customerName}` : ''
+                } — ${
+                  l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'scheduled'
+                }`;
+              })
               .join('; ');
             say('agent', `${name} — ${loads.length} load${loads.length === 1 ? '' : 's'} ${label}: ${items}.`);
           } catch (e) {
@@ -301,7 +305,7 @@ export default function VoiceScreen() {
         const high = a.filter((x) => x.severity === 'high').length;
         const top = a
           .slice(0, 3)
-          .map((x) => `${kindLabel(x.kind)}${x.loadInternalId ? ` on #${x.loadInternalId}` : ''}`)
+          .map((x) => `${kindLabel(x.kind)}${x.loadInternalId ? ` on ${displayLoadId(x.loadInternalId)}` : ''}`)
           .join('; ');
         return say('agent', `${a.length} open alert${a.length === 1 ? '' : 's'}${high ? ` (${high} high)` : ''}: ${top}.`);
       }
