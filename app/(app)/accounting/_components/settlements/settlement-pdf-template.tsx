@@ -11,6 +11,7 @@ import { Document, Page, StyleSheet, Text, View } from '@react-pdf/renderer';
 import {
   SETTLE_PRESETS,
   PLAN_META,
+  buildRateHours,
   chipKeyForRow,
   fmtUSD,
   type SettlementParty,
@@ -74,6 +75,8 @@ const pdfStyles = StyleSheet.create({
     padding: 12,
   },
   totalsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  totalsRateLabel: { fontSize: 9, color: '#444444' },
+  totalsRateSub: { fontSize: 8, color: '#666666', marginTop: 1.5 },
   totalsDivider: { borderTop: '1 solid #e2e8f0', marginVertical: 4 },
   footer: {
     flexDirection: 'row',
@@ -101,6 +104,20 @@ export function SettlementPDF({
   const chip = SETTLE_PRESETS[chipKeyForRow(row)];
   const planMeta = row.planBasis ? PLAN_META[row.planBasis] : null;
   const hasAdjustments = sections.reimb.length > 0 || sections.deduct.length > 0;
+  // Hours-at-each-rate rows for the totals box (hourly plans) — same rollup
+  // as the review panel's Net pay card, so the printed statement reads the
+  // same way: each rate is its own line, Earnings is their subtotal.
+  const rateHours =
+    row.planBasis === 'hourly'
+      ? buildRateHours(
+          sections.earn.map((p) => ({
+            label: p.description,
+            hours: p.sourceType === 'SYSTEM' ? p.quantity : undefined,
+            rate: p.rate,
+            amount: p.totalAmount,
+          })),
+        )
+      : null;
 
   return (
     <Document>
@@ -209,9 +226,35 @@ export function SettlementPDF({
         {/* totals */}
         <View style={pdfStyles.totalsWrap}>
           <View style={pdfStyles.totalsBox}>
+            {rateHours && (
+              <>
+                {rateHours.rows.map((r) => (
+                  <View key={`${r.label}|${r.rate}`} style={pdfStyles.totalsRow}>
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <Text style={pdfStyles.totalsRateLabel}>{r.label}</Text>
+                      <Text style={pdfStyles.totalsRateSub}>
+                        {r.hours.toFixed(2)} h @ ${r.rate.toFixed(2)}/hr
+                      </Text>
+                    </View>
+                    <Text style={pdfStyles.cellMain}>{fmtUSD(r.amount)}</Text>
+                  </View>
+                ))}
+                {rateHours.otherTotal !== 0 && (
+                  <View style={pdfStyles.totalsRow}>
+                    <Text style={pdfStyles.muted}>Other earnings</Text>
+                    <Text style={pdfStyles.cellMain}>{fmtUSD(rateHours.otherTotal)}</Text>
+                  </View>
+                )}
+                <View style={pdfStyles.totalsDivider} />
+              </>
+            )}
             <View style={pdfStyles.totalsRow}>
-              <Text style={pdfStyles.muted}>Earnings</Text>
-              <Text style={pdfStyles.cellMain}>{fmtUSD(sections.earnTotal)}</Text>
+              <Text style={rateHours ? { fontSize: 9, fontFamily: 'Helvetica-Bold' } : pdfStyles.muted}>
+                Earnings
+              </Text>
+              <Text style={rateHours ? { fontSize: 9.5, fontFamily: 'Helvetica-Bold' } : pdfStyles.cellMain}>
+                {fmtUSD(sections.earnTotal)}
+              </Text>
             </View>
             {sections.reimbTotal > 0 && (
               <View style={pdfStyles.totalsRow}>

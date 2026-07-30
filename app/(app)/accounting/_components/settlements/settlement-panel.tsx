@@ -29,6 +29,7 @@ import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 import { Avatar, WBtn, WIcon, type IconName } from '@/components/web';
 import {
   blockersFor,
+  buildRateHours,
   chipKeyForRow,
   fmtPeriod,
   fmtShortDate,
@@ -1965,37 +1966,17 @@ export function SettlementPanel({
   // Per-rate hour rollup for the Net pay card — total hours paid at each
   // distinct rate across the statement (Base hourly 42.50 h @ $32, H&W
   // 42.50 h @ $5, load premium 18.20 h @ $4 …), so a reviewer can rebuild
-  // the Earnings — and from it Net pay — from hours × rate. Lines with no
-  // hours story (flat/mile/legacy) roll into one "Other earnings" remainder
-  // so the sub-rows always reconcile to the Earnings figure above them.
-  // Layers are NOT summed to a grand hours total: stacked layers cover the
-  // same clock hours, so adding them would double-count time.
-  const rateHours = React.useMemo(() => {
-    if (!lines) return null;
-    const groups = new Map<string, { label: string; rate: number; hours: number; amount: number }>();
-    let otherTotal = 0;
-    for (const l of lines.earn) {
-      if (l.hours != null && l.hours > 0 && l.rate != null) {
-        // Strip the "— Mon, Jun 8" / "— ORD-123" tail so one pay layer
-        // groups across its shifts and loads.
-        const label = (l.desc ?? l.label).replace(/\s+—\s+[^—]+$/, '');
-        const key = `${label}|${l.rate.toFixed(4)}`;
-        const g = groups.get(key);
-        if (g) {
-          g.hours += l.hours;
-          g.amount += l.amount;
-        } else {
-          groups.set(key, { label, rate: l.rate, hours: l.hours, amount: l.amount });
-        }
-      } else {
-        otherTotal += l.amount;
-      }
-    }
-    if (groups.size === 0) return null;
-    // Dominant layer first — mirrors the shift cards' ordering.
-    const rows = [...groups.values()].sort((a, b) => b.amount - a.amount);
-    return { rows, otherTotal };
-  }, [lines]);
+  // the Earnings — and from it Net pay — from hours × rate. Shared with the
+  // statement PDF's totals box (buildRateHours) so screen and paper agree.
+  const rateHours = React.useMemo(
+    () =>
+      lines
+        ? buildRateHours(
+            lines.earn.map((l) => ({ label: l.desc ?? l.label, hours: l.hours, rate: l.rate, amount: l.amount })),
+          )
+        : null,
+    [lines],
+  );
 
   // While the details query streams in, the header strip falls back to the
   // (already-enriched) row totals so nothing flashes empty.
@@ -2664,46 +2645,53 @@ export function SettlementPanel({
               gap: 9,
             }}
           >
-            <div className="flex justify-between">
-              <span style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>Earnings</span>
-              <span className="num" style={{ fontSize: 12.5, fontWeight: 500 }}>
-                {fmtUSD(totals.earnTotal)}
-              </span>
-            </div>
-            {/* Hours-at-each-rate sub-rows — how the Earnings figure is built.
-                Rows + remainder sum to Earnings; layers aren't totaled into one
-                hours figure (stacked layers share the same clock hours). */}
+            {/* Hours-at-each-rate rows — each rate is its own full-size line
+                of the breakdown (label, hours @ rate underneath, amount).
+                Rows + remainder sum to Earnings, which sits below them as
+                their subtotal. Layers aren't totaled into one hours figure:
+                stacked layers share the same clock hours. */}
             {rateHours && (
-              <div
-                className="flex flex-col"
-                style={{ gap: 5, marginTop: -4, paddingLeft: 10, borderLeft: '2px solid var(--border-hairline)' }}
-              >
+              <>
                 {rateHours.rows.map((r) => (
-                  <div key={`${r.label}|${r.rate}`} className="flex justify-between items-baseline gap-2">
-                    <span className="truncate min-w-0" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                      {r.label}
-                      {' · '}
-                      <span className="num">
+                  <div key={`${r.label}|${r.rate}`} className="flex justify-between items-start gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate" style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                        {r.label}
+                      </div>
+                      <div className="num" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
                         {r.hours.toFixed(2)} h @ ${r.rate.toFixed(2)}/hr
-                      </span>
-                    </span>
-                    <span className="num shrink-0" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                      </div>
+                    </div>
+                    <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 500 }}>
                       {fmtUSD(r.amount)}
                     </span>
                   </div>
                 ))}
                 {rateHours.otherTotal !== 0 && (
-                  <div className="flex justify-between items-baseline gap-2">
-                    <span className="truncate min-w-0" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                      Other earnings
-                    </span>
-                    <span className="num shrink-0" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                  <div className="flex justify-between">
+                    <span style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>Other earnings</span>
+                    <span className="num" style={{ fontSize: 12.5, fontWeight: 500 }}>
                       {fmtUSD(rateHours.otherTotal)}
                     </span>
                   </div>
                 )}
-              </div>
+                <div style={{ height: 1, background: 'var(--border-hairline)', margin: '2px 0' }} />
+              </>
             )}
+            <div className="flex justify-between">
+              <span
+                style={{
+                  fontSize: 12.5,
+                  fontWeight: rateHours ? 600 : undefined,
+                  color: rateHours ? 'var(--text-primary)' : 'var(--text-secondary)',
+                }}
+              >
+                Earnings
+              </span>
+              <span className="num" style={{ fontSize: 12.5, fontWeight: rateHours ? 600 : 500 }}>
+                {fmtUSD(totals.earnTotal)}
+              </span>
+            </div>
             {totals.reimbTotal > 0 && (
               <div className="flex justify-between">
                 <span style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>Reimbursements</span>
