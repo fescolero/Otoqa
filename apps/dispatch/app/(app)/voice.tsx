@@ -70,7 +70,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v7';
+const VOICE_BUILD = 'v8';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -173,7 +173,7 @@ export default function VoiceScreen() {
         if ('ambiguous' in loadHit)
           return say(
             'agent',
-            `Several loads match: ${loadHit.ambiguous.map((r) => `#${displayLoadId(r.load?.internalId)}`).join(', ')}. Say the full number.`,
+            `Several loads match: ${loadHit.ambiguous.map((r) => `${displayLoadId(r.load?.internalId)}`).join(', ')}. Say the full number.`,
           );
         const driverHit = matchDriver(drivers ?? [], intent.driverQuery);
         if (!driverHit) return say('agent', `I don't know a driver called “${intent.driverQuery}”.`);
@@ -188,7 +188,7 @@ export default function VoiceScreen() {
           kind: 'assign',
           assignmentId: row._id,
           driverId: d._id,
-          label: `Assign #${displayLoadId(row.load?.internalId)} to ${d.firstName} ${d.lastName}?`,
+          label: `Assign ${displayLoadId(row.load?.internalId)} to ${d.firstName} ${d.lastName}?`,
         });
       }
       case 'move_window': {
@@ -197,11 +197,11 @@ export default function VoiceScreen() {
         if ('ambiguous' in loadHit)
           return say(
             'agent',
-            `Several loads match: ${loadHit.ambiguous.map((r) => `#${displayLoadId(r.load?.internalId)}`).join(', ')}. Say the full number.`,
+            `Several loads match: ${loadHit.ambiguous.map((r) => `${displayLoadId(r.load?.internalId)}`).join(', ')}. Say the full number.`,
           );
         const row = loadHit.match;
         const stop = row.stops.filter((s) => !s.checkedInAt)[0];
-        if (!stop) return say('agent', `Every stop on #${displayLoadId(row.load?.internalId)} is already checked in.`);
+        if (!stop) return say('agent', `Every stop on ${displayLoadId(row.load?.internalId)} is already checked in.`);
         const begin = nextOccurrence(intent.time, new Date());
         const end = new Date(begin.getTime() + 30 * 60 * 1000);
         return setPending({
@@ -209,7 +209,7 @@ export default function VoiceScreen() {
           stopId: stop._id,
           beginISO: begin.toISOString(),
           endISO: end.toISOString(),
-          label: `Move #${displayLoadId(row.load?.internalId)} stop ${stop.sequenceNumber} to ${fmtT(begin)} – ${fmtT(end)}?`,
+          label: `Move ${displayLoadId(row.load?.internalId)} stop ${stop.sequenceNumber} to ${fmtT(begin)} – ${fmtT(end)}?`,
         });
       }
       case 'accept_offer':
@@ -224,7 +224,7 @@ export default function VoiceScreen() {
           if ('ambiguous' in hit)
             return say(
               'agent',
-              `Several offers match: ${hit.ambiguous.map((o) => `#${displayLoadId(o.load?.internalId)}`).join(', ')}.`,
+              `Several offers match: ${hit.ambiguous.map((o) => `${displayLoadId(o.load?.internalId)}`).join(', ')}.`,
             );
           target = hit.match;
         } else if (open.length === 1) {
@@ -238,7 +238,7 @@ export default function VoiceScreen() {
         return setPending({
           kind: intent.kind === 'accept_offer' ? 'accept' : 'decline',
           assignmentId: target._id,
-          label: `${verb} the offer for #${displayLoadId(target.load?.internalId)}?`,
+          label: `${verb} the offer for ${displayLoadId(target.load?.internalId)}?`,
         });
       }
       case 'driver_history': {
@@ -272,7 +272,7 @@ export default function VoiceScreen() {
             const items = loads
               .map(
                 (l) =>
-                  `#${displayLoadId(l.internalId)}${l.customerName ? ` ${l.customerName}` : ''} (${
+                  `${displayLoadId(l.internalId)}${l.customerName ? ` ${l.customerName}` : ''} (${
                     l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'scheduled'
                   })`,
               )

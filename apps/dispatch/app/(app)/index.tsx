@@ -92,7 +92,7 @@ function OfferCard({ offer }: { offer: OfferRow }) {
   const confirmDecline = () =>
     Alert.alert(
       'Decline this offer?',
-      `Load #${displayLoadId(offer.load?.internalId)} goes back to the broker. This can't be undone.`,
+      `Load ${displayLoadId(offer.load?.internalId)} goes back to the broker. This can't be undone.`,
       [
         { text: 'Keep offer', style: 'cancel' },
         {
@@ -107,7 +107,7 @@ function OfferCard({ offer }: { offer: OfferRow }) {
     <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.primary, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
         <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-          #{displayLoadId(offer.load?.internalId)}
+          {displayLoadId(offer.load?.internalId)}
         </Text>
         {offer.status === 'ACCEPTED' ? (
           <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
@@ -219,7 +219,7 @@ export default function BoardScreen() {
               >
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                   <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-                    #{displayLoadId(row.load?.internalId)}
+                    {displayLoadId(row.load?.internalId)}
                   </Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                     <Pressable onPress={() => router.push({ pathname: '/adjust', params: { assignmentId: row._id } })} hitSlop={8}>

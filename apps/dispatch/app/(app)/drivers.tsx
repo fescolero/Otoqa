@@ -43,7 +43,7 @@ export default function DriversScreen() {
                 {item.firstName} {item.lastName}
               </Text>
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
-                {item.currentLoad ? `On load #${displayLoadId(item.currentLoad.internalId)}` : 'Available'}
+                {item.currentLoad ? `On load ${displayLoadId(item.currentLoad.internalId)}` : 'Available'}
                 {item.phone ? ` · ${item.phone}` : ''}
               </Text>
             </View>

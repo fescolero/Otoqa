@@ -45,7 +45,7 @@ export default function MapScreen() {
               key={p.driver._id}
               coordinate={{ latitude: p.location.latitude, longitude: p.location.longitude }}
               title={`${p.driver.firstName} ${p.driver.lastName}`}
-              description={p.load ? `Load #${displayLoadId(p.load.internalId)} · ${p.load.trackingStatus}` : 'No active load'}
+              description={p.load ? `Load ${displayLoadId(p.load.internalId)} · ${p.load.trackingStatus}` : 'No active load'}
             />
           ))}
         </MapView>

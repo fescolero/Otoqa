@@ -38,7 +38,7 @@ export default function AdjustScreen() {
           <Ionicons name="chevron-back" size={24} color={colors.foreground} />
         </Pressable>
         <Text style={{ fontSize: typography.xl, fontWeight: typography.bold, color: colors.foreground }}>
-          Adjust times{assignment?.load ? ` · #${displayLoadId(assignment.load.internalId)}` : ''}
+          Adjust times{assignment?.load ? ` · ${displayLoadId(assignment.load.internalId)}` : ''}
         </Text>
       </View>
       {rows === undefined ? (
