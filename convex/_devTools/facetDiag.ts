@@ -18,15 +18,26 @@ import { getLoadFacets } from '../lib/loadFacets';
 export const forInternalId = internalQuery({
   args: { internalId: v.string() },
   handler: async (ctx, args) => {
-    // FourKites internalIds are "FK-<shipment id>", and the shipment id is
-    // the indexed externalLoadId — an indexed point lookup, no table scan.
-    const externalId = args.internalId.replace(/^fk[-_]?/i, '');
-    const loads = await ctx.db
-      .query('loadInformation')
-      .withIndex('by_external_id', (q) =>
-        q.eq('externalSource', 'FourKites').eq('externalLoadId', externalId),
-      )
-      .collect();
+    // by_internal_id is (workosOrgId, internalId); iterate the small
+    // organizations table to supply the org — indexed point lookups only.
+    // (internalId is FK-<loadNumber>, NOT FK-<shipment id>, so the
+    // by_external_id index can't find it.)
+    const orgs = await ctx.db.query('organizations').collect();
+    const orgIds = [
+      ...new Set(
+        orgs.flatMap((o) => [o.workosOrgId, o.clerkOrgId]).filter((x): x is string => !!x),
+      ),
+    ];
+    const loads = [];
+    for (const orgId of orgIds) {
+      const hits = await ctx.db
+        .query('loadInformation')
+        .withIndex('by_internal_id', (q) =>
+          q.eq('workosOrgId', orgId).eq('internalId', args.internalId),
+        )
+        .collect();
+      loads.push(...hits);
+    }
     const out = [];
     for (const load of loads) {
       const tagRows = await ctx.db
