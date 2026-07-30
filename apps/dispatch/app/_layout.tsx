@@ -11,10 +11,7 @@ import { ClerkProvider } from '@clerk/clerk-expo';
 import { colors } from '@otoqa/mobile-core';
 import { DispatchAuthProvider } from '../lib/convex';
 
-const CLERK_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY;
-if (!CLERK_PUBLISHABLE_KEY) {
-  throw new Error('EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY is not set');
-}
+import { CLERK_PUBLISHABLE_KEY } from '../lib/env';
 
 // Same SecureStore token cache shape as the driver app.
 const tokenCache = {

@@ -19,7 +19,7 @@ import type { TokenSource } from './token-source';
 
 WebBrowser.maybeCompleteAuthSession();
 
-const CLIENT_ID = process.env.EXPO_PUBLIC_WORKOS_CLIENT_ID ?? '';
+import { WORKOS_CLIENT_ID as CLIENT_ID } from '../env';
 const AUTHORIZE_URL = 'https://api.workos.com/user_management/authorize';
 const AUTHENTICATE_URL = 'https://api.workos.com/user_management/authenticate';
 const ACCESS_KEY = 'otoqa-dispatch-workos-access';

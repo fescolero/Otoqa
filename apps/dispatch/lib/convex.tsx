@@ -20,8 +20,7 @@ import {
 } from './auth/token-source';
 import { useWorkOSTokenSource } from './auth/workos-token-source';
 
-const CONVEX_URL = process.env.EXPO_PUBLIC_CONVEX_URL;
-if (!CONVEX_URL) throw new Error('EXPO_PUBLIC_CONVEX_URL is not set');
+import { CONVEX_URL } from './env';
 
 export const convex = new ConvexReactClient(CONVEX_URL, { unsavedChangesWarning: false });
 
