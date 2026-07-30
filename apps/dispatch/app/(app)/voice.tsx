@@ -59,7 +59,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v4';
+const VOICE_BUILD = 'v5';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -106,6 +106,17 @@ export default function VoiceScreen() {
 
   const say = (role: 'you' | 'agent', text: string) =>
     setMessages((m) => [...m, { id: nextId.current++, role, text }]);
+
+  // Fresh start: wipes the feed (which IS the conversational context sent
+  // to the server), any pending confirm card, and the clarify bridge. The
+  // next utterance parses with zero context.
+  const clearConversation = () => {
+    if (listening) Speech?.stop();
+    setMessages([]);
+    setPending(null);
+    setPartial('');
+    pendingClarifyRef.current = null;
+  };
 
   const handleIntent = (intent: VoiceIntent) => {
     switch (intent.kind) {
@@ -438,9 +449,17 @@ export default function VoiceScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 70 }}>
       <View style={{ paddingHorizontal: 24 }}>
-        <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
-          Voice
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
+            Voice
+          </Text>
+          {(messages.length > 0 || pending) && (
+            <Pressable onPress={clearConversation} hitSlop={10} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+              <Ionicons name="refresh-outline" size={16} color={colors.foregroundMuted} />
+              <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm }}>New chat</Text>
+            </Pressable>
+          )}
+        </View>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
           Speak a command — every action asks before it runs · {VOICE_BUILD} · {updateTag}
         </Text>
