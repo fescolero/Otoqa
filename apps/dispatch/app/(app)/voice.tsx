@@ -45,6 +45,16 @@ try {
 } catch {
   FileSystem = null;
 }
+// TTS — native module; absent until the build that bundles it (OTA-safe).
+let SpeechSynth: {
+  speak(text: string, opts?: { language?: string; onDone?: () => void; onError?: () => void }): void;
+  stop(): void;
+} | null = null;
+try {
+  SpeechSynth = require('expo-speech');
+} catch {
+  SpeechSynth = null;
+}
 /* eslint-enable @typescript-eslint/no-var-requires */
 
 const mimeForUri = (uri: string) =>
@@ -59,7 +69,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v5';
+const VOICE_BUILD = 'v6';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -104,14 +114,50 @@ export default function VoiceScreen() {
   const nextId = useRef(1);
   const scrollRef = useRef<ScrollView>(null);
 
-  const say = (role: 'you' | 'agent', text: string) =>
-    setMessages((m) => [...m, { id: nextId.current++, role, text }]);
+  // TTS mute — ref-mirrored so async flows always read the live value.
+  const [muted, setMuted] = useState(false);
+  const mutedRef = useRef(false);
+  const toggleMute = () => {
+    setMuted((m) => {
+      const next = !m;
+      mutedRef.current = next;
+      if (next) SpeechSynth?.stop();
+      return next;
+    });
+  };
+
+  /**
+   * Speak an agent reply aloud (unless muted / module absent). thenListen
+   * reopens the mic AFTER speech finishes — speaking first would let the
+   * TTS bleed into the recording.
+   */
+  const speakReply = (text: string, thenListen?: boolean) => {
+    const after = thenListen ? () => void startListeningRef.current() : undefined;
+    if (!mutedRef.current && SpeechSynth) {
+      SpeechSynth.stop();
+      SpeechSynth.speak(text, { language: 'en-US', onDone: after, onError: after });
+    } else if (after) {
+      setTimeout(after, 600);
+    }
+  };
+
+  const say = (role: 'you' | 'agent', text: string, opts?: { thenListen?: boolean }) => {
+    const id = nextId.current++;
+    setMessages((m) => [...m, { id, role, text }]);
+    if (role === 'agent') speakReply(text, opts?.thenListen);
+    return id;
+  };
+
+  /** Optimistic-transcript swap: refine a shown message in place. */
+  const updateMessage = (id: number, text: string) =>
+    setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, text } : msg)));
 
   // Fresh start: wipes the feed (which IS the conversational context sent
-  // to the server), any pending confirm card, and the clarify bridge. The
-  // next utterance parses with zero context.
+  // to the server), any pending confirm card, the clarify bridge, and any
+  // speech in progress. The next utterance parses with zero context.
   const clearConversation = () => {
     if (listening) Speech?.stop();
+    SpeechSynth?.stop();
     setMessages([]);
     setPending(null);
     setPartial('');
@@ -260,8 +306,9 @@ export default function VoiceScreen() {
       }
       case 'clarify':
         // The pipeline holds the original command; the next utterance
-        // answers this question and completes it.
-        return say('agent', intent.question);
+        // answers this question and completes it — so reopen the mic
+        // automatically once the question has been spoken/shown.
+        return void say('agent', intent.question, { thenListen: true });
       case 'unknown':
       // Version-skew guard: a server-parsed intent kind this build doesn't
       // know must show help, never silently drop the turn.
@@ -308,14 +355,20 @@ export default function VoiceScreen() {
       handleIntentRef.current(intent);
     };
 
+    // Conversational context: the last few visible turns ride along so
+    // follow-ups resolve. Captured from the pre-utterance feed (the
+    // closure's `messages` predates the optimistic bubble below).
+    const history = messages.slice(-8).map((m) => ({ role: m.role, text: m.text }));
+
+    // Optimistic transcript: show the on-device text the instant the mic
+    // closes; the (keyterm-corrected) server transcript swaps in when it
+    // lands — no dead air while Deepgram runs.
+    const shownId = deviceTranscript ? say('you', deviceTranscript) : null;
+
     if (uri && FileSystem) {
       setThinking(true);
       try {
         const audioBase64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-        // Conversational context: the last few visible turns ride along so
-        // follow-ups resolve ("what about Sam", "assign it to Marcus").
-        // The server caps and truncates; reference resolution only.
-        const history = messages.slice(-8).map((m) => ({ role: m.role, text: m.text }));
         const res = await transcribe({
           audioBase64,
           mimeType: mimeForUri(uri),
@@ -324,8 +377,9 @@ export default function VoiceScreen() {
         });
         const transcript = res.transcript || deviceTranscript;
         setThinking(false);
-        if (!transcript) return say('agent', "I didn't catch that — try again.");
-        say('you', transcript);
+        if (!transcript) return void say('agent', "I didn't catch that — try again.");
+        if (shownId == null) say('you', transcript);
+        else if (transcript !== deviceTranscript) updateMessage(shownId, transcript);
         return dispatchIntent(
           transcript,
           (res.intent as VoiceIntent | null) ??
@@ -336,8 +390,7 @@ export default function VoiceScreen() {
         // Server pipeline unavailable — fall through to on-device.
       }
     }
-    if (!deviceTranscript) return say('agent', "I didn't catch that — try again.");
-    say('you', deviceTranscript);
+    if (!deviceTranscript) return void say('agent', "I didn't catch that — try again.");
     dispatchIntent(
       deviceTranscript,
       parseCommand(pending ? `${pending} ${deviceTranscript}` : deviceTranscript),
@@ -387,12 +440,9 @@ export default function VoiceScreen() {
     return () => subs.forEach((s) => s.remove());
   }, []);
 
-  const toggleMic = async () => {
-    if (!Speech) return;
-    if (listening) {
-      Speech.stop();
-      return;
-    }
+  const startListening = async () => {
+    if (!Speech || listening) return;
+    SpeechSynth?.stop(); // never record our own TTS
     const perm = await Speech.requestPermissionsAsync();
     if (!perm.granted) {
       say('agent', 'Microphone permission is required for voice commands — enable it in Settings.');
@@ -412,6 +462,19 @@ export default function VoiceScreen() {
       // Android, caf on iOS; int16 keeps the upload small).
       recordingOptions: { persist: true, outputEncoding: 'pcmFormatInt16', outputSampleRate: 16000 },
     });
+  };
+  // Latest closure for auto-relisten callbacks (TTS onDone fires from an
+  // older render's closure).
+  const startListeningRef = useRef(startListening);
+  startListeningRef.current = startListening;
+
+  const toggleMic = async () => {
+    if (!Speech) return;
+    if (listening) {
+      Speech.stop();
+      return;
+    }
+    await startListening();
   };
 
   const confirm = async () => {
@@ -453,12 +516,23 @@ export default function VoiceScreen() {
           <Text style={{ fontSize: typography['2xl'], fontWeight: typography.bold, color: colors.foreground }}>
             Voice
           </Text>
-          {(messages.length > 0 || pending) && (
-            <Pressable onPress={clearConversation} hitSlop={10} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-              <Ionicons name="refresh-outline" size={16} color={colors.foregroundMuted} />
-              <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm }}>New chat</Text>
-            </Pressable>
-          )}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 18 }}>
+            {SpeechSynth && (
+              <Pressable onPress={toggleMute} hitSlop={10}>
+                <Ionicons
+                  name={muted ? 'volume-mute-outline' : 'volume-high-outline'}
+                  size={19}
+                  color={muted ? colors.foregroundMuted : colors.primary}
+                />
+              </Pressable>
+            )}
+            {(messages.length > 0 || pending) && (
+              <Pressable onPress={clearConversation} hitSlop={10} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                <Ionicons name="refresh-outline" size={16} color={colors.foregroundMuted} />
+                <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm }}>New chat</Text>
+              </Pressable>
+            )}
+          </View>
         </View>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
           Speak a command — every action asks before it runs · {VOICE_BUILD} · {updateTag}
@@ -541,7 +615,7 @@ export default function VoiceScreen() {
           <View style={{ alignItems: 'center', paddingBottom: 26, paddingTop: 6 }}>
             {(listening || partial || thinking) && (
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginBottom: 10, paddingHorizontal: 32, textAlign: 'center' }} numberOfLines={2}>
-                {thinking ? 'Transcribing…' : partial || 'Listening…'}
+                {thinking ? 'Thinking…' : partial || 'Listening…'}
               </Text>
             )}
             <Pressable
