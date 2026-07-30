@@ -18,11 +18,15 @@ import { getLoadFacets } from '../lib/loadFacets';
 export const forInternalId = internalQuery({
   args: { internalId: v.string() },
   handler: async (ctx, args) => {
-    // internalId is only indexed together with org; a full scan is fine
-    // for a diagnostic on this table size.
-    const loads = (await ctx.db.query('loadInformation').collect()).filter(
-      (l) => l.internalId === args.internalId,
-    );
+    // FourKites internalIds are "FK-<shipment id>", and the shipment id is
+    // the indexed externalLoadId — an indexed point lookup, no table scan.
+    const externalId = args.internalId.replace(/^fk[-_]?/i, '');
+    const loads = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_external_id', (q) =>
+        q.eq('externalSource', 'FourKites').eq('externalLoadId', externalId),
+      )
+      .collect();
     const out = [];
     for (const load of loads) {
       const tagRows = await ctx.db
