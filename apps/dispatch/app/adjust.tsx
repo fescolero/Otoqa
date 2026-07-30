@@ -7,6 +7,7 @@ import { useMutation, useQuery } from 'convex/react';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { displayLoadId } from '../lib/format';
 
 const STEP_MS = 15 * 60 * 1000;
 const fmt = (iso: string | undefined) =>
@@ -37,7 +38,7 @@ export default function AdjustScreen() {
           <Ionicons name="chevron-back" size={24} color={colors.foreground} />
         </Pressable>
         <Text style={{ fontSize: typography.xl, fontWeight: typography.bold, color: colors.foreground }}>
-          Adjust times{assignment?.load ? ` · #${assignment.load.internalId}` : ''}
+          Adjust times{assignment?.load ? ` · #${displayLoadId(assignment.load.internalId)}` : ''}
         </Text>
       </View>
       {rows === undefined ? (

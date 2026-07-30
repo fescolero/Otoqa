@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { api } from '@otoqa/convex-client';
 import { useQuery } from 'convex/react';
 import { colors, typography } from '@otoqa/mobile-core';
+import { displayLoadId } from '../lib/format';
 
 function fleetRegion(pins: { location: { latitude: number; longitude: number } }[]) {
   const lats = pins.map((p) => p.location.latitude);
@@ -44,7 +45,7 @@ export default function MapScreen() {
               key={p.driver._id}
               coordinate={{ latitude: p.location.latitude, longitude: p.location.longitude }}
               title={`${p.driver.firstName} ${p.driver.lastName}`}
-              description={p.load ? `Load #${p.load.internalId} · ${p.load.trackingStatus}` : 'No active load'}
+              description={p.load ? `Load #${displayLoadId(p.load.internalId)} · ${p.load.trackingStatus}` : 'No active load'}
             />
           ))}
         </MapView>

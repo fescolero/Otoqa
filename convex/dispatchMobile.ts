@@ -375,6 +375,8 @@ export const listDriverHistory = query({
       completedAt: number | null;
       internalId: string | null;
       customerName: string | null;
+      tripNumber: string | null;
+      hcr: string | null;
       firstStopTime: string | null;
       stopCount: number;
     }[] = [];
@@ -391,12 +393,17 @@ export const listDriverHistory = query({
       if (!stopTouchesDay(stops) && !inDay(assignment.completedAt)) continue;
       seenLoads.add(assignment.loadId);
       const load = await ctx.db.get(assignment.loadId);
+      const facets: { trip?: string; hcr?: string } = load
+        ? await getLoadFacets(ctx, load._id)
+        : {};
       out.push({
         _id: assignment._id,
         status: assignment.status as 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
         completedAt: assignment.completedAt ?? null,
         internalId: load?.internalId ?? null,
         customerName: load?.customerName ?? null,
+        tripNumber: facets.trip ?? null,
+        hcr: facets.hcr ?? null,
         firstStopTime: stops[0]?.windowBeginTime ?? null,
         stopCount: stops.length,
       });
@@ -428,6 +435,9 @@ export const listDriverHistory = query({
       seenLoads.add(leg.loadId);
       stops ??= await stopsOf(leg.loadId);
       const load = await ctx.db.get(leg.loadId);
+      const facets: { trip?: string; hcr?: string } = load
+        ? await getLoadFacets(ctx, load._id)
+        : {};
       out.push({
         _id: leg._id,
         status:
@@ -435,6 +445,8 @@ export const listDriverHistory = query({
         completedAt: leg.endedAt ?? null,
         internalId: load?.internalId ?? null,
         customerName: load?.customerName ?? null,
+        tripNumber: facets.trip ?? null,
+        hcr: facets.hcr ?? null,
         firstStopTime: stops[0]?.windowBeginTime ?? null,
         stopCount: stops.length,
       });
@@ -474,6 +486,7 @@ export const listOffers = query({
               .withIndex('by_load', (q) => q.eq('loadId', load._id))
               .collect()
           : [];
+        const facets = load ? await getLoadFacets(ctx, load._id) : { hcr: undefined, trip: undefined };
         return {
           ...assignment,
           load: load
@@ -483,6 +496,8 @@ export const listOffers = query({
                 customerName: load.customerName,
                 equipmentType: load.equipmentType,
                 effectiveMiles: load.effectiveMiles,
+                tripNumber: facets.trip ?? null,
+                hcr: facets.hcr ?? null,
               }
             : null,
           stops: stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber),
@@ -798,6 +813,7 @@ const PLAN_CHAIN_BUFFER_MS = 45 * 60 * 1000;
 interface PlanItem {
   assignment: Doc<'loadCarrierAssignments'>;
   load: Doc<'loadInformation'> | null;
+  facets: { trip?: string; hcr?: string };
   stopCount: number;
   /** First pickup window open / close (close falls back to open). */
   startT: number;
@@ -808,7 +824,10 @@ interface PlanItem {
   dest: { lat: number; lng: number } | null;
 }
 
-const lightLoad = (load: Doc<'loadInformation'> | null) =>
+const lightLoad = (
+  load: Doc<'loadInformation'> | null,
+  facets?: { trip?: string; hcr?: string },
+) =>
   load
     ? {
         _id: load._id,
@@ -816,6 +835,8 @@ const lightLoad = (load: Doc<'loadInformation'> | null) =>
         customerName: load.customerName,
         equipmentType: load.equipmentType,
         effectiveMiles: load.effectiveMiles,
+        tripNumber: facets?.trip ?? null,
+        hcr: facets?.hcr ?? null,
       }
     : null;
 
@@ -842,10 +863,11 @@ export const suggestPlan = query({
       (a) => !a.assignedDriverId,
     );
 
-    const shaped: (PlanItem | { assignment: Doc<'loadCarrierAssignments'>; load: Doc<'loadInformation'> | null; reason: string })[] =
+    const shaped: (PlanItem | { assignment: Doc<'loadCarrierAssignments'>; load: Doc<'loadInformation'> | null; facets: { trip?: string; hcr?: string }; reason: string })[] =
       await Promise.all(
         backlog.map(async (assignment) => {
           const load = await ctx.db.get(assignment.loadId);
+          const facets = load ? await getLoadFacets(ctx, load._id) : {};
           const stops = (
             await ctx.db
               .query('loadStops')
@@ -862,11 +884,12 @@ export const suggestPlan = query({
               ? Date.parse(lastStop.windowBeginTime)
               : NaN;
           if (!Number.isFinite(startT) || !Number.isFinite(endT)) {
-            return { assignment, load, reason: 'Missing appointment windows' };
+            return { assignment, load, facets, reason: 'Missing appointment windows' };
           }
           return {
             assignment,
             load,
+            facets,
             stopCount: stops.length,
             startT,
             startCloseT: Number.isFinite(startCloseT) ? startCloseT : startT,
@@ -885,7 +908,7 @@ export const suggestPlan = query({
 
     const unplannable = shaped
       .filter((s): s is Extract<typeof s, { reason: string }> => 'reason' in s)
-      .map((s) => ({ assignmentId: s.assignment._id, load: lightLoad(s.load), reason: s.reason }));
+      .map((s) => ({ assignmentId: s.assignment._id, load: lightLoad(s.load, s.facets), reason: s.reason }));
     const plannable = shaped
       .filter((s): s is PlanItem => !('reason' in s))
       .sort((a, b) => a.startT - b.startT || (a.assignment._id < b.assignment._id ? -1 : 1));
@@ -922,7 +945,7 @@ export const suggestPlan = query({
       proposed.push({
         loads: run.items.map((it) => ({
           assignmentId: it.assignment._id,
-          load: lightLoad(it.load),
+          load: lightLoad(it.load, it.facets),
           stopCount: it.stopCount,
           start: it.startT,
           end: it.endT,

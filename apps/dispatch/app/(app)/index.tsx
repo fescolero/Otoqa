@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { displayLoadId } from '../../lib/format';
 import { useDispatchSession } from './_layout';
 
 type Row = NonNullable<ReturnType<typeof useQuery<typeof api.dispatchMobile.listActiveAssignments>>>[number];
@@ -50,6 +51,26 @@ function fmtTime(t: number | null): string {
   return t ? new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '';
 }
 
+/** Small facet pill (HCR / Trip). */
+function Tag({ label }: { label: string }) {
+  return (
+    <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 }}>
+      <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{label}</Text>
+    </View>
+  );
+}
+
+/** HCR + Trip chips row; renders nothing when the load has neither. */
+function FacetTags({ load }: { load?: { hcr?: string | null; tripNumber?: string | null } | null }) {
+  if (!load?.hcr && !load?.tripNumber) return null;
+  return (
+    <View style={{ flexDirection: 'row', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+      {load?.hcr ? <Tag label={`HCR ${load.hcr}`} /> : null}
+      {load?.tripNumber ? <Tag label={`Trip ${load.tripNumber}`} /> : null}
+    </View>
+  );
+}
+
 /** Offer card — Accept / Decline while OFFERED; "awaiting award" after. */
 function OfferCard({ offer }: { offer: OfferRow }) {
   const acceptOffer = useMutation(api.dispatchMobile.acceptOffer);
@@ -71,7 +92,7 @@ function OfferCard({ offer }: { offer: OfferRow }) {
   const confirmDecline = () =>
     Alert.alert(
       'Decline this offer?',
-      `Load #${offer.load?.internalId ?? ''} goes back to the broker. This can't be undone.`,
+      `Load #${displayLoadId(offer.load?.internalId)} goes back to the broker. This can't be undone.`,
       [
         { text: 'Keep offer', style: 'cancel' },
         {
@@ -86,7 +107,7 @@ function OfferCard({ offer }: { offer: OfferRow }) {
     <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.primary, borderRadius: borderRadius.lg, padding: 14, marginBottom: 10 }}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
         <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-          #{offer.load?.internalId ?? '—'}
+          #{displayLoadId(offer.load?.internalId)}
         </Text>
         {offer.status === 'ACCEPTED' ? (
           <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, fontWeight: typography.bold }}>
@@ -103,6 +124,7 @@ function OfferCard({ offer }: { offer: OfferRow }) {
         {t ? ` · ${fmtTime(t)}` : ''}
         {offer.load?.effectiveMiles ? ` · ${Math.round(offer.load.effectiveMiles)} mi` : ''}
       </Text>
+      <FacetTags load={offer.load} />
       {offer.carrierTotalAmount != null && (
         <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold, marginTop: 2 }}>
           ${offer.carrierTotalAmount.toLocaleString()}
@@ -197,7 +219,7 @@ export default function BoardScreen() {
               >
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                   <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-                    #{row.load?.internalId ?? '—'}
+                    #{displayLoadId(row.load?.internalId)}
                   </Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                     <Pressable onPress={() => router.push({ pathname: '/adjust', params: { assignmentId: row._id } })} hitSlop={8}>
@@ -215,6 +237,7 @@ export default function BoardScreen() {
                 <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 2 }}>
                   {row.driver ? `${row.driver.firstName} ${row.driver.lastName}` : 'No driver assigned'}
                 </Text>
+                <FacetTags load={row.load} />
               </Pressable>
             );
           }}

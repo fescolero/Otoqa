@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { displayLoadId } from '../lib/format';
 
 const fmt = (t: number) =>
   new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -107,8 +108,9 @@ export default function PlanScreen() {
                         </Text>
                       )}
                       <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}>
-                        #{l.load?.internalId ?? '—'}{' '}
+                        #{l.load ? displayLoadId(l.load.internalId) : '—'}{' '}
                         <Text style={{ color: colors.foregroundMuted, fontWeight: typography.medium }}>
+                          {l.load?.tripNumber ? `Trip ${l.load.tripNumber} · ` : ''}
                           {l.load?.customerName ?? ''} · {fmt(l.start)}
                         </Text>
                       </Text>
@@ -153,7 +155,8 @@ export default function PlanScreen() {
                 {plan.unplannable.map((u) => (
                   <View key={u.assignmentId} style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 12, marginBottom: 8 }}>
                     <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}>
-                      #{u.load?.internalId ?? '—'}
+                      #{u.load ? displayLoadId(u.load.internalId) : '—'}
+                      {u.load?.tripNumber ? ` · Trip ${u.load.tripNumber}` : ''}
                     </Text>
                     <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 2 }}>{u.reason}</Text>
                   </View>

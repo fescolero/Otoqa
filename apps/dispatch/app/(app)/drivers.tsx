@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
+import { displayLoadId } from '../../lib/format';
 
 export default function DriversScreen() {
   const rows = useQuery(api.dispatchMobile.listDrivers, {});
@@ -42,7 +43,7 @@ export default function DriversScreen() {
                 {item.firstName} {item.lastName}
               </Text>
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
-                {item.currentLoad ? `On load #${item.currentLoad.internalId}` : 'Available'}
+                {item.currentLoad ? `On load #${displayLoadId(item.currentLoad.internalId)}` : 'Available'}
                 {item.phone ? ` · ${item.phone}` : ''}
               </Text>
             </View>
