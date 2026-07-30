@@ -33,6 +33,7 @@ import {
   PLAN_META,
   SETTLE_PRESETS,
   SettleChip,
+  buildRateHours,
   chipKeyForRow,
   fmtPeriod,
   fmtUSD,
@@ -510,6 +511,19 @@ export function SettlementDocPanel({
     net: row.net,
   };
   const hasAdjustments = sections != null && (sections.reimb.length > 0 || sections.deduct.length > 0);
+  // Hours-at-each-rate rows for the totals card (hourly plans) — the same
+  // rollup the PDF and the review panel use, so preview and paper agree.
+  const rateHours =
+    sections != null && row.planBasis === 'hourly'
+      ? buildRateHours(
+          sections.earn.map((p) => ({
+            label: p.description,
+            hours: p.sourceType === 'SYSTEM' ? p.quantity : undefined,
+            rate: p.rate,
+            amount: p.totalAmount,
+          })),
+        )
+      : null;
   const logoLetter = (company.name || 'O').charAt(0).toUpperCase();
 
   return (
@@ -814,7 +828,42 @@ export function SettlementDocPanel({
                 gap: 9,
               }}
             >
-              <StDocRow label="Earnings" value={fmtUSD(totals.earnTotal)} />
+              {rateHours && (
+                <>
+                  {rateHours.rows.map((r) => (
+                    <div key={`${r.label}|${r.rate}`} className="flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <div className="truncate" style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                          {r.label}
+                        </div>
+                        <div className="num" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
+                          {r.hours.toFixed(2)} h @ ${r.rate.toFixed(2)}/hr
+                        </div>
+                      </div>
+                      <span
+                        className="num shrink-0"
+                        style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}
+                      >
+                        {fmtUSD(r.amount)}
+                      </span>
+                    </div>
+                  ))}
+                  {rateHours.otherTotal !== 0 && (
+                    <StDocRow label="Other earnings" value={fmtUSD(rateHours.otherTotal)} />
+                  )}
+                  <div style={{ height: 1, background: 'var(--border-hairline)' }} />
+                </>
+              )}
+              {rateHours ? (
+                <div className="flex items-center justify-between gap-4">
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>Earnings</span>
+                  <span className="num" style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {fmtUSD(totals.earnTotal)}
+                  </span>
+                </div>
+              ) : (
+                <StDocRow label="Earnings" value={fmtUSD(totals.earnTotal)} />
+              )}
               {totals.reimbTotal > 0 && <StDocRow label="Reimbursements" value={fmtUSD(totals.reimbTotal)} />}
               {totals.deductTotal > 0 && (
                 <StDocRow label="Deductions" value={`−${fmtUSD(totals.deductTotal)}`} negative />

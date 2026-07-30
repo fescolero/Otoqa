@@ -29,6 +29,7 @@ import { EntityAuditTimeline } from '@/components/audit/entity-audit-timeline';
 import { Avatar, WBtn, WIcon, type IconName } from '@/components/web';
 import {
   blockersFor,
+  buildRateHours,
   chipKeyForRow,
   fmtPeriod,
   fmtShortDate,
@@ -1965,37 +1966,17 @@ export function SettlementPanel({
   // Per-rate hour rollup for the Net pay card — total hours paid at each
   // distinct rate across the statement (Base hourly 42.50 h @ $32, H&W
   // 42.50 h @ $5, load premium 18.20 h @ $4 …), so a reviewer can rebuild
-  // the Earnings — and from it Net pay — from hours × rate. Lines with no
-  // hours story (flat/mile/legacy) roll into one "Other earnings" remainder
-  // so the rows always sum to the Earnings subtotal beneath them.
-  // Layers are NOT summed to a grand hours total: stacked layers cover the
-  // same clock hours, so adding them would double-count time.
-  const rateHours = React.useMemo(() => {
-    if (!lines) return null;
-    const groups = new Map<string, { label: string; rate: number; hours: number; amount: number }>();
-    let otherTotal = 0;
-    for (const l of lines.earn) {
-      if (l.hours != null && l.hours > 0 && l.rate != null) {
-        // Strip the "— Mon, Jun 8" / "— ORD-123" tail so one pay layer
-        // groups across its shifts and loads.
-        const label = (l.desc ?? l.label).replace(/\s+—\s+[^—]+$/, '');
-        const key = `${label}|${l.rate.toFixed(4)}`;
-        const g = groups.get(key);
-        if (g) {
-          g.hours += l.hours;
-          g.amount += l.amount;
-        } else {
-          groups.set(key, { label, rate: l.rate, hours: l.hours, amount: l.amount });
-        }
-      } else {
-        otherTotal += l.amount;
-      }
-    }
-    if (groups.size === 0) return null;
-    // Dominant layer first — mirrors the shift cards' ordering.
-    const rows = [...groups.values()].sort((a, b) => b.amount - a.amount);
-    return { rows, otherTotal };
-  }, [lines]);
+  // the Earnings — and from it Net pay — from hours × rate. Shared with the
+  // statement PDF's totals box (buildRateHours) so screen and paper agree.
+  const rateHours = React.useMemo(
+    () =>
+      lines
+        ? buildRateHours(
+            lines.earn.map((l) => ({ label: l.desc ?? l.label, hours: l.hours, rate: l.rate, amount: l.amount })),
+          )
+        : null,
+    [lines],
+  );
 
   // While the details query streams in, the header strip falls back to the
   // (already-enriched) row totals so nothing flashes empty.

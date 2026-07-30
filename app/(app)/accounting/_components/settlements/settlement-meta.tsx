@@ -225,3 +225,48 @@ export function fmtPeriod(start: number, end: number): string {
 export function payRunKey(row: Pick<SettlementRow, 'payDate'>): string {
   return row.payDate == null ? 'Unscheduled' : fmtShortDate(row.payDate);
 }
+
+// ── per-rate hour rollup (panel Net pay card + statement PDF totals) ─────────
+
+export interface RateHoursRow {
+  label: string;
+  rate: number;
+  hours: number;
+  amount: number;
+}
+
+/**
+ * Group hourly earning lines by pay layer + rate — the total hours paid at
+ * each distinct rate — so the Earnings figure reads as Σ hours × rate. The
+ * "— Mon, Jun 8" / "— ORD-123" description tail is stripped so one layer
+ * groups across its shifts and loads. Lines with no hours story (flat/mile/
+ * legacy) land in `otherTotal`, keeping rows + otherTotal equal to the same
+ * lines' earnings total. Returns null when nothing groups (non-hourly
+ * statements). Layers are deliberately NOT summed into a grand hours figure:
+ * stacked layers pay on the same clock hours, so adding them would
+ * double-count time.
+ */
+export function buildRateHours(
+  lines: Array<{ label: string; hours?: number; rate?: number; amount: number }>,
+): { rows: RateHoursRow[]; otherTotal: number } | null {
+  const groups = new Map<string, RateHoursRow>();
+  let otherTotal = 0;
+  for (const l of lines) {
+    if (l.hours != null && l.hours > 0 && l.rate != null) {
+      const label = l.label.replace(/\s+—\s+[^—]+$/, '');
+      const key = `${label}|${l.rate.toFixed(4)}`;
+      const g = groups.get(key);
+      if (g) {
+        g.hours += l.hours;
+        g.amount += l.amount;
+      } else {
+        groups.set(key, { label, rate: l.rate, hours: l.hours, amount: l.amount });
+      }
+    } else {
+      otherTotal += l.amount;
+    }
+  }
+  if (groups.size === 0) return null;
+  // Dominant layer first — mirrors the shift cards' ordering.
+  return { rows: [...groups.values()].sort((a, b) => b.amount - a.amount), otherTotal };
+}
