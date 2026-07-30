@@ -453,11 +453,6 @@ export const listDriverHistory = query({
     }
 
     out.sort((a, b) => (a.firstStopTime ?? '').localeCompare(b.firstStopTime ?? ''));
-    // Diagnostic (shows in `npx convex logs`): distinguishes "no records for
-    // this driver at all" from "records exist but none touch the day".
-    console.log(
-      `[voice] listDriverHistory driver=${args.driverId} window=${new Date(args.dayStartMs).toISOString()}..${new Date(args.dayEndMs).toISOString()} assignments=${assignments.length} legs=${legs.length} matched=${out.length}`,
-    );
     return out;
   },
 });
