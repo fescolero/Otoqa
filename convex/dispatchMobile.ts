@@ -1305,6 +1305,8 @@ export const findLoadsByFacetDates = query({
       firstStopDate: string;
       customerName: string | null;
       currentDriverName: string | null;
+      tripNumber: string | null;
+      hcr: string | null;
     }[] = [];
     for (const loadId of loadIds) {
       const load = await ctx.db.get(loadId);
@@ -1316,6 +1318,7 @@ export const findLoadsByFacetDates = query({
         .collect();
       const liveLeg = legs.find((l) => l.status === 'PENDING' || l.status === 'ACTIVE');
       const currentDriver = liveLeg?.driverId ? await ctx.db.get(liveLeg.driverId) : null;
+      const facets = await getLoadFacets(ctx, loadId);
       out.push({
         loadId,
         internalId: load.internalId,
@@ -1324,6 +1327,8 @@ export const findLoadsByFacetDates = query({
         currentDriverName: currentDriver
           ? `${currentDriver.firstName} ${currentDriver.lastName}`
           : null,
+        tripNumber: facets.trip ?? null,
+        hcr: facets.hcr ?? null,
       });
     }
     out.sort((a, b) => a.firstStopDate.localeCompare(b.firstStopDate));

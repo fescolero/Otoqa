@@ -63,16 +63,24 @@ const mimeForUri = (uri: string) =>
   uri.toLowerCase().endsWith('.caf') ? 'audio/x-caf' : 'audio/wav';
 
 type Msg = { id: number; role: 'you' | 'agent'; text: string };
+type PendingRow = { load: string; date: string; tags: string[]; current: string | null };
 type Pending =
   | { kind: 'assign'; assignmentId: string; driverId: string; label: string }
-  | { kind: 'assignLoads'; loadIds: string[]; driverId: string; label: string }
+  | { kind: 'assignLoads'; loadIds: string[]; driverId: string; label: string; rows: PendingRow[] }
   | { kind: 'move'; stopId: string; beginISO: string; endISO: string; label: string }
   | { kind: 'accept' | 'decline'; assignmentId: string; label: string };
+
+const fmtDay = (iso: string) => {
+  const d = new Date(`${iso}T00:00:00`);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+};
 
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v13';
+const VOICE_BUILD = 'v14';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -136,7 +144,13 @@ export default function VoiceScreen() {
    * TTS bleed into the recording.
    */
   const speakReply = (text: string, thenListen?: boolean) => {
-    const after = thenListen ? () => void startListeningRef.current() : undefined;
+    const after = thenListen
+      ? () => {
+          autoOpenedRef.current = true;
+          autoRetriedRef.current = false;
+          void startListeningRef.current();
+        }
+      : undefined;
     if (!mutedRef.current && SpeechSynth) {
       SpeechSynth.stop();
       SpeechSynth.speak(text, { language: 'en-US', onDone: after, onError: after });
@@ -200,21 +214,22 @@ export default function VoiceScreen() {
               if (found.length === 0)
                 return say(
                   'agent',
-                  `No loads match ${routeLabel} on ${dates.join(', ')}. Check the trip and contract numbers.`,
+                  `No loads match ${routeLabel} on ${dates.map(fmtDay).join(', ')}. Check the trip and contract numbers.`,
                 );
-              const items = found
-                .map(
-                  (f) =>
-                    `${displayLoadId(f.internalId)} (${f.firstStopDate})${
-                      f.currentDriverName ? ` — currently ${f.currentDriverName}` : ''
-                    }`,
-                )
-                .join('; ');
               setPending({
                 kind: 'assignLoads',
                 loadIds: found.map((f) => f.loadId as string),
                 driverId: d._id,
-                label: `Assign ${found.length} load${found.length === 1 ? '' : 's'} on ${routeLabel} to ${d.firstName} ${d.lastName}? ${items}`,
+                label: `Assign ${found.length} load${found.length === 1 ? '' : 's'} on ${routeLabel} to ${d.firstName} ${d.lastName}?`,
+                rows: found.map((f) => ({
+                  load: displayLoadId(f.internalId),
+                  date: f.firstStopDate,
+                  tags: [
+                    f.tripNumber ? `Trip ${f.tripNumber}` : null,
+                    f.hcr ? `HCR ${f.hcr}` : null,
+                  ].filter((t): t is string => !!t),
+                  current: f.currentDriverName,
+                })),
               });
             } catch (e) {
               say('agent', e instanceof Error ? e.message : 'Could not look that route up.');
@@ -395,6 +410,11 @@ export default function VoiceScreen() {
   // Clarification continuation: when the agent asks for a missing piece,
   // this holds the ORIGINAL command so the next utterance completes it.
   const pendingClarifyRef = useRef<string | null>(null);
+  // Auto-opened mic sessions (post-clarify relisten): silence gets ONE
+  // silent reopen, then gives up quietly — never an error bubble. Only
+  // manual taps earn "I didn't catch that".
+  const autoOpenedRef = useRef(false);
+  const autoRetriedRef = useRef(false);
   const audioUriRef = useRef<string | null>(null);
   const finalTranscriptRef = useRef('');
   const endedRef = useRef(false);
@@ -408,6 +428,20 @@ export default function VoiceScreen() {
     const deviceTranscript = finalTranscriptRef.current.trim();
 
     const pending = pendingClarifyRef.current;
+    // Silence handling: auto-opened sessions retry once silently, then
+    // stop quietly. Manual sessions get the spoken error.
+    const onNoSpeech = () => {
+      if (autoOpenedRef.current) {
+        if (!autoRetriedRef.current) {
+          autoRetriedRef.current = true;
+          void startListeningRef.current();
+        } else {
+          autoOpenedRef.current = false;
+        }
+        return;
+      }
+      say('agent', "I didn't catch that — try again.");
+    };
     const dispatchIntent = (transcript: string, intent: VoiceIntent) => {
       if (intent.kind === 'clarify') {
         // Chain: keep accumulating context until the command completes.
@@ -440,7 +474,8 @@ export default function VoiceScreen() {
         });
         const transcript = res.transcript || deviceTranscript;
         setThinking(false);
-        if (!transcript) return void say('agent', "I didn't catch that — try again.");
+        if (!transcript) return onNoSpeech();
+        autoOpenedRef.current = false;
         if (shownId == null) say('you', transcript);
         else if (transcript !== deviceTranscript) updateMessage(shownId, transcript);
         return dispatchIntent(
@@ -453,7 +488,8 @@ export default function VoiceScreen() {
         // Server pipeline unavailable — fall through to on-device.
       }
     }
-    if (!deviceTranscript) return void say('agent', "I didn't catch that — try again.");
+    if (!deviceTranscript) return onNoSpeech();
+    autoOpenedRef.current = false;
     dispatchIntent(
       deviceTranscript,
       parseCommand(pending ? `${pending} ${deviceTranscript}` : deviceTranscript),
@@ -492,6 +528,12 @@ export default function VoiceScreen() {
       Speech.addListener('error', (e: { error?: string; message?: string }) => {
         setListening(false);
         setPartial('');
+        if (e.error === 'no-speech' && autoOpenedRef.current && !autoRetriedRef.current) {
+          // Auto-opened mic heard nothing (OS closed it) — one quiet reopen.
+          autoRetriedRef.current = true;
+          void startListeningRef.current();
+          return;
+        }
         if (e.error !== 'no-speech' && e.error !== 'aborted') {
           setMessages((m) => [
             ...m,
@@ -537,6 +579,8 @@ export default function VoiceScreen() {
       Speech.stop();
       return;
     }
+    autoOpenedRef.current = false;
+    autoRetriedRef.current = false;
     await startListening();
   };
 
@@ -666,6 +710,39 @@ export default function VoiceScreen() {
                 <Text style={{ color: colors.foreground, fontSize: typography.base, fontWeight: typography.semibold }}>
                   {pending.label}
                 </Text>
+                {pending.kind === 'assignLoads' &&
+                  pending.rows.map((r, i) => (
+                    <View
+                      key={i}
+                      style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border }}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.bold }}>
+                          {r.load}
+                        </Text>
+                        <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>
+                          {fmtDay(r.date)}
+                        </Text>
+                      </View>
+                      {r.tags.length > 0 && (
+                        <View style={{ flexDirection: 'row', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                          {r.tags.map((t) => (
+                            <View
+                              key={t}
+                              style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 }}
+                            >
+                              <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{t}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                      {r.current && (
+                        <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 4 }}>
+                          Currently assigned to {r.current} — confirming reassigns it.
+                        </Text>
+                      )}
+                    </View>
+                  ))}
                 <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
                   <Pressable
                     disabled={busy}
