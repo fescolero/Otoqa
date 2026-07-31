@@ -7,7 +7,8 @@ import {
   type DispatchCapability,
 } from './lib/auth';
 import { isPermitted } from './lib/permissions';
-import { getLoadFacets } from './lib/loadFacets';
+import { getLoadFacets, findLoadIdsByFacets } from './lib/loadFacets';
+import { internal } from './_generated/api';
 import { carrierStatementsForOrg, carrierStatementDetailsForOrg } from './mobileSettlements';
 import { logAudit } from './lib/audit';
 import { raiseAlert } from './dispatchAlerts';
@@ -1261,5 +1262,101 @@ export const createLoad = mutation({
       createdBy: performer.userId,
     });
     return { loadId, assignmentId };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Voice facet assignment — "trip 5 HCR 96036 to Jorge tomorrow".
+// Recurring routes produce one load per service day sharing the same
+// (HCR, TRIP) tags; the resolver picks the day's load(s), the mutation
+// assigns via the web-TMS leg model (dispatchLegs), matching how these
+// orgs dispatch everywhere else.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Loads matching (hcr, trip) whose service date is one of `dates`. */
+export const findLoadsByFacetDates = query({
+  args: {
+    hcr: v.optional(v.string()),
+    trip: v.optional(v.string()),
+    dates: v.array(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const webOrgId = resolved.org.workosOrgId;
+    if (!webOrgId) return [];
+    const dates = new Set(args.dates);
+    const loadIds = await findLoadIdsByFacets(ctx, {
+      workosOrgId: webOrgId,
+      hcr: args.hcr,
+      trip: args.trip,
+    });
+    const out: {
+      loadId: Id<'loadInformation'>;
+      internalId: string;
+      firstStopDate: string;
+      customerName: string | null;
+      currentDriverName: string | null;
+    }[] = [];
+    for (const loadId of loadIds) {
+      const load = await ctx.db.get(loadId);
+      if (!load || load.status === 'Canceled') continue;
+      if (!load.firstStopDate || !dates.has(load.firstStopDate)) continue;
+      const legs = await ctx.db
+        .query('dispatchLegs')
+        .withIndex('by_load', (q) => q.eq('loadId', loadId))
+        .collect();
+      const liveLeg = legs.find((l) => l.status === 'PENDING' || l.status === 'ACTIVE');
+      const currentDriver = liveLeg?.driverId ? await ctx.db.get(liveLeg.driverId) : null;
+      out.push({
+        loadId,
+        internalId: load.internalId,
+        firstStopDate: load.firstStopDate,
+        customerName: load.customerName ?? null,
+        currentDriverName: currentDriver
+          ? `${currentDriver.firstName} ${currentDriver.lastName}`
+          : null,
+      });
+    }
+    out.sort((a, b) => a.firstStopDate.localeCompare(b.firstStopDate));
+    return out;
+  },
+});
+
+/** Assign one driver to several loads via the web-TMS leg model. */
+export const assignDriverToLoadsWeb = mutation({
+  args: {
+    loadIds: v.array(v.id('loadInformation')),
+    driverId: v.id('drivers'),
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canDispatch');
+    const identity = await ctx.auth.getUserIdentity();
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
+      throw new Error('Driver not found in your organization');
+    }
+    const results: { internalId: string | null; success: boolean; reason?: string }[] = [];
+    for (const loadId of args.loadIds.slice(0, 20)) {
+      const load = await ctx.db.get(loadId);
+      if (!load || load.workosOrgId !== resolved.org.workosOrgId) {
+        results.push({ internalId: null, success: false, reason: 'Load not found' });
+        continue;
+      }
+      const res: { status: 'SUCCESS' | 'ERROR'; message?: string } = await ctx.runMutation(
+        internal.dispatchLegs.assignDriverInternal,
+        {
+          loadId,
+          driverId: args.driverId,
+          assignedBy: identity?.subject ?? 'dispatch-app',
+          assignedByName: 'Dispatch voice',
+        },
+      );
+      results.push({
+        internalId: load.internalId,
+        success: res.status === 'SUCCESS',
+        reason: res.message,
+      });
+    }
+    return { results };
   },
 });

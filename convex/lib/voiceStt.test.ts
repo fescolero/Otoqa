@@ -33,8 +33,38 @@ describe('coerceIntent', () => {
     expect(coerceIntent({ kind: 'assign', loadRef: '1001', driverQuery: 'Marcus Vega' })).toEqual({
       kind: 'assign',
       loadRef: '1001',
+      hcr: null,
+      trip: null,
+      dates: null,
       driverQuery: 'Marcus Vega',
     });
+    // Facet form: route (trip/hcr) + dates instead of a load number.
+    expect(
+      coerceIntent({
+        kind: 'assign',
+        trip: '5',
+        hcr: '96036',
+        dates: ['2026-08-01', '2026-08-01', 'saturday', '2026-08-02'],
+        driverQuery: 'Jorge Romero',
+      }),
+    ).toEqual({
+      kind: 'assign',
+      loadRef: null,
+      hcr: '96036',
+      trip: '5',
+      dates: ['2026-08-01', '2026-08-02'], // deduped, malformed dropped
+      driverQuery: 'Jorge Romero',
+    });
+    expect(coerceIntent({ kind: 'assign', trip: '5', driverQuery: 'Jorge' })).toEqual({
+      kind: 'assign',
+      loadRef: null,
+      hcr: null,
+      trip: '5',
+      dates: null,
+      driverQuery: 'Jorge',
+    });
+    // No load ref AND no facets → unusable.
+    expect(coerceIntent({ kind: 'assign', driverQuery: 'Jorge' })).toBeNull();
     expect(coerceIntent({ kind: 'move_window', loadRef: 'HCR75960', hour: 15, minute: 30 })).toEqual({
       kind: 'move_window',
       loadRef: 'HCR75960',

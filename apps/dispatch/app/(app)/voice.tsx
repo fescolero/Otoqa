@@ -18,6 +18,7 @@ import { useAction, useConvex, useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import {
+  localDateStr,
   matchByRef,
   matchDriver,
   nextOccurrence,
@@ -64,13 +65,14 @@ const mimeForUri = (uri: string) =>
 type Msg = { id: number; role: 'you' | 'agent'; text: string };
 type Pending =
   | { kind: 'assign'; assignmentId: string; driverId: string; label: string }
+  | { kind: 'assignLoads'; loadIds: string[]; driverId: string; label: string }
   | { kind: 'move'; stopId: string; beginISO: string; endISO: string; label: string }
   | { kind: 'accept' | 'decline'; assignmentId: string; label: string };
 
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v11';
+const VOICE_BUILD = 'v12';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -101,6 +103,7 @@ export default function VoiceScreen() {
   const offers = useQuery(api.dispatchMobile.listOffers, {});
   const alerts = useQuery(api.dispatchAlerts.listAlerts, {});
   const assignDriver = useMutation(api.dispatchMobile.assignDriverToLoad);
+  const assignLoadsWeb = useMutation(api.dispatchMobile.assignDriverToLoadsWeb);
   const adjustWindow = useMutation(api.dispatchMobile.adjustStopWindow);
   const acceptOffer = useMutation(api.dispatchMobile.acceptOffer);
   const declineOffer = useMutation(api.dispatchMobile.declineOffer);
@@ -168,6 +171,57 @@ export default function VoiceScreen() {
   const handleIntent = (intent: VoiceIntent) => {
     switch (intent.kind) {
       case 'assign': {
+        // Facet form — "trip 5 HCR 96036 to Jorge tomorrow and Saturday":
+        // resolve loads by route tags + service dates on the server.
+        if (intent.hcr || intent.trip) {
+          const driverHit = matchDriver(drivers ?? [], intent.driverQuery);
+          if (!driverHit) return say('agent', `I don't know a driver called “${intent.driverQuery}”.`);
+          if ('ambiguous' in driverHit)
+            return say(
+              'agent',
+              `Several drivers match: ${driverHit.ambiguous.map((d) => `${d.firstName} ${d.lastName}`).join(', ')}. Say the full name.`,
+            );
+          const d = driverHit.match;
+          const routeLabel = [
+            intent.trip ? `Trip ${intent.trip}` : null,
+            intent.hcr ? `HCR ${intent.hcr}` : null,
+          ]
+            .filter(Boolean)
+            .join(' ');
+          const dates = intent.dates?.length ? intent.dates : [localDateStr(new Date())];
+          void (async () => {
+            try {
+              const found = await convexClient.query(api.dispatchMobile.findLoadsByFacetDates, {
+                hcr: intent.hcr ?? undefined,
+                trip: intent.trip ?? undefined,
+                dates,
+              });
+              if (found.length === 0)
+                return say(
+                  'agent',
+                  `No loads match ${routeLabel} on ${dates.join(', ')}. Check the trip and contract numbers.`,
+                );
+              const items = found
+                .map(
+                  (f) =>
+                    `${displayLoadId(f.internalId)} (${f.firstStopDate})${
+                      f.currentDriverName ? ` — currently ${f.currentDriverName}` : ''
+                    }`,
+                )
+                .join('; ');
+              setPending({
+                kind: 'assignLoads',
+                loadIds: found.map((f) => f.loadId as string),
+                driverId: d._id,
+                label: `Assign ${found.length} load${found.length === 1 ? '' : 's'} on ${routeLabel} to ${d.firstName} ${d.lastName}? ${items}`,
+              });
+            } catch (e) {
+              say('agent', e instanceof Error ? e.message : 'Could not look that route up.');
+            }
+          })();
+          return;
+        }
+        if (!intent.loadRef) return say('agent', 'Which load should I assign? Say the load number, or a trip and HCR.');
         // Web-TMS leg rows are read-only here — their driver is managed in
         // the TMS, and assignLoad only accepts loadCarrierAssignments ids.
         const assignable = (rows ?? []).filter((r) => r.source !== 'leg');
@@ -495,6 +549,21 @@ export default function VoiceScreen() {
           driverId: pending.driverId as never,
         });
         say('agent', res.success ? 'Done — assigned.' : `That load was just assigned to ${res.alreadyAssigned.driverName}.`);
+      } else if (pending.kind === 'assignLoads') {
+        const res = await assignLoadsWeb({
+          loadIds: pending.loadIds as never,
+          driverId: pending.driverId as never,
+        });
+        const ok = res.results.filter((r) => r.success);
+        const failed = res.results.filter((r) => !r.success);
+        say(
+          'agent',
+          failed.length === 0
+            ? `Done — ${ok.length} load${ok.length === 1 ? '' : 's'} assigned.`
+            : `${ok.length} assigned, ${failed.length} failed: ${failed
+                .map((f) => `${f.internalId ? displayLoadId(f.internalId) : 'a load'} (${f.reason ?? 'unknown'})`)
+                .join('; ')}`,
+        );
       } else if (pending.kind === 'move') {
         const res = await adjustWindow({
           stopId: pending.stopId as never,

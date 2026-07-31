@@ -63,6 +63,22 @@ export const INTENT_TOOL = {
         type: 'string',
         description: 'Load / trip number or HCR exactly as spoken, e.g. "1001", "L-1001", "HCR75960".',
       },
+      hcr: {
+        type: 'string',
+        description:
+          'assign only: HCR / contract number when the command names a route ("HCR 96036", "contract 96036").',
+      },
+      trip: {
+        type: 'string',
+        description:
+          'assign only: trip number when the command names a route ("trip 5"). With hcr and/or trip set, leave loadRef empty.',
+      },
+      dates: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'assign only: service dates YYYY-MM-DD ("tomorrow and Saturday" → both, resolved from today). Omit when no day was spoken (means today).',
+      },
       driverQuery: { type: 'string', description: 'Driver name as spoken (assign / driver_loads).' },
       hour: { type: 'integer', description: '24h hour for move_window (0-23).' },
       minute: { type: 'integer', description: 'Minute for move_window (0-59).' },
@@ -91,6 +107,7 @@ Commands you may see: assigning a load to a driver ("assign", "give", "put ... o
 The text is a SPEECH TRANSCRIPT and may contain recognition errors — interpret charitably ("have hit" is likely "have it", "for jorge" may arrive as "four jorge"). Ignore filler words and politeness.
 Rules:
 - loadRef: the load/trip number or HCR code as spoken, digits preferred ("load ten oh one" → "1001").
+- assign BY ROUTE: when the command names a trip and/or HCR/contract ("trip 5 HCR 96036 assign to Jorge", "put Marcus on contract 902 trip 12"), set trip and/or hcr (NOT loadRef) plus driverQuery. Any spoken days ("tomorrow", "Saturday", "tomorrow and Saturday") become the dates array resolved from today's date; no day spoken = omit dates.
 - driverQuery: the driver's name only — strip titles and words like "driver". "Jorge's loads" → driverQuery "Jorge".
 - move_window: hour is 24-hour; a bare 1-7 with no am/pm means afternoon (add 12).
 - accept_offer/decline_offer: loadRef may be omitted when no number was said.
@@ -145,7 +162,14 @@ export function buildNluInput(
 
 /** Client-facing intent — mirrors apps/dispatch/lib/voice/parser.ts. */
 export type CoercedIntent =
-  | { kind: 'assign'; loadRef: string; driverQuery: string }
+  | {
+      kind: 'assign';
+      loadRef: string | null;
+      hcr: string | null;
+      trip: string | null;
+      dates: string[] | null;
+      driverQuery: string;
+    }
   | { kind: 'move_window'; loadRef: string; time: { hour: number; minute: number } }
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
@@ -234,8 +258,28 @@ export function coerceIntent(raw: unknown): CoercedIntent | null {
   switch (r.kind) {
     case 'assign': {
       const loadRef = str(r.loadRef);
+      const hcr = str(r.hcr);
+      const trip = str(r.trip);
       const driverQuery = str(r.driverQuery);
-      return loadRef && driverQuery ? { kind: 'assign', loadRef, driverQuery } : null;
+      // ISO dates only, deduped — bad entries drop silently (STT noise).
+      const dates = Array.isArray(r.dates)
+        ? [
+            ...new Set(
+              r.dates.filter(
+                (d): d is string => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d),
+              ),
+            ),
+          ].slice(0, 7)
+        : [];
+      if (!driverQuery || (!loadRef && !hcr && !trip)) return null;
+      return {
+        kind: 'assign',
+        loadRef,
+        hcr,
+        trip,
+        dates: dates.length ? dates : null,
+        driverQuery,
+      };
     }
     case 'move_window': {
       const loadRef = str(r.loadRef);

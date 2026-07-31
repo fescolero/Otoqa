@@ -13,7 +13,16 @@
  */
 
 export type VoiceIntent =
-  | { kind: 'assign'; loadRef: string; driverQuery: string }
+  | {
+      kind: 'assign';
+      /** Direct load-number form; null/absent in the facet (trip/hcr) form. */
+      loadRef?: string | null;
+      /** Facet form: route identified by trip and/or HCR + optional dates. */
+      hcr?: string | null;
+      trip?: string | null;
+      dates?: string[] | null;
+      driverQuery: string;
+    }
   | { kind: 'move_window'; loadRef: string; time: SpokenTime }
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
