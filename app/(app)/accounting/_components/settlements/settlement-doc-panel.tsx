@@ -76,6 +76,12 @@ export interface StatementPayable {
   isRebillable?: boolean;
   loadOrderNumber?: string;
   loadInternalId?: string;
+  /** Which component the line counts as (new-ledger adapter). */
+  componentId?: string;
+  /** Weekly-cap "maxed out" line: the capped component + hour threshold —
+   *  renders as a cap applied to earnings, never a deduction. */
+  capComponentId?: string;
+  capThresholdQty?: number;
 }
 
 export interface StatementSections {
@@ -164,6 +170,11 @@ export function buildSettlementSections(payables: StatementPayable[]): Statement
  * `28% of $4,600`, or `Flat` for single-quantity lines.
  */
 export function basisLabel(p: StatementPayable, basis: SettlementRow['planBasis']): string {
+  // Weekly-cap lines: the quantity is hours AT the max, not extra earned
+  // hours — label the cap instead of pretending it's an earning basis.
+  if (p.capComponentId) {
+    return p.capThresholdQty != null ? `${p.capThresholdQty} h/week max` : 'Weekly max';
+  }
   if (p.quantity > 1) {
     if (basis === 'pct' && p.rate <= 1) {
       return `${Math.round(p.rate * 100)}% of ${fmtUSD(p.quantity, false)}`;
@@ -189,6 +200,32 @@ export function lineDisplay(p: StatementPayable): { label: string; sub: string |
   const loadRef = p.loadOrderNumber ?? p.loadInternalId ?? null;
   if (loadRef) return { label: loadRef, sub: p.description, mono: true };
   return { label: p.description, sub: null, mono: false };
+}
+
+/** Hours-at-each-rate rollup for a statement's earn lines (hourly plans).
+ *  Weekly-cap lines are split out and FOLDED into their component's row, so
+ *  rows show the hours actually paid with a "capped at N h/week" note —
+ *  shared by the on-screen totals card and the PDF totals box. */
+export function rateHoursFromEarn(earn: StatementPayable[]) {
+  return buildRateHours(
+    earn
+      .filter((p) => !p.capComponentId)
+      .map((p) => ({
+        label: p.description,
+        hours: p.sourceType === 'SYSTEM' ? p.quantity : undefined,
+        rate: p.rate,
+        amount: p.totalAmount,
+        componentId: p.componentId,
+      })),
+    earn
+      .filter((p) => p.capComponentId)
+      .map((p) => ({
+        componentId: p.capComponentId!,
+        hours: p.quantity,
+        amount: Math.abs(p.totalAmount),
+        thresholdQty: p.capThresholdQty,
+      })),
+  );
 }
 
 // ── PDF document (mirrors the on-screen statement; Print/PDF both render it) ─
@@ -514,16 +551,7 @@ export function SettlementDocPanel({
   // Hours-at-each-rate rows for the totals card (hourly plans) — the same
   // rollup the PDF and the review panel use, so preview and paper agree.
   const rateHours =
-    sections != null && row.planBasis === 'hourly'
-      ? buildRateHours(
-          sections.earn.map((p) => ({
-            label: p.description,
-            hours: p.sourceType === 'SYSTEM' ? p.quantity : undefined,
-            rate: p.rate,
-            amount: p.totalAmount,
-          })),
-        )
-      : null;
+    sections != null && row.planBasis === 'hourly' ? rateHoursFromEarn(sections.earn) : null;
   const logoLetter = (company.name || 'O').charAt(0).toUpperCase();
 
   return (
@@ -838,6 +866,7 @@ export function SettlementDocPanel({
                         </div>
                         <div className="num" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
                           {r.hours.toFixed(2)} h @ ${r.rate.toFixed(2)}/hr
+                          {r.cappedNote && <span style={{ color: '#A66800' }}> · {r.cappedNote}</span>}
                         </div>
                       </div>
                       <span

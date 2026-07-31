@@ -348,6 +348,25 @@ async function syncPostCalcItems(
       if (match.description !== spec.description) patch.description = spec.description;
       if (match.periodAnchorAt !== spec.periodAnchorAt) patch.periodAnchorAt = spec.periodAnchorAt;
       if ((match.componentId as string) !== spec.componentId) patch.componentId = spec.componentId as Id<'chargeComponents'>;
+      // Converge sourceData too — cap metadata (capComponentId/thresholdQty)
+      // drives the "maxed out" display fold, and rows written by earlier
+      // engine versions may predate those fields.
+      if (spec.sourceData._variant === 'POST_CALC_ADJUSTMENT') {
+        const md = match.sourceData?._variant === 'POST_CALC_ADJUSTMENT' ? match.sourceData : undefined;
+        if (
+          md?.postCalcRuleName !== spec.sourceData.postCalcRuleName ||
+          (md?.capComponentId as string | undefined) !== spec.sourceData.capComponentId ||
+          md?.capThresholdQty !== spec.sourceData.capThresholdQty
+        ) {
+          patch.sourceData = {
+            _variant: 'POST_CALC_ADJUSTMENT',
+            postCalcRuleName: spec.sourceData.postCalcRuleName,
+            profileIdSnapshot: spec.sourceData.profileIdSnapshot as Id<'payProfiles'>,
+            capComponentId: spec.sourceData.capComponentId as Id<'chargeComponents'> | undefined,
+            capThresholdQty: spec.sourceData.capThresholdQty,
+          };
+        }
+      }
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(match._id, { ...patch, updatedAt: params.now });
         kept.push({ ...match, ...patch });

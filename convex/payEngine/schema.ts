@@ -647,6 +647,11 @@ export const payItems = defineTable({
       _variant: v.literal('POST_CALC_ADJUSTMENT'),
       postCalcRuleName: v.string(),
       profileIdSnapshot: v.id('payProfiles'),
+      // Cap offsets only: which component was capped + the per-week hour
+      // threshold. Display layers use these to fold the offset INTO the
+      // capped component ("maxed out at 40 h/week"), never as a deduction.
+      capComponentId: v.optional(v.id('chargeComponents')),
+      capThresholdQty: v.optional(v.number()),
     }),
     v.object({
       _variant: v.literal('MANUAL_ADJUSTMENT'),

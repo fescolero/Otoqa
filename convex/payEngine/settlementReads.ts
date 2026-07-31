@@ -90,6 +90,20 @@ export function bucketToCategory(bucket: string): PayableCategory {
   return bucket === 'DEDUCTION' ? 'DEDUCTION' : bucket === 'REIMBURSEMENT' ? 'REIMBURSEMENT' : 'EARNING';
 }
 
+/** Cap-offset detection: a weekly-hour-cap adjustment (MAXIMUM_CAP_WEEKLY)
+ *  emitted by the aggregator. These display as EARNINGS-side reductions —
+ *  the capped component "maxed out at N h/week" — never as deductions: a
+ *  fringe cap is not pay being taken away, it's pay that tops out. The
+ *  ledger row keeps its DEBIT magnitude; only presentation re-signs it. */
+export function capOffsetInfo(
+  it: Doc<'payItems'>,
+): { capComponentId: Id<'chargeComponents'>; capThresholdQty?: number } | null {
+  if (it.kind !== 'POST_CALC_ADJUSTMENT') return null;
+  const sd = it.sourceData;
+  if (sd?._variant !== 'POST_CALC_ADJUSTMENT' || sd.capComponentId == null) return null;
+  return { capComponentId: sd.capComponentId, capThresholdQty: sd.capThresholdQty };
+}
+
 export interface AdapterCaches {
   drivers: Map<string, Doc<'drivers'> | null>;
   partnerships: Map<string, Doc<'carrierPartnerships'> | null>;
@@ -163,14 +177,16 @@ export async function linesFromItems(
   const lines: AdaptedLine[] = [];
   for (const it of items) {
     if (it.isVoided) continue;
-    const category = bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
+    const cap = capOffsetInfo(it);
+    const category = cap ? 'EARNING' : bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
     const dollars = Number(it.amountCents) / 100;
     const receiptStorageId =
       it.sourceData?._variant === 'TRIP_EXPENSE' ? it.sourceData.receiptStorageId : undefined;
     lines.push({
       _id: it._id,
       category,
-      totalAmount: category === 'DEDUCTION' ? -dollars : dollars,
+      // Cap offsets reduce earnings (negative EARNING) instead of deducting.
+      totalAmount: cap || category === 'DEDUCTION' ? -dollars : dollars,
       sourceType: it.kind === 'MANUAL_ADJUSTMENT' ? 'MANUAL' : 'SYSTEM',
       quantity: it.quantity,
       loadId: it.sourceRef.loadId,
@@ -205,7 +221,8 @@ async function payablesFromItems(
   const wsCaches = { ...newWorkStartCaches(), loads: caches.loads };
   for (const it of items) {
     if (it.isVoided) continue;
-    const category = bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
+    const cap = capOffsetInfo(it);
+    const category = cap ? 'EARNING' : bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
     const dollars = Number(it.amountCents) / 100;
 
     const sessionId = it.sourceRef.sessionId;
@@ -257,9 +274,15 @@ async function payablesFromItems(
       description: it.description,
       quantity: it.quantity,
       rate: Number(it.rateMicroCents) / 100000,
-      totalAmount: category === 'DEDUCTION' ? -dollars : dollars,
+      // Cap offsets display as negative EARNINGS ("maxed out"), not deductions.
+      totalAmount: cap || category === 'DEDUCTION' ? -dollars : dollars,
       sourceType: (it.kind === 'MANUAL_ADJUSTMENT' ? 'MANUAL' : 'SYSTEM') as 'MANUAL' | 'SYSTEM',
       category,
+      // Which component this line counts as + cap fold metadata — the panel
+      // folds cap offsets into the capped component's per-rate breakdown row.
+      componentId: it.componentId as string,
+      capComponentId: cap?.capComponentId as string | undefined,
+      capThresholdQty: cap?.capThresholdQty,
       isLocked: it.isLocked,
       warningMessage: it.warning,
       createdAt: it.createdAt,

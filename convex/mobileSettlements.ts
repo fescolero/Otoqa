@@ -21,6 +21,7 @@ import {
   SETTLEMENTS_READ_LEDGER_FLAG,
   bucketOf,
   bucketToCategory,
+  capOffsetInfo,
   linesFromItems,
   newAdapterCaches,
   payItemsForSettlement,
@@ -402,7 +403,8 @@ async function newDriverDetails(ctx: QueryCtx, driver: Doc<'drivers'>, rawId: st
   const lines: MobileStatementLine[] = [];
   for (const it of items) {
     if (it.isVoided) continue;
-    const category = bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
+    const cap = capOffsetInfo(it);
+    const category = cap ? 'EARNING' as const : bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
     const dollars = Number(it.amountCents) / 100;
     let workEnd: number | null = null;
     let shiftLoads: ShiftLoadRow[] | null = null;
@@ -419,7 +421,7 @@ async function newDriverDetails(ctx: QueryCtx, driver: Doc<'drivers'>, rawId: st
       description: it.description,
       quantity: it.quantity,
       rate: Number(it.rateMicroCents) / 100000,
-      totalAmount: category === 'DEDUCTION' ? -dollars : dollars,
+      totalAmount: cap || category === 'DEDUCTION' ? -dollars : dollars,
       category,
       kind: it.kind === 'MANUAL_ADJUSTMENT' ? 'MANUAL' : 'SYSTEM',
       loadLabel: it.sourceRef.loadId ? await loadLabel(ctx, wsCaches.loads, it.sourceRef.loadId) : null,
@@ -774,14 +776,15 @@ async function newCarrierDetails(ctx: QueryCtx, orgCandidates: string[], rawId: 
   const lines: MobileStatementLine[] = [];
   for (const it of items) {
     if (it.isVoided) continue;
-    const category = bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
+    const cap = capOffsetInfo(it);
+    const category = cap ? 'EARNING' as const : bucketToCategory(await bucketOf(ctx, caches, it.componentId as string));
     const dollars = Number(it.amountCents) / 100;
     lines.push({
       id: it._id as string,
       description: it.description,
       quantity: it.quantity,
       rate: Number(it.rateMicroCents) / 100000,
-      totalAmount: category === 'DEDUCTION' ? -dollars : dollars,
+      totalAmount: cap || category === 'DEDUCTION' ? -dollars : dollars,
       category,
       kind: it.kind === 'MANUAL_ADJUSTMENT' ? 'MANUAL' : 'SYSTEM',
       loadLabel: it.sourceRef.loadId ? await loadLabel(ctx, wsCaches.loads, it.sourceRef.loadId) : null,
