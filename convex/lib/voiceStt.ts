@@ -77,7 +77,7 @@ export const INTENT_TOOL = {
         type: 'array',
         items: { type: 'string' },
         description:
-          'assign only: EVERY trip number named ("trip 5 and 6" → ["5","6"]). One entry per trip.',
+          'assign only: EVERY trip number named ("trip 5 and 6" → ["5","6"]). One entry per trip. A multi-digit number is ONE trip: "trip 103" → ["103"], "trips 103 and 123" → ["103","123"] — never split the digits of one number.',
       },
       dates: {
         type: 'array',
@@ -114,6 +114,7 @@ The text is a SPEECH TRANSCRIPT and may contain recognition errors — interpret
 Rules:
 - loadRef: the load/trip number or HCR code as spoken, digits preferred ("load ten oh one" → "1001").
 - assign BY ROUTE: when the command names trip(s) and/or an HCR/contract ("trip 5 HCR 96036 assign to Jorge", "put Marcus on contract 902 trip 12", "trips 5 and 6 contract 96036 to Jorge"), set trips (one entry per trip named) and/or hcr — NOT loadRef — plus driverQuery. Any spoken days ("tomorrow", "Saturday", "tomorrow and Saturday") become the dates array resolved from today's date; no day spoken = omit dates.
+- Trip and load numbers are read as WHOLE numbers: "trip one oh three" / "trip 103" is the single trip "103", never ["1","0","3"]. Only an explicit separator ("and", a comma, "&") splits two trips; digits spoken in sequence are one number.
 - driverQuery: the driver's name only — strip titles and words like "driver". "Jorge's loads" → driverQuery "Jorge".
 - move_window: hour is 24-hour; a bare 1-7 with no am/pm means afternoon (add 12).
 - accept_offer/decline_offer: loadRef may be omitted when no number was said.

@@ -78,6 +78,40 @@ describe('coerceIntent', () => {
       dates: null,
       driverQuery: 'Jorge',
     });
+    // Multi-digit trip numbers stay whole — splitting only happens on
+    // explicit separators, never between digits.
+    expect(coerceIntent({ kind: 'assign', trip: '103', driverQuery: 'Jorge' })).toEqual({
+      kind: 'assign',
+      loadRef: null,
+      hcr: null,
+      trip: '103',
+      trips: ['103'],
+      dates: null,
+      driverQuery: 'Jorge',
+    });
+    expect(
+      coerceIntent({ kind: 'assign', trips: ['103 and 123'], hcr: '96036', driverQuery: 'Jorge' }),
+    ).toEqual({
+      kind: 'assign',
+      loadRef: null,
+      hcr: '96036',
+      trip: '103',
+      trips: ['103', '123'],
+      dates: null,
+      driverQuery: 'Jorge',
+    });
+    // "5 6" with no separator is NOT split — spoken digit sequences are
+    // one number, so it stays a single (unmatchable) value rather than
+    // fanning out into wrong trips.
+    expect(coerceIntent({ kind: 'assign', trip: '5 6', driverQuery: 'Jorge' })).toEqual({
+      kind: 'assign',
+      loadRef: null,
+      hcr: null,
+      trip: '5 6',
+      trips: ['5 6'],
+      dates: null,
+      driverQuery: 'Jorge',
+    });
     // No load ref AND no facets → unusable.
     expect(coerceIntent({ kind: 'assign', driverQuery: 'Jorge' })).toBeNull();
     expect(coerceIntent({ kind: 'move_window', loadRef: 'HCR75960', hour: 15, minute: 30 })).toEqual({
