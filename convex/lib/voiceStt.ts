@@ -71,7 +71,13 @@ export const INTENT_TOOL = {
       trip: {
         type: 'string',
         description:
-          'assign only: trip number when the command names a route ("trip 5"). With hcr and/or trip set, leave loadRef empty.',
+          'assign only: single trip number ("trip 5"). Prefer trips when more than one is named. With hcr/trip/trips set, leave loadRef empty.',
+      },
+      trips: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'assign only: EVERY trip number named ("trip 5 and 6" → ["5","6"]). One entry per trip.',
       },
       dates: {
         type: 'array',
@@ -107,7 +113,7 @@ Commands you may see: assigning a load to a driver ("assign", "give", "put ... o
 The text is a SPEECH TRANSCRIPT and may contain recognition errors — interpret charitably ("have hit" is likely "have it", "for jorge" may arrive as "four jorge"). Ignore filler words and politeness.
 Rules:
 - loadRef: the load/trip number or HCR code as spoken, digits preferred ("load ten oh one" → "1001").
-- assign BY ROUTE: when the command names a trip and/or HCR/contract ("trip 5 HCR 96036 assign to Jorge", "put Marcus on contract 902 trip 12"), set trip and/or hcr (NOT loadRef) plus driverQuery. Any spoken days ("tomorrow", "Saturday", "tomorrow and Saturday") become the dates array resolved from today's date; no day spoken = omit dates.
+- assign BY ROUTE: when the command names trip(s) and/or an HCR/contract ("trip 5 HCR 96036 assign to Jorge", "put Marcus on contract 902 trip 12", "trips 5 and 6 contract 96036 to Jorge"), set trips (one entry per trip named) and/or hcr — NOT loadRef — plus driverQuery. Any spoken days ("tomorrow", "Saturday", "tomorrow and Saturday") become the dates array resolved from today's date; no day spoken = omit dates.
 - driverQuery: the driver's name only — strip titles and words like "driver". "Jorge's loads" → driverQuery "Jorge".
 - move_window: hour is 24-hour; a bare 1-7 with no am/pm means afternoon (add 12).
 - accept_offer/decline_offer: loadRef may be omitted when no number was said.
@@ -166,7 +172,9 @@ export type CoercedIntent =
       kind: 'assign';
       loadRef: string | null;
       hcr: string | null;
+      /** First trip — kept for older app bundles; trips is the full list. */
       trip: string | null;
+      trips: string[] | null;
       dates: string[] | null;
       driverQuery: string;
     }
@@ -259,8 +267,21 @@ export function coerceIntent(raw: unknown): CoercedIntent | null {
     case 'assign': {
       const loadRef = str(r.loadRef);
       const hcr = str(r.hcr);
-      const trip = str(r.trip);
       const driverQuery = str(r.driverQuery);
+      // Trips: gather from trips[] and legacy trip, then split spoken
+      // conjunctions ("5 and 6", "5, 6") the model may leave joined.
+      const tripInputs = [
+        ...(Array.isArray(r.trips) ? r.trips : []),
+        r.trip,
+      ].filter((t): t is string => typeof t === 'string');
+      const trips = [
+        ...new Set(
+          tripInputs
+            .flatMap((t) => t.split(/\s*(?:,|&|\band\b)\s*/i))
+            .map((t) => t.trim())
+            .filter(Boolean),
+        ),
+      ].slice(0, 10);
       // ISO dates only, deduped — bad entries drop silently (STT noise).
       const dates = Array.isArray(r.dates)
         ? [
@@ -271,12 +292,13 @@ export function coerceIntent(raw: unknown): CoercedIntent | null {
             ),
           ].slice(0, 7)
         : [];
-      if (!driverQuery || (!loadRef && !hcr && !trip)) return null;
+      if (!driverQuery || (!loadRef && !hcr && trips.length === 0)) return null;
       return {
         kind: 'assign',
         loadRef,
         hcr,
-        trip,
+        trip: trips[0] ?? null,
+        trips: trips.length ? trips : null,
         dates: dates.length ? dates : null,
         driverQuery,
       };

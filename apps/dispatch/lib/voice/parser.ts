@@ -17,9 +17,10 @@ export type VoiceIntent =
       kind: 'assign';
       /** Direct load-number form; null/absent in the facet (trip/hcr) form. */
       loadRef?: string | null;
-      /** Facet form: route identified by trip and/or HCR + optional dates. */
+      /** Facet form: route identified by trip(s) and/or HCR + optional dates. */
       hcr?: string | null;
       trip?: string | null;
+      trips?: string[] | null;
       dates?: string[] | null;
       driverQuery: string;
     }

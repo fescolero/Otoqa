@@ -35,6 +35,7 @@ describe('coerceIntent', () => {
       loadRef: '1001',
       hcr: null,
       trip: null,
+      trips: null,
       dates: null,
       driverQuery: 'Marcus Vega',
     });
@@ -52,14 +53,28 @@ describe('coerceIntent', () => {
       loadRef: null,
       hcr: '96036',
       trip: '5',
+      trips: ['5'],
       dates: ['2026-08-01', '2026-08-02'], // deduped, malformed dropped
       driverQuery: 'Jorge Romero',
     });
-    expect(coerceIntent({ kind: 'assign', trip: '5', driverQuery: 'Jorge' })).toEqual({
+    // Multiple trips — from the trips array or a joined "5 and 6" string.
+    expect(
+      coerceIntent({ kind: 'assign', trips: ['5', '6'], hcr: '96036', driverQuery: 'Jorge' }),
+    ).toEqual({
+      kind: 'assign',
+      loadRef: null,
+      hcr: '96036',
+      trip: '5',
+      trips: ['5', '6'],
+      dates: null,
+      driverQuery: 'Jorge',
+    });
+    expect(coerceIntent({ kind: 'assign', trip: '5 and 6', driverQuery: 'Jorge' })).toEqual({
       kind: 'assign',
       loadRef: null,
       hcr: null,
       trip: '5',
+      trips: ['5', '6'],
       dates: null,
       driverQuery: 'Jorge',
     });

@@ -72,7 +72,7 @@ type Pending =
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v12';
+const VOICE_BUILD = 'v13';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -173,7 +173,7 @@ export default function VoiceScreen() {
       case 'assign': {
         // Facet form — "trip 5 HCR 96036 to Jorge tomorrow and Saturday":
         // resolve loads by route tags + service dates on the server.
-        if (intent.hcr || intent.trip) {
+        if (intent.hcr || intent.trip || intent.trips?.length) {
           const driverHit = matchDriver(drivers ?? [], intent.driverQuery);
           if (!driverHit) return say('agent', `I don't know a driver called “${intent.driverQuery}”.`);
           if ('ambiguous' in driverHit)
@@ -182,8 +182,9 @@ export default function VoiceScreen() {
               `Several drivers match: ${driverHit.ambiguous.map((d) => `${d.firstName} ${d.lastName}`).join(', ')}. Say the full name.`,
             );
           const d = driverHit.match;
+          const tripList = intent.trips?.length ? intent.trips : intent.trip ? [intent.trip] : [];
           const routeLabel = [
-            intent.trip ? `Trip ${intent.trip}` : null,
+            tripList.length ? `Trip${tripList.length === 1 ? '' : 's'} ${tripList.join(', ')}` : null,
             intent.hcr ? `HCR ${intent.hcr}` : null,
           ]
             .filter(Boolean)
@@ -193,7 +194,7 @@ export default function VoiceScreen() {
             try {
               const found = await convexClient.query(api.dispatchMobile.findLoadsByFacetDates, {
                 hcr: intent.hcr ?? undefined,
-                trip: intent.trip ?? undefined,
+                trips: tripList.length ? tripList : undefined,
                 dates,
               });
               if (found.length === 0)

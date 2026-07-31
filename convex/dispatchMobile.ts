@@ -1273,11 +1273,12 @@ export const createLoad = mutation({
 // orgs dispatch everywhere else.
 // ─────────────────────────────────────────────────────────────────────
 
-/** Loads matching (hcr, trip) whose service date is one of `dates`. */
+/** Loads matching (hcr, trip[s]) whose service date is one of `dates`. */
 export const findLoadsByFacetDates = query({
   args: {
     hcr: v.optional(v.string()),
     trip: v.optional(v.string()),
+    trips: v.optional(v.array(v.string())),
     dates: v.array(v.string()),
   },
   handler: async (ctx, args) => {
@@ -1285,11 +1286,19 @@ export const findLoadsByFacetDates = query({
     const webOrgId = resolved.org.workosOrgId;
     if (!webOrgId) return [];
     const dates = new Set(args.dates);
-    const loadIds = await findLoadIdsByFacets(ctx, {
-      workosOrgId: webOrgId,
-      hcr: args.hcr,
-      trip: args.trip,
-    });
+    // Union across every named trip ("trip 5 and 6 contract 96036"); a
+    // bare-HCR command resolves once with no trip filter.
+    const tripValues = [
+      ...new Set([...(args.trips ?? []), ...(args.trip ? [args.trip] : [])]),
+    ].slice(0, 10);
+    const idSets = await Promise.all(
+      tripValues.length === 0
+        ? [findLoadIdsByFacets(ctx, { workosOrgId: webOrgId, hcr: args.hcr })]
+        : tripValues.map((trip) =>
+            findLoadIdsByFacets(ctx, { workosOrgId: webOrgId, hcr: args.hcr, trip }),
+          ),
+    );
+    const loadIds = [...new Set(idSets.flat())];
     const out: {
       loadId: Id<'loadInformation'>;
       internalId: string;
