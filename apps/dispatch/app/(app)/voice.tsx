@@ -62,7 +62,18 @@ try {
 const mimeForUri = (uri: string) =>
   uri.toLowerCase().endsWith('.caf') ? 'audio/x-caf' : 'audio/wav';
 
-type Msg = { id: number; role: 'you' | 'agent'; text: string };
+/** Row-per-load rendering, shared by chat bubbles and the confirm card. */
+type LoadRow = {
+  load: string;
+  /** Right-aligned detail: a date, a time, or empty. */
+  when: string | null;
+  tags: string[];
+  /** Muted second line (customer · status). */
+  note: string | null;
+  /** Warning line (e.g. reassignment). */
+  warn: string | null;
+};
+type Msg = { id: number; role: 'you' | 'agent'; text: string; rows?: LoadRow[] };
 type PendingRow = { load: string; date: string; tags: string[]; current: string | null };
 type Pending =
   | { kind: 'assign'; assignmentId: string; driverId: string; label: string }
@@ -77,10 +88,53 @@ const fmtDay = (iso: string) => {
     : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 };
 
+/** One visual row per load — used by agent bubbles AND the confirm card. */
+function RowList({ rows }: { rows: LoadRow[] }) {
+  return (
+    <>
+      {rows.map((r, i) => (
+        <View
+          key={i}
+          style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border }}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.bold }}>
+              {r.load}
+            </Text>
+            {r.when ? (
+              <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{r.when}</Text>
+            ) : null}
+          </View>
+          {r.tags.length > 0 && (
+            <View style={{ flexDirection: 'row', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+              {r.tags.map((t) => (
+                <View
+                  key={t}
+                  style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 }}
+                >
+                  <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{t}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+          {r.note && (
+            <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, marginTop: 4 }}>
+              {r.note}
+            </Text>
+          )}
+          {r.warn && (
+            <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 4 }}>{r.warn}</Text>
+          )}
+        </View>
+      ))}
+    </>
+  );
+}
+
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v14';
+const VOICE_BUILD = 'v15';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -159,10 +213,16 @@ export default function VoiceScreen() {
     }
   };
 
-  const say = (role: 'you' | 'agent', text: string, opts?: { thenListen?: boolean }) => {
+  const say = (
+    role: 'you' | 'agent',
+    text: string,
+    opts?: { thenListen?: boolean; rows?: LoadRow[]; speak?: string },
+  ) => {
     const id = nextId.current++;
-    setMessages((m) => [...m, { id, role, text }]);
-    if (role === 'agent') speakReply(text, opts?.thenListen);
+    setMessages((m) => [...m, { id, role, text, ...(opts?.rows ? { rows: opts.rows } : {}) }]);
+    // The bubble can show a terse header + rows while the spoken reply
+    // stays a natural sentence (opts.speak).
+    if (role === 'agent') speakReply(opts?.speak ?? text, opts?.thenListen);
     return id;
   };
 
@@ -342,19 +402,25 @@ export default function VoiceScreen() {
             const name = `${d.firstName} ${d.lastName}`;
             const label = dayLabel(day, endDay);
             if (loads.length === 0) return say('agent', `${name} had no loads ${label}.`);
-            const items = loads
-              .map((l) => {
-                const tags = [l.tripNumber ? `Trip ${l.tripNumber}` : null, l.hcr ? `HCR ${l.hcr}` : null]
-                  .filter(Boolean)
-                  .join(', ');
-                return `${displayLoadId(l.internalId)}${tags ? ` (${tags})` : ''}${
-                  l.customerName ? ` ${l.customerName}` : ''
-                } — ${
-                  l.status === 'COMPLETED' ? 'completed' : l.status === 'IN_PROGRESS' ? 'in transit' : 'scheduled'
-                }`;
-              })
+            const statusWord = (s: string) =>
+              s === 'COMPLETED' ? 'completed' : s === 'IN_PROGRESS' ? 'in transit' : 'scheduled';
+            const rows: LoadRow[] = loads.map((l) => ({
+              load: displayLoadId(l.internalId),
+              when: l.firstStopTime ?? null,
+              tags: [
+                l.tripNumber ? `Trip ${l.tripNumber}` : null,
+                l.hcr ? `HCR ${l.hcr}` : null,
+              ].filter((t): t is string => !!t),
+              note: [l.customerName, statusWord(l.status)].filter(Boolean).join(' · '),
+              warn: null,
+            }));
+            const spoken = loads
+              .map((l) => `${displayLoadId(l.internalId)} ${l.customerName ?? ''} ${statusWord(l.status)}`)
               .join('; ');
-            say('agent', `${name} — ${loads.length} load${loads.length === 1 ? '' : 's'} ${label}: ${items}.`);
+            say('agent', `${name} — ${loads.length} load${loads.length === 1 ? '' : 's'} ${label}:`, {
+              rows,
+              speak: `${name} — ${loads.length} load${loads.length === 1 ? '' : 's'} ${label}: ${spoken}.`,
+            });
           } catch (e) {
             say('agent', e instanceof Error ? e.message : 'Could not look that up.');
           }
@@ -455,7 +521,19 @@ export default function VoiceScreen() {
     // Conversational context: the last few visible turns ride along so
     // follow-ups resolve. Captured from the pre-utterance feed (the
     // closure's `messages` predates the optimistic bubble below).
-    const history = messages.slice(-8).map((m) => ({ role: m.role, text: m.text }));
+    // Rows carry the load details the bubble header omits — flatten them
+    // back into the text so the NLU context keeps the numbers.
+    const history = messages.slice(-8).map((m) => ({
+      role: m.role,
+      text: m.rows
+        ? `${m.text} ${m.rows
+            .map(
+              (r) =>
+                `${r.load}${r.tags.length ? ` (${r.tags.join(', ')})` : ''}${r.note ? ` ${r.note}` : ''}`,
+            )
+            .join('; ')}`
+        : m.text,
+    }));
 
     // Optimistic transcript: show the on-device text the instant the mic
     // closes; the (keyterm-corrected) server transcript swaps in when it
@@ -703,6 +781,7 @@ export default function VoiceScreen() {
                 <Text style={{ color: m.role === 'you' ? colors.primaryForeground : colors.foreground, fontSize: typography.sm, lineHeight: 20 }}>
                   {m.text}
                 </Text>
+                {m.rows && <RowList rows={m.rows} />}
               </View>
             ))}
             {pending && (
@@ -710,39 +789,19 @@ export default function VoiceScreen() {
                 <Text style={{ color: colors.foreground, fontSize: typography.base, fontWeight: typography.semibold }}>
                   {pending.label}
                 </Text>
-                {pending.kind === 'assignLoads' &&
-                  pending.rows.map((r, i) => (
-                    <View
-                      key={i}
-                      style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border }}
-                    >
-                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.bold }}>
-                          {r.load}
-                        </Text>
-                        <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>
-                          {fmtDay(r.date)}
-                        </Text>
-                      </View>
-                      {r.tags.length > 0 && (
-                        <View style={{ flexDirection: 'row', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
-                          {r.tags.map((t) => (
-                            <View
-                              key={t}
-                              style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 }}
-                            >
-                              <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{t}</Text>
-                            </View>
-                          ))}
-                        </View>
-                      )}
-                      {r.current && (
-                        <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 4 }}>
-                          Currently assigned to {r.current} — confirming reassigns it.
-                        </Text>
-                      )}
-                    </View>
-                  ))}
+                {pending.kind === 'assignLoads' && (
+                  <RowList
+                    rows={pending.rows.map((r) => ({
+                      load: r.load,
+                      when: fmtDay(r.date),
+                      tags: r.tags,
+                      note: null,
+                      warn: r.current
+                        ? `Currently assigned to ${r.current} — confirming reassigns it.`
+                        : null,
+                    }))}
+                  />
+                )}
                 <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
                   <Pressable
                     disabled={busy}
