@@ -232,17 +232,6 @@ const styles = StyleSheet.create({
     color: '#999999',
     marginTop: 8,
   },
-  pageFooter: {
-    position: 'absolute',
-    bottom: 30,
-    left: 40,
-    right: 40,
-    textAlign: 'center',
-    fontSize: 8,
-    color: '#999999',
-    paddingTop: 12,
-    borderTop: '1 solid #e2e8f0',
-  },
 });
 
 interface InvoiceLineItem {
@@ -538,17 +527,6 @@ export const InvoicePDFTemplate: React.FC<InvoicePDFTemplateProps> = ({
               contact {companyDetails.email}.
             </Text>
           </View>
-        </View>
-
-        {/* Page Footer */}
-        <View style={styles.pageFooter}>
-          <Text>
-            {companyDetails.name} • Generated on {new Date().toLocaleDateString('en-US', {
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric'
-            })}
-          </Text>
         </View>
       </Page>
     </Document>

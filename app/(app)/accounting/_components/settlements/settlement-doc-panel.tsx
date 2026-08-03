@@ -430,10 +430,6 @@ export function SettlementDocPanel({
   const row: SettlementRow | undefined = list[index];
   const count = list.length;
 
-  // "Generated on" date for the statement — captured once per mount so render
-  // stays pure (react-hooks/purity flags Date.now() in render).
-  const [generatedOn] = React.useState(() => fmtDateYear(Date.now()));
-
   // Esc closes; arrows page through the current view.
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -480,13 +476,7 @@ export function SettlementDocPanel({
       const { pdf } = await import('@react-pdf/renderer');
       const { SettlementPDF } = await import('./settlement-pdf-template');
       const blob = await pdf(
-        <SettlementPDF
-          row={row}
-          party={party}
-          sections={sections}
-          company={company}
-          generatedOn={fmtDateYear(Date.now())}
-        />,
+        <SettlementPDF row={row} party={party} sections={sections} company={company} />,
       ).toBlob();
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank');
@@ -510,13 +500,7 @@ export function SettlementDocPanel({
       const { pdf } = await import('@react-pdf/renderer');
       const { SettlementPDF } = await import('./settlement-pdf-template');
       const blob = await pdf(
-        <SettlementPDF
-          row={row}
-          party={party}
-          sections={sections}
-          company={company}
-          generatedOn={fmtDateYear(Date.now())}
-        />,
+        <SettlementPDF row={row} party={party} sections={sections} company={company} />,
       ).toBlob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -939,10 +923,6 @@ export function SettlementDocPanel({
                   `Questions about this statement? Contact ${company.email || 'your administrator'} within 30 days of the pay date.`}
               </div>
             </div>
-          </div>
-
-          <div className="text-center" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 26 }}>
-            {company.name ? `${company.name} · ` : ''}Generated on {generatedOn}
           </div>
         </div>
       </div>

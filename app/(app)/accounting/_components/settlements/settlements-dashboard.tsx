@@ -501,11 +501,6 @@ export function SettlementsDashboard({ party, organizationId, userId }: Settleme
     try {
       const orgSettings = await convex.query(api.settings.getOrgSettings, { workosOrgId: organizationId });
       const company = buildSettlementCompany(orgSettings);
-      const generatedOn = new Date().toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-      });
       const result = await bulkDownloadPdfs<SettlementRow>({
         items: targets,
         zipName: `${noun}-settlements`,
@@ -522,7 +517,7 @@ export function SettlementsDashboard({ party, organizationId, userId }: Settleme
           const { pdf } = await import('@react-pdf/renderer');
           const { SettlementPDF } = await import('./settlement-pdf-template');
           const blob = await pdf(
-            <SettlementPDF row={r} party={party} sections={sections} company={company} generatedOn={generatedOn} />,
+            <SettlementPDF row={r} party={party} sections={sections} company={company} />,
           ).toBlob();
           return { blob, name: `settlement-${r.statementNumber}` };
         },
