@@ -34,9 +34,12 @@ import {
 } from './lib/voiceStt';
 
 /**
- * Keyterm source: org fleet + customers. Auth rides along from the
- * calling action (canViewOperations — same bar as the reads the voice
- * screen already subscribes to).
+ * Keyterm source: org fleet + customers + HCR facet values. Auth rides
+ * along from the calling action (canViewOperations — same bar as the
+ * reads the voice screen already subscribes to). The SAME set goes with
+ * every request (org vocabulary, not per-utterance) — buildDeepgramUrl
+ * caps at Nova-3's 100-term limit, so order = priority: drivers first,
+ * then HCRs (small set, alphanumerics recognize worst), then customers.
  */
 export const voiceContext = internalQuery({
   args: {},
@@ -45,6 +48,13 @@ export const voiceContext = internalQuery({
     const drivers = await orgDrivers(ctx, resolved);
     const keyterms = drivers.map((d) => `${d.firstName} ${d.lastName}`);
     if (resolved.org.workosOrgId) {
+      const hcrs = await ctx.db
+        .query('facetValues')
+        .withIndex('by_org_key', (q) =>
+          q.eq('workosOrgId', resolved.org.workosOrgId!).eq('facetKey', 'HCR'),
+        )
+        .collect();
+      for (const h of hcrs) keyterms.push(h.value);
       const customers = await ctx.db
         .query('customers')
         .withIndex('by_organization', (q) => q.eq('workosOrgId', resolved.org.workosOrgId!))
