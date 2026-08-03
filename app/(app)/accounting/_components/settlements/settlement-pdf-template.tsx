@@ -85,7 +85,6 @@ const pdfStyles = StyleSheet.create({
     paddingTop: 12,
     borderTop: '1 dashed #cbd5e1',
   },
-  generated: { fontSize: 8.5, color: '#666666', textAlign: 'center', marginTop: 22 },
 });
 
 export function SettlementPDF({
@@ -93,13 +92,11 @@ export function SettlementPDF({
   party,
   sections,
   company,
-  generatedOn,
 }: {
   row: SettlementRow;
   party: SettlementParty;
   sections: StatementSections;
   company: CompanyBlock;
-  generatedOn: string;
 }) {
   const chip = SETTLE_PRESETS[chipKeyForRow(row)];
   const planMeta = row.planBasis ? PLAN_META[row.planBasis] : null;
@@ -302,10 +299,6 @@ export function SettlementPDF({
             </Text>
           </View>
         </View>
-
-        <Text style={pdfStyles.generated}>
-          {company.name ? `${company.name} · ` : ''}Generated on {generatedOn}
-        </Text>
       </Page>
     </Document>
   );

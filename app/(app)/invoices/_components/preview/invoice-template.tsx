@@ -374,17 +374,6 @@ export function InvoiceTemplate({
               </p>
             </div>
           </div>
-
-          {/* Footer */}
-          <div className="mt-3 pt-2 print:mt-2 print:pt-2 border-t border-border text-center">
-            <p className="text-[10px] text-muted-foreground">
-              {companyDetails.name} • Generated on {new Date().toLocaleDateString('en-US', { 
-                year: 'numeric', 
-                month: 'long', 
-                day: 'numeric' 
-              })}
-            </p>
-          </div>
         </div>
       </div>
       </div>

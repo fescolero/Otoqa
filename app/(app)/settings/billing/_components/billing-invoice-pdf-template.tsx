@@ -196,17 +196,6 @@ const styles = StyleSheet.create({
     lineHeight: 1.5,
     color: '#333333',
   },
-  pageFooter: {
-    position: 'absolute',
-    bottom: 30,
-    left: 40,
-    right: 40,
-    textAlign: 'center',
-    fontSize: 8,
-    color: '#999999',
-    paddingTop: 12,
-    borderTop: '1 solid #e2e8f0',
-  },
 });
 
 interface BillingInvoicePDFTemplateProps {
@@ -334,14 +323,6 @@ export const BillingInvoicePDFTemplate: React.FC<BillingInvoicePDFTemplateProps>
           <Text style={styles.footerLabel}>NOTES</Text>
           <Text style={styles.footerText}>{invoiceContactNote()}</Text>
         </View>
-      </View>
-
-      {/* Page footer */}
-      <View style={styles.pageFooter}>
-        <Text>
-          {OTOQA_BILLER.name} • {cycle.invoiceNo} • Generated on{' '}
-          {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
-        </Text>
       </View>
     </Page>
   </Document>
