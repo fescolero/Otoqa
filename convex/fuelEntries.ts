@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
@@ -425,9 +425,9 @@ export const update = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const existing = await ctx.db.get(args.entryId);
-    if (!existing) throw new Error('Fuel entry not found');
+    if (!existing) throw new ConvexError('Fuel entry not found');
     if (existing.organizationId !== callerOrgId) {
-      throw new Error('Fuel entry not found');
+      throw new ConvexError('Fuel entry not found');
     }
 
     const { entryId, updatedBy: _updatedBy, ...updates } = args;
@@ -482,9 +482,9 @@ export const remove = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const existing = await ctx.db.get(args.entryId);
-    if (!existing) throw new Error('Fuel entry not found');
+    if (!existing) throw new ConvexError('Fuel entry not found');
     if (existing.organizationId !== callerOrgId) {
-      throw new Error('Fuel entry not found');
+      throw new ConvexError('Fuel entry not found');
     }
 
     await ctx.db.delete(args.entryId);

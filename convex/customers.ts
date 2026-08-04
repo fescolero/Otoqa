@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
@@ -288,7 +288,7 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
-    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized');
     const { id, ...updates } = args;
     const nameChanged = args.name !== undefined && args.name !== existing.name;
 
@@ -337,7 +337,7 @@ export const deactivate = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
-    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized');
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
@@ -370,7 +370,7 @@ export const restore = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
-    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized');
     await ctx.db.patch(args.id, {
       isDeleted: false,
       deletedAt: undefined,
@@ -403,7 +403,7 @@ export const permanentDelete = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.id);
-    if (!existing || existing.workosOrgId !== callerOrgId) throw new Error('Not authorized');
+    if (!existing || existing.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized');
     await ctx.db.delete(args.id);
 
     // Log the permanent deletion
@@ -437,7 +437,7 @@ export const bulkDeactivate = mutation({
 
     for (const customerId of args.customerIds) {
       const customer = await ctx.db.get(customerId);
-      if (!customer || customer.workosOrgId !== callerOrgId) throw new Error('Not authorized');
+      if (!customer || customer.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized');
       await ctx.db.patch(customerId, {
         isDeleted: true,
         deletedAt: now,

@@ -8,7 +8,7 @@
 
 import { query, mutation, action, MutationCtx } from './_generated/server';
 import { paginationOptsValidator } from 'convex/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internal } from './_generated/api';
 import { calculateInvoiceAmounts, getZeroInvoiceAmounts } from './invoiceCalculations';
 import { Doc } from './_generated/dataModel';
@@ -668,12 +668,12 @@ export const addLineItem = mutation({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const invoice = await ctx.db.get(args.invoiceId);
-    if (!invoice) throw new Error('Invoice not found');
-    if (invoice.workosOrgId !== callerOrgId) throw new Error('Invoice not found');
+    if (!invoice) throw new ConvexError('Invoice not found');
+    if (invoice.workosOrgId !== callerOrgId) throw new ConvexError('Invoice not found');
 
     // Block edits on finalized invoices — those go through credit memos.
     if (invoice.status !== 'DRAFT' && invoice.status !== 'MISSING_DATA') {
-      throw new Error(
+      throw new ConvexError(
         `Cannot add line items to a ${invoice.status.toLowerCase()} invoice. ` +
           'Use a credit memo from the Invoice page instead.',
       );
@@ -712,14 +712,14 @@ export const updateLineItem = mutation({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const line = await ctx.db.get(args.lineItemId);
-    if (!line) throw new Error('Line item not found');
+    if (!line) throw new ConvexError('Line item not found');
 
     const invoice = await ctx.db.get(line.invoiceId);
     if (!invoice || invoice.workosOrgId !== callerOrgId) {
-      throw new Error('Line item not found');
+      throw new ConvexError('Line item not found');
     }
     if (invoice.status !== 'DRAFT' && invoice.status !== 'MISSING_DATA') {
-      throw new Error(
+      throw new ConvexError(
         `Cannot edit lines on a ${invoice.status.toLowerCase()} invoice. ` +
           'Use a credit memo from the Invoice page instead.',
       );
@@ -753,10 +753,10 @@ export const removeLineItem = mutation({
 
     const invoice = await ctx.db.get(line.invoiceId);
     if (!invoice || invoice.workosOrgId !== callerOrgId) {
-      throw new Error('Line item not found');
+      throw new ConvexError('Line item not found');
     }
     if (invoice.status !== 'DRAFT' && invoice.status !== 'MISSING_DATA') {
-      throw new Error(
+      throw new ConvexError(
         `Cannot remove lines from a ${invoice.status.toLowerCase()} invoice. ` +
           'Use a credit memo from the Invoice page instead.',
       );
@@ -1696,11 +1696,11 @@ export const recordSinglePayment = mutation({
   handler: async (ctx, args) => {
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const invoice = await ctx.db.get(args.invoiceId);
-    if (!invoice || invoice.workosOrgId !== args.workosOrgId) throw new Error('Invoice not found');
+    if (!invoice || invoice.workosOrgId !== args.workosOrgId) throw new ConvexError('Invoice not found');
     if (invoice.status === 'VOID' || invoice.status === 'MISSING_DATA') {
-      throw new Error(`Cannot record a payment on a ${invoice.status} invoice`);
+      throw new ConvexError(`Cannot record a payment on a ${invoice.status} invoice`);
     }
-    if (!(args.amount > 0)) throw new Error('Payment amount must be greater than zero');
+    if (!(args.amount > 0)) throw new ConvexError('Payment amount must be greater than zero');
     await recordInvoicePayment(ctx, {
       invoice,
       amount: args.amount,

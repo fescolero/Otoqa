@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalMutation, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
@@ -238,7 +238,7 @@ export const calculateCarrierPay = internalMutation({
   },
   handler: async (ctx, args) => {
     const leg = await ctx.db.get(args.legId);
-    if (!leg) throw new Error('Leg not found');
+    if (!leg) throw new ConvexError('Leg not found');
 
     if (!leg.carrierPartnershipId) {
       // No carrier assigned - nothing to calculate
@@ -250,7 +250,7 @@ export const calculateCarrierPay = internalMutation({
 
     // 1. Get load and stops
     const load = await ctx.db.get(leg.loadId);
-    if (!load) throw new Error('Load not found');
+    if (!load) throw new ConvexError('Load not found');
 
     const allStops = await ctx.db
       .query('loadStops')

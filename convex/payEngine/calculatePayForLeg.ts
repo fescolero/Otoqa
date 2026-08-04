@@ -25,7 +25,7 @@
 // recalc (see legRecalc.scheduleLegPayRecalc / endSessionInternal).
 
 import { internalMutation } from '../_generated/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import type { Doc, Id } from '../_generated/dataModel';
 import { calculatePay } from './calculatePay';
 import type { PayItemSpec, PayeeType } from './calculatePay';
@@ -52,7 +52,7 @@ export const calculatePayForLeg = internalMutation({
 
     // ---- 1. Load core context ----
     const leg = await ctx.db.get(legId);
-    if (!leg) throw new Error(`calculatePayForLeg: leg ${legId} not found`);
+    if (!leg) throw new ConvexError(`calculatePayForLeg: leg ${legId} not found`);
 
     // ---- Latest-wins coalesce check ----
     // If a newer recalc has been queued for this leg, exit. This is the

@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { query, mutation, QueryCtx, MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
@@ -71,10 +71,10 @@ export async function resolveAuthenticatedDriver(
   claimedDriverId?: Id<'drivers'>,
 ): Promise<Doc<'drivers'>> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error('Unauthenticated');
+  if (!identity) throw new ConvexError('Unauthenticated');
 
   const phone = extractPhoneFromIdentity(identity as any);
-  if (!phone) throw new Error('No phone number in identity');
+  if (!phone) throw new ConvexError('No phone number in identity');
 
   const normalizedPhone = normalizePhoneForMatch(phone);
   const phoneVariants = [normalizedPhone, `+1${normalizedPhone}`, `1${normalizedPhone}`];
@@ -91,11 +91,11 @@ export async function resolveAuthenticatedDriver(
     }
   }
 
-  if (!driver) throw new Error('Driver not found');
+  if (!driver) throw new ConvexError('Driver not found');
 
   // If a specific driverId was claimed, verify it matches
   if (claimedDriverId && claimedDriverId !== driver._id) {
-    throw new Error('Driver not found');
+    throw new ConvexError('Driver not found');
   }
 
   return driver;
@@ -1594,7 +1594,7 @@ export const uploadLoadDocument = mutation({
 
     const load = await ctx.db.get(args.loadId);
     if (!load) {
-      throw new Error('Load not found');
+      throw new ConvexError('Load not found');
     }
 
     // Verify driver assignment (same rules as getLoadWithStops).
@@ -1609,13 +1609,13 @@ export const uploadLoadDocument = mutation({
       }
     }
     if (!hasAccess) {
-      throw new Error('Not authorized for this load');
+      throw new ConvexError('Not authorized for this load');
     }
 
     // Must have either a storageId or an externalUrl — we reject empty
     // records rather than creating a pointer to nothing.
     if (!args.storageId && !args.externalUrl) {
-      throw new Error('Document must have either storageId or externalUrl');
+      throw new ConvexError('Document must have either storageId or externalUrl');
     }
 
     const stops = await ctx.db

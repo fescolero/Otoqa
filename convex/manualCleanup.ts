@@ -6,7 +6,7 @@
  */
 
 import { mutation } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { updateInvoiceCount } from "./stats_helpers";
 import { assertCallerOwnsOrg } from "./lib/auth";
 import { getLoadFacets } from "./lib/loadFacets";
@@ -22,7 +22,7 @@ export const triggerCleanup = mutation({
   },
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const BATCH_SIZE = Math.min(args.batchSize || 50, 100);

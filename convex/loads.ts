@@ -1,4 +1,4 @@
-import { v, type Infer } from 'convex/values';
+import { ConvexError, v, type Infer } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import type { MutationCtx } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -57,7 +57,7 @@ async function applyLoadStatusUpdate(
   },
 ) {
   const load = await ctx.db.get(args.loadId);
-  if (!load) throw new Error('Load not found');
+  if (!load) throw new ConvexError('Load not found');
 
   const now = Date.now();
   const updates: Record<string, unknown> = {
@@ -1500,10 +1500,10 @@ export async function createLoadForOrg(
   {
     const { userId: createdBy, userName: createdByName, userEmail: createdByEmail } = performer;
     const now = Date.now();
-    if (args.stops.length === 0) throw new Error('At least one stop is required');
+    if (args.stops.length === 0) throw new ConvexError('At least one stop is required');
 
     const customer = await ctx.db.get(args.customerId);
-    if (!customer) throw new Error('Customer not found');
+    if (!customer) throw new ConvexError('Customer not found');
 
     const effectiveMiles = calculateEffectiveMiles(
       args.manualMiles,
@@ -1733,8 +1733,8 @@ export const updateLoadStatus = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
-    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
     const result = await applyLoadStatusUpdate(ctx, args);
 
     await updateLoadCount(ctx, result.load.workosOrgId, result.previousStatus, result.nextStatus);
@@ -1901,8 +1901,8 @@ export const updateLoadMiles = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
-    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const updatedContractMiles = args.contractMiles ?? load.contractMiles;
     const updatedImportedMiles = args.importedMiles ?? load.importedMiles;
@@ -1953,8 +1953,8 @@ export const deleteLoad = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const loadToDelete = await ctx.db.get(args.loadId);
-    if (!loadToDelete) throw new Error('Load not found');
-    if (loadToDelete.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!loadToDelete) throw new ConvexError('Load not found');
+    if (loadToDelete.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     // Cascade: cancel any open legs before removing the load. Legs are
     // retained (not deleted) so downstream ledger data — loadPayables,
@@ -2025,9 +2025,9 @@ export const updateStopTimes = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const stop = await ctx.db.get(args.stopId);
-    if (!stop) throw new Error('Stop not found');
+    if (!stop) throw new ConvexError('Stop not found');
     const stopLoad = await ctx.db.get(stop.loadId);
-    if (!stopLoad || stopLoad.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!stopLoad || stopLoad.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const { stopId, userId: _argUserId, ...updates } = args;
     const now = Date.now();
@@ -2261,8 +2261,8 @@ export const updateLoadAttributes = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
-    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const { loadId, userId: _argUserId, ...updates } = args;
     const now = Date.now();
@@ -2416,7 +2416,7 @@ export const getByDriver = query({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!driver || driver.organizationId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);
     const seenLoadIds = new Set<string>();
@@ -2544,7 +2544,7 @@ export const getRecentByDriver = query({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const driver = await ctx.db.get(args.driverId);
-    if (!driver || driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!driver || driver.organizationId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const limit = args.limit ?? 4;
     // Bounded candidate window per source. Each index walk is `.take(cap)`
@@ -2730,7 +2730,7 @@ export const getByCarrierPartnership = query({
     const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership || (partnership.brokerOrgId !== callerOrgId && partnership.carrierOrgId !== callerOrgId)) {
-      throw new Error('Not authorized for this organization');
+      throw new ConvexError('Not authorized for this organization');
     }
 
     const dispatchStatus = mapLoadStatusToDispatchStatus(args.status);

@@ -5,7 +5,7 @@
  */
 
 import { internalMutation, internalQuery } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { updateInvoiceCount, updateLoadCount } from "./stats_helpers";
@@ -266,7 +266,7 @@ export const importLoadFromShipment = internalMutation({
     // Fetch customer name
     const customer = await ctx.db.get(contractLane.customerCompanyId);
     if (!customer || !('name' in customer)) {
-      throw new Error("Customer not found");
+      throw new ConvexError("Customer not found");
     }
     const customerName = customer.name;
 

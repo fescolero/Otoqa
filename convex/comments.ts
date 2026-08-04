@@ -6,7 +6,7 @@
  * delete their own comment.
  */
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { requireCallerIdentity } from './lib/auth';
 
@@ -34,8 +34,8 @@ export const addComment = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const trimmed = args.body.trim();
-    if (!trimmed) throw new Error('Empty comment');
-    if (trimmed.length > 4000) throw new Error('Comment too long');
+    if (!trimmed) throw new ConvexError('Empty comment');
+    if (trimmed.length > 4000) throw new ConvexError('Comment too long');
 
     return await ctx.db.insert('comments', {
       workosOrgId: orgId,
@@ -54,12 +54,12 @@ export const updateComment = mutation({
   handler: async (ctx, { id, body }) => {
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const c = await ctx.db.get(id);
-    if (!c) throw new Error('Comment not found');
-    if (c.workosOrgId !== orgId) throw new Error('Not authorized for this comment');
-    if (c.authorId !== userId) throw new Error('Only the author can edit a comment');
+    if (!c) throw new ConvexError('Comment not found');
+    if (c.workosOrgId !== orgId) throw new ConvexError('Not authorized for this comment');
+    if (c.authorId !== userId) throw new ConvexError('Only the author can edit a comment');
     const trimmed = body.trim();
-    if (!trimmed) throw new Error('Empty comment');
-    if (trimmed.length > 4000) throw new Error('Comment too long');
+    if (!trimmed) throw new ConvexError('Empty comment');
+    if (trimmed.length > 4000) throw new ConvexError('Comment too long');
     await ctx.db.patch(id, { body: trimmed, editedAt: Date.now() });
   },
 });
@@ -70,8 +70,8 @@ export const deleteComment = mutation({
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const c = await ctx.db.get(id);
     if (!c) return;
-    if (c.workosOrgId !== orgId) throw new Error('Not authorized for this comment');
-    if (c.authorId !== userId) throw new Error('Only the author can delete a comment');
+    if (c.workosOrgId !== orgId) throw new ConvexError('Not authorized for this comment');
+    if (c.authorId !== userId) throw new ConvexError('Only the author can delete a comment');
     await ctx.db.delete(id);
   },
 });

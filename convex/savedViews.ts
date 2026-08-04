@@ -15,7 +15,7 @@
  * them.
  */
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { requireCallerIdentity } from './lib/auth';
 
@@ -99,10 +99,10 @@ export const updateView = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const view = await ctx.db.get(args.id);
-    if (!view) throw new Error('View not found');
-    if (view.workosOrgId !== orgId) throw new Error('Not authorized for this view');
+    if (!view) throw new ConvexError('View not found');
+    if (view.workosOrgId !== orgId) throw new ConvexError('Not authorized for this view');
     if (view.scope === 'user' && view.ownerId !== userId) {
-      throw new Error('Not authorized for this view');
+      throw new ConvexError('Not authorized for this view');
     }
 
     if (args.isDefault) {
@@ -133,9 +133,9 @@ export const deleteView = mutation({
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const view = await ctx.db.get(id);
     if (!view) return;
-    if (view.workosOrgId !== orgId) throw new Error('Not authorized for this view');
+    if (view.workosOrgId !== orgId) throw new ConvexError('Not authorized for this view');
     if (view.scope === 'user' && view.ownerId !== userId) {
-      throw new Error('Not authorized for this view');
+      throw new ConvexError('Not authorized for this view');
     }
     await ctx.db.delete(id);
   },

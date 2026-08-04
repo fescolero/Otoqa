@@ -5,7 +5,7 @@
 // Naming: matches the design's "rate line item" concept. Replaces the legacy
 // rateRules.ts surface for new-engine orgs.
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { requireCallerIdentity } from './lib/auth';
 
@@ -73,16 +73,16 @@ export const addRule = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const profile = await ctx.db.get(args.profileId);
-    if (!profile) throw new Error('Pay profile not found');
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Pay profile not found');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     // Also verify the component belongs to the same org
     const component = await ctx.db.get(args.componentId);
-    if (!component) throw new Error('Charge component not found');
-    if (component.workosOrgId !== orgId) throw new Error('Charge component belongs to a different organization');
+    if (!component) throw new ConvexError('Charge component not found');
+    if (component.workosOrgId !== orgId) throw new ConvexError('Charge component belongs to a different organization');
 
     if (args.rateAmountMicroCents === undefined && (!args.tieredRate || args.tieredRate.length === 0)) {
-      throw new Error('Rule must have either a flat rate or a tiered rate schedule');
+      throw new ConvexError('Rule must have either a flat rate or a tiered rate schedule');
     }
 
     // Determine sort order — append to the end
@@ -153,15 +153,15 @@ export const updateRule = mutation({
   handler: async (ctx, { ruleId, patch }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const rule = await ctx.db.get(ruleId);
-    if (!rule) throw new Error('Pay rule not found');
+    if (!rule) throw new ConvexError('Pay rule not found');
     const profile = await ctx.db.get(rule.profileId);
-    if (!profile) throw new Error('Parent pay profile not found');
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Parent pay profile not found');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     if (patch.componentId) {
       const component = await ctx.db.get(patch.componentId);
-      if (!component) throw new Error('Charge component not found');
-      if (component.workosOrgId !== orgId) throw new Error('Charge component belongs to a different organization');
+      if (!component) throw new ConvexError('Charge component not found');
+      if (component.workosOrgId !== orgId) throw new ConvexError('Charge component belongs to a different organization');
     }
 
     const now = Date.now();
@@ -196,7 +196,7 @@ export const removeRule = mutation({
     if (!rule) return;
     const profile = await ctx.db.get(rule.profileId);
     if (!profile) return;
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
     // Soft-deactivate rather than hard-delete — preserves audit trail and
@@ -229,8 +229,8 @@ export const reorder = mutation({
   handler: async (ctx, { profileId, orderedRuleIds }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const profile = await ctx.db.get(profileId);
-    if (!profile) throw new Error('Pay profile not found');
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Pay profile not found');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
     for (let i = 0; i < orderedRuleIds.length; i++) {

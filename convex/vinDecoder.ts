@@ -1,5 +1,5 @@
 import { action } from './_generated/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { requireCallerOrgId } from './lib/auth';
 
 // NHTSA VIN Decoder API integration
@@ -25,7 +25,7 @@ export const decodeVIN = action({
 
     // Validate VIN length (should be 17 characters)
     if (vin.length !== 17) {
-      throw new Error('VIN must be exactly 17 characters');
+      throw new ConvexError('VIN must be exactly 17 characters');
     }
 
     try {
@@ -34,13 +34,13 @@ export const decodeVIN = action({
       );
 
       if (!response.ok) {
-        throw new Error('Failed to decode VIN');
+        throw new ConvexError('Failed to decode VIN');
       }
 
       const data = await response.json();
 
       if (!data.Results || data.Results.length === 0) {
-        throw new Error('No results found for this VIN');
+        throw new ConvexError('No results found for this VIN');
       }
 
       // Parse the NHTSA response
@@ -76,7 +76,7 @@ export const decodeVIN = action({
       return decodedData;
     } catch (error) {
       console.error('VIN decode error:', error);
-      throw new Error('Failed to decode VIN. Please check the VIN and try again.');
+      throw new ConvexError('Failed to decode VIN. Please check the VIN and try again.');
     }
   },
 });

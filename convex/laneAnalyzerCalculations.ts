@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalMutation, internalQuery } from './_generated/server';
 import { Doc } from './_generated/dataModel';
 import {
@@ -54,7 +54,7 @@ export const runFullAnalysis = internalMutation({
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
-    if (!session || session.isDeleted) throw new Error('Session not found');
+    if (!session || session.isDeleted) throw new ConvexError('Session not found');
 
     const entries = await ctx.db
       .query('laneAnalysisEntries')

@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { query, mutation, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
@@ -222,10 +222,10 @@ export const startSession = mutation({
 
     const truck = await ctx.db.get(args.truckId);
     if (!truck || truck.isDeleted) {
-      throw new Error('Truck not found');
+      throw new ConvexError('Truck not found');
     }
     if (truck.organizationId !== driver.organizationId) {
-      throw new Error('Truck does not belong to your organization');
+      throw new ConvexError('Truck does not belong to your organization');
     }
 
     const now = Date.now();
@@ -289,8 +289,8 @@ export const endSession = mutation({
   handler: async (ctx, args) => {
     const driver = await resolveAuthenticatedDriver(ctx);
     const session = await ctx.db.get(args.sessionId);
-    if (!session) throw new Error('Session not found');
-    if (session.driverId !== driver._id) throw new Error('Not your session');
+    if (!session) throw new ConvexError('Session not found');
+    if (session.driverId !== driver._id) throw new ConvexError('Not your session');
     if (session.status !== 'active') return null; // idempotent
 
     await endSessionInternal(ctx, session, { endReason: args.endReason });
@@ -317,7 +317,7 @@ export const markSoftCapHit = mutation({
     const driver = await resolveAuthenticatedDriver(ctx);
     const session = await ctx.db.get(args.sessionId);
     if (!session) return null; // session may have ended already; no-op
-    if (session.driverId !== driver._id) throw new Error('Not your session');
+    if (session.driverId !== driver._id) throw new ConvexError('Not your session');
     if (session.status !== 'active') return null;
 
     const now = Date.now();
@@ -357,11 +357,11 @@ export const getOrCreateActiveSession = mutation({
     }
 
     if (!driver.currentTruckId) {
-      throw new Error('Scan your truck before checking in');
+      throw new ConvexError('Scan your truck before checking in');
     }
     const truck = await ctx.db.get(driver.currentTruckId);
     if (!truck || truck.isDeleted || truck.organizationId !== driver.organizationId) {
-      throw new Error('Current truck is unavailable — rescan your truck');
+      throw new ConvexError('Current truck is unavailable — rescan your truck');
     }
 
     const now = Date.now();
@@ -757,9 +757,9 @@ export const adminEndSession = mutation({
   handler: async (ctx, args) => {
     const caller = await requireCallerIdentity(ctx);
     const session = await ctx.db.get(args.sessionId);
-    if (!session) throw new Error('Session not found');
+    if (!session) throw new ConvexError('Session not found');
     if (session.organizationId !== caller.orgId) {
-      throw new Error('Not authorized for this session');
+      throw new ConvexError('Not authorized for this session');
     }
     if (session.status !== 'active') return null; // idempotent
 

@@ -1,6 +1,6 @@
 'use node';
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalAction, action } from './_generated/server';
 import { internal } from './_generated/api';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
@@ -346,7 +346,7 @@ export const getArchivedPositionFiles = action({
   handler: async (ctx, args): Promise<ArchiveSignedUrlRow[]> => {
     const s3 = createArchiveS3Client();
     if (!s3) {
-      throw new Error('Archive storage not configured');
+      throw new ConvexError('Archive storage not configured');
     }
 
     const files: ArchiveFileRow[] = await ctx.runQuery(

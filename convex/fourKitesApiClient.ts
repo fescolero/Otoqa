@@ -3,6 +3,7 @@
  * Used by the sync worker to fetch shipment data from FourKites API
  */
 
+import { ConvexError } from 'convex/values';
 import { parseShipmentsResponse } from './fourKitesUtils';
 
 const FOURKITES_API_URL = process.env.FOURKITES_API_URL || 'https://api.fourkites.com/shipments';
@@ -151,7 +152,7 @@ async function getOauthAccessToken(credentials: FourKitesAuthCredentials): Promi
   const clientSecret = credentials.clientSecret?.trim();
 
   if (!apiKey || !clientSecret) {
-    throw new Error('OAuth2 requires apiKey and clientSecret');
+    throw new ConvexError('OAuth2 requires apiKey and clientSecret');
   }
 
   const tokenResponse = await fetch(getOauthTokenUrl(), {
@@ -169,7 +170,7 @@ async function getOauthAccessToken(credentials: FourKitesAuthCredentials): Promi
 
   if (!tokenResponse.ok) {
     const errorText = await tokenResponse.text();
-    throw new Error(
+    throw new ConvexError(
       `FourKites OAuth Error (${tokenResponse.status}): ${tokenResponse.statusText} - ${errorText}`
     );
   }
@@ -177,7 +178,7 @@ async function getOauthAccessToken(credentials: FourKitesAuthCredentials): Promi
   const tokenData = await tokenResponse.json();
   const accessToken = tokenData?.access_token;
   if (!accessToken || typeof accessToken !== 'string') {
-    throw new Error('FourKites OAuth token response missing access_token');
+    throw new ConvexError('FourKites OAuth token response missing access_token');
   }
 
   return accessToken;
@@ -215,7 +216,7 @@ async function buildAuthHeaders(credentials: FourKitesAuthCredentials): Promise<
     return headers;
   }
 
-  throw new Error(
+  throw new ConvexError(
     'Missing FourKites credentials. Provide apiKey, username/password, or apiKey + clientSecret.'
   );
 }
@@ -313,7 +314,7 @@ export async function fetchShipments(
 
     if (!firstResponse.ok) {
       const errorText = await firstResponse.text();
-      throw new Error(
+      throw new ConvexError(
         `FourKites API Error (${firstResponse.status}): ${firstResponse.statusText} - ${errorText}`
       );
     }

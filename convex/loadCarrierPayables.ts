@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
@@ -156,11 +156,11 @@ export const addManual = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
-    if (load.workosOrgId !== callerOrgId) throw new Error('Load not found');
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new ConvexError('Load not found');
 
     const partnership = await ctx.db.get(args.carrierPartnershipId);
-    if (!partnership) throw new Error('Carrier partnership not found');
+    if (!partnership) throw new ConvexError('Carrier partnership not found');
 
     const totalAmount = args.quantity * args.rate;
     const now = Date.now();
@@ -217,8 +217,8 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
-    if (!payable) throw new Error('Carrier payable not found');
-    if (payable.workosOrgId !== callerOrgId) throw new Error('Carrier payable not found');
+    if (!payable) throw new ConvexError('Carrier payable not found');
+    if (payable.workosOrgId !== callerOrgId) throw new ConvexError('Carrier payable not found');
 
     const { payableId, userId: _argUserId, userName: _argUserName, ...updates } = args;
 
@@ -281,12 +281,12 @@ export const remove = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
-    if (!payable) throw new Error('Carrier payable not found');
-    if (payable.workosOrgId !== callerOrgId) throw new Error('Carrier payable not found');
+    if (!payable) throw new ConvexError('Carrier payable not found');
+    if (payable.workosOrgId !== callerOrgId) throw new ConvexError('Carrier payable not found');
 
     // Only allow deleting manual items
     if (payable.sourceType === 'SYSTEM' && !payable.isLocked) {
-      throw new Error('Cannot delete system-calculated items. Use recalculate instead.');
+      throw new ConvexError('Cannot delete system-calculated items. Use recalculate instead.');
     }
 
     await logAudit(ctx, {
@@ -321,11 +321,11 @@ export const recalculate = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
-    if (!leg) throw new Error('Leg not found');
-    if (leg.workosOrgId !== callerOrgId) throw new Error('Leg not found');
+    if (!leg) throw new ConvexError('Leg not found');
+    if (leg.workosOrgId !== callerOrgId) throw new ConvexError('Leg not found');
 
     if (!leg.carrierPartnershipId) {
-      throw new Error('Cannot recalculate carrier pay: no carrier assigned');
+      throw new ConvexError('Cannot recalculate carrier pay: no carrier assigned');
     }
 
     // Trigger legacy recalculation (source of truth in v1)
@@ -463,12 +463,12 @@ export const assignToSettlement = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement) throw new Error('Settlement not found');
-    if (settlement.workosOrgId !== callerOrgId) throw new Error('Settlement not found');
+    if (!settlement) throw new ConvexError('Settlement not found');
+    if (settlement.workosOrgId !== callerOrgId) throw new ConvexError('Settlement not found');
 
     // Only allow assigning to DRAFT settlements
     if (settlement.status !== 'DRAFT') {
-      throw new Error('Can only assign payables to DRAFT settlements');
+      throw new ConvexError('Can only assign payables to DRAFT settlements');
     }
 
     const now = Date.now();
@@ -480,7 +480,7 @@ export const assignToSettlement = mutation({
 
       // Verify payable belongs to same carrier partnership
       if (payable.carrierPartnershipId !== settlement.carrierPartnershipId) {
-        throw new Error('Payable does not belong to this carrier');
+        throw new ConvexError('Payable does not belong to this carrier');
       }
 
       // Skip if already assigned
@@ -546,7 +546,7 @@ export const removeFromSettlement = mutation({
       // Verify settlement is in DRAFT status
       const settlement = await ctx.db.get(payable.settlementId);
       if (settlement?.status !== 'DRAFT') {
-        throw new Error('Can only remove payables from DRAFT settlements');
+        throw new ConvexError('Can only remove payables from DRAFT settlements');
       }
 
       await ctx.db.patch(payableId, {

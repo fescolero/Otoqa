@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { paginationOptsValidator } from 'convex/server';
 import type { Id } from './_generated/dataModel';
@@ -278,7 +278,7 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.entryId);
-    if (!existing || existing.organizationId !== callerOrgId) throw new Error('DEF entry not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new ConvexError('DEF entry not found');
 
     const { entryId, updatedBy: _updatedBy, ...updates } = args;
     const changedFields: Array<string> = [];
@@ -331,7 +331,7 @@ export const remove = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.entryId);
-    if (!existing || existing.organizationId !== callerOrgId) throw new Error('DEF entry not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new ConvexError('DEF entry not found');
 
     await ctx.db.delete(args.entryId);
 

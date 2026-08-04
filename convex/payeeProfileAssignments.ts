@@ -6,7 +6,7 @@
 // is the fallback when no override applies. Setting a new default
 // automatically clears the prior default in a single mutation.
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query, type MutationCtx } from './_generated/server';
 import { requireCallerIdentity } from './lib/auth';
 import type { Id } from './_generated/dataModel';
@@ -107,14 +107,14 @@ export const assign = mutation({
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
-    if (!profile) throw new Error('Pay profile not found');
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Pay profile not found');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     // Profile must match the payeeType (a DRIVER profile can't be assigned
     // to a CARRIER and vice versa). This is the contract that keeps calc
     // semantics correct.
     if (profile.payeeType !== args.payeeType) {
-      throw new Error(
+      throw new ConvexError(
         `Profile is for ${profile.payeeType}; cannot assign to a ${args.payeeType}`,
       );
     }
@@ -126,7 +126,7 @@ export const assign = mutation({
         q.eq('payeeType', args.payeeType).eq('payeeId', args.payeeId).eq('isActive', true))
       .collect();
     if (existing.some(e => e.profileId === args.profileId)) {
-      throw new Error('Payee is already assigned to this profile');
+      throw new ConvexError('Payee is already assigned to this profile');
     }
 
     const now = Date.now();
@@ -184,9 +184,9 @@ export const setDefault = mutation({
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const target = await ctx.db.get(assignmentId);
-    if (!target) throw new Error('Assignment not found');
-    if (target.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
-    if (!target.isActive) throw new Error('Cannot set an inactive assignment as default');
+    if (!target) throw new ConvexError('Assignment not found');
+    if (target.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
+    if (!target.isActive) throw new ConvexError('Cannot set an inactive assignment as default');
 
     const now = Date.now();
 
@@ -229,7 +229,7 @@ export const unassign = mutation({
 
     const target = await ctx.db.get(assignmentId);
     if (!target) return;
-    if (target.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (target.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
     await ctx.db.patch(assignmentId, { isActive: false, updatedAt: now });
@@ -286,8 +286,8 @@ export const updateStrategy = mutation({
   handler: async (ctx, { assignmentId, patch }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const target = await ctx.db.get(assignmentId);
-    if (!target) throw new Error('Assignment not found');
-    if (target.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!target) throw new ConvexError('Assignment not found');
+    if (target.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
     const cleaned: Record<string, unknown> = {};

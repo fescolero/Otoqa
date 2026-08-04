@@ -1,5 +1,5 @@
 import { query } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { assertCallerOwnsOrg } from "./lib/auth";
 
 /**
@@ -15,7 +15,7 @@ export const checkReviewLoads = query({
   },
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const loads = await ctx.db

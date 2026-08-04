@@ -6,7 +6,7 @@
  */
 
 import { internalMutation, internalAction } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { scheduleSyncCarrierOwnerToClerk } from "./clerkSyncScheduler";
 
@@ -236,10 +236,10 @@ export const syncCarrierOwnerToClerk = internalMutation({
     // Verify org exists and is a carrier
     const org = await ctx.db.get(args.organizationId);
     if (!org) {
-      throw new Error('Organization not found');
+      throw new ConvexError('Organization not found');
     }
     if (org.orgType !== 'CARRIER' && org.orgType !== 'BROKER_CARRIER') {
-      throw new Error('Organization is not a carrier');
+      throw new ConvexError('Organization is not a carrier');
     }
 
     // Schedule the Clerk sync action

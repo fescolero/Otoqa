@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, typecheck, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # bun.lock is the single committed lockfile for the workspace
+      # (see docs/dispatch-app-split-plan.md, OQ-10).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck (web + convex)
+        run: bun run typecheck
+
+      - name: Typecheck (driver app)
+        run: bunx tsc --noEmit -p apps/driver
+
+      - name: Typecheck (dispatch app)
+        run: bunx tsc --noEmit -p apps/dispatch
+
+      - name: Test
+        run: bun run test

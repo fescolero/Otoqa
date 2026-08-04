@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import {
   action,
   mutation,
@@ -114,14 +114,14 @@ function isPrivateIPv4(ip: [number, number, number, number]): boolean {
  */
 function validateWebhookUrl(url: string): void {
   if (!url.startsWith('https://')) {
-    throw new Error('Webhook URL must use HTTPS');
+    throw new ConvexError('Webhook URL must use HTTPS');
   }
 
   let urlObj: URL;
   try {
     urlObj = new URL(url);
   } catch {
-    throw new Error('Invalid webhook URL');
+    throw new ConvexError('Invalid webhook URL');
   }
 
   const hostname = urlObj.hostname.toLowerCase();
@@ -137,24 +137,24 @@ function validateWebhookUrl(url: string): void {
     hostname === 'metadata.google.internal' ||
     hostname === 'metadata.google.com'
   ) {
-    throw new Error('Webhook URL must not point to an internal domain');
+    throw new ConvexError('Webhook URL must not point to an internal domain');
   }
 
   // IPv6 loopback
   if (hostname === '[::1]' || hostname === '[0:0:0:0:0:0:0:1]') {
-    throw new Error('Webhook URL must not point to a loopback address');
+    throw new ConvexError('Webhook URL must not point to a loopback address');
   }
 
   // Check for IPv4 in any encoding (decimal, octal, hex, dotted)
   const ipv4 = parseIPv4(hostname) ?? extractIPv4FromIPv6(hostname);
   if (ipv4 && isPrivateIPv4(ipv4)) {
-    throw new Error('Webhook URL must not point to a private or reserved IP address');
+    throw new ConvexError('Webhook URL must not point to a private or reserved IP address');
   }
 
   // Block pure-numeric hostnames that didn't parse as valid IPv4
   // (prevents novel decimal-encoding bypasses)
   if (/^\d+$/.test(hostname)) {
-    throw new Error('Webhook URL must not use a numeric hostname');
+    throw new ConvexError('Webhook URL must not use a numeric hostname');
   }
 }
 
@@ -191,7 +191,7 @@ export const createSubscription = action({
     const validEvents = ['position.update', 'status.changed', 'tracking.started', 'tracking.ended'];
     for (const event of args.events) {
       if (!validEvents.includes(event)) {
-        throw new Error(`Invalid event type: ${event}. Valid: ${validEvents.join(', ')}`);
+        throw new ConvexError(`Invalid event type: ${event}. Valid: ${validEvents.join(', ')}`);
       }
     }
 
@@ -240,8 +240,8 @@ export const insertSubscription = internalMutation({
   handler: async (ctx, args) => {
     // Validate the key belongs to the same org
     const key = await ctx.db.get(args.partnerKeyId);
-    if (!key || key.workosOrgId !== args.workosOrgId) throw new Error('API key not found');
-    if (key.status !== 'ACTIVE') throw new Error('API key is not active');
+    if (!key || key.workosOrgId !== args.workosOrgId) throw new ConvexError('API key not found');
+    if (key.status !== 'ACTIVE') throw new ConvexError('API key is not active');
 
     return await ctx.db.insert('webhookSubscriptions', {
       workosOrgId: args.workosOrgId,
@@ -314,7 +314,7 @@ export const updateSubscriptionStatus = mutation({
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const sub = await ctx.db.get(args.subscriptionId);
-    if (!sub || sub.workosOrgId !== args.workosOrgId) throw new Error('Subscription not found');
+    if (!sub || sub.workosOrgId !== args.workosOrgId) throw new ConvexError('Subscription not found');
 
     await ctx.db.patch(args.subscriptionId, {
       status: args.status,

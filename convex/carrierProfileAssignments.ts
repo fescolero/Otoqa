@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -86,23 +86,23 @@ export const assign = mutation({
       ctx.db.get(args.profileId),
     ]);
 
-    if (!partnership) throw new Error('Carrier partnership not found');
+    if (!partnership) throw new ConvexError('Carrier partnership not found');
     if (partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Carrier partnership not found');
+      throw new ConvexError('Carrier partnership not found');
     }
-    if (!profile) throw new Error('Rate profile not found');
+    if (!profile) throw new ConvexError('Rate profile not found');
     if (profile.workosOrgId !== callerOrgId) {
-      throw new Error('Rate profile not found');
+      throw new ConvexError('Rate profile not found');
     }
 
     // Verify profile is for CARRIER type
     if (profile.profileType !== 'CARRIER') {
-      throw new Error('Cannot assign a driver profile to a carrier');
+      throw new ConvexError('Cannot assign a driver profile to a carrier');
     }
 
     // Validate threshold is provided for DISTANCE_THRESHOLD strategy
     if (args.selectionStrategy === 'DISTANCE_THRESHOLD' && !args.thresholdValue) {
-      throw new Error('Threshold value is required for DISTANCE_THRESHOLD strategy');
+      throw new ConvexError('Threshold value is required for DISTANCE_THRESHOLD strategy');
     }
 
     // Get existing assignments
@@ -116,7 +116,7 @@ export const assign = mutation({
       (a) => a.profileId === args.profileId
     );
     if (existingForProfile) {
-      throw new Error('This profile is already assigned to this carrier');
+      throw new ConvexError('This profile is already assigned to this carrier');
     }
 
     // If setting as default, remove default from others
@@ -171,9 +171,9 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
-    if (!assignment) throw new Error('Assignment not found');
+    if (!assignment) throw new ConvexError('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     // Validate threshold for DISTANCE_THRESHOLD
@@ -181,7 +181,7 @@ export const update = mutation({
     if (newStrategy === 'DISTANCE_THRESHOLD') {
       const newThreshold = args.thresholdValue ?? assignment.thresholdValue;
       if (!newThreshold) {
-        throw new Error('Threshold value is required for DISTANCE_THRESHOLD strategy');
+        throw new ConvexError('Threshold value is required for DISTANCE_THRESHOLD strategy');
       }
     }
 
@@ -237,9 +237,9 @@ export const remove = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
-    if (!assignment) throw new Error('Assignment not found');
+    if (!assignment) throw new ConvexError('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     const wasDefault = assignment.isDefault;
@@ -284,9 +284,9 @@ export const setDefault = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
-    if (!assignment) throw new Error('Assignment not found');
+    if (!assignment) throw new ConvexError('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.isDefault) {

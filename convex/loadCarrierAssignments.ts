@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
@@ -412,7 +412,7 @@ export const offerLoad = mutation({
     // Verify load exists
     const load = await ctx.db.get(args.loadId);
     if (!load) {
-      throw new Error('Load not found');
+      throw new ConvexError('Load not found');
     }
 
     // Calculate total amount (only if not using pay profile)
@@ -434,10 +434,10 @@ export const offerLoad = mutation({
       if (partnership) {
         // Validate partnership is active
         if (partnership.status === 'TERMINATED') {
-          throw new Error('Cannot offer load to terminated partnership');
+          throw new ConvexError('Cannot offer load to terminated partnership');
         }
         if (partnership.status === 'SUSPENDED') {
-          throw new Error('Cannot offer load to suspended partnership');
+          throw new ConvexError('Cannot offer load to suspended partnership');
         }
         carrierName = partnership.carrierName;
         carrierMcNumber = partnership.mcNumber;
@@ -451,7 +451,7 @@ export const offerLoad = mutation({
             .collect();
 
           if (profileAssignments.length === 0) {
-            throw new Error('Carrier does not have a pay profile configured');
+            throw new ConvexError('Carrier does not have a pay profile configured');
           }
         }
       }
@@ -459,7 +459,7 @@ export const offerLoad = mutation({
 
     // Validate rate is provided when not using pay profile
     if (!args.usePayProfile && args.carrierRate === undefined) {
-      throw new Error('Rate is required when not using pay profile');
+      throw new ConvexError('Rate is required when not using pay profile');
     }
 
     const assignmentId = await ctx.db.insert('loadCarrierAssignments', {
@@ -529,22 +529,22 @@ export const directAssign = mutation({
     // Verify load exists and is assignable
     const load = await ctx.db.get(args.loadId);
     if (!load) {
-      throw new Error('Load not found');
+      throw new ConvexError('Load not found');
     }
     if (load.status === 'Canceled') {
-      throw new Error('Cannot assign carrier to a canceled load');
+      throw new ConvexError('Cannot assign carrier to a canceled load');
     }
 
     // Get partnership details
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     if (partnership.brokerOrgId !== args.brokerOrgId) {
-      throw new Error('Partnership does not belong to this broker');
+      throw new ConvexError('Partnership does not belong to this broker');
     }
     if (partnership.status !== 'ACTIVE') {
-      throw new Error('Partnership is not active');
+      throw new ConvexError('Partnership is not active');
     }
 
     // If using pay profile, verify one exists
@@ -561,7 +561,7 @@ export const directAssign = mutation({
         .collect();
 
       if (profileAssignments.length === 0) {
-        throw new Error('Carrier does not have a pay profile configured');
+        throw new ConvexError('Carrier does not have a pay profile configured');
       }
 
       // Rate fields are optional when using pay profile
@@ -577,7 +577,7 @@ export const directAssign = mutation({
       currency = args.currency ?? partnership.defaultCurrency ?? 'USD';
 
       if (carrierRate === undefined) {
-        throw new Error('Rate is required - provide rate or configure default rate on partnership');
+        throw new ConvexError('Rate is required - provide rate or configure default rate on partnership');
       }
 
       // Calculate total amount based on rate type
@@ -612,7 +612,7 @@ export const directAssign = mutation({
 
     if (activeAssignments.length > 0) {
       if (load.status === 'Assigned') {
-        throw new Error('Load already has an active carrier assignment. Please cancel the existing assignment first.');
+        throw new ConvexError('Load already has an active carrier assignment. Please cancel the existing assignment first.');
       }
       // Load is Open/other status but has stale assignment records - clean them up
       for (const stale of activeAssignments) {
@@ -762,11 +762,11 @@ export const acceptOffer = mutation({
   handler: async (ctx, args) => {
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.carrierOrgId !== args.carrierOrgId) {
-      throw new Error('Assignment does not belong to this carrier');
+      throw new ConvexError('Assignment does not belong to this carrier');
     }
 
     // Caller must actually belong to the carrier org on the assignment —
@@ -774,7 +774,7 @@ export const acceptOffer = mutation({
     await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
 
     if (assignment.status !== 'OFFERED') {
-      throw new Error(`Cannot accept assignment with status: ${assignment.status}`);
+      throw new ConvexError(`Cannot accept assignment with status: ${assignment.status}`);
     }
 
     await ctx.db.patch(args.assignmentId, {
@@ -797,18 +797,18 @@ export const declineOffer = mutation({
   handler: async (ctx, args) => {
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.carrierOrgId !== args.carrierOrgId) {
-      throw new Error('Assignment does not belong to this carrier');
+      throw new ConvexError('Assignment does not belong to this carrier');
     }
 
     // Caller must actually belong to the carrier org on the assignment.
     await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
 
     if (assignment.status !== 'OFFERED') {
-      throw new Error(`Cannot decline assignment with status: ${assignment.status}`);
+      throw new ConvexError(`Cannot decline assignment with status: ${assignment.status}`);
     }
 
     await ctx.db.patch(args.assignmentId, {
@@ -844,15 +844,15 @@ export const awardToCarrier = mutation({
 
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.brokerOrgId !== args.brokerOrgId) {
-      throw new Error('Assignment does not belong to this broker');
+      throw new ConvexError('Assignment does not belong to this broker');
     }
 
     if (assignment.status !== 'ACCEPTED') {
-      throw new Error('Can only award to carriers who have accepted');
+      throw new ConvexError('Can only award to carriers who have accepted');
     }
 
     // Get all other assignments for this load
@@ -910,15 +910,15 @@ export const withdrawOffer = mutation({
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.brokerOrgId !== args.brokerOrgId) {
-      throw new Error('Assignment does not belong to this broker');
+      throw new ConvexError('Assignment does not belong to this broker');
     }
 
     if (assignment.status !== 'OFFERED' && assignment.status !== 'ACCEPTED') {
-      throw new Error(`Cannot withdraw assignment with status: ${assignment.status}`);
+      throw new ConvexError(`Cannot withdraw assignment with status: ${assignment.status}`);
     }
 
     await ctx.db.patch(args.assignmentId, {
@@ -963,7 +963,7 @@ export const assignDriver = mutation({
 
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     console.log('[assignDriver] Assignment found:', {
@@ -977,7 +977,7 @@ export const assignDriver = mutation({
         expected: assignment.carrierOrgId,
         received: args.carrierOrgId,
       });
-      throw new Error('Assignment does not belong to this carrier');
+      throw new ConvexError('Assignment does not belong to this carrier');
     }
 
     // Caller must actually belong to the carrier org on the assignment —
@@ -988,7 +988,7 @@ export const assignDriver = mutation({
       assignment.status !== 'AWARDED' &&
       assignment.status !== 'IN_PROGRESS'
     ) {
-      throw new Error('Can only assign driver to awarded or in-progress loads');
+      throw new ConvexError('Can only assign driver to awarded or in-progress loads');
     }
 
     // If driverId provided, verify driver belongs to carrier's org
@@ -1004,11 +1004,11 @@ export const assignDriver = mutation({
       // Note: driver.organizationId is the Convex doc ID, but args.carrierOrgId 
       // might be the external ID. We should validate ownership differently.
       if (!driver) {
-        throw new Error('Driver not found');
+        throw new ConvexError('Driver not found');
       }
       // For now, just verify the driver exists and is active
       if (driver.isDeleted) {
-        throw new Error('Driver has been deleted');
+        throw new ConvexError('Driver has been deleted');
       }
     }
 
@@ -1035,18 +1035,18 @@ export const startLoad = mutation({
   handler: async (ctx, args) => {
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.carrierOrgId !== args.carrierOrgId) {
-      throw new Error('Assignment does not belong to this carrier');
+      throw new ConvexError('Assignment does not belong to this carrier');
     }
 
     // Caller must actually belong to the carrier org on the assignment.
     await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
 
     if (assignment.status !== 'AWARDED') {
-      throw new Error('Can only start awarded loads');
+      throw new ConvexError('Can only start awarded loads');
     }
 
     await ctx.db.patch(args.assignmentId, {
@@ -1076,18 +1076,18 @@ export const completeLoad = mutation({
 
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.carrierOrgId !== args.carrierOrgId) {
-      throw new Error('Assignment does not belong to this carrier');
+      throw new ConvexError('Assignment does not belong to this carrier');
     }
 
     // Caller must actually belong to the carrier org on the assignment.
     await assertCallerInCarrierOrg(ctx, assignment.carrierOrgId);
 
     if (assignment.status !== 'IN_PROGRESS') {
-      throw new Error('Can only complete in-progress loads');
+      throw new ConvexError('Can only complete in-progress loads');
     }
 
     await ctx.db.patch(args.assignmentId, {
@@ -1152,17 +1152,17 @@ export const cancelAssignment = mutation({
 
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     // Verify caller belongs to either the broker or carrier org on the assignment
     if (assignment.brokerOrgId !== callerOrgId && assignment.carrierOrgId !== callerOrgId) {
-      throw new Error('Not authorized to cancel this assignment');
+      throw new ConvexError('Not authorized to cancel this assignment');
     }
 
     // Can only cancel awarded or in-progress loads
     if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') {
-      throw new Error(`Cannot cancel assignment with status: ${assignment.status}`);
+      throw new ConvexError(`Cannot cancel assignment with status: ${assignment.status}`);
     }
 
     await ctx.db.patch(args.assignmentId, {
@@ -1241,11 +1241,11 @@ export const updatePaymentStatus = mutation({
     const { userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.brokerOrgId);
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (assignment.brokerOrgId !== args.brokerOrgId) {
-      throw new Error('Assignment does not belong to this broker');
+      throw new ConvexError('Assignment does not belong to this broker');
     }
 
     const updates: Record<string, unknown> = {

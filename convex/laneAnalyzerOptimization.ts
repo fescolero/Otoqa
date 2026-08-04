@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalMutation, internalQuery, query, QueryCtx } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
 import { Doc, Id } from './_generated/dataModel';
@@ -71,7 +71,7 @@ export const optimizeBases = internalMutation({
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
-    if (!session || session.isDeleted) throw new Error('Session not found');
+    if (!session || session.isDeleted) throw new ConvexError('Session not found');
 
     const entries = await ctx.db
       .query('laneAnalysisEntries')
@@ -302,7 +302,7 @@ export const findLaneCombinations = internalMutation({
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
-    if (!session || session.isDeleted) throw new Error('Session not found');
+    if (!session || session.isDeleted) throw new ConvexError('Session not found');
 
     const entries = await ctx.db
       .query('laneAnalysisEntries')

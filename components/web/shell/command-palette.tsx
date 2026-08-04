@@ -67,7 +67,7 @@ function flattenNav(): FlatItem[] {
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const router = useRouter();
-  const items = React.useMemo(flattenNav, []);
+  const items = React.useMemo(() => flattenNav(), []);
   const groups = React.useMemo(() => {
     const map = new Map<string, FlatItem[]>();
     for (const it of items) {

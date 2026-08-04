@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -136,14 +136,14 @@ export const assign = mutation({
       ctx.db.get(args.profileId),
     ]);
 
-    if (!driver) throw new Error('Driver not found');
-    if (driver.organizationId !== callerOrgId) throw new Error('Driver not found');
-    if (!profile) throw new Error('Rate profile not found');
-    if (profile.workosOrgId !== callerOrgId) throw new Error('Rate profile not found');
+    if (!driver) throw new ConvexError('Driver not found');
+    if (driver.organizationId !== callerOrgId) throw new ConvexError('Driver not found');
+    if (!profile) throw new ConvexError('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new ConvexError('Rate profile not found');
 
     // Verify profile is for DRIVER type
     if (profile.profileType !== 'DRIVER') {
-      throw new Error('Cannot assign a carrier profile to a driver');
+      throw new ConvexError('Cannot assign a carrier profile to a driver');
     }
 
     // Get existing assignments
@@ -157,7 +157,7 @@ export const assign = mutation({
       (a) => a.profileId === args.profileId
     );
     if (alreadyAssigned) {
-      throw new Error('This profile is already assigned to the driver');
+      throw new ConvexError('This profile is already assigned to the driver');
     }
 
     // If setting as default, unset other defaults for this driver
@@ -205,9 +205,9 @@ export const remove = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
-    if (!assignment) throw new Error('Assignment not found');
+    if (!assignment) throw new ConvexError('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     // Get driver and profile for logging
@@ -245,9 +245,9 @@ export const setDefault = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
-    if (!assignment) throw new Error('Assignment not found');
+    if (!assignment) throw new ConvexError('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     // Unset other defaults for this driver
@@ -297,9 +297,9 @@ export const unsetDefault = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const assignment = await ctx.db.get(args.assignmentId);
-    if (!assignment) throw new Error('Assignment not found');
+    if (!assignment) throw new ConvexError('Assignment not found');
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
 
     if (!assignment.isDefault) {

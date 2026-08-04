@@ -7,7 +7,7 @@
 // Naming: this file mirrors the design's "Pay profile" concept and replaces
 // the legacy rateProfiles.ts surface for new-engine orgs.
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query, type QueryCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -263,7 +263,7 @@ async function assertPostCalcComponentsOwned(
   for (const rule of rules) {
     const component = await ctx.db.get(rule.componentId);
     if (!component || component.workosOrgId !== orgId) {
-      throw new Error(`Period rule "${rule.name}" references a charge component outside this organization`);
+      throw new ConvexError(`Period rule "${rule.name}" references a charge component outside this organization`);
     }
   }
 }
@@ -329,7 +329,7 @@ export const create = mutation({
           q.eq('workosOrgId', args.workosOrgId).eq('code', rule.componentCode))
         .first();
       if (!component) {
-        throw new Error(`Charge component "${rule.componentCode}" not found for this organization`);
+        throw new ConvexError(`Charge component "${rule.componentCode}" not found for this organization`);
       }
       const ruleId = await ctx.db.insert('payRules', {
         profileId,
@@ -394,8 +394,8 @@ export const update = mutation({
   handler: async (ctx, { profileId, patch }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const profile = await ctx.db.get(profileId);
-    if (!profile) throw new Error('Pay profile not found');
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Pay profile not found');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
     const cleaned = stripUndefined(patch);
@@ -453,8 +453,8 @@ export const archive = mutation({
   handler: async (ctx, { profileId }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const profile = await ctx.db.get(profileId);
-    if (!profile) throw new Error('Pay profile not found');
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Pay profile not found');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
     const now = Date.now();
     await ctx.db.patch(profileId, { isActive: false, updatedAt: now, updatedBy: userId });
     await ctx.db.insert('auditLog', {
@@ -477,8 +477,8 @@ export const restore = mutation({
   handler: async (ctx, { profileId }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const profile = await ctx.db.get(profileId);
-    if (!profile) throw new Error('Pay profile not found');
-    if (profile.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Pay profile not found');
+    if (profile.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
     const now = Date.now();
     await ctx.db.patch(profileId, { isActive: true, updatedAt: now, updatedBy: userId });
     await ctx.db.insert('auditLog', {
@@ -503,8 +503,8 @@ export const duplicate = mutation({
   handler: async (ctx, { profileId }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const original = await ctx.db.get(profileId);
-    if (!original) throw new Error('Pay profile not found');
-    if (original.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!original) throw new ConvexError('Pay profile not found');
+    if (original.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
     const newId = await ctx.db.insert('payProfiles', {
@@ -593,16 +593,16 @@ export const setLoadOverride = mutation({
   handler: async (ctx, { loadId, profileId }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(loadId);
-    if (!load) throw new Error('Load not found');
-    if (load.workosOrgId !== orgId) throw new Error('Not authorized for this organization');
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     let profileName: string | null = null;
     if (profileId) {
       const profile = await ctx.db.get(profileId);
-      if (!profile) throw new Error('Pay profile not found');
-      if (profile.workosOrgId !== orgId) throw new Error('Pay profile belongs to a different organization');
-      if (!profile.isActive) throw new Error('Cannot use an archived pay profile as an override');
-      if (profile.payeeType !== 'DRIVER') throw new Error('Load pay overrides must use a driver profile');
+      if (!profile) throw new ConvexError('Pay profile not found');
+      if (profile.workosOrgId !== orgId) throw new ConvexError('Pay profile belongs to a different organization');
+      if (!profile.isActive) throw new ConvexError('Cannot use an archived pay profile as an override');
+      if (profile.payeeType !== 'DRIVER') throw new ConvexError('Load pay overrides must use a driver profile');
       profileName = profile.name;
     }
 
@@ -670,16 +670,16 @@ export const setSessionOverride = mutation({
   handler: async (ctx, { sessionId, profileId }) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const session = await ctx.db.get(sessionId);
-    if (!session) throw new Error('Driver session not found');
-    if (session.organizationId !== orgId) throw new Error('Not authorized for this organization');
+    if (!session) throw new ConvexError('Driver session not found');
+    if (session.organizationId !== orgId) throw new ConvexError('Not authorized for this organization');
 
     let profileName: string | null = null;
     if (profileId) {
       const profile = await ctx.db.get(profileId);
-      if (!profile) throw new Error('Pay profile not found');
-      if (profile.workosOrgId !== orgId) throw new Error('Pay profile belongs to a different organization');
-      if (!profile.isActive) throw new Error('Cannot use an archived pay profile as an override');
-      if (profile.payeeType !== 'DRIVER') throw new Error('Shift pay overrides must use a driver profile');
+      if (!profile) throw new ConvexError('Pay profile not found');
+      if (profile.workosOrgId !== orgId) throw new ConvexError('Pay profile belongs to a different organization');
+      if (!profile.isActive) throw new ConvexError('Cannot use an archived pay profile as an override');
+      if (profile.payeeType !== 'DRIVER') throw new ConvexError('Shift pay overrides must use a driver profile');
       profileName = profile.name;
     }
 

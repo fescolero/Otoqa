@@ -1,5 +1,6 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action, internalAction, internalMutation, internalQuery } from './_generated/server';
+import type { ActionCtx } from './_generated/server';
 import { internal, api } from './_generated/api';
 import type { Doc } from './_generated/dataModel';
 import { requireCallerOrgId } from './lib/auth';
@@ -621,7 +622,7 @@ export const updateEntryRoute = internalMutation({
 });
 
 // Helper: fetch and cache fuel prices from EIA API
-async function fetchAndCacheFuelPrices(ctx: { runMutation: Function }) {
+async function fetchAndCacheFuelPrices(ctx: Pick<ActionCtx, 'runMutation'>) {
   const apiKey = process.env.EIA_API_KEY;
   if (!apiKey) {
     console.warn('EIA_API_KEY not configured, skipping fuel price fetch');
@@ -712,8 +713,8 @@ async function calculateRouteDistanceFromStops(
   stops: Array<{ latitude: number; longitude: number }>,
 ): Promise<{ miles: number; durationHours: number }> {
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) throw new Error('Google Maps API key not configured');
-  if (stops.length < 2) throw new Error('At least 2 stops required');
+  if (!apiKey) throw new ConvexError('Google Maps API key not configured');
+  if (stops.length < 2) throw new ConvexError('At least 2 stops required');
 
   let totalDistanceMeters = 0;
   let totalDurationSeconds = 0;
@@ -729,14 +730,14 @@ async function calculateRouteDistanceFromStops(
     url.searchParams.append('units', 'imperial');
 
     const response = await fetch(url.toString());
-    if (!response.ok) throw new Error(`API request failed: ${response.status}`);
+    if (!response.ok) throw new ConvexError(`API request failed: ${response.status}`);
 
     const data = await response.json();
-    if (data.status !== 'OK') throw new Error(`Distance Matrix API error: ${data.status}`);
+    if (data.status !== 'OK') throw new ConvexError(`Distance Matrix API error: ${data.status}`);
 
     const element = data.rows[0]?.elements[0];
     if (!element || element.status !== 'OK') {
-      throw new Error(`Failed to calculate segment ${i + 1}: ${element?.status}`);
+      throw new ConvexError(`Failed to calculate segment ${i + 1}: ${element?.status}`);
     }
 
     totalDistanceMeters += element.distance.value;
@@ -759,11 +760,11 @@ async function geocodeAddress(
   url.searchParams.append('key', apiKey);
 
   const response = await fetch(url.toString());
-  if (!response.ok) throw new Error(`Geocoding API error: ${response.status}`);
+  if (!response.ok) throw new ConvexError(`Geocoding API error: ${response.status}`);
 
   const data = await response.json();
   if (data.status !== 'OK' || !data.results?.[0]) {
-    throw new Error(`Geocoding failed for "${address}": ${data.status}`);
+    throw new ConvexError(`Geocoding failed for "${address}": ${data.status}`);
   }
 
   const location = data.results[0].geometry.location;
@@ -830,7 +831,7 @@ export const runExternalSolver = internalAction({
     });
 
     if (!response.ok) {
-      throw new Error(`Solver API returned ${response.status}: ${await response.text()}`);
+      throw new ConvexError(`Solver API returned ${response.status}: ${await response.text()}`);
     }
 
     const result = await response.json() as {
@@ -864,7 +865,7 @@ export const runExternalSolver = internalAction({
     };
 
     if (!result.success) {
-      throw new Error(`Solver failed: ${result.error || 'unknown'}`);
+      throw new ConvexError(`Solver failed: ${result.error || 'unknown'}`);
     }
 
     console.log(`Weekly solver: ${result.driverCount} drivers, HOS compliant: ${result.hosCompliant}`);

@@ -16,7 +16,7 @@
  * Feed queries are dual-path (WorkOS staff + Clerk owner-operators) and
  * fail loud; the same queries serve the web surface (D19).
  */
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalMutation, mutation, query, type MutationCtx } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Doc, Id } from './_generated/dataModel';
@@ -220,7 +220,7 @@ export const dismissAlert = mutation({
   args: { alertId: v.id('dispatchAlerts') },
   handler: async (ctx, args) => {
     const alert = await ctx.db.get(args.alertId);
-    if (!alert) throw new Error('Alert not found');
+    if (!alert) throw new ConvexError('Alert not found');
     await requireCapability(ctx, alert.orgExternalId, 'canDispatch');
     if (alert.status === 'open') await ctx.db.patch(args.alertId, { status: 'dismissed' });
     return { success: true };

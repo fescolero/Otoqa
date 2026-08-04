@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -490,7 +490,7 @@ export const create = mutation({
       .first();
 
     if (existing) {
-      throw new Error(`Partnership already exists for MC# ${normalizedMcNumber}. Use update instead.`);
+      throw new ConvexError(`Partnership already exists for MC# ${normalizedMcNumber}. Use update instead.`);
     }
 
     const duplicate = await findDuplicateCarrierPartnership(ctx, {
@@ -506,7 +506,7 @@ export const create = mutation({
     });
 
     if (duplicate) {
-      throw new Error(formatDuplicateError(duplicate));
+      throw new ConvexError(formatDuplicateError(duplicate));
     }
 
     // Check if carrier org exists with this MC#
@@ -676,10 +676,10 @@ export const update = mutation({
 
     const partnership = await ctx.db.get(partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     if (partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     const now = Date.now();
     const previousOwnerPhone = partnership.ownerDriverPhone || partnership.contactPhone || null;
@@ -709,7 +709,7 @@ export const update = mutation({
     });
 
     if (duplicate) {
-      throw new Error(formatDuplicateError(duplicate));
+      throw new ConvexError(formatDuplicateError(duplicate));
     }
 
     // Remove undefined values
@@ -950,10 +950,10 @@ export const updateStatus = mutation({
     const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     if (partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
 
     const now = Date.now();
@@ -1185,26 +1185,26 @@ export const retryClerkSync = mutation({
     const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     if (partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
 
     if (!partnership.carrierOrgId) {
-      throw new Error('Partnership has no linked organization');
+      throw new ConvexError('Partnership has no linked organization');
     }
 
     // Get the organization
     const org = await ctx.db.get(partnership.carrierOrgId as Id<'organizations'>);
     if (!org) {
-      throw new Error('Linked organization not found');
+      throw new ConvexError('Linked organization not found');
     }
 
     // Get phone from owner-operator fields or contact info
     const phone = partnership.ownerDriverPhone || partnership.contactPhone;
     if (!phone) {
-      throw new Error('No phone number available for Clerk sync');
+      throw new ConvexError('No phone number available for Clerk sync');
     }
 
     const firstName =
@@ -1242,23 +1242,23 @@ export const createOwnerDriverRecord = mutation({
     const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     if (partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
 
     if (!partnership.isOwnerOperator) {
-      throw new Error('Partnership is not marked as owner-operator');
+      throw new ConvexError('Partnership is not marked as owner-operator');
     }
 
     if (!partnership.carrierOrgId) {
-      throw new Error('Partnership has no linked organization');
+      throw new ConvexError('Partnership has no linked organization');
     }
 
     const org = await ctx.db.get(partnership.carrierOrgId as Id<'organizations'>);
     if (!org) {
-      throw new Error('Linked organization not found');
+      throw new ConvexError('Linked organization not found');
     }
 
     // Check if driver already linked
@@ -1273,7 +1273,7 @@ export const createOwnerDriverRecord = mutation({
     const phone = partnership.ownerDriverPhone || partnership.contactPhone;
 
     if (!phone) {
-      throw new Error('No phone number available for driver record');
+      throw new ConvexError('No phone number available for driver record');
     }
 
     // Check if driver already exists with this phone
@@ -1352,15 +1352,15 @@ export const accept = mutation({
   handler: async (ctx, args) => {
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
 
     if (partnership.carrierOrgId !== args.carrierOrgId) {
-      throw new Error('Partnership does not belong to this carrier');
+      throw new ConvexError('Partnership does not belong to this carrier');
     }
 
     if (partnership.status !== 'PENDING') {
-      throw new Error('Partnership is not pending acceptance');
+      throw new ConvexError('Partnership is not pending acceptance');
     }
 
     await ctx.db.patch(args.partnershipId, {
@@ -1383,15 +1383,15 @@ export const decline = mutation({
   handler: async (ctx, args) => {
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
 
     if (partnership.carrierOrgId !== args.carrierOrgId) {
-      throw new Error('Partnership does not belong to this carrier');
+      throw new ConvexError('Partnership does not belong to this carrier');
     }
 
     if (partnership.status !== 'PENDING') {
-      throw new Error('Partnership is not pending');
+      throw new ConvexError('Partnership is not pending');
     }
 
     await ctx.db.patch(args.partnershipId, {
@@ -1467,13 +1467,13 @@ export const syncFromCarrierOrg = mutation({
         .first();
 
       if (!carrierOrgByClerk) {
-        throw new Error('Carrier organization not found');
+        throw new ConvexError('Carrier organization not found');
       }
     }
 
     const org = carrierOrg;
     if (!org) {
-      throw new Error('Carrier organization not found');
+      throw new ConvexError('Carrier organization not found');
     }
 
     // Find all partnerships for this carrier
@@ -2212,14 +2212,14 @@ export const sendInvite = mutation({
     const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     if (partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
 
     if (partnership.carrierOrgId) {
-      throw new Error('Carrier already has an account');
+      throw new ConvexError('Carrier already has an account');
     }
 
     await ctx.db.patch(args.partnershipId, {
@@ -2249,14 +2249,14 @@ export const syncPartnershipForMobileAccess = mutation({
     const callerOrgId = await requireCallerOrgId(ctx);
     const partnership = await ctx.db.get(args.partnershipId);
     if (!partnership) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
     if (partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Partnership not found');
+      throw new ConvexError('Partnership not found');
     }
 
     if (!partnership.contactPhone) {
-      throw new Error('Partnership has no contact phone - cannot enable mobile access');
+      throw new ConvexError('Partnership has no contact phone - cannot enable mobile access');
     }
 
     const now = Date.now();

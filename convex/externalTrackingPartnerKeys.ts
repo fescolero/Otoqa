@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action, mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
@@ -158,8 +158,8 @@ export const revokeKey = mutation({
     const identity = (await ctx.auth.getUserIdentity())!;
 
     const key = await ctx.db.get(args.keyId);
-    if (!key) throw new Error('Key not found');
-    if (key.workosOrgId !== args.workosOrgId) throw new Error('Unauthorized');
+    if (!key) throw new ConvexError('Key not found');
+    if (key.workosOrgId !== args.workosOrgId) throw new ConvexError('Unauthorized');
 
     await ctx.db.patch(args.keyId, {
       status: 'REVOKED',

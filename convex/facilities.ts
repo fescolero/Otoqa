@@ -8,7 +8,7 @@
  *
  * See docs/fourkites-address-quality-plan.md §5.
  */
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -32,7 +32,7 @@ async function requireOwnedFacility(
 ): Promise<Doc<'facilities'>> {
   const facility = await ctx.db.get(facilityId);
   if (!facility || facility.workosOrgId !== callerOrgId || facility.isDeleted) {
-    throw new Error('Facility not found');
+    throw new ConvexError('Facility not found');
   }
   return facility;
 }
@@ -159,7 +159,7 @@ export const applySuggestedPin = mutation({
 
     const evidence = await gatherEvidence(ctx, facility._id);
     if (!evidence || !evidence.qualifies) {
-      throw new Error('Not enough check-in evidence to suggest a pin for this facility');
+      throw new ConvexError('Not enough check-in evidence to suggest a pin for this facility');
     }
 
     const now = Date.now();
@@ -233,7 +233,7 @@ export const create = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const customer = await ctx.db.get(args.customerId);
     if (!customer || customer.workosOrgId !== callerOrgId) {
-      throw new Error('Customer not found');
+      throw new ConvexError('Customer not found');
     }
 
     const now = Date.now();

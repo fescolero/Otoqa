@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import {
   internalAction,
   internalMutation,
@@ -82,7 +82,7 @@ export const ensureSimulatorCustomer = internalMutation({
   returns: v.id('customers'),
   handler: async (ctx) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const existing = await ctx.db
       .query('customers')
@@ -124,7 +124,7 @@ export const simulateLoadCreate = internalMutation({
   returns: v.id('loadInformation'),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const now = Date.now();
     const loadId = await ctx.db.insert('loadInformation', {
@@ -170,7 +170,7 @@ export const simulateLoadDelete = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     await removeAllTagsForLoad(ctx, args.loadId);
     await ctx.db.delete(args.loadId);
@@ -203,7 +203,7 @@ export const runMixedBurnIn = internalAction({
   }),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const loadCount = args.loadCount ?? 200;
     const concurrency = args.concurrency ?? 10;
@@ -277,7 +277,7 @@ export const runHotKeyBurst = internalAction({
   }),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const count = args.count ?? 50;
     const hcr = args.sameHcr ?? 'HOTKEY1';
@@ -316,7 +316,7 @@ export const runCasingStorm = internalAction({
   returns: v.object({ created: v.number() }),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const count = args.count ?? 30;
     const customerId = await ctx.runMutation(self.ensureSimulatorCustomer, {});
@@ -367,7 +367,7 @@ export const summary = internalQuery({
   }),
   handler: async (ctx) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const loads = await ctx.db
       .query('loadInformation')
@@ -468,7 +468,7 @@ export const facetHealthCheck = internalQuery({
   }),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const CAP = 500; // sample cap; if more exist, numbers shown as CAP
 
@@ -553,7 +553,7 @@ export const findLoadsByFacetValue = internalQuery({
   }),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     // Sources HCR/Trip from loadTags (the column is gone post Phase 5b).
     // Uses the by_org_key_canonical_date index for an exact canonical
@@ -686,7 +686,7 @@ export const scanDistinctFacetValues = internalQuery({
   }),
   handler: async (ctx, args) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     // Aggregate from loadTags only — DO NOT scan loadInformation. The
     // earlier version .collected() all loads to sample externalSource
@@ -802,7 +802,7 @@ export const cleanup = internalAction({
   }),
   handler: async (ctx) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     return await ctx.runMutation(self.cleanupMutation, {});
   },
@@ -818,7 +818,7 @@ export const cleanupMutation = internalMutation({
   }),
   handler: async (ctx) => {
     if (process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
-      throw new Error('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
+      throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     const loads = await ctx.db
       .query('loadInformation')

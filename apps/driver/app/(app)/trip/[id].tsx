@@ -52,7 +52,7 @@ import { AppState } from 'react-native';
 // Design system — used for the redesigned top chrome (header, summary card,
 // quick actions). The stops list + modals below keep the legacy palette
 // for now; they'll migrate in a later pass.
-import { Icon } from '../../../lib/design-icons';
+import { Icon, type IconName } from '../../../lib/design-icons';
 import { useTheme } from '../../../lib/ThemeContext';
 import { displayLoadId } from '../../../lib/format';
 import {
@@ -3009,7 +3009,7 @@ type DocKind = 'POD' | 'Receipt' | 'Cargo' | 'Damage' | 'Accident' | 'Other';
 // dedicated AccidentSheet flow (kind chips + attach photo + page ops).
 // Exposing it here too would give drivers two entry points for the same
 // record and risk inconsistent metadata.
-const DOC_KINDS: ReadonlyArray<{ key: DocKind; icon: string; sub: string }> = [
+const DOC_KINDS: ReadonlyArray<{ key: DocKind; icon: IconName; sub: string }> = [
   { key: 'POD', icon: 'check', sub: 'Signed delivery slip' },
   { key: 'Receipt', icon: 'clipboard', sub: 'Lumper, fuel, tolls' },
   { key: 'Cargo', icon: 'package', sub: 'Load condition' },
@@ -3263,7 +3263,7 @@ function LoadDocumentRowView({ palette, doc }: { palette: Palette; doc: LoadDocu
 
 // Shared with DOC_KINDS above — keeps the icon mapping authoritative
 // even when the list grows.
-const DOC_TYPE_ICON: Record<DocKind, string> = {
+const DOC_TYPE_ICON: Record<DocKind, IconName> = {
   POD: 'check',
   Receipt: 'clipboard',
   Cargo: 'package',

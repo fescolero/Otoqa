@@ -21,11 +21,21 @@ const jetbrainsMono = JetBrains_Mono({
   display: 'swap',
 });
 
+const description =
+  'Otoqa fleet operations — dispatch, loads, settlements, and accounting for trucking teams.';
+
 export const metadata: Metadata = {
-  title: 'Otoqa',
-  description: 'Otoqa fleet operations',
-  icons: {
-    icon: '/convex.svg',
+  title: {
+    default: 'Otoqa',
+    template: '%s · Otoqa',
+  },
+  description,
+  applicationName: 'Otoqa',
+  openGraph: {
+    title: 'Otoqa',
+    description,
+    siteName: 'Otoqa',
+    type: 'website',
   },
 };
 

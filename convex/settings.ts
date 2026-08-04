@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, assertOrgPermission, requireCallerOrgId } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -137,7 +137,7 @@ export const updateOrgSettings = mutation({
     if (typeof invoicePrefix === 'string' && invoicePrefix.trim() !== '') {
       normalizedPrefix = invoicePrefix.trim().toUpperCase();
       if (!/^[A-Z0-9][A-Z0-9-]{0,11}$/.test(normalizedPrefix)) {
-        throw new Error('Invoice prefix must be 1–12 letters, numbers, or dashes');
+        throw new ConvexError('Invoice prefix must be 1–12 letters, numbers, or dashes');
       }
     }
 
