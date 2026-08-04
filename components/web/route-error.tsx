@@ -7,8 +7,10 @@
  * Next.js passes `reset` to re-render the segment.
  */
 
+import { useEffect } from 'react';
 import { WIcon } from '@/components/web/icons';
 import { Button } from '@/components/ui/button';
+import { POSTHOG_KEY, posthog } from '@/lib/posthog';
 
 interface RouteErrorProps {
   section: string;
@@ -17,6 +19,17 @@ interface RouteErrorProps {
 }
 
 export function RouteError({ section, error, reset }: RouteErrorProps) {
+  useEffect(() => {
+    // Segment boundaries swallow the error before capture_exceptions can
+    // see it, so report it explicitly (D17).
+    if (!POSTHOG_KEY) return;
+    posthog.captureException(error, {
+      source: 'route_error_boundary',
+      section,
+      digest: error.digest,
+    });
+  }, [error, section]);
+
   return (
     <div className="flex h-[60vh] flex-col items-center justify-center gap-4 px-6">
       <span

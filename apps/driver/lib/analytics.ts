@@ -301,6 +301,32 @@ export function trackErrorBoundary(error: string, componentStack?: string) {
   });
 }
 
+/**
+ * D17: route an Error into PostHog error tracking ($exception → issue
+ * grouping, alerting, MCP access). Same client-selection rules as
+ * capture(), but exceptions can't be buffered for later — if no client
+ * exists yet the event is dropped rather than crashing the caller.
+ *
+ * SDK autocapture (see _layout.tsx PostHogProvider options) covers
+ * uncaught errors and rejections in the foreground app; this helper is
+ * for errors we CATCH — ErrorBoundary render crashes and BG task catch
+ * blocks, where autocapture never fires.
+ */
+export function captureAppException(
+  error: unknown,
+  additionalProperties?: PostHogEventProperties,
+) {
+  try {
+    const client = posthogClient ?? getOrCreateBgClient();
+    client?.captureException(error, {
+      ...additionalProperties,
+      ...getAppVersionContext(),
+    });
+  } catch {
+    // Telemetry must never mask the original error.
+  }
+}
+
 export function trackPermissionRequest(permission: string, granted: boolean) {
   capture('permission_request', { permission, granted });
 }

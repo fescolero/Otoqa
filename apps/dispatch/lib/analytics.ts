@@ -83,6 +83,28 @@ export function trackAction(action: string, properties?: PostHogEventProperties)
   capture('dispatch_action', { action, ...properties });
 }
 
+/**
+ * D17: route a caught Error into PostHog error tracking ($exception →
+ * issue grouping, alerting, MCP access). SDK autocapture (_layout.tsx
+ * PostHogProvider options) covers UNCAUGHT errors and rejections; this
+ * is for errors we catch ourselves, e.g. the ErrorBoundary, where
+ * autocapture never fires. No pre-init buffering — an exception before
+ * the client exists is dropped rather than crashing the caller.
+ */
+export function captureAppException(
+  error: unknown,
+  additionalProperties?: PostHogEventProperties,
+) {
+  try {
+    client?.captureException(error, {
+      ...additionalProperties,
+      ...getAppVersionContext(),
+    });
+  } catch {
+    // Telemetry must never mask the original error.
+  }
+}
+
 /** D17 error tracking: render crashes and uncaught JS errors. */
 export function trackError(
   kind: 'error_boundary' | 'js_uncaught',

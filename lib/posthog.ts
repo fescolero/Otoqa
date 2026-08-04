@@ -36,6 +36,10 @@ export function trackError(
   const stack =
     error instanceof Error ? error.stack : undefined;
 
+  // Dual-emit during the D17 transition: `web_error` keeps existing
+  // dashboards alive; captureException feeds PostHog error tracking
+  // (issue grouping, alerting, MCP access).
+  posthog.captureException(error, { source, ...extra });
   posthog.capture('web_error', {
     source,
     error: message,
