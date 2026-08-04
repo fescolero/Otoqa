@@ -15,6 +15,7 @@ import { api } from '@otoqa/convex-client';
 import { colors, typography } from '@otoqa/mobile-core';
 import { useActiveAuth } from '../../lib/convex';
 import { usePushRegistration } from '../../lib/hooks/usePushRegistration';
+import { attachSessionContext } from '../../lib/analytics';
 
 export type DispatchSession = NonNullable<ReturnType<typeof useDispatchSession>>;
 
@@ -32,6 +33,10 @@ export default function AppLayout() {
   const session = useQuery(api.dispatchMobile.getSession, isAuthenticated ? {} : 'skip');
   // Register for §5.7 alert pushes once we have a working org session.
   usePushRegistration(!!session?.authenticated && !!session.orgExternalId);
+  // Analytics org/persona context (D18) — super-properties + org group.
+  React.useEffect(() => {
+    if (session?.authenticated && session.orgExternalId) attachSessionContext(session);
+  }, [session]);
 
   if (isLoading || (isAuthenticated && session === undefined)) {
     return (

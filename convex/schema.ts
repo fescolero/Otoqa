@@ -3081,6 +3081,8 @@ export default defineSchema({
     fcmConsecutiveFailures: v.optional(v.float64()),
   })
     .index('by_driver_status', ['driverId', 'status'])
+    // HOS estimate (D11): trailing-8-day session scan per driver.
+    .index('by_driver_started', ['driverId', 'startedAt'])
     .index('by_org_active', ['organizationId', 'status'])
     .index('by_org_started', ['organizationId', 'startedAt'])
     // Samsara backup ingest: find the currently-open session for a truck.

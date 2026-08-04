@@ -8,6 +8,7 @@ import {
 } from './lib/auth';
 import { isPermitted } from './lib/permissions';
 import { getLoadFacets, findLoadIdsByFacets } from './lib/loadFacets';
+import { estimateHos, hosChipLabel, HOS_CYCLE_DAYS, type HosEstimate } from './lib/hos';
 import { internal } from './_generated/api';
 import { carrierStatementsForOrg, carrierStatementDetailsForOrg } from './mobileSettlements';
 import { logAudit } from './lib/audit';
@@ -241,6 +242,34 @@ async function latestLocation(ctx: QueryCtx, driverId: Id<'drivers'>) {
     .first();
 }
 
+/** Session-derived HOS estimate (D11): trailing-8-day sessions via the
+ *  by_driver_started index, plus the live session (which may predate the
+ *  window). Pure math lives in lib/hos.ts. */
+async function hosForDriver(ctx: QueryCtx, driverId: Id<'drivers'>): Promise<HosEstimate> {
+  const cutoff = Date.now() - HOS_CYCLE_DAYS * 86_400_000;
+  const recent = await ctx.db
+    .query('driverSessions')
+    .withIndex('by_driver_started', (q) => q.eq('driverId', driverId).gte('startedAt', cutoff))
+    .collect();
+  const active = await ctx.db
+    .query('driverSessions')
+    .withIndex('by_driver_status', (q) => q.eq('driverId', driverId).eq('status', 'active'))
+    .collect();
+  const seen = new Set<string>();
+  const sessions = [];
+  for (const s of [...recent, ...active]) {
+    if (seen.has(s._id as string)) continue;
+    seen.add(s._id as string);
+    sessions.push({
+      startedAt: s.startedAt,
+      endedAt: s.endedAt ?? null,
+      totalActiveMinutes: s.totalActiveMinutes ?? null,
+      status: s.status,
+    });
+  }
+  return estimateHos(sessions, Date.now());
+}
+
 async function assignmentsByStatus(
   ctx: QueryCtx,
   externalId: string,
@@ -449,6 +478,7 @@ export const listDriverHistory = query({
       _id: string;
       status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED';
       completedAt: number | null;
+      loadId: string;
       internalId: string | null;
       customerName: string | null;
       tripNumber: string | null;
@@ -476,6 +506,7 @@ export const listDriverHistory = query({
         _id: assignment._id,
         status: assignment.status as 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
         completedAt: assignment.completedAt ?? null,
+        loadId: assignment.loadId as string,
         internalId: load?.internalId ?? null,
         customerName: load?.customerName ?? null,
         tripNumber: facets.trip ?? null,
@@ -519,6 +550,7 @@ export const listDriverHistory = query({
         status:
           leg.status === 'ACTIVE' ? 'IN_PROGRESS' : leg.status === 'PENDING' ? 'AWARDED' : 'COMPLETED',
         completedAt: leg.endedAt ?? null,
+        loadId: leg.loadId as string,
         internalId: load?.internalId ?? null,
         customerName: load?.customerName ?? null,
         tripNumber: facets.trip ?? null,
@@ -772,15 +804,25 @@ async function rankDriversForOrigin(
         const activeCount = inProgress.filter((a) => a.assignedDriverId === d._id).length;
         const mi =
           origin && loc ? milesBetween(loc.latitude, loc.longitude, origin.lat, origin.lng) : null;
+        const hos = await hosForDriver(ctx, d._id);
         const warns: string[] = [];
         if (activeCount > 0) warns.push(`On ${activeCount} active load${activeCount > 1 ? 's' : ''}`);
         if (!loc) warns.push('No GPS data');
         else if (loc.recordedAt < staleCutoff) warns.push('Ping older than 45 min');
         if (mi != null && mi > 60) warns.push(`${mi} mi deadhead`);
+        // HOS estimate warnings (D11) — ranked with warnings, never hidden.
+        if (hos.onShift && hos.windowRemainingHours != null && hos.windowRemainingHours < 3) {
+          warns.push(`~${hos.windowRemainingHours}h left in 14h window (est)`);
+        }
+        if (hos.cycleRemainingHours < 5) {
+          warns.push(`~${hos.cycleRemainingHours}h left in 70h cycle (est)`);
+        }
         let score = 100 + (activeCount === 0 ? 22 : -7 * activeCount);
         if (mi != null) score -= mi * 0.9;
         if (!loc) score -= 25;
         else if (loc.recordedAt < staleCutoff) score -= 15;
+        if (hos.onShift && hos.windowRemainingHours != null && hos.windowRemainingHours < 3) score -= 12;
+        if (hos.cycleRemainingHours < 5) score -= 12;
         return {
           _id: d._id,
           firstName: d.firstName,
@@ -789,6 +831,8 @@ async function rankDriversForOrigin(
           milesFromPickup: mi,
           activeLoads: activeCount,
           lastPingAt: loc?.recordedAt ?? null,
+          hos,
+          hosLabel: hosChipLabel(hos),
           warns,
           score,
         };
@@ -1333,6 +1377,143 @@ export const findLoadsByFacetDates = query({
     }
     out.sort((a, b) => a.firstStopDate.localeCompare(b.firstStopDate));
     return out;
+  },
+});
+
+/**
+ * Read-only load view (Phase-1 "load detail", built 2026-07-31): doc +
+ * facet tags + stop timeline + the live driver from either assignment
+ * model. Reachable when the load belongs to the caller's web-TMS org OR
+ * is offered/awarded to their carrier org. Returns null (never throws)
+ * so the screen can render a clean not-found state.
+ */
+export const getLoadDetail = query({
+  args: { loadId: v.id('loadInformation') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const load = await ctx.db.get(args.loadId);
+    if (!load) return null;
+    let assignment: Doc<'loadCarrierAssignments'> | null = null;
+    let allowed = load.workosOrgId === resolved.org.workosOrgId;
+    if (!allowed) {
+      const assignments = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect();
+      assignment = assignments.find((a) => a.carrierOrgId === resolved.externalId) ?? null;
+      allowed = assignment !== null;
+    }
+    if (!allowed) return null;
+
+    const stops = (
+      await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect()
+    ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    const facets = await getLoadFacets(ctx, load._id);
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect();
+    const liveLeg = legs.find((l) => l.status === 'PENDING' || l.status === 'ACTIVE');
+    const driverId = liveLeg?.driverId ?? assignment?.assignedDriverId ?? null;
+    const driver = driverId ? await ctx.db.get(driverId) : null;
+
+    return {
+      _id: load._id,
+      internalId: load.internalId,
+      status: load.status,
+      trackingStatus: load.trackingStatus ?? null,
+      customerName: load.customerName ?? null,
+      commodityDescription: load.commodityDescription ?? null,
+      weight: load.weight ?? null,
+      effectiveMiles: load.effectiveMiles ?? null,
+      equipmentType: load.equipmentType ?? null,
+      externalSource: load.externalSource ?? null,
+      tripNumber: facets.trip ?? null,
+      hcr: facets.hcr ?? null,
+      legStatus: liveLeg?.status ?? null,
+      driver: driver
+        ? { _id: driver._id, firstName: driver.firstName, lastName: driver.lastName, phone: driver.phone }
+        : null,
+      stops: stops.map((s) => ({
+        _id: s._id,
+        sequenceNumber: s.sequenceNumber,
+        stopType: s.stopType,
+        address: s.address,
+        city: s.city ?? null,
+        state: s.state ?? null,
+        windowBeginDate: s.windowBeginDate ?? null,
+        windowBeginTime: s.windowBeginTime ?? null,
+        windowEndTime: s.windowEndTime ?? null,
+        checkedInAt: s.checkedInAt ?? null,
+        checkedOutAt: s.checkedOutAt ?? null,
+      })),
+    };
+  },
+});
+
+/**
+ * Driver profile (Phase-1 "driver detail"): identity + credentials with
+ * expirations, current/next load via the leg model, and last-known GPS
+ * fix age. History rides the existing listDriverHistory query client-side.
+ */
+export const getDriverDetail = query({
+  args: { driverId: v.id('drivers') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
+      return null;
+    }
+    const location = await latestLocation(ctx, driver._id);
+    const lightLoadOf = async (loadId: Id<'loadInformation'>) => {
+      const load = await ctx.db.get(loadId);
+      if (!load) return null;
+      const facets = await getLoadFacets(ctx, load._id);
+      return {
+        _id: load._id,
+        internalId: load.internalId,
+        customerName: load.customerName ?? null,
+        tripNumber: facets.trip ?? null,
+        hcr: facets.hcr ?? null,
+      };
+    };
+    const activeLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', driver._id).eq('status', 'ACTIVE'))
+      .collect();
+    const pendingLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', driver._id).eq('status', 'PENDING'))
+      .collect();
+    const nextPending =
+      pendingLegs.sort(
+        (a, b) => (a.scheduledStartMs ?? Infinity) - (b.scheduledStartMs ?? Infinity),
+      )[0] ?? null;
+    const hos = await hosForDriver(ctx, driver._id);
+
+    return {
+      _id: driver._id,
+      firstName: driver.firstName,
+      lastName: driver.lastName,
+      phone: driver.phone,
+      email: driver.email,
+      employmentStatus: driver.employmentStatus,
+      employmentType: driver.employmentType,
+      hireDate: driver.hireDate,
+      licenseClass: driver.licenseClass,
+      licenseState: driver.licenseState,
+      licenseExpiration: driver.licenseExpiration,
+      medicalExpiration: driver.medicalExpiration ?? null,
+      twicExpiration: driver.twicExpiration ?? null,
+      lastFixAt: location?.recordedAt ?? null,
+      currentLoad: activeLegs[0] ? await lightLoadOf(activeLegs[0].loadId) : null,
+      nextLoad: nextPending ? await lightLoadOf(nextPending.loadId) : null,
+      hos,
+      hosLabel: hosChipLabel(hos),
+    };
   },
 });
 

@@ -12,6 +12,7 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import { displayLoadId } from '../lib/format';
+import { trackAction } from '../lib/analytics';
 
 const fmt = (t: number) =>
   new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
@@ -40,6 +41,7 @@ export default function PlanScreen() {
       });
       const failed = res.results.filter((r) => !r.success);
       const ok = res.results.length - failed.length;
+      trackAction('plan_applied', { applied: ok, skipped: failed.length });
       if (failed.length === 0) {
         router.back();
       } else {

@@ -53,6 +53,8 @@ export const INTENT_TOOL = {
           'accept_offer',
           'decline_offer',
           'driver_loads',
+          'call_driver',
+          'driver_location',
           'board_summary',
           'alerts_summary',
           'clarify',
@@ -109,7 +111,7 @@ export const haikuCommandSystem = (
   todayISO: string,
 ) => `You parse voice commands for a truck-dispatch app into the set_intent tool.
 Today's date is ${todayISO}.
-Commands you may see: assigning a load to a driver ("assign", "give", "put ... on"), moving an appointment window to a time, accepting or declining a broker offer, asking which loads a driver had or has on a day or across days (driver_loads), asking what's on the board, asking about alerts/exceptions.
+Commands you may see: assigning a load to a driver ("assign", "give", "put ... on"), moving an appointment window to a time, accepting or declining a broker offer, asking which loads a driver had or has on a day or across days (driver_loads), calling a driver ("call/phone/dial X" → call_driver), asking where a driver is ("where is X", "where's X at" → driver_location), asking what's on the board, asking about alerts/exceptions.
 The text is a SPEECH TRANSCRIPT and may contain recognition errors — interpret charitably ("have hit" is likely "have it", "for jorge" may arrive as "four jorge"). Ignore filler words and politeness.
 Rules:
 - loadRef: the load/trip number or HCR code as spoken, digits preferred ("load ten oh one" → "1001").
@@ -185,6 +187,8 @@ export type CoercedIntent =
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
   | { kind: 'driver_history'; driverQuery: string; date: string | null; dateEnd: string | null }
+  | { kind: 'call_driver'; driverQuery: string }
+  | { kind: 'driver_location'; driverQuery: string }
   | { kind: 'clarify'; question: string }
   | { kind: 'board_summary' }
   | { kind: 'alerts_summary' };
@@ -317,6 +321,11 @@ export function coerceIntent(raw: unknown): CoercedIntent | null {
       return { kind: 'accept_offer', loadRef: str(r.loadRef) };
     case 'decline_offer':
       return { kind: 'decline_offer', loadRef: str(r.loadRef) };
+    case 'call_driver':
+    case 'driver_location': {
+      const driverQuery = str(r.driverQuery);
+      return driverQuery ? { kind: r.kind, driverQuery } : null;
+    }
     case 'driver_loads': {
       const driverQuery = str(r.driverQuery);
       if (!driverQuery) return null;
