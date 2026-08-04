@@ -109,11 +109,8 @@ export function ScheduleViewTab({ organizationId, activeSessionId }: ScheduleVie
     );
   }
 
-  const totalAnnualRuns = useMemo(() => {
-    let total = 0;
-    for (const lane of scheduleData) total += lane.dates.size;
-    return total;
-  }, [scheduleData]);
+  let totalAnnualRuns = 0;
+  for (const lane of scheduleData) totalAnnualRuns += lane.dates.size;
 
   return (
     <div className="space-y-6">
