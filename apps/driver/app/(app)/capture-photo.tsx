@@ -405,6 +405,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  headerSpacer: {
+    width: 44,
+  },
   headerTitle: {
     fontSize: 20,
     fontWeight: '600',

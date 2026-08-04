@@ -107,7 +107,8 @@ interface UserRoles {
   isDriver: boolean;
   driverId: string | null;
   driverOrgId: string | null;
-  driverOrgName: string | null;
+  // Absent on the roles branch returned before the driver org resolves.
+  driverOrgName?: string | null;
   isCarrierOwner: boolean;
   carrierOrgId: string | null;
   carrierOrgName: string | null;
@@ -507,7 +508,7 @@ export default function AppLayout() {
             setHasSelectedRole(true);
             await setMode(selectedRole);
           },
-          roles: userRoles,
+          roles: userRoles ?? null,
           canSwitchModes,
         }}
       >
@@ -664,7 +665,7 @@ export default function AppLayout() {
 
   if (mode === 'owner' && carrierOrg?._id && needsDriverProfileOnboarding) {
     return (
-      <AppModeContext.Provider value={{ mode, setMode, roles: userRoles, canSwitchModes }}>
+      <AppModeContext.Provider value={{ mode, setMode, roles: userRoles ?? null, canSwitchModes }}>
         <CarrierOwnerContext.Provider value={carrierOwnerContextValue}>
           <CompleteDriverProfileScreen />
         </CarrierOwnerContext.Provider>
@@ -678,7 +679,7 @@ export default function AppLayout() {
         value={{
           mode,
           setMode,
-          roles: userRoles,
+          roles: userRoles ?? null,
           canSwitchModes,
         }}
       >
