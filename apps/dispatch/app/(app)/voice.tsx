@@ -151,7 +151,7 @@ function RowList({ rows }: { rows: LoadRow[] }) {
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v19';
+const VOICE_BUILD = 'v20';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -174,9 +174,10 @@ const agoLabel = (ms: number): string => {
 };
 /** Leading yes/no words for hands-free confirmation of the pending card. */
 const yesNo = (t: string): 'yes' | 'no' | null => {
-  const w = t.trim().toLowerCase();
-  if (/^(yes|yeah|yep|yup|confirm|confirmed|correct|do it|go ahead|sure)\b/.test(w)) return 'yes';
-  if (/^(no|nope|cancel|stop|don'?t|do not|never ?mind|nevermind)\b/.test(w)) return 'no';
+  const w = t.trim().toLowerCase().replace(/^[^a-z']+/, '');
+  if (/^(yes|yeah|yep|yup|ok(ay)?|confirm(ed)?|correct|do it|go ahead|sure|affirmative)\b/.test(w))
+    return 'yes';
+  if (/^(no|nope|cancel|stop|don'?t|do not|never ?mind|nevermind|negative)\b/.test(w)) return 'no';
   return null;
 };
 const shortDate = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -242,7 +243,20 @@ export default function VoiceScreen() {
       : undefined;
     if (!mutedRef.current && SpeechSynth) {
       SpeechSynth.stop();
-      SpeechSynth.speak(text, { language: 'en-US', onDone: after, onError: after });
+      let fired = false;
+      const once = after
+        ? () => {
+            if (!fired) {
+              fired = true;
+              after();
+            }
+          }
+        : undefined;
+      SpeechSynth.speak(text, { language: 'en-US', onDone: once, onError: once });
+      // Engine watchdog: some Android TTS engines go silent without ever
+      // firing callbacks — open the mic after the estimated speech
+      // duration anyway so hands-free confirmation survives a dead engine.
+      if (once) setTimeout(once, Math.min(2000 + text.length * 55, 9000));
     } else if (after) {
       setTimeout(after, 600);
     }
