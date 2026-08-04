@@ -12,7 +12,7 @@
  * of crashing (lazy require).
  */
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, Animated, Linking, Pressable, ScrollView, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAction, useConvex, useMutation, useQuery } from 'convex/react';
@@ -152,7 +152,7 @@ function RowList({ rows }: { rows: LoadRow[] }) {
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v22';
+const VOICE_BUILD = 'v23';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -216,6 +216,25 @@ export default function VoiceScreen() {
   const [busy, setBusy] = useState(false);
   const nextId = useRef(1);
   const scrollRef = useRef<ScrollView>(null);
+
+  // v23 UI: the mic button breathes while the app is listening — the
+  // visual cue that the session is still open through pauses (v21
+  // endpointing keeps it open until 1.8s of silence).
+  const pulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (!listening) {
+      pulse.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1.12, duration: 650, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 1, duration: 650, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [listening, pulse]);
 
   // TTS mute — ref-mirrored so async flows always read the live value.
   const [muted, setMuted] = useState(false);
@@ -1055,7 +1074,7 @@ export default function VoiceScreen() {
           </View>
         </View>
         <Text style={{ fontSize: typography.sm, color: colors.foregroundMuted, marginTop: 4 }}>
-          Speak a command — every action asks before it runs · {VOICE_BUILD} · {updateTag}
+          Talk naturally — every action asks before it runs · {VOICE_BUILD} · {updateTag}
         </Text>
       </View>
 
@@ -1079,9 +1098,44 @@ export default function VoiceScreen() {
             onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
           >
             {messages.length === 0 && (
-              <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', marginTop: 24, lineHeight: 22 }}>
-                Try:{'\n'}“Assign load 1001 to Marcus”{'\n'}“Move load 1001 to 3 pm”{'\n'}“Accept offer 1001”{'\n'}“What loads did Marcus have this week?”{'\n'}“Call Marcus” · “Where's Marcus?”{'\n'}“What’s on the board?” · “Any alerts?”
-              </Text>
+              <View style={{ marginTop: 8, gap: 12 }}>
+                <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 16 }}>
+                  <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold, marginBottom: 6 }}>
+                    Try saying
+                  </Text>
+                  {[
+                    '“Trip 5, HCR 96036 — assign to Jorge tomorrow and Saturday”',
+                    '“Assign trips 103 and 104 on 96036 to Marcus for Friday”',
+                    '“What loads did Marcus have this week?”',
+                    '“Where’s Marcus?” · “Call Marcus”',
+                    '“Move load 1001 to 3 pm” · “Accept offer 1001”',
+                    '“What’s on the board?” · “Any alerts?”',
+                  ].map((t) => (
+                    <Text key={t} style={{ color: colors.foregroundMuted, fontSize: typography.sm, lineHeight: 24 }}>
+                      {t}
+                    </Text>
+                  ))}
+                </View>
+                <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 16, gap: 10 }}>
+                  <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}>
+                    Hands-free
+                  </Text>
+                  {(
+                    [
+                      ['mic-outline', 'It keeps listening through pauses — take your time mid-sentence.'],
+                      ['chatbubble-ellipses-outline', 'When it asks a question, just answer — the mic reopens itself. “Yes” confirms, “cancel” stops.'],
+                      ['hand-left-outline', 'While it’s talking, tap the mic to jump in.'],
+                    ] as const
+                  ).map(([icon, text]) => (
+                    <View key={icon} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <Ionicons name={icon} size={16} color={colors.primary} />
+                      <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, flex: 1, lineHeight: 20 }}>
+                        {text}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
             )}
             {messages.map((m) => (
               <View
@@ -1149,33 +1203,78 @@ export default function VoiceScreen() {
                     <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, fontWeight: typography.semibold }}>Cancel</Text>
                   </Pressable>
                 </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 }}>
+                  <Ionicons name="mic-outline" size={13} color={colors.foregroundMuted} />
+                  <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>
+                    Hands-free: say “yes” or “cancel” — or ask for a change
+                  </Text>
+                </View>
               </View>
             )}
           </ScrollView>
 
-          <View style={{ alignItems: 'center', paddingBottom: 26, paddingTop: 6 }}>
-            {(listening || partial || thinking || speaking) && (
-              <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginBottom: 10, paddingHorizontal: 32, textAlign: 'center' }} numberOfLines={2}>
-                {thinking
-                  ? 'Thinking…'
-                  : listening || partial
-                    ? partial || 'Listening…'
-                    : 'Speaking — tap the mic to interrupt'}
-              </Text>
-            )}
-            <Pressable
-              onPress={() => void toggleMic()}
-              style={{
-                width: 72,
-                height: 72,
-                borderRadius: 36,
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: listening ? colors.destructive : colors.primary,
-              }}
-            >
-              <Ionicons name={listening ? 'stop' : 'mic'} size={30} color={colors.primaryForeground} />
-            </Pressable>
+          <View style={{ alignItems: 'center', paddingBottom: 22, paddingTop: 6 }}>
+            {(() => {
+              // One visual state machine for the whole voice loop —
+              // listening wins (mic is hot), then thinking, then speaking.
+              const micState = listening ? 'listening' : thinking ? 'thinking' : speaking ? 'speaking' : 'idle';
+              return (
+                <>
+                  {(micState !== 'idle' || partial) && (
+                    <Text
+                      style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginBottom: 10, paddingHorizontal: 32, textAlign: 'center' }}
+                      numberOfLines={3}
+                    >
+                      {micState === 'thinking'
+                        ? 'Thinking…'
+                        : micState === 'speaking'
+                          ? 'Speaking — tap the mic to jump in'
+                          : partial || 'Listening — take your time'}
+                    </Text>
+                  )}
+                  <Animated.View style={{ transform: [{ scale: pulse }] }}>
+                    <Pressable
+                      disabled={micState === 'thinking'}
+                      onPress={() => void toggleMic()}
+                      style={{
+                        width: 72,
+                        height: 72,
+                        borderRadius: 36,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor:
+                          micState === 'listening'
+                            ? colors.destructive
+                            : micState === 'idle'
+                              ? colors.primary
+                              : colors.card,
+                        borderWidth: micState === 'thinking' || micState === 'speaking' ? 1 : 0,
+                        borderColor: micState === 'speaking' ? colors.primary : colors.border,
+                      }}
+                    >
+                      {micState === 'thinking' ? (
+                        <ActivityIndicator color={colors.primary} />
+                      ) : (
+                        <Ionicons
+                          name={micState === 'listening' ? 'stop' : 'mic'}
+                          size={30}
+                          color={micState === 'speaking' ? colors.primary : colors.primaryForeground}
+                        />
+                      )}
+                    </Pressable>
+                  </Animated.View>
+                  <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, marginTop: 8 }}>
+                    {micState === 'idle'
+                      ? 'Tap to talk'
+                      : micState === 'listening'
+                        ? 'Tap to stop'
+                        : micState === 'speaking'
+                          ? 'Tap to jump in'
+                          : ' '}
+                  </Text>
+                </>
+              );
+            })()}
           </View>
         </>
       )}
