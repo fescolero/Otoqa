@@ -1,3 +1,4 @@
+import { ConvexError } from 'convex/values';
 import type { QueryCtx, MutationCtx, ActionCtx } from '../_generated/server';
 import { isPermitted, type PermissionClaims } from './permissions';
 import { normalizePhoneForMatch } from '../_helpers/mobileAuth';
@@ -49,13 +50,13 @@ export async function getCallerOrgId(ctx: AnyCtx): Promise<string | null> {
  */
 export async function requireCallerOrgId(ctx: AnyCtx): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error('Unauthenticated');
+  if (!identity) throw new ConvexError('Unauthenticated');
 
   const claims = identity as unknown as IdentityWithOrg;
   const orgId = claims.org_id ?? claims.organizationId;
 
   if (!orgId || typeof orgId !== 'string') {
-    throw new Error('No organization claim on identity');
+    throw new ConvexError('No organization claim on identity');
   }
   return orgId;
 }
@@ -71,13 +72,13 @@ export async function requireCallerIdentity(ctx: AnyCtx): Promise<{
   userEmail: string | undefined;
 }> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error('Unauthenticated');
+  if (!identity) throw new ConvexError('Unauthenticated');
 
   const claims = identity as unknown as IdentityWithOrg;
   const orgId = claims.org_id ?? claims.organizationId;
 
   if (!orgId || typeof orgId !== 'string') {
-    throw new Error('No organization claim on identity');
+    throw new ConvexError('No organization claim on identity');
   }
   return {
     orgId,
@@ -101,7 +102,7 @@ export async function assertCallerOwnsOrg(
 ): Promise<{ orgId: string; userId: string; userName: string | undefined; userEmail: string | undefined }> {
   const result = await requireCallerIdentity(ctx);
   if (result.orgId !== claimedOrgId) {
-    throw new Error('Not authorized for this organization');
+    throw new ConvexError('Not authorized for this organization');
   }
   return result;
 }
@@ -135,7 +136,7 @@ export async function assertOrgPermission(
   const result = await assertCallerOwnsOrg(ctx, claimedOrgId);
   const claims = await getCallerPermissionClaims(ctx);
   if (!isPermitted(claims, slug)) {
-    throw new Error(`Your role doesn't have the ${slug} permission`);
+    throw new ConvexError(`Your role doesn't have the ${slug} permission`);
   }
   return result;
 }
@@ -242,7 +243,7 @@ export async function requireCapability(
   capability: DispatchCapability,
 ): Promise<{ userId: string; userName: string | undefined; userEmail: string | undefined }> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error('Unauthenticated');
+  if (!identity) throw new ConvexError('Unauthenticated');
 
   const claims = identity as unknown as IdentityWithOrg;
   const claimOrg = claims.org_id ?? claims.organizationId;
@@ -267,7 +268,7 @@ export async function requireCapability(
     };
   }
 
-  throw new Error(`Not authorized: missing ${capability} for this organization`);
+  throw new ConvexError(`Not authorized: missing ${capability} for this organization`);
 }
 
 /**
@@ -296,7 +297,7 @@ export async function assertCallerInCarrierOrg(
   carrierExternalOrgId: string,
 ): Promise<{ userId: string; userName: string | undefined; userEmail: string | undefined }> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error('Unauthenticated');
+  if (!identity) throw new ConvexError('Unauthenticated');
 
   const result = {
     userId: identity.subject,
@@ -350,5 +351,5 @@ export async function assertCallerInCarrierOrg(
     }
   }
 
-  throw new Error('Not authorized for this carrier');
+  throw new ConvexError('Not authorized for this carrier');
 }

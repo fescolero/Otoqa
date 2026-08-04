@@ -1,6 +1,6 @@
 'use node';
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalAction } from './_generated/server';
 import crypto from 'crypto';
 
@@ -45,7 +45,7 @@ export const generateApiKey = internalAction({
 function getEncryptionKey(): Buffer {
   const keyHex = process.env.WEBHOOK_ENCRYPTION_KEY;
   if (!keyHex || keyHex.length < 64) {
-    throw new Error(
+    throw new ConvexError(
       'WEBHOOK_ENCRYPTION_KEY environment variable must be set (64-char hex string = 32 bytes)'
     );
   }

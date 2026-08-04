@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -298,23 +298,23 @@ export const create = mutation({
 
     // Validate that either driver or carrier is set (not both, not neither)
     if (!args.driverId && !args.carrierPartnershipId) {
-      throw new Error('Either driverId or carrierPartnershipId must be provided');
+      throw new ConvexError('Either driverId or carrierPartnershipId must be provided');
     }
     if (args.driverId && args.carrierPartnershipId) {
-      throw new Error('Cannot assign to both driver and carrier');
+      throw new ConvexError('Cannot assign to both driver and carrier');
     }
 
     // Validate driver exists and is active
     if (args.driverId) {
       const driver = await ctx.db.get(args.driverId);
       if (!driver) {
-        throw new Error('Driver not found');
+        throw new ConvexError('Driver not found');
       }
       if (driver.isDeleted) {
-        throw new Error('Cannot assign to deleted driver');
+        throw new ConvexError('Cannot assign to deleted driver');
       }
       if (driver.employmentStatus !== 'Active') {
-        throw new Error('Cannot assign to inactive driver');
+        throw new ConvexError('Cannot assign to inactive driver');
       }
     }
 
@@ -322,10 +322,10 @@ export const create = mutation({
     if (args.carrierPartnershipId) {
       const carrier = await ctx.db.get(args.carrierPartnershipId);
       if (!carrier) {
-        throw new Error('Carrier partnership not found');
+        throw new ConvexError('Carrier partnership not found');
       }
       if (carrier.status !== 'ACTIVE') {
-        throw new Error('Cannot assign to inactive carrier');
+        throw new ConvexError('Cannot assign to inactive carrier');
       }
     }
 
@@ -341,7 +341,7 @@ export const create = mutation({
       .first();
 
     if (existing) {
-      throw new Error(
+      throw new ConvexError(
         `Route assignment already exists for HCR ${args.hcr}${args.tripNumber ? ` / Trip ${args.tripNumber}` : ''}`
       );
     }
@@ -400,20 +400,20 @@ export const update = mutation({
 
     const existing = await ctx.db.get(id);
     if (!existing) {
-      throw new Error('Route assignment not found');
+      throw new ConvexError('Route assignment not found');
     }
     if (existing.workosOrgId !== callerOrgId) {
-      throw new Error('Not authorized for this organization');
+      throw new ConvexError('Not authorized for this organization');
     }
 
     // Validate driver if being updated
     if (updates.driverId) {
       const driver = await ctx.db.get(updates.driverId);
       if (!driver) {
-        throw new Error('Driver not found');
+        throw new ConvexError('Driver not found');
       }
       if (driver.isDeleted) {
-        throw new Error('Cannot assign to deleted driver');
+        throw new ConvexError('Cannot assign to deleted driver');
       }
     }
 
@@ -421,7 +421,7 @@ export const update = mutation({
     if (updates.carrierPartnershipId) {
       const carrier = await ctx.db.get(updates.carrierPartnershipId);
       if (!carrier) {
-        throw new Error('Carrier partnership not found');
+        throw new ConvexError('Carrier partnership not found');
       }
     }
 
@@ -479,10 +479,10 @@ export const toggleActive = mutation({
 
     const assignment = await ctx.db.get(args.id);
     if (!assignment) {
-      throw new Error('Route assignment not found');
+      throw new ConvexError('Route assignment not found');
     }
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Not authorized for this organization');
+      throw new ConvexError('Not authorized for this organization');
     }
 
     const newStatus = !assignment.isActive;
@@ -519,10 +519,10 @@ export const remove = mutation({
 
     const assignment = await ctx.db.get(args.id);
     if (!assignment) {
-      throw new Error('Route assignment not found');
+      throw new ConvexError('Route assignment not found');
     }
     if (assignment.workosOrgId !== callerOrgId) {
-      throw new Error('Not authorized for this organization');
+      throw new ConvexError('Not authorized for this organization');
     }
 
     await ctx.db.delete(args.id);

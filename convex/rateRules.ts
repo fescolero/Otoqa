@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -90,8 +90,8 @@ export const create = mutation({
 
     // Verify profile exists and caller owns the org
     const profile = await ctx.db.get(args.profileId);
-    if (!profile) throw new Error('Rate profile not found');
-    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const ruleId = await ctx.db.insert('rateRules', {
       profileId: args.profileId,
@@ -142,8 +142,8 @@ export const update = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const rule = await ctx.db.get(args.ruleId);
-    if (!rule) throw new Error('Rate rule not found');
-    if (rule.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!rule) throw new ConvexError('Rate rule not found');
+    if (rule.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const { ruleId, userId: _argUserId, userName: _argUserName, ...updates } = args;
 
@@ -191,8 +191,8 @@ export const remove = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const rule = await ctx.db.get(args.ruleId);
-    if (!rule) throw new Error('Rate rule not found');
-    if (rule.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!rule) throw new ConvexError('Rate rule not found');
+    if (rule.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     // Log before deletion
     await logAudit(ctx, {
@@ -225,8 +225,8 @@ export const toggleActive = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const rule = await ctx.db.get(args.ruleId);
-    if (!rule) throw new Error('Rate rule not found');
-    if (rule.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!rule) throw new ConvexError('Rate rule not found');
+    if (rule.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const newStatus = !rule.isActive;
 
@@ -273,8 +273,8 @@ export const bulkCreate = mutation({
 
     // Verify profile exists and caller owns the org
     const profile = await ctx.db.get(args.profileId);
-    if (!profile) throw new Error('Rate profile not found');
-    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const ruleIds: string[] = [];
 

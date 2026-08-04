@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import {
   query,
   mutation,
@@ -761,7 +761,7 @@ export const batchInsertLocations = mutation({
   }),
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) throw new Error('Not authenticated');
+    if (!identity) throw new ConvexError('Not authenticated');
     return ingestBatch(ctx, args.locations, args.organizationId);
   },
 });

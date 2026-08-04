@@ -16,7 +16,7 @@
  * Deployment env vars: DEEPGRAM_API_KEY (required for this action),
  * ANTHROPIC_API_KEY (optional — without it, intent is always null).
  */
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { resolveOrgForRead, orgDrivers } from './dispatchMobile';
@@ -121,7 +121,7 @@ async function deepgramTranscribe(
   const key = process.env.DEEPGRAM_API_KEY;
   if (!key) {
     console.error('[voice] DEEPGRAM_API_KEY not set on the deployment');
-    throw new Error('Voice transcription is not configured (DEEPGRAM_API_KEY missing).');
+    throw new ConvexError('Voice transcription is not configured (DEEPGRAM_API_KEY missing).');
   }
 
   const binary = atob(audioBase64);
@@ -138,7 +138,7 @@ async function deepgramTranscribe(
   });
   if (!res.ok) {
     console.error(`[voice] Deepgram error ${res.status}: ${await res.text()}`);
-    throw new Error(`Transcription failed (${res.status})`);
+    throw new ConvexError(`Transcription failed (${res.status})`);
   }
   const data = (await res.json()) as {
     results?: { channels?: { alternatives?: { transcript?: string }[] }[] };

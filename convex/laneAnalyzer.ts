@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { scheduleRuleValidator } from './lib/validators';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -154,7 +154,7 @@ export const updateSession = mutation({
     await requireCallerOrgId(ctx);
     const { id, ...updates } = args;
     const session = await ctx.db.get(id);
-    if (!session || session.isDeleted) throw new Error('Session not found');
+    if (!session || session.isDeleted) throw new ConvexError('Session not found');
 
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {
@@ -172,7 +172,7 @@ export const archiveSession = mutation({
   handler: async (ctx, args) => {
     const { userId } = await requireCallerIdentity(ctx);
     const session = await ctx.db.get(args.id);
-    if (!session || session.isDeleted) throw new Error('Session not found');
+    if (!session || session.isDeleted) throw new ConvexError('Session not found');
     await ctx.db.patch(args.id, {
       isDeleted: true,
       deletedAt: Date.now(),
@@ -371,7 +371,7 @@ export const updateEntry = mutation({
     await requireCallerOrgId(ctx);
     const { id, ...updates } = args;
     const entry = await ctx.db.get(id);
-    if (!entry) throw new Error('Entry not found');
+    if (!entry) throw new ConvexError('Entry not found');
 
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {
@@ -478,7 +478,7 @@ export const updateBase = mutation({
     await requireCallerOrgId(ctx);
     const { id, ...updates } = args;
     const base = await ctx.db.get(id);
-    if (!base) throw new Error('Base not found');
+    if (!base) throw new ConvexError('Base not found');
 
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {

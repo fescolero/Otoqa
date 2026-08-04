@@ -1,6 +1,6 @@
 'use node';
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalAction } from './_generated/server';
 import crypto from 'crypto';
 
@@ -14,7 +14,7 @@ import crypto from 'crypto';
 function getEncryptionKey(): Buffer {
   const keyHex = process.env.WEBHOOK_ENCRYPTION_KEY;
   if (!keyHex || keyHex.length < 64) {
-    throw new Error(
+    throw new ConvexError(
       'WEBHOOK_ENCRYPTION_KEY environment variable must be set (64-char hex string = 32 bytes)',
     );
   }
@@ -42,7 +42,7 @@ export const decryptSamsaraToken = internalAction({
     const key = getEncryptionKey();
     const [ivHex, authTagHex, ciphertext] = args.encryptedToken.split(':');
     if (!ivHex || !authTagHex || !ciphertext) {
-      throw new Error('Malformed encrypted Samsara token (expected iv:authTag:ciphertext)');
+      throw new ConvexError('Malformed encrypted Samsara token (expected iv:authTag:ciphertext)');
     }
     const iv = Buffer.from(ivHex, 'hex');
     const authTag = Buffer.from(authTagHex, 'hex');

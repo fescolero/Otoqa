@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -257,7 +257,7 @@ export const update = mutation({
 
     // Get current truck data for audit log
     const truck = await ctx.db.get(id);
-    if (!truck || truck.organizationId !== callerOrgId) throw new Error('Truck not found');
+    if (!truck || truck.organizationId !== callerOrgId) throw new ConvexError('Truck not found');
 
     await ctx.db.patch(id, {
       ...updates,
@@ -297,7 +297,7 @@ export const deactivate = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get truck data before deactivation
     const truck = await ctx.db.get(args.id);
-    if (!truck || truck.organizationId !== callerOrgId) throw new Error('Truck not found');
+    if (!truck || truck.organizationId !== callerOrgId) throw new ConvexError('Truck not found');
 
     await ctx.db.patch(args.id, {
       isDeleted: true,

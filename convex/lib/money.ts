@@ -1,3 +1,4 @@
+import { ConvexError } from 'convex/values';
 // Money primitives for the pay engine.
 //
 // Every monetary amount in the pay engine is stored as an integer count of
@@ -100,10 +101,10 @@ export const ZERO_MICRO_CENTS: MicroCents = asMicroCents(ZERO_BIG);
 export function centsFromDecimalString(input: string, currency: Currency = 'USD'): Cents {
   const decimals = CURRENCY_DECIMALS[currency];
   const trimmed = input.trim();
-  if (trimmed === '') throw new Error('centsFromDecimalString: empty input');
+  if (trimmed === '') throw new ConvexError('centsFromDecimalString: empty input');
 
   const match = /^(-?)(\d+)(?:\.(\d*))?$/.exec(trimmed);
-  if (!match) throw new Error(`centsFromDecimalString: not a decimal number: ${input}`);
+  if (!match) throw new ConvexError(`centsFromDecimalString: not a decimal number: ${input}`);
 
   const sign = match[1] === '-' ? BigInt(-1) : ONE_BIG;
   const wholePart = BigInt(match[2]);
@@ -113,7 +114,7 @@ export function centsFromDecimalString(input: string, currency: Currency = 'USD'
   // Truncation does NOT round; if the caller passed more decimal places than
   // the currency supports, that's a programming error — fail loudly.
   if (fracInput.length > decimals) {
-    throw new Error(
+    throw new ConvexError(
       `centsFromDecimalString: too many decimal places for ${currency} ` +
       `(got ${fracInput.length}, max ${decimals}): ${input}`,
     );
@@ -148,7 +149,7 @@ export function centsToDecimalString(value: Cents, currency: Currency = 'USD'): 
  *  helper is intended for tests, fixtures, and legacy-data migration only. */
 export function centsFromNumber(value: number, currency: Currency = 'USD'): Cents {
   if (!Number.isFinite(value)) {
-    throw new Error(`centsFromNumber: not a finite number: ${value}`);
+    throw new ConvexError(`centsFromNumber: not a finite number: ${value}`);
   }
   return centsFromDecimalString(value.toFixed(CURRENCY_DECIMALS[currency]), currency);
 }
@@ -171,17 +172,17 @@ export function microCentsFromDecimalString(
 ): MicroCents {
   const decimals = CURRENCY_DECIMALS[currency] + 3; // 3 extra digits for sub-cent
   const trimmed = input.trim();
-  if (trimmed === '') throw new Error('microCentsFromDecimalString: empty input');
+  if (trimmed === '') throw new ConvexError('microCentsFromDecimalString: empty input');
 
   const match = /^(-?)(\d+)(?:\.(\d*))?$/.exec(trimmed);
-  if (!match) throw new Error(`microCentsFromDecimalString: not a number: ${input}`);
+  if (!match) throw new ConvexError(`microCentsFromDecimalString: not a number: ${input}`);
 
   const sign = match[1] === '-' ? BigInt(-1) : ONE_BIG;
   const wholePart = BigInt(match[2]);
   const fracInput = match[3] ?? '';
 
   if (fracInput.length > decimals) {
-    throw new Error(
+    throw new ConvexError(
       `microCentsFromDecimalString: too many decimal places for ${currency} ` +
       `(got ${fracInput.length}, max ${decimals}): ${input}`,
     );
@@ -194,7 +195,7 @@ export function microCentsFromDecimalString(
 
 export function microCentsFromNumber(value: number, currency: Currency = 'USD'): MicroCents {
   if (!Number.isFinite(value)) {
-    throw new Error(`microCentsFromNumber: not a finite number: ${value}`);
+    throw new ConvexError(`microCentsFromNumber: not a finite number: ${value}`);
   }
   // Toward-zero string formatting up to the max precision microcents allow.
   const decimals = CURRENCY_DECIMALS[currency] + 3;
@@ -255,8 +256,8 @@ export function compareCents(a: Cents, b: Cents): -1 | 0 | 1 {
 /** Multiply Cents by a basis-points multiplier (10000 = 100%, 15000 = 1.5x).
  *  Used for OT premium, percentage allocations, percent-of-load calculations. */
 export function multiplyByBps(value: Cents, bps: Bps, mode: RoundingMode = 'HALF_UP'): Cents {
-  if (!Number.isFinite(bps)) throw new Error(`multiplyByBps: bps not finite: ${bps}`);
-  if (!Number.isInteger(bps)) throw new Error(`multiplyByBps: bps must be integer: ${bps}`);
+  if (!Number.isFinite(bps)) throw new ConvexError(`multiplyByBps: bps not finite: ${bps}`);
+  if (!Number.isInteger(bps)) throw new ConvexError(`multiplyByBps: bps must be integer: ${bps}`);
   const bpsBig = BigInt(bps);
   const divisor = BigInt(10000);
   return asCents(divideRound(rawCents(value) * bpsBig, divisor, mode));
@@ -270,7 +271,7 @@ export function multiplyByBps(value: Cents, bps: Bps, mode: RoundingMode = 'HALF
  *  percent precision (e.g. 12.34567%). */
 export function percentToMicroPctPoints(percent: number): bigint {
   if (!Number.isFinite(percent)) {
-    throw new Error(`percentToMicroPctPoints: not finite: ${percent}`);
+    throw new ConvexError(`percentToMicroPctPoints: not finite: ${percent}`);
   }
   // 1% = 1,000,000 micro-pct-points. Round half-up at 6 decimal places.
   return BigInt(Math.round(percent * 1_000_000));
@@ -296,7 +297,7 @@ export function multiplyRateByQuantity(
   mode: RoundingMode = 'HALF_UP',
 ): Cents {
   if (!Number.isFinite(quantity)) {
-    throw new Error(`multiplyRateByQuantity: quantity not finite: ${quantity}`);
+    throw new ConvexError(`multiplyRateByQuantity: quantity not finite: ${quantity}`);
   }
   // Convert quantity to a high-precision integer factor. Use up to 6 decimal
   // places of quantity, which covers practical needs (mile fractions, hour
@@ -317,7 +318,7 @@ export function applyTieredRate(
   mode: RoundingMode = 'HALF_UP',
 ): Cents {
   if (!Number.isFinite(quantity)) {
-    throw new Error(`applyTieredRate: quantity not finite: ${quantity}`);
+    throw new ConvexError(`applyTieredRate: quantity not finite: ${quantity}`);
   }
   if (quantity <= 0) return ZERO_CENTS;
   let total = ZERO_BIG;
@@ -414,12 +415,12 @@ export function assertSameCurrency(
   context = 'operation',
 ): Currency {
   if (items.length === 0) {
-    throw new Error(`assertSameCurrency: empty items for ${context}`);
+    throw new ConvexError(`assertSameCurrency: empty items for ${context}`);
   }
   const first = items[0].currency;
   for (let i = 1; i < items.length; i++) {
     if (items[i].currency !== first) {
-      throw new Error(
+      throw new ConvexError(
         `assertSameCurrency: mixed currencies in ${context} ` +
         `(${first} vs ${items[i].currency} at index ${i})`,
       );
@@ -442,17 +443,17 @@ export function deserializeCents(value: string | number | bigint): Cents {
   if (typeof value === 'bigint') return asCents(value);
   if (typeof value === 'number') {
     if (!Number.isInteger(value)) {
-      throw new Error(`deserializeCents: non-integer number cannot represent cents: ${value}`);
+      throw new ConvexError(`deserializeCents: non-integer number cannot represent cents: ${value}`);
     }
     return asCents(BigInt(value));
   }
   if (typeof value === 'string') {
     if (!/^-?\d+$/.test(value)) {
-      throw new Error(`deserializeCents: not an integer string: ${value}`);
+      throw new ConvexError(`deserializeCents: not an integer string: ${value}`);
     }
     return asCents(BigInt(value));
   }
-  throw new Error(`deserializeCents: unsupported type: ${typeof value}`);
+  throw new ConvexError(`deserializeCents: unsupported type: ${typeof value}`);
 }
 
 // ============================================================================
@@ -468,7 +469,7 @@ function pow10(exp: number): bigint {
 /** Integer division with explicit rounding mode. Both operands are bigints.
  *  Sign of result matches mathematical division (not truncated). */
 function divideRound(num: bigint, denom: bigint, mode: RoundingMode): bigint {
-  if (denom === ZERO_BIG) throw new Error('divideRound: division by zero');
+  if (denom === ZERO_BIG) throw new ConvexError('divideRound: division by zero');
   // bigint division in JS truncates toward zero. We need explicit modes.
   const negativeResult = (num < ZERO_BIG) !== (denom < ZERO_BIG);
   const absNum = num < ZERO_BIG ? -num : num;

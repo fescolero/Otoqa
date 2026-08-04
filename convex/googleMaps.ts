@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action } from './_generated/server';
 
 /**
@@ -18,11 +18,11 @@ export const calculateRouteDistance = action({
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     
     if (!apiKey) {
-      throw new Error('Google Maps API key not configured');
+      throw new ConvexError('Google Maps API key not configured');
     }
 
     if (args.stops.length < 2) {
-      throw new Error('At least 2 stops are required to calculate distance');
+      throw new ConvexError('At least 2 stops are required to calculate distance');
     }
 
     try {
@@ -47,21 +47,21 @@ export const calculateRouteDistance = action({
         const response = await fetch(url.toString());
         
         if (!response.ok) {
-          throw new Error(`API request failed with status ${response.status}`);
+          throw new ConvexError(`API request failed with status ${response.status}`);
         }
 
         const data = await response.json();
 
         // Check for API errors
         if (data.status !== 'OK') {
-          throw new Error(`Distance Matrix API error: ${data.status} - ${data.error_message || 'Unknown error'}`);
+          throw new ConvexError(`Distance Matrix API error: ${data.status} - ${data.error_message || 'Unknown error'}`);
         }
 
         // Extract distance from the response
         const element = data.rows[0]?.elements[0];
         
         if (!element || element.status !== 'OK') {
-          throw new Error(`Failed to calculate distance for segment ${i + 1}: ${element?.status || 'Unknown error'}`);
+          throw new ConvexError(`Failed to calculate distance for segment ${i + 1}: ${element?.status || 'Unknown error'}`);
         }
 
         totalDistanceMeters += element.distance.value;
@@ -80,7 +80,7 @@ export const calculateRouteDistance = action({
       };
     } catch (error) {
       console.error('Error calculating route distance:', error);
-      throw new Error(`Failed to calculate route distance: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new ConvexError(`Failed to calculate route distance: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   },
 });
@@ -97,7 +97,7 @@ export const geocodeAddress = action({
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     
     if (!apiKey) {
-      throw new Error('Google Maps API key not configured');
+      throw new ConvexError('Google Maps API key not configured');
     }
 
     try {
@@ -108,13 +108,13 @@ export const geocodeAddress = action({
       const response = await fetch(url.toString());
       
       if (!response.ok) {
-        throw new Error(`API request failed with status ${response.status}`);
+        throw new ConvexError(`API request failed with status ${response.status}`);
       }
 
       const data = await response.json();
 
       if (data.status !== 'OK' || !data.results || data.results.length === 0) {
-        throw new Error(`Geocoding failed: ${data.status} - ${data.error_message || 'No results found'}`);
+        throw new ConvexError(`Geocoding failed: ${data.status} - ${data.error_message || 'No results found'}`);
       }
 
       const location = data.results[0].geometry.location;
@@ -126,7 +126,7 @@ export const geocodeAddress = action({
       };
     } catch (error) {
       console.error('Error geocoding address:', error);
-      throw new Error(`Failed to geocode address: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new ConvexError(`Failed to geocode address: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   },
 });

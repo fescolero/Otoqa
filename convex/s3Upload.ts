@@ -1,6 +1,6 @@
 'use node';
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action, internalAction } from './_generated/server';
 import { internal } from './_generated/api';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
@@ -34,7 +34,7 @@ export function createS3Client() {
   const r2AccountId = process.env.R2_ACCOUNT_ID; // For Cloudflare R2
 
   if (!bucket || !accessKeyId || !secretAccessKey) {
-    throw new Error('S3/R2 configuration not found. Please set S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY environment variables.');
+    throw new ConvexError('S3/R2 configuration not found. Please set S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY environment variables.');
   }
 
   // Determine endpoint - use R2 if account ID is provided
@@ -132,7 +132,7 @@ export const getUploadUrl = action({
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
-      throw new Error('Not authenticated');
+      throw new ConvexError('Not authenticated');
     }
 
     const { client, bucket, r2AccountId } = createS3Client();
@@ -228,7 +228,7 @@ export const getLoadDocumentUploadUrl = action({
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
-      throw new Error('Not authenticated');
+      throw new ConvexError('Not authenticated');
     }
 
     const { client, bucket, r2AccountId } = createS3Client();
@@ -326,7 +326,7 @@ export const getPODUploadUrl = action({
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
-      throw new Error('Not authenticated');
+      throw new ConvexError('Not authenticated');
     }
 
     const { client, bucket, r2AccountId } = createS3Client();
@@ -415,7 +415,7 @@ export const getDocumentDownloadUrl = action({
       documentId: args.documentId,
     });
     if (!doc) {
-      throw new Error('Document not found');
+      throw new ConvexError('Document not found');
     }
 
     if (doc.storageId) {

@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -235,13 +235,13 @@ export function calculateCurrentPeriod(
   switch (plan.frequency) {
     case 'WEEKLY':
       if (!plan.periodStartDayOfWeek) {
-        throw new Error('WEEKLY frequency requires periodStartDayOfWeek');
+        throw new ConvexError('WEEKLY frequency requires periodStartDayOfWeek');
       }
       wallStart = weeklyWallStart(wallRef, getDayOfWeekNumber(plan.periodStartDayOfWeek));
       break;
     case 'BIWEEKLY':
       if (!plan.periodStartDayOfWeek && !plan.biweeklyAnchor) {
-        throw new Error('BIWEEKLY frequency requires periodStartDayOfWeek or biweeklyAnchor');
+        throw new ConvexError('BIWEEKLY frequency requires periodStartDayOfWeek or biweeklyAnchor');
       }
       wallStart = biweeklyWallStart(
         wallRef,
@@ -256,7 +256,7 @@ export function calculateCurrentPeriod(
       wallStart = monthlyWallStart(wallRef, plan.periodStartDayOfMonth || 1);
       break;
     default:
-      throw new Error(`Unknown frequency: ${plan.frequency}`);
+      throw new ConvexError(`Unknown frequency: ${String(plan.frequency)}`);
   }
 
   const wallEndExclusive = wallPeriodEndExclusive(wallStart, plan.frequency);
@@ -781,25 +781,25 @@ export const create = mutation({
       periodStartDayOfWeek = dayOfWeekFromAnchor(args.biweeklyAnchor) ?? undefined;
     }
     if (args.biweeklyAnchor && !parseAnchorDate(args.biweeklyAnchor)) {
-      throw new Error('biweeklyAnchor must be a YYYY-MM-DD date');
+      throw new ConvexError('biweeklyAnchor must be a YYYY-MM-DD date');
     }
 
     // Validate frequency-specific fields
     if ((args.frequency === 'WEEKLY' || args.frequency === 'BIWEEKLY') && !periodStartDayOfWeek) {
-      throw new Error('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
+      throw new ConvexError('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
     }
 
     if (args.frequency === 'MONTHLY' && !args.periodStartDayOfMonth) {
-      throw new Error('MONTHLY frequency requires periodStartDayOfMonth');
+      throw new ConvexError('MONTHLY frequency requires periodStartDayOfMonth');
     }
 
     if (args.periodStartDayOfMonth && (args.periodStartDayOfMonth < 1 || args.periodStartDayOfMonth > 28)) {
-      throw new Error('periodStartDayOfMonth must be between 1 and 28');
+      throw new ConvexError('periodStartDayOfMonth must be between 1 and 28');
     }
 
     // Validate cutoff time format
     if (!/^\d{2}:\d{2}$/.test(args.cutoffTime)) {
-      throw new Error('cutoffTime must be in HH:MM format (e.g., "17:00")');
+      throw new ConvexError('cutoffTime must be in HH:MM format (e.g., "17:00")');
     }
 
     const now = Date.now();
@@ -898,8 +898,8 @@ export const update = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
-    if (!plan) throw new Error('Pay plan not found');
-    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!plan) throw new ConvexError('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
     const updates: Partial<Doc<'payPlans'>> = {
@@ -923,7 +923,7 @@ export const update = mutation({
     if (args.isDefault !== undefined) updates.isDefault = args.isDefault;
 
     if (args.biweeklyAnchor && !parseAnchorDate(args.biweeklyAnchor)) {
-      throw new Error('biweeklyAnchor must be a YYYY-MM-DD date');
+      throw new ConvexError('biweeklyAnchor must be a YYYY-MM-DD date');
     }
 
     // Validate frequency-specific fields with the final values
@@ -942,11 +942,11 @@ export const update = mutation({
     }
 
     if ((finalFrequency === 'WEEKLY' || finalFrequency === 'BIWEEKLY') && !finalDayOfWeek) {
-      throw new Error('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
+      throw new ConvexError('WEEKLY and BIWEEKLY frequencies require periodStartDayOfWeek');
     }
 
     if (finalFrequency === 'MONTHLY' && !finalDayOfMonth) {
-      throw new Error('MONTHLY frequency requires periodStartDayOfMonth');
+      throw new ConvexError('MONTHLY frequency requires periodStartDayOfMonth');
     }
 
     // Single default per org: promoting this plan demotes any other default.
@@ -997,11 +997,11 @@ export const archive = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
-    if (!plan) throw new Error('Pay plan not found');
-    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!plan) throw new ConvexError('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     if (plan.isDefault) {
-      throw new Error('Cannot archive the default pay plan. Set another plan as default first.');
+      throw new ConvexError('Cannot archive the default pay plan. Set another plan as default first.');
     }
 
     // Check if any drivers are using this plan
@@ -1012,7 +1012,7 @@ export const archive = mutation({
       .collect();
 
     if (driversUsingPlan.length > 0) {
-      throw new Error(
+      throw new ConvexError(
         `Cannot archive pay plan. ${driversUsingPlan.length} driver(s) are currently assigned to it.`
       );
     }
@@ -1051,8 +1051,8 @@ export const restore = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
-    if (!plan) throw new Error('Pay plan not found');
-    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!plan) throw new ConvexError('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     await ctx.db.patch(args.planId, {
       isActive: true,
@@ -1089,14 +1089,14 @@ export const assignToDriver = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const driver = await ctx.db.get(args.driverId);
-    if (!driver) throw new Error('Driver not found');
-    if (driver.organizationId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!driver) throw new ConvexError('Driver not found');
+    if (driver.organizationId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     let plan: Doc<'payPlans'> | null = null;
     if (args.planId) {
       plan = await ctx.db.get(args.planId);
-      if (!plan) throw new Error('Pay plan not found');
-      if (!plan.isActive) throw new Error('Cannot assign inactive pay plan');
+      if (!plan) throw new ConvexError('Pay plan not found');
+      if (!plan.isActive) throw new ConvexError('Cannot assign inactive pay plan');
     }
 
     const previousPlanId = driver.payPlanId;
@@ -1145,9 +1145,9 @@ export const bulkAssignToDrivers = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const plan = await ctx.db.get(args.planId);
-    if (!plan) throw new Error('Pay plan not found');
-    if (plan.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
-    if (!plan.isActive) throw new Error('Cannot assign inactive pay plan');
+    if (!plan) throw new ConvexError('Pay plan not found');
+    if (plan.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
+    if (!plan.isActive) throw new ConvexError('Cannot assign inactive pay plan');
 
     let success = 0;
     let failed = 0;

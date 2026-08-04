@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -117,7 +117,7 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.vendorId);
-    if (!existing || existing.organizationId !== callerOrgId) throw new Error('Vendor not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new ConvexError('Vendor not found');
 
     const { vendorId, updatedBy: _updatedBy, ...updates } = args;
     const changedFields: Array<string> = [];
@@ -165,7 +165,7 @@ export const toggleActive = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const existing = await ctx.db.get(args.vendorId);
-    if (!existing || existing.organizationId !== callerOrgId) throw new Error('Vendor not found');
+    if (!existing || existing.organizationId !== callerOrgId) throw new ConvexError('Vendor not found');
 
     const newStatus = !existing.isActive;
     await ctx.db.patch(args.vendorId, {

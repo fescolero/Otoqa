@@ -21,7 +21,7 @@
 // quantity × rate with the engine's exact rounding (multiplyRateByQuantity).
 import { mutation } from '../_generated/server';
 import { internal } from '../_generated/api';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import type { Doc, Id } from '../_generated/dataModel';
 import { requireCallerIdentity } from '../lib/auth';
 import {
@@ -56,7 +56,7 @@ async function assertNotFinalized(
   if (!settlementId) return;
   const settlement = await ctx.db.get(settlementId);
   if (settlement && FINALIZED_STATES.has(settlement.status)) {
-    throw new Error('Cannot edit a finalized settlement');
+    throw new ConvexError('Cannot edit a finalized settlement');
   }
 }
 
@@ -86,8 +86,8 @@ export const editPayItem = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const item = await ctx.db.get(args.payItemId);
-    if (!item || item.workosOrgId !== orgId) throw new Error('Pay item not found');
-    if (item.isVoided) throw new Error('Cannot edit a voided pay item');
+    if (!item || item.workosOrgId !== orgId) throw new ConvexError('Pay item not found');
+    if (item.isVoided) throw new ConvexError('Cannot edit a voided pay item');
     await assertNotFinalized(ctx, item.settlementId);
 
     const now = Date.now();
@@ -187,9 +187,9 @@ export const revertPayItemEdit = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const item = await ctx.db.get(args.payItemId);
-    if (!item || item.workosOrgId !== orgId) throw new Error('Pay item not found');
+    if (!item || item.workosOrgId !== orgId) throw new ConvexError('Pay item not found');
     if (!item.reviewerEdit) return null; // nothing to revert
-    if (item.isVoided) throw new Error('Cannot revert a voided pay item');
+    if (item.isVoided) throw new ConvexError('Cannot revert a voided pay item');
     await assertNotFinalized(ctx, item.settlementId);
 
     const now = Date.now();
@@ -236,16 +236,16 @@ export const adoptEnginePayItem = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const item = await ctx.db.get(args.payItemId);
-    if (!item || item.workosOrgId !== orgId) throw new Error('Pay item not found');
+    if (!item || item.workosOrgId !== orgId) throw new ConvexError('Pay item not found');
     if (!item.reviewerEdit || item.reviewerEdit.engineAmountCents == null) return null;
-    if (item.isVoided) throw new Error('Cannot adopt on a voided pay item');
+    if (item.isVoided) throw new ConvexError('Cannot adopt on a voided pay item');
     await assertNotFinalized(ctx, item.settlementId);
 
     const sessionId = item.sourceRef.sessionId;
     if (!sessionId) {
       // Non-session line: no session recalc path. Fall back to reverting the
       // edit (returns to rules control); the leg recalc will refresh it.
-      throw new Error('adoptEnginePayItem is only supported for session/shift lines');
+      throw new ConvexError('adoptEnginePayItem is only supported for session/shift lines');
     }
 
     const now = Date.now();

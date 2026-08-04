@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internal } from './_generated/api';
 import {
   action,
@@ -79,7 +79,7 @@ export const insertSamsaraIntegration = internalMutation({
       .first();
 
     if (existing) {
-      throw new Error(
+      throw new ConvexError(
         `Samsara integration already exists for org ${args.workosOrgId} ` +
           `(id=${existing._id}). Revoke it before creating a new one.`,
       );
@@ -126,7 +126,7 @@ export const setTruckSamsaraVehicleId = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const truck = await ctx.db.get(args.truckId);
-    if (!truck) throw new Error(`Truck not found: ${args.truckId}`);
+    if (!truck) throw new ConvexError(`Truck not found: ${args.truckId}`);
 
     // Guard against silently swapping a vehicleId out from under another
     // truck — Samsara vehicleIds are unique within an org's Samsara fleet,
@@ -139,7 +139,7 @@ export const setTruckSamsaraVehicleId = internalMutation({
         )
         .first();
       if (collision && collision._id !== args.truckId) {
-        throw new Error(
+        throw new ConvexError(
           `Samsara vehicleId ${args.samsaraVehicleId} is already mapped to ` +
             `truck ${collision._id} (unitId=${collision.unitId}).`,
         );
@@ -164,9 +164,9 @@ export const revokeSamsaraIntegration = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const integration = await ctx.db.get(args.integrationId);
-    if (!integration) throw new Error(`Integration not found: ${args.integrationId}`);
+    if (!integration) throw new ConvexError(`Integration not found: ${args.integrationId}`);
     if (integration.provider !== 'samsara') {
-      throw new Error(`Not a Samsara integration: ${args.integrationId}`);
+      throw new ConvexError(`Not a Samsara integration: ${args.integrationId}`);
     }
 
     const now = Date.now();

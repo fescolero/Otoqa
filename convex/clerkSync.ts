@@ -1,6 +1,6 @@
 'use node';
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalAction } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
@@ -405,7 +405,7 @@ export const backfillDriverClerkSyncStatus = internalAction({
           { headers: { 'Authorization': `Bearer ${clerkSecretKey}` } }
         );
         if (!lookupResponse.ok) {
-          throw new Error(`Clerk lookup returned HTTP ${lookupResponse.status}`);
+          throw new ConvexError(`Clerk lookup returned HTTP ${lookupResponse.status}`);
         }
         clerkUsers = (await lookupResponse.json()) as Array<{ id: string }>;
       } catch (error) {

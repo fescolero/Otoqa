@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { getExpirationStatus } from './_helpers/dateUtils';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -230,7 +230,7 @@ export const update = mutation({
 
     // Get current trailer data for audit log
     const trailer = await ctx.db.get(id);
-    if (!trailer || trailer.organizationId !== callerOrgId) throw new Error('Trailer not found');
+    if (!trailer || trailer.organizationId !== callerOrgId) throw new ConvexError('Trailer not found');
 
     await ctx.db.patch(id, {
       ...updates,
@@ -270,7 +270,7 @@ export const deactivate = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get trailer data before deactivation
     const trailer = await ctx.db.get(args.id);
-    if (!trailer || trailer.organizationId !== callerOrgId) throw new Error('Trailer not found');
+    if (!trailer || trailer.organizationId !== callerOrgId) throw new ConvexError('Trailer not found');
 
     await ctx.db.patch(args.id, {
       isDeleted: true,

@@ -1,6 +1,6 @@
 'use node';
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action, internalAction } from './_generated/server';
 import { internal } from './_generated/api';
 import { assertCallerOwnsOrg } from './lib/auth';
@@ -332,7 +332,7 @@ export const autoMapSamsaraTrucksByVin = action({
       { workosOrgId: args.workosOrgId },
     );
     if (!integration) {
-      throw new Error(
+      throw new ConvexError(
         'No Samsara integration is connected for this organization. ' +
           'Connect Samsara first, then run Map Fleet.',
       );
@@ -349,18 +349,18 @@ export const autoMapSamsaraTrucksByVin = action({
     });
 
     if (fetchResult.kind === 'auth_failed') {
-      throw new Error(
+      throw new ConvexError(
         `Samsara rejected the API token (HTTP ${fetchResult.status}). ` +
           'Reconnect with a valid token, then run Map Fleet again.',
       );
     }
     if (fetchResult.kind === 'rate_limited') {
-      throw new Error(
+      throw new ConvexError(
         `Samsara rate-limited the request. Retry in ${fetchResult.retryAfterSec} seconds.`,
       );
     }
     if (fetchResult.kind === 'transient_error') {
-      throw new Error(
+      throw new ConvexError(
         `Samsara request failed (${fetchResult.status ?? 'network'}). ` +
           `Try again in a minute. Detail: ${fetchResult.message}`,
       );
@@ -470,7 +470,7 @@ export const previewSamsaraVehicleVins = internalAction({
       { workosOrgId: args.workosOrgId },
     );
     if (!integration) {
-      throw new Error('No Samsara integration connected for this organization.');
+      throw new ConvexError('No Samsara integration connected for this organization.');
     }
 
     const apiToken: string = await ctx.runAction(
@@ -483,7 +483,7 @@ export const previewSamsaraVehicleVins = internalAction({
       environment: integration.environment as SamsaraEnvironment,
     });
     if (fetchResult.kind !== 'ok') {
-      throw new Error(`Samsara fetch failed: ${fetchResult.kind}`);
+      throw new ConvexError(`Samsara fetch failed: ${fetchResult.kind}`);
     }
 
     const otoqaTrucks: OtoqaTruckSummary[] = (await ctx.runQuery(

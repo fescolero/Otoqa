@@ -24,7 +24,7 @@
 
 import { internalAction, internalMutation, internalQuery } from '../_generated/server';
 import { api, internal } from '../_generated/api';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import type { Doc, Id } from '../_generated/dataModel';
 import { seedChargeComponentsLogic } from '../payEngine/seedChargeComponents';
 import { microCentsFromNumber, percentToMicroPctPoints, centsFromNumber } from '../lib/money';
@@ -206,9 +206,9 @@ export const seedAndMigrateProfile = internalMutation({
 
     // Step 2: read legacy profile + rules
     const legacy = await ctx.db.get(legacyProfileId);
-    if (!legacy) throw new Error(`legacy profile ${legacyProfileId} not found`);
+    if (!legacy) throw new ConvexError(`legacy profile ${legacyProfileId} not found`);
     if (legacy.workosOrgId !== workosOrgId) {
-      throw new Error(`legacy profile org mismatch: ${legacy.workosOrgId} vs ${workosOrgId}`);
+      throw new ConvexError(`legacy profile org mismatch: ${legacy.workosOrgId} vs ${workosOrgId}`);
     }
 
     const legacyRules = await ctx.db
@@ -288,6 +288,7 @@ export const seedAndMigrateProfile = internalMutation({
     // unifies both via payeeType.
     let assignmentsCreated = 0;
     const isCarrier = legacy.profileType === 'CARRIER';
+    let legacyAssignmentCount = 0;
 
     if (isCarrier) {
       const allAssignments = await ctx.db
@@ -334,7 +335,7 @@ export const seedAndMigrateProfile = internalMutation({
         assignmentsCreated++;
       }
       // Surface this for the return value
-      var legacyAssignmentCount = legacyAssignments.length;
+      legacyAssignmentCount = legacyAssignments.length;
     } else {
       const allAssignments = await ctx.db
         .query('driverProfileAssignments')
@@ -377,7 +378,7 @@ export const seedAndMigrateProfile = internalMutation({
         });
         assignmentsCreated++;
       }
-      var legacyAssignmentCount = legacyAssignments.length;
+      legacyAssignmentCount = legacyAssignments.length;
     }
 
     return {

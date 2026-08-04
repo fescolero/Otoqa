@@ -1,6 +1,6 @@
 'use node';
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { action } from './_generated/server';
 import OpenAI from 'openai';
 import { requireCallerOrgId } from './lib/auth';
@@ -338,7 +338,7 @@ export const extractLanesFromSchedule = action({
           await new Promise((r) => setTimeout(r, delayMs));
         }
       }
-      throw new Error('Unreachable');
+      throw new ConvexError('Unreachable');
     }
 
     try {

@@ -30,7 +30,7 @@
  *     asserts the caller's org and schedules the internal action).
  */
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import {
   internalAction,
   internalMutation,
@@ -92,9 +92,9 @@ export const requestVerification = mutation({
       .query('organizations')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', args.workosOrgId))
       .unique();
-    if (!org) throw new Error('Organization not found');
+    if (!org) throw new ConvexError('Organization not found');
     if (!org.usdotNumber?.trim()) {
-      throw new Error('Add a USDOT number before verifying');
+      throw new ConvexError('Add a USDOT number before verifying');
     }
 
     await ctx.scheduler.runAfter(0, internal.fmcsaVerification.verifyOrg, {
@@ -162,7 +162,7 @@ async function qcMobileGet(path: string, webKey: string): Promise<unknown | null
     headers: { Accept: 'application/json' },
   });
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`QCMobile API responded ${res.status}`);
+  if (!res.ok) throw new ConvexError(`QCMobile API responded ${res.status}`);
   return res.json();
 }
 
@@ -229,9 +229,9 @@ async function socrataGet(
       ...(token ? { 'X-App-Token': token } : {}),
     },
   });
-  if (!res.ok) throw new Error(`FMCSA open data responded ${res.status}`);
+  if (!res.ok) throw new ConvexError(`FMCSA open data responded ${res.status}`);
   const json = (await res.json()) as unknown;
-  if (!Array.isArray(json)) throw new Error('FMCSA open data returned an unexpected shape');
+  if (!Array.isArray(json)) throw new ConvexError('FMCSA open data returned an unexpected shape');
   return json as Array<Record<string, unknown>>;
 }
 

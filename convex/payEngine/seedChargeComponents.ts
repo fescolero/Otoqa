@@ -15,7 +15,7 @@
 //   - Admin UI (optional "refresh seed catalog" action)
 
 import { internalMutation, type MutationCtx } from '../_generated/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { CHARGE_COMPONENT_TEMPLATES, validateCatalog } from './chargeComponentsCatalog';
 import type { Doc, Id } from '../_generated/dataModel';
 
@@ -39,7 +39,7 @@ export async function seedChargeComponentsLogic(
 
   const validation = validateCatalog(CHARGE_COMPONENT_TEMPLATES);
   if (!validation.ok) {
-    throw new Error(
+    throw new ConvexError(
       `chargeComponents catalog invalid:\n  - ${validation.errors.join('\n  - ')}`,
     );
   }

@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
@@ -697,7 +697,7 @@ export const getLoadRouteHistory = query({
       .first();
 
     if (!assignment || assignment.carrierOrgId !== args.carrierOrgId) {
-      throw new Error('Load not found or does not belong to carrier');
+      throw new ConvexError('Load not found or does not belong to carrier');
     }
 
     // Get all location points for this load
@@ -1217,23 +1217,23 @@ export const createDriver = mutation({
   handler: async (ctx, args) => {
     // Auth: verify caller belongs to this organization (IDOR guard)
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
-    if (!auth) throw new Error('Not authorized for this organization');
+    if (!auth) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
 
     // Verify the organization exists and is a carrier
     const org = await ctx.db.get(args.carrierOrgId as Id<'organizations'>);
     if (!org) {
-      throw new Error('Organization not found');
+      throw new ConvexError('Organization not found');
     }
     
     if (org.orgType !== 'CARRIER' && org.orgType !== 'BROKER_CARRIER') {
-      throw new Error('Organization is not a carrier');
+      throw new ConvexError('Organization is not a carrier');
     }
 
     // Check if organization is deleted
     if (org.isDeleted) {
-      throw new Error(`Cannot add drivers to deactivated organization "${org.name}"`);
+      throw new ConvexError(`Cannot add drivers to deactivated organization "${org.name}"`);
     }
 
     // Check if driver with same phone already exists in this org
@@ -1250,7 +1250,7 @@ export const createDriver = mutation({
     });
 
     if (existingDriver) {
-      throw new Error('A driver with this phone number already exists');
+      throw new ConvexError('A driver with this phone number already exists');
     }
 
     // Create the driver
@@ -1332,7 +1332,7 @@ export const updateDriver = mutation({
   handler: async (ctx, args) => {
     // Auth: verify caller belongs to this organization (IDOR guard)
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
-    if (!auth) throw new Error('Not authorized for this organization');
+    if (!auth) throw new ConvexError('Not authorized for this organization');
 
     const { driverId, carrierOrgId, ...updates } = args;
 
@@ -1340,7 +1340,7 @@ export const updateDriver = mutation({
     try {
       const org = await ctx.db.get(carrierOrgId as Id<'organizations'>);
       if (org?.isDeleted) {
-        throw new Error(`Cannot update drivers in deactivated organization "${org.name}"`);
+        throw new ConvexError(`Cannot update drivers in deactivated organization "${org.name}"`);
       }
     } catch (e) {
       // If carrierOrgId is not a valid Convex ID, skip org validation
@@ -1350,11 +1350,11 @@ export const updateDriver = mutation({
     // Verify driver exists and belongs to this org
     const driver = await ctx.db.get(driverId);
     if (!driver) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
     
     if (driver.organizationId !== carrierOrgId) {
-      throw new Error('Driver does not belong to this organization');
+      throw new ConvexError('Driver does not belong to this organization');
     }
 
     // Remove undefined values
@@ -1463,15 +1463,15 @@ export const deleteDriver = mutation({
   handler: async (ctx, args) => {
     // Auth: verify caller belongs to this organization (IDOR guard)
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
-    if (!auth) throw new Error('Not authorized for this organization');
+    if (!auth) throw new ConvexError('Not authorized for this organization');
 
     const driver = await ctx.db.get(args.driverId);
     if (!driver) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
     
     if (driver.organizationId !== args.carrierOrgId) {
-      throw new Error('Driver does not belong to this organization');
+      throw new ConvexError('Driver does not belong to this organization');
     }
 
     await ctx.db.patch(args.driverId, {
@@ -1573,30 +1573,30 @@ export const createOwnerDriver = mutation({
   handler: async (ctx, args) => {
     // Auth: verify caller belongs to this organization (IDOR guard)
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
-    if (!auth) throw new Error('Not authorized for this organization');
+    if (!auth) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
 
     // Verify the organization exists and is a carrier
     const org = await ctx.db.get(args.carrierOrgId as Id<'organizations'>);
     if (!org) {
-      throw new Error('Organization not found');
+      throw new ConvexError('Organization not found');
     }
 
     if (org.orgType !== 'CARRIER' && org.orgType !== 'BROKER_CARRIER') {
-      throw new Error('Organization is not a carrier');
+      throw new ConvexError('Organization is not a carrier');
     }
 
     // Check if organization is deleted
     if (org.isDeleted) {
-      throw new Error(`Cannot create owner-driver for deactivated organization "${org.name}"`);
+      throw new ConvexError(`Cannot create owner-driver for deactivated organization "${org.name}"`);
     }
 
     // Check if org already has an owner driver
     if (org.ownerDriverId) {
       const existingDriver = await ctx.db.get(org.ownerDriverId);
       if (existingDriver && !existingDriver.isDeleted) {
-        throw new Error('Organization already has an owner-driver linked');
+        throw new ConvexError('Organization already has an owner-driver linked');
       }
     }
 

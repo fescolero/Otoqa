@@ -12,7 +12,7 @@
 // numbers, buckets, and blockers are computed by identical code.
 import { query } from '../_generated/server';
 import type { QueryCtx } from '../_generated/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { paginationOptsValidator } from 'convex/server';
 import type { Doc, Id } from '../_generated/dataModel';
 import { FINALIZED_SETTLEMENT_STATUSES } from './schema';
@@ -527,7 +527,7 @@ export const getSettlementDetails = query({
   handler: async (ctx, args) => {
     const orgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement || settlement.workosOrgId !== orgId) throw new Error('Settlement not found');
+    if (!settlement || settlement.workosOrgId !== orgId) throw new ConvexError('Settlement not found');
 
     const caches = newAdapterCaches();
     const driver = (await ctx.db.get(settlement.payeeId as Id<'drivers'>)) as Doc<'drivers'> | null;
@@ -779,7 +779,7 @@ export const carrierGetSettlementDetails = query({
   handler: async (ctx, args) => {
     const orgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement || settlement.workosOrgId !== orgId) throw new Error('Settlement not found');
+    if (!settlement || settlement.workosOrgId !== orgId) throw new ConvexError('Settlement not found');
 
     const caches = newAdapterCaches();
     const partnership = (await ctx.db.get(settlement.payeeId as Id<'carrierPartnerships'>)) as Doc<'carrierPartnerships'> | null;

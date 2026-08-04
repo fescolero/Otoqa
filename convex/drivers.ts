@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { getDateStatus } from './_helpers/dateUtils';
@@ -377,9 +377,9 @@ export const update = mutation({
 
     // Get current driver data for audit log
     const driver = await ctx.db.get(id);
-    if (!driver) throw new Error('Driver not found');
+    if (!driver) throw new ConvexError('Driver not found');
     if (driver.organizationId !== callerOrgId) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
 
     // Handle payPlanId separately (it's an Id type, not a string)
@@ -536,12 +536,12 @@ export const resyncToClerk = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const driver = await ctx.db.get(args.id);
-    if (!driver) throw new Error('Driver not found');
+    if (!driver) throw new ConvexError('Driver not found');
     if (driver.organizationId !== callerOrgId) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
-    if (driver.isDeleted) throw new Error('Cannot sync a deleted driver');
-    if (!driver.phone) throw new Error('Driver has no phone number');
+    if (driver.isDeleted) throw new ConvexError('Cannot sync a deleted driver');
+    if (!driver.phone) throw new ConvexError('Driver has no phone number');
 
     await ctx.db.patch(args.id, {
       clerkSyncStatus: 'pending',
@@ -587,9 +587,9 @@ export const deactivate = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get driver data before deactivation
     const driver = await ctx.db.get(args.id);
-    if (!driver) throw new Error('Driver not found');
+    if (!driver) throw new ConvexError('Driver not found');
     if (driver.organizationId !== callerOrgId) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
 
     await ctx.db.patch(args.id, {
@@ -628,9 +628,9 @@ export const restore = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get driver data before restoration
     const driver = await ctx.db.get(args.id);
-    if (!driver) throw new Error('Driver not found');
+    if (!driver) throw new ConvexError('Driver not found');
     if (driver.organizationId !== callerOrgId) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
 
     await ctx.db.patch(args.id, {
@@ -671,15 +671,15 @@ export const updateCurrentTruck = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
 
     const driver = await ctx.db.get(args.driverId);
-    if (!driver) throw new Error('Driver not found');
+    if (!driver) throw new ConvexError('Driver not found');
     if (driver.organizationId !== callerOrgId) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
 
     const truck = await ctx.db.get(args.truckId);
-    if (!truck) throw new Error('Truck not found');
+    if (!truck) throw new ConvexError('Truck not found');
     if (truck.organizationId !== callerOrgId) {
-      throw new Error('Truck not found');
+      throw new ConvexError('Truck not found');
     }
 
     // Update driver with current truck
@@ -718,9 +718,9 @@ export const permanentDelete = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     // Get driver data before deletion
     const driver = await ctx.db.get(args.id);
-    if (!driver) throw new Error('Driver not found');
+    if (!driver) throw new ConvexError('Driver not found');
     if (driver.organizationId !== callerOrgId) {
-      throw new Error('Driver not found');
+      throw new ConvexError('Driver not found');
     }
 
     // Delete sensitive info first

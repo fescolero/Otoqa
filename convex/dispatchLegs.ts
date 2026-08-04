@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import {
   mutation,
   query,
@@ -212,8 +212,8 @@ export const create = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
-    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     // Get existing legs to determine sequence
     const existingLegs = await ctx.db
@@ -288,8 +288,8 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
-    if (!leg) throw new Error('Leg not found');
-    if (leg.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!leg) throw new ConvexError('Leg not found');
+    if (leg.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const { legId, userId: _argUserId, userName: _argUserName, ...updates } = args;
     const now = Date.now();
@@ -998,8 +998,8 @@ export const splitAtStop = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
-    if (load.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!load) throw new ConvexError('Load not found');
+    if (load.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     // Get all stops
     const stops = await ctx.db
@@ -1011,12 +1011,12 @@ export const splitAtStop = mutation({
 
     // Find the split stop
     const splitStop = sortedStops.find((s) => s._id === args.splitStopId);
-    if (!splitStop) throw new Error('Split stop not found');
+    if (!splitStop) throw new ConvexError('Split stop not found');
 
     const splitIndex = sortedStops.findIndex((s) => s._id === args.splitStopId);
-    if (splitIndex === 0) throw new Error('Cannot split at the first stop');
+    if (splitIndex === 0) throw new ConvexError('Cannot split at the first stop');
     if (splitIndex === sortedStops.length - 1) {
-      throw new Error('Cannot split at the last stop');
+      throw new ConvexError('Cannot split at the last stop');
     }
 
     // Get existing leg (Leg A - will be truncated)
@@ -1026,7 +1026,7 @@ export const splitAtStop = mutation({
       .filter((q) => q.eq(q.field('sequence'), 1))
       .first();
 
-    if (!existingLeg) throw new Error('No existing leg to split');
+    if (!existingLeg) throw new ConvexError('No existing leg to split');
 
     const now = Date.now();
     const firstStop = sortedStops[0];
@@ -1133,8 +1133,8 @@ export const removeDriver = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const leg = await ctx.db.get(args.legId);
-    if (!leg) throw new Error('Leg not found');
-    if (leg.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!leg) throw new ConvexError('Leg not found');
+    if (leg.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const now = Date.now();
 
@@ -1693,10 +1693,10 @@ export const startLeg = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const leg = await ctx.db.get(args.legId);
-    if (!leg) throw new Error('Leg not found');
+    if (!leg) throw new ConvexError('Leg not found');
     if (leg.status === 'ACTIVE') return null; // idempotent
     if (leg.status !== 'PENDING') {
-      throw new Error(`Cannot start leg in status ${leg.status}`);
+      throw new ConvexError(`Cannot start leg in status ${leg.status}`);
     }
 
     await ctx.db.patch(args.legId, {
@@ -1731,7 +1731,7 @@ export const completeLeg = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const leg = await ctx.db.get(args.legId);
-    if (!leg) throw new Error('Leg not found');
+    if (!leg) throw new ConvexError('Leg not found');
     if (leg.status === 'COMPLETED') return null; // idempotent
 
     await ctx.db.patch(args.legId, {
@@ -1781,21 +1781,21 @@ export const handoffLoad = mutation({
     const caller = await requireCallerIdentity(ctx);
 
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
+    if (!load) throw new ConvexError('Load not found');
     if (load.workosOrgId !== caller.orgId) {
-      throw new Error('Not authorized for this load');
+      throw new ConvexError('Not authorized for this load');
     }
 
     const [fromDriver, toDriver] = await Promise.all([
       ctx.db.get(args.fromDriverId),
       ctx.db.get(args.toDriverId),
     ]);
-    if (!fromDriver || !toDriver) throw new Error('Driver not found');
+    if (!fromDriver || !toDriver) throw new ConvexError('Driver not found');
     if (toDriver.isDeleted || toDriver.employmentStatus !== 'Active') {
-      throw new Error('Destination driver is inactive');
+      throw new ConvexError('Destination driver is inactive');
     }
     if (toDriver.organizationId !== caller.orgId) {
-      throw new Error('Destination driver not in your organization');
+      throw new ConvexError('Destination driver not in your organization');
     }
 
     const now = Date.now();
@@ -1806,7 +1806,7 @@ export const handoffLoad = mutation({
       .withIndex('by_driver', (q) => q.eq('driverId', args.fromDriverId).eq('status', 'ACTIVE'))
       .collect();
     const oldLeg = activeLegs.find((l) => l.loadId === args.loadId);
-    if (!oldLeg) throw new Error('From-driver has no active leg on this load');
+    if (!oldLeg) throw new ConvexError('From-driver has no active leg on this load');
 
     // Figure out where the new leg starts. Prefer the tracking frontier
     // (where the from-driver was heading); fall back to the old leg's start.

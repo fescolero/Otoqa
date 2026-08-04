@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
@@ -296,7 +296,7 @@ export const update = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
-      throw new Error('Not authorized for this lane');
+      throw new ConvexError('Not authorized for this lane');
     }
     const { id, ...updates } = args;
 
@@ -352,7 +352,7 @@ export const deactivate = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
-      throw new Error('Not authorized for this lane');
+      throw new ConvexError('Not authorized for this lane');
     }
     await ctx.db.patch(args.id, {
       isDeleted: true,
@@ -387,7 +387,7 @@ export const restore = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
-      throw new Error('Not authorized for this lane');
+      throw new ConvexError('Not authorized for this lane');
     }
     await ctx.db.patch(args.id, {
       isDeleted: false,
@@ -422,7 +422,7 @@ export const permanentDelete = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const lane = await ctx.db.get(args.id);
     if (!lane || lane.workosOrgId !== callerOrgId) {
-      throw new Error('Not authorized for this lane');
+      throw new ConvexError('Not authorized for this lane');
     }
     await ctx.db.delete(args.id);
 

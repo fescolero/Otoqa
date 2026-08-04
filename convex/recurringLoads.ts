@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query, internalMutation, internalAction, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id } from './_generated/dataModel';
@@ -178,7 +178,7 @@ export const get = query({
     const callerOrgId = await requireCallerOrgId(ctx);
     const template = await ctx.db.get(args.id);
     if (!template) return null;
-    if (template.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (template.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
     return template;
   },
 });
@@ -207,9 +207,9 @@ export const createFromLoad = mutation({
     // 1. Get the source load
     const sourceLoad = await ctx.db.get(args.sourceLoadId);
     if (!sourceLoad) {
-      throw new Error('Source load not found');
+      throw new ConvexError('Source load not found');
     }
-    if (sourceLoad.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (sourceLoad.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     // 2. Get the stops for the source load
     const stops = await ctx.db
@@ -218,7 +218,7 @@ export const createFromLoad = mutation({
       .collect();
 
     if (stops.length === 0) {
-      throw new Error('Source load has no stops');
+      throw new ConvexError('Source load has no stops');
     }
 
     // Sort stops by sequence
@@ -230,7 +230,7 @@ export const createFromLoad = mutation({
       (s): s is typeof s & { stopType: 'PICKUP' | 'DELIVERY' } => s.stopType !== 'DETOUR'
     );
     if (scheduledStops.length === 0) {
-      throw new Error('Source load has no scheduled stops (only detours)');
+      throw new ConvexError('Source load has no scheduled stops (only detours)');
     }
     const stopTemplates = scheduledStops.map((stop) => {
       // Extract HH:mm from the time string
@@ -332,9 +332,9 @@ export const toggleActive = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const template = await ctx.db.get(args.id);
     if (!template) {
-      throw new Error('Template not found');
+      throw new ConvexError('Template not found');
     }
-    if (template.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (template.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const newStatus = !template.isActive;
 
@@ -369,9 +369,9 @@ export const remove = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const template = await ctx.db.get(args.id);
     if (!template) {
-      throw new Error('Template not found');
+      throw new ConvexError('Template not found');
     }
-    if (template.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (template.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     await ctx.db.delete(args.id);
 

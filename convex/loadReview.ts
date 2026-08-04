@@ -4,7 +4,7 @@
  */
 
 import { mutation, query } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from "./lib/auth";
 import { getLoadFacets, findLoadIdsByFacets } from "./lib/loadFacets";
 import type { Doc } from "./_generated/dataModel";
@@ -22,10 +22,10 @@ export const confirmSpotLoad = mutation({
     const callerOrgId = await requireCallerOrgId(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) {
-      throw new Error("Load not found");
+      throw new ConvexError("Load not found");
     }
     if (load.workosOrgId !== callerOrgId) {
-      throw new Error("Load not found");
+      throw new ConvexError("Load not found");
     }
 
     await ctx.db.patch(args.loadId, {
@@ -55,16 +55,16 @@ export const convertToContract = mutation({
     const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const load = await ctx.db.get(args.loadId);
     if (!load) {
-      throw new Error("Load not found");
+      throw new ConvexError("Load not found");
     }
     if (load.workosOrgId !== callerOrgId) {
-      throw new Error("Load not found");
+      throw new ConvexError("Load not found");
     }
 
     // Read HCR/Trip from facet tags (Phase 5 drops the columns).
     const loadFacets = await getLoadFacets(ctx, load._id);
     if (!loadFacets.hcr || !loadFacets.trip) {
-      throw new Error("Cannot convert: Load missing HCR or Trip information");
+      throw new ConvexError("Cannot convert: Load missing HCR or Trip information");
     }
 
     // Check if specific lane already exists. contractLanes still has its
@@ -88,7 +88,7 @@ export const convertToContract = mutation({
       // Get customer info for defaults
       const customer = await ctx.db.get(load.customerId);
       if (!customer || !('name' in customer)) {
-        throw new Error("Customer not found");
+        throw new ConvexError("Customer not found");
       }
 
       // Create contract period (today + 1 year)

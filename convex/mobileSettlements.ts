@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { query } from './_generated/server';
 import type { QueryCtx } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
@@ -315,7 +315,7 @@ async function legacyDriverDetails(ctx: QueryCtx, driver: Doc<'drivers'>, rawId:
   const id = ctx.db.normalizeId('driverSettlements', rawId);
   const settlement = id ? await ctx.db.get(id) : null;
   if (!settlement || settlement.driverId !== driver._id || settlement.status === 'VOID') {
-    throw new Error('Statement not found');
+    throw new ConvexError('Statement not found');
   }
 
   const payables = await ctx.db
@@ -393,7 +393,7 @@ async function newDriverDetails(ctx: QueryCtx, driver: Doc<'drivers'>, rawId: st
     settlement.payeeId !== (driver._id as string) ||
     settlement.status === 'VOID'
   ) {
-    throw new Error('Statement not found');
+    throw new ConvexError('Statement not found');
   }
 
   const items = await payItemsForSettlement(ctx, settlement);
@@ -656,7 +656,7 @@ export const getCarrierStatementDetails = query({
   },
   handler: async (ctx, args) => {
     const auth = await requireCarrierAuth(ctx, args.carrierOrgId);
-    if (!auth) throw new Error('Statement not found');
+    if (!auth) throw new ConvexError('Statement not found');
     return carrierStatementDetailsForOrg(ctx, auth.org, args.settlementId, args.source);
   },
 });
@@ -672,10 +672,10 @@ async function brokerNameFor(ctx: QueryCtx, brokerOrgId: string): Promise<string
 async function legacyCarrierDetails(ctx: QueryCtx, orgCandidates: string[], rawId: string) {
   const id = ctx.db.normalizeId('carrierSettlements', rawId);
   const settlement = id ? await ctx.db.get(id) : null;
-  if (!settlement || settlement.status === 'VOID') throw new Error('Statement not found');
+  if (!settlement || settlement.status === 'VOID') throw new ConvexError('Statement not found');
   const partnership = await ctx.db.get(settlement.carrierPartnershipId);
   if (!partnership?.carrierOrgId || !orgCandidates.includes(partnership.carrierOrgId)) {
-    throw new Error('Statement not found');
+    throw new ConvexError('Statement not found');
   }
 
   // Bounded fetch — catch-up statements can carry thousands of lines. When
@@ -746,11 +746,11 @@ async function newCarrierDetails(ctx: QueryCtx, orgCandidates: string[], rawId: 
   const id = ctx.db.normalizeId('settlements', rawId);
   const settlement = id ? await ctx.db.get(id) : null;
   if (!settlement || settlement.payeeType !== 'CARRIER' || settlement.status === 'VOID') {
-    throw new Error('Statement not found');
+    throw new ConvexError('Statement not found');
   }
   const partnership = await ctx.db.get(settlement.payeeId as Id<'carrierPartnerships'>);
   if (!partnership?.carrierOrgId || !orgCandidates.includes(partnership.carrierOrgId)) {
-    throw new Error('Statement not found');
+    throw new ConvexError('Statement not found');
   }
 
   // Finalized statements can be huge (frozen membership) — bounded fetch with

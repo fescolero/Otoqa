@@ -1,5 +1,5 @@
 import { mutation, query } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { assertCallerOwnsOrg, requireCallerOrgId } from "./lib/auth";
 
@@ -22,11 +22,11 @@ export const triggerManualSync = mutation({
       .first();
 
     if (!integration) {
-      throw new Error("No FourKites integration found for this organization");
+      throw new ConvexError("No FourKites integration found for this organization");
     }
 
     if (!integration.syncSettings.isEnabled) {
-      throw new Error("FourKites sync is disabled for this organization");
+      throw new ConvexError("FourKites sync is disabled for this organization");
     }
 
     // Parse credentials

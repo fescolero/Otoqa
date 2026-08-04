@@ -10,7 +10,7 @@
  * with an `isLocked: true` flag so the UI can render an edit-blocked treatment.
  */
 
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { requireCallerIdentity } from './lib/auth';
 import type { Doc, Id } from './_generated/dataModel';
@@ -247,7 +247,7 @@ export const addManualAdjustment = mutation({
     // Ownership check on the load
     const load = await ctx.db.get(args.loadId);
     if (!load || load.workosOrgId !== orgId) {
-      throw new Error('Load not found');
+      throw new ConvexError('Load not found');
     }
 
     // Resolve componentCode → componentId in this org's catalog
@@ -256,7 +256,7 @@ export const addManualAdjustment = mutation({
       .withIndex('by_org_code', q => q.eq('workosOrgId', orgId).eq('code', args.componentCode))
       .first();
     if (!component) {
-      throw new Error(`Unknown charge component "${args.componentCode}" for this org`);
+      throw new ConvexError(`Unknown charge component "${args.componentCode}" for this org`);
     }
 
     // Default leg attribution = first leg of the load
@@ -348,14 +348,14 @@ export const updateManualAdjustment = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const target = await ctx.db.get(args.payItemId);
-    if (!target) throw new Error('Pay item not found');
-    if (target.workosOrgId !== orgId) throw new Error('Pay item not found');
+    if (!target) throw new ConvexError('Pay item not found');
+    if (target.workosOrgId !== orgId) throw new ConvexError('Pay item not found');
 
-    if (target.isVoided) throw new Error('Pay item has been voided');
+    if (target.isVoided) throw new ConvexError('Pay item has been voided');
     if (target.kind !== 'MANUAL_ADJUSTMENT') {
-      throw new Error('Only manual adjustments can be edited inline');
+      throw new ConvexError('Only manual adjustments can be edited inline');
     }
-    if (target.isLocked) throw new Error('Pay item is locked');
+    if (target.isLocked) throw new ConvexError('Pay item is locked');
 
     const now = Date.now();
     const patch: Record<string, unknown> = { updatedAt: now, lastEditedBy: userId };
@@ -409,13 +409,13 @@ export const voidManualAdjustment = mutation({
     const { orgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
     const target = await ctx.db.get(args.payItemId);
     if (!target) return;
-    if (target.workosOrgId !== orgId) throw new Error('Pay item not found');
+    if (target.workosOrgId !== orgId) throw new ConvexError('Pay item not found');
 
     if (target.isVoided) return;
     if (target.kind !== 'MANUAL_ADJUSTMENT') {
-      throw new Error('Only manual adjustments can be removed inline');
+      throw new ConvexError('Only manual adjustments can be removed inline');
     }
-    if (target.isLocked) throw new Error('Pay item is locked');
+    if (target.isLocked) throw new ConvexError('Pay item is locked');
 
     const now = Date.now();
     await ctx.db.patch(args.payItemId, {

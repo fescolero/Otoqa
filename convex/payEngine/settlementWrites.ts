@@ -7,7 +7,7 @@
 import { mutation } from '../_generated/server';
 import type { MutationCtx } from '../_generated/server';
 import { internal } from '../_generated/api';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import type { Doc, Id } from '../_generated/dataModel';
 import { requireCallerIdentity, requireCallerOrgId } from '../lib/auth';
 import { centsFromNumber, microCentsFromNumber, rawCents, rawMicroCents } from '../lib/money';
@@ -24,7 +24,7 @@ const STATUS_MAP: Record<'DRAFT' | 'PENDING' | 'APPROVED' | 'PAID' | 'VOID', Doc
 
 async function getOwnedSettlement(ctx: MutationCtx, settlementId: Id<'settlements'>, orgId: string) {
   const s = await ctx.db.get(settlementId);
-  if (!s || s.workosOrgId !== orgId) throw new Error('Settlement not found');
+  if (!s || s.workosOrgId !== orgId) throw new ConvexError('Settlement not found');
   return s;
 }
 
@@ -47,7 +47,7 @@ export const acknowledgeBlocker = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const s = await getOwnedSettlement(ctx, args.settlementId, orgId);
-    if (FINALIZED.has(s.status)) throw new Error('Settlement is already finalized');
+    if (FINALIZED.has(s.status)) throw new ConvexError('Settlement is already finalized');
     const existing = s.acknowledgedBlockers ?? [];
     if (existing.some((a) => a.key === args.blockerKey)) return null; // idempotent
     await ctx.db.patch(args.settlementId, {
@@ -132,7 +132,7 @@ export const reversePayment = mutation({
   handler: async (ctx, args) => {
     const orgId = await requireCallerOrgId(ctx);
     const s = await getOwnedSettlement(ctx, args.settlementId, orgId);
-    if (s.status !== 'PAID') throw new Error('Only a paid settlement can have its payment reversed');
+    if (s.status !== 'PAID') throw new ConvexError('Only a paid settlement can have its payment reversed');
     await ctx.db.patch(args.settlementId, {
       status: 'VERIFIED', paidAt: undefined, paidBy: undefined,
       paymentMethod: undefined, paymentReference: undefined, updatedAt: Date.now(),
@@ -155,14 +155,14 @@ export const reopenSettlement = mutation({
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const s = await getOwnedSettlement(ctx, args.settlementId, orgId);
     if (s.status !== 'VERIFIED') {
-      throw new Error(
+      throw new ConvexError(
         s.status === 'PAID'
           ? 'Reverse the payment before reopening a paid settlement'
           : 'Only an approved settlement can be reopened',
       );
     }
     const reason = args.reason.trim();
-    if (!reason) throw new Error('A reason is required to reopen a settlement');
+    if (!reason) throw new ConvexError('A reason is required to reopen a settlement');
     const now = Date.now();
 
     for (const it of await periodItems(ctx, s)) {
@@ -199,14 +199,14 @@ export const addManualAdjustment = mutation({
   handler: async (ctx, args) => {
     const { orgId, userId } = await requireCallerIdentity(ctx);
     const s = await getOwnedSettlement(ctx, args.settlementId, orgId);
-    if (FINALIZED.has(s.status)) throw new Error('Cannot add adjustments to a finalized settlement');
+    if (FINALIZED.has(s.status)) throw new ConvexError('Cannot add adjustments to a finalized settlement');
 
     const code = args.amount < 0 ? 'LEGACY_DEDUCTION' : 'LEGACY_MANUAL';
     const comp = await ctx.db
       .query('chargeComponents')
       .withIndex('by_org_code', (q) => q.eq('workosOrgId', orgId).eq('code', code))
       .first();
-    if (!comp) throw new Error(`Missing ${code} charge component`);
+    if (!comp) throw new ConvexError(`Missing ${code} charge component`);
 
     const now = Date.now();
     const magnitude = Math.abs(args.amount);
@@ -235,12 +235,12 @@ export const removePayItem = mutation({
   handler: async (ctx, args) => {
     const orgId = await requireCallerOrgId(ctx);
     const item = await ctx.db.get(args.payItemId);
-    if (!item || item.workosOrgId !== orgId) throw new Error('Pay item not found');
+    if (!item || item.workosOrgId !== orgId) throw new ConvexError('Pay item not found');
     if (item.isVoided) return null;
     // Guard against removing from a finalized settlement.
     if (item.settlementId) {
       const s = await ctx.db.get(item.settlementId);
-      if (s && FINALIZED.has(s.status)) throw new Error('Cannot remove items from a finalized settlement');
+      if (s && FINALIZED.has(s.status)) throw new ConvexError('Cannot remove items from a finalized settlement');
     }
     await ctx.db.patch(args.payItemId, {
       isVoided: true, voidedAt: Date.now(), voidReason: 'removed from settlement by reviewer', updatedAt: Date.now(),

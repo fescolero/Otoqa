@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import {
   internalAction,
   internalMutation,
@@ -115,7 +115,7 @@ type WakeOutcome =
 function loadServiceAccount(): FcmServiceAccount {
   const raw = process.env.FCM_SERVICE_ACCOUNT_JSON;
   if (!raw) {
-    throw new Error(
+    throw new ConvexError(
       'FCM_SERVICE_ACCOUNT_JSON not set — see mobile/docs/gps-tracking-architecture.md § Pre-work',
     );
   }
@@ -123,11 +123,11 @@ function loadServiceAccount(): FcmServiceAccount {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error('FCM_SERVICE_ACCOUNT_JSON is not valid JSON');
+    throw new ConvexError('FCM_SERVICE_ACCOUNT_JSON is not valid JSON');
   }
   const sa = parsed as Partial<FcmServiceAccount>;
   if (!sa.private_key || !sa.client_email || !sa.project_id) {
-    throw new Error(
+    throw new ConvexError(
       'FCM_SERVICE_ACCOUNT_JSON missing required fields (private_key, client_email, project_id)',
     );
   }
@@ -202,7 +202,7 @@ async function mintFcmAccessToken(): Promise<{
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(
+    throw new ConvexError(
       `FCM token mint failed: HTTP ${res.status} — ${body.slice(0, 200)}`,
     );
   }
@@ -211,7 +211,7 @@ async function mintFcmAccessToken(): Promise<{
     expires_in?: number;
   };
   if (!data.access_token) {
-    throw new Error('FCM token mint returned no access_token');
+    throw new ConvexError('FCM token mint returned no access_token');
   }
   // expires_in is seconds-from-now. Default 3600 if missing.
   const expiresAtMs = Date.now() + (data.expires_in ?? 3600) * 1000;

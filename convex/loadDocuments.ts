@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalQuery, mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { getCallerOrgId, requireCallerIdentity, requireCallerOrgId } from './lib/auth';
@@ -59,9 +59,9 @@ export const create = mutation({
     const { orgId: callerOrgId, userId: subject } = await requireCallerIdentity(ctx);
 
     const load = await ctx.db.get(args.loadId);
-    if (!load) throw new Error('Load not found');
+    if (!load) throw new ConvexError('Load not found');
     if (load.workosOrgId !== callerOrgId) {
-      throw new Error('Load not found');
+      throw new ConvexError('Load not found');
     }
 
     const now = Date.now();
@@ -179,7 +179,7 @@ export const remove = mutation({
 
     const doc = await ctx.db.get(args.documentId);
     if (!doc || doc.workosOrgId !== orgId) {
-      throw new Error('Document not found');
+      throw new ConvexError('Document not found');
     }
 
     await ctx.db.delete(args.documentId);

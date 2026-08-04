@@ -26,7 +26,7 @@
 // divergences.
 
 import { internalQuery, type QueryCtx } from '../_generated/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import type { Doc, Id } from '../_generated/dataModel';
 import { calculatePay } from './calculatePay';
 import type { CalculatePayResult } from './calculatePay';
@@ -233,14 +233,14 @@ export const shadowValidateLeg = internalQuery({
   args: { legId: v.id('dispatchLegs') },
   handler: async (ctx, { legId }): Promise<ShadowValidationResult> => {
     const leg = await ctx.db.get(legId);
-    if (!leg) throw new Error(`shadowValidateLeg: leg ${legId} not found`);
+    if (!leg) throw new ConvexError(`shadowValidateLeg: leg ${legId} not found`);
 
     if (!leg.driverId && (!leg.drivers || leg.drivers.length === 0)) {
       return emptyResult(legId, 'NO_DRIVER_ASSIGNED');
     }
 
     const load = await ctx.db.get(leg.loadId);
-    if (!load) throw new Error(`shadowValidateLeg: load ${leg.loadId} not found`);
+    if (!load) throw new ConvexError(`shadowValidateLeg: load ${leg.loadId} not found`);
 
     // Use the PRIMARY driver for comparison — team-driver validation can be
     // its own harness mode later. For single-driver legs this is leg.driverId.
@@ -316,14 +316,14 @@ export const shadowValidateCarrierLeg = internalQuery({
   args: { legId: v.id('dispatchLegs') },
   handler: async (ctx, { legId }): Promise<ShadowValidationResult> => {
     const leg = await ctx.db.get(legId);
-    if (!leg) throw new Error(`shadowValidateCarrierLeg: leg ${legId} not found`);
+    if (!leg) throw new ConvexError(`shadowValidateCarrierLeg: leg ${legId} not found`);
 
     if (!leg.carrierPartnershipId) {
       return emptyResult(legId, 'NO_DRIVER_ASSIGNED');
     }
 
     const load = await ctx.db.get(leg.loadId);
-    if (!load) throw new Error(`shadowValidateCarrierLeg: load ${leg.loadId} not found`);
+    if (!load) throw new ConvexError(`shadowValidateCarrierLeg: load ${leg.loadId} not found`);
 
     const carrierPartnershipId = leg.carrierPartnershipId;
 

@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
@@ -169,8 +169,8 @@ export const update = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
-    if (!profile) throw new Error('Rate profile not found');
-    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     const { profileId, userId: _argUserId, userName: _argUserName, ...updates } = args;
 
@@ -243,8 +243,8 @@ export const deactivate = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
-    if (!profile) throw new Error('Rate profile not found');
-    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     await ctx.db.patch(args.profileId, {
       isActive: false,
@@ -279,8 +279,8 @@ export const reactivate = mutation({
     const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
 
     const profile = await ctx.db.get(args.profileId);
-    if (!profile) throw new Error('Rate profile not found');
-    if (profile.workosOrgId !== callerOrgId) throw new Error('Not authorized for this organization');
+    if (!profile) throw new ConvexError('Rate profile not found');
+    if (profile.workosOrgId !== callerOrgId) throw new ConvexError('Not authorized for this organization');
 
     await ctx.db.patch(args.profileId, {
       isActive: true,

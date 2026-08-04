@@ -1,5 +1,5 @@
 import { internalAction } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { internal } from "./_generated/api";
 import { fetchShipments } from "./fourKitesApiClient";
 import {
@@ -137,7 +137,7 @@ export const processOrg = internalAction({
       const startTime = new Date(Date.now() - (lookbackHours * 60 * 60 * 1000)).toISOString();
 
       if (!authCredentials) {
-        throw new Error("Missing FourKites credentials in integration settings");
+        throw new ConvexError("Missing FourKites credentials in integration settings");
       }
 
       // Fetch shipments from FourKites API (this can happen in an action)

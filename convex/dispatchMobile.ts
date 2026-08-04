@@ -1,5 +1,5 @@
 import { mutation, query, type QueryCtx } from './_generated/server';
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import {
   CAPABILITY_SLUGS,
   getCallerPermissionClaims,
@@ -181,7 +181,7 @@ export async function resolveOrgForRead(
   capability: DispatchCapability,
 ): Promise<ResolvedOrg> {
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new Error('Unauthenticated');
+  if (!identity) throw new ConvexError('Unauthenticated');
 
   const claims = identity as unknown as { org_id?: string; organizationId?: string };
   const claimOrg = claims.org_id ?? claims.organizationId;
@@ -189,13 +189,13 @@ export async function resolveOrgForRead(
   if (claimOrg) {
     const permissionClaims = await getCallerPermissionClaims(ctx);
     if (!isPermitted(permissionClaims, CAPABILITY_SLUGS[capability])) {
-      throw new Error(`Not authorized: missing ${capability}`);
+      throw new ConvexError(`Not authorized: missing ${capability}`);
     }
     const org = await ctx.db
       .query('organizations')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', claimOrg))
       .first();
-    if (!org || org.isDeleted) throw new Error('Organization not provisioned for dispatch');
+    if (!org || org.isDeleted) throw new ConvexError('Organization not provisioned for dispatch');
     return {
       org,
       externalId: org.clerkOrgId ?? claimOrg,
@@ -204,7 +204,7 @@ export async function resolveOrgForRead(
   }
 
   const membership = await resolveClerkCarrierMembership(ctx);
-  if (!membership) throw new Error(`Not authorized: missing ${capability}`);
+  if (!membership) throw new ConvexError(`Not authorized: missing ${capability}`);
   const org = membership.org as Doc<'organizations'>;
   return {
     org,
@@ -427,7 +427,7 @@ export const listDriverHistory = query({
     const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
-      throw new Error('Driver not found in your organization');
+      throw new ConvexError('Driver not found in your organization');
     }
     const inDay = (t: number | null | undefined) =>
       t != null && t >= args.dayStartMs && t < args.dayEndMs;
@@ -590,10 +590,10 @@ export const acceptOffer = mutation({
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
-      throw new Error('Offer not found');
+      throw new ConvexError('Offer not found');
     }
     if (assignment.status !== 'OFFERED') {
-      throw new Error(`Cannot accept assignment with status: ${assignment.status}`);
+      throw new ConvexError(`Cannot accept assignment with status: ${assignment.status}`);
     }
     await ctx.db.patch(args.assignmentId, {
       status: 'ACCEPTED',
@@ -614,10 +614,10 @@ export const declineOffer = mutation({
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
-      throw new Error('Offer not found');
+      throw new ConvexError('Offer not found');
     }
     if (assignment.status !== 'OFFERED') {
-      throw new Error(`Cannot decline assignment with status: ${assignment.status}`);
+      throw new ConvexError(`Cannot decline assignment with status: ${assignment.status}`);
     }
     await ctx.db.patch(args.assignmentId, { status: 'DECLINED' });
     await raiseAlert(ctx, {
@@ -804,7 +804,7 @@ export const suggestDriversForLoad = query({
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
     const stops = await ctx.db
       .query('loadStops')
@@ -836,14 +836,14 @@ export const assignDriverToLoad = mutation({
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
     const assignment = await ctx.db.get(args.assignmentId);
     if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
-      throw new Error('Assignment not found');
+      throw new ConvexError('Assignment not found');
     }
     if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') {
-      throw new Error('Can only assign driver to awarded or in-progress loads');
+      throw new ConvexError('Can only assign driver to awarded or in-progress loads');
     }
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
-      throw new Error('Driver not found in your organization');
+      throw new ConvexError('Driver not found in your organization');
     }
     if (assignment.assignedDriverId && assignment.assignedDriverId !== args.driverId) {
       const current = await ctx.db.get(assignment.assignedDriverId);
@@ -1057,12 +1057,12 @@ export const applyPlan = mutation({
     for (const pick of args.picks) {
       const driver = await ctx.db.get(pick.driverId);
       if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
-        throw new Error('Driver not found in your organization');
+        throw new ConvexError('Driver not found in your organization');
       }
       for (const assignmentId of pick.assignmentIds) {
         const assignment = await ctx.db.get(assignmentId);
         if (!assignment || assignment.carrierOrgId !== resolved.externalId) {
-          throw new Error('Assignment not found');
+          throw new ConvexError('Assignment not found');
         }
         if (assignment.status !== 'AWARDED' && assignment.status !== 'IN_PROGRESS') {
           results.push({
@@ -1147,7 +1147,7 @@ export const adjustStopWindow = mutation({
     const identity = await ctx.auth.getUserIdentity();
 
     const stop = await ctx.db.get(args.stopId);
-    if (!stop) throw new Error('Stop not found');
+    if (!stop) throw new ConvexError('Stop not found');
     const assignments = await ctx.db
       .query('loadCarrierAssignments')
       .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
@@ -1157,13 +1157,13 @@ export const adjustStopWindow = mutation({
         a.carrierOrgId === resolved.externalId &&
         (a.status === 'AWARDED' || a.status === 'IN_PROGRESS'),
     );
-    if (!assignment) throw new Error('Stop not found');
+    if (!assignment) throw new ConvexError('Stop not found');
 
     const end = Date.parse(args.windowEndTime);
-    if (!Number.isFinite(end)) throw new Error('Invalid window end time');
+    if (!Number.isFinite(end)) throw new ConvexError('Invalid window end time');
     const begin = args.windowBeginTime ? Date.parse(args.windowBeginTime) : null;
-    if (args.windowBeginTime && !Number.isFinite(begin!)) throw new Error('Invalid window begin time');
-    if (begin != null && begin >= end) throw new Error('Window must end after it begins');
+    if (args.windowBeginTime && !Number.isFinite(begin!)) throw new ConvexError('Invalid window begin time');
+    if (begin != null && begin >= end) throw new ConvexError('Window must end after it begins');
 
     await ctx.db.patch(args.stopId, {
       windowEndTime: args.windowEndTime,
@@ -1240,7 +1240,7 @@ export const createLoad = mutation({
     const resolved = await resolveOrgForRead(ctx, 'canDispatch');
     const workosOrgId = resolved.org.workosOrgId;
     if (!workosOrgId) {
-      throw new Error('Your organization is not provisioned for load creation yet');
+      throw new ConvexError('Your organization is not provisioned for load creation yet');
     }
     const identity = await ctx.auth.getUserIdentity();
     const performer = {
@@ -1347,7 +1347,7 @@ export const assignDriverToLoadsWeb = mutation({
     const identity = await ctx.auth.getUserIdentity();
     const driver = await ctx.db.get(args.driverId);
     if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
-      throw new Error('Driver not found in your organization');
+      throw new ConvexError('Driver not found in your organization');
     }
     const results: { internalId: string | null; success: boolean; reason?: string }[] = [];
     for (const loadId of args.loadIds.slice(0, 20)) {

@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { internalMutation, mutation, query } from './_generated/server';
 import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
@@ -108,7 +108,7 @@ async function assertNoDuplicateCarrierStatement(
       s.periodEnd === periodEnd
   );
   if (duplicate) {
-    throw new Error(
+    throw new ConvexError(
       `A statement already exists for this carrier and period (${duplicate.statementNumber ?? duplicate._id})`
     );
   }
@@ -496,9 +496,9 @@ export const getSettlementDetails = query({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement) throw new Error('Settlement not found');
+    if (!settlement) throw new ConvexError('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
-      throw new Error('Settlement not found');
+      throw new ConvexError('Settlement not found');
     }
 
     const partnership = await ctx.db.get(settlement.carrierPartnershipId);
@@ -611,7 +611,7 @@ export const generateStatement = mutation({
     const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const partnership = await ctx.db.get(args.carrierPartnershipId);
     if (!partnership || partnership.brokerOrgId !== callerOrgId) {
-      throw new Error('Carrier partnership not found');
+      throw new ConvexError('Carrier partnership not found');
     }
 
     await assertNoDuplicateCarrierStatement(
@@ -810,9 +810,9 @@ export const acknowledgeBlocker = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement || settlement.workosOrgId !== callerOrgId) throw new Error('Settlement not found');
+    if (!settlement || settlement.workosOrgId !== callerOrgId) throw new ConvexError('Settlement not found');
     if (settlement.status === 'APPROVED' || settlement.status === 'PAID') {
-      throw new Error('Settlement is already finalized');
+      throw new ConvexError('Settlement is already finalized');
     }
     const existing = settlement.acknowledgedBlockers ?? [];
     if (existing.some((a) => a.key === args.blockerKey)) return null;
@@ -830,7 +830,7 @@ export const unacknowledgeBlocker = mutation({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement || settlement.workosOrgId !== callerOrgId) throw new Error('Settlement not found');
+    if (!settlement || settlement.workosOrgId !== callerOrgId) throw new ConvexError('Settlement not found');
     if (settlement.status === 'APPROVED' || settlement.status === 'PAID') return null;
     await ctx.db.patch(args.settlementId, {
       acknowledgedBlockers: (settlement.acknowledgedBlockers ?? []).filter((a) => a.key !== args.blockerKey),
@@ -864,9 +864,9 @@ export const updateSettlementStatus = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement) throw new Error('Settlement not found');
+    if (!settlement) throw new ConvexError('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
-      throw new Error('Settlement not found');
+      throw new ConvexError('Settlement not found');
     }
 
     const now = Date.now();
@@ -935,12 +935,12 @@ export const reversePayment = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement) throw new Error('Settlement not found');
+    if (!settlement) throw new ConvexError('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
-      throw new Error('Settlement not found');
+      throw new ConvexError('Settlement not found');
     }
     if (settlement.status !== 'PAID') {
-      throw new Error('Only a paid statement can have its payment reversed');
+      throw new ConvexError('Only a paid statement can have its payment reversed');
     }
 
     await ctx.db.patch(args.settlementId, {
@@ -972,17 +972,17 @@ export const reopenSettlement = mutation({
     const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const settlement = await ctx.db.get(args.settlementId);
     if (!settlement || settlement.workosOrgId !== callerOrgId) {
-      throw new Error('Settlement not found');
+      throw new ConvexError('Settlement not found');
     }
     if (settlement.status !== 'APPROVED') {
-      throw new Error(
+      throw new ConvexError(
         settlement.status === 'PAID'
           ? 'Reverse the payment before reopening a paid statement'
           : 'Only an approved statement can be reopened',
       );
     }
     const reason = args.reason.trim();
-    if (!reason) throw new Error('A reason is required to reopen a statement');
+    if (!reason) throw new ConvexError('A reason is required to reopen a statement');
 
     const now = Date.now();
     const payables = await ctx.db
@@ -1033,14 +1033,14 @@ export const addManualAdjustment = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId } = await assertCallerOwnsOrg(ctx, args.workosOrgId);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement) throw new Error('Settlement not found');
+    if (!settlement) throw new ConvexError('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
-      throw new Error('Settlement not found');
+      throw new ConvexError('Settlement not found');
     }
 
     // Cannot add to approved/paid settlements
     if (settlement.status === 'APPROVED' || settlement.status === 'PAID') {
-      throw new Error('Cannot add adjustments to approved or paid settlements');
+      throw new ConvexError('Cannot add adjustments to approved or paid settlements');
     }
 
     const now = Date.now();
@@ -1091,11 +1091,11 @@ export const editPayableLine = mutation({
   handler: async (ctx, args) => {
     const { orgId: callerOrgId, userId } = await requireCallerIdentity(ctx);
     const payable = await ctx.db.get(args.payableId);
-    if (!payable || payable.workosOrgId !== callerOrgId) throw new Error('Line not found');
+    if (!payable || payable.workosOrgId !== callerOrgId) throw new ConvexError('Line not found');
     if (payable.settlementId) {
       const settlement = await ctx.db.get(payable.settlementId);
       if (settlement && (settlement.status === 'APPROVED' || settlement.status === 'PAID')) {
-        throw new Error('Cannot edit a finalized settlement');
+        throw new ConvexError('Cannot edit a finalized settlement');
       }
     }
     const now = Date.now();
@@ -1130,12 +1130,12 @@ export const revertPayableEdit = mutation({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
-    if (!payable || payable.workosOrgId !== callerOrgId) throw new Error('Line not found');
+    if (!payable || payable.workosOrgId !== callerOrgId) throw new ConvexError('Line not found');
     if (payable.editedAt == null) return null;
     if (payable.settlementId) {
       const settlement = await ctx.db.get(payable.settlementId);
       if (settlement && (settlement.status === 'APPROVED' || settlement.status === 'PAID')) {
-        throw new Error('Cannot edit a finalized settlement');
+        throw new ConvexError('Cannot edit a finalized settlement');
       }
     }
     await ctx.db.patch(args.payableId, {
@@ -1164,12 +1164,12 @@ export const applyRulesAmount = mutation({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
-    if (!payable || payable.workosOrgId !== callerOrgId) throw new Error('Line not found');
+    if (!payable || payable.workosOrgId !== callerOrgId) throw new ConvexError('Line not found');
     if (payable.rulesAmount == null) return null;
     if (payable.settlementId) {
       const settlement = await ctx.db.get(payable.settlementId);
       if (settlement && (settlement.status === 'APPROVED' || settlement.status === 'PAID')) {
-        throw new Error('Cannot edit a finalized settlement');
+        throw new ConvexError('Cannot edit a finalized settlement');
       }
     }
     const newTotal = payable.rulesAmount;
@@ -1202,20 +1202,20 @@ export const removePayableFromSettlement = mutation({
     const callerOrgId = await requireCallerOrgId(ctx);
     const payable = await ctx.db.get(args.payableId);
     if (payable && payable.workosOrgId !== callerOrgId) {
-      throw new Error('Payable not found');
+      throw new ConvexError('Payable not found');
     }
-    if (!payable) throw new Error('Payable not found');
+    if (!payable) throw new ConvexError('Payable not found');
 
     if (!payable.settlementId) {
-      throw new Error('Payable is not assigned to a settlement');
+      throw new ConvexError('Payable is not assigned to a settlement');
     }
 
     const settlement = await ctx.db.get(payable.settlementId);
-    if (!settlement) throw new Error('Settlement not found');
+    if (!settlement) throw new ConvexError('Settlement not found');
 
     // Cannot remove from approved/paid settlements
     if (settlement.status === 'APPROVED' || settlement.status === 'PAID') {
-      throw new Error('Cannot remove payables from approved or paid settlements');
+      throw new ConvexError('Cannot remove payables from approved or paid settlements');
     }
 
     // Standalone manual adjustments are per-statement by design (the same
@@ -1254,14 +1254,14 @@ export const deleteSettlement = mutation({
   handler: async (ctx, args) => {
     const callerOrgId = await requireCallerOrgId(ctx);
     const settlement = await ctx.db.get(args.settlementId);
-    if (!settlement) throw new Error('Settlement not found');
+    if (!settlement) throw new ConvexError('Settlement not found');
     if (settlement.workosOrgId !== callerOrgId) {
-      throw new Error('Settlement not found');
+      throw new ConvexError('Settlement not found');
     }
 
     // Can only delete DRAFT or VOID settlements
     if (settlement.status !== 'DRAFT' && settlement.status !== 'VOID') {
-      throw new Error('Can only delete DRAFT or VOID settlements');
+      throw new ConvexError('Can only delete DRAFT or VOID settlements');
     }
 
     // Get all payables for this settlement

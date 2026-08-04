@@ -1,4 +1,4 @@
-import { v } from 'convex/values';
+import { ConvexError, v } from 'convex/values';
 import { mutation, query, internalQuery, internalMutation } from './_generated/server';
 import { assertCallerOwnsOrg } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -179,7 +179,7 @@ export const updateSyncSettings = mutation({
       .first();
 
     if (!integration) {
-      throw new Error('Integration not found');
+      throw new ConvexError('Integration not found');
     }
 
     const patchData: {
@@ -194,7 +194,7 @@ export const updateSyncSettings = mutation({
     if (args.apiKey !== undefined) {
       const trimmedApiKey = args.apiKey.trim();
       if (!trimmedApiKey) {
-        throw new Error('API key cannot be empty');
+        throw new ConvexError('API key cannot be empty');
       }
 
       let currentCredentials: Record<string, unknown> = {};
@@ -246,7 +246,7 @@ export const deleteIntegration = mutation({
       .first();
 
     if (!integration) {
-      throw new Error('Integration not found');
+      throw new ConvexError('Integration not found');
     }
 
     // Samsara has a companion `samsaraSyncState` row (one per integration).
@@ -300,7 +300,7 @@ export const updateSyncStats = internalMutation({
       .first();
 
     if (!integration) {
-      throw new Error('Integration not found');
+      throw new ConvexError('Integration not found');
     }
 
     await ctx.db.patch(integration._id, {
