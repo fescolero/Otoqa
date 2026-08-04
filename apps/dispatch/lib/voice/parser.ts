@@ -28,6 +28,8 @@ export type VoiceIntent =
   | { kind: 'accept_offer'; loadRef: string | null }
   | { kind: 'decline_offer'; loadRef: string | null }
   | { kind: 'driver_history'; driverQuery: string; date: string | null; dateEnd: string | null }
+  | { kind: 'call_driver'; driverQuery: string }
+  | { kind: 'driver_location'; driverQuery: string }
   | { kind: 'clarify'; question: string }
   | { kind: 'board_summary' }
   | { kind: 'alerts_summary' }
@@ -105,6 +107,12 @@ const REF = String.raw`(?:load\s+)?(?:number\s+|#\s*)?([\w-]+)`;
 
 export function parseCommand(text: string, now: Date = new Date()): VoiceIntent {
   const s = clean(text);
+
+  // Tier-2 driver actions — before assign so "call ..." never falls through.
+  const call = s.match(/^\s*(?:call|phone|dial)\s+(?:driver\s+)?(.+?)\s*$/i);
+  if (call) return { kind: 'call_driver', driverQuery: clean(call[1]) };
+  const whereIs = s.match(/\bwhere(?:'s|\s+is)\s+(?:driver\s+)?(.+?)(?:\s+at)?\s*\??$/i);
+  if (whereIs) return { kind: 'driver_location', driverQuery: clean(whereIs[1]) };
 
   const assign = s.match(new RegExp(String.raw`\b(?:assign|give|send|put)\b\s+${REF}\s+to\s+(.+)$`, 'i'));
   if (assign) return { kind: 'assign', loadRef: assign[1], driverQuery: clean(assign[2]) };

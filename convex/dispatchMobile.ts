@@ -478,6 +478,7 @@ export const listDriverHistory = query({
       _id: string;
       status: 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED';
       completedAt: number | null;
+      loadId: string;
       internalId: string | null;
       customerName: string | null;
       tripNumber: string | null;
@@ -505,6 +506,7 @@ export const listDriverHistory = query({
         _id: assignment._id,
         status: assignment.status as 'AWARDED' | 'IN_PROGRESS' | 'COMPLETED',
         completedAt: assignment.completedAt ?? null,
+        loadId: assignment.loadId as string,
         internalId: load?.internalId ?? null,
         customerName: load?.customerName ?? null,
         tripNumber: facets.trip ?? null,
@@ -548,6 +550,7 @@ export const listDriverHistory = query({
         status:
           leg.status === 'ACTIVE' ? 'IN_PROGRESS' : leg.status === 'PENDING' ? 'AWARDED' : 'COMPLETED',
         completedAt: leg.endedAt ?? null,
+        loadId: leg.loadId as string,
         internalId: load?.internalId ?? null,
         customerName: load?.customerName ?? null,
         tripNumber: facets.trip ?? null,

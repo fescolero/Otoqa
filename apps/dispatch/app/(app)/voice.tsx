@@ -12,7 +12,8 @@
  * of crashing (lazy require).
  */
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAction, useConvex, useMutation, useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
@@ -73,9 +74,11 @@ type LoadRow = {
   note: string | null;
   /** Warning line (e.g. reassignment). */
   warn: string | null;
+  /** Tier 2: tap-through target — opens /load/[id] when present. */
+  loadId?: string | null;
 };
 type Msg = { id: number; role: 'you' | 'agent'; text: string; rows?: LoadRow[] };
-type PendingRow = { load: string; date: string; tags: string[]; current: string | null };
+type PendingRow = { load: string; date: string; tags: string[]; current: string | null; loadId: string };
 type Pending =
   | { kind: 'assign'; assignmentId: string; driverId: string; label: string }
   | { kind: 'assignLoads'; loadIds: string[]; driverId: string; label: string; rows: PendingRow[] }
@@ -89,22 +92,35 @@ const fmtDay = (iso: string) => {
     : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 };
 
-/** One visual row per load — used by agent bubbles AND the confirm card. */
+/** One visual row per load — used by agent bubbles AND the confirm card.
+ *  Rows with a loadId tap through to the load detail screen. */
 function RowList({ rows }: { rows: LoadRow[] }) {
+  const router = useRouter();
   return (
     <>
       {rows.map((r, i) => (
-        <View
+        <Pressable
           key={i}
+          disabled={!r.loadId}
+          onPress={
+            r.loadId
+              ? () => router.push({ pathname: '/load/[id]', params: { id: r.loadId! } })
+              : undefined
+          }
           style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border }}
         >
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
             <Text style={{ color: colors.foreground, fontSize: typography.sm, fontWeight: typography.bold }}>
               {r.load}
             </Text>
-            {r.when ? (
-              <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{r.when}</Text>
-            ) : null}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              {r.when ? (
+                <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs }}>{r.when}</Text>
+              ) : null}
+              {r.loadId ? (
+                <Ionicons name="chevron-forward" size={13} color={colors.foregroundMuted} />
+              ) : null}
+            </View>
           </View>
           {r.tags.length > 0 && (
             <View style={{ flexDirection: 'row', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
@@ -126,7 +142,7 @@ function RowList({ rows }: { rows: LoadRow[] }) {
           {r.warn && (
             <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 4 }}>{r.warn}</Text>
           )}
-        </View>
+        </Pressable>
       ))}
     </>
   );
@@ -135,7 +151,7 @@ function RowList({ rows }: { rows: LoadRow[] }) {
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v18';
+const VOICE_BUILD = 'v19';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -149,6 +165,20 @@ try {
 
 const fmtT = (d: Date) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 const kindLabel = (k: string) => k.toLowerCase().replace(/_/g, ' ');
+const agoLabel = (ms: number): string => {
+  const mins = Math.round((Date.now() - ms) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+};
+/** Leading yes/no words for hands-free confirmation of the pending card. */
+const yesNo = (t: string): 'yes' | 'no' | null => {
+  const w = t.trim().toLowerCase();
+  if (/^(yes|yeah|yep|yup|confirm|confirmed|correct|do it|go ahead|sure)\b/.test(w)) return 'yes';
+  if (/^(no|nope|cancel|stop|don'?t|do not|never ?mind|nevermind)\b/.test(w)) return 'no';
+  return null;
+};
 const shortDate = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 const dayLabel = (d: Date, end?: Date | null) => {
   if (end) return `${shortDate(d)} – ${shortDate(end)}`;
@@ -175,6 +205,10 @@ export default function VoiceScreen() {
 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [pending, setPending] = useState<Pending | null>(null);
+  // Mirrors for the once-subscribed native listeners / process closure:
+  // the pending ACTION card (voice yes/no) and the latest confirm().
+  const pendingActionRef = useRef<Pending | null>(null);
+  const confirmRef = useRef<() => Promise<void>>(async () => {});
   const [listening, setListening] = useState(false);
   const [partial, setPartial] = useState('');
   const [busy, setBusy] = useState(false);
@@ -231,6 +265,20 @@ export default function VoiceScreen() {
   const updateMessage = (id: number, text: string) =>
     setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, text } : msg)));
 
+  /** Tier 2 voice confirmation: show the card, speak the question, and
+   *  reopen the mic so "yes" / "cancel" completes it hands-free. The
+   *  buttons keep working; ambiguous speech falls through to normal
+   *  command parsing with the card still up. */
+  const propose = (p: Pending) => {
+    setPending(p);
+    pendingActionRef.current = p;
+    speakReply(`${p.label} Say yes to confirm, or cancel.`, true);
+  };
+  const clearPending = () => {
+    setPending(null);
+    pendingActionRef.current = null;
+  };
+
   // Fresh start: wipes the feed (which IS the conversational context sent
   // to the server), any pending confirm card, the clarify bridge, and any
   // speech in progress. The next utterance parses with zero context.
@@ -238,7 +286,7 @@ export default function VoiceScreen() {
     if (listening) Speech?.stop();
     SpeechSynth?.stop();
     setMessages([]);
-    setPending(null);
+    clearPending();
     setPartial('');
     pendingClarifyRef.current = null;
   };
@@ -277,7 +325,7 @@ export default function VoiceScreen() {
                   'agent',
                   `No loads match ${routeLabel} on ${dates.map(fmtDay).join(', ')}. Check the trip and contract numbers.`,
                 );
-              setPending({
+              propose({
                 kind: 'assignLoads',
                 loadIds: found.map((f) => f.loadId as string),
                 driverId: d._id,
@@ -285,6 +333,7 @@ export default function VoiceScreen() {
                 rows: found.map((f) => ({
                   load: displayLoadId(f.internalId),
                   date: f.firstStopDate,
+                  loadId: f.loadId as string,
                   tags: [
                     f.tripNumber ? `Trip ${f.tripNumber}` : null,
                     f.hcr ? `HCR ${f.hcr}` : null,
@@ -318,7 +367,7 @@ export default function VoiceScreen() {
           );
         const row = loadHit.match;
         const d = driverHit.match;
-        return setPending({
+        return propose({
           kind: 'assign',
           assignmentId: row._id,
           driverId: d._id,
@@ -338,7 +387,7 @@ export default function VoiceScreen() {
         if (!stop) return say('agent', `Every stop on ${displayLoadId(row.load?.internalId)} is already checked in.`);
         const begin = nextOccurrence(intent.time, new Date());
         const end = new Date(begin.getTime() + 30 * 60 * 1000);
-        return setPending({
+        return propose({
           kind: 'move',
           stopId: stop._id,
           beginISO: begin.toISOString(),
@@ -369,7 +418,7 @@ export default function VoiceScreen() {
             `There are ${open.length} open offers. Say "${verb.toLowerCase()} offer" plus the load number.`,
           );
         }
-        return setPending({
+        return propose({
           kind: intent.kind === 'accept_offer' ? 'accept' : 'decline',
           assignmentId: target._id,
           label: `${verb} the offer for ${displayLoadId(target.load?.internalId)}?`,
@@ -408,6 +457,7 @@ export default function VoiceScreen() {
             const rows: LoadRow[] = loads.map((l) => ({
               load: displayLoadId(l.internalId),
               when: l.firstStopTime ?? null,
+              loadId: l.loadId,
               tags: [
                 l.tripNumber ? `Trip ${l.tripNumber}` : null,
                 l.hcr ? `HCR ${l.hcr}` : null,
@@ -422,6 +472,72 @@ export default function VoiceScreen() {
               rows,
               speak: `${name} — ${loads.length} load${loads.length === 1 ? '' : 's'} ${label}: ${spoken}.`,
             });
+          } catch (e) {
+            say('agent', e instanceof Error ? e.message : 'Could not look that up.');
+          }
+        })();
+        return;
+      }
+      case 'call_driver': {
+        const hit = matchDriver(drivers ?? [], intent.driverQuery);
+        if (!hit) return say('agent', `I don't know a driver called “${intent.driverQuery}”.`);
+        if ('ambiguous' in hit)
+          return say(
+            'agent',
+            `Several drivers match: ${hit.ambiguous.map((d) => `${d.firstName} ${d.lastName}`).join(', ')}. Say the full name.`,
+          );
+        const d = hit.match;
+        if (!d.phone) return say('agent', `No phone number on file for ${d.firstName} ${d.lastName}.`);
+        say('agent', `Calling ${d.firstName} ${d.lastName}…`);
+        trackAction('voice_call_driver');
+        void Linking.openURL(`tel:${d.phone}`);
+        return;
+      }
+      case 'driver_location': {
+        const hit = matchDriver(drivers ?? [], intent.driverQuery);
+        if (!hit) return say('agent', `I don't know a driver called “${intent.driverQuery}”.`);
+        if ('ambiguous' in hit)
+          return say(
+            'agent',
+            `Several drivers match: ${hit.ambiguous.map((d) => `${d.firstName} ${d.lastName}`).join(', ')}. Say the full name.`,
+          );
+        const d = hit.match;
+        void (async () => {
+          try {
+            const detail = await convexClient.query(api.dispatchMobile.getDriverDetail, {
+              driverId: d._id,
+            });
+            if (!detail) return say('agent', `Couldn't load ${d.firstName}'s status.`);
+            const name = `${d.firstName} ${d.lastName}`;
+            const ping = detail.lastFixAt
+              ? `last ping ${agoLabel(detail.lastFixAt)}`
+              : 'no recent GPS data';
+            const cur = detail.currentLoad;
+            const rows: LoadRow[] = cur
+              ? [
+                  {
+                    load: displayLoadId(cur.internalId),
+                    when: null,
+                    tags: [
+                      cur.tripNumber ? `Trip ${cur.tripNumber}` : null,
+                      cur.hcr ? `HCR ${cur.hcr}` : null,
+                    ].filter((t): t is string => !!t),
+                    note: cur.customerName,
+                    warn: null,
+                    loadId: cur._id as string,
+                  },
+                ]
+              : [];
+            say(
+              'agent',
+              `${name} — ${ping} · ${detail.hosLabel}${cur ? '. Current load:' : '. No active load.'}`,
+              {
+                rows: rows.length ? rows : undefined,
+                speak: `${name}: ${ping}, ${detail.hosLabel}${
+                  cur ? `, on load ${displayLoadId(cur.internalId)}` : ', no active load'
+                }`,
+              },
+            );
           } catch (e) {
             say('agent', e instanceof Error ? e.message : 'Could not look that up.');
           }
@@ -460,7 +576,7 @@ export default function VoiceScreen() {
       default:
         return say(
           'agent',
-          'Try: “assign load 1001 to Marcus”, “move load 1001 to 3 pm”, “accept offer 1001”, “what loads did Marcus have yesterday / this week”, “what’s on the board”, or “any alerts”.',
+          'Try: “assign load 1001 to Marcus”, “move load 1001 to 3 pm”, “accept offer 1001”, “what loads did Marcus have yesterday / this week”, “what’s on the board”, “call Marcus”, “where’s Marcus”, or “any alerts”.',
         );
     }
   };
@@ -493,6 +609,23 @@ export default function VoiceScreen() {
     setPartial('');
     const uri = audioUriRef.current;
     const deviceTranscript = finalTranscriptRef.current.trim();
+
+    // Tier 2 voice confirmation: a leading yes/no while a confirm card
+    // is up completes it immediately — no server round-trip. Anything
+    // else falls through to normal parsing with the card still showing.
+    const action = pendingActionRef.current;
+    if (action && deviceTranscript) {
+      const verdict = yesNo(deviceTranscript);
+      if (verdict) {
+        say('you', deviceTranscript);
+        if (verdict === 'yes') void confirmRef.current();
+        else {
+          clearPending();
+          say('agent', 'Cancelled.');
+        }
+        return;
+      }
+    }
 
     const pending = pendingClarifyRef.current;
     // Silence handling: auto-opened sessions retry once silently, then
@@ -557,6 +690,15 @@ export default function VoiceScreen() {
         autoOpenedRef.current = false;
         if (shownId == null) say('you', transcript);
         else if (transcript !== deviceTranscript) updateMessage(shownId, transcript);
+        const act = pendingActionRef.current;
+        if (act) {
+          const verdict = yesNo(transcript);
+          if (verdict === 'yes') return void confirmRef.current();
+          if (verdict === 'no') {
+            clearPending();
+            return void say('agent', 'Cancelled.');
+          }
+        }
         return dispatchIntent(
           transcript,
           (res.intent as VoiceIntent | null) ??
@@ -709,10 +851,11 @@ export default function VoiceScreen() {
     } catch (e) {
       say('agent', e instanceof Error ? e.message : 'That didn’t work — try again.');
     } finally {
-      setPending(null);
+      clearPending();
       setBusy(false);
     }
   };
+  confirmRef.current = confirm;
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: 70 }}>
@@ -765,7 +908,7 @@ export default function VoiceScreen() {
           >
             {messages.length === 0 && (
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, textAlign: 'center', marginTop: 24, lineHeight: 22 }}>
-                Try:{'\n'}“Assign load 1001 to Marcus”{'\n'}“Move load 1001 to 3 pm”{'\n'}“Accept offer 1001”{'\n'}“What loads did Marcus have this week?”{'\n'}“What’s on the board?” · “Any alerts?”
+                Try:{'\n'}“Assign load 1001 to Marcus”{'\n'}“Move load 1001 to 3 pm”{'\n'}“Accept offer 1001”{'\n'}“What loads did Marcus have this week?”{'\n'}“Call Marcus” · “Where's Marcus?”{'\n'}“What’s on the board?” · “Any alerts?”
               </Text>
             )}
             {messages.map((m) => (
@@ -804,6 +947,7 @@ export default function VoiceScreen() {
                       warn: r.current
                         ? `Currently assigned to ${r.current} — confirming reassigns it.`
                         : null,
+                      loadId: r.loadId,
                     }))}
                   />
                 )}
@@ -821,7 +965,7 @@ export default function VoiceScreen() {
                   </Pressable>
                   <Pressable
                     disabled={busy}
-                    onPress={() => setPending(null)}
+                    onPress={clearPending}
                     style={{ flex: 1, alignItems: 'center', borderWidth: 1, borderColor: colors.border, paddingVertical: 10, borderRadius: borderRadius.md }}
                   >
                     <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, fontWeight: typography.semibold }}>Cancel</Text>

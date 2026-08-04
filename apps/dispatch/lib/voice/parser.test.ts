@@ -8,6 +8,16 @@ import {
 } from './parser';
 
 describe('parseCommand', () => {
+  it('call and where-is (Tier 2)', () => {
+    expect(parseCommand('call Jorge Romero')).toEqual({ kind: 'call_driver', driverQuery: 'Jorge Romero' });
+    expect(parseCommand('Phone driver Marcus')).toEqual({ kind: 'call_driver', driverQuery: 'Marcus' });
+    expect(parseCommand("where's Jorge")).toEqual({ kind: 'driver_location', driverQuery: 'Jorge' });
+    expect(parseCommand('where is Jorge Romero at?')).toEqual({
+      kind: 'driver_location',
+      driverQuery: 'Jorge Romero',
+    });
+  });
+
   it('assign variants', () => {
     expect(parseCommand('Assign load 1001 to Marcus Vega')).toEqual({
       kind: 'assign',
