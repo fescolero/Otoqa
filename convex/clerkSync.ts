@@ -327,8 +327,148 @@ export const syncSingleDriverToClerk = internalAction({
   },
 });
 
+// Type for backfill results
+type BackfillResults = {
+  total: number;
+  synced: number;
+  missing: number;
+  created: number;
+  failed: number;
+  errors: string[];
+};
+
+/**
+ * One-time backfill: stamp clerkSyncStatus on drivers created before sync
+ * tracking existed (they show "Not tracked" in the admin UI). For each
+ * untracked, non-deleted driver with a phone, this looks the phone up in
+ * Clerk and records:
+ *   - found            → synced (+ real Clerk user ID)
+ *   - not found        → failed ("not registered"), or — when createMissing
+ *                        is true — the Clerk user is created on the spot
+ *                        (with the normal retry/tracking behavior).
+ *
+ * Drivers that already have a clerkSyncStatus are never touched, so the
+ * action is safe to re-run. Run from the Convex dashboard:
+ *   clerkSync:backfillDriverClerkSyncStatus
+ *   { "createMissing": true }              // all orgs
+ *   { "organizationId": "...", ... }       // one org
+ * Logs are tagged [clerkSync.driver] backfill.
+ */
+export const backfillDriverClerkSyncStatus = internalAction({
+  args: {
+    organizationId: v.optional(v.string()),
+    createMissing: v.optional(v.boolean()),
+  },
+  returns: v.object({
+    total: v.number(),
+    synced: v.number(),
+    missing: v.number(),
+    created: v.number(),
+    failed: v.number(),
+    errors: v.array(v.string()),
+  }),
+  handler: async (ctx, args): Promise<BackfillResults> => {
+    const clerkSecretKey = process.env.CLERK_SECRET_KEY;
+    if (!clerkSecretKey) {
+      console.error('[clerkSync.driver] backfill aborted: CLERK_SECRET_KEY not configured');
+      return { total: 0, synced: 0, missing: 0, created: 0, failed: 1, errors: ['CLERK_SECRET_KEY not configured'] };
+    }
+
+    const drivers: DriverInfoWithId[] = await ctx.runQuery(
+      internal.clerkSyncHelpers.getDriversForBackfill,
+      { organizationId: args.organizationId }
+    );
+
+    const results: BackfillResults = {
+      total: drivers.length,
+      synced: 0,
+      missing: 0,
+      created: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    console.log('[clerkSync.driver] backfill started', {
+      organizationId: args.organizationId ?? 'ALL',
+      createMissing: args.createMissing ?? false,
+      untrackedDrivers: drivers.length,
+    });
+
+    for (const driver of drivers) {
+      const e164Phone = normalizePhoneToE164(driver.phone);
+      const label = `${driver.firstName} ${driver.lastName} (${maskPhone(e164Phone)})`;
+
+      let clerkUsers: Array<{ id: string }>;
+      try {
+        const lookupResponse = await fetch(
+          `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`,
+          { headers: { 'Authorization': `Bearer ${clerkSecretKey}` } }
+        );
+        if (!lookupResponse.ok) {
+          throw new Error(`Clerk lookup returned HTTP ${lookupResponse.status}`);
+        }
+        clerkUsers = (await lookupResponse.json()) as Array<{ id: string }>;
+      } catch (error) {
+        // Lookup failed — leave the driver untracked (unknown state) rather
+        // than stamping a status we can't stand behind; re-running the
+        // backfill will pick the driver up again.
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        results.failed++;
+        results.errors.push(`${label}: ${errorMessage}`);
+        console.error('[clerkSync.driver] backfill lookup failed', {
+          driverId: driver.driverId,
+          phone: maskPhone(e164Phone),
+          error: errorMessage,
+        });
+        continue;
+      }
+
+      if (clerkUsers.length > 0) {
+        await ctx.runMutation(internal.clerkSyncHelpers.recordDriverClerkSync, {
+          driverId: driver.driverId,
+          status: 'synced',
+          clerkUserId: clerkUsers[0].id,
+        });
+        results.synced++;
+        continue;
+      }
+
+      if (args.createMissing) {
+        const createResult: CreateResult = await ctx.runAction(
+          internal.clerkSync.createClerkUserForDriver,
+          {
+            phone: driver.phone,
+            firstName: driver.firstName,
+            lastName: driver.lastName,
+            driverId: driver.driverId,
+          }
+        );
+        if (createResult.success) {
+          results.created++;
+        } else {
+          // createClerkUserForDriver already recorded the failure and
+          // scheduled retries; just count it here.
+          results.failed++;
+          results.errors.push(`${label}: ${createResult.error}`);
+        }
+        continue;
+      }
+
+      await ctx.runMutation(internal.clerkSyncHelpers.recordDriverClerkSync, {
+        driverId: driver.driverId,
+        status: 'failed',
+        error: 'Not registered in Clerk — driver cannot sign in to the mobile app (found by backfill)',
+      });
+      results.missing++;
+    }
+
+    console.log('[clerkSync.driver] backfill finished', results);
+    return results;
+  },
+});
+
 // Type for update result
-type UpdateResult = 
+type UpdateResult =
   | { success: true; action: string }
   | { success: false; error: string };
 

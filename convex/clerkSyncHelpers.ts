@@ -66,6 +66,41 @@ export const getDriverById = internalQuery({
 });
 
 /**
+ * Get drivers whose Clerk sync status has never been recorded (drivers
+ * created before sync tracking existed). Used by the one-time backfill.
+ */
+export const getDriversForBackfill = internalQuery({
+  args: {
+    organizationId: v.optional(v.string()),
+  },
+  returns: v.array(
+    v.object({
+      driverId: v.id('drivers'),
+      phone: v.string(),
+      firstName: v.string(),
+      lastName: v.string(),
+    })
+  ),
+  handler: async (ctx, args) => {
+    const drivers = args.organizationId
+      ? await ctx.db
+          .query('drivers')
+          .withIndex('by_organization', (q) => q.eq('organizationId', args.organizationId!))
+          .collect()
+      : await ctx.db.query('drivers').collect();
+
+    return drivers
+      .filter((d) => !d.isDeleted && d.phone && d.clerkSyncStatus === undefined)
+      .map((d) => ({
+        driverId: d._id,
+        phone: d.phone,
+        firstName: d.firstName,
+        lastName: d.lastName,
+      }));
+  },
+});
+
+/**
  * Record the outcome of a driver Clerk sync attempt on the driver record.
  * Written by clerkSync.createClerkUserForDriver so admins can see (and the
  * driver page can surface) whether mobile sign-in is actually provisioned.
