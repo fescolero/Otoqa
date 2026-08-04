@@ -53,6 +53,7 @@ try {
 let SpeechSynth: {
   speak(text: string, opts?: { language?: string; onDone?: () => void; onError?: () => void }): void;
   stop(): void;
+  isSpeakingAsync?: () => Promise<boolean>;
 } | null = null;
 try {
   SpeechSynth = require('expo-speech');
@@ -151,7 +152,7 @@ function RowList({ rows }: { rows: LoadRow[] }) {
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v20';
+const VOICE_BUILD = 'v21';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -253,10 +254,29 @@ export default function VoiceScreen() {
           }
         : undefined;
       SpeechSynth.speak(text, { language: 'en-US', onDone: once, onError: once });
-      // Engine watchdog: some Android TTS engines go silent without ever
-      // firing callbacks — open the mic after the estimated speech
-      // duration anyway so hands-free confirmation survives a dead engine.
-      if (once) setTimeout(once, Math.min(2000 + text.length * 55, 9000));
+      // Engine watchdog: some Android TTS engines never fire callbacks.
+      // Instead of blindly opening the mic (which cut the spoken question
+      // short), poll isSpeakingAsync — re-arm while the engine is still
+      // talking, open the mic only once it's done or unresponsive.
+      if (once) {
+        let checks = 0;
+        const watchdog = () => {
+          if (fired) return;
+          const probe = SpeechSynth?.isSpeakingAsync?.();
+          if (probe && typeof probe.then === 'function') {
+            probe
+              .then((speaking) => {
+                if (fired) return;
+                if (speaking && checks < 8) {
+                  checks++;
+                  setTimeout(watchdog, 1200);
+                } else once?.();
+              })
+              .catch(() => once?.());
+          } else once?.();
+        };
+        setTimeout(watchdog, Math.min(2000 + text.length * 55, 9000));
+      }
     } else if (after) {
       setTimeout(after, 600);
     }
@@ -614,6 +634,17 @@ export default function VoiceScreen() {
   const autoRetriedRef = useRef(false);
   const audioUriRef = useRef<string | null>(null);
   const finalTranscriptRef = useRef('');
+  // App-side endpointing (Perplexity-style): the OS recognizer's ~0.5s
+  // endpointer is far too eager for dispatch commands, so we run the
+  // session in continuous mode and end the turn ourselves — after a
+  // comfortable silence hold once the user HAS spoken, or a generous
+  // no-speech window when they haven't started yet.
+  const segmentsRef = useRef<string[]>([]);
+  const partialRef = useRef('');
+  const lastActivityRef = useRef(0);
+  const sessionStartRef = useRef(0);
+  const listeningRef = useRef(false);
+  const endpointTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const endedRef = useRef(false);
   const processedRef = useRef(true);
 
@@ -742,8 +773,22 @@ export default function VoiceScreen() {
     const subs = [
       Speech.addListener('result', (e: { results?: { transcript: string }[]; isFinal?: boolean }) => {
         const tr = e.results?.[0]?.transcript ?? '';
-        if (e.isFinal) finalTranscriptRef.current = tr;
-        else setPartial(tr);
+        lastActivityRef.current = Date.now();
+        if (e.isFinal) {
+          const t = tr.trim();
+          if (t) {
+            // Continuous sessions may emit cumulative or per-segment
+            // finals depending on the engine — collapse cumulative ones.
+            const joined = segmentsRef.current.join(' ').trim();
+            if (joined && t.startsWith(joined)) segmentsRef.current = [t];
+            else segmentsRef.current.push(t);
+          }
+          partialRef.current = '';
+          setPartial(segmentsRef.current.join(' '));
+        } else {
+          partialRef.current = tr;
+          setPartial(`${segmentsRef.current.join(' ')} ${tr}`.trim());
+        }
       }),
       Speech.addListener('audioend', (e: { uri?: string | null }) => {
         audioUriRef.current = e.uri ?? null;
@@ -752,6 +797,12 @@ export default function VoiceScreen() {
       }),
       Speech.addListener('end', () => {
         setListening(false);
+        listeningRef.current = false;
+        if (endpointTimerRef.current) {
+          clearInterval(endpointTimerRef.current);
+          endpointTimerRef.current = null;
+        }
+        finalTranscriptRef.current = `${segmentsRef.current.join(' ')} ${partialRef.current}`.trim();
         endedRef.current = true;
         if (audioUriRef.current) {
           void processRef.current();
@@ -762,6 +813,11 @@ export default function VoiceScreen() {
       }),
       Speech.addListener('error', (e: { error?: string; message?: string }) => {
         setListening(false);
+        listeningRef.current = false;
+        if (endpointTimerRef.current) {
+          clearInterval(endpointTimerRef.current);
+          endpointTimerRef.current = null;
+        }
         setPartial('');
         if (e.error === 'no-speech' && autoOpenedRef.current && !autoRetriedRef.current) {
           // Auto-opened mic heard nothing (OS closed it) — one quiet reopen.
@@ -791,17 +847,47 @@ export default function VoiceScreen() {
     setPartial('');
     audioUriRef.current = null;
     finalTranscriptRef.current = '';
+    segmentsRef.current = [];
+    partialRef.current = '';
     endedRef.current = false;
     processedRef.current = false;
+    sessionStartRef.current = Date.now();
+    lastActivityRef.current = Date.now();
     setListening(true);
+    listeningRef.current = true;
     Speech.start({
       lang: 'en-US',
       interimResults: true,
-      continuous: false,
+      // Continuous: the OS never unilaterally closes the mic; the
+      // endpoint loop below decides when the turn is over.
+      continuous: true,
+      androidIntentOptions: {
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 2000,
+        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 2000,
+      },
       // Persist the session audio for the server pipeline (wav on
       // Android, caf on iOS; int16 keeps the upload small).
       recordingOptions: { persist: true, outputEncoding: 'pcmFormatInt16', outputSampleRate: 16000 },
     });
+    // App-side endpointing: silence hold after speech, patience before it.
+    const SILENCE_HOLD_MS = 1800;
+    const NO_SPEECH_WAIT_MS = autoOpenedRef.current ? 9000 : 15000;
+    const HARD_CAP_MS = 45000;
+    if (endpointTimerRef.current) clearInterval(endpointTimerRef.current);
+    endpointTimerRef.current = setInterval(() => {
+      if (!listeningRef.current) return;
+      const now = Date.now();
+      const spoken = segmentsRef.current.length > 0 || partialRef.current.trim().length > 0;
+      const idle = now - lastActivityRef.current;
+      const elapsed = now - sessionStartRef.current;
+      if (
+        elapsed > HARD_CAP_MS ||
+        (spoken && idle > SILENCE_HOLD_MS) ||
+        (!spoken && elapsed > NO_SPEECH_WAIT_MS)
+      ) {
+        Speech?.stop();
+      }
+    }, 300);
   };
   // Latest closure for auto-relisten callbacks (TTS onDone fires from an
   // older render's closure).
