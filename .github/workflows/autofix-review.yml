@@ -46,6 +46,10 @@ jobs:
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           safety-strategy: read-only
+          # Autofix PRs are opened by the Claude GitHub App bot; codex-action
+          # rejects bot-triggered runs unless allow-listed.
+          allow-bots: true
+          allow-bot-users: claude
           prompt: |
             You are an INDEPENDENT reviewer of an AI-authored bug-fix PR in
             this repo (Next.js web app at root, Expo apps in apps/driver and
