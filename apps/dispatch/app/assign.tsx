@@ -62,6 +62,18 @@ export default function AssignScreen() {
                 {item.milesFromPickup != null ? `${item.milesFromPickup} mi from pickup · ` : ''}
                 {item.activeLoads} active load{item.activeLoads === 1 ? '' : 's'}
               </Text>
+              <Text
+                style={{
+                  color:
+                    item.hos.onShift && (item.hos.windowRemainingHours ?? 14) < 3
+                      ? colors.warning
+                      : colors.foregroundMuted,
+                  fontSize: typography.xs,
+                  marginTop: 3,
+                }}
+              >
+                {item.hosLabel}
+              </Text>
               {item.warns.length > 0 && (
                 <Text style={{ color: colors.warning, fontSize: typography.xs, marginTop: 4 }}>
                   {item.warns.join(' · ')}

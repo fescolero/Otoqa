@@ -161,6 +161,31 @@ export default function DriverDetailScreen() {
           </Text>
         )}
 
+        {/* HOS estimate (D11) — session-derived, always labeled (est). */}
+        <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14, marginBottom: 12 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Ionicons
+              name="time-outline"
+              size={18}
+              color={
+                driver.hos.onShift && (driver.hos.windowRemainingHours ?? 14) < 3
+                  ? colors.warning
+                  : colors.primary
+              }
+            />
+            <Text style={{ flex: 1, color: colors.foreground, fontSize: typography.sm, fontWeight: typography.semibold }}>
+              {driver.hosLabel}
+            </Text>
+          </View>
+          <Text style={{ color: driver.hos.cycleRemainingHours < 5 ? colors.warning : colors.foregroundMuted, fontSize: typography.xs, marginTop: 5 }}>
+            {driver.hos.cycleUsedHours}h of 70h used in the last 8 days · ~
+            {driver.hos.cycleRemainingHours}h left (est)
+          </Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: typography.xs, marginTop: 5, lineHeight: 16 }}>
+            Estimated from shift sessions — not an ELD record.
+          </Text>
+        </View>
+
         {driver.currentLoad && (
           <LoadRow
             title="Current load"

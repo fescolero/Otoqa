@@ -8,6 +8,7 @@ import {
 } from './lib/auth';
 import { isPermitted } from './lib/permissions';
 import { getLoadFacets, findLoadIdsByFacets } from './lib/loadFacets';
+import { estimateHos, hosChipLabel, HOS_CYCLE_DAYS, type HosEstimate } from './lib/hos';
 import { internal } from './_generated/api';
 import { carrierStatementsForOrg, carrierStatementDetailsForOrg } from './mobileSettlements';
 import { logAudit } from './lib/audit';
@@ -239,6 +240,34 @@ async function latestLocation(ctx: QueryCtx, driverId: Id<'drivers'>) {
     .withIndex('by_driver_time', (q) => q.eq('driverId', driverId))
     .order('desc')
     .first();
+}
+
+/** Session-derived HOS estimate (D11): trailing-8-day sessions via the
+ *  by_driver_started index, plus the live session (which may predate the
+ *  window). Pure math lives in lib/hos.ts. */
+async function hosForDriver(ctx: QueryCtx, driverId: Id<'drivers'>): Promise<HosEstimate> {
+  const cutoff = Date.now() - HOS_CYCLE_DAYS * 86_400_000;
+  const recent = await ctx.db
+    .query('driverSessions')
+    .withIndex('by_driver_started', (q) => q.eq('driverId', driverId).gte('startedAt', cutoff))
+    .collect();
+  const active = await ctx.db
+    .query('driverSessions')
+    .withIndex('by_driver_status', (q) => q.eq('driverId', driverId).eq('status', 'active'))
+    .collect();
+  const seen = new Set<string>();
+  const sessions = [];
+  for (const s of [...recent, ...active]) {
+    if (seen.has(s._id as string)) continue;
+    seen.add(s._id as string);
+    sessions.push({
+      startedAt: s.startedAt,
+      endedAt: s.endedAt ?? null,
+      totalActiveMinutes: s.totalActiveMinutes ?? null,
+      status: s.status,
+    });
+  }
+  return estimateHos(sessions, Date.now());
 }
 
 async function assignmentsByStatus(
@@ -772,15 +801,25 @@ async function rankDriversForOrigin(
         const activeCount = inProgress.filter((a) => a.assignedDriverId === d._id).length;
         const mi =
           origin && loc ? milesBetween(loc.latitude, loc.longitude, origin.lat, origin.lng) : null;
+        const hos = await hosForDriver(ctx, d._id);
         const warns: string[] = [];
         if (activeCount > 0) warns.push(`On ${activeCount} active load${activeCount > 1 ? 's' : ''}`);
         if (!loc) warns.push('No GPS data');
         else if (loc.recordedAt < staleCutoff) warns.push('Ping older than 45 min');
         if (mi != null && mi > 60) warns.push(`${mi} mi deadhead`);
+        // HOS estimate warnings (D11) — ranked with warnings, never hidden.
+        if (hos.onShift && hos.windowRemainingHours != null && hos.windowRemainingHours < 3) {
+          warns.push(`~${hos.windowRemainingHours}h left in 14h window (est)`);
+        }
+        if (hos.cycleRemainingHours < 5) {
+          warns.push(`~${hos.cycleRemainingHours}h left in 70h cycle (est)`);
+        }
         let score = 100 + (activeCount === 0 ? 22 : -7 * activeCount);
         if (mi != null) score -= mi * 0.9;
         if (!loc) score -= 25;
         else if (loc.recordedAt < staleCutoff) score -= 15;
+        if (hos.onShift && hos.windowRemainingHours != null && hos.windowRemainingHours < 3) score -= 12;
+        if (hos.cycleRemainingHours < 5) score -= 12;
         return {
           _id: d._id,
           firstName: d.firstName,
@@ -789,6 +828,8 @@ async function rankDriversForOrigin(
           milesFromPickup: mi,
           activeLoads: activeCount,
           lastPingAt: loc?.recordedAt ?? null,
+          hos,
+          hosLabel: hosChipLabel(hos),
           warns,
           score,
         };
@@ -1448,6 +1489,7 @@ export const getDriverDetail = query({
       pendingLegs.sort(
         (a, b) => (a.scheduledStartMs ?? Infinity) - (b.scheduledStartMs ?? Infinity),
       )[0] ?? null;
+    const hos = await hosForDriver(ctx, driver._id);
 
     return {
       _id: driver._id,
@@ -1466,6 +1508,8 @@ export const getDriverDetail = query({
       lastFixAt: location?.recordedAt ?? null,
       currentLoad: activeLegs[0] ? await lightLoadOf(activeLegs[0].loadId) : null,
       nextLoad: nextPending ? await lightLoadOf(nextPending.loadId) : null,
+      hos,
+      hosLabel: hosChipLabel(hos),
     };
   },
 });
