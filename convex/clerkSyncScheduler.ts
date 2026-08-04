@@ -40,6 +40,12 @@ export type CreateClerkUserForDriverArgs = {
   phone: string;
   firstName: string;
   lastName: string;
+  /**
+   * When provided, the sync outcome (synced/failed + Clerk user ID + error)
+   * is persisted on this driver record and failures are retried with
+   * backoff. Always pass it when a driver record exists.
+   */
+  driverId?: Id<'drivers'>;
 };
 
 /**
@@ -64,6 +70,12 @@ export type UpdateClerkUserPhoneArgs = {
   lastName: string;
   targetClerkUserId?: string;
   organizationId?: Id<'organizations'>;
+  /**
+   * When provided, the outcome is persisted on this driver record (via the
+   * tracked updateClerkUserPhoneForDriver wrapper). Always pass it when a
+   * driver record exists.
+   */
+  driverId?: Id<'drivers'>;
 };
 
 /**
@@ -74,10 +86,18 @@ export function scheduleUpdateClerkUserPhone(
   ctx: SchedulerCtx,
   args: UpdateClerkUserPhoneArgs
 ): Promise<unknown> {
+  const { driverId, ...updateArgs } = args;
+  if (driverId) {
+    return ctx.scheduler.runAfter(
+      0,
+      internal.clerkSync.updateClerkUserPhoneForDriver,
+      { driverId, ...updateArgs }
+    );
+  }
   return ctx.scheduler.runAfter(
     0,
     internal.clerkSync.updateClerkUserPhone,
-    args
+    updateArgs
   );
 }
 

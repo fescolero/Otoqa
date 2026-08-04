@@ -732,6 +732,17 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
 
+    // Clerk mobile-auth sync tracking. The Clerk user is created by a
+    // fire-and-forget scheduled action, so the outcome must be persisted
+    // here — otherwise a failed sync is invisible and the driver gets
+    // "Not Registered" at mobile sign-in with no admin-facing signal.
+    clerkUserId: v.optional(v.string()),
+    clerkSyncStatus: v.optional(
+      v.union(v.literal('pending'), v.literal('synced'), v.literal('failed'))
+    ),
+    clerkSyncError: v.optional(v.string()),
+    clerkSyncedAt: v.optional(v.number()),
+
     // Soft Delete
     isDeleted: v.optional(v.boolean()),
     deletedAt: v.optional(v.number()),
