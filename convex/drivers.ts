@@ -225,6 +225,7 @@ export const create = mutation({
     // Insert non-sensitive data into drivers table
     const driverId = await ctx.db.insert('drivers', {
       ...nonSensitiveData,
+      clerkSyncStatus: 'pending',
       createdAt: now,
       updatedAt: now,
     });
@@ -292,6 +293,7 @@ export const create = mutation({
 
     // Create Clerk user for mobile app authentication (async, non-blocking)
     scheduleCreateClerkUserForDriver(ctx, {
+      driverId,
       phone: args.phone,
       firstName: args.firstName,
       lastName: args.lastName,
@@ -457,7 +459,9 @@ export const update = mutation({
 
     // If phone number changed, update Clerk user (async, non-blocking)
     if (updates.phone && updates.phone !== driver.phone) {
+      await ctx.db.patch(id, { clerkSyncStatus: 'pending' });
       scheduleUpdateClerkUserPhone(ctx, {
+        driverId: id,
         oldPhone: driver.phone,
         newPhone: updates.phone,
         firstName: updates.firstName || driver.firstName,
@@ -515,6 +519,60 @@ export const update = mutation({
     }
 
     return id;
+  },
+});
+
+// Manually re-run Clerk mobile-auth provisioning for a driver. Used by the
+// "Resync to Clerk" button on the admin driver page when a driver reports
+// "Not Registered" at mobile sign-in (i.e. no Clerk user exists for their
+// phone). Safe to run repeatedly — the sync treats an already-existing
+// Clerk user as success.
+export const resyncToClerk = mutation({
+  args: {
+    id: v.id('drivers'),
+    userId: v.optional(v.string()),
+    userName: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { orgId: callerOrgId, userId, userName, userEmail } = await requireCallerIdentity(ctx);
+    const driver = await ctx.db.get(args.id);
+    if (!driver) throw new Error('Driver not found');
+    if (driver.organizationId !== callerOrgId) {
+      throw new Error('Driver not found');
+    }
+    if (driver.isDeleted) throw new Error('Cannot sync a deleted driver');
+    if (!driver.phone) throw new Error('Driver has no phone number');
+
+    await ctx.db.patch(args.id, {
+      clerkSyncStatus: 'pending',
+      clerkSyncError: undefined,
+    });
+
+    console.log('[clerkSync.driver] manual resync requested', {
+      driverId: args.id,
+      requestedBy: userId,
+    });
+
+    await logAudit(ctx, {
+      organizationId: driver.organizationId,
+      entityType: 'driver',
+      entityId: args.id,
+      entityName: `${driver.firstName} ${driver.lastName}`,
+      action: 'updated',
+      performedBy: userId,
+      performedByName: userName,
+      performedByEmail: userEmail,
+      description: `Requested Clerk mobile-auth resync for ${driver.firstName} ${driver.lastName}`,
+    });
+
+    scheduleCreateClerkUserForDriver(ctx, {
+      driverId: args.id,
+      phone: driver.phone,
+      firstName: driver.firstName,
+      lastName: driver.lastName,
+    });
+
+    return args.id;
   },
 });
 

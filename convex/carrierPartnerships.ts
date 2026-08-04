@@ -4,6 +4,7 @@ import { Id } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
 import {
+  scheduleCreateClerkUserForDriver,
   scheduleSyncCarrierOwnerToClerk,
   scheduleUpdateClerkUserPhone,
   scheduleDeleteClerkUser,
@@ -777,18 +778,20 @@ export const update = mutation({
 
           if (!existingDriver) {
             // Create new driver record
+            const driverFirstName =
+              (updates.ownerDriverFirstName as string) ||
+              partnership.ownerDriverFirstName ||
+              partnership.contactFirstName ||
+              'Owner';
+            const driverLastName =
+              (updates.ownerDriverLastName as string) ||
+              partnership.ownerDriverLastName ||
+              partnership.contactLastName ||
+              'Operator';
             const driverId = await ctx.db.insert('drivers', {
               organizationId: carrierOrgId,
-              firstName:
-                (updates.ownerDriverFirstName as string) ||
-                partnership.ownerDriverFirstName ||
-                partnership.contactFirstName ||
-                'Owner',
-              lastName:
-                (updates.ownerDriverLastName as string) ||
-                partnership.ownerDriverLastName ||
-                partnership.contactLastName ||
-                'Operator',
+              firstName: driverFirstName,
+              lastName: driverLastName,
               email:
                 (updates.ownerDriverEmail as string) || partnership.ownerDriverEmail || partnership.contactEmail || '',
               phone: driverPhone,
@@ -806,6 +809,7 @@ export const update = mutation({
               hireDate: new Date().toISOString().split('T')[0],
               createdBy: 'system',
               isDeleted: false,
+              clerkSyncStatus: 'pending',
               createdAt: now,
               updatedAt: now,
             });
@@ -815,6 +819,16 @@ export const update = mutation({
               ownerDriverId: driverId,
               isOwnerOperator: true,
               updatedAt: now,
+            });
+
+            // Provision Clerk mobile auth for the owner-operator driver.
+            // Without this the driver record exists but the phone is never
+            // registered in Clerk → "Not Registered" at mobile sign-in.
+            await scheduleCreateClerkUserForDriver(ctx, {
+              driverId,
+              phone: driverPhone,
+              firstName: driverFirstName,
+              lastName: driverLastName,
             });
           } else {
             // Link existing driver to organization
@@ -892,6 +906,7 @@ export const update = mutation({
             });
 
             await scheduleUpdateClerkUserPhone(ctx, {
+              driverId: ownerDriver._id,
               oldPhone: ownerDriver.phone,
               newPhone: nextOwnerPhone,
               firstName: (updates.ownerDriverFirstName as string) || ownerDriver.firstName,
@@ -1055,12 +1070,15 @@ export const updateStatus = mutation({
 
           if (!existingDriver) {
             // Create new driver record for owner-operator
+            const driverFirstName = partnership.ownerDriverFirstName || partnership.contactFirstName || 'Owner';
+            const driverLastName = partnership.ownerDriverLastName || partnership.contactLastName || 'Operator';
+            const driverPhone = partnership.ownerDriverPhone || phone;
             const driverId = await ctx.db.insert('drivers', {
               organizationId: newCarrierOrgId,
-              firstName: partnership.ownerDriverFirstName || partnership.contactFirstName || 'Owner',
-              lastName: partnership.ownerDriverLastName || partnership.contactLastName || 'Operator',
+              firstName: driverFirstName,
+              lastName: driverLastName,
               email: partnership.ownerDriverEmail || partnership.contactEmail || '',
-              phone: partnership.ownerDriverPhone || phone,
+              phone: driverPhone,
               dateOfBirth: partnership.ownerDriverDOB,
               employmentStatus: 'Active',
               employmentType: 'Owner-Operator',
@@ -1071,6 +1089,7 @@ export const updateStatus = mutation({
               hireDate: new Date().toISOString().split('T')[0],
               createdBy: 'system',
               isDeleted: false,
+              clerkSyncStatus: 'pending',
               createdAt: now,
               updatedAt: now,
             });
@@ -1080,6 +1099,17 @@ export const updateStatus = mutation({
               ownerDriverId: driverId,
               isOwnerOperator: true,
               updatedAt: now,
+            });
+
+            // Provision Clerk mobile auth for the owner-operator driver.
+            // The carrier-owner sync above covers `phone`, but the driver
+            // record may use ownerDriverPhone, which can differ — sync the
+            // driver's own phone so mobile sign-in works either way.
+            await scheduleCreateClerkUserForDriver(ctx, {
+              driverId,
+              phone: driverPhone,
+              firstName: driverFirstName,
+              lastName: driverLastName,
             });
           } else {
             // Link existing driver to organization
@@ -1266,10 +1296,12 @@ export const createOwnerDriverRecord = mutation({
       driverId = existingDriver._id;
     } else {
       // Create new driver record
+      const driverFirstName = partnership.ownerDriverFirstName || partnership.contactFirstName || 'Owner';
+      const driverLastName = partnership.ownerDriverLastName || partnership.contactLastName || 'Operator';
       driverId = await ctx.db.insert('drivers', {
         organizationId: partnership.carrierOrgId as Id<'organizations'>,
-        firstName: partnership.ownerDriverFirstName || partnership.contactFirstName || 'Owner',
-        lastName: partnership.ownerDriverLastName || partnership.contactLastName || 'Operator',
+        firstName: driverFirstName,
+        lastName: driverLastName,
         email: partnership.ownerDriverEmail || partnership.contactEmail || '',
         phone: phone,
         dateOfBirth: partnership.ownerDriverDOB,
@@ -1282,8 +1314,18 @@ export const createOwnerDriverRecord = mutation({
         hireDate: new Date().toISOString().split('T')[0],
         createdBy: 'system',
         isDeleted: false,
+        clerkSyncStatus: 'pending',
         createdAt: now,
         updatedAt: now,
+      });
+
+      // Provision Clerk mobile auth for the owner-operator driver so the
+      // repaired record can actually sign in to the mobile app.
+      await scheduleCreateClerkUserForDriver(ctx, {
+        driverId,
+        phone,
+        firstName: driverFirstName,
+        lastName: driverLastName,
       });
     }
 

@@ -128,9 +128,11 @@ export default function DriverDetailPage() {
   const restoreDriver = useMutation(api.drivers.restore);
   const permanentDeleteDriver = useMutation(api.drivers.permanentDelete);
   const updateDriver = useMutation(api.drivers.update);
+  const resyncDriverToClerk = useMutation(api.drivers.resyncToClerk);
 
   const [showDeleteDialog, setShowDeleteDialog] = React.useState(false);
   const [isDeleting, setIsDeleting] = React.useState(false);
+  const [isResyncing, setIsResyncing] = React.useState(false);
   // Controlled active section id so the AttentionBand can navigate.
   const [activeSection, setActiveSection] = React.useState('overview');
 
@@ -179,6 +181,23 @@ export default function DriverDetailPage() {
       toast.error('Failed to restore driver');
     }
   };
+  // Re-run Clerk mobile-auth provisioning. The button lives on the Profile
+  // tab's "Mobile app access" card; the sync runs async, so the status chip
+  // flips from Pending once the scheduled action reports back.
+  const onResyncClerk = async () => {
+    if (!user) return;
+    setIsResyncing(true);
+    try {
+      await resyncDriverToClerk({ id: driverId, userId: user.id, userName });
+      toast.success('Clerk resync started — status updates shortly');
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to start Clerk resync');
+    } finally {
+      setIsResyncing(false);
+    }
+  };
+
   const onPermanentDelete = async () => {
     if (!user) return;
     setIsDeleting(true);
@@ -680,6 +699,14 @@ export default function DriverDetailPage() {
     attentionItems.push({ tone: 'crit', icon: 'alert', tab: 'documents', title: 'Medical card expired', detail: formatDate(driver.medicalExpiration) });
   else if (medicalStatus === 'expiring')
     attentionItems.push({ tone: 'warn', icon: 'alert', tab: 'documents', title: 'Medical card expiring soon', detail: formatDate(driver.medicalExpiration) });
+  if (driver.clerkSyncStatus === 'failed')
+    attentionItems.push({
+      tone: 'crit',
+      icon: 'alert',
+      tab: 'profile',
+      title: 'Mobile sign-in not provisioned',
+      detail: 'Clerk sync failed — driver will see "Not Registered". Resync from Profile.',
+    });
 
   const docsAttention = countAttention({
     _id: driver._id,
@@ -839,6 +866,57 @@ export default function DriverDetailPage() {
     </div>
   );
 
+  // Mobile app access — surfaces whether the driver's phone is actually
+  // registered in Clerk (the mobile app's auth provider). A driver whose
+  // sync failed sees "Not Registered" at mobile sign-in; the Resync button
+  // re-runs provisioning for exactly that case.
+  const clerkStatus = driver.clerkSyncStatus;
+  const clerkChip =
+    clerkStatus === 'synced' ? (
+      <Chip status="valid" label="Registered" />
+    ) : clerkStatus === 'pending' ? (
+      <Chip status="pending" label="Sync pending" />
+    ) : clerkStatus === 'failed' ? (
+      <Chip status="danger" label="Sync failed" />
+    ) : (
+      <Chip status="na" label="Not tracked" />
+    );
+  const mobileAccessRow = (label: string, value: React.ReactNode) => (
+    <div className="flex items-center justify-between gap-3 py-1.5">
+      <span className="text-[12px] text-[var(--text-tertiary)] shrink-0">{label}</span>
+      <span className="text-[12.5px] text-foreground text-right min-w-0 truncate">{value}</span>
+    </div>
+  );
+  const mobileAccessContent = (
+    <div className="flex flex-col">
+      {mobileAccessRow('Sign-in status', clerkChip)}
+      {mobileAccessRow('Phone', driver.phone ? formatPhoneNumber(driver.phone) : '—')}
+      {mobileAccessRow(
+        'Clerk user',
+        driver.clerkUserId ? <span className="num">{driver.clerkUserId}</span> : '—',
+      )}
+      {mobileAccessRow(
+        'Last synced',
+        driver.clerkSyncedAt ? (
+          <span className="num">{new Date(driver.clerkSyncedAt).toLocaleString()}</span>
+        ) : (
+          '—'
+        ),
+      )}
+      {clerkStatus === 'failed' && driver.clerkSyncError && (
+        <p className="m-0 mt-1.5 text-[12px] leading-[17px] text-[#B43030]">
+          {driver.clerkSyncError}
+        </p>
+      )}
+      {(clerkStatus === 'failed' || clerkStatus === undefined) && (
+        <p className="m-0 mt-1.5 text-[12px] leading-[17px] text-[var(--text-tertiary)]">
+          If the driver sees &ldquo;Not Registered&rdquo; when signing in to the mobile app,
+          run Resync to re-provision their phone number.
+        </p>
+      )}
+    </div>
+  );
+
   // Profile tab — deep reference data, edited inline. Every previously-
   // Overview field lives here.
   const profileContent = (
@@ -854,6 +932,16 @@ export default function DriverDetailPage() {
       </DSCard>
       <DSCard title="Emergency contact">
         <DSPropsEditable items={emergencyItems} onCommit={commitField} />
+      </DSCard>
+      <DSCard
+        title="Mobile app access"
+        action={
+          <WBtn size="sm" onClick={onResyncClerk} disabled={isResyncing || driver.isDeleted}>
+            {isResyncing ? 'Resyncing…' : 'Resync to Clerk'}
+          </WBtn>
+        }
+      >
+        {mobileAccessContent}
       </DSCard>
     </div>
   );

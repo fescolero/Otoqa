@@ -3,6 +3,7 @@
 import { v } from 'convex/values';
 import { internalAction } from './_generated/server';
 import { internal } from './_generated/api';
+import type { Id } from './_generated/dataModel';
 
 /**
  * Normalize phone number to E.164 format for Clerk
@@ -36,20 +37,45 @@ type DriverInfo = {
   lastName: string;
 };
 
+// Driver info with record ID, from getDriversForSync
+type DriverInfoWithId = DriverInfo & { driverId: Id<'drivers'> };
+
 // Type for create result
 type CreateResult = 
   | { success: true; clerkUserId: string }
   | { success: false; error: string };
 
 /**
+ * Retry schedule for failed driver Clerk syncs: 30s, 5min, 30min after the
+ * failing attempt. Retries only run when a driverId is provided (so the
+ * outcome can be tracked on the driver record) — attempt 1 is the initial
+ * scheduled call, attempts 2..MAX_DRIVER_SYNC_ATTEMPTS are retries.
+ */
+const DRIVER_SYNC_RETRY_DELAYS_MS = [30_000, 5 * 60_000, 30 * 60_000];
+const MAX_DRIVER_SYNC_ATTEMPTS = DRIVER_SYNC_RETRY_DELAYS_MS.length + 1;
+
+/** Mask a phone for logs: keep last 4 digits. */
+function maskPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return `***${digits.slice(-4)}`;
+}
+
+/**
  * Create a Clerk user for a driver
  * Called automatically when a new driver is created
+ *
+ * When `driverId` is provided, the outcome (synced/failed + Clerk user ID +
+ * error) is persisted on the driver record, and failures are retried with
+ * backoff. All log lines carry the `[clerkSync.driver]` tag so they can be
+ * found in the Convex logs.
  */
 export const createClerkUserForDriver = internalAction({
   args: {
     phone: v.string(),
     firstName: v.string(),
     lastName: v.string(),
+    driverId: v.optional(v.id('drivers')),
+    attempt: v.optional(v.number()),
   },
   returns: v.union(
     v.object({
@@ -62,15 +88,68 @@ export const createClerkUserForDriver = internalAction({
     })
   ),
   handler: async (ctx, args): Promise<CreateResult> => {
+    const attempt = args.attempt ?? 1;
+
+    const recordOutcome = async (
+      status: 'synced' | 'failed',
+      clerkUserId?: string,
+      error?: string
+    ) => {
+      if (!args.driverId) return;
+      await ctx.runMutation(internal.clerkSyncHelpers.recordDriverClerkSync, {
+        driverId: args.driverId,
+        status,
+        clerkUserId,
+        error,
+      });
+    };
+
+    const failWithRetry = async (errorMessage: string): Promise<CreateResult> => {
+      await recordOutcome('failed', undefined, errorMessage);
+      if (args.driverId && attempt < MAX_DRIVER_SYNC_ATTEMPTS) {
+        const delayMs = DRIVER_SYNC_RETRY_DELAYS_MS[attempt - 1];
+        console.log('[clerkSync.driver] scheduling retry', {
+          driverId: args.driverId,
+          phone: maskPhone(args.phone),
+          attempt,
+          nextAttempt: attempt + 1,
+          delayMs,
+          error: errorMessage,
+        });
+        await ctx.scheduler.runAfter(delayMs, internal.clerkSync.createClerkUserForDriver, {
+          phone: args.phone,
+          firstName: args.firstName,
+          lastName: args.lastName,
+          driverId: args.driverId,
+          attempt: attempt + 1,
+        });
+      } else if (args.driverId) {
+        console.error('[clerkSync.driver] giving up after max attempts', {
+          driverId: args.driverId,
+          phone: maskPhone(args.phone),
+          attempt,
+          error: errorMessage,
+        });
+      }
+      return { success: false, error: errorMessage };
+    };
+
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) {
-      console.error('CLERK_SECRET_KEY not configured - driver will not be able to sign in to mobile app');
+      console.error('[clerkSync.driver] CLERK_SECRET_KEY not configured - driver will not be able to sign in to mobile app');
+      // No retry: this is a deployment config problem, retrying won't fix it.
+      await recordOutcome('failed', undefined, 'CLERK_SECRET_KEY not configured');
       return { success: false, error: 'CLERK_SECRET_KEY not configured' };
     }
 
     // Convert phone to E.164 format for Clerk
     const e164Phone = normalizePhoneToE164(args.phone);
-    console.log(`Creating Clerk user for driver: ${args.firstName} ${args.lastName}`);
+    console.log('[clerkSync.driver] create attempt', {
+      driverId: args.driverId ?? null,
+      phone: maskPhone(e164Phone),
+      name: `${args.firstName} ${args.lastName}`,
+      attempt,
+    });
 
     try {
       const response = await fetch('https://api.clerk.com/v1/users', {
@@ -92,21 +171,58 @@ export const createClerkUserForDriver = internalAction({
       if (!response.ok) {
         // Check if user already exists (this is fine)
         if (responseData.errors?.[0]?.code === 'form_identifier_exists') {
-          console.log(`Clerk user already exists for this phone number`);
-          return { success: true, clerkUserId: 'existing' };
+          // Resolve the actual Clerk user ID so the driver record stores a
+          // real ID instead of the 'existing' sentinel.
+          let existingId = 'existing';
+          try {
+            const lookupResponse = await fetch(
+              `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`,
+              { headers: { 'Authorization': `Bearer ${clerkSecretKey}` } }
+            );
+            if (lookupResponse.ok) {
+              const users = (await lookupResponse.json()) as Array<{ id: string }>;
+              if (users.length > 0) existingId = users[0].id;
+            }
+          } catch {
+            // Lookup is best-effort; the sync itself still counts as success.
+          }
+          console.log('[clerkSync.driver] user already exists', {
+            driverId: args.driverId ?? null,
+            phone: maskPhone(e164Phone),
+            clerkUserId: existingId,
+          });
+          await recordOutcome('synced', existingId === 'existing' ? undefined : existingId);
+          return { success: true, clerkUserId: existingId };
         }
 
         const errorMessage = responseData.errors?.[0]?.message || responseData.errors?.[0]?.long_message || 'Failed to create Clerk user';
-        console.error(`Failed to create Clerk user: ${errorMessage}`);
-        return { success: false, error: errorMessage };
+        console.error('[clerkSync.driver] create failed', {
+          driverId: args.driverId ?? null,
+          phone: maskPhone(e164Phone),
+          attempt,
+          status: response.status,
+          error: errorMessage,
+        });
+        return await failWithRetry(errorMessage);
       }
 
-      console.log(`Successfully created Clerk user ${responseData.id} for driver ${args.firstName} ${args.lastName}`);
+      console.log('[clerkSync.driver] created Clerk user', {
+        driverId: args.driverId ?? null,
+        phone: maskPhone(e164Phone),
+        clerkUserId: responseData.id,
+        name: `${args.firstName} ${args.lastName}`,
+      });
+      await recordOutcome('synced', responseData.id);
       return { success: true, clerkUserId: responseData.id };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Error creating Clerk user: ${errorMessage}`);
-      return { success: false, error: errorMessage };
+      console.error('[clerkSync.driver] create errored', {
+        driverId: args.driverId ?? null,
+        phone: maskPhone(e164Phone),
+        attempt,
+        error: errorMessage,
+      });
+      return await failWithRetry(errorMessage);
     }
   },
 });
@@ -137,7 +253,7 @@ export const syncExistingDriversToClerk = internalAction({
   }),
   handler: async (ctx, args): Promise<SyncResults> => {
     // Get all drivers for this organization using the helper query
-    const drivers: DriverInfo[] = await ctx.runQuery(internal.clerkSyncHelpers.getDriversForSync, {
+    const drivers: DriverInfoWithId[] = await ctx.runQuery(internal.clerkSyncHelpers.getDriversForSync, {
       organizationId: args.organizationId,
     });
 
@@ -154,6 +270,7 @@ export const syncExistingDriversToClerk = internalAction({
         phone: driver.phone,
         firstName: driver.firstName,
         lastName: driver.lastName,
+        driverId: driver.driverId,
       });
 
       if (result.success) {
@@ -203,8 +320,9 @@ export const syncSingleDriverToClerk = internalAction({
       phone: driver.phone,
       firstName: driver.firstName,
       lastName: driver.lastName,
+      driverId: args.driverId,
     });
-    
+
     return result;
   },
 });
@@ -668,8 +786,59 @@ export const updateClerkUserPhone = internalAction({
   },
 });
 
+/**
+ * Tracked variant of updateClerkUserPhone: runs the update and persists the
+ * outcome on the driver record so a silent phone-sync failure is visible in
+ * the admin UI (and findable in logs via the `[clerkSync.driver]` tag).
+ */
+export const updateClerkUserPhoneForDriver = internalAction({
+  args: {
+    driverId: v.id('drivers'),
+    oldPhone: v.string(),
+    newPhone: v.string(),
+    firstName: v.string(),
+    lastName: v.string(),
+    targetClerkUserId: v.optional(v.string()),
+    organizationId: v.optional(v.id('organizations')),
+  },
+  returns: v.union(
+    v.object({
+      success: v.literal(true),
+      action: v.string(),
+    }),
+    v.object({
+      success: v.literal(false),
+      error: v.string(),
+    })
+  ),
+  handler: async (ctx, args): Promise<UpdateResult> => {
+    const { driverId, ...updateArgs } = args;
+    const result: UpdateResult = await ctx.runAction(
+      internal.clerkSync.updateClerkUserPhone,
+      updateArgs
+    );
+
+    console.log('[clerkSync.driver] phone update outcome', {
+      driverId,
+      oldPhone: maskPhone(args.oldPhone),
+      newPhone: maskPhone(args.newPhone),
+      success: result.success,
+      action: result.success ? result.action : null,
+      error: result.success ? null : result.error,
+    });
+
+    await ctx.runMutation(internal.clerkSyncHelpers.recordDriverClerkSync, {
+      driverId,
+      status: result.success ? 'synced' : 'failed',
+      error: result.success ? undefined : result.error,
+    });
+
+    return result;
+  },
+});
+
 // Type for delete result
-type DeleteResult = 
+type DeleteResult =
   | { success: true }
   | { success: false; error: string };
 

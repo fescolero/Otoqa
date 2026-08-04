@@ -15,6 +15,7 @@ export const getDriversForSync = internalQuery({
   },
   returns: v.array(
     v.object({
+      driverId: v.id('drivers'),
       phone: v.string(),
       firstName: v.string(),
       lastName: v.string(),
@@ -29,6 +30,7 @@ export const getDriversForSync = internalQuery({
     return drivers
       .filter((d) => !d.isDeleted && d.phone)
       .map((d) => ({
+        driverId: d._id,
         phone: d.phone,
         firstName: d.firstName,
         lastName: d.lastName,
@@ -60,6 +62,46 @@ export const getDriverById = internalQuery({
       firstName: driver.firstName,
       lastName: driver.lastName,
     };
+  },
+});
+
+/**
+ * Record the outcome of a driver Clerk sync attempt on the driver record.
+ * Written by clerkSync.createClerkUserForDriver so admins can see (and the
+ * driver page can surface) whether mobile sign-in is actually provisioned.
+ */
+export const recordDriverClerkSync = internalMutation({
+  args: {
+    driverId: v.id('drivers'),
+    status: v.union(v.literal('pending'), v.literal('synced'), v.literal('failed')),
+    clerkUserId: v.optional(v.string()),
+    error: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver) {
+      console.log('[clerkSync.driver] recordDriverClerkSync: driver not found', {
+        driverId: args.driverId,
+        status: args.status,
+      });
+      return false;
+    }
+
+    await ctx.db.patch(args.driverId, {
+      clerkSyncStatus: args.status,
+      clerkSyncError: args.status === 'failed' ? args.error : undefined,
+      ...(args.clerkUserId ? { clerkUserId: args.clerkUserId } : {}),
+      ...(args.status === 'synced' ? { clerkSyncedAt: Date.now() } : {}),
+    });
+
+    console.log('[clerkSync.driver] recorded sync status', {
+      driverId: args.driverId,
+      status: args.status,
+      clerkUserId: args.clerkUserId ?? null,
+      error: args.error ?? null,
+    });
+    return true;
   },
 });
 

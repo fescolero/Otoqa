@@ -1276,6 +1276,7 @@ export const createDriver = mutation({
       createdAt: now,
       updatedAt: now,
       isDeleted: false,
+      clerkSyncStatus: 'pending',
     });
 
     // Log the creation
@@ -1294,6 +1295,7 @@ export const createDriver = mutation({
     // Create Clerk user for mobile app authentication (async, non-blocking)
     // This allows the driver to log in via phone number
     scheduleCreateClerkUserForDriver(ctx, {
+      driverId,
       phone: args.phone,
       firstName: args.firstName,
       lastName: args.lastName,
@@ -1385,7 +1387,9 @@ export const updateDriver = mutation({
 
     // If phone number changed, update Clerk user
     if (updates.phone && updates.phone !== driver.phone) {
+      await ctx.db.patch(driverId, { clerkSyncStatus: 'pending' });
       scheduleUpdateClerkUserPhone(ctx, {
+        driverId,
         oldPhone: driver.phone,
         newPhone: updates.phone,
         firstName: updates.firstName || driver.firstName,
@@ -1394,6 +1398,7 @@ export const updateDriver = mutation({
     } else {
       // Phone didn't change - ensure Clerk user exists (for drivers created before sync was added)
       scheduleCreateClerkUserForDriver(ctx, {
+        driverId,
         phone: updates.phone || driver.phone,
         firstName: updates.firstName || driver.firstName,
         lastName: updates.lastName || driver.lastName,
@@ -1643,6 +1648,7 @@ export const createOwnerDriver = mutation({
       createdAt: now,
       updatedAt: now,
       isDeleted: false,
+      clerkSyncStatus: 'pending',
     });
 
     // Link driver to organization as owner-driver
@@ -1667,6 +1673,7 @@ export const createOwnerDriver = mutation({
 
     // Create Clerk user for mobile app authentication
     scheduleCreateClerkUserForDriver(ctx, {
+      driverId,
       phone: args.phone,
       firstName: args.firstName,
       lastName: args.lastName,
