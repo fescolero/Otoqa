@@ -21,3 +21,9 @@ export const CLERK_PUBLISHABLE_KEY =
 
 export const WORKOS_CLIENT_ID =
   process.env.EXPO_PUBLIC_WORKOS_CLIENT_ID ?? 'client_01KAETKWFMGC6VEVXXB51A40QC';
+
+// PostHog (D17/D18) — same project as the driver app; events are
+// distinguished by the `app: dispatch` super-property.
+export const POSTHOG_KEY =
+  process.env.EXPO_PUBLIC_POSTHOG_KEY ?? 'phc_PZ3GNbNMNfasjq93uuEzrw9vQABLHfe4OFxm4H7Sg6X';
+export const POSTHOG_HOST = process.env.EXPO_PUBLIC_POSTHOG_HOST ?? 'https://us.i.posthog.com';

@@ -26,6 +26,7 @@ import {
   type VoiceIntent,
 } from '../../lib/voice/parser';
 import { displayLoadId } from '../../lib/format';
+import { trackAction } from '../../lib/analytics';
 
 // Lazy requires: absent native modules (old APK + OTA JS) must not crash.
 /* eslint-disable @typescript-eslint/no-var-requires */
@@ -134,7 +135,7 @@ function RowList({ rows }: { rows: LoadRow[] }) {
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v15';
+const VOICE_BUILD = 'v16';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -701,6 +702,10 @@ export default function VoiceScreen() {
         await declineOffer({ assignmentId: pending.assignmentId as never });
         say('agent', 'Offer declined.');
       }
+      trackAction('voice_action_confirmed', {
+        kind: pending.kind,
+        ...(pending.kind === 'assignLoads' ? { load_count: pending.loadIds.length } : {}),
+      });
     } catch (e) {
       say('agent', e instanceof Error ? e.message : 'That didn’t work — try again.');
     } finally {
