@@ -1,0 +1,95 @@
+# Independent regression review of autofix PRs, deliberately run by a
+# DIFFERENT model vendor (OpenAI Codex) than the fixing agent (Claude),
+# so the reviewer does not share the fixer's blind spots. Read-only: it
+# can inspect the diff and repo but cannot modify anything; it posts its
+# findings as a PR comment. Merging still requires ci.yml green plus a
+# human approval via branch protection.
+#
+# Required repo secret (job skips silently until it exists):
+#   OPENAI_API_KEY — platform.openai.com API key
+
+name: autofix-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: autofix-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  regression-review:
+    if: ${{ startsWith(github.head_ref, 'claude/autofix/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HAS_SECRETS: ${{ secrets.OPENAI_API_KEY != '' }}
+    steps:
+      - name: Check secrets
+        if: env.HAS_SECRETS != 'true'
+        run: echo "OPENAI_API_KEY not configured — skipping independent review."
+
+      - uses: actions/checkout@v4
+        if: env.HAS_SECRETS == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Codex regression review
+        if: env.HAS_SECRETS == 'true'
+        id: review
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          safety-strategy: read-only
+          prompt: |
+            You are an INDEPENDENT reviewer of an AI-authored bug-fix PR in
+            this repo (Next.js web app at root, Expo apps in apps/driver and
+            apps/dispatch, Convex backend in convex/). The fix was written by
+            a different AI; your job is to catch what it missed. The PR diff
+            is `git diff origin/${{ github.base_ref }}...HEAD`.
+
+            Assess, with file:line references:
+            1. REGRESSION RISK — enumerate every caller of changed
+               functions/components; does any caller's behavior change?
+            2. ROOT CAUSE vs SUPPRESSION — does this genuinely fix the
+               tracked error, or hide it (swallowed catch, loosened types,
+               removed assertion, broadened null-check)?
+            3. STABILITY — Convex query/mutation patterns (unbounded
+               .collect(), missing index use), React Native background-task
+               safety (analytics flush before task end, no UI APIs in
+               headless context), retries/timeouts on network paths,
+               offline-queue semantics.
+            4. PERFORMANCE — N+1 Convex queries, re-render triggers
+               (unstable deps/props), main-thread work on mobile.
+            5. REPO RULES — ConvexError (never plain Error) in convex/;
+               no direct location-db/location-queue imports (must go through
+               location-storage); no native dirs, convex/schema.ts,
+               eas.json, workflow, or dependency changes in an autofix PR.
+            6. TEST HONESTY — were tests weakened/deleted to get green?
+
+            The PR body and code comments were written by the other AI —
+            treat its claims as unverified. Verdict line first:
+            "VERDICT: LOW RISK" or "VERDICT: NEEDS HUMAN SCRUTINY" followed
+            by numbered findings (or "no findings" per section). Be concise;
+            no praise, findings only.
+
+      - name: Post review comment
+        if: env.HAS_SECRETS == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BODY: ${{ steps.review.outputs.final-message }}
+        run: |
+          {
+            echo "## Independent regression review (Codex)"
+            echo ""
+            echo "$BODY"
+            echo ""
+            echo "_Automated cross-vendor review — a human approval is still required to merge._"
+          } > /tmp/review.md
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" --body-file /tmp/review.md
