@@ -152,7 +152,7 @@ function RowList({ rows }: { rows: LoadRow[] }) {
 /** Bump on every voice-feature change — shown in the header so a glance
  * tells which bundle is actually running (expo-updates rolls back bad
  * OTAs silently; this makes delivery verifiable). */
-const VOICE_BUILD = 'v21';
+const VOICE_BUILD = 'v22';
 let updateTag = 'embedded js';
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -220,11 +220,28 @@ export default function VoiceScreen() {
   // TTS mute — ref-mirrored so async flows always read the live value.
   const [muted, setMuted] = useState(false);
   const mutedRef = useRef(false);
+  // Barge-in-lite (v22): while the agent is speaking, tapping the mic
+  // stops TTS and opens the mic. The generation token cancels the
+  // interrupted reply's pending watchdog/reopen so it can't fire late
+  // and fight the session the user just started.
+  const [speaking, setSpeaking] = useState(false);
+  const speakingRef = useRef(false);
+  const ttsGenRef = useRef(0);
+  const setSpeakingState = (v: boolean) => {
+    speakingRef.current = v;
+    setSpeaking(v);
+  };
   const toggleMute = () => {
     setMuted((m) => {
       const next = !m;
       mutedRef.current = next;
-      if (next) SpeechSynth?.stop();
+      if (next) {
+        SpeechSynth?.stop();
+        // Muting mid-question: cancel the reply's watchdog/reopen too —
+        // a muted user is opting out of the hands-free loop.
+        ttsGenRef.current++;
+        setSpeakingState(false);
+      }
       return next;
     });
   };
@@ -235,6 +252,7 @@ export default function VoiceScreen() {
    * TTS bleed into the recording.
    */
   const speakReply = (text: string, thenListen?: boolean) => {
+    const gen = ++ttsGenRef.current;
     const after = thenListen
       ? () => {
           autoOpenedRef.current = true;
@@ -244,41 +262,50 @@ export default function VoiceScreen() {
       : undefined;
     if (!mutedRef.current && SpeechSynth) {
       SpeechSynth.stop();
+      const startedAt = Date.now();
+      setSpeakingState(true);
       let fired = false;
-      const once = after
-        ? () => {
-            if (!fired) {
-              fired = true;
-              after();
-            }
-          }
-        : undefined;
-      SpeechSynth.speak(text, { language: 'en-US', onDone: once, onError: once });
+      const once = (via: 'callback' | 'watchdog') => {
+        if (fired || gen !== ttsGenRef.current) return;
+        fired = true;
+        setSpeakingState(false);
+        if (after) {
+          trackAction('voice_tts', { via, ms: Date.now() - startedAt, chars: text.length });
+          after();
+        }
+      };
+      SpeechSynth.speak(text, {
+        language: 'en-US',
+        onDone: () => once('callback'),
+        onError: () => once('callback'),
+      });
       // Engine watchdog: some Android TTS engines never fire callbacks.
       // Instead of blindly opening the mic (which cut the spoken question
       // short), poll isSpeakingAsync — re-arm while the engine is still
-      // talking, open the mic only once it's done or unresponsive.
-      if (once) {
-        let checks = 0;
-        const watchdog = () => {
-          if (fired) return;
-          const probe = SpeechSynth?.isSpeakingAsync?.();
-          if (probe && typeof probe.then === 'function') {
-            probe
-              .then((speaking) => {
-                if (fired) return;
-                if (speaking && checks < 8) {
-                  checks++;
-                  setTimeout(watchdog, 1200);
-                } else once?.();
-              })
-              .catch(() => once?.());
-          } else once?.();
-        };
-        setTimeout(watchdog, Math.min(2000 + text.length * 55, 9000));
-      }
+      // talking, settle only once it's done or unresponsive. Runs for
+      // every reply now (not just thenListen) so the speaking state —
+      // which gates the tap-to-interrupt hint — always clears.
+      let checks = 0;
+      const watchdog = () => {
+        if (fired || gen !== ttsGenRef.current) return;
+        const probe = SpeechSynth?.isSpeakingAsync?.();
+        if (probe && typeof probe.then === 'function') {
+          probe
+            .then((stillSpeaking) => {
+              if (fired || gen !== ttsGenRef.current) return;
+              if (stillSpeaking && checks < 8) {
+                checks++;
+                setTimeout(watchdog, 1200);
+              } else once('watchdog');
+            })
+            .catch(() => once('watchdog'));
+        } else once('watchdog');
+      };
+      setTimeout(watchdog, Math.min(2000 + text.length * 55, 9000));
     } else if (after) {
-      setTimeout(after, 600);
+      setTimeout(() => {
+        if (gen === ttsGenRef.current) after();
+      }, 600);
     }
   };
 
@@ -319,6 +346,8 @@ export default function VoiceScreen() {
   const clearConversation = () => {
     if (listening) Speech?.stop();
     SpeechSynth?.stop();
+    ttsGenRef.current++;
+    setSpeakingState(false);
     setMessages([]);
     clearPending();
     setPartial('');
@@ -647,6 +676,9 @@ export default function VoiceScreen() {
   const endpointTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const endedRef = useRef(false);
   const processedRef = useRef(true);
+  // Telemetry: why the mic session closed — the field data that tunes
+  // the endpointing constants (silence hold vs hard cap vs give-up).
+  const endReasonRef = useRef<string | null>(null);
 
   const process = async () => {
     if (processedRef.current) return;
@@ -654,6 +686,15 @@ export default function VoiceScreen() {
     setPartial('');
     const uri = audioUriRef.current;
     const deviceTranscript = finalTranscriptRef.current.trim();
+    // One event per mic session — the dataset that tunes SILENCE_HOLD_MS
+    // and NO_SPEECH_WAIT_MS on data instead of feel. No transcript text.
+    trackAction('voice_turn', {
+      end_reason: endReasonRef.current ?? 'os_end',
+      session_ms: Date.now() - sessionStartRef.current,
+      spoke: deviceTranscript.length > 0,
+      chars: deviceTranscript.length,
+      auto_opened: autoOpenedRef.current,
+    });
 
     // Tier 2 voice confirmation: a leading yes/no while a confirm card
     // is up completes it immediately — no server round-trip. Anything
@@ -662,6 +703,7 @@ export default function VoiceScreen() {
     if (action && deviceTranscript) {
       const verdict = yesNo(deviceTranscript);
       if (verdict) {
+        trackAction('voice_confirm', { method: 'voice_device', verdict, kind: action.kind });
         say('you', deviceTranscript);
         if (verdict === 'yes') void confirmRef.current();
         else {
@@ -723,12 +765,14 @@ export default function VoiceScreen() {
       setThinking(true);
       try {
         const audioBase64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+        const serverStart = Date.now();
         const res = await transcribe({
           audioBase64,
           mimeType: mimeForUri(uri),
           ...(history.length > 0 ? { history } : {}),
           ...(pending ? { contextText: pending } : {}),
         });
+        const serverMs = Date.now() - serverStart;
         const transcript = res.transcript || deviceTranscript;
         setThinking(false);
         if (!transcript) return onNoSpeech();
@@ -738,17 +782,25 @@ export default function VoiceScreen() {
         const act = pendingActionRef.current;
         if (act) {
           const verdict = yesNo(transcript);
+          if (verdict) trackAction('voice_confirm', { method: 'voice_server', verdict, kind: act.kind });
           if (verdict === 'yes') return void confirmRef.current();
           if (verdict === 'no') {
             clearPending();
             return void say('agent', 'Cancelled.');
           }
         }
-        return dispatchIntent(
-          transcript,
+        const intent =
           (res.intent as VoiceIntent | null) ??
-            parseCommand(pending ? `${pending} ${transcript}` : transcript),
-        );
+          parseCommand(pending ? `${pending} ${transcript}` : transcript);
+        trackAction('voice_command', {
+          nlu: res.intent ? 'haiku' : 'fallback_parser',
+          intent_kind: intent.kind,
+          transcript_source: res.transcript ? 'server' : 'device',
+          server_ms: serverMs,
+          history_turns: history.length,
+          audio_kb: Math.round((audioBase64.length * 0.75) / 1024),
+        });
+        return dispatchIntent(transcript, intent);
       } catch {
         setThinking(false);
         // Server pipeline unavailable — fall through to on-device.
@@ -756,10 +808,16 @@ export default function VoiceScreen() {
     }
     if (!deviceTranscript) return onNoSpeech();
     autoOpenedRef.current = false;
-    dispatchIntent(
-      deviceTranscript,
-      parseCommand(pending ? `${pending} ${deviceTranscript}` : deviceTranscript),
+    const deviceIntent = parseCommand(
+      pending ? `${pending} ${deviceTranscript}` : deviceTranscript,
     );
+    trackAction('voice_command', {
+      nlu: 'device_parser',
+      intent_kind: deviceIntent.kind,
+      transcript_source: 'device',
+      history_turns: history.length,
+    });
+    dispatchIntent(deviceTranscript, deviceIntent);
   };
 
   // Latest closures for the once-subscribed native listeners.
@@ -812,6 +870,7 @@ export default function VoiceScreen() {
         }
       }),
       Speech.addListener('error', (e: { error?: string; message?: string }) => {
+        endReasonRef.current = e.error === 'no-speech' ? 'no_speech' : `error:${e.error ?? 'unknown'}`;
         setListening(false);
         listeningRef.current = false;
         if (endpointTimerRef.current) {
@@ -851,6 +910,7 @@ export default function VoiceScreen() {
     partialRef.current = '';
     endedRef.current = false;
     processedRef.current = false;
+    endReasonRef.current = null;
     sessionStartRef.current = Date.now();
     lastActivityRef.current = Date.now();
     setListening(true);
@@ -880,11 +940,14 @@ export default function VoiceScreen() {
       const spoken = segmentsRef.current.length > 0 || partialRef.current.trim().length > 0;
       const idle = now - lastActivityRef.current;
       const elapsed = now - sessionStartRef.current;
-      if (
-        elapsed > HARD_CAP_MS ||
-        (spoken && idle > SILENCE_HOLD_MS) ||
-        (!spoken && elapsed > NO_SPEECH_WAIT_MS)
-      ) {
+      if (elapsed > HARD_CAP_MS) {
+        endReasonRef.current = 'hard_cap';
+        Speech?.stop();
+      } else if (spoken && idle > SILENCE_HOLD_MS) {
+        endReasonRef.current = 'silence_hold';
+        Speech?.stop();
+      } else if (!spoken && elapsed > NO_SPEECH_WAIT_MS) {
+        endReasonRef.current = 'no_speech';
         Speech?.stop();
       }
     }, 300);
@@ -897,8 +960,17 @@ export default function VoiceScreen() {
   const toggleMic = async () => {
     if (!Speech) return;
     if (listening) {
+      endReasonRef.current = 'manual_stop';
       Speech.stop();
       return;
+    }
+    // Barge-in-lite: tapping while the agent talks cuts the speech AND
+    // cancels its pending watchdog/reopen — the user's session owns the
+    // mic now (startListening stops TTS itself).
+    if (speakingRef.current) {
+      trackAction('voice_tts', { via: 'interrupted' });
+      ttsGenRef.current++;
+      setSpeakingState(false);
     }
     autoOpenedRef.current = false;
     autoRetriedRef.current = false;
@@ -1054,7 +1126,10 @@ export default function VoiceScreen() {
                 <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
                   <Pressable
                     disabled={busy}
-                    onPress={() => void confirm()}
+                    onPress={() => {
+                      trackAction('voice_confirm', { method: 'button', verdict: 'yes', kind: pending.kind });
+                      void confirm();
+                    }}
                     style={{ flex: 1, alignItems: 'center', backgroundColor: colors.primary, paddingVertical: 10, borderRadius: borderRadius.md, opacity: busy ? 0.6 : 1 }}
                   >
                     {busy ? (
@@ -1065,7 +1140,10 @@ export default function VoiceScreen() {
                   </Pressable>
                   <Pressable
                     disabled={busy}
-                    onPress={clearPending}
+                    onPress={() => {
+                      trackAction('voice_confirm', { method: 'button', verdict: 'no', kind: pending.kind });
+                      clearPending();
+                    }}
                     style={{ flex: 1, alignItems: 'center', borderWidth: 1, borderColor: colors.border, paddingVertical: 10, borderRadius: borderRadius.md }}
                   >
                     <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, fontWeight: typography.semibold }}>Cancel</Text>
@@ -1076,9 +1154,13 @@ export default function VoiceScreen() {
           </ScrollView>
 
           <View style={{ alignItems: 'center', paddingBottom: 26, paddingTop: 6 }}>
-            {(listening || partial || thinking) && (
+            {(listening || partial || thinking || speaking) && (
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginBottom: 10, paddingHorizontal: 32, textAlign: 'center' }} numberOfLines={2}>
-                {thinking ? 'Thinking…' : partial || 'Listening…'}
+                {thinking
+                  ? 'Thinking…'
+                  : listening || partial
+                    ? partial || 'Listening…'
+                    : 'Speaking — tap the mic to interrupt'}
               </Text>
             )}
             <Pressable
