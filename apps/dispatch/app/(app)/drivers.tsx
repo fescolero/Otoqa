@@ -38,15 +38,21 @@ export default function DriversScreen() {
           keyExtractor={(r) => r._id}
           contentContainerStyle={{ padding: 24, gap: 10 }}
           renderItem={({ item }) => (
-            <View style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14 }}>
-              <Text style={{ color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
-                {item.firstName} {item.lastName}
-              </Text>
+            <Pressable
+              onPress={() => router.push({ pathname: '/driver/[id]', params: { id: item._id } })}
+              style={{ backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.lg, padding: 14 }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Text style={{ flex: 1, color: colors.foreground, fontWeight: typography.semibold, fontSize: typography.base }}>
+                  {item.firstName} {item.lastName}
+                </Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.foregroundMuted} />
+              </View>
               <Text style={{ color: colors.foregroundMuted, fontSize: typography.sm, marginTop: 3 }}>
                 {item.currentLoad ? `On load ${displayLoadId(item.currentLoad.internalId)}` : 'Available'}
                 {item.phone ? ` · ${item.phone}` : ''}
               </Text>
-            </View>
+            </Pressable>
           )}
         />
       )}

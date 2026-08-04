@@ -1336,6 +1336,140 @@ export const findLoadsByFacetDates = query({
   },
 });
 
+/**
+ * Read-only load view (Phase-1 "load detail", built 2026-07-31): doc +
+ * facet tags + stop timeline + the live driver from either assignment
+ * model. Reachable when the load belongs to the caller's web-TMS org OR
+ * is offered/awarded to their carrier org. Returns null (never throws)
+ * so the screen can render a clean not-found state.
+ */
+export const getLoadDetail = query({
+  args: { loadId: v.id('loadInformation') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const load = await ctx.db.get(args.loadId);
+    if (!load) return null;
+    let assignment: Doc<'loadCarrierAssignments'> | null = null;
+    let allowed = load.workosOrgId === resolved.org.workosOrgId;
+    if (!allowed) {
+      const assignments = await ctx.db
+        .query('loadCarrierAssignments')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect();
+      assignment = assignments.find((a) => a.carrierOrgId === resolved.externalId) ?? null;
+      allowed = assignment !== null;
+    }
+    if (!allowed) return null;
+
+    const stops = (
+      await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect()
+    ).sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+    const facets = await getLoadFacets(ctx, load._id);
+    const legs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_load', (q) => q.eq('loadId', load._id))
+      .collect();
+    const liveLeg = legs.find((l) => l.status === 'PENDING' || l.status === 'ACTIVE');
+    const driverId = liveLeg?.driverId ?? assignment?.assignedDriverId ?? null;
+    const driver = driverId ? await ctx.db.get(driverId) : null;
+
+    return {
+      _id: load._id,
+      internalId: load.internalId,
+      status: load.status,
+      trackingStatus: load.trackingStatus ?? null,
+      customerName: load.customerName ?? null,
+      commodityDescription: load.commodityDescription ?? null,
+      weight: load.weight ?? null,
+      effectiveMiles: load.effectiveMiles ?? null,
+      equipmentType: load.equipmentType ?? null,
+      externalSource: load.externalSource ?? null,
+      tripNumber: facets.trip ?? null,
+      hcr: facets.hcr ?? null,
+      legStatus: liveLeg?.status ?? null,
+      driver: driver
+        ? { _id: driver._id, firstName: driver.firstName, lastName: driver.lastName, phone: driver.phone }
+        : null,
+      stops: stops.map((s) => ({
+        _id: s._id,
+        sequenceNumber: s.sequenceNumber,
+        stopType: s.stopType,
+        address: s.address,
+        city: s.city ?? null,
+        state: s.state ?? null,
+        windowBeginDate: s.windowBeginDate ?? null,
+        windowBeginTime: s.windowBeginTime ?? null,
+        windowEndTime: s.windowEndTime ?? null,
+        checkedInAt: s.checkedInAt ?? null,
+        checkedOutAt: s.checkedOutAt ?? null,
+      })),
+    };
+  },
+});
+
+/**
+ * Driver profile (Phase-1 "driver detail"): identity + credentials with
+ * expirations, current/next load via the leg model, and last-known GPS
+ * fix age. History rides the existing listDriverHistory query client-side.
+ */
+export const getDriverDetail = query({
+  args: { driverId: v.id('drivers') },
+  handler: async (ctx, args) => {
+    const resolved = await resolveOrgForRead(ctx, 'canViewOperations');
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver || driver.isDeleted || !resolved.driverOrgIds.includes(driver.organizationId)) {
+      return null;
+    }
+    const location = await latestLocation(ctx, driver._id);
+    const lightLoadOf = async (loadId: Id<'loadInformation'>) => {
+      const load = await ctx.db.get(loadId);
+      if (!load) return null;
+      const facets = await getLoadFacets(ctx, load._id);
+      return {
+        _id: load._id,
+        internalId: load.internalId,
+        customerName: load.customerName ?? null,
+        tripNumber: facets.trip ?? null,
+        hcr: facets.hcr ?? null,
+      };
+    };
+    const activeLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', driver._id).eq('status', 'ACTIVE'))
+      .collect();
+    const pendingLegs = await ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', driver._id).eq('status', 'PENDING'))
+      .collect();
+    const nextPending =
+      pendingLegs.sort(
+        (a, b) => (a.scheduledStartMs ?? Infinity) - (b.scheduledStartMs ?? Infinity),
+      )[0] ?? null;
+
+    return {
+      _id: driver._id,
+      firstName: driver.firstName,
+      lastName: driver.lastName,
+      phone: driver.phone,
+      email: driver.email,
+      employmentStatus: driver.employmentStatus,
+      employmentType: driver.employmentType,
+      hireDate: driver.hireDate,
+      licenseClass: driver.licenseClass,
+      licenseState: driver.licenseState,
+      licenseExpiration: driver.licenseExpiration,
+      medicalExpiration: driver.medicalExpiration ?? null,
+      twicExpiration: driver.twicExpiration ?? null,
+      lastFixAt: location?.recordedAt ?? null,
+      currentLoad: activeLegs[0] ? await lightLoadOf(activeLegs[0].loadId) : null,
+      nextLoad: nextPending ? await lightLoadOf(nextPending.loadId) : null,
+    };
+  },
+});
+
 /** Assign one driver to several loads via the web-TMS leg model. */
 export const assignDriverToLoadsWeb = mutation({
   args: {

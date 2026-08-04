@@ -219,7 +219,9 @@ export default function BoardScreen() {
               <Pressable
                 onPress={
                   row.source === 'leg'
-                    ? undefined
+                    ? row.load
+                      ? () => router.push({ pathname: '/load/[id]', params: { id: row.load!._id } })
+                      : undefined
                     : () => router.push({ pathname: '/assign', params: { assignmentId: row._id } })
                 }
                 onLongPress={() => Alert.alert('Load payload (debug)', JSON.stringify(row.load, null, 2))}
