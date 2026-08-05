@@ -120,6 +120,9 @@ export default function RootLayout() {
           host: POSTHOG_HOST,
           flushAt: 5,
           flushInterval: 3000,
+          // SDK >= 4.39 defaults this ON; keep it off so the upgrade
+          // doesn't change event volume — app_started already covers it.
+          captureAppLifecycleEvents: false,
           // D17: fatal JS errors + unhandled rejections become $exception
           // events. installGlobalErrorTracking() keeps the legacy app_error
           // dual-emit alongside.

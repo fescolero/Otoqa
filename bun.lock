@@ -109,7 +109,7 @@
         "expo-status-bar": "~3.0.9",
         "expo-updates": "~29.0.19",
         "expo-web-browser": "~15.0.10",
-        "posthog-react-native": "4.34.0",
+        "posthog-react-native": "4.61.4",
         "react": "19.1.0",
         "react-dom": "19.1.0",
         "react-native": "0.81.5",
@@ -169,8 +169,8 @@
         "i18n-js": "4.5.2",
         "otoqa-motion": "file:./modules/otoqa-motion",
         "otoqa-shift-status": "file:./modules/otoqa-shift-status",
-        "posthog-react-native": "4.34.0",
-        "posthog-react-native-session-replay": "1.2.4",
+        "posthog-react-native": "4.61.4",
+        "posthog-react-native-session-replay": "1.6.0",
         "react": "19.1.0",
         "react-dom": "19.1.0",
         "react-native": "0.81.5",
@@ -2602,9 +2602,9 @@
 
     "posthog-js": ["posthog-js@1.407.2", "", { "dependencies": { "@posthog/browser-common": "^0.2.0", "@posthog/core": "^1.45.1", "@posthog/types": "^1.398.0", "core-js": "^3.49.0", "dompurify": "^3.3.2", "fflate": "^0.4.8", "preact": "^10.29.3", "query-selector-shadow-dom": "^1.0.1", "web-vitals": "^5.3.0" } }, "sha512-5deTvXopn+NJWEmCUw8Ix/ms3cv2+60WJ73Vgbvu2wSkZY/FIj2uqAgCnq7IewGpGC+tH7CAbPYFzH6hw8eW1w=="],
 
-    "posthog-react-native": ["posthog-react-native@4.34.0", "", { "dependencies": { "@posthog/core": "1.22.0" }, "peerDependencies": { "@react-native-async-storage/async-storage": ">=1.0.0", "@react-navigation/native": ">= 5.0.0", "expo-application": ">= 4.0.0", "expo-device": ">= 4.0.0", "expo-file-system": ">= 13.0.0", "expo-localization": ">= 11.0.0", "posthog-react-native-session-replay": ">= 1.2.0", "react-native-device-info": ">= 10.0.0", "react-native-localize": ">= 3.0.0", "react-native-navigation": ">= 6.0.0", "react-native-safe-area-context": ">= 4.0.0", "react-native-svg": ">= 15.0.0" }, "optionalPeers": ["@react-native-async-storage/async-storage", "@react-navigation/native", "expo-application", "expo-device", "expo-file-system", "expo-localization", "posthog-react-native-session-replay", "react-native-device-info", "react-native-localize", "react-native-navigation", "react-native-safe-area-context"] }, "sha512-wJLIDA8S12C61rV02I8rLStMLdG4aP7/+b5Hn54KnqydWokdMaCvMhEI2ZlqYxqpQqD8CVGevwxRuIT1q6oeig=="],
+    "posthog-react-native": ["posthog-react-native@4.61.4", "", { "dependencies": { "@posthog/core": "^1.46.4", "@posthog/types": "^1.400.0" }, "peerDependencies": { "@posthog/react-native-plugin": ">= 2.2.0", "@react-native-async-storage/async-storage": ">=1.0.0", "@react-navigation/native": ">= 5.0.0", "expo-application": ">= 4.0.0", "expo-device": ">= 4.0.0", "expo-file-system": ">= 13.0.0", "expo-localization": ">= 11.0.0", "posthog-react-native-session-replay": ">= 1.6.0", "react-native-device-info": ">= 10.0.0", "react-native-localize": ">= 3.0.0", "react-native-navigation": ">= 6.0.0", "react-native-safe-area-context": ">= 4.0.0", "react-native-svg": ">= 15.0.0" }, "optionalPeers": ["@posthog/react-native-plugin", "@react-native-async-storage/async-storage", "@react-navigation/native", "expo-application", "expo-device", "expo-file-system", "expo-localization", "posthog-react-native-session-replay", "react-native-device-info", "react-native-localize", "react-native-navigation", "react-native-safe-area-context", "react-native-svg"], "bin": { "posthog-react-native-xcode": "tooling/posthog-xcode.sh" } }, "sha512-8l9wZ1boR27hRuEH41dF/BtUdwm7VTyzFykRKXphFXYKqygrO4Cxr2xyuwqFVSnbnu4S/NKWFuWxK4bk98clpw=="],
 
-    "posthog-react-native-session-replay": ["posthog-react-native-session-replay@1.2.4", "", { "peerDependencies": { "react": "*", "react-native": "*" } }, "sha512-kPPDTJAHhEJBp5/aCNlO3bjBhcQlXmTOhrDfsZa1FuW44csldVK33DYA2Xr1eQDh/LW0xH3P3IupE+vpc9MRXQ=="],
+    "posthog-react-native-session-replay": ["posthog-react-native-session-replay@1.6.0", "", { "peerDependencies": { "react": "*", "react-native": "*" } }, "sha512-OCaei77mtgg7JT+TgHSCgpWeKq2XXENUOPNxGbjhXZa/aJpptOW5VsBqjtH4BPzM2c1veS1DK4/Fb/uV4Rb3cg=="],
 
     "preact": ["preact@10.29.7", "", { "peerDependencies": { "preact-render-to-string": ">=5" }, "optionalPeers": ["preact-render-to-string"] }, "sha512-DCHYrK/B10yUD3ZjLfhZ3WIE/9Vf9VFUODcRE2dRomTYDpJk6z6L9wecSfhfE6M9ZTHUdyQkoC46arIDhEV84Q=="],
 
@@ -3626,7 +3626,9 @@
 
     "png-js/fflate": ["fflate@0.8.3", "", {}, "sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA=="],
 
-    "posthog-react-native/@posthog/core": ["@posthog/core@1.22.0", "", { "dependencies": { "cross-spawn": "^7.0.6" } }, "sha512-WkmOnq95aAOu6yk6r5LWr5cfXsQdpVbWDCwOxQwxSne8YV6GuZET1ziO5toSQXgrgbdcjrSz2/GopAfiL6iiAA=="],
+    "posthog-react-native/@posthog/core": ["@posthog/core@1.46.7", "", { "dependencies": { "@posthog/types": "^1.401.0" } }, "sha512-Oxsa6AvXXtNhHI+BDMBvysSg9lPIrMKWP9mKKgqD9M0jgyZN1GuIxIXI3T+0h9kLRWdIFFIOGaNNrCmFTg6Dzw=="],
+
+    "posthog-react-native/@posthog/types": ["@posthog/types@1.401.0", "", {}, "sha512-tLGiHJhYoGMFkcB5kPT3eTOMAKQYd8Wsm2H+RvMkDehY2YJwLjr2wrJ3DcRddpdivqT0TYT9TAMWKSNRzNSMtg=="],
 
     "prop-types/react-is": ["react-is@16.13.1", "", {}, "sha512-24e6ynE2H+OKt4kqsOvNd8kBpV65zoxbA4BVsEOB3ARVWQki/DHzaUoC5KuON/BiccDaCCTZBuOcfZs70kR8bQ=="],
 

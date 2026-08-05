@@ -57,6 +57,9 @@ function getOrCreateBgClient(): PostHog | null {
         // afford to batch.
         flushAt: 1,
         flushInterval: 1000,
+        // SDK >= 4.39 defaults this ON; a headless client must never
+        // emit Application Opened/Backgrounded on task wakes.
+        captureAppLifecycleEvents: false,
         // No session replay in BG: it requires native UI hooks that
         // don't exist in headless contexts.
         enableSessionReplay: false,

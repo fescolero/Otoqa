@@ -487,6 +487,11 @@ export default function RootLayout() {
                 },
                 flushAt: 1,
                 flushInterval: 1000,
+                // SDK >= 4.39 defaults this ON; keep it off so the upgrade
+                // doesn't change event volume — bundle_loaded/app lifecycle
+                // telemetry already covers this ground. Enable deliberately
+                // if the built-in lifecycle events are ever wanted.
+                captureAppLifecycleEvents: false,
                 // D17: fatal JS errors + unhandled rejections become
                 // $exception events. Console capture stays off — lib/log.ts
                 // is chatty and volume would drown real crashes.
