@@ -26,7 +26,7 @@ events: shift start/end, load attach/detach, check-in/check-out.
 | `targets/shift-status-widget/` | WidgetKit extension (via `@bacons/apple-targets`) with the SwiftUI Live Activity UI. |
 | `lib/location-tracking.ts` | start on `startSessionTracking`, re-assert on `resumeTracking`, update on load attach/detach, end in `stopLocationTracking` (covers End Shift + legacy stop + server-forced stop). |
 | `lib/hooks/useCheckIn.ts` | `announceStopStatus` — stop-level status line on check-in/out (online and queued). |
-| `app.json` | `NSSupportsLiveActivities: true`, `@bacons/apple-targets` plugin, `runtimeVersion: 1.6.0`. |
+| `app.json` | `NSSupportsLiveActivities: true`, `@bacons/apple-targets` plugin, `runtimeVersion: 1.7.0`. |
 
 **Duplicated struct warning:** `ShiftStatusAttributes` exists twice by
 design — in the module (`ios/ShiftStatusAttributes.swift`) and the widget
