@@ -30,7 +30,7 @@ import { uploadPODPhoto } from '../lib/s3-upload';
 import { configureQuietChannels } from 'otoqa-shift-status';
 import { LanguageProvider } from '../lib/LanguageContext';
 import { ThemeProvider } from '../lib/ThemeContext';
-import { setPostHogClient, trackErrorBoundary, trackOtaUpdateCheck, getAppVersionContext } from '../lib/analytics';
+import { setPostHogClient, trackErrorBoundary, captureAppException, trackOtaUpdateCheck, getAppVersionContext } from '../lib/analytics';
 
 // ============================================
 // ERROR BOUNDARY
@@ -53,7 +53,13 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, Error
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    // Dual-emit during the D17 transition: legacy custom event for
+    // existing dashboards + $exception for PostHog error tracking.
     trackErrorBoundary(error.message || 'Unknown error', errorInfo.componentStack ?? undefined);
+    captureAppException(error, {
+      source: 'error_boundary',
+      component_stack: errorInfo.componentStack ?? null,
+    });
   }
 
   render() {
@@ -61,9 +67,22 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, Error
       return (
         <View style={errorStyles.container}>
           <ScrollView contentContainerStyle={errorStyles.scroll}>
-            <Text style={errorStyles.title}>App Crashed</Text>
-            <Text style={errorStyles.message}>{this.state.error?.message || 'Unknown error'}</Text>
-            <Text style={errorStyles.stack}>{this.state.error?.stack || ''}</Text>
+            <Text style={errorStyles.title}>Something went wrong</Text>
+            <Text style={errorStyles.message}>
+              The app hit an unexpected error. Tap below to try again.
+            </Text>
+            <Text
+              style={errorStyles.retry}
+              onPress={() => this.setState({ hasError: false, error: null })}
+            >
+              Try again
+            </Text>
+            {__DEV__ && (
+              <>
+                <Text style={errorStyles.message}>{this.state.error?.message || 'Unknown error'}</Text>
+                <Text style={errorStyles.stack}>{this.state.error?.stack || ''}</Text>
+              </>
+            )}
           </ScrollView>
         </View>
       );
@@ -77,6 +96,18 @@ const errorStyles = StyleSheet.create({
   scroll: { paddingBottom: 40 },
   title: { color: '#ff6b6b', fontSize: 24, fontWeight: 'bold', marginBottom: 12 },
   message: { color: '#fff', fontSize: 16, marginBottom: 16 },
+  retry: {
+    color: '#1a1a2e',
+    backgroundColor: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignSelf: 'flex-start',
+    marginBottom: 24,
+    overflow: 'hidden',
+  },
   stack: { color: '#888', fontSize: 12, fontFamily: 'monospace' },
 });
 
@@ -456,6 +487,20 @@ export default function RootLayout() {
                 },
                 flushAt: 1,
                 flushInterval: 1000,
+                // SDK >= 4.39 defaults this ON; keep it off so the upgrade
+                // doesn't change event volume — bundle_loaded/app lifecycle
+                // telemetry already covers this ground. Enable deliberately
+                // if the built-in lifecycle events are ever wanted.
+                captureAppLifecycleEvents: false,
+                // D17: fatal JS errors + unhandled rejections become
+                // $exception events. Console capture stays off — lib/log.ts
+                // is chatty and volume would drown real crashes.
+                errorTracking: {
+                  autocapture: {
+                    uncaughtExceptions: true,
+                    unhandledRejections: true,
+                  },
+                },
               }}
             >
               <PostHogInit />
