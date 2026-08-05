@@ -26,13 +26,14 @@ maintainers: logs, bug triage, account support, platform billing, and performanc
    can answer "is this caller Otoqa staff?" — `admin` is strictly an org-scoped tenant role.
 2. **No backend error visibility outside the Convex dashboard.** Convex functions log via
    `console.*` only; there is no queryable event/error store and no log streaming configured.
-3. **No cron run ledger.** 28 cron jobs; most handlers have no try/catch, so a failed tick is
+3. **No cron run ledger.** 29 cron jobs; most handlers have no try/catch, so a failed tick is
    visible only in dashboard logs. No "did last night's settlement generation succeed?" answer.
 4. **Billing is metering-only.** No payment processor (Stripe columns are reserved but unused),
    and invoice statuses on the tenant billing page are derived placeholders, not lifecycle state.
-5. **Support operations are CLI-shaped.** Fixing an account (Clerk resync, force-ending a stuck
-   session, flipping a flag, rebaselining usage) means `npx convex run` from an engineer's laptop
-   — unaudited and unavailable to non-engineers.
+5. **Support operations are mostly CLI-shaped.** Fixing an account (Clerk resync, flipping a
+   flag, rebaselining usage, identity relinking) means `npx convex run` from an engineer's
+   laptop — unaudited and unavailable to non-engineers. (Exception: force-ending a driver
+   session already has a tenant-facing UI via `driverSessions.adminEndSession`.)
 6. **Soft privilege gaps to close while we're here:** `featureFlags.setFlag` is a public
    mutation with no role check; `forceResync.clearFourKitesLoads` deletes FK loads across *all*
    orgs; `app/(app)/dev/create-form` is ungated; security-review findings 8/9/11/12 remain open.
@@ -111,7 +112,9 @@ is visible. Same S3 archival pattern as `auditLog`.
   snapshots), drivers and their session state, billing summary, flags, integration status,
   recent tenant audit log, recent staff actions.
 - **Support actions** (each audited, each a thin wrapper over logic that mostly already exists):
-  - Force-end a stuck driver session (`driverSessions.adminEndSession` is already internal).
+  - Force-end a stuck driver session — a staff-scoped variant of the existing public
+    `driverSessions.adminEndSession` mutation (which is tenant-facing, already used by the
+    web sessions UI, and org-scoped to the caller).
   - Clerk resync / re-provision for a driver or owner (`clerkSync.*` internal actions).
   - Unlink/relink a `userIdentityLinks` row (wrong phone, org move).
   - Acknowledge `sessionEndedWithActiveLoad` rows.
@@ -141,7 +144,7 @@ is visible. Same S3 archival pattern as `auditLog`.
 ### 3.5 Performance & reliability
 
 - **Cron run ledger:** a `runCronJob(name, handler)` wrapper that records start/end/duration/
-  error per tick into `cronRuns`, applied to all 28 jobs. Fixes the "no try/catch" gap once,
+  error per tick into `cronRuns`, applied to all 29 jobs. Fixes the "no try/catch" gap once,
   centrally. Console shows a jobs board: last run, duration trend, consecutive failures.
 - **Integration health board:** `fourKitesPushTickHealth` across all orgs (alert on
   `all_failed` / rising `consecutiveTransientTicks`), Samsara poll health, webhook queue depth +
