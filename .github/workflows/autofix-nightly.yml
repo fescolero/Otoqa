@@ -130,9 +130,18 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           branch_prefix: claude/autofix/
+          # Headless runs auto-deny every tool not explicitly allowed, so the
+          # allowlist below is what lets the agent query PostHog/Convex, run
+          # the checks, and push branches. `gh` authenticates via the Claude
+          # App token the action exports (GH_TOKEN), so its PRs still trigger
+          # pull_request workflows (ci + autofix-review) — the workflow
+          # GITHUB_TOKEN would not. Workflow/native paths stay deny-listed as
+          # a hard backstop to the OUT OF BOUNDS prompt section.
           claude_args: |
             --mcp-config /tmp/autofix/mcp.json
             --max-turns 120
+            --allowedTools "Edit,Write,mcp__posthog__*,mcp__convex__*,Bash(git:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(bun:*),Bash(bunx:*)"
+            --disallowedTools "Edit(.github/**),Write(.github/**),Edit(**/android/**),Write(**/android/**),Edit(**/ios/**),Write(**/ios/**),Edit(apps/*/modules/**),Write(apps/*/modules/**),Edit(convex/schema.ts),Write(convex/schema.ts),Edit(eas.json),Write(eas.json)"
           prompt: |
             You are the nightly autofix agent for this repo (Next.js web app at
             root, Expo apps in apps/driver and apps/dispatch, Convex backend in
