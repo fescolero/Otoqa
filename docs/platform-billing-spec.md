@@ -28,6 +28,26 @@ correction happens in a visible adjustment layer on top (§4), never by touching
 
 ## 2. Layer 1 — The invoice record (`platformInvoices`, new)
 
+### Org billing configuration (console-editable, all audited)
+
+Contracts vary, so the org carries a billing config the cycle-close job reads
+(fields on `organizations` / `organizations_sensitive` as appropriate):
+
+```
+ratePerLoad,                       // current rate (existing billingRatePerLoad)
+rateSchedule?: [{                  // escalators: future-dated steps (some multi-year
+  effectiveFromPeriod,             //   contracts step the rate at set dates)
+  ratePerLoad }],                  // cycle close picks the step covering the period
+recurringCharges?: [{              // fixed fees beyond metered usage
+  label, amount,
+  cadence: 'monthly' | 'annual',
+  anniversaryMonth? }],            // annual charges bill in their anniversary cycle
+minimumMonthlyCharge?,             // commitment floor (see line computation below)
+terms, taxRatePercent?, taxJurisdiction?, termYears, license window, contacts
+```
+
+### The invoice row
+
 One row per org × closed cycle, created by the cycle-close job (§3).
 
 ```
@@ -35,15 +55,22 @@ platformInvoices {
   workosOrgId, periodKey,                      // identity; unique together
   invoiceNumber,                               // SAME deterministic scheme as today
   loadsWritten,                                // frozen at issue
-  ratePerLoad,                                 // frozen at issue
-  subtotal,                                    // loadsWritten × ratePerLoad, frozen
+  ratePerLoad,                                 // frozen at issue (from schedule if set)
+  lines: [{ kind: 'usage' | 'recurring' | 'minimum_true_up',
+            label, amount }],                  // computed at draft, frozen at issue
+  subtotal,                                    // Σ lines, frozen
   adjustments: [{                              // signed line items
     label, amountDelta, reason, addedByEmail, addedAt
   }],
-  total,                                       // subtotal + Σ adjustments
-  amountPaid,                                  // running total of recorded payments
+  taxRatePercent?, taxJurisdiction?,           // snapshot at issue; unset = no tax line (§6a)
+  taxAmount?,                                  // taxable base × rate, frozen at issue
+  total,                                       // subtotal + Σ adjustments + taxAmount
+  payments: [{ amount, method: 'ach' | 'check' | 'wire' | 'stripe' | 'other',
+               reference?, recordedByEmail, receivedAt }],  // check #s, ACH refs
+  amountPaid,                                  // Σ payments (denormalized)
   status: 'draft' | 'issued' | 'sent' | 'paid' | 'void',
-  termsDays,                                   // default 15 (net-15, matches today's due-on-15th)
+  terms: { kind: 'net', days: number }         // net-N (N ≤ 15 typical, per agreement)
+       | { kind: 'dayOfMonth', day: number },  // fixed calendar due day (1–28; see §3)
   issuedAt?, dueAt?, paidAt?, voidedAt?, voidReason?,
   driftDetectedAt?,                            // §5
   stripeInvoiceId?,                            // §7, null until Stripe phase
@@ -84,15 +111,25 @@ Monthly job (new cron), **03:00 UTC on the 2nd** of each month:
 1. Runs after the nightly recalc window so the count for the just-closed month has had a
    full drift-correction pass. (The period boundary itself is clean — attribution is by
    `createdAt`, so a load created on the 1st belongs to the new cycle.)
-2. For each org with `loadsWritten > 0` in the closed period (or a contractual minimum,
-   §8-D3): create a `draft` invoice with frozen count/rate/subtotal.
-3. Zero-usage cycles: **no invoice issued** (default; §8-D2), but the cycle still renders
-   in the tenant timeline as a zero row.
+2. For each org, compute the draft's lines from the billing config:
+   - **usage**: `loadsWritten × ratePerLoad` (rate = the `rateSchedule` step covering
+     this period, else the current rate);
+   - **recurring**: every `monthly` charge, plus any `annual` charge whose anniversary
+     month this is;
+   - **minimum_true_up**: `max(0, minimumMonthlyCharge − (usage + monthly recurring))`
+     when a minimum is configured — annual charges don't count toward the minimum.
+   A draft is created when any line is non-zero.
+3. Cycles with no non-zero line: **no invoice issued** (default; §8-D2), but the cycle
+   still renders in the tenant timeline as a zero row.
 4. Drafts sit for a **review window until the 5th**: staff see all drafts on the console's
    billing board, can add adjustments, then bulk-issue. On the 5th, any untouched drafts
    **auto-issue** (the default path once we trust the pipeline; initially auto-issue is
    off and issuing is manual — §8-D1).
-5. Issue sets `issuedAt = now`, `dueAt = issuedAt + termsDays`, emits the PDF (reuse the
+5. Issue sets `issuedAt = now` and computes `dueAt` from the org's terms: `net` →
+   `issuedAt + days`; `dayOfMonth` → the next occurrence of that calendar day strictly
+   after issue (issue on the 2nd with day 20 → the 20th this month; day already passed →
+   next month; days 29–31 are stored as given but clamp to the last day of short months).
+   It emits the PDF (reuse the
    existing React-PDF template at
    `app/(app)/settings/billing/_components/billing-invoice-pdf-template.tsx`), and — once
    email exists (§8-V2) — sends it to `organizations.billingEmail` (a required field
@@ -135,14 +172,43 @@ a backfilled sync writes loads with an old `createdAt`). Handling:
 
 - `billingRatePerLoad` edits in the console take effect **from the next cycle**. The UI
   shows "current rate / next-cycle rate" when a change is pending.
+- **Escalators (RESOLVED: some contracts have them):** multi-year agreements may step the
+  rate at contract dates. The `rateSchedule` (§2) holds future-dated steps entered when
+  the contract is signed; cycle close applies whichever step covers the period, so
+  escalations happen on schedule without anyone remembering to edit the rate. Console
+  shows the full schedule on the org billing tab and flags the cycle where a step lands.
 - Backdating a rate is allowed **only** onto periods with no issued invoice, requires
   step-up + reason, and is audited with before/after.
-- Contract fields (number, license window, terms, contacts) are console-editable and
-  audited. `organizations.billingCycle` (holds values like "Annual") has **undefined
-  semantics today** — clarify what it means contractually before wiring it to anything
-  (§8-D4). Until then the engine bills monthly metered, which matches the code as built.
-- License expiry (`platformLicenseEnd`) surfaces on the console org page 60/30/7 days out
-  (systemEvent + badge) so renewals aren't discovered by accident.
+- **Contract term vs billing cycle (RESOLVED 2026-08-06):** these are two different
+  things. The contractual **term** varies per agreement — 1, 3, 5, or 8 years — and lives
+  in the license window (`platformLicenseStart`/`platformLicenseEnd`, plus a `termYears`
+  field for display). **Billing is always monthly** regardless of term. The legacy
+  `organizations.billingCycle` string is retired in favor of these explicit fields.
+- **Payment terms (RESOLVED):** per-org, either net-N with N ≤ 15 (never longer), or a
+  fixed calendar due day of the month — the `terms` union in §2. Default for orgs with
+  nothing specified: net-15 (matches today's derived behavior).
+- Contract fields (number, term, license window, terms, contacts) are console-editable
+  and audited.
+- License expiry (`platformLicenseEnd`) surfaces on the console org page — for multi-year
+  terms, alerts at 180/90/30 days out (systemEvent + badge) so a renewal on a 3–8 year
+  contract isn't discovered by accident.
+
+## 6a. Taxes (mechanism now, rates later — RESOLVED as design)
+
+Rates are unknown today, but the engine supports them from day one so adding a rate is
+data entry, not a schema migration:
+
+- Per-org tax config on the billing tab: `taxRatePercent` + `taxJurisdiction` (free-text
+  label, e.g. "TX", set according to where the client is based). Both optional; unset
+  means no tax line and the invoice footer states "tax not included".
+- At issue time the invoice **snapshots** the rate and computes
+  `taxAmount = (subtotal + adjustments) × rate` as a frozen line — a later rate change
+  never touches issued invoices, same immutability rule as everything else.
+- Backfilled historical invoices carry no tax line.
+- When real rates are determined (accountant, per client state — §11 V-B3), staff fill
+  the per-org fields; if obligations turn out to be multi-state/complex, Stripe Tax can
+  replace manual rates at the Stripe phase without changing the invoice model (it just
+  becomes the source of the snapshot).
 
 ## 7. Payments — Stripe phase (after manual lifecycle is proven)
 
@@ -207,13 +273,25 @@ processor is in the loop.
 
 ## 11. Open items (roll up into plan §14)
 
-**Verify:** V-B1 — what `organizations.billingCycle` ("Annual") means contractually.
-V-B2 — email provider for invoice delivery (none exists in the repo today; Resend or
-Postmark are the obvious candidates). V-B3 — sales-tax obligations (accountant;
-whether Stripe Tax is needed).
+**Resolved 2026-08-06 (owner decisions):**
+- ~~V-B1~~ — contract term is 1/3/5/8 years per agreement; billing is always monthly (§6).
+- ~~D-B4~~ — payment terms are net-≤15 or a fixed due day, per agreement (§2, §3).
+- V-B3 (partial) — tax **mechanism** built now (per-org rate + jurisdiction, snapshot at
+  issue, §6a); actual rates still pending accountant/per-state determination.
 
-**Decide:** D-B1 — auto-issue on the 5th vs manual-issue-only initially (default:
-manual until two clean cycles). D-B2 — zero-usage cycles get no invoice (default: yes,
-skip). D-B3 — contractual monthly minimums: none modeled today; add
-`minimumMonthlyCharge` only if a contract actually has one. D-B4 — payment terms
-per-org (`termsDays`) default 15; confirm against signed contracts.
+**Resolved 2026-08-06 (second round):**
+- ~~D-B3~~ — both fixed fees AND monthly minimums exist in real agreements → modeled as
+  `recurringCharges` + `minimumMonthlyCharge` with a `minimum_true_up` line (§2, §3).
+- ~~D-B5~~ — some multi-year contracts have rate escalators → `rateSchedule` with
+  future-dated steps applied automatically at cycle close (§2, §6).
+- ~~D-B6~~ — clients pay by ACH and check → payment records carry method + reference
+  (check number / ACH ref); confirms ACH-first for the Stripe phase.
+- ~~V-B2~~ — invoice email deferred by decision: invoices are download/manual-send for
+  the first cycles; "sent" is a staff-marked status. Provider chosen when automated
+  sending is wanted.
+
+**Still open:**
+- D-B1 — auto-issue on the 5th vs manual-issue-only initially (default: manual until two
+  clean cycles).
+- D-B2 — zero-line cycles get no invoice (default: yes, skip).
+- V-B3 — actual tax rates per client state (accountant); mechanism is ready (§6a).
