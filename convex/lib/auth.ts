@@ -108,6 +108,66 @@ export async function assertCallerOwnsOrg(
 }
 
 /**
+ * Identity of an authenticated Otoqa platform-staff caller (the provider
+ * console at apps/admin). See requirePlatformStaff.
+ */
+export interface PlatformStaffIdentity {
+  email: string;
+  subject: string;
+}
+
+/**
+ * Fail-closed guard for the platform console (apps/admin). Every exported
+ * function under convex/platform/ MUST call this first.
+ *
+ * Authorization is by ISSUER, not by role: platform staff authenticate
+ * against a dedicated identity provider (a separate WorkOS project — see
+ * docs/platform-admin-console-plan.md §5) registered as its own customJwt
+ * provider in auth.config.ts. Tenant WorkOS tokens and Clerk mobile tokens
+ * have different issuers and are rejected by construction, so tenant RBAC
+ * (roles, permissions, the legacy-grandfathering rule in lib/permissions.ts)
+ * never applies here.
+ *
+ * Checks, all fail-closed:
+ *   1. STAFF_ISSUER must be configured on the deployment — otherwise the
+ *      console is simply disabled (dev deployments without the env stay
+ *      inert rather than open).
+ *   2. The token's issuer must equal STAFF_ISSUER exactly.
+ *   3. The identity must carry an email whose lowercase form is on
+ *      STAFF_EMAIL_ALLOWLIST (comma-separated, exact emails — deliberately
+ *      not a domain match, so a lookalike domain buys nothing). The staff
+ *      IdP's JWT template must include the email claim.
+ *   4. An explicit emailVerified === false is rejected.
+ */
+export async function requirePlatformStaff(ctx: AnyCtx): Promise<PlatformStaffIdentity> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new ConvexError('Unauthenticated');
+
+  const staffIssuer = process.env.STAFF_ISSUER;
+  if (!staffIssuer) {
+    throw new ConvexError('Platform console is not enabled on this deployment');
+  }
+  if (identity.issuer !== staffIssuer) {
+    throw new ConvexError('Not platform staff');
+  }
+
+  const email = typeof identity.email === 'string' ? identity.email.trim().toLowerCase() : '';
+  if (!email || identity.emailVerified === false) {
+    throw new ConvexError('Not platform staff');
+  }
+
+  const allowlist = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  if (!allowlist.includes(email)) {
+    throw new ConvexError('Not platform staff');
+  }
+
+  return { email, subject: identity.subject };
+}
+
+/**
  * RBAC claims from the caller's access token. WorkOS puts `role`, `roles`,
  * and `permissions` on the JWT once RBAC is configured; sessions predating
  * that carry none (see lib/permissions.ts for how the policy treats them).

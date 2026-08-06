@@ -152,6 +152,26 @@ function hasPermission(auth: AuthContext, permission: string): boolean {
 }
 
 // ============================================
+// PUBLIC LIVENESS PROBE
+// ============================================
+
+// Unauthenticated on purpose: external synthetic monitors (UptimeRobot /
+// Checkly) hit this to detect a full outage from OUTSIDE the platform —
+// today nothing else checks us externally because /v1/health below requires
+// a partner key. Returns a static body and touches no data, so there is
+// nothing to leak and nothing to rate-limit beyond the platform default.
+http.route({
+  path: '/liveness',
+  method: 'GET',
+  handler: httpAction(async () => {
+    return new Response('ok', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' },
+    });
+  }),
+});
+
+// ============================================
 // HEALTH CHECK
 // ============================================
 

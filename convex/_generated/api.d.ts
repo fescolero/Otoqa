@@ -166,6 +166,7 @@ import type * as payPlans from "../payPlans.js";
 import type * as payProfiles from "../payProfiles.js";
 import type * as payRules from "../payRules.js";
 import type * as payeeProfileAssignments from "../payeeProfileAssignments.js";
+import type * as platform_access from "../platform/access.js";
 import type * as platformUsage from "../platformUsage.js";
 import type * as platformUsageHelpers from "../platformUsageHelpers.js";
 import type * as push from "../push.js";
@@ -363,6 +364,7 @@ declare const fullApi: ApiFromModules<{
   payProfiles: typeof payProfiles;
   payRules: typeof payRules;
   payeeProfileAssignments: typeof payeeProfileAssignments;
+  "platform/access": typeof platform_access;
   platformUsage: typeof platformUsage;
   platformUsageHelpers: typeof platformUsageHelpers;
   push: typeof push;

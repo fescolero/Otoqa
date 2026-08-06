@@ -1,0 +1,26 @@
+{
+  "name": "@otoqa/admin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Otoqa Platform Console — internal provider/maintainer dashboard (admin.otoqa.com). Separate staff auth; see docs/platform-admin-console-plan.md.",
+  "scripts": {
+    "dev": "next dev --port 3100",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@otoqa/convex-client": "workspace:*",
+    "@workos-inc/authkit-nextjs": "^2.7.1",
+    "convex": "^1.35.1",
+    "next": "^16.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "typescript": "^5"
+  }
+}

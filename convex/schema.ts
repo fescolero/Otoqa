@@ -3948,4 +3948,28 @@ export default defineSchema({
     .index('by_org_user', ['workosOrgId', 'userId'])
     // Cron-side scan — find expired drafts without a full collect.
     .index('by_updatedAt', ['updatedAt']),
+
+  // Platform-staff action log for the provider console (apps/admin).
+  // Deliberately separate from the tenant `auditLog`: different actor
+  // population (Otoqa platform staff, authenticated via the staff issuer —
+  // see convex/lib/auth.ts requirePlatformStaff), records cross-org actions
+  // plus sensitive READS, and carries a much longer retention than the
+  // tenant log. Write only through convex/lib/platformAudit.ts, which keeps
+  // `action` a closed union and enforces `reason` on destructive actions.
+  // Spec: docs/platform-admin-console-plan.md §6.
+  platformAuditLog: defineTable({
+    actorEmail: v.string(), // staff identity (allowlisted email)
+    action: v.string(), // closed union in convex/lib/platformAudit.ts
+    targetOrgId: v.optional(v.string()), // WorkOS org id the action touched, if org-scoped
+    targetTable: v.optional(v.string()),
+    targetId: v.optional(v.string()),
+    before: v.optional(v.string()), // JSON string of prior values
+    after: v.optional(v.string()), // JSON string of new values
+    reason: v.optional(v.string()), // required by the helper for destructive actions
+    metadata: v.optional(v.string()), // additional context as JSON string
+    timestamp: v.number(),
+  })
+    .index('by_time', ['timestamp'])
+    .index('by_actor', ['actorEmail', 'timestamp'])
+    .index('by_target_org', ['targetOrgId', 'timestamp']),
 });

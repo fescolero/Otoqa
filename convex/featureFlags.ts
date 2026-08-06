@@ -1,6 +1,10 @@
 import { v } from 'convex/values';
 import { query, mutation, internalMutation } from './_generated/server';
-import { requireCallerOrgId, resolveClerkCarrierMembership } from './lib/auth';
+import {
+  requireCallerOrgId,
+  assertOrgPermission,
+  resolveClerkCarrierMembership,
+} from './lib/auth';
 import { resolveAuthenticatedDriver } from './driverMobile';
 
 // ============================================================================
@@ -111,11 +115,15 @@ export const getForOrg = query({
 });
 
 /**
- * Set a flag value for the caller's org. Upsert semantics. Callable from
- * the Convex dashboard or any authenticated admin context. Deliberately
- * does NOT require a role check beyond "has org claim" — the surface is
- * dashboard-only until we wire a proper admin UI, and the flags here are
- * operational (no PII exposure).
+ * Set a flag value for the caller's org. Upsert semantics.
+ *
+ * Requires the `settings:edit` RBAC permission: flags are operational
+ * levers (GPS queue backend, wake mechanisms, rollout gates), so flipping
+ * them is a settings-grade action, not something any org member should be
+ * able to do. No client UI calls this today (verified — only the CLI
+ * `setFlagInternal` path is used in runbooks), so tightening it breaks
+ * nothing. Global-scope ('*') flags are NOT writable here at all — that
+ * lever belongs to the platform console (convex/platform/) or the CLI.
  */
 export const setFlag = mutation({
   args: {
@@ -125,6 +133,7 @@ export const setFlag = mutation({
   returns: v.null(),
   handler: async (ctx, { key, value }) => {
     const orgId = await requireCallerOrgId(ctx);
+    await assertOrgPermission(ctx, orgId, 'settings:edit');
     const identity = await ctx.auth.getUserIdentity();
     const updatedBy = identity?.subject;
 

@@ -1,0 +1,178 @@
+/* Platform console — deliberately minimal, dependency-free styling for
+   Phase 0. A design pass can replace this wholesale later. */
+
+:root {
+  --bg: #0d0f12;
+  --panel: #16191e;
+  --border: #262b33;
+  --text: #e6e8eb;
+  --muted: #8b929c;
+  --accent: #f97316; /* Otoqa orange */
+  --danger: #ef4444;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.console-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.console-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.console-brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 4px 8px 16px;
+}
+
+.console-brand span {
+  color: var(--accent);
+}
+
+.console-nav-item {
+  padding: 7px 8px;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.console-nav-item.active,
+.console-nav-item:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.console-nav-item.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.console-sidebar-footer {
+  margin-top: auto;
+  padding: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.console-main {
+  flex: 1;
+  padding: 24px 28px;
+  max-width: 1100px;
+}
+
+.console-main h1 {
+  font-size: 18px;
+  margin: 0 0 4px;
+}
+
+.console-main .subtitle {
+  color: var(--muted);
+  margin: 0 0 24px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.panel h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+
+.audit-row {
+  display: flex;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.audit-row:first-of-type {
+  border-top: none;
+}
+
+.audit-row .when {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.audit-row .action {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent);
+}
+
+.empty {
+  color: var(--muted);
+  padding: 8px 0;
+}
+
+.denied {
+  max-width: 460px;
+  margin: 18vh auto 0;
+  text-align: center;
+}
+
+.denied h1 {
+  color: var(--danger);
+  font-size: 18px;
+}
+
+.denied p {
+  color: var(--muted);
+}
+
+.button {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.loading {
+  color: var(--muted);
+  padding: 18vh 0;
+  text-align: center;
+}

@@ -58,7 +58,6 @@ export const NAV: NavSection[] = [
     items: [
       { id: 'carriers',     label: 'Carriers',     href: '/operations/carriers' },
       { id: 'customers',    label: 'Customers',    href: '/operations/customers' },
-      { id: 'compliance',   label: 'Compliance',   href: '/operations/compliance', area: 'fleet' },
       { id: 'diesel',       label: 'Diesel',       href: '/operations/diesel', area: 'fuel' },
       { id: 'fuel-vendors', label: 'Fuel Vendors', href: '/operations/diesel/vendors', area: 'fuel' },
       { id: 'fuel-reports', label: 'Fuel Reports', href: '/operations/diesel/reports', area: 'fuel' },

@@ -83,6 +83,24 @@
         "vitest": "^4.1.4",
       },
     },
+    "apps/admin": {
+      "name": "@otoqa/admin",
+      "version": "0.1.0",
+      "dependencies": {
+        "@otoqa/convex-client": "workspace:*",
+        "@workos-inc/authkit-nextjs": "^2.7.1",
+        "convex": "^1.35.1",
+        "next": "^16.1.1",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
+      },
+      "devDependencies": {
+        "@types/node": "^20",
+        "@types/react": "^19",
+        "@types/react-dom": "^19",
+        "typescript": "^5",
+      },
+    },
     "apps/dispatch": {
       "name": "otoqa-dispatch",
       "version": "1.0.0",
@@ -821,6 +839,8 @@
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
 
     "@nolyfill/is-core-module": ["@nolyfill/is-core-module@1.0.39", "", {}, "sha512-nn5ozdjYQpUCZlWGuxcJY/KpxkWQs4DcbMCmKojjyrYDEAGy4Ce19NN4v5MduafTwJlbKc99UA8YhSVqq9yPZA=="],
+
+    "@otoqa/admin": ["@otoqa/admin@workspace:apps/admin"],
 
     "@otoqa/convex-client": ["@otoqa/convex-client@workspace:packages/convex-client"],
 

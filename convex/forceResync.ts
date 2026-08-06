@@ -14,13 +14,14 @@ export const clearFourKitesLoads = mutation({
       throw new ConvexError('Disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable');
     }
     await assertCallerOwnsOrg(ctx, args.workosOrgId);
-    // Find all FK loads
+    // Find the CALLER ORG's FK loads only. (Previously this collected the
+    // entire loadInformation table and deleted FK- loads across all orgs.)
     const loads = await ctx.db
       .query("loadInformation")
-      .filter((q) => q.eq(q.field("internalId"), q.field("internalId")))
+      .withIndex("by_organization", (q) => q.eq("workosOrgId", args.workosOrgId))
       .collect();
 
-    const fkLoads = loads.filter((load) => 
+    const fkLoads = loads.filter((load) =>
       load.internalId?.startsWith("FK-")
     );
 
