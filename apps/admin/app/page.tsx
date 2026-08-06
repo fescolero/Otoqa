@@ -8,11 +8,36 @@ export default function OverviewPage() {
   return (
     <ConsoleShell>
       <h1>Overview</h1>
-      <p className="subtitle">
-        Phase 0 — staff access, audit trail, and the shell. Boards land in Phase 1.
-      </p>
+      <p className="subtitle">Needs-attention events and recent staff activity.</p>
+      <NeedsAttention />
       <RecentStaffActivity />
     </ConsoleShell>
+  );
+}
+
+function NeedsAttention() {
+  const events = useQuery(api.platform.events.recentEvents, { minSeverity: 'warn', limit: 25 });
+
+  return (
+    <div className={events && events.length > 0 ? 'panel panel-attention' : 'panel'}>
+      <h2>Needs attention</h2>
+      {events === undefined ? (
+        <div className="empty">Loading…</div>
+      ) : events.length === 0 ? (
+        <div className="empty">Nothing needs attention. 🎉</div>
+      ) : (
+        events.map((e) => (
+          <div className="audit-row" key={e._id}>
+            <span className="when">{new Date(e.createdAt).toLocaleString()}</span>
+            <span className={`chip ${e.severity === 'critical' ? 'chip-danger' : e.severity === 'error' ? 'chip-danger' : 'chip-warn'}`}>
+              {e.severity}
+            </span>
+            <span className="action">{e.code}</span>
+            <span>{e.message}</span>
+          </div>
+        ))
+      )}
+    </div>
   );
 }
 

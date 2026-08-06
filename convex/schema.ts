@@ -3972,4 +3972,78 @@ export default defineSchema({
     .index('by_time', ['timestamp'])
     .index('by_actor', ['actorEmail', 'timestamp'])
     .index('by_target_org', ['targetOrgId', 'timestamp']),
+
+  // ===== PLATFORM CONSOLE (Phase 1) — see docs/platform-admin-console-plan.md =====
+
+  // One row per organization, rebuilt by the org-health-snapshots cron.
+  // The console's org directory reads ONLY this table — cross-org views
+  // never scan operational tables live (plan §4: snapshot tables are the
+  // rule for all cross-org reads, matching organizationStats /
+  // fourKitesPushTickHealth / loadStatusCounts).
+  orgHealthSnapshots: defineTable({
+    organizationId: v.id('organizations'),
+    workosOrgId: v.optional(v.string()),
+    name: v.string(),
+    orgType: v.optional(v.string()),
+    isDeleted: v.boolean(),
+    memberCount: v.number(), // orgMembers directory rows
+    driverCount: v.number(),
+    activeSessionCount: v.number(), // driverSessions with status='active'
+    loadsThisCycle: v.number(), // platformUsageStats, current period
+    openDispatchAlerts: v.number(),
+    flagOverrideCount: v.number(), // org-scoped featureFlags rows
+    identityLinkCount: v.number(), // Clerk↔WorkOS links
+    updatedAt: v.number(),
+  }).index('by_organization', ['organizationId']),
+
+  // One row per cron job, upserted EVERY tick by platform/cronRunner —
+  // cheap enough even for the 10s Samsara poll. This is the jobs board's
+  // source of truth for "is it healthy right now".
+  cronHealth: defineTable({
+    jobName: v.string(),
+    lastStartedAt: v.number(),
+    lastFinishedAt: v.number(),
+    lastDurationMs: v.number(),
+    lastOutcome: v.union(v.literal('ok'), v.literal('error')),
+    lastError: v.optional(v.string()), // truncated
+    consecutiveFailures: v.number(),
+    totalRuns: v.number(),
+    totalFailures: v.number(),
+    updatedAt: v.number(),
+  }).index('by_job', ['jobName']),
+
+  // Append-only run history. Policy (plan §11-6): sub-5-minute jobs write
+  // here only on FAILURE (their health row carries the ok signal);
+  // everything else records every tick. Pruned at 30 days.
+  cronRuns: defineTable({
+    jobName: v.string(),
+    startedAt: v.number(),
+    durationMs: v.number(),
+    outcome: v.union(v.literal('ok'), v.literal('error')),
+    error: v.optional(v.string()),
+  })
+    .index('by_job_time', ['jobName', 'startedAt'])
+    .index('by_time', ['startedAt']),
+
+  // Curated, actionable backend events — the console's "needs attention"
+  // feed. NOT a log store (Axiom is): only failures and anomalies worth a
+  // human's attention are written here. Never written unconditionally in
+  // high-frequency paths. Pruned at 30 days. Write via
+  // convex/lib/systemEvents.ts only.
+  systemEvents: defineTable({
+    severity: v.union(
+      v.literal('info'),
+      v.literal('warn'),
+      v.literal('error'),
+      v.literal('critical'),
+    ),
+    source: v.string(), // e.g. 'cron', 'webhooks', 'fourkites', 'billing'
+    code: v.string(), // stable machine key, e.g. 'cron.failed'
+    message: v.string(),
+    orgId: v.optional(v.string()), // WorkOS org id when org-scoped
+    context: v.optional(v.string()), // JSON string
+    createdAt: v.number(),
+  })
+    .index('by_time', ['createdAt'])
+    .index('by_severity_time', ['severity', 'createdAt']),
 });

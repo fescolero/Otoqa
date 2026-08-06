@@ -11,18 +11,17 @@
  */
 
 import { Component, ReactNode, useEffect, useRef } from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 
 const NAV = [
-  { label: 'Overview', href: '/', active: true },
-  // Phase 1+ surfaces — listed so the shape of the console is visible,
-  // disabled until their pages exist.
-  { label: 'Organizations', href: '#', disabled: true },
-  { label: 'Billing', href: '#', disabled: true },
-  { label: 'Jobs', href: '#', disabled: true },
-  { label: 'Health', href: '#', disabled: true },
-  { label: 'Errors', href: '#', disabled: true },
+  { label: 'Overview', href: '/' },
+  { label: 'Organizations', href: '/organizations' },
+  { label: 'Billing', href: '/billing' },
+  { label: 'Jobs', href: '/jobs' },
+  { label: 'Health', href: '/health' },
 ];
 
 export function ConsoleShell({ children }: { children: ReactNode }) {
@@ -61,15 +60,7 @@ function GatedShell({ children }: { children: ReactNode }) {
         <div className="console-brand">
           otoqa <span>console</span>
         </div>
-        {NAV.map((item) => (
-          <a
-            key={item.label}
-            href={item.href}
-            className={`console-nav-item${item.active ? ' active' : ''}${item.disabled ? ' disabled' : ''}`}
-          >
-            {item.label}
-          </a>
-        ))}
+        <ShellNav />
         <div className="console-sidebar-footer">
           {me.email}
           <br />
@@ -78,6 +69,27 @@ function GatedShell({ children }: { children: ReactNode }) {
       </aside>
       <main className="console-main">{children}</main>
     </div>
+  );
+}
+
+function ShellNav() {
+  const pathname = usePathname();
+  return (
+    <>
+      {NAV.map((item) => {
+        const active =
+          item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
+        return (
+          <Link
+            key={item.label}
+            href={item.href}
+            className={`console-nav-item${active ? ' active' : ''}`}
+          >
+            {item.label}
+          </Link>
+        );
+      })}
+    </>
   );
 }
 

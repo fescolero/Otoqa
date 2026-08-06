@@ -11,7 +11,10 @@ const convexOverrides = (convexRecommended.overrides ?? []).map((override) => ({
 
 export default defineConfig([
   {
-    ignores: ['**/*-old.*'],
+    // apps/*/.next: Next's root ignore only covers the repo-root build dir,
+    // so workspace-app build output (e.g. apps/admin/.next from a local
+    // `next build`) must be excluded explicitly.
+    ignores: ['**/*-old.*', 'apps/*/.next/**'],
   },
   ...nextCoreWebVitals,
   ...nextTypescript,
