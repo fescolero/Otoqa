@@ -12,9 +12,27 @@ import { ConvexReactClient, ConvexProviderWithAuth } from 'convex/react';
 import { AuthKitProvider, useAuth, useAccessToken } from '@workos-inc/authkit-nextjs/components';
 
 export function ConvexClientProvider({ children }: { children: ReactNode }) {
-  const [convex] = useState(() => {
-    return new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
-  });
+  // NEXT_PUBLIC_CONVEX_URL is inlined at build time. When it's missing
+  // (project env vars not configured yet), render an explicit
+  // misconfiguration notice instead of throwing — a constructor throw here
+  // fails `next build` during the /_not-found prerender, which obscures
+  // the real problem. See apps/admin/README.md for the required env vars.
+  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+  const [convex] = useState(() => (convexUrl ? new ConvexReactClient(convexUrl) : null));
+
+  if (!convex) {
+    return (
+      <div className="denied">
+        <h1>Console not configured</h1>
+        <p>
+          This deployment is missing its environment variables (starting with
+          NEXT_PUBLIC_CONVEX_URL). Set the variables listed in apps/admin/README.md
+          on the Vercel project and redeploy.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <AuthKitProvider>
       <ConvexProviderWithAuth client={convex} useAuth={useAuthFromAuthKit}>

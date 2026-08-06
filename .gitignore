@@ -71,3 +71,6 @@ apps/driver/.claude/
 
 # Native module build output
 apps/driver/modules/*/android/build/
+
+# Next.js build output in workspace apps (root /.next/ is anchored)
+apps/*/.next/
