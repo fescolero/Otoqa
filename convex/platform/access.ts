@@ -47,6 +47,28 @@ export const recordSessionStart = mutation({
 });
 
 /**
+ * Debug: the caller's OWN token claims as Convex sees them. Requires
+ * authentication but deliberately NOT requirePlatformStaff — its purpose is
+ * diagnosing why the staff gate rejected a session. Returns only the
+ * caller's own claims (issuer/email/subject), never anyone else's data and
+ * never any env/config values, so exposure is limited to what the caller's
+ * own JWT already contains.
+ */
+export const debugIdentity = query({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return null;
+    return {
+      issuer: identity.issuer,
+      email: typeof identity.email === 'string' ? identity.email : null,
+      emailVerified: typeof identity.emailVerified === 'boolean' ? identity.emailVerified : null,
+      subject: identity.subject,
+    };
+  },
+});
+
+/**
  * Most recent platform-staff audit entries, newest first. Phase 0 surfaces
  * this on the console home so the very first feature is accountability.
  */

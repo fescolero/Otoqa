@@ -109,7 +109,11 @@ class AccessBoundary extends Component<{ children: ReactNode }, { error: string 
       const isAuthRejection = /Not platform staff|Unauthenticated|not enabled on this deployment/i.test(
         this.state.error,
       );
-      return isAuthRejection ? <Denied /> : <ConsoleError message={this.state.error} />;
+      return isAuthRejection ? (
+        <Denied detail={this.state.error} />
+      ) : (
+        <ConsoleError message={this.state.error} />
+      );
     }
     return this.props.children;
   }
@@ -134,7 +138,35 @@ function ConsoleError({ message }: { message: string }) {
   );
 }
 
-function Denied() {
+function TokenClaims() {
+  // Shows the caller's OWN token claims as Convex sees them, so a denial
+  // screenshot includes everything needed to fix the config: the issuer
+  // the token actually carries and whether an email claim survived the
+  // JWT template.
+  const claims = useQuery(api.platform.access.debugIdentity, {});
+  if (claims === undefined) return null;
+  if (claims === null) {
+    return <p className="muted">Your token: not recognized by Convex (no identity).</p>;
+  }
+  return (
+    <p className="muted">
+      Your token — issuer: <code>{claims.issuer}</code> · email:{' '}
+      <code>{claims.email ?? '(no email claim)'}</code> · verified:{' '}
+      <code>{claims.emailVerified === null ? '(no claim)' : String(claims.emailVerified)}</code>
+    </p>
+  );
+}
+
+function Denied({ detail }: { detail?: string }) {
+  // The three rejection reasons are deliberately distinguishable so a
+  // screenshot of this page is a complete diagnosis:
+  //   "Unauthenticated"          → Convex didn't recognize the JWT at all
+  //                                (staff provider missing from auth config,
+  //                                or no token reached the backend)
+  //   "…not enabled…"            → STAFF_ISSUER env var missing on the
+  //                                Convex deployment
+  //   "Not platform staff"       → token recognized but wrong issuer, or
+  //                                email absent/not on the allowlist
   return (
     <div className="denied">
       <h1>Access denied</h1>
@@ -143,6 +175,8 @@ function Denied() {
         allowlist — if it should be, ask an administrator to add your email and sign
         in again.
       </p>
+      {detail ? <p className="muted">Reason: {detail}</p> : null}
+      <TokenClaims />
       <a className="button" href="/sign-out">
         Sign out
       </a>

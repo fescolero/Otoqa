@@ -147,13 +147,19 @@ export async function requirePlatformStaff(ctx: AnyCtx): Promise<PlatformStaffId
   if (!staffIssuer) {
     throw new ConvexError('Platform console is not enabled on this deployment');
   }
+  // The parenthetical reasons below are shown on the console's denied
+  // screen. They reveal which gate failed but no secret values — acceptable
+  // for an internal console, and they turn a denial screenshot into a
+  // complete diagnosis.
   if (identity.issuer !== staffIssuer) {
-    throw new ConvexError('Not platform staff');
+    throw new ConvexError('Not platform staff (token issuer is not the staff issuer)');
   }
 
   const email = typeof identity.email === 'string' ? identity.email.trim().toLowerCase() : '';
   if (!email || identity.emailVerified === false) {
-    throw new ConvexError('Not platform staff');
+    throw new ConvexError(
+      'Not platform staff (token carries no verified email claim — check the staff JWT template)',
+    );
   }
 
   const allowlist = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
@@ -161,7 +167,7 @@ export async function requirePlatformStaff(ctx: AnyCtx): Promise<PlatformStaffId
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
   if (!allowlist.includes(email)) {
-    throw new ConvexError('Not platform staff');
+    throw new ConvexError('Not platform staff (email is not on STAFF_EMAIL_ALLOWLIST)');
   }
 
   return { email, subject: identity.subject };
