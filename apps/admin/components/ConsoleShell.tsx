@@ -138,6 +138,25 @@ function ConsoleError({ message }: { message: string }) {
   );
 }
 
+function TokenClaims() {
+  // Shows the caller's OWN token claims as Convex sees them, so a denial
+  // screenshot includes everything needed to fix the config: the issuer
+  // the token actually carries and whether an email claim survived the
+  // JWT template.
+  const claims = useQuery(api.platform.access.debugIdentity, {});
+  if (claims === undefined) return null;
+  if (claims === null) {
+    return <p className="muted">Your token: not recognized by Convex (no identity).</p>;
+  }
+  return (
+    <p className="muted">
+      Your token — issuer: <code>{claims.issuer}</code> · email:{' '}
+      <code>{claims.email ?? '(no email claim)'}</code> · verified:{' '}
+      <code>{claims.emailVerified === null ? '(no claim)' : String(claims.emailVerified)}</code>
+    </p>
+  );
+}
+
 function Denied({ detail }: { detail?: string }) {
   // The three rejection reasons are deliberately distinguishable so a
   // screenshot of this page is a complete diagnosis:
@@ -157,6 +176,7 @@ function Denied({ detail }: { detail?: string }) {
         in again.
       </p>
       {detail ? <p className="muted">Reason: {detail}</p> : null}
+      <TokenClaims />
       <a className="button" href="/sign-out">
         Sign out
       </a>
