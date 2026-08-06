@@ -9,6 +9,7 @@
  */
 
 import type * as _devTools_facetSimulator from "../_devTools/facetSimulator.js";
+import type * as _devTools_geofenceBackfill from "../_devTools/geofenceBackfill.js";
 import type * as _devTools_payEngineValidationSetup from "../_devTools/payEngineValidationSetup.js";
 import type * as _devTools_syncLatencyDiag from "../_devTools/syncLatencyDiag.js";
 import type * as _helpers_cronUtils from "../_helpers/cronUtils.js";
@@ -189,6 +190,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "_devTools/facetSimulator": typeof _devTools_facetSimulator;
+  "_devTools/geofenceBackfill": typeof _devTools_geofenceBackfill;
   "_devTools/payEngineValidationSetup": typeof _devTools_payEngineValidationSetup;
   "_devTools/syncLatencyDiag": typeof _devTools_syncLatencyDiag;
   "_helpers/cronUtils": typeof _helpers_cronUtils;
