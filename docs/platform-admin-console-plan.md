@@ -219,6 +219,10 @@ applicable, all with explicit retention.
   not on "do it again".
 
 ### 7.4 Platform billing
+
+> Full specification: **`docs/platform-billing-spec.md`** (invoice state machine,
+> cycle-close job, adjustments/credit notes, drift handling, Stripe phase, edge-case
+> table). Summary below.
 - Revenue dashboard from `platformUsageStats` × frozen/current rates: MRR, accruals, top
   orgs, cycle-over-cycle. (Small table — direct query is fine here.)
 - Contract management: rate (effective-dated — a change applies from the NEXT cycle unless
