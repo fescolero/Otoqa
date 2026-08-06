@@ -93,17 +93,45 @@ function ShellNav() {
   );
 }
 
-class AccessBoundary extends Component<{ children: ReactNode }, { denied: boolean }> {
-  state = { denied: false };
+class AccessBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
+  state: { error: string | null } = { error: null };
 
-  static getDerivedStateFromError() {
-    return { denied: true };
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error.message : String(error) };
   }
 
   render() {
-    if (this.state.denied) return <Denied />;
+    if (this.state.error !== null) {
+      // Only genuine authorization rejections render the access-denied
+      // screen. Anything else (e.g. "Could not find public function" when
+      // the Convex deploy lags the console deploy) gets an honest error
+      // screen instead of a misleading denial.
+      const isAuthRejection = /Not platform staff|Unauthenticated|not enabled on this deployment/i.test(
+        this.state.error,
+      );
+      return isAuthRejection ? <Denied /> : <ConsoleError message={this.state.error} />;
+    }
     return this.props.children;
   }
+}
+
+function ConsoleError({ message }: { message: string }) {
+  const looksUndeployed = /could not find/i.test(message);
+  return (
+    <div className="denied">
+      <h1>Console error</h1>
+      <p>{message}</p>
+      {looksUndeployed ? (
+        <p>
+          This usually means the Convex backend hasn&apos;t been deployed with the
+          console&apos;s latest functions yet — run <code>npx convex deploy</code> and reload.
+        </p>
+      ) : null}
+      <a className="button" href="/">
+        Reload
+      </a>
+    </div>
+  );
 }
 
 function Denied() {
