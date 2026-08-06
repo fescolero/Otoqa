@@ -9,6 +9,7 @@
  */
 
 import type * as _devTools_facetSimulator from "../_devTools/facetSimulator.js";
+import type * as _devTools_geofenceBackfill from "../_devTools/geofenceBackfill.js";
 import type * as _helpers_cronUtils from "../_helpers/cronUtils.js";
 import type * as _helpers_dateUtils from "../_helpers/dateUtils.js";
 import type * as _helpers_timeUtils from "../_helpers/timeUtils.js";
@@ -135,6 +136,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   "_devTools/facetSimulator": typeof _devTools_facetSimulator;
+  "_devTools/geofenceBackfill": typeof _devTools_geofenceBackfill;
   "_helpers/cronUtils": typeof _helpers_cronUtils;
   "_helpers/dateUtils": typeof _helpers_dateUtils;
   "_helpers/timeUtils": typeof _helpers_timeUtils;
