@@ -17,9 +17,10 @@
 'use client';
 
 import * as React from 'react';
-import { useMutation, useQuery } from 'convex/react';
+import { useConvexAuth, useMutation } from 'convex/react';
 import { useTheme } from 'next-themes';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 
 export type UiTheme = 'light' | 'dark' | 'system';
@@ -73,7 +74,23 @@ function writeLocal(prefs: UiPreferences) {
 
 export function UiPreferencesProvider({ children }: { children: React.ReactNode }) {
   const workosOrgId = useOrganizationId();
-  const remote = useQuery(api.settings.getUserPreferences, { workosOrgId });
+  // getUserPreferences asserts the caller owns the org, so it must not run
+  // before the Convex auth handshake finishes. A plain useQuery here fires on
+  // the provider's very first render — while the client still has no token —
+  // and the server throws ConvexError('Unauthenticated'), which Convex
+  // re-throws out of useQuery during render and takes the whole shell down.
+  // useAuthQuery holds the query at 'skip' until the token is established.
+  const { isLoading: isAuthLoading, isAuthenticated } = useConvexAuth();
+  const remote = useAuthQuery(
+    api.settings.getUserPreferences,
+    workosOrgId ? { workosOrgId } : 'skip',
+  );
+  // True only while a remote value is genuinely still in flight. Once auth has
+  // resolved without a session (or without an org), the query stays skipped
+  // forever and `remote` never leaves `undefined` — the effects below have to
+  // fall through to the localStorage mirror instead of waiting on it.
+  const isRemotePending =
+    remote === undefined && (isAuthLoading || (isAuthenticated && Boolean(workosOrgId)));
   const updateUi = useMutation(api.settings.updateUiPreferences);
   const { setTheme: setNextTheme } = useTheme();
 
@@ -110,8 +127,11 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
   // → page paints new theme. Net: 3 paints instead of 1, hence the flicker.
   const hasHydratedFromRemote = React.useRef(false);
   React.useEffect(() => {
-    if (remote === undefined) return;
+    if (isRemotePending) return;
     setIsHydrating(false);
+    // Query skipped for good (no session / no org). Leave the latch open so a
+    // handshake that completes later in this session can still hydrate.
+    if (remote === undefined) return;
     if (hasHydratedFromRemote.current) return;
     hasHydratedFromRemote.current = true;
     if (remote === null) return;
@@ -123,7 +143,7 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
     setPrefs(next);
     writeLocal(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remote]);
+  }, [remote, isRemotePending]);
 
   // Apply density via a document attribute on every prefs change. Theme is
   // intentionally NOT in this effect — see the theme-application reasoning
@@ -141,11 +161,11 @@ export function UiPreferencesProvider({ children }: { children: React.ReactNode 
   const themeBootstrapped = React.useRef(false);
   React.useEffect(() => {
     if (themeBootstrapped.current) return;
-    if (remote === undefined) return;
+    if (isRemotePending) return;
     themeBootstrapped.current = true;
     setNextTheme(prefs.theme);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remote, prefs.theme]);
+  }, [isRemotePending, prefs.theme]);
 
   const persist = React.useCallback(
     (next: UiPreferences, partial: Partial<UiPreferences>) => {
