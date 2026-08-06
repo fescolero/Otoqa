@@ -3188,6 +3188,11 @@ export default defineSchema({
     longitude: v.float64(),
     distanceMeters: v.float64(),
     accuracy: v.optional(v.float64()), // GPS horizontal accuracy of the triggering ping (m)
+    // True when the event was computed retroactively from stored pings by
+    // _devTools/geofenceBackfill (same ring/debounce logic replayed over
+    // historical GPS). Absent on live-detected events — the audit trail
+    // always distinguishes "detected live" from "computed after the fact".
+    backfilled: v.optional(v.boolean()),
   })
     .index('by_load_stop_event', ['loadId', 'stopSequenceNumber', 'eventType'])
     .index('by_load', ['loadId', 'triggeredAt'])
