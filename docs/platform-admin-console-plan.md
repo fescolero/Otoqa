@@ -38,36 +38,47 @@ maintainers: logs, bug triage, account support, platform billing, and performanc
    mutation with no role check; `forceResync.clearFourKitesLoads` deletes FK loads across *all*
    orgs; `app/(app)/dev/create-form` is ungated; security-review findings 8/9/11/12 remain open.
 
-## 2. Architecture decision
+## 2. Architecture decision (revised: fully separated admin surface)
 
-**Same monorepo, same Convex deployment, new isolated surfaces:**
+**Separate site, separate auth, same Convex deployment and monorepo:**
 
-- **Web:** new route group `app/(platform)/admin/*` with its own layout, nav, and shell —
-  completely separate from the tenant `(app)` group. The layout does a server-side staff check
-  and everything under it renders nothing without it.
+- **Web:** a new workspace app `apps/admin` (Next.js), deployed independently at
+  `admin.otoqa.com`. It shares `packages/convex-client` for generated types but shares **no**
+  routes, layout, session, or middleware with the tenant web app. The tenant app is never
+  touched by console work, and a console bug can't take the tenant site down.
+- **Staff auth — its own identity provider, zero coupling to tenant WorkOS/Clerk.**
+  Recommended: a **separate WorkOS project/environment** used only for staff (AuthKit + Google
+  Workspace SSO connection, MFA enforced) — familiar tooling, no custom crypto, and its client
+  ID / issuer is *different* from the tenant project. Alternative if we want no WorkOS at all:
+  Auth.js + Google OAuth with a small `jose`-based route that mints short-lived Convex JWTs and
+  serves a JWKS. Either way the result is the same: a **third `customJwt` provider entry in
+  `convex/auth.config.ts` with a staff-only issuer**.
+- **Authorization by issuer, not by role:** `requirePlatformStaff(ctx)` in `convex/lib/auth.ts`
+  verifies the identity's **issuer is the staff issuer** (and optionally the email is on a
+  Convex-env allowlist). Tenant WorkOS tokens and Clerk tokens are rejected by construction —
+  a tenant can never mint a staff token, so there is no role-escalation path through the tenant
+  team UI and no interaction with tenant RBAC at all. The legacy "`permissions == null` ⇒
+  allow" grandfathering in `isPermitted` never applies here — platform checks are a separate
+  code path that fails closed.
 - **Backend:** new directory `convex/platform/` (e.g. `orgs.ts`, `billing.ts`, `health.ts`,
   `flags.ts`, `support.ts`, `logs.ts`). **Every** exported function in this namespace begins
   with `requirePlatformStaff(ctx)`. Tenant helpers (`assertCallerOwnsOrg`, etc.) are never
   loosened to admit staff — cross-org access exists only inside `convex/platform/`, so the
   tenant attack surface does not widen.
+- **Logs live in a log store, not in Convex.** Configure **Convex log streaming to Axiom**
+  (dashboard config, no code) for raw function logs, search, retention, and log-based alert
+  monitors (→ Slack). Convex keeps only *curated operational state*: snapshot tables, the cron
+  ledger, actionable `systemEvents`, invoices, and the staff audit log. We do not run our own
+  log database.
+- Defense in depth: staff session check in the `apps/admin` server layout, the issuer check in
+  every Convex platform function, MFA at the IdP, and (optionally) an IP allowlist on the
+  admin deployment.
 
-Why not a separate app/deployment: shared schema/codegen and one deploy keep iteration fast, and
-the isolation we need is authorization-level, not infrastructure-level. If stronger separation is
-wanted later, the route group can move behind an `admin.otoqa.com` host check in `proxy.ts`
-without backend changes.
-
-### Staff identity
-
-- Create a dedicated **"Otoqa Internal" WorkOS organization**; its org ID goes in a
-  `PLATFORM_STAFF_ORG_IDS` env var on both Next and Convex.
-- Seed two environment roles: `platform_admin` (full) and `platform_support` (read +
-  low-risk account fixes; no billing writes, no destructive ops).
-- `requirePlatformStaff(ctx, level?)` in `convex/lib/auth.ts`: verifies the JWT's `org_id` is in
-  the staff allowlist **and** carries a platform role slug. Critically, the legacy
-  "`permissions == null` ⇒ allow" grandfathering in `isPermitted` must **not** apply to
-  platform checks — fail closed, always.
-- Defense in depth: staff check in the `(platform)` server layout, again in every Convex
-  platform function, and (optionally) a host/path check in `proxy.ts`.
+Why this beats the earlier same-app/staff-org design: the console's workload (logs, snapshots,
+cross-org reads, destructive ops) and its trust model are both different from the tenant app's.
+Separating the site and the issuer eliminates the shared-environment-role escalation risk, the
+`membership[0]` single-org assumption, and the env-allowlist drift between deployments — rather
+than mitigating them. Cost: a second (small) deploy, and staff use dedicated accounts.
 
 ### Staff audit log
 
@@ -80,14 +91,15 @@ is visible. Same S3 archival pattern as `auditLog`.
 
 ### 3.1 Logs & errors
 
-- **`systemEvents` table + `logSystemEvent(ctx, …)` helper** — structured, queryable backend
-  events: `{severity, source, orgId?, code, message, context}`. Integration failures, webhook
-  dead-letters, auth anomalies, and cron errors write here. Pruned like `apiAuditLog` (30d),
-  with severity-based retention. This becomes the console's live "backend log" feed with
-  org/source/severity filters.
-- **Convex log streaming** (Axiom or Datadog) for raw `console.*` output and function-level
-  execution logs — configuration, not code. `systemEvents` is for curated, actionable events;
-  the stream is for forensic depth.
+- **Axiom is the log store.** Convex log streaming ships all `console.*` output and
+  function-execution logs (status, duration, errors) to Axiom — configuration, not code.
+  Search, retention, dashboards, and log-based alert monitors (→ Slack) come with it. The
+  console links into Axiom rather than rebuilding log search.
+- **`systemEvents` table + `logSystemEvent(ctx, …)` helper** — small, curated, *actionable*
+  backend events only: `{severity, source, orgId?, code, message, context}` for integration
+  failures, webhook dead-letters, auth anomalies, cron errors. Pruned like `apiAuditLog` (30d).
+  Never written unconditionally in high-frequency paths (10s/1min jobs) — sample or
+  failure-only there. This feeds the console's "needs attention" feed; Axiom is for forensics.
 - **Client errors:** an admin "Errors" page that pulls top PostHog error-tracking issues per
   app (web / driver / dispatch) via the PostHog API (the `error_tracking:read` personal key
   already exists for the nightly autofix job), grouped by release/OTA update ID so a bad OTA
@@ -174,13 +186,54 @@ is visible. Same S3 archival pattern as `auditLog`.
 
 | Phase | Scope | Outcome |
 | --- | --- | --- |
-| **0 — Foundation** | Staff org + roles, `requirePlatformStaff`, `(platform)` shell + nav, `platformAuditLog`, hardening items 1–4 | Staff can log in to an empty, safe console; nothing else changed |
+| **0 — Foundation** | Staff IdP (separate WorkOS project or Auth.js+Google) + third `customJwt` provider, `requirePlatformStaff` (issuer check), `apps/admin` shell + deploy, Axiom log streaming, `platformAuditLog`, hardening items 1–4 | Staff can log in to an empty, safe console with logs already flowing; tenant app untouched |
 | **1 — Visibility** | Org directory + org detail (read-only), cross-org billing dashboard, cron run ledger + jobs board, integration health board, `systemEvents` + errors page (PostHog API) | "What is happening?" answerable without the Convex dashboard |
 | **2 — Operations** | Support actions (sessions, Clerk resync, identity links, flags UI, usage rebaseline), `supportTickets` + in-app report-a-problem, platform alerting to Slack | Support stops requiring an engineer with CLI access |
 | **3 — Billing maturity** | `platformInvoices` lifecycle, invoice generation at cycle close, then Stripe + dunning | Real receivables instead of derived placeholders |
 | **4 — Advanced** | Read-only view-as-org, SLO dashboards, anomaly detection on usage/error rates | Proactive quality management |
 
-## 6. Testing & guardrails
+## 6. Risks & edge cases, and how the revised architecture resolves them
+
+1. **Staff/tenant role escalation** — *dissolved.* Staff tokens come from a different issuer;
+   tenant WorkOS/Clerk tokens can never pass `requirePlatformStaff`. Tenant RBAC (`isPermitted`,
+   environment roles) is untouched and irrelevant to the console.
+2. **`membership[0]` / mixed-membership accounts** — *dissolved.* Staff sign in to a different
+   site with dedicated accounts; the tenant app's first-membership assumption never sees them.
+3. **Staff offboarding lag** — disable the account in the staff IdP (one system), keep staff
+   token TTL short (≤15 min), and re-verify the IdP session server-side before destructive ops.
+4. **Cross-org dashboards vs Convex limits/reactivity** — live queries scanning all orgs would
+   hit read limits and re-execute on every tenant write. Rule: **all cross-org views read
+   cron-built snapshot tables** (`orgHealthSnapshots`, revenue rollups), following the existing
+   `organizationStats` / `fourKitesPushTickHealth` / `loadStatusCounts` pattern. Drill-downs do
+   targeted per-org queries. Admin pages poll/refresh; they don't need tenant-grade liveness.
+5. **Cron ledger transactionality** — a failing *mutation* rolls back its own ledger row. The
+   `runCronJob` wrapper runs at the **action** level, records the outcome in a separate write,
+   and **rethrows** so Convex logs (→ Axiom) still see the failure.
+6. **Cron ledger volume** — `samsara-gps-poll` (10s) and the 1-min jobs would write ~10k+
+   rows/day. High-frequency jobs get an **upserted per-job health row** (last outcome,
+   consecutive-failure counter); append-only history rows are reserved for ≤hourly jobs and for
+   failures.
+7. **Billing history mutability (latent bug)** — `getBillingOverview` recomputes closed-cycle
+   amounts from the *current* `billingRatePerLoad`, so a rate change silently rewrites history.
+   `platformInvoices` must **freeze rate + amount at issuance**; closed cycles render from the
+   invoice, never recomputed. Also model: effective-dated rate changes, manual
+   adjustment/credit line items, and a policy for soft-deleted orgs with open accruals or
+   unpaid invoices.
+8. **Alert storms** — 1-min sweeps must dedupe: one open alert per key with a cooldown,
+   reusing the `dispatchAlerts` `by_dedupe` approach; Axiom monitors handle log-threshold
+   alerts with their own grouping.
+9. **PostHog as an incident-path dependency** — the console's errors page calls PostHog through
+   an `apps/admin` server route (API key never in the browser), tolerates PostHog
+   downtime/rate limits, and is a *convenience view* — Axiom + `systemEvents` remain the
+   primary incident surfaces.
+10. **Offline bug reports** — driver-app "report a problem" rides the existing offline queue
+    so reports from drivers without signal aren't lost.
+11. **View-as-org scope creep** — tenant queries derive the org from the caller's identity, so
+    staff can't reuse them; view-as-org is a parallel read surface and stays in Phase 4.
+12. **Safe Phase-0 hardening confirmed** — no client code calls `featureFlags.setFlag`
+    (only CLI runbooks use `setFlagInternal`), so tightening it breaks nothing.
+
+## 7. Testing & guardrails
 
 - Every `convex/platform/*` function gets `convex-test` coverage for: staff allowed,
   tenant-admin rejected, unauthenticated rejected, legacy-claims (no `permissions` array)
