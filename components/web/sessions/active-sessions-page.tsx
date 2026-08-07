@@ -19,9 +19,10 @@
 'use client';
 
 import * as React from 'react';
-import { useQuery, usePaginatedQuery } from 'convex/react';
+import { useConvexAuth, usePaginatedQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { PageHeader, WBtn } from '@/components/web';
 import { ForceEndShiftDialog } from '@/components/sessions/force-end-shift-dialog';
 import { FleetSidebar } from './fleet-sidebar';
@@ -45,15 +46,22 @@ export function ActiveSessionsPage() {
   const ymdKey = sameDayKey(date);
 
   // ────────────────── Reactive live data ──────────────────
-  const liveSessions = useQuery(
+  // Every query below derives its org from the caller's identity
+  // (`requireCallerOrgId`), so none of them may run before the Convex auth
+  // handshake finishes. A plain `useQuery` fires on the first render — while
+  // the client still has no token — and the server throws
+  // ConvexError('Unauthenticated'). `useAuthQuery` holds them at 'skip' until
+  // the token is established.
+  const { isAuthenticated } = useConvexAuth();
+  const liveSessions = useAuthQuery(
     api.sessionsLiveOps.listLiveSessions,
     isLive ? {} : 'skip'
   ) as LiveSessionRow[] | undefined;
-  const pastSessions = useQuery(
+  const pastSessions = useAuthQuery(
     api.sessionsLiveOps.listSessionsForDay,
     isLive ? 'skip' : { ymdKey }
   ) as PastSessionRow[] | undefined;
-  const daysWithData = useQuery(
+  const daysWithData = useAuthQuery(
     api.sessionsLiveOps.listDaysWithData,
     {}
   ) as string[] | undefined;
@@ -214,7 +222,11 @@ export function ActiveSessionsPage() {
     loadMore: loadMorePings,
   } = usePaginatedQuery(
     api.sessionsLiveOps.listSessionPingsPage,
-    anySelected ? { sessionId: selectedId as Id<'driverSessions'> } : 'skip',
+    // `useAuthQuery` has no paginated equivalent, so gate on the same signal
+    // inline — this query calls `requireCallerOrgId` too.
+    isAuthenticated && anySelected
+      ? { sessionId: selectedId as Id<'driverSessions'> }
+      : 'skip',
     { initialNumItems: 1000 },
   );
   // Auto-load all remaining pages once the user has a driver selected.
