@@ -71,6 +71,25 @@ export const getOrgDetail = query({
           .take(20)
       : [];
 
+    // Read-only "view as org" slice (Phase 4): the org's most recent loads
+    // as the tenant would see them listed. Targeted, bounded, staff-gated —
+    // NOT a reuse of tenant queries (those derive org from the caller).
+    const recentLoads = workosOrgId
+      ? (
+          await ctx.db
+            .query('loadInformation')
+            .withIndex('by_organization', (q) => q.eq('workosOrgId', workosOrgId))
+            .order('desc')
+            .take(25)
+        ).map((l) => ({
+          _id: l._id,
+          internalId: l.internalId,
+          status: l.status,
+          firstStopDate: l.firstStopDate,
+          createdAt: l.createdAt ?? l._creationTime,
+        }))
+      : [];
+
     const fkTickHealth = workosOrgId
       ? await ctx.db
           .query('fourKitesPushTickHealth')
@@ -126,6 +145,7 @@ export const getOrgDetail = query({
         timestamp: a.timestamp,
       })),
       fkTickHealth,
+      recentLoads,
     };
   },
 });

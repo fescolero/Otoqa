@@ -325,6 +325,17 @@ crons.interval(
   job('platform-alerts-evaluate', 'platform/alerts:evaluate', 'mutation'),
 );
 
+// ✅ Stripe reconciliation (daily at 4:45 AM UTC). Cross-checks pushed
+// open invoices against Stripe: applies payments the webhook missed
+// (idempotent) and flags void/uncollectible mismatches as systemEvents.
+// No-op while STRIPE_SECRET_KEY is unset.
+crons.cron(
+  'platform-stripe-reconcile',
+  '45 4 * * *',
+  internal.platform.cronRunner.run,
+  job('platform-stripe-reconcile', 'platform/stripe:reconcileStripeInvoices', 'action'),
+);
+
 // ✅ Prune platform ledgers (daily at 6:15 AM UTC; 30-day retention for
 // cronRuns and systemEvents, bounded batches)
 crons.cron(

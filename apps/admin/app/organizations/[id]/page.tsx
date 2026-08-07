@@ -23,7 +23,8 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
   if (detail === undefined) return <div className="empty">Loading…</div>;
   if (detail === null) return <div className="empty">Organization not found.</div>;
 
-  const { org, snapshot, members, identityLinks, flags, usage, recentAudit, fkTickHealth } = detail;
+  const { org, snapshot, members, identityLinks, flags, usage, recentAudit, fkTickHealth, recentLoads } =
+    detail;
 
   return (
     <>
@@ -130,6 +131,22 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
         flags={flags}
         identityLinks={identityLinks}
       />
+
+      <div className="panel">
+        <h2>Recent loads (read-only view)</h2>
+        {recentLoads.length === 0 ? (
+          <div className="empty">No loads.</div>
+        ) : (
+          recentLoads.map((l) => (
+            <div className="audit-row" key={l._id}>
+              <span className="action">{l.internalId ?? l._id}</span>
+              <span className="chip">{l.status}</span>
+              <span className="muted">first stop {l.firstStopDate ?? '—'}</span>
+              <span className="muted">{formatAgo(l.createdAt)}</span>
+            </div>
+          ))
+        )}
+      </div>
 
       <div className="panel">
         <h2>Recent tenant activity</h2>

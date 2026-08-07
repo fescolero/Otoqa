@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery, useMutation, useAction } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { formatMoney, formatWhen } from '@/lib/format';
 import { ReasonAction } from '@/components/ReasonAction';
@@ -73,6 +73,7 @@ function InvoiceRow({
   const recordPayment = useMutation(api.platform.invoices.recordPayment);
   const voidInvoice = useMutation(api.platform.invoices.voidInvoice);
   const addAdjustment = useMutation(api.platform.invoices.addAdjustment);
+  const pushToStripe = useAction(api.platform.stripe.pushInvoiceToStripe);
   const [expanded, setExpanded] = useState(false);
 
   const balance = Math.round((inv.total - inv.amountPaid) * 100) / 100;
@@ -178,13 +179,34 @@ function InvoiceRow({
               </>
             ) : null}
             {inv.status === 'issued' ? (
-              <ReasonAction
-                label="Mark sent"
-                requireReason={false}
-                onSubmit={async () => {
-                  await markSent({ id: inv._id });
-                }}
-              />
+              <>
+                <ReasonAction
+                  label="Mark sent"
+                  requireReason={false}
+                  onSubmit={async () => {
+                    await markSent({ id: inv._id });
+                  }}
+                />
+                {!inv.stripeInvoiceId ? (
+                  <ReasonAction
+                    label="Push to Stripe"
+                    requireReason={false}
+                    onSubmit={async () => {
+                      await pushToStripe({ id: inv._id });
+                    }}
+                  />
+                ) : null}
+              </>
+            ) : null}
+            {inv.stripeHostedInvoiceUrl ? (
+              <a
+                className="button button-sm"
+                href={inv.stripeHostedInvoiceUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Stripe invoice ↗
+              </a>
             ) : null}
             {inv.status === 'issued' || inv.status === 'sent' ? (
               <>

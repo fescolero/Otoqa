@@ -172,6 +172,52 @@ http.route({
 });
 
 // ============================================
+// STRIPE WEBHOOK (platform billing — Phase 4)
+// ============================================
+
+// Signature-verified (HMAC-SHA256, 5-min replay window). Only invoice
+// lifecycle events are acted on; everything else is 200-acknowledged so
+// Stripe doesn't retry. Amounts are never trusted beyond recording a
+// payment — the ledger reconcile cron cross-checks nightly.
+http.route({
+  path: '/stripe/webhook',
+  method: 'POST',
+  handler: httpAction(async (ctx, request) => {
+    const secret = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!secret) return new Response('Stripe webhook not configured', { status: 501 });
+
+    const payload = await request.text();
+    const { verifyStripeSignature } = await import('./platform/stripe');
+    const valid = await verifyStripeSignature(
+      payload,
+      request.headers.get('Stripe-Signature'),
+      secret,
+    );
+    if (!valid) return new Response('Invalid signature', { status: 400 });
+
+    let event: { type?: string; data?: { object?: { id?: string; amount_paid?: number } } };
+    try {
+      event = JSON.parse(payload);
+    } catch {
+      return new Response('Malformed payload', { status: 400 });
+    }
+    const stripeInvoiceId = event.data?.object?.id;
+
+    if (event.type === 'invoice.paid' && stripeInvoiceId) {
+      await ctx.runMutation(internal.platform.stripe.applyStripeInvoicePaid, {
+        stripeInvoiceId,
+        amountPaidCents: event.data?.object?.amount_paid ?? 0,
+      });
+    } else if (event.type === 'invoice.payment_failed' && stripeInvoiceId) {
+      await ctx.runMutation(internal.platform.stripe.recordStripePaymentFailed, {
+        stripeInvoiceId,
+      });
+    }
+    return new Response('ok', { status: 200 });
+  }),
+});
+
+// ============================================
 // HEALTH CHECK
 // ============================================
 
