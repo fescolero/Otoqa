@@ -66,19 +66,6 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   const [isValidating, setIsValidating] = useState(false);
   const [cancellationLoads, setCancellationLoads] = useState<{ id: string; orderNumber?: string }[]>([]);
 
-  const loadCounts = useAuthQuery(api.loads.countLoadsByStatus, {
-    workosOrgId: organizationId,
-  });
-
-  // Determine status filter from tab (map UI 'Delivered' back to DB 'Completed')
-  const statusFilter = activeTab === 'all' ? undefined : activeTab === 'Delivered' ? 'Completed' : activeTab;
-
-  // ✅ Debounce search input to prevent excessive queries (300ms delay)
-  const debouncedSearch = useDebounce(filters.search, 300);
-
-  // Force query refresh by temporarily skipping query
-  const [skipQuery, setSkipQuery] = useState(false);
-
   // Helper to convert timestamp to YYYY-MM-DD string for Convex query.
   // Uses local date components (not UTC) so the calendar date the user
   // selected in the date picker is preserved regardless of timezone.
@@ -90,6 +77,27 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   };
+
+  // Tab badge counts, scoped to the active HCR / Trip / date filters so
+  // the numbers match what each tab actually shows (same pattern as the
+  // dispatch planner). Unfiltered, the query serves the cheap org-wide
+  // aggregate; search / mile range / tracking status are not reflected.
+  const loadCounts = useAuthQuery(api.loads.countLoadsByStatusFiltered, {
+    workosOrgId: organizationId,
+    hcr: filters.hcr || undefined,
+    tripNumber: filters.trip || undefined,
+    startDate: formatDateForQuery(filters.dateRange?.start),
+    endDate: formatDateForQuery(filters.dateRange?.end),
+  });
+
+  // Determine status filter from tab (map UI 'Delivered' back to DB 'Completed')
+  const statusFilter = activeTab === 'all' ? undefined : activeTab === 'Delivered' ? 'Completed' : activeTab;
+
+  // ✅ Debounce search input to prevent excessive queries (300ms delay)
+  const debouncedSearch = useDebounce(filters.search, 300);
+
+  // Force query refresh by temporarily skipping query
+  const [skipQuery, setSkipQuery] = useState(false);
 
   // Fetch loads with infinite scroll via usePaginatedQuery.
   // The hook manages cursor state internally and resets when args change.
