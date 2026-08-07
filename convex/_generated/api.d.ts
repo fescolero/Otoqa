@@ -61,6 +61,7 @@ import type * as externalTrackingPartnerKeys from "../externalTrackingPartnerKey
 import type * as externalTrackingWebhooks from "../externalTrackingWebhooks.js";
 import type * as facetMaintenance from "../facetMaintenance.js";
 import type * as facilities from "../facilities.js";
+import type * as facilityRadius from "../facilityRadius.js";
 import type * as fcmWake from "../fcmWake.js";
 import type * as featureFlags from "../featureFlags.js";
 import type * as forceResync from "../forceResync.js";
@@ -274,6 +275,7 @@ declare const fullApi: ApiFromModules<{
   externalTrackingWebhooks: typeof externalTrackingWebhooks;
   facetMaintenance: typeof facetMaintenance;
   facilities: typeof facilities;
+  facilityRadius: typeof facilityRadius;
   fcmWake: typeof fcmWake;
   featureFlags: typeof featureFlags;
   forceResync: typeof forceResync;

@@ -48,6 +48,14 @@ export interface FacilityEvidence {
   medianLongitude: number;
   /** Max distance from the median point across all points (meters). */
   spreadMeters: number;
+  /**
+   * Outlier-trimmed spread: the distance below which 95% of points fall.
+   * This is what qualification and the suggested radius use — one driver
+   * parked across the street can't disqualify a facility or inflate its
+   * fence (the industry-standard approach: Geotab/project44 size zones
+   * from trimmed dwell clusters, not extrema).
+   */
+  p95SpreadMeters: number;
   qualifies: boolean;
   suggestedRadiusMeters: number;
 }
@@ -71,23 +79,26 @@ export function computeFacilityEvidence(points: EvidencePoint[]): FacilityEviden
   const medianLatitude = median(valid.map((p) => p.latitude));
   const medianLongitude = median(valid.map((p) => p.longitude));
 
-  let spreadMeters = 0;
-  for (const p of valid) {
-    const d = calculateDistanceMeters(p.latitude, p.longitude, medianLatitude, medianLongitude);
-    if (d > spreadMeters) spreadMeters = d;
-  }
-  spreadMeters = Math.round(spreadMeters);
+  const distances = valid
+    .map((p) => calculateDistanceMeters(p.latitude, p.longitude, medianLatitude, medianLongitude))
+    .sort((a, b) => a - b);
+  const spreadMeters = Math.round(distances[distances.length - 1]);
+  // Trim the top 5%: index floor(0.95 × (n−1)) drops the extreme tail once
+  // n is large enough to have one (n ≥ ~10 with one wild point).
+  const p95SpreadMeters = Math.round(distances[Math.floor(0.95 * (distances.length - 1))]);
 
   const distinctDays = new Set(valid.map((p) => p.dayKey).filter(Boolean)).size;
 
+  // Qualification gates on the TRIMMED spread: the question is "is this
+  // cluster genuinely one place", which a single bad GPS fix shouldn't veto.
   const qualifies =
     valid.length >= EVIDENCE_MIN_CHECKINS &&
     distinctDays >= EVIDENCE_MIN_DISTINCT_DAYS &&
-    spreadMeters <= EVIDENCE_MAX_SPREAD_METERS;
+    p95SpreadMeters <= EVIDENCE_MAX_SPREAD_METERS;
 
   const suggestedRadiusMeters = Math.min(
     INNER_RING_METERS,
-    Math.max(SUGGESTED_RADIUS_MIN_METERS, spreadMeters + SUGGESTED_RADIUS_MARGIN_METERS),
+    Math.max(SUGGESTED_RADIUS_MIN_METERS, p95SpreadMeters + SUGGESTED_RADIUS_MARGIN_METERS),
   );
 
   return {
@@ -96,6 +107,7 @@ export function computeFacilityEvidence(points: EvidencePoint[]): FacilityEviden
     medianLatitude,
     medianLongitude,
     spreadMeters,
+    p95SpreadMeters,
     qualifies,
     suggestedRadiusMeters,
   };

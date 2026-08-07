@@ -10,6 +10,7 @@
  */
 import { ConvexError, v } from 'convex/values';
 import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
+import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId, requireCallerIdentity } from './lib/auth';
 import { logAudit } from './lib/audit';
@@ -167,6 +168,7 @@ export const applySuggestedPin = mutation({
       latitude: evidence.medianLatitude,
       longitude: evidence.medianLongitude,
       radiusMeters: evidence.suggestedRadiusMeters,
+      radiusSource: 'learned',
       verificationState: 'VERIFIED',
       verifiedBy: userId,
       verifiedAt: now,
@@ -249,6 +251,7 @@ export const create = mutation({
       latitude: args.latitude,
       longitude: args.longitude,
       radiusMeters: args.radiusMeters,
+      radiusSource: args.radiusMeters !== undefined ? 'manual' : undefined,
       verificationState: 'UNVERIFIED',
       notes: args.notes,
       isDeleted: false,
@@ -256,6 +259,15 @@ export const create = mutation({
       createdAt: now,
       updatedAt: now,
     });
+
+    // Layer-2 seed: no radius supplied → estimate one from the address
+    // viewport so the fence isn't the ½-mi default until the first visits
+    // produce evidence. Best-effort; see convex/facilityRadius.ts.
+    if (args.radiusMeters === undefined) {
+      await ctx.scheduler.runAfter(0, internal.facilityRadius.seedRadiusFromViewport, {
+        facilityId,
+      });
+    }
 
     await logAudit(ctx, {
       organizationId: callerOrgId,
@@ -296,6 +308,11 @@ export const update = mutation({
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(fields)) {
       if (value !== undefined) patch[key] = value;
+    }
+    // A human typing a radius pins it: the nightly refinement cron never
+    // touches 'manual' rows (convex/facilityRadius.ts).
+    if (args.radiusMeters !== undefined) {
+      patch.radiusSource = 'manual';
     }
 
     if (verificationState !== undefined && verificationState !== facility.verificationState) {

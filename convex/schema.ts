@@ -1817,6 +1817,15 @@ export default defineSchema({
     longitude: v.number(),
     // Check-in enforcement radius. Unset = INNER_RING_METERS default.
     radiusMeters: v.optional(v.number()),
+    // Where radiusMeters came from — decides whether the nightly
+    // refinement cron (convex/facilityRadius.ts) may touch it:
+    //   'manual'  — a human typed it; never auto-changed
+    //   'learned' — from check-in evidence (applySuggestedPin or the cron)
+    //   'seed'    — geocoder-viewport estimate at creation, pre-first-visit
+    // Absent (legacy rows): treated as refinable.
+    radiusSource: v.optional(
+      v.union(v.literal('manual'), v.literal('learned'), v.literal('seed')),
+    ),
 
     verificationState: v.union(v.literal('UNVERIFIED'), v.literal('VERIFIED')),
     verifiedBy: v.optional(v.string()),

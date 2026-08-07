@@ -54,12 +54,23 @@ describe('computeFacilityEvidence', () => {
     expect(e.qualifies).toBe(false);
   });
 
-  it('median resists a single wild outlier', () => {
+  it('median AND qualification resist a single wild outlier (p95 trim)', () => {
     const points = [...cluster(9, 4), { latitude: 45.0, longitude: -110.0, dayKey: '2026-07-09' }];
     const e = computeFacilityEvidence(points)!;
-    // The outlier blows the spread (so it can't qualify) but not the pin.
     expect(Math.abs(e.medianLatitude - BASE.latitude)).toBeLessThan(0.001);
     expect(Math.abs(e.medianLongitude - BASE.longitude)).toBeLessThan(0.001);
-    expect(e.qualifies).toBe(false);
+    // Max spread is blown by the outlier, but the trimmed spread — which
+    // qualification and the suggested radius use — is not. One bad GPS fix
+    // must not veto a facility or inflate its fence.
+    expect(e.spreadMeters).toBeGreaterThan(EVIDENCE_MAX_SPREAD_METERS);
+    expect(e.p95SpreadMeters).toBeLessThanOrEqual(EVIDENCE_MAX_SPREAD_METERS);
+    expect(e.qualifies).toBe(true);
+    expect(e.suggestedRadiusMeters).toBeLessThanOrEqual(300); // not dragged by the outlier
+  });
+
+  it('p95 equals max for tight clusters (no over-trimming of good data)', () => {
+    const e = computeFacilityEvidence(cluster(8, 4))!;
+    expect(e.p95SpreadMeters).toBeLessThanOrEqual(e.spreadMeters);
+    expect(e.spreadMeters - e.p95SpreadMeters).toBeLessThan(60);
   });
 });

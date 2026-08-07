@@ -313,6 +313,17 @@ crons.cron(
   job('platform-invoice-cycle-close', 'platform/invoices:cycleClose', 'mutation'),
 );
 
+// ✅ Facility geofence radius refinement (daily at 5:20 AM UTC, after the
+// facet prune). Re-derives VERIFIED facilities' radii from the p95 spread
+// of real check-in/checkout fixes; manual radii never touched; steps
+// bounded ±25%/night. See convex/facilityRadius.ts.
+crons.cron(
+  'facility-radius-refinement',
+  '20 5 * * *',
+  internal.platform.cronRunner.run,
+  job('facility-radius-refinement', 'facilityRadius:refineAllFacilityRadii', 'mutation'),
+);
+
 // ✅ Platform alert evaluator (every 5 min): checks the alerting matrix
 // (crons failing ≥3×, webhook dead-letters, FourKites all_failed), keeps
 // one deduped alert per incident, notifies Slack on open, auto-resolves.
