@@ -36,6 +36,8 @@ import { getPeriodKey } from './accountingStatsHelpers';
 import { DEFAULT_BILLING_RATE_PER_LOAD, METERING_CUTOVER_MS } from './platformUsageHelpers';
 import { assertCallerOwnsOrg } from './lib/auth';
 import { queryByOrg } from './_helpers/queryByOrg';
+import { ConvexError } from 'convex/values';
+import { flagDriftIfInvoiced, orgHasCommittedInvoices } from './platform/invoices';
 
 const BATCH_SIZE = 2000;
 
@@ -107,6 +109,9 @@ export const countPlatformUsage = internalMutation({
             `Platform usage undercount corrected for org ${workosOrgId} period ${periodKey}: ` +
               `${existing.loadsWritten} -> ${counted}`,
           );
+          // Spec §5: if this period is already invoiced, the raise must be
+          // SURFACED (drift badge + systemEvent), never silently absorbed.
+          await flagDriftIfInvoiced(ctx, workosOrgId, periodKey, counted);
         }
         await ctx.db.patch(existing._id, {
           loadsWritten: Math.max(existing.loadsWritten, counted),
@@ -189,6 +194,14 @@ export const rebaselineOrgPlatformUsage = internalMutation({
   args: { workosOrgId: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    // Spec §5: the "only safe pre-invoicing" docstring is now an enforced
+    // check — a rebaseline would rewrite history that issued invoices froze.
+    if (await orgHasCommittedInvoices(ctx, args.workosOrgId)) {
+      throw new ConvexError(
+        `Org ${args.workosOrgId} has issued invoices — rebaseline is forbidden. ` +
+          'Correct via invoice adjustments instead.',
+      );
+    }
     const rows = await ctx.db
       .query('platformUsageStats')
       .withIndex('by_org', (q) => q.eq('workosOrgId', args.workosOrgId))
@@ -342,10 +355,11 @@ export function platformInvoiceNumber(workosOrgId: string, periodKey: string): s
  * the org's rate + billing contact, the open (accruing) cycle, and the
  * closed cycles newest-last with derived amounts.
  *
- * Invoice status/dates are DERIVED PLACEHOLDERS until a payment processor
- * is integrated: each closed cycle is treated as invoiced on the 1st of the
- * following month and due on the 15th; the most recent closed cycle is
- * "due" and older ones "paid". Usage counts and amounts are real.
+ * Closed cycles render from the platformInvoices ledger when a row exists
+ * (frozen amounts + real statuses/dates — Phase 3); cycles with no invoice
+ * row yet (pre-backfill, or drafts not issued) fall back to the legacy
+ * derived placeholders so the timeline never has holes. Void invoices fall
+ * back to derived as well.
  */
 export const getBillingOverview = query({
   args: { workosOrgId: v.string() },
@@ -405,7 +419,31 @@ export const getBillingOverview = query({
       }
     }
 
+    // Frozen ledger rows for this org, keyed by period (bounded: one row
+    // per org × month).
+    const invoiceRows = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_org_period', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+    const invoiceByPeriod = new Map(invoiceRows.map((r) => [r.periodKey, r]));
+
     const closedCycles = closedKeys.map((key, i) => {
+      const invoice = invoiceByPeriod.get(key);
+      if (invoice && invoice.status !== 'draft' && invoice.status !== 'void') {
+        return {
+          periodKey: key,
+          invoiceNo: invoice.invoiceNumber,
+          loadsWritten: invoice.loadsWritten,
+          amount: invoice.total,
+          status: (invoice.status === 'paid' ? 'paid' : 'due') as 'due' | 'paid',
+          // issuedAt/dueAt are always set once an invoice leaves draft; the
+          // ?? 0 is a type-level fallback only.
+          issuedMs: invoice.issuedAt ?? 0,
+          dueMs: invoice.dueAt ?? 0,
+          paidMs: invoice.paidAt,
+        };
+      }
+      // Legacy derived placeholder (no committed invoice row for the cycle).
       const [y, m] = key.split('-').map(Number); // m is 1-based
       const issuedMs = Date.UTC(y, m, 1); // 1st of following month
       const dueMs = Date.UTC(y, m, 15);
@@ -419,7 +457,6 @@ export const getBillingOverview = query({
         status: (isLatest ? 'due' : 'paid') as 'due' | 'paid',
         issuedMs,
         dueMs,
-        // Placeholder settlement date for display until real payments exist.
         paidMs: isLatest ? undefined : Date.UTC(y, m, 3),
       };
     });

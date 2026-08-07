@@ -259,6 +259,105 @@ function IdentityLinksPanel({
   );
 }
 
+export function BillingConfigPanel({
+  organizationId,
+  current,
+}: {
+  organizationId: Id<'organizations'>;
+  current: {
+    billingRatePerLoad?: number | null;
+    rateSchedule?: { effectiveFromPeriod: string; ratePerLoad: number }[] | null;
+    billingTerms?: { kind: 'net'; days: number } | { kind: 'dayOfMonth'; day: number } | null;
+    taxRatePercent?: number | null;
+    taxJurisdiction?: string | null;
+    minimumMonthlyCharge?: number | null;
+  };
+}) {
+  const update = useMutation(api.platform.invoices.updateBillingConfig);
+  const pendingStep = (current.rateSchedule ?? [])
+    .slice()
+    .sort((a, b) => a.effectiveFromPeriod.localeCompare(b.effectiveFromPeriod))
+    .at(-1);
+
+  return (
+    <div className="panel">
+      <h2>Billing configuration</h2>
+      <div className="detail-grid">
+        <span className="muted">Current rate</span>
+        <span>
+          {current.billingRatePerLoad != null ? `$${current.billingRatePerLoad.toFixed(2)}/load` : 'default'}
+          {pendingStep ? (
+            <span className="muted">
+              {' '}
+              → ${pendingStep.ratePerLoad.toFixed(2)} from {pendingStep.effectiveFromPeriod}
+            </span>
+          ) : null}
+        </span>
+        <span className="muted">Terms</span>
+        <span>
+          {current.billingTerms
+            ? current.billingTerms.kind === 'net'
+              ? `net-${current.billingTerms.days}`
+              : `due on day ${current.billingTerms.day}`
+            : 'net-15 (default)'}
+        </span>
+        <span className="muted">Tax</span>
+        <span>
+          {current.taxRatePercent != null
+            ? `${current.taxRatePercent}% (${current.taxJurisdiction ?? 'no jurisdiction'})`
+            : 'not configured — invoices state "tax not included"'}
+        </span>
+        <span className="muted">Monthly minimum</span>
+        <span>{current.minimumMonthlyCharge != null ? `$${current.minimumMonthlyCharge.toFixed(2)}` : 'none'}</span>
+      </div>
+      <ReasonAction
+        label="Update billing config"
+        danger
+        onSubmit={async (reason, form) => {
+          const data = new FormData(form);
+          const num = (name: string) => {
+            const raw = String(data.get(name) ?? '').trim();
+            if (!raw) return undefined;
+            const n = Number(raw);
+            if (!Number.isFinite(n)) throw new Error(`${name} must be a number`);
+            return n;
+          };
+          const rate = num('rate');
+          const termsKind = String(data.get('termsKind') ?? '');
+          const termsValue = num('termsValue');
+          const tax = num('tax');
+          const minimum = num('minimum');
+          await update({
+            organizationId,
+            ...(rate !== undefined ? { ratePerLoadNextCycle: rate } : {}),
+            ...(termsKind && termsValue !== undefined
+              ? {
+                  billingTerms:
+                    termsKind === 'net'
+                      ? { kind: 'net' as const, days: termsValue }
+                      : { kind: 'dayOfMonth' as const, day: termsValue },
+                }
+              : {}),
+            ...(tax !== undefined ? { taxRatePercent: tax } : {}),
+            ...(minimum !== undefined ? { minimumMonthlyCharge: minimum } : {}),
+            reason,
+          });
+        }}
+      >
+        <input className="input" name="rate" placeholder="Rate/load (next cycle)" />
+        <select className="input" name="termsKind" defaultValue="">
+          <option value="">terms unchanged</option>
+          <option value="net">net-N days</option>
+          <option value="dayOfMonth">due day of month</option>
+        </select>
+        <input className="input" name="termsValue" placeholder="N (days or day)" />
+        <input className="input" name="tax" placeholder="Tax % (e.g. 8.25)" />
+        <input className="input" name="minimum" placeholder="Monthly minimum $" />
+      </ReasonAction>
+    </div>
+  );
+}
+
 function DangerZone({
   organizationId,
   orgName,

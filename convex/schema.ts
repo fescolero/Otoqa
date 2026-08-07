@@ -166,6 +166,39 @@ export default defineSchema({
     // rate (see convex/platformUsageHelpers.ts DEFAULT_BILLING_RATE_PER_LOAD)
     // when missing. Set per org from the Convex dashboard.
     billingRatePerLoad: v.optional(v.number()),
+    // ── Platform billing config (Phase 3 — docs/platform-billing-spec.md §2) ──
+    // Rate escalators: future-dated steps entered at contract signing.
+    // Cycle close applies whichever step covers the period; billingRatePerLoad
+    // remains the fallback when no step matches.
+    rateSchedule: v.optional(
+      v.array(v.object({ effectiveFromPeriod: v.string(), ratePerLoad: v.number() })),
+    ),
+    // Fixed fees beyond metered usage (monthly, or annual billed in the
+    // anniversary month 1–12).
+    recurringCharges: v.optional(
+      v.array(
+        v.object({
+          label: v.string(),
+          amount: v.number(),
+          cadence: v.union(v.literal('monthly'), v.literal('annual')),
+          anniversaryMonth: v.optional(v.number()),
+        }),
+      ),
+    ),
+    // Commitment floor: a minimum_true_up invoice line tops the cycle up.
+    minimumMonthlyCharge: v.optional(v.number()),
+    // Payment terms: net-N (N ≤ 15 typical) or a fixed calendar due day.
+    // Absent = net-15 (matches the pre-ledger derived behavior).
+    billingTerms: v.optional(
+      v.union(
+        v.object({ kind: v.literal('net'), days: v.number() }),
+        v.object({ kind: v.literal('dayOfMonth'), day: v.number() }),
+      ),
+    ),
+    // Tax mechanism (rates pending accountant — spec §6a). Unset = no tax
+    // line; invoices state "tax not included".
+    taxRatePercent: v.optional(v.number()),
+    taxJurisdiction: v.optional(v.string()),
     // Contract identity shown on platform invoices (Settings → Billing &
     // usage → invoice PDF). Set per org from the Convex dashboard; the
     // invoice shows "—" for any missing value.
@@ -4035,6 +4068,74 @@ export default defineSchema({
   // human's attention are written here. Never written unconditionally in
   // high-frequency paths. Pruned at 30 days. Write via
   // convex/lib/systemEvents.ts only.
+  // Platform invoices — the billing record of truth (spec §2). One row per
+  // org × closed cycle, created by cycle close. IMMUTABILITY RULE: once
+  // status ≠ draft, lines/rate/subtotal/tax are frozen — corrections happen
+  // via next-cycle adjustments or void+reissue, never edits. Write only
+  // through convex/platform/invoices.ts.
+  platformInvoices: defineTable({
+    workosOrgId: v.string(),
+    periodKey: v.string(), // 'YYYY-MM' (UTC)
+    invoiceNumber: v.string(), // deterministic scheme (platformInvoiceNumber)
+    loadsWritten: v.number(),
+    ratePerLoad: v.number(), // from rateSchedule step covering the period
+    lines: v.array(
+      v.object({
+        kind: v.union(v.literal('usage'), v.literal('recurring'), v.literal('minimum_true_up')),
+        label: v.string(),
+        amount: v.number(),
+      }),
+    ),
+    adjustments: v.array(
+      v.object({
+        label: v.string(),
+        amountDelta: v.number(),
+        reason: v.string(),
+        addedByEmail: v.string(),
+        addedAt: v.number(),
+      }),
+    ),
+    subtotal: v.number(), // Σ lines + Σ adjustments, pre-tax
+    taxRatePercent: v.optional(v.number()), // snapshot at issue
+    taxJurisdiction: v.optional(v.string()),
+    taxAmount: v.optional(v.number()), // frozen at issue
+    total: v.number(), // subtotal + taxAmount
+    payments: v.array(
+      v.object({
+        amount: v.number(),
+        method: v.union(
+          v.literal('ach'),
+          v.literal('check'),
+          v.literal('wire'),
+          v.literal('stripe'),
+          v.literal('other'),
+        ),
+        reference: v.optional(v.string()),
+        recordedByEmail: v.string(),
+        receivedAt: v.number(),
+      }),
+    ),
+    amountPaid: v.number(),
+    status: v.union(
+      v.literal('draft'),
+      v.literal('issued'),
+      v.literal('sent'),
+      v.literal('paid'),
+      v.literal('void'),
+    ),
+    issuedAt: v.optional(v.number()),
+    dueAt: v.optional(v.number()),
+    paidAt: v.optional(v.number()),
+    voidedAt: v.optional(v.number()),
+    voidReason: v.optional(v.string()),
+    driftDetectedAt: v.optional(v.number()), // recalc raised an invoiced period
+    backfilled: v.optional(v.boolean()), // historical row created by backfill
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org_period', ['workosOrgId', 'periodKey'])
+    .index('by_status', ['status', 'periodKey']),
+
   // Support tickets — user-reported problems (web + mobile report-a-problem),
   // staff-filed issues, and automated escalations. The ticket row IS the
   // workflow record; platformAuditLog is not duplicated for ticket edits.

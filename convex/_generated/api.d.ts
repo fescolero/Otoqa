@@ -173,6 +173,7 @@ import type * as platform_billing from "../platform/billing.js";
 import type * as platform_cronRunner from "../platform/cronRunner.js";
 import type * as platform_events from "../platform/events.js";
 import type * as platform_health from "../platform/health.js";
+import type * as platform_invoices from "../platform/invoices.js";
 import type * as platform_jobs from "../platform/jobs.js";
 import type * as platform_orgs from "../platform/orgs.js";
 import type * as platform_snapshots from "../platform/snapshots.js";
@@ -382,6 +383,7 @@ declare const fullApi: ApiFromModules<{
   "platform/cronRunner": typeof platform_cronRunner;
   "platform/events": typeof platform_events;
   "platform/health": typeof platform_health;
+  "platform/invoices": typeof platform_invoices;
   "platform/jobs": typeof platform_jobs;
   "platform/orgs": typeof platform_orgs;
   "platform/snapshots": typeof platform_snapshots;

@@ -3,6 +3,7 @@
 import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
+import { InvoicesBoard } from '@/components/InvoicesBoard';
 import { formatMoney } from '@/lib/format';
 
 export default function BillingPage() {
@@ -10,9 +11,10 @@ export default function BillingPage() {
     <ConsoleShell>
       <h1>Platform billing</h1>
       <p className="subtitle">
-        Usage × rate across all organizations. Amounts are derived from current rates until
-        the invoice ledger (Phase 3) freezes them.
+        Receivables from the frozen invoice ledger; the revenue trend below derives the open
+        cycle from live usage.
       </p>
+      <InvoicesBoard />
       <Revenue />
     </ConsoleShell>
   );
