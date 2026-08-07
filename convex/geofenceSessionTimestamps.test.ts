@@ -26,6 +26,7 @@ import {
 } from './loadTrackingState';
 import { buildSessionStopTimeline } from './driverSessions';
 import { repairDepartedEventsCore } from './_devTools/geofenceBackfill';
+import { collectDepartureTail } from './driverLocations';
 import type { Doc, Id } from './_generated/dataModel';
 import type { MutationCtx } from './_generated/server';
 
@@ -760,6 +761,88 @@ describe('geofenceBackfill.repairDepartedEventsCore', () => {
       });
       expect(again.repaired).toBe(0);
       expect(again.alreadyAccurate).toBe(1);
+    });
+  });
+});
+
+describe('driverLocations.collectDepartureTail', () => {
+  it('extends the trail with session pings through the final DEPARTED, excluding next-load pings', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const basePing = {
+        driverId: f.driverId,
+        sessionId: f.sessionId,
+        organizationId: ORG,
+        latitude: STOP.lat,
+        longitude: STOP.lng,
+        createdAt: 0,
+      };
+      // Last LOAD_ROUTE ping at checkout time.
+      await ctx.db.insert('driverLocations', {
+        ...basePing,
+        loadId: f.loadId,
+        trackingType: 'LOAD_ROUTE',
+        recordedAt: 100_000,
+      });
+      // Post-checkout session pings: two before the departure, one within
+      // the buffer, one far beyond it, and one belonging to a NEXT load.
+      const sessionPing = (recordedAt: number) =>
+        ctx.db.insert('driverLocations', { ...basePing, trackingType: 'SESSION_ROUTE', recordedAt });
+      await sessionPing(110_000);
+      await sessionPing(120_000);
+      await sessionPing(125_000);
+      await sessionPing(120_000 + 60 * 60_000); // an hour later — outside buffer
+      await ctx.db.insert('driverLocations', {
+        ...basePing,
+        loadId: f.loadId, // next-load pings are excluded by loadId presence
+        trackingType: 'LOAD_ROUTE',
+        recordedAt: 122_000,
+      });
+      // Final DEPARTED at t=120000.
+      await ctx.db.insert('geofenceEvents', {
+        sessionId: f.sessionId,
+        loadId: f.loadId,
+        stopSequenceNumber: 2,
+        driverId: f.driverId,
+        organizationId: ORG,
+        eventType: 'DEPARTED',
+        triggeredAt: 120_000,
+        latitude: KM_2.latitude,
+        longitude: KM_2.longitude,
+        distanceMeters: 2000,
+      });
+
+      const lastLoadPing = (await ctx.db.query('driverLocations').collect()).find(
+        (p) => p.loadId !== undefined && p.recordedAt === 100_000,
+      );
+      const tail = await collectDepartureTail(ctx, f.loadId, lastLoadPing);
+      // 110k, 120k, 125k in-window session pings; the hour-later ping and
+      // the loadId-tagged ping are excluded.
+      expect(tail.map((p) => p.recordedAt).sort((a, b) => a - b)).toEqual([
+        110_000, 120_000, 125_000,
+      ]);
+    });
+  });
+
+  it('returns nothing when the load has no departure past its trail', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const lastPing = {
+        driverId: f.driverId,
+        sessionId: f.sessionId,
+        organizationId: ORG,
+        latitude: STOP.lat,
+        longitude: STOP.lng,
+        createdAt: 0,
+        loadId: f.loadId,
+        trackingType: 'LOAD_ROUTE' as const,
+        recordedAt: 100_000,
+      };
+      const id = await ctx.db.insert('driverLocations', lastPing);
+      const doc = (await ctx.db.get(id))!;
+      expect(await collectDepartureTail(ctx, f.loadId, doc)).toEqual([]);
     });
   });
 });

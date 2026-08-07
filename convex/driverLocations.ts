@@ -6,6 +6,7 @@ import {
   internalQuery,
   internalMutation,
   MutationCtx,
+  QueryCtx,
 } from './_generated/server';
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
@@ -893,6 +894,51 @@ export const getActiveDriverLocations = query({
  * Get route history for a specific load (polyline data)
  * Returns all location points for drawing the route on a map
  */
+// Departure-tail window: how far past the load's final DEPARTED event the
+// trail keeps session pings, and a cap on how many. The final-stop
+// departure happens AFTER checkout, when pings have reverted to
+// SESSION_ROUTE (no loadId) — without this tail the trail dead-ends at the
+// dock while the departure pin sits on an invisible ping down the road.
+const DEPARTURE_TAIL_BUFFER_MS = 10 * 60 * 1000;
+const MAX_DEPARTURE_TAIL_PINGS = 200;
+
+/**
+ * Session pings continuing the load's trail from the last LOAD_ROUTE ping
+ * through the final DEPARTED event (+ a small buffer). Empty when the load
+ * has no post-trail departure. Exported for tests; both route-history
+ * queries append it so the drawn trail reaches the departure pin.
+ */
+export async function collectDepartureTail(
+  ctx: QueryCtx,
+  loadId: Id<'loadInformation'>,
+  lastLoadPing: Doc<'driverLocations'> | undefined,
+): Promise<Doc<'driverLocations'>[]> {
+  if (!lastLoadPing?.sessionId) return [];
+
+  const events = await ctx.db
+    .query('geofenceEvents')
+    .withIndex('by_load', (q) => q.eq('loadId', loadId))
+    .collect();
+  const finalDeparted = events
+    .filter((e) => e.eventType === 'DEPARTED')
+    .sort((a, b) => b.triggeredAt - a.triggeredAt)[0];
+  if (!finalDeparted || finalDeparted.triggeredAt <= lastLoadPing.recordedAt) return [];
+
+  const tail = await ctx.db
+    .query('driverLocations')
+    .withIndex('by_session_time', (q) =>
+      q
+        .eq('sessionId', lastLoadPing.sessionId!)
+        .gt('recordedAt', lastLoadPing.recordedAt)
+        .lte('recordedAt', finalDeparted.triggeredAt + DEPARTURE_TAIL_BUFFER_MS),
+    )
+    .take(MAX_DEPARTURE_TAIL_PINGS);
+
+  // Session pings only — if the driver checked into a NEXT load inside the
+  // window, its LOAD_ROUTE pings belong to that load's trail, not this one.
+  return tail.filter((p) => p.loadId === undefined);
+}
+
 export const getRouteHistoryForLoad = query({
   args: { loadId: v.id('loadInformation') },
   returns: v.array(
@@ -914,8 +960,9 @@ export const getRouteHistoryForLoad = query({
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .order('asc')
       .collect();
+    const tail = await collectDepartureTail(ctx, args.loadId, locations[locations.length - 1]);
 
-    return locations.map((loc) => ({
+    return [...locations, ...tail].map((loc) => ({
       latitude: loc.latitude,
       longitude: loc.longitude,
       speed: loc.speed,
@@ -953,8 +1000,9 @@ export const getDetailedRouteHistoryForLoad = query({
       .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
       .order('asc')
       .collect();
+    const tail = await collectDepartureTail(ctx, args.loadId, locations[locations.length - 1]);
 
-    return locations.map((loc) => ({
+    return [...locations, ...tail].map((loc) => ({
       _id: loc._id,
       latitude: loc.latitude,
       longitude: loc.longitude,
