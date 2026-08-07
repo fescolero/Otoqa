@@ -11,6 +11,7 @@ import { updateLoadCount } from './stats_helpers';
 import { recordLoadWritten } from './platformUsageHelpers';
 import { readScopedCounts, READ_FROM_CACHE_FLAG } from './loadStatusCounts';
 import { scheduleLegPayRecalc, voidUnlockedLegPayItems } from './payEngine/legRecalc';
+import { deleteFrontierForLoad, releaseFrontierOnLoadComplete } from './loadTrackingState';
 import { getActiveFacilities, resolveStopFacilityLink } from './lib/facilityLink';
 import {
   setLoadTag,
@@ -69,6 +70,14 @@ async function applyLoadStatusUpdate(
     updates.trackingStatus = 'Completed';
     updates.deliveredAt = now;
 
+    // Release the geofence frontier. Normally the driver-checkout flow has
+    // already done this (and re-bound the kept row to their session), in
+    // which case this is a no-op — but a dispatcher manually completing a
+    // load skips checkout, and without this the tracking row leaks. Keeps
+    // the departure-watch row alive so a truck still at the dock gets its
+    // final DEPARTED.
+    await releaseFrontierOnLoadComplete(ctx, args.loadId, now);
+
     const carrierAssignments = await ctx.db
       .query('loadCarrierAssignments')
       .withIndex('by_load', (q: any) => q.eq('loadId', args.loadId))
@@ -104,6 +113,10 @@ async function applyLoadStatusUpdate(
     }
   } else if (args.status === 'Canceled') {
     updates.trackingStatus = 'Canceled';
+
+    // The load will never be driven to completion — release the geofence
+    // frontier outright (no departure-watch keep-alive for a dead load).
+    await deleteFrontierForLoad(ctx, args.loadId);
 
     if (args.cancellationReason) {
       updates.cancellationReason = args.cancellationReason;
@@ -143,6 +156,11 @@ async function applyLoadStatusUpdate(
   } else if (args.status === 'Expired') {
     updates.trackingStatus = 'Canceled';
 
+    // Same as the Canceled branch: expiry ends the load's execution, so
+    // the geofence frontier must not linger (this was leaking a tracking
+    // row per expired assigned load).
+    await deleteFrontierForLoad(ctx, args.loadId);
+
     // Cascade: a load can't expire while still holding open legs. Mirrors
     // the Canceled branch above. Prior to this cascade, expiring loads
     // accumulated orphan PENDING legs (closed out in migration 012).
@@ -180,6 +198,9 @@ async function applyLoadStatusUpdate(
     updates.primaryDriverId = undefined;
     updates.primaryCarrierPartnershipId = undefined;
     updates.trackingStatus = 'Pending';
+
+    // Reopening unassigns the driver — any frontier row is stale.
+    await deleteFrontierForLoad(ctx, args.loadId);
 
     const legs = await ctx.db
       .query('dispatchLegs')
