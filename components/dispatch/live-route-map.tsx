@@ -1043,9 +1043,9 @@ function StopMarker({
 }
 
 // ============================================
-// TIME RANGE INDICATOR - rendered inside the top-left overlay stack
-// (below "Matched X%" / alongside "Planned Route") so all map chrome
-// shares one anchor and doesn't fight the modal's right-rail edge.
+// TIME RANGE INDICATOR - a bare segment (no card of its own) rendered
+// inside the combined GPS-status card in the top-left rail, next to
+// "Matched X%", so route quality + coverage read as one unit.
 // ============================================
 function TimeRangeIndicator({
   routePoints,
@@ -1057,17 +1057,15 @@ function TimeRangeIndicator({
   if (routePoints.length === 0) return null;
 
   return (
-    <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
-      <div className="text-[10px] text-foreground flex items-center gap-1.5 tabular-nums">
-        <span>{format(new Date(routePoints[0].recordedAt), 'h:mm a')}</span>
-        <span className="text-muted-foreground">→</span>
-        {isLive ? (
-          <span className="text-green-600 dark:text-green-400 font-medium">Now</span>
-        ) : (
-          <span>{format(new Date(routePoints[routePoints.length - 1].recordedAt), 'h:mm a')}</span>
-        )}
-      </div>
-    </div>
+    <span className="text-[10px] text-foreground flex items-center gap-1.5 tabular-nums">
+      <span>{format(new Date(routePoints[0].recordedAt), 'h:mm a')}</span>
+      <span className="text-muted-foreground">→</span>
+      {isLive ? (
+        <span className="text-green-600 dark:text-green-400 font-medium">Now</span>
+      ) : (
+        <span>{format(new Date(routePoints[routePoints.length - 1].recordedAt), 'h:mm a')}</span>
+      )}
+    </span>
   );
 }
 
@@ -1467,20 +1465,26 @@ export function LiveRouteMap({
           </div>
         )}
 
-        {/* Match confidence */}
-        {matchConfidence > 0 && routePath.length > 0 && (
-          <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
-            <div className="flex items-center gap-1.5 text-xs text-foreground">
-              <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
-              <span>Matched {Math.round(matchConfidence * 100)}%</span>
+        {/* GPS status — ONE card for match confidence + covered time range
+            (they always describe the same route data, so two stacked cards
+            were noise). Either segment renders alone when the other is
+            absent; a hairline divider separates them when both show. */}
+        {((matchConfidence > 0 && routePath.length > 0) || routeHistory.length > 0) && (
+          <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm self-start">
+            <div className="flex items-center gap-2 text-xs text-foreground">
+              {matchConfidence > 0 && routePath.length > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
+                  <span>Matched {Math.round(matchConfidence * 100)}%</span>
+                </span>
+              )}
+              {matchConfidence > 0 && routePath.length > 0 && routeHistory.length > 0 && (
+                <span aria-hidden className="border-l border-[var(--border-hairline)] self-stretch" />
+              )}
+              <TimeRangeIndicator routePoints={routeHistory} isLive={isLiveTracking} />
             </div>
           </div>
         )}
-
-        {/* Time range indicator — sits directly under the Match-confidence
-            pill so all GPS-quality chrome is in one corner. Pure rail card
-            now (no absolute positioning of its own). */}
-        <TimeRangeIndicator routePoints={routeHistory} isLive={isLiveTracking} />
 
         {/* Planned route indicator when no GPS data */}
         {!hasRouteData && !hasLiveData && hasStops && (
