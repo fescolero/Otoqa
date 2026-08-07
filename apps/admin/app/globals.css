@@ -308,3 +308,80 @@ a {
   margin-bottom: 12px;
   font-size: 13px;
 }
+
+/* ===== Phase 2: forms, actions, tickets ===== */
+
+.input {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  max-width: 220px;
+}
+
+.input-wide {
+  max-width: 420px;
+  flex: 1;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.form-error {
+  width: 100%;
+  font-size: 12px;
+}
+
+.button-sm {
+  margin-top: 0;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.button-danger {
+  border-color: rgba(239, 68, 68, 0.5);
+  color: var(--danger);
+}
+
+.panel-danger {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.chip-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.chip-button {
+  cursor: pointer;
+  background: var(--panel);
+  margin-left: 0;
+}
+
+.ticket-row {
+  border-top: 1px solid var(--border);
+  padding: 10px 0;
+}
+
+.ticket-row:first-of-type {
+  border-top: none;
+}
+
+.ticket-row .audit-row {
+  border-top: none;
+  padding: 3px 0;
+}
+
+.ticket-body {
+  margin: 4px 0 0;
+  font-size: 13px;
+  white-space: pre-wrap;
+}

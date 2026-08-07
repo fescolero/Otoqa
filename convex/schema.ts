@@ -4035,6 +4035,54 @@ export default defineSchema({
   // human's attention are written here. Never written unconditionally in
   // high-frequency paths. Pruned at 30 days. Write via
   // convex/lib/systemEvents.ts only.
+  // Support tickets — user-reported problems (web + mobile report-a-problem),
+  // staff-filed issues, and automated escalations. The ticket row IS the
+  // workflow record; platformAuditLog is not duplicated for ticket edits.
+  supportTickets: defineTable({
+    source: v.union(v.literal('user_report'), v.literal('staff'), v.literal('automated')),
+    status: v.union(
+      v.literal('open'),
+      v.literal('in_progress'),
+      v.literal('resolved'),
+      v.literal('closed'),
+    ),
+    severity: v.union(v.literal('low'), v.literal('normal'), v.literal('high'), v.literal('urgent')),
+    title: v.string(),
+    body: v.optional(v.string()),
+    orgId: v.optional(v.string()), // WorkOS org id when resolvable
+    reporterSubject: v.optional(v.string()), // token subject of the reporter
+    reporterEmail: v.optional(v.string()),
+    appContext: v.optional(v.string()), // JSON: app, version, OTA update id…
+    githubUrl: v.optional(v.string()),
+    assignee: v.optional(v.string()), // staff email
+    resolutionNote: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_status_time', ['status', 'createdAt'])
+    .index('by_org', ['orgId', 'createdAt']),
+
+  // Platform alerts — deduped incidents raised by the evaluator cron
+  // (platform/alerts.ts). One OPEN row per dedupeKey (mirrors the tenant
+  // dispatchAlerts pattern); Slack is notified once per incident, not per
+  // tick. Auto-resolves when the condition clears.
+  platformAlerts: defineTable({
+    dedupeKey: v.string(), // e.g. 'cron:driver-settlement-generation'
+    kind: v.string(), // 'cron_failing' | 'webhook_dead_letters' | 'fourkites_all_failed'
+    severity: v.union(v.literal('medium'), v.literal('high')),
+    message: v.string(),
+    orgId: v.optional(v.string()),
+    status: v.union(v.literal('open'), v.literal('acked'), v.literal('resolved')),
+    firstSeenAt: v.number(),
+    lastSeenAt: v.number(),
+    count: v.number(), // evaluator ticks the condition has held
+    acknowledgedBy: v.optional(v.string()),
+    resolvedAt: v.optional(v.number()),
+    slackNotifiedAt: v.optional(v.number()),
+  })
+    .index('by_dedupe', ['dedupeKey', 'status'])
+    .index('by_status_time', ['status', 'lastSeenAt']),
+
   systemEvents: defineTable({
     severity: v.union(
       v.literal('info'),

@@ -5,6 +5,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import type { Id } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
+import { OrgSupportPanels } from '@/components/OrgSupportPanels';
 import { formatAgo, formatCapped, formatMoney, formatWhen } from '@/lib/format';
 
 export default function OrgDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -119,36 +120,14 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
         )}
       </div>
 
-      <div className="panel">
-        <h2>Identity links ({identityLinks.length})</h2>
-        {identityLinks.length === 0 ? (
-          <div className="empty">No Clerk↔WorkOS links.</div>
-        ) : (
-          identityLinks.map((l) => (
-            <div className="audit-row" key={l._id}>
-              <span className="chip">{l.role}</span>
-              <span>{l.phone ?? l.email ?? '—'}</span>
-              <span className="muted">clerk: {l.clerkUserId}</span>
-              <span className="muted">{l.workosUserId ? `workos: ${l.workosUserId}` : 'not upgraded'}</span>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="panel">
-        <h2>Feature flags ({flags.length})</h2>
-        {flags.length === 0 ? (
-          <div className="empty">No org-scoped overrides.</div>
-        ) : (
-          flags.map((f) => (
-            <div className="audit-row" key={f._id}>
-              <span className="action">{f.key}</span>
-              <span>{f.value}</span>
-              <span className="muted">{formatAgo(f.updatedAt)}</span>
-            </div>
-          ))
-        )}
-      </div>
+      <OrgSupportPanels
+        organizationId={organizationId}
+        workosOrgId={org.workosOrgId ?? null}
+        orgName={org.name}
+        isDeleted={org.isDeleted}
+        flags={flags}
+        identityLinks={identityLinks}
+      />
 
       <div className="panel">
         <h2>Recent tenant activity</h2>

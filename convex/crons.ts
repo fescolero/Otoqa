@@ -301,6 +301,18 @@ crons.interval(
   job('org-health-snapshots', 'platform/snapshots:rebuildAllOrgHealthSnapshots', 'mutation'),
 );
 
+// ✅ Platform alert evaluator (every 5 min): checks the alerting matrix
+// (crons failing ≥3×, webhook dead-letters, FourKites all_failed), keeps
+// one deduped alert per incident, notifies Slack on open, auto-resolves.
+// Also logs the dead-man's-switch heartbeat line for the Axiom absence
+// monitor.
+crons.interval(
+  'platform-alerts-evaluate',
+  { minutes: 5 },
+  internal.platform.cronRunner.run,
+  job('platform-alerts-evaluate', 'platform/alerts:evaluate', 'mutation'),
+);
+
 // ✅ Prune platform ledgers (daily at 6:15 AM UTC; 30-day retention for
 // cronRuns and systemEvents, bounded batches)
 crons.cron(
