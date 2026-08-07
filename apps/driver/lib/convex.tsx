@@ -20,6 +20,35 @@ export const convex = new ConvexReactClient(CONVEX_URL, {
 });
 
 // ============================================
+// NON-REACT AUTH MIRROR
+// ============================================
+
+/**
+ * Whether `convex` (the ConvexReactClient) currently holds usable Convex
+ * auth. ConvexReactClient exposes no such accessor, and auth is only ever
+ * installed by ConvexAuthProvider below — i.e. by the React tree.
+ *
+ * Code that fires mutations from OUTSIDE the tree (location-tracking's queue
+ * flush, which also runs from background tasks with React unmounted) needs
+ * this to tell "the client will authenticate this request" apart from "the
+ * client will send it anonymously". That distinction is not free to get
+ * wrong: an anonymous mutation still executes server-side, throws
+ * ConvexError('Not authenticated'), and is reported as a backend error before
+ * the caller ever sees a rejection.
+ *
+ * Deliberately NOT debounced the way the React-facing `authState` is. That
+ * debounce exists so the UI doesn't flash an error during a token refresh.
+ * Transport selection wants the opposite: the instant auth stops being
+ * usable, non-React callers should stop using the WebSocket path and mint a
+ * fresh token themselves.
+ */
+let reactClientHasAuth = false;
+
+export function isReactClientAuthenticated(): boolean {
+  return reactClientHasAuth;
+}
+
+// ============================================
 // CONVEX AUTH CONTEXT
 // Share auth state across the app
 // ============================================
@@ -150,6 +179,7 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
 
     if (!isSignedIn) {
       console.log('[ConvexAuth] Not signed in, clearing auth');
+      reactClientHasAuth = false;
       convex.clearAuth();
       clearAuthToken().catch(() => {});
       hasSetAuthRef.current = false;
@@ -173,11 +203,16 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
     clearAuthTimeout();
     authTimeoutRef.current = setTimeout(() => {
       trackConvexAuthEvent('auth_timeout', { reason, setup_id: setupId, elapsed_ms: AUTH_TIMEOUT_MS });
+      reactClientHasAuth = false;
       wasAuthenticatedRef.current = false;
       setAuthState({ isLoading: false, isAuthenticated: false });
     }, AUTH_TIMEOUT_MS);
 
     hasSetAuthRef.current = true;
+
+    // setAuth resets the AuthenticationManager and pauses the WebSocket, so
+    // the client is unauthenticated until onChange reports otherwise.
+    reactClientHasAuth = false;
 
     let tokenRetryCount = 0;
     const MAX_TOKEN_RETRIES = 3;
@@ -225,6 +260,8 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
       (isAuthenticated) => {
         clearAuthTimeout();
         clearFalseDebounce();
+        // Undebounced on purpose — see isReactClientAuthenticated.
+        reactClientHasAuth = isAuthenticated;
         const elapsed = Date.now() - startTime;
 
         if (isAuthenticated) {
@@ -310,6 +347,7 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
     if (isLoaded && !isSignedIn && authSetupCount.current > 0) {
       console.log('[ConvexAuth] Signed out, resetting');
       authSetupCount.current = 0;
+      reactClientHasAuth = false;
       convex.clearAuth();
       clearAuthToken().catch(() => {});
       hasSetAuthRef.current = false;
