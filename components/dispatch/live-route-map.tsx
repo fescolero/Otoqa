@@ -22,6 +22,7 @@ import {
   DEPARTURE_RING_METERS,
   OUTER_RING_METERS,
 } from '@/convex/lib/geo';
+import { pointInPolygon } from '@/convex/lib/polygonGeo';
 
 // ============================================
 // POLYLINE DECODERS
@@ -590,7 +591,14 @@ function GeofenceRings({
   selectedStopId?: string | null;
   colorScheme: 'LIGHT' | 'DARK';
   /** Per-stop effective radii (facility overrides); defaults when absent. */
-  radiiByStopId?: Record<string, { arrivalRadiusMeters: number; exitRadiusMeters: number }>;
+  radiiByStopId?: Record<
+    string,
+    {
+      arrivalRadiusMeters: number;
+      exitRadiusMeters: number;
+      polygon?: { lat: number; lng: number }[];
+    }
+  >;
 }) {
   const map = useMap();
   const mapsLibrary = useMapsLibrary('maps');
@@ -604,32 +612,58 @@ function GeofenceRings({
     const insideColor = GEOFENCE_EVENT_STYLE[colorScheme].ARRIVED;
     const approachColor = GEOFENCE_EVENT_STYLE[colorScheme].APPROACHING;
 
-    const circles: google.maps.Circle[] = [];
+    const circles: (google.maps.Circle | google.maps.Polygon)[] = [];
     stops.forEach((stop) => {
       const radii = stop.id ? radiiByStopId?.[stop.id] : undefined;
       const arrivalRadius = radii?.arrivalRadiusMeters ?? INNER_RING_METERS;
       const exitRadius = radii?.exitRadiusMeters ?? DEPARTURE_RING_METERS;
+      const fencePolygon = radii?.polygon;
 
       const isDriverInside = driverLocation
-        ? haversineDistance(stop.lat, stop.lng, driverLocation.latitude, driverLocation.longitude) *
-            1000 <
-          arrivalRadius
+        ? fencePolygon
+          ? pointInPolygon(
+              { lat: driverLocation.latitude, lng: driverLocation.longitude },
+              fencePolygon,
+            )
+          : haversineDistance(
+              stop.lat,
+              stop.lng,
+              driverLocation.latitude,
+              driverLocation.longitude,
+            ) *
+              1000 <
+            arrivalRadius
         : false;
       const highlight = isDriverInside || stop.status === 'Completed';
 
-      // Arrival ring — the ARRIVED boundary.
-      circles.push(
-        new mapsLibrary.Circle({
-          center: { lat: stop.lat, lng: stop.lng },
-          radius: arrivalRadius,
-          strokeColor: highlight ? insideColor : neutralStroke,
-          strokeOpacity: 0.65,
-          strokeWeight: 2,
-          fillColor: highlight ? insideColor : neutralFill,
-          fillOpacity: isDriverInside ? 0.18 : 0.08,
-          map,
-        }),
-      );
+      // Arrival boundary — the learned facility polygon when one exists
+      // (the fence's real shape), else the ARRIVED circle.
+      if (fencePolygon) {
+        circles.push(
+          new mapsLibrary.Polygon({
+            paths: fencePolygon,
+            strokeColor: highlight ? insideColor : neutralStroke,
+            strokeOpacity: 0.65,
+            strokeWeight: 2,
+            fillColor: highlight ? insideColor : neutralFill,
+            fillOpacity: isDriverInside ? 0.18 : 0.08,
+            map,
+          }),
+        );
+      } else {
+        circles.push(
+          new mapsLibrary.Circle({
+            center: { lat: stop.lat, lng: stop.lng },
+            radius: arrivalRadius,
+            strokeColor: highlight ? insideColor : neutralStroke,
+            strokeOpacity: 0.65,
+            strokeWeight: 2,
+            fillColor: highlight ? insideColor : neutralFill,
+            fillOpacity: isDriverInside ? 0.18 : 0.08,
+            map,
+          }),
+        );
+      }
 
       // Departure ring — the wider DEPARTED (exit) boundary.
       circles.push(
@@ -1139,9 +1173,20 @@ export function LiveRouteMap({
     return Object.fromEntries(
       ringRadii.map((r) => [
         r.stopId as string,
-        { arrivalRadiusMeters: r.arrivalRadiusMeters, exitRadiusMeters: r.exitRadiusMeters },
+        {
+          arrivalRadiusMeters: r.arrivalRadiusMeters,
+          exitRadiusMeters: r.exitRadiusMeters,
+          polygon: r.polygon,
+        },
       ]),
-    ) as Record<string, { arrivalRadiusMeters: number; exitRadiusMeters: number }>;
+    ) as Record<
+      string,
+      {
+        arrivalRadiusMeters: number;
+        exitRadiusMeters: number;
+        polygon?: { lat: number; lng: number }[];
+      }
+    >;
   }, [ringRadii]);
   const hasRadiusOverride = ringRadii?.some((r) => r.overridden) ?? false;
   const pathStateRef = useRef({ lastCount: 0, isLoading: false });

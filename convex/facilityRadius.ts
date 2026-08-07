@@ -5,6 +5,11 @@ import type { Doc } from './_generated/dataModel';
 import { computeFacilityEvidence, type EvidencePoint } from './lib/facilityEvidence';
 import { EVIDENCE_MIN_CHECKINS, EVIDENCE_MIN_DISTINCT_DAYS } from './lib/facilityEvidence';
 import { INNER_RING_METERS } from './lib/geo';
+import {
+  buildFencePolygon,
+  POLYGON_MIN_FIXES,
+  POLYGON_MIN_DISTINCT_DAYS,
+} from './lib/polygonGeo';
 import { logAudit } from './lib/audit';
 
 /**
@@ -83,10 +88,30 @@ export const refineAllFacilityRadii = internalMutation({
       const next = Math.round(
         Math.min(current * (1 + REFINE_STEP_LIMIT), Math.max(current * (1 - REFINE_STEP_LIMIT), target)),
       );
-      if (Math.abs(next - current) < REFINE_MIN_DELTA_METERS) continue;
+
+      // Polygon fence: with enough signal, the hull of the trimmed fixes
+      // (buffered like the radius) becomes the arrival boundary's true
+      // shape. Rebuilt each night from current evidence; kept as-is when
+      // tonight's data is too thin to justify one but one already exists.
+      const polygon =
+        evidence.count >= POLYGON_MIN_FIXES && evidence.distinctDays >= POLYGON_MIN_DISTINCT_DAYS
+          ? buildFencePolygon(
+              points.map((p) => ({ lat: p.latitude, lng: p.longitude })),
+              { lat: evidence.medianLatitude, lng: evidence.medianLongitude },
+              evidence.p95SpreadMeters,
+              100,
+            )
+          : null;
+
+      const radiusChanged = Math.abs(next - current) >= REFINE_MIN_DELTA_METERS;
+      const polygonChanged =
+        polygon !== null &&
+        JSON.stringify(polygon) !== JSON.stringify(facility.geofencePolygon ?? null);
+      if (!radiusChanged && !polygonChanged) continue;
 
       await ctx.db.patch(facility._id, {
-        radiusMeters: next,
+        ...(radiusChanged ? { radiusMeters: next } : {}),
+        ...(polygon !== null ? { geofencePolygon: polygon } : {}),
         radiusSource: 'learned',
         updatedAt: Date.now(),
       });
@@ -98,11 +123,18 @@ export const refineAllFacilityRadii = internalMutation({
         action: 'updated',
         performedBy: 'system:radius-refinement',
         description:
-          `Geofence radius auto-refined ${current}m → ${next}m ` +
+          `Geofence auto-refined${radiusChanged ? ` radius ${current}m → ${next}m` : ''}` +
+          `${polygonChanged ? `${radiusChanged ? ',' : ''} polygon ${polygon!.length} vertices` : ''} ` +
           `(target ${target}m from ${evidence.count} fixes across ${evidence.distinctDays} days, ` +
           `p95 spread ${evidence.p95SpreadMeters}m)`,
-        changesBefore: JSON.stringify({ radiusMeters: current }),
-        changesAfter: JSON.stringify({ radiusMeters: next }),
+        changesBefore: JSON.stringify({
+          radiusMeters: current,
+          polygonVertices: facility.geofencePolygon?.length ?? 0,
+        }),
+        changesAfter: JSON.stringify({
+          radiusMeters: radiusChanged ? next : current,
+          polygonVertices: polygon?.length ?? facility.geofencePolygon?.length ?? 0,
+        }),
       });
     }
 

@@ -1,6 +1,7 @@
 import { QueryCtx, MutationCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { exitRadiusFor } from './lib/geo';
+import { exitRadiusFor, EXIT_RADIUS_RATIO, INNER_RING_METERS } from './lib/geo';
+import { expandPolygon } from './lib/polygonGeo';
 
 /**
  * loadTrackingState — per-load geofence frontier.
@@ -47,11 +48,30 @@ export async function facilityArrivalRadius(
   ctx: QueryCtx | MutationCtx,
   stop: Pick<Doc<'loadStops'>, 'facilityId'> | undefined
 ): Promise<number | undefined> {
-  if (!stop?.facilityId) return undefined;
+  return (await facilityFence(ctx, stop)).radiusMeters;
+}
+
+/**
+ * The stop's full facility fence: radius override AND learned polygon
+ * (when the refinement cron has built one). The polygon replaces the
+ * arrival circle in the evaluator; the radius remains the fallback and
+ * the exit-ratio base.
+ */
+export async function facilityFence(
+  ctx: QueryCtx | MutationCtx,
+  stop: Pick<Doc<'loadStops'>, 'facilityId'> | undefined
+): Promise<{ radiusMeters?: number; polygon?: { lat: number; lng: number }[] }> {
+  if (!stop?.facilityId) return {};
   const facility = await ctx.db.get(stop.facilityId);
-  return facility && !facility.isDeleted && facility.radiusMeters && facility.radiusMeters > 0
-    ? facility.radiusMeters
-    : undefined;
+  if (!facility || facility.isDeleted) return {};
+  return {
+    radiusMeters:
+      facility.radiusMeters && facility.radiusMeters > 0 ? facility.radiusMeters : undefined,
+    polygon:
+      facility.geofencePolygon && facility.geofencePolygon.length >= 3
+        ? facility.geofencePolygon
+        : undefined,
+  };
 }
 
 async function getActiveSessionForDriver(
@@ -111,16 +131,27 @@ export async function setFrontierOnCheckIn(
     )
     .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
 
-  const [upcomingRadius, thisStopRadius] = await Promise.all([
-    facilityArrivalRadius(ctx, upcoming),
-    facilityArrivalRadius(ctx, stop),
+  const [upcomingFence, thisStopFence] = await Promise.all([
+    facilityFence(ctx, upcoming),
+    facilityFence(ctx, stop),
   ]);
+
+  // Polygon hysteresis mirrors the circle's: the exit boundary is the
+  // arrival polygon pushed out by the same delta the exit ring adds to
+  // the arrival ring (ratio − 1 × radius, defaulting the radius base).
+  const exitPolygon = thisStopFence.polygon
+    ? expandPolygon(
+        thisStopFence.polygon,
+        (EXIT_RADIUS_RATIO - 1) * (thisStopFence.radiusMeters ?? INNER_RING_METERS),
+      )
+    : undefined;
 
   const watches = {
     currentStopSequenceNumber: upcoming?.sequenceNumber,
     currentStopLat: upcoming?.latitude,
     currentStopLng: upcoming?.longitude,
-    currentStopArrivalRadiusMeters: upcomingRadius,
+    currentStopArrivalRadiusMeters: upcomingFence.radiusMeters,
+    currentStopPolygon: upcomingFence.polygon,
     approachingFired: false,
     arrivedFired: false,
     // A coordinate-less stop (possible on detours) clears the departure
@@ -132,7 +163,8 @@ export async function setFrontierOnCheckIn(
             lat: stop.latitude,
             lng: stop.longitude,
             armedAt: args.now,
-            exitRadiusMeters: exitRadiusFor(thisStopRadius),
+            exitRadiusMeters: exitRadiusFor(thisStopFence.radiusMeters),
+            exitPolygon,
           }
         : undefined,
     loadCompleted: undefined,

@@ -1826,6 +1826,12 @@ export default defineSchema({
     radiusSource: v.optional(
       v.union(v.literal('manual'), v.literal('learned'), v.literal('seed')),
     ),
+    // Learned fence polygon (convex hull of trimmed visit fixes + margin,
+    // ≤16 vertices, closed implicitly). When present it replaces the
+    // arrival circle in the evaluator and on the map; radiusMeters stays
+    // as the approach/fallback boundary. Built only by the refinement cron
+    // (convex/facilityRadius.ts) — needs more evidence than a radius.
+    geofencePolygon: v.optional(v.array(v.object({ lat: v.number(), lng: v.number() }))),
 
     verificationState: v.union(v.literal('UNVERIFIED'), v.literal('VERIFIED')),
     verifiedBy: v.optional(v.string()),
@@ -3172,6 +3178,10 @@ export default defineSchema({
     // the target stop's linked facility (facilities.radiusMeters). Absent =
     // INNER_RING_METERS default.
     currentStopArrivalRadiusMeters: v.optional(v.float64()),
+    // Polygon arrival boundary (the next stop's facility polygon),
+    // snapshotted at check-in. When present it replaces the arrival-radius
+    // circle for the ARRIVED decision; APPROACHING stays a circle.
+    currentStopPolygon: v.optional(v.array(v.object({ lat: v.float64(), lng: v.float64() }))),
 
     approachingFired: v.boolean(), // 5mi outer-ring event fired
     arrivedFired: v.boolean(), // 0.5mi inner-ring event fired
@@ -3199,6 +3209,10 @@ export default defineSchema({
         // stop's arrival radius (facility override or default). Absent on
         // pre-override rows = DEPARTURE_RING_METERS.
         exitRadiusMeters: v.optional(v.float64()),
+        // Polygon exit boundary (facility polygon expanded for hysteresis),
+        // snapshotted at check-in. When present it replaces the exit-radius
+        // circle in the departure watch.
+        exitPolygon: v.optional(v.array(v.object({ lat: v.float64(), lng: v.float64() }))),
         candidateAt: v.optional(v.float64()),
         // The candidate ping's fix. The DEPARTED event is stamped with the
         // candidate's time AND position, so the map pin sits exactly where

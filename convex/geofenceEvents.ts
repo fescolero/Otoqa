@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
-import { facilityArrivalRadius } from './loadTrackingState';
+import { facilityFence } from './loadTrackingState';
 import { INNER_RING_METERS, exitRadiusFor } from './lib/geo';
 
 /**
@@ -76,6 +76,9 @@ export const ringsForLoad = query({
       arrivalRadiusMeters: v.number(),
       exitRadiusMeters: v.number(),
       overridden: v.boolean(),
+      // Learned facility polygon — when present the map draws the fence's
+      // real shape instead of the arrival circle.
+      polygon: v.optional(v.array(v.object({ lat: v.number(), lng: v.number() }))),
     }),
   ),
   handler: async (ctx, args) => {
@@ -91,13 +94,14 @@ export const ringsForLoad = query({
     const out = [];
     for (const stop of stops) {
       if (stop.latitude === undefined || stop.longitude === undefined) continue;
-      const override = await facilityArrivalRadius(ctx, stop);
+      const fence = await facilityFence(ctx, stop);
       out.push({
         stopId: stop._id,
         sequenceNumber: stop.sequenceNumber,
-        arrivalRadiusMeters: override ?? INNER_RING_METERS,
-        exitRadiusMeters: exitRadiusFor(override),
-        overridden: override !== undefined,
+        arrivalRadiusMeters: fence.radiusMeters ?? INNER_RING_METERS,
+        exitRadiusMeters: exitRadiusFor(fence.radiusMeters),
+        overridden: fence.radiusMeters !== undefined,
+        polygon: fence.polygon,
       });
     }
     return out;

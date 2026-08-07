@@ -148,7 +148,7 @@ describe('facilityRadius — nightly refinement', () => {
       const stops = await ctx.db.query('loadStops').collect();
       void stops;
       const loadId = (await ctx.db.query('loadInformation').first())!._id;
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 12; i++) {
         await ctx.db.insert('loadStops', {
           loadId,
           internalId: 'L-9001',
@@ -177,6 +177,11 @@ describe('facilityRadius — nightly refinement', () => {
     // within the arrival-ring cap.
     expect(facility.radiusMeters!).toBeGreaterThan(400);
     expect(facility.radiusMeters!).toBeLessThanOrEqual(INNER_RING_METERS);
+    // Rich evidence (12 fixes / 4 days, wide spread) also earns a polygon
+    // fence — the hull of the visit cluster, buffered.
+    expect(facility.geofencePolygon).toBeDefined();
+    expect(facility.geofencePolygon!.length).toBeGreaterThanOrEqual(3);
+    expect(facility.geofencePolygon!.length).toBeLessThanOrEqual(16);
   });
 });
 

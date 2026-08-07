@@ -8,6 +8,7 @@ import {
   DEPARTURE_RING_METERS,
   GEOFENCE_MAX_ACCURACY_METERS,
 } from './lib/geo';
+import { pointInPolygon } from './lib/polygonGeo';
 
 /**
  * Geofence Evaluator — Phases 2–3.
@@ -145,8 +146,15 @@ export async function evaluatePing(
       patch.approachingFired = true;
     }
 
+    // A learned facility polygon replaces the arrival circle: ARRIVED means
+    // "on the property as observed", not "within r of the pin". Falls back
+    // to the radius when no polygon was snapshotted.
     const arrivalRadius = state.currentStopArrivalRadiusMeters ?? INNER_RING_METERS;
-    if (distance < arrivalRadius && !state.arrivedFired) {
+    const arrived =
+      state.currentStopPolygon && state.currentStopPolygon.length >= 3
+        ? pointInPolygon({ lat: args.ping.latitude, lng: args.ping.longitude }, state.currentStopPolygon)
+        : distance < arrivalRadius;
+    if (arrived && !state.arrivedFired) {
       await insertEventOnce(ctx, state, eventSessionId, {
         stopSequenceNumber: state.currentStopSequenceNumber!,
         eventType: 'ARRIVED',
@@ -174,8 +182,15 @@ export async function evaluatePing(
       watch.lng
     );
 
+    // Polygon departure mirrors polygon arrival: outside the expanded exit
+    // polygon (hysteresis pre-baked at snapshot time) instead of beyond the
+    // exit radius.
     const exitRadius = watch.exitRadiusMeters ?? DEPARTURE_RING_METERS;
-    if (distance > exitRadius) {
+    const outside =
+      watch.exitPolygon && watch.exitPolygon.length >= 3
+        ? !pointInPolygon({ lat: args.ping.latitude, lng: args.ping.longitude }, watch.exitPolygon)
+        : distance > exitRadius;
+    if (outside) {
       if (watch.candidateAt === undefined) {
         // First ping outside the exit ring — remember when AND where. The
         // eventual DEPARTED is stamped with this fix so the map pin sits
@@ -211,7 +226,10 @@ export async function evaluatePing(
         }
         patch.departureWatch = undefined;
       }
-    } else if (watch.candidateAt !== undefined && args.ping.recordedAt > watch.candidateAt) {
+    } else if (
+      watch.candidateAt !== undefined &&
+      args.ping.recordedAt > watch.candidateAt
+    ) {
       // A newer ping back inside the ring — the excursion was jitter, not a
       // departure. (An older ping proves nothing about the candidate.)
       patch.departureWatch = {
