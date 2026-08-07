@@ -25,10 +25,13 @@
 'use client';
 
 import * as React from 'react';
+import { format } from 'date-fns';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { LiveRouteMap, type RouteSummary } from '@/components/dispatch/live-route-map';
 import { Avatar, Chip, type ChipStatus, WBtn, WIcon, type IconName } from '@/components/web';
 import { cn } from '@/lib/utils';
+import { useAuthQuery } from '@/hooks/use-auth-query';
+import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 
 type EventTone = 'info' | 'ok' | 'warn' | 'crit' | 'neutral';
@@ -45,7 +48,25 @@ interface TimelineEvent {
   tone: EventTone;
   /** Marks the most recent / current event for the highlighted ring. */
   current?: boolean;
+  /**
+   * Detected-vs-reported linkage (all optional; set by callers whose
+   * events come from driver taps). `at` is the reported timestamp in ms;
+   * `stopSequenceNumber` + `kind` let the modal pair the tap with the
+   * matching geofence event (checkin↔ARRIVED, checkout↔DEPARTED).
+   */
+  at?: number;
+  stopSequenceNumber?: number;
+  kind?: 'checkin' | 'checkout';
+  /** Filled by the modal after pairing: the GPS-detected counterpart. */
+  detectedAtMs?: number;
+  deltaMinutes?: number;
 }
+
+/**
+ * |reported − detected| at or beyond this is highlighted amber: the tap
+ * and the GPS disagree enough to matter (detention math, late-tap habits).
+ */
+const DETECTED_REPORTED_WARN_MIN = 15;
 
 const TONE_HEX: Record<EventTone, { fg: string; bg: string }> = {
   info: { fg: '#1A47E6', bg: 'rgba(46,92,255,0.10)' },
@@ -182,6 +203,72 @@ export function LiveTrackingModal({
   onShareEta,
 }: LiveTrackingModalProps) {
   const [tab, setTab] = React.useState<'activity' | 'pings'>('activity');
+
+  // Geofence events for the detected-vs-reported comparison in the rail.
+  // Same query the map's event pins use; skipped while the modal is closed.
+  const geofenceEvents = useAuthQuery(
+    api.geofenceEvents.listForLoad,
+    open ? { loadId: loadId as Id<'loadInformation'> } : 'skip',
+  );
+
+  // Pair driver taps with their GPS-detected counterparts
+  // (checkin↔ARRIVED, checkout↔DEPARTED), and surface detected-only rows
+  // for stops where the geofence fired but no tap was ever recorded.
+  const railEvents = React.useMemo<TimelineEvent[]>(() => {
+    if (!geofenceEvents || geofenceEvents.length === 0) return events;
+
+    const detected = new Map<string, { triggeredAt: number }>();
+    for (const ge of geofenceEvents) {
+      if (ge.eventType === 'ARRIVED' || ge.eventType === 'DEPARTED') {
+        detected.set(`${ge.stopSequenceNumber}|${ge.eventType}`, { triggeredAt: ge.triggeredAt });
+      }
+    }
+
+    const matchedKeys = new Set<string>();
+    const enriched = events.map((ev) => {
+      if (ev.stopSequenceNumber === undefined || !ev.kind || ev.at === undefined) return ev;
+      const key = `${ev.stopSequenceNumber}|${ev.kind === 'checkin' ? 'ARRIVED' : 'DEPARTED'}`;
+      const hit = detected.get(key);
+      if (!hit) return ev;
+      matchedKeys.add(key);
+      return {
+        ...ev,
+        detectedAtMs: hit.triggeredAt,
+        deltaMinutes: Math.round((ev.at - hit.triggeredAt) / 60_000),
+      };
+    });
+
+    // Detected-only rows: the geofence saw it happen, but no tap exists.
+    const stopBySeq = new Map((stops ?? []).map((s) => [s.sequenceNumber, s]));
+    const extras: TimelineEvent[] = [];
+    for (const [key, hit] of detected) {
+      if (matchedKeys.has(key)) continue;
+      const [seqStr, type] = key.split('|');
+      const seq = Number(seqStr);
+      const stop = stopBySeq.get(seq);
+      const place = stop ? [stop.city, stop.state].filter(Boolean).join(', ') : null;
+      extras.push({
+        id: `gps-${key}`,
+        title: type === 'ARRIVED' ? `Arrived at stop #${seq}` : `Departed stop #${seq}`,
+        detail: [place, type === 'ARRIVED' ? 'GPS-detected · no check-in tap' : 'GPS-detected · no checkout tap']
+          .filter(Boolean)
+          .join(' · '),
+        time: format(new Date(hit.triggeredAt), 'h:mm a'),
+        icon: type === 'ARRIVED' ? 'check' : 'arrow-up-right',
+        tone: 'warn',
+        at: hit.triggeredAt,
+      });
+    }
+    if (extras.length === 0) return enriched;
+
+    // Keep the caller's newest-first ordering: merge by timestamp where we
+    // have one, pinning the synthetic "Now" row (no `at`) to the top.
+    const pinned = enriched.filter((e) => e.at === undefined);
+    const dated = [...enriched.filter((e) => e.at !== undefined), ...extras].sort(
+      (a, b) => b.at! - a.at!,
+    );
+    return [...pinned, ...dated];
+  }, [events, geofenceEvents, stops]);
 
   // Authoritative route summary from Google Directions, populated by
   // LiveRouteMap's onRouteResolved hook. The map already fires this call to
@@ -464,14 +551,14 @@ export function LiveTrackingModal({
               {/* Timeline */}
               <div className="flex-1 min-h-0 overflow-auto scroll-thin px-4 py-3">
                 {tab === 'activity' ? (
-                  events.length === 0 ? (
+                  railEvents.length === 0 ? (
                     <p className="m-0 text-[12px] text-[var(--text-tertiary)] italic">
                       No activity yet — events will appear here as the trip progresses.
                     </p>
                   ) : (
                     <div className="flex flex-col">
-                      {events.map((ev, idx) => (
-                        <TimelineRow key={ev.id} ev={ev} isLast={idx === events.length - 1} />
+                      {railEvents.map((ev, idx) => (
+                        <TimelineRow key={ev.id} ev={ev} isLast={idx === railEvents.length - 1} />
                       ))}
                     </div>
                   )
@@ -540,6 +627,22 @@ function TimelineRow({ ev, isLast }: { ev: TimelineEvent; isLast: boolean }) {
         </div>
         {ev.detail && (
           <div className="text-[11.5px] text-[var(--text-secondary)] mt-0.5 leading-[16px]">{ev.detail}</div>
+        )}
+        {ev.detectedAtMs !== undefined && ev.deltaMinutes !== undefined && (
+          <div
+            className="num text-[10.5px] tabular-nums mt-0.5"
+            style={{
+              color:
+                Math.abs(ev.deltaMinutes) >= DETECTED_REPORTED_WARN_MIN
+                  ? TONE_HEX.warn.fg
+                  : 'var(--text-tertiary)',
+            }}
+          >
+            GPS {format(new Date(ev.detectedAtMs), 'h:mm a')}
+            {ev.deltaMinutes === 0
+              ? ' · matches tap'
+              : ` · tap ${Math.abs(ev.deltaMinutes)}m ${ev.deltaMinutes > 0 ? 'later' : 'earlier'}`}
+          </div>
         )}
         {ev.mile != null && (
           <div className="num text-[10.5px] text-[var(--text-tertiary)] mt-0.5">mi {ev.mile.toLocaleString()}</div>

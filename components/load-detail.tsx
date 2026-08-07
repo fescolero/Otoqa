@@ -1751,6 +1751,11 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
                   time: formatTime(sw.checkedOutAt),
                   icon: 'arrow-up-right',
                   tone: 'neutral',
+                  // Detected-vs-reported linkage: the modal pairs this tap
+                  // with the stop's DEPARTED geofence event.
+                  at: new Date(sw.checkedOutAt).getTime(),
+                  stopSequenceNumber: sw.sequenceNumber,
+                  kind: 'checkout',
                 });
               }
               if (sw.checkedInAt) {
@@ -1764,6 +1769,10 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
                   time: formatTime(sw.checkedInAt),
                   icon: 'check',
                   tone: 'ok',
+                  // Paired with the stop's ARRIVED geofence event.
+                  at: new Date(sw.checkedInAt).getTime(),
+                  stopSequenceNumber: sw.sequenceNumber,
+                  kind: 'checkin',
                 });
               }
             });
