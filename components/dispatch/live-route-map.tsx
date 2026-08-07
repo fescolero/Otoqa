@@ -1491,13 +1491,15 @@ export function LiveRouteMap({
             </div>
           </div>
         )}
-      </div>
 
-      {/* Geofence legend + layer toggle. Text labels beside every colored
-          mark keep the encoding readable without color; the ring key names
-          the two always-on radii (approach ring appears on stop select). */}
-      <div className="absolute bottom-3 left-3 z-10">
-        <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
+        {/* Geofence legend + layer toggle — a rail card like the rest of
+            the chrome above, NOT its own absolute corner. It used to sit at
+            bottom-left, where the LiveTrackingModal's From/To pill also
+            lives (same bottom-3 left-3 z-10), and covered it. Text labels
+            beside every colored mark keep the encoding readable without
+            color; the ring key names the two always-on radii (approach
+            ring appears on stop select). */}
+        <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm self-start">
           <button
             type="button"
             onClick={() => setShowGeofence((s) => !s)}
