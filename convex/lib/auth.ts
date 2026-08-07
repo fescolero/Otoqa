@@ -174,6 +174,31 @@ export async function requirePlatformStaff(ctx: AnyCtx): Promise<PlatformStaffId
 }
 
 /**
+ * Step-up gate for DESTRUCTIVE platform actions (plan §5): on top of
+ * requirePlatformStaff, the caller's original authentication (the OIDC
+ * `auth_time` claim — set at login, unchanged by silent token refreshes)
+ * must be recent. Forces a fresh sign-in before force-ends, deletions,
+ * global flag writes, etc. Fail-closed: a token without the claim doesn't
+ * qualify.
+ */
+const STEP_UP_MAX_AGE_MS = 15 * 60 * 1000;
+
+export async function requireRecentStaffAuth(ctx: AnyCtx): Promise<PlatformStaffIdentity> {
+  const staff = await requirePlatformStaff(ctx);
+  const identity = await ctx.auth.getUserIdentity();
+  const authTime = (identity as unknown as { auth_time?: number }).auth_time;
+  if (
+    typeof authTime !== 'number' ||
+    Date.now() - authTime * 1000 > STEP_UP_MAX_AGE_MS
+  ) {
+    throw new ConvexError(
+      'Step-up required: this action needs a recent sign-in. Sign out and back in, then retry.',
+    );
+  }
+  return staff;
+}
+
+/**
  * RBAC claims from the caller's access token. WorkOS puts `role`, `roles`,
  * and `permissions` on the JWT once RBAC is configured; sessions predating
  * that carry none (see lib/permissions.ts for how the policy treats them).

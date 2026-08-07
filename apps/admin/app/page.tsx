@@ -1,6 +1,6 @@
 'use client';
 
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 
@@ -8,10 +8,40 @@ export default function OverviewPage() {
   return (
     <ConsoleShell>
       <h1>Overview</h1>
-      <p className="subtitle">Needs-attention events and recent staff activity.</p>
+      <p className="subtitle">Open alerts, needs-attention events, and recent staff activity.</p>
+      <OpenAlerts />
       <NeedsAttention />
       <RecentStaffActivity />
     </ConsoleShell>
+  );
+}
+
+function OpenAlerts() {
+  const alerts = useQuery(api.platform.alerts.listAlerts, {});
+  const ack = useMutation(api.platform.alerts.ackAlert);
+
+  if (!alerts || alerts.length === 0) return null;
+  return (
+    <div className="panel panel-danger">
+      <h2>Active alerts</h2>
+      {alerts.map((a) => (
+        <div className="audit-row" key={a._id}>
+          <span className={a.severity === 'high' ? 'chip chip-danger' : 'chip chip-warn'}>
+            {a.severity}
+          </span>
+          <span className="action">{a.kind}</span>
+          <span>{a.message}</span>
+          <span className="muted">×{a.count}</span>
+          {a.status === 'open' ? (
+            <button className="button button-sm" onClick={() => ack({ alertId: a._id })}>
+              Ack
+            </button>
+          ) : (
+            <span className="chip">acked by {a.acknowledgedBy}</span>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

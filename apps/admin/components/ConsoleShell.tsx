@@ -22,6 +22,8 @@ const NAV = [
   { label: 'Billing', href: '/billing' },
   { label: 'Jobs', href: '/jobs' },
   { label: 'Health', href: '/health' },
+  { label: 'Tickets', href: '/tickets' },
+  { label: 'Flags', href: '/flags' },
 ];
 
 export function ConsoleShell({ children }: { children: ReactNode }) {
@@ -131,9 +133,9 @@ function ConsoleError({ message }: { message: string }) {
           console&apos;s latest functions yet — run <code>npx convex deploy</code> and reload.
         </p>
       ) : null}
-      <a className="button" href="/">
+      <Link className="button" href="/">
         Reload
-      </a>
+      </Link>
     </div>
   );
 }

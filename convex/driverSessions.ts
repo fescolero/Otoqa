@@ -67,7 +67,10 @@ async function getCallerActiveSession(
  *
  * Caller is expected to have already done org/auth checks.
  */
-async function endSessionInternal(
+// Exported for the platform console's staff-scoped force-end
+// (convex/platform/support.ts) — same closure semantics as the tenant
+// dispatcher path, different authorization.
+export async function endSessionInternal(
   ctx: MutationCtx,
   session: Doc<'driverSessions'>,
   args: {
