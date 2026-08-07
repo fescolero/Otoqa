@@ -1073,6 +1073,18 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
             </span>
           );
         }
+        // Clean in-fence check-in: show the distance instead of a blank —
+        // pin quality is visible on every row, not just the problem ones.
+        if (r.checkedInAt && typeof r.checkinDistanceMeters === 'number') {
+          return (
+            <span
+              className="cursor-help"
+              title={`Checked in ${r.checkinDistanceMeters}m from the pin, inside the geofence.`}
+            >
+              <Chip status="valid" label={`✓ ${r.checkinDistanceMeters}m`} />
+            </span>
+          );
+        }
         return <span className="text-[var(--text-tertiary)]">—</span>;
       },
     },

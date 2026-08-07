@@ -28,6 +28,10 @@ import {
   useMap,
 } from '@vis.gl/react-google-maps';
 import { MarkerClusterer, type Marker } from '@googlemaps/markerclusterer';
+import { useMapsLibrary } from '@vis.gl/react-google-maps';
+import { useAuthQuery } from '@/hooks/use-auth-query';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { snapPathToRoads } from '@/lib/googleRoads';
@@ -40,6 +44,74 @@ import {
   type PastSessionRow,
   type TripInfo,
 } from './types';
+
+/**
+ * Geofence overlay for one load's stops on the sessions map — the same
+ * learned fences the load-detail map draws: the facility's polygon when
+ * one has been learned, else the arrival circle, plus the wider exit
+ * boundary. Fetches its own ring data (the session rows don't carry stop
+ * coordinates) and draws imperatively, cleaning up on unmount/load switch.
+ */
+function StopFencesLayer({ loadId }: { loadId: Id<'loadInformation'> }) {
+  const map = useMap();
+  const mapsLibrary = useMapsLibrary('maps');
+  const colorScheme = useMapColorScheme();
+  const rings = useAuthQuery(api.geofenceEvents.ringsForLoad, { loadId });
+
+  React.useEffect(() => {
+    if (!map || !mapsLibrary || !rings || rings.length === 0) return;
+
+    const dark = colorScheme === 'DARK';
+    const fenceColor = dark ? '#059669' : '#10B981';
+    const neutralStroke = dark ? '#5A6172' : '#94a3b8';
+
+    const shapes: (google.maps.Circle | google.maps.Polygon)[] = [];
+    for (const ring of rings) {
+      // Arrival boundary: learned polygon when present, circle otherwise.
+      if (ring.polygon && ring.polygon.length >= 3) {
+        shapes.push(
+          new mapsLibrary.Polygon({
+            paths: ring.polygon,
+            strokeColor: fenceColor,
+            strokeOpacity: 0.55,
+            strokeWeight: 2,
+            fillColor: fenceColor,
+            fillOpacity: 0.07,
+            map,
+          }),
+        );
+      } else {
+        shapes.push(
+          new mapsLibrary.Circle({
+            center: { lat: ring.latitude, lng: ring.longitude },
+            radius: ring.arrivalRadiusMeters,
+            strokeColor: fenceColor,
+            strokeOpacity: 0.55,
+            strokeWeight: 2,
+            fillColor: fenceColor,
+            fillOpacity: 0.07,
+            map,
+          }),
+        );
+      }
+      // Exit boundary — faint, non-filled.
+      shapes.push(
+        new mapsLibrary.Circle({
+          center: { lat: ring.latitude, lng: ring.longitude },
+          radius: ring.exitRadiusMeters,
+          strokeColor: neutralStroke,
+          strokeOpacity: 0.3,
+          strokeWeight: 1.5,
+          fillOpacity: 0,
+          map,
+        }),
+      );
+    }
+    return () => shapes.forEach((s) => s.setMap(null));
+  }, [map, mapsLibrary, rings, colorScheme]);
+
+  return null;
+}
 
 /** One GPS ping the map needs to draw a polyline segment. */
 export interface MapPing {
@@ -1124,6 +1196,13 @@ function MapInner(
     const selectedSession = props.selectedId
       ? props.sessions.find((s) => s.sessionId === props.selectedId)
       : null;
+    // Fence overlay target: the pinned trip if the dispatcher focused one,
+    // else the leg being driven right now. Same learned fences as the load
+    // map — polygon when the facility has earned one, circle otherwise.
+    const fenceTrip =
+      props.focusedTripIndex != null
+        ? trips[props.focusedTripIndex]
+        : trips.find((t) => t.status === 'ACTIVE');
 
     return (
       <>
@@ -1165,6 +1244,12 @@ function MapInner(
           <HoveredPingHighlight
             latitude={props.hoveredPing.latitude}
             longitude={props.hoveredPing.longitude}
+          />
+        )}
+        {selectedSession && fenceTrip && (
+          <StopFencesLayer
+            key={fenceTrip.loadId}
+            loadId={fenceTrip.loadId as Id<'loadInformation'>}
           />
         )}
       </>

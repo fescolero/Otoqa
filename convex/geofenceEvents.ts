@@ -73,6 +73,10 @@ export const ringsForLoad = query({
     v.object({
       stopId: v.id('loadStops'),
       sequenceNumber: v.number(),
+      // Stop pin — lets consumers without their own stop list (the
+      // sessions map) draw the fence without a second query.
+      latitude: v.number(),
+      longitude: v.number(),
       arrivalRadiusMeters: v.number(),
       exitRadiusMeters: v.number(),
       overridden: v.boolean(),
@@ -98,6 +102,8 @@ export const ringsForLoad = query({
       out.push({
         stopId: stop._id,
         sequenceNumber: stop.sequenceNumber,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
         arrivalRadiusMeters: fence.radiusMeters ?? INNER_RING_METERS,
         exitRadiusMeters: exitRadiusFor(fence.radiusMeters),
         overridden: fence.radiusMeters !== undefined,
