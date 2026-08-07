@@ -164,6 +164,23 @@ export async function releaseFrontierOnLoadComplete(
 }
 
 /**
+ * Hard-release the frontier for a load that is no longer being driven at
+ * all — Canceled, Expired, or reopened to Open. Unlike
+ * releaseFrontierOnLoadComplete there is no departure-watch keep-alive:
+ * the load's execution is void, so no further geofence timestamps are
+ * meaningful for it. Without this, expiring/canceling assigned loads
+ * leaks their tracking rows (17 orphans found in the first production
+ * sweep). Idempotent — no row is a no-op.
+ */
+export async function deleteFrontierForLoad(
+  ctx: MutationCtx,
+  loadId: Id<'loadInformation'>
+): Promise<void> {
+  const state = await getByLoadId(ctx, loadId);
+  if (state) await ctx.db.delete(state._id);
+}
+
+/**
  * Handoff: point the frontier at the relay driver. The arrival watch is
  * preserved so the relay resumes exactly where the primary left off; the
  * departure watch is cleared — it tracked the from-driver's physical

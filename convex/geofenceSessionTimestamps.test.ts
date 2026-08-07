@@ -19,6 +19,7 @@ import { evaluatePing } from './geofenceEvaluator';
 import {
   setFrontierOnCheckIn,
   releaseFrontierOnLoadComplete,
+  deleteFrontierForLoad,
   transferFrontierToDriver,
   deleteCompletedRowsForSession,
   transferCompletedRowsToSession,
@@ -517,6 +518,23 @@ describe('loadTrackingState frontier helpers', () => {
       expect(after.departureWatch).toBeUndefined();
       // Arrival watch preserved — the relay resumes toward the same stop.
       expect(after.currentStopSequenceNumber).toBe(2);
+    });
+  });
+
+  it('hard-deletes the frontier for dead loads even with a pending departure watch', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      // Row with an armed departure watch — the case the soft release
+      // would keep alive. Cancel/expire must delete it anyway.
+      await ctx.db.insert('loadTrackingState', trackingRow(f));
+
+      await deleteFrontierForLoad(ctx, f.loadId);
+      expect(await ctx.db.query('loadTrackingState').collect()).toHaveLength(0);
+
+      // Idempotent: releasing an already-released load is a no-op.
+      await deleteFrontierForLoad(ctx, f.loadId);
+      expect(await ctx.db.query('loadTrackingState').collect()).toHaveLength(0);
     });
   });
 
