@@ -41,6 +41,7 @@ import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import { useQuery } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
+import { useConvexAuthState } from '../convex';
 import {
   registerBackgroundWakeTask,
   registerForegroundWakeListener,
@@ -54,6 +55,15 @@ interface ActiveSessionLite {
 }
 
 export function usePushWake(activeSession: ActiveSessionLite | null | undefined) {
+  // `registerPushToken` resolves the caller through the Clerk phone claim, so
+  // it is only callable once Convex auth is live. The hook is mounted from the
+  // root layout, which renders before the handshake completes — firing then
+  // sends the mutation anonymously, and the server throws Unauthenticated.
+  // The client-side catch in refreshPushTokenIfChanged does not prevent that:
+  // the mutation has already run (and failed) on the backend by the time the
+  // rejection arrives. Gate on the real auth state instead.
+  const { isAuthenticated } = useConvexAuthState();
+
   // 1. Background wake task + foreground wake listener.
   useEffect(() => {
     registerBackgroundWakeTask().catch(() => {});
@@ -61,21 +71,26 @@ export function usePushWake(activeSession: ActiveSessionLite | null | undefined)
     return cleanup;
   }, []);
 
-  // 2. Token refresh on mount + on every foreground return.
+  // 2. Token refresh once authenticated + on every foreground return.
+  //    `isAuthenticated` in the deps is what replaces the old mount-only run:
+  //    the effect re-fires when the handshake lands, so registration still
+  //    happens exactly once per sign-in, just not before it can succeed.
   useEffect(() => {
+    if (!isAuthenticated) return;
     refreshPushTokenIfChanged().catch(() => {});
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') refreshPushTokenIfChanged().catch(() => {});
     });
     return () => sub.remove();
-  }, []);
+  }, [isAuthenticated]);
 
   // 3. Re-register when the active session _id transitions.
   useEffect(() => {
+    if (!isAuthenticated) return;
     if (activeSession?._id) {
       refreshPushTokenIfChanged().catch(() => {});
     }
-  }, [activeSession?._id]);
+  }, [activeSession?._id, isAuthenticated]);
 
   // 4. Reactive feature-flag subscription.
   const liveFlags = useQuery(api.featureFlags.getForOrg, {});
