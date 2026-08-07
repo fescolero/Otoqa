@@ -32,6 +32,18 @@ export const OUTER_RING_METERS = 8047;
 export const INNER_RING_METERS = 804;
 export const DEPARTURE_RING_METERS = 1207;
 
+// Exit ring = ratio × arrival ring, preserved when a facility overrides
+// its arrival radius (facilities.radiusMeters): a 300 m yard gets a 450 m
+// exit boundary, keeping the same hysteresis margin proportionally.
+export const EXIT_RADIUS_RATIO = 1.5;
+
+/** The exit boundary for a given arrival radius (default ring when unset). */
+export function exitRadiusFor(arrivalRadiusMeters: number | undefined): number {
+  return arrivalRadiusMeters && arrivalRadiusMeters > 0
+    ? Math.round(arrivalRadiusMeters * EXIT_RADIUS_RATIO)
+    : DEPARTURE_RING_METERS;
+}
+
 // Pings with horizontal accuracy worse than this are ignored for departure
 // decisions. Mobile already drops fixes over 50 m before syncing; this is
 // server-side defense in depth (rows without accuracy still count).

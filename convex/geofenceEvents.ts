@@ -1,6 +1,8 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
+import { facilityArrivalRadius } from './loadTrackingState';
+import { INNER_RING_METERS, exitRadiusFor } from './lib/geo';
 
 /**
  * Read API over the geofenceEvents log (written by geofenceEvaluator and
@@ -54,5 +56,50 @@ export const listForLoad = query({
       accuracy: e.accuracy ?? null,
       backfilled: e.backfilled ?? false,
     }));
+  },
+});
+
+/**
+ * Effective geofence ring radii per stop for one load, honoring the linked
+ * facility's radiusMeters override (the same value manual check-in
+ * enforcement uses). The map draws the real boundaries from this instead of
+ * assuming the global defaults. Bounded: one facility read per stop.
+ */
+export const ringsForLoad = query({
+  args: {
+    loadId: v.id('loadInformation'),
+  },
+  returns: v.array(
+    v.object({
+      stopId: v.id('loadStops'),
+      sequenceNumber: v.number(),
+      arrivalRadiusMeters: v.number(),
+      exitRadiusMeters: v.number(),
+      overridden: v.boolean(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+
+    const stops = await ctx.db
+      .query('loadStops')
+      .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+      .collect();
+
+    const out = [];
+    for (const stop of stops) {
+      if (stop.latitude === undefined || stop.longitude === undefined) continue;
+      const override = await facilityArrivalRadius(ctx, stop);
+      out.push({
+        stopId: stop._id,
+        sequenceNumber: stop.sequenceNumber,
+        arrivalRadiusMeters: override ?? INNER_RING_METERS,
+        exitRadiusMeters: exitRadiusFor(override),
+        overridden: override !== undefined,
+      });
+    }
+    return out;
   },
 });

@@ -583,11 +583,14 @@ function GeofenceRings({
   driverLocation,
   selectedStopId,
   colorScheme,
+  radiiByStopId,
 }: {
   stops: StopData[];
   driverLocation?: { latitude: number; longitude: number } | null;
   selectedStopId?: string | null;
   colorScheme: 'LIGHT' | 'DARK';
+  /** Per-stop effective radii (facility overrides); defaults when absent. */
+  radiiByStopId?: Record<string, { arrivalRadiusMeters: number; exitRadiusMeters: number }>;
 }) {
   const map = useMap();
   const mapsLibrary = useMapsLibrary('maps');
@@ -603,10 +606,14 @@ function GeofenceRings({
 
     const circles: google.maps.Circle[] = [];
     stops.forEach((stop) => {
+      const radii = stop.id ? radiiByStopId?.[stop.id] : undefined;
+      const arrivalRadius = radii?.arrivalRadiusMeters ?? INNER_RING_METERS;
+      const exitRadius = radii?.exitRadiusMeters ?? DEPARTURE_RING_METERS;
+
       const isDriverInside = driverLocation
         ? haversineDistance(stop.lat, stop.lng, driverLocation.latitude, driverLocation.longitude) *
             1000 <
-          INNER_RING_METERS
+          arrivalRadius
         : false;
       const highlight = isDriverInside || stop.status === 'Completed';
 
@@ -614,7 +621,7 @@ function GeofenceRings({
       circles.push(
         new mapsLibrary.Circle({
           center: { lat: stop.lat, lng: stop.lng },
-          radius: INNER_RING_METERS,
+          radius: arrivalRadius,
           strokeColor: highlight ? insideColor : neutralStroke,
           strokeOpacity: 0.65,
           strokeWeight: 2,
@@ -628,7 +635,7 @@ function GeofenceRings({
       circles.push(
         new mapsLibrary.Circle({
           center: { lat: stop.lat, lng: stop.lng },
-          radius: DEPARTURE_RING_METERS,
+          radius: exitRadius,
           strokeColor: neutralStroke,
           strokeOpacity: 0.35,
           strokeWeight: 1.5,
@@ -656,7 +663,7 @@ function GeofenceRings({
     return () => {
       circles.forEach((c) => c.setMap(null));
     };
-  }, [map, mapsLibrary, stops, driverLocation, selectedStopId, colorScheme]);
+  }, [map, mapsLibrary, stops, driverLocation, selectedStopId, colorScheme, radiiByStopId]);
 
   return null;
 }
@@ -688,31 +695,41 @@ function GeofenceEventPins({
           key={event._id}
           position={{ lat: event.latitude, lng: event.longitude }}
           onClick={() => setOpenEventId(openEventId === event._id ? null : event._id)}
-          zIndex={5}
+          zIndex={openEventId === event._id ? 20 : 5}
         >
-          <div className="flex flex-col items-center" style={{ transform: 'translateY(50%)' }}>
+          {/* Fixed-size wrapper translated so the diamond's CENTER sits on
+              the triggering ping's coordinate (AdvancedMarker anchors
+              bottom-center); the audit card is absolutely positioned so
+              opening it never shifts the pin off the ping. */}
+          <div style={{ position: 'relative', width: 18, height: 18, transform: 'translateY(50%)' }}>
             {openEventId === event._id && (
               <div
-                className="mb-1.5 rounded-lg border border-[var(--border-hairline)] bg-card/95 px-2.5 py-1.5 shadow-md backdrop-blur"
-                style={{ minWidth: 148 }}
+                className="rounded-lg border border-[var(--border-hairline)] bg-card/95 px-2.5 py-1.5 shadow-md backdrop-blur"
+                style={{
+                  position: 'absolute',
+                  bottom: 26,
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  minWidth: 168,
+                }}
               >
-                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground whitespace-nowrap">
                   <span style={{ color: palette[event.eventType] }}>
                     {GEOFENCE_EVENT_GLYPH[event.eventType]}
                   </span>
                   {GEOFENCE_EVENT_LABEL[event.eventType]} · Stop {event.stopSequenceNumber}
                 </div>
-                <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">
+                <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground whitespace-nowrap">
                   {format(new Date(event.triggeredAt), 'MMM d, h:mm a')}
                 </div>
-                <div className="text-[10px] tabular-nums text-muted-foreground">
+                <div className="text-[10px] tabular-nums text-muted-foreground whitespace-nowrap">
                   {event.distanceMeters >= 1000
                     ? `${(event.distanceMeters / 1000).toFixed(1)} km from stop`
                     : `${Math.round(event.distanceMeters)} m from stop`}
                   {event.accuracy !== null && ` · ±${Math.round(event.accuracy)} m GPS`}
                 </div>
                 {event.backfilled && (
-                  <div className="mt-0.5 text-[10px] italic text-muted-foreground">
+                  <div className="mt-0.5 text-[10px] italic text-muted-foreground whitespace-nowrap">
                     Computed retroactively from stored pings
                   </div>
                 )}
@@ -1113,6 +1130,22 @@ export function LiveRouteMap({
   const [matchConfidence, setMatchConfidence] = useState<number>(0);
   const [isUsingFallback, setIsUsingFallback] = useState(false);
   const [showGeofence, setShowGeofence] = useState(true);
+
+  // Effective ring radii per stop (facility overrides). Undefined while
+  // loading → rings fall back to the global defaults, then tighten.
+  const ringRadii = useAuthQuery(api.geofenceEvents.ringsForLoad, showGeofence ? { loadId } : 'skip');
+  const radiiByStopId = useMemo(() => {
+    if (!ringRadii) return undefined;
+    // Plain record (not a JS Map): the `Map` identifier in this module is
+    // the react-google-maps component import.
+    return Object.fromEntries(
+      ringRadii.map((r) => [
+        r.stopId as string,
+        { arrivalRadiusMeters: r.arrivalRadiusMeters, exitRadiusMeters: r.exitRadiusMeters },
+      ]),
+    ) as Record<string, { arrivalRadiusMeters: number; exitRadiusMeters: number }>;
+  }, [ringRadii]);
+  const hasRadiusOverride = ringRadii?.some((r) => r.overridden) ?? false;
   const pathStateRef = useRef({ lastCount: 0, isLoading: false });
   const [now, setNow] = useState(() => Date.now());
 
@@ -1354,6 +1387,7 @@ export function LiveRouteMap({
               driverLocation={effectiveLiveLocation}
               selectedStopId={selectedStopId}
               colorScheme={geofenceScheme}
+              radiiByStopId={radiiByStopId}
             />
           )}
           {showGeofence && <GeofenceEventPins loadId={loadId} colorScheme={geofenceScheme} />}
@@ -1498,7 +1532,7 @@ export function LiveRouteMap({
                   </span>
                 ))}
                 <span className="text-muted-foreground border-l border-[var(--border-hairline)] pl-2">
-                  ○ ½ mi in · ¾ mi out
+                  {hasRadiusOverride ? '○ facility radii' : '○ ½ mi in · ¾ mi out'}
                 </span>
               </span>
             ) : (

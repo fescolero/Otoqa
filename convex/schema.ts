@@ -3159,6 +3159,10 @@ export default defineSchema({
     currentStopSequenceNumber: v.optional(v.float64()),
     currentStopLat: v.optional(v.float64()),
     currentStopLng: v.optional(v.float64()),
+    // Per-facility ARRIVED radius override, snapshotted at check-in from
+    // the target stop's linked facility (facilities.radiusMeters). Absent =
+    // INNER_RING_METERS default.
+    currentStopArrivalRadiusMeters: v.optional(v.float64()),
 
     approachingFired: v.boolean(), // 5mi outer-ring event fired
     arrivedFired: v.boolean(), // 0.5mi inner-ring event fired
@@ -3182,7 +3186,17 @@ export default defineSchema({
         lat: v.float64(),
         lng: v.float64(),
         armedAt: v.float64(),
+        // Exit boundary, snapshotted at check-in: EXIT_RADIUS_RATIO × the
+        // stop's arrival radius (facility override or default). Absent on
+        // pre-override rows = DEPARTURE_RING_METERS.
+        exitRadiusMeters: v.optional(v.float64()),
         candidateAt: v.optional(v.float64()),
+        // The candidate ping's fix. The DEPARTED event is stamped with the
+        // candidate's time AND position, so the map pin sits exactly where
+        // the truck crossed out — not wherever the confirming ping landed.
+        candidateLat: v.optional(v.float64()),
+        candidateLng: v.optional(v.float64()),
+        candidateAccuracy: v.optional(v.float64()),
       })
     ),
 

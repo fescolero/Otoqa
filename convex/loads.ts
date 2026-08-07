@@ -894,33 +894,37 @@ export const getLoads = query({
       continueCursor: string;
     };
 
-    if (useFacetIndex) {
-      // Helper — in-memory row filter shared across both combined and
-      // single-facet paths.
-      const passesNonIndexedFilters = (load: Doc<'loadInformation'>): boolean => {
-        if (load.workosOrgId !== args.workosOrgId) return false;
-        if (args.status && load.status !== args.status) return false;
-        if (args.trackingStatus && load.trackingStatus !== args.trackingStatus) return false;
-        if (args.customerId && load.customerId !== args.customerId) return false;
-        if (
-          args.requiresManualReview !== undefined &&
-          load.requiresManualReview !== args.requiresManualReview
-        )
-          return false;
-        if (args.loadType && load.loadType !== args.loadType) return false;
-        if (args.mileRange && args.mileRange !== 'all') {
-          const miles = load.effectiveMiles;
-          if (miles === undefined) return false;
-          const inRange =
-            (args.mileRange === '0-100' && miles >= 0 && miles <= 100) ||
-            (args.mileRange === '100-250' && miles > 100 && miles <= 250) ||
-            (args.mileRange === '250-500' && miles > 250 && miles <= 500) ||
-            (args.mileRange === '500+' && miles > 500);
-          if (!inRange) return false;
-        }
-        return true;
-      };
+    // In-memory row filter shared by all pagination strategies. Applied in
+    // app code (never via Convex .filter() on a paginated query): a
+    // query-level filter keeps scanning docs until the page fills, which
+    // is unbounded on sparse filters and trips the 16MiB per-execution
+    // read limit. Post-filtering a bounded page can return short pages —
+    // the table auto-loads more until the viewport fills or isDone.
+    const passesNonIndexedFilters = (load: Doc<'loadInformation'>): boolean => {
+      if (load.workosOrgId !== args.workosOrgId) return false;
+      if (args.status && load.status !== args.status) return false;
+      if (args.trackingStatus && load.trackingStatus !== args.trackingStatus) return false;
+      if (args.customerId && load.customerId !== args.customerId) return false;
+      if (
+        args.requiresManualReview !== undefined &&
+        load.requiresManualReview !== args.requiresManualReview
+      )
+        return false;
+      if (args.loadType && load.loadType !== args.loadType) return false;
+      if (args.mileRange && args.mileRange !== 'all') {
+        const miles = load.effectiveMiles;
+        if (miles === undefined) return false;
+        const inRange =
+          (args.mileRange === '0-100' && miles >= 0 && miles <= 100) ||
+          (args.mileRange === '100-250' && miles > 100 && miles <= 250) ||
+          (args.mileRange === '250-500' && miles > 250 && miles <= 500) ||
+          (args.mileRange === '500+' && miles > 500);
+        if (!inRange) return false;
+      }
+      return true;
+    };
 
+    if (useFacetIndex) {
       if (canonicalHcr && canonicalTrip) {
         // ─ COMBINED HCR + TRIP: full intersection, in-memory paginate ─
         //
@@ -973,26 +977,51 @@ export const getLoads = query({
           )
           .map((t) => t.loadId);
 
-        const loads = (
-          await Promise.all(intersectionLoadIds.map((id) => ctx.db.get(id)))
-        ).filter((l): l is Doc<'loadInformation'> => l !== null);
-
-        const filtered = loads.filter(passesNonIndexedFilters);
-
-        // In-memory pagination — numeric-offset cursor. Stable since the
+        // Fetch load docs only for the current page window — never the whole
+        // intersection. Tag rows are tiny, but load docs are wide: fetching
+        // every intersection load blew past Convex's 16MiB per-execution
+        // read limit for high-volume (HCR, TRIP) pairs.
+        //
+        // Numeric-offset cursor into intersectionLoadIds. Stable since the
         // intersection ordering is deterministic (primary tag order desc).
+        // Docs fetched per execution are capped so a selective post-filter
+        // can't re-create an unbounded scan; a short page with a cursor is
+        // fine — the client keeps paging via loadMore.
         const offset = args.paginationOpts.cursor
           ? parseInt(args.paginationOpts.cursor, 10) || 0
           : 0;
         const pageSize = args.paginationOpts.numItems;
-        const page = filtered.slice(offset, offset + pageSize);
-        const next = offset + pageSize;
-        const isDone = next >= filtered.length;
+        const MAX_DOCS_PER_EXECUTION = Math.max(pageSize * 4, 200);
 
+        const page: Array<Doc<'loadInformation'>> = [];
+        let cursorIndex = offset;
+        let fetched = 0;
+        while (
+          cursorIndex < intersectionLoadIds.length &&
+          page.length < pageSize &&
+          fetched < MAX_DOCS_PER_EXECUTION
+        ) {
+          const batchEnd = Math.min(
+            cursorIndex + (pageSize - page.length),
+            cursorIndex + (MAX_DOCS_PER_EXECUTION - fetched),
+            intersectionLoadIds.length,
+          );
+          const batchIds = intersectionLoadIds.slice(cursorIndex, batchEnd);
+          const batch = await Promise.all(batchIds.map((id) => ctx.db.get(id)));
+          cursorIndex = batchEnd;
+          fetched += batchIds.length;
+          for (const load of batch) {
+            if (load !== null && passesNonIndexedFilters(load)) {
+              page.push(load);
+            }
+          }
+        }
+
+        const isDone = cursorIndex >= intersectionLoadIds.length;
         paginatedResult = {
           page,
           isDone,
-          continueCursor: isDone ? '' : String(next),
+          continueCursor: isDone ? '' : String(cursorIndex),
         };
       } else {
         // ─ SINGLE FACET: paginate the tag index directly ─
@@ -1034,8 +1063,30 @@ export const getLoads = query({
       }
     } else {
       // Unfiltered (or only date-range): existing loadInformation path.
+      //
+      // When a status filter is present, use by_org_status_first_stop so
+      // status + date range are both served by the index. Filtering status
+      // via .filter() made Convex scan the org/date range until the page
+      // filled — on sparse statuses that read (and billed toward the 16MiB
+      // limit) every doc in the range. Ordering is unchanged: firstStopDate
+      // desc within the org (and status).
+      const indexedStatus = args.status as Doc<'loadInformation'>['status'] | undefined;
       let loadsQuery;
-      if (args.startDate && args.endDate) {
+      if (indexedStatus) {
+        loadsQuery = ctx.db
+          .query('loadInformation')
+          .withIndex('by_org_status_first_stop', (q) => {
+            const base = q.eq('workosOrgId', args.workosOrgId).eq('status', indexedStatus);
+            if (args.startDate && args.endDate) {
+              return base
+                .gte('firstStopDate', args.startDate!)
+                .lte('firstStopDate', args.endDate!);
+            }
+            if (args.startDate) return base.gte('firstStopDate', args.startDate!);
+            if (args.endDate) return base.lte('firstStopDate', args.endDate!);
+            return base;
+          });
+      } else if (args.startDate && args.endDate) {
         loadsQuery = ctx.db
           .query('loadInformation')
           .withIndex('by_org_first_stop_date', (q) =>
@@ -1062,45 +1113,31 @@ export const getLoads = query({
           .withIndex('by_org_first_stop_date', (q) => q.eq('workosOrgId', args.workosOrgId));
       }
 
-      if (args.status) {
-        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('status'), args.status));
-      }
-      if (args.trackingStatus) {
-        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('trackingStatus'), args.trackingStatus));
-      }
-      if (args.customerId) {
-        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('customerId'), args.customerId));
-      }
-      if (args.requiresManualReview !== undefined) {
-        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('requiresManualReview'), args.requiresManualReview));
-      }
-      if (args.loadType) {
-        loadsQuery = loadsQuery.filter((q) => q.eq(q.field('loadType'), args.loadType));
-      }
-      if (args.mileRange && args.mileRange !== 'all') {
-        switch (args.mileRange) {
-          case '0-100':
-            loadsQuery = loadsQuery
-              .filter((q) => q.gte(q.field('effectiveMiles'), 0))
-              .filter((q) => q.lte(q.field('effectiveMiles'), 100));
-            break;
-          case '100-250':
-            loadsQuery = loadsQuery
-              .filter((q) => q.gt(q.field('effectiveMiles'), 100))
-              .filter((q) => q.lte(q.field('effectiveMiles'), 250));
-            break;
-          case '250-500':
-            loadsQuery = loadsQuery
-              .filter((q) => q.gt(q.field('effectiveMiles'), 250))
-              .filter((q) => q.lte(q.field('effectiveMiles'), 500));
-            break;
-          case '500+':
-            loadsQuery = loadsQuery.filter((q) => q.gt(q.field('effectiveMiles'), 500));
-            break;
-        }
-      }
+      // Secondary filters (trackingStatus, customer, load type, miles, …)
+      // are applied in app code to the fetched page, NOT via .filter() on
+      // the paginated query — a query-level filter keeps scanning docs
+      // until the page fills, which is unbounded on sparse filters. When
+      // such filters are active, over-fetch so pages still fill reasonably;
+      // reads per execution stay bounded either way.
+      const hasSecondaryFilters =
+        !!args.trackingStatus ||
+        !!args.customerId ||
+        args.requiresManualReview !== undefined ||
+        !!args.loadType ||
+        (!!args.mileRange && args.mileRange !== 'all');
 
-      paginatedResult = await loadsQuery.order('desc').paginate(args.paginationOpts);
+      const paginated = await loadsQuery.order('desc').paginate(
+        hasSecondaryFilters
+          ? {
+              ...args.paginationOpts,
+              numItems: Math.min(Math.max(args.paginationOpts.numItems * 4, 100), 400),
+            }
+          : args.paginationOpts,
+      );
+
+      paginatedResult = hasSecondaryFilters
+        ? { ...paginated, page: paginated.page.filter(passesNonIndexedFilters) }
+        : paginated;
     }
 
     // Enrich each page row with parsedHcr / parsedTripNumber from facet
