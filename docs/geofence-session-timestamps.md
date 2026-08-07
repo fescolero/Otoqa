@@ -178,7 +178,12 @@ matching the existing table.
   no `loadId` and no tracking row exists yet, so true pickup-approach
   detection would need PENDING-leg evaluation — a candidate Phase 4 along
   with org-configurable radii and a detention push alert at the 2-hour mark.
-- Radii are constants in `convex/lib/geo.ts` (`INNER_RING_METERS` 804,
-  `DEPARTURE_RING_METERS` 1207, `OUTER_RING_METERS` 8047), chosen inside the
-  industry-typical band; per-org/per-facility overrides are deliberately
-  deferred until someone needs them.
+- Default radii are constants in `convex/lib/geo.ts` (`INNER_RING_METERS`
+  804, `DEPARTURE_RING_METERS` 1207, `OUTER_RING_METERS` 8047), chosen
+  inside the industry-typical band. **Per-facility overrides** now apply:
+  a stop linked to a facility with `facilities.radiusMeters` set (the same
+  value manual check-in enforcement uses, editable in the customer's
+  Facilities section) gets that arrival radius and an exit ring of
+  `EXIT_RADIUS_RATIO` (1.5×) times it — snapshotted onto the tracking
+  watches at check-in so mid-drive facility edits don't move a leg's
+  thresholds. The approach ring stays global.

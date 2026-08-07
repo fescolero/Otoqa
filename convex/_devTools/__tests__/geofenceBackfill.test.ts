@@ -66,7 +66,29 @@ describe('replayLoadEvents', () => {
       'DEPARTED@2',
     ]);
     expect(events[0].triggeredAt).toBe(10_000); // candidate ping, not confirming ping
+    // Position parity with the live evaluator: the DEPARTED event carries
+    // the candidate fix (~2 km out), not the confirming ping (~5 km out).
+    expect(events[0].latitude).toBeCloseTo(STOP1.lat + 2 * KM, 6);
+    expect(events[0].distanceMeters).toBeGreaterThan(1900);
+    expect(events[0].distanceMeters).toBeLessThan(2100);
     expect(events[3].triggeredAt).toBe(110_000);
+  });
+
+  it('honors a per-stop facility radius override for arrival and exit', () => {
+    // 300 m facility on stop 2: 500 m out must not count as arrived; the
+    // stop-1 default rings stay unchanged.
+    const overridden = stops([{}, { arrivalRadiusMeters: 300 }]);
+    const nearMiss = [
+      ping(2, 10_000),
+      ping(5, 20_000), // DEPARTED@1 (default exit ring)
+      ping(49.55, 30_000), // ~450 m from stop 2 — inside 804 m, outside 300 m
+    ];
+    const events = replayLoadEvents(overridden, nearMiss);
+    expect(types(events)).toContain('DEPARTED@1');
+    expect(types(events)).not.toContain('ARRIVED@2');
+
+    const closeEnough = replayLoadEvents(overridden, [...nearMiss, ping(49.8, 40_000)]); // ~200 m
+    expect(types(closeEnough)).toContain('ARRIVED@2');
   });
 
   it('produces nothing when the load was never checked in', () => {

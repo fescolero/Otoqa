@@ -12,9 +12,10 @@ import {
   calculateDistanceMeters,
   OUTER_RING_METERS,
   INNER_RING_METERS,
-  DEPARTURE_RING_METERS,
   GEOFENCE_MAX_ACCURACY_METERS,
+  exitRadiusFor,
 } from '../lib/geo';
+import { facilityArrivalRadius } from '../loadTrackingState';
 
 /**
  * Geofence event backfill (DEV/OPS TOOL).
@@ -88,6 +89,10 @@ type ReplayStop = {
   latitude?: number;
   longitude?: number;
   checkedInAt?: number; // parsed ms
+  // Facility ARRIVED-radius override (facilities.radiusMeters); absent =
+  // INNER_RING_METERS. Exit radius derives via exitRadiusFor, mirroring
+  // the live snapshot in setFrontierOnCheckIn.
+  arrivalRadiusMeters?: number;
 };
 
 export type ReplayEvent = {
@@ -155,7 +160,10 @@ export function replayLoadEvents(stops: ReplayStop[], pings: ReplayPing[]): Repl
     let arrivedFired = false;
 
     const departureArmed = stop.latitude !== undefined && stop.longitude !== undefined;
-    let departureCandidateAt: number | undefined;
+    const exitRadius = exitRadiusFor(stop.arrivalRadiusMeters);
+    let departureCandidate:
+      | { at: number; latitude: number; longitude: number; accuracy?: number }
+      | undefined;
     let departureDone = false;
 
     for (const ping of sortedPings) {
@@ -184,7 +192,7 @@ export function replayLoadEvents(stops: ReplayStop[], pings: ReplayPing[]): Repl
             driverId: ping.driverId,
           });
         }
-        if (d < INNER_RING_METERS && !arrivedFired) {
+        if (d < (arrivalTarget.arrivalRadiusMeters ?? INNER_RING_METERS) && !arrivedFired) {
           arrivedFired = true;
           emit({
             stopSequenceNumber: arrivalTarget.sequenceNumber,
@@ -211,25 +219,37 @@ export function replayLoadEvents(stops: ReplayStop[], pings: ReplayPing[]): Repl
             stop.latitude!,
             stop.longitude!,
           );
-          if (d > DEPARTURE_RING_METERS) {
-            if (departureCandidateAt === undefined) {
-              departureCandidateAt = ping.recordedAt;
-            } else if (ping.recordedAt > departureCandidateAt) {
+          if (d > exitRadius) {
+            if (departureCandidate === undefined) {
+              departureCandidate = {
+                at: ping.recordedAt,
+                latitude: ping.latitude,
+                longitude: ping.longitude,
+                accuracy: ping.accuracy,
+              };
+            } else if (ping.recordedAt > departureCandidate.at) {
               departureDone = true;
+              // Live parity: the event carries the CANDIDATE fix — where
+              // the truck actually crossed out — not the confirming ping.
               emit({
                 stopSequenceNumber: stop.sequenceNumber,
                 eventType: 'DEPARTED',
-                triggeredAt: departureCandidateAt,
-                latitude: ping.latitude,
-                longitude: ping.longitude,
-                distanceMeters: d,
-                accuracy: ping.accuracy,
+                triggeredAt: departureCandidate.at,
+                latitude: departureCandidate.latitude,
+                longitude: departureCandidate.longitude,
+                distanceMeters: calculateDistanceMeters(
+                  departureCandidate.latitude,
+                  departureCandidate.longitude,
+                  stop.latitude!,
+                  stop.longitude!,
+                ),
+                accuracy: departureCandidate.accuracy,
                 sessionId: ping.sessionId,
                 driverId: ping.driverId,
               });
             }
-          } else if (departureCandidateAt !== undefined && ping.recordedAt > departureCandidateAt) {
-            departureCandidateAt = undefined;
+          } else if (departureCandidate !== undefined && ping.recordedAt > departureCandidate.at) {
+            departureCandidate = undefined;
           }
         }
       }
@@ -287,14 +307,17 @@ export const analyzeLoad = internalMutation({
       const ms = new Date(iso).getTime();
       return Number.isFinite(ms) ? ms : undefined;
     };
-    const stops: ReplayStop[] = stopDocs.map((s) => ({
-      sequenceNumber: s.sequenceNumber,
-      stopType: s.stopType,
-      status: s.status,
-      latitude: s.latitude,
-      longitude: s.longitude,
-      checkedInAt: parseMs(s.checkedInAt),
-    }));
+    const stops: ReplayStop[] = await Promise.all(
+      stopDocs.map(async (s) => ({
+        sequenceNumber: s.sequenceNumber,
+        stopType: s.stopType,
+        status: s.status,
+        latitude: s.latitude,
+        longitude: s.longitude,
+        checkedInAt: parseMs(s.checkedInAt),
+        arrivalRadiusMeters: await facilityArrivalRadius(ctx, s),
+      })),
+    );
     for (const s of stopDocs) {
       if (s.latitude === undefined && s.stopType !== 'DETOUR') {
         warnings.push(`stop ${s.sequenceNumber} has no coordinates`);
