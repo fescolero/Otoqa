@@ -17,6 +17,11 @@ import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { MapPin, Route, CheckCircle2 } from 'lucide-react';
 import { format } from 'date-fns';
+import {
+  INNER_RING_METERS,
+  DEPARTURE_RING_METERS,
+  OUTER_RING_METERS,
+} from '@/convex/lib/geo';
 
 // ============================================
 // POLYLINE DECODERS
@@ -87,8 +92,27 @@ function decodePolylineWithPrecision(
 // To customize styles, go to: https://console.cloud.google.com/google/maps-platform/styling
 // Create a Map Style and associate it with mapId "live-route-map"
 
-// Geofence radius in meters (for visualization)
-const GEOFENCE_RADIUS_METERS = 150;
+// Geofence event-pin palette. Hues come from the app's status set and are
+// per-theme steps validated for CVD separation and surface contrast
+// (dataviz six-checks); every pin also carries a glyph and the legend
+// carries text labels, so type is never encoded by color alone.
+const GEOFENCE_EVENT_STYLE: Record<
+  'LIGHT' | 'DARK',
+  Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string>
+> = {
+  LIGHT: { APPROACHING: '#F59E0B', ARRIVED: '#10B981', DEPARTED: '#2E5CFF' },
+  DARK: { APPROACHING: '#D97706', ARRIVED: '#059669', DEPARTED: '#4C6FFF' },
+};
+const GEOFENCE_EVENT_GLYPH: Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string> = {
+  APPROACHING: '→',
+  ARRIVED: '✓',
+  DEPARTED: '↗',
+};
+const GEOFENCE_EVENT_LABEL: Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string> = {
+  APPROACHING: 'Approach',
+  ARRIVED: 'Arrived',
+  DEPARTED: 'Departed',
+};
 
 interface StopData {
   id?: string;
@@ -542,12 +566,28 @@ function PlannedRoutePolyline({
 // ============================================
 // GEOFENCE CIRCLES - Around stops
 // ============================================
-function GeofenceCircles({ 
-  stops, 
-  driverLocation 
-}: { 
+/**
+ * The real geofence rings, matching the server's evaluator thresholds
+ * (convex/lib/geo.ts) — these circles are the actual boundaries the
+ * ARRIVED / DEPARTED timestamps fire on, not decoration:
+ *   - arrival ring   INNER_RING_METERS (~0.5 mi): filled, highlights green
+ *     when the live driver is inside it or the stop is Completed;
+ *   - departure ring DEPARTURE_RING_METERS (~0.75 mi): stroke-only, the
+ *     wider exit boundary (hysteresis);
+ *   - approach ring  OUTER_RING_METERS (~5 mi): stroke-only amber, drawn
+ *     only for the selected stop — at ~10 mi across it would drown the
+ *     map if always on.
+ */
+function GeofenceRings({
+  stops,
+  driverLocation,
+  selectedStopId,
+  colorScheme,
+}: {
   stops: StopData[];
   driverLocation?: { latitude: number; longitude: number } | null;
+  selectedStopId?: string | null;
+  colorScheme: 'LIGHT' | 'DARK';
 }) {
   const map = useMap();
   const mapsLibrary = useMapsLibrary('maps');
@@ -555,34 +595,158 @@ function GeofenceCircles({
   useEffect(() => {
     if (!map || !mapsLibrary || !stops.length) return;
 
+    const dark = colorScheme === 'DARK';
+    const neutralStroke = dark ? '#5A6172' : '#94a3b8';
+    const neutralFill = dark ? '#9BA3B4' : '#e2e8f0';
+    const insideColor = GEOFENCE_EVENT_STYLE[colorScheme].ARRIVED;
+    const approachColor = GEOFENCE_EVENT_STYLE[colorScheme].APPROACHING;
+
     const circles: google.maps.Circle[] = [];
-
     stops.forEach((stop) => {
-      // Check if driver is within geofence
-      const isDriverInside = driverLocation 
-        ? haversineDistance(stop.lat, stop.lng, driverLocation.latitude, driverLocation.longitude) * 1000 < GEOFENCE_RADIUS_METERS
+      const isDriverInside = driverLocation
+        ? haversineDistance(stop.lat, stop.lng, driverLocation.latitude, driverLocation.longitude) *
+            1000 <
+          INNER_RING_METERS
         : false;
+      const highlight = isDriverInside || stop.status === 'Completed';
 
-      const circle = new mapsLibrary.Circle({
-        center: { lat: stop.lat, lng: stop.lng },
-        radius: GEOFENCE_RADIUS_METERS,
-        strokeColor: isDriverInside ? '#22c55e' : stop.status === 'Completed' ? '#22c55e' : '#94a3b8',
-        strokeOpacity: 0.6,
-        strokeWeight: 2,
-        fillColor: isDriverInside ? '#22c55e' : stop.status === 'Completed' ? '#22c55e' : '#e2e8f0',
-        fillOpacity: isDriverInside ? 0.25 : 0.15,
-        map,
-      });
+      // Arrival ring — the ARRIVED boundary.
+      circles.push(
+        new mapsLibrary.Circle({
+          center: { lat: stop.lat, lng: stop.lng },
+          radius: INNER_RING_METERS,
+          strokeColor: highlight ? insideColor : neutralStroke,
+          strokeOpacity: 0.65,
+          strokeWeight: 2,
+          fillColor: highlight ? insideColor : neutralFill,
+          fillOpacity: isDriverInside ? 0.18 : 0.08,
+          map,
+        }),
+      );
 
-      circles.push(circle);
+      // Departure ring — the wider DEPARTED (exit) boundary.
+      circles.push(
+        new mapsLibrary.Circle({
+          center: { lat: stop.lat, lng: stop.lng },
+          radius: DEPARTURE_RING_METERS,
+          strokeColor: neutralStroke,
+          strokeOpacity: 0.35,
+          strokeWeight: 1.5,
+          fillOpacity: 0,
+          map,
+        }),
+      );
+
+      // Approach ring — selected stop only.
+      if (stop.id && stop.id === selectedStopId) {
+        circles.push(
+          new mapsLibrary.Circle({
+            center: { lat: stop.lat, lng: stop.lng },
+            radius: OUTER_RING_METERS,
+            strokeColor: approachColor,
+            strokeOpacity: 0.3,
+            strokeWeight: 1.5,
+            fillOpacity: 0,
+            map,
+          }),
+        );
+      }
     });
 
     return () => {
       circles.forEach((c) => c.setMap(null));
     };
-  }, [map, mapsLibrary, stops, driverLocation]);
+  }, [map, mapsLibrary, stops, driverLocation, selectedStopId, colorScheme]);
 
   return null;
+}
+
+/**
+ * Pins at the exact GPS fixes that fired geofence events for this load.
+ * Diamond shape + glyph distinguishes them from the round numbered stop
+ * markers; click opens an info window with the audit detail (time,
+ * distance from stop, GPS accuracy, backfilled origin).
+ */
+function GeofenceEventPins({
+  loadId,
+  colorScheme,
+}: {
+  loadId: Id<'loadInformation'>;
+  colorScheme: 'LIGHT' | 'DARK';
+}) {
+  const events = useAuthQuery(api.geofenceEvents.listForLoad, { loadId });
+  const [openEventId, setOpenEventId] = useState<string | null>(null);
+
+  if (!events || events.length === 0) return null;
+  const palette = GEOFENCE_EVENT_STYLE[colorScheme];
+  const ring = colorScheme === 'DARK' ? '#12151C' : '#FFFFFF';
+
+  return (
+    <>
+      {events.map((event) => (
+        <AdvancedMarker
+          key={event._id}
+          position={{ lat: event.latitude, lng: event.longitude }}
+          onClick={() => setOpenEventId(openEventId === event._id ? null : event._id)}
+          zIndex={5}
+        >
+          <div className="flex flex-col items-center" style={{ transform: 'translateY(50%)' }}>
+            {openEventId === event._id && (
+              <div
+                className="mb-1.5 rounded-lg border border-[var(--border-hairline)] bg-card/95 px-2.5 py-1.5 shadow-md backdrop-blur"
+                style={{ minWidth: 148 }}
+              >
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
+                  <span style={{ color: palette[event.eventType] }}>
+                    {GEOFENCE_EVENT_GLYPH[event.eventType]}
+                  </span>
+                  {GEOFENCE_EVENT_LABEL[event.eventType]} · Stop {event.stopSequenceNumber}
+                </div>
+                <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">
+                  {format(new Date(event.triggeredAt), 'MMM d, h:mm a')}
+                </div>
+                <div className="text-[10px] tabular-nums text-muted-foreground">
+                  {event.distanceMeters >= 1000
+                    ? `${(event.distanceMeters / 1000).toFixed(1)} km from stop`
+                    : `${Math.round(event.distanceMeters)} m from stop`}
+                  {event.accuracy !== null && ` · ±${Math.round(event.accuracy)} m GPS`}
+                </div>
+                {event.backfilled && (
+                  <div className="mt-0.5 text-[10px] italic text-muted-foreground">
+                    Computed retroactively from stored pings
+                  </div>
+                )}
+              </div>
+            )}
+            <div
+              className="flex items-center justify-center"
+              style={{
+                width: 18,
+                height: 18,
+                transform: 'rotate(45deg)',
+                borderRadius: 4,
+                backgroundColor: palette[event.eventType],
+                border: `2px solid ${ring}`,
+                boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
+              }}
+            >
+              <span
+                style={{
+                  transform: 'rotate(-45deg)',
+                  color: '#fff',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  lineHeight: 1,
+                }}
+              >
+                {GEOFENCE_EVENT_GLYPH[event.eventType]}
+              </span>
+            </div>
+          </div>
+        </AdvancedMarker>
+      ))}
+    </>
+  );
 }
 
 // ============================================
@@ -930,6 +1094,9 @@ export function LiveRouteMap({
   const apiKey = useGoogleMapsKey();
   const mapId = useThemedMapId();
   const colorScheme = useMapColorScheme();
+  // The hook only ever resolves LIGHT or DARK (FOLLOW_SYSTEM is in the type
+  // union but never returned); normalize for the geofence palette lookups.
+  const geofenceScheme: 'LIGHT' | 'DARK' = colorScheme === 'DARK' ? 'DARK' : 'LIGHT';
 
   // Stabilize stops reference so child effects don't re-fire on every parent render.
   // The parent creates a new stops array on every render via .filter().map(),
@@ -945,6 +1112,7 @@ export function LiveRouteMap({
   const [isLoadingPath, setIsLoadingPath] = useState(false);
   const [matchConfidence, setMatchConfidence] = useState<number>(0);
   const [isUsingFallback, setIsUsingFallback] = useState(false);
+  const [showGeofence, setShowGeofence] = useState(true);
   const pathStateRef = useRef({ lastCount: 0, isLoading: false });
   const [now, setNow] = useState(() => Date.now());
 
@@ -1160,7 +1328,7 @@ export function LiveRouteMap({
           defaultCenter={center}
           defaultZoom={hasRouteData || hasLiveData ? 12 : 6}
           mapId={mapId}
-          colorScheme={colorScheme}
+          colorScheme={geofenceScheme}
           gestureHandling="cooperative"
           disableDefaultUI
           zoomControl
@@ -1177,14 +1345,18 @@ export function LiveRouteMap({
             selectedStopId={selectedStopId}
           />
 
-          {/* Geofence circles around stops — driver-inside highlight only
-              while the load is in transit. */}
-          {hasStops && (
-            <GeofenceCircles
+          {/* Geofence rings around stops (the real evaluator boundaries)
+              and pins at the GPS fixes that fired ARRIVED/DEPARTED events.
+              One toggle hides the whole layer. */}
+          {hasStops && showGeofence && (
+            <GeofenceRings
               stops={stops!}
               driverLocation={effectiveLiveLocation}
+              selectedStopId={selectedStopId}
+              colorScheme={geofenceScheme}
             />
           )}
+          {showGeofence && <GeofenceEventPins loadId={loadId} colorScheme={geofenceScheme} />}
 
           {/* GPS trail polyline - uses snapped points when available.
               Suppressed in pings mode: the rail's "GPS pings" tab swaps
@@ -1285,6 +1457,55 @@ export function LiveRouteMap({
             </div>
           </div>
         )}
+      </div>
+
+      {/* Geofence legend + layer toggle. Text labels beside every colored
+          mark keep the encoding readable without color; the ring key names
+          the two always-on radii (approach ring appears on stop select). */}
+      <div className="absolute bottom-3 left-3 z-10">
+        <div className="bg-card/95 backdrop-blur border border-[var(--border-hairline)] rounded-lg px-2.5 py-1.5 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setShowGeofence((s) => !s)}
+            className="flex items-center gap-2 text-[10px] text-foreground"
+            aria-pressed={showGeofence}
+            aria-label={showGeofence ? 'Hide geofence layer' : 'Show geofence layer'}
+          >
+            <span
+              className={cn(
+                'font-medium',
+                showGeofence ? 'text-foreground' : 'text-muted-foreground',
+              )}
+            >
+              Geofence
+            </span>
+            {showGeofence ? (
+              <span className="flex items-center gap-2">
+                {(['APPROACHING', 'ARRIVED', 'DEPARTED'] as const).map((type) => (
+                  <span key={type} className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 8,
+                        height: 8,
+                        transform: 'rotate(45deg)',
+                        borderRadius: 2,
+                        backgroundColor: GEOFENCE_EVENT_STYLE[geofenceScheme][type],
+                        display: 'inline-block',
+                      }}
+                    />
+                    <span className="text-muted-foreground">{GEOFENCE_EVENT_LABEL[type]}</span>
+                  </span>
+                ))}
+                <span className="text-muted-foreground border-l border-[var(--border-hairline)] pl-2">
+                  ○ ½ mi in · ¾ mi out
+                </span>
+              </span>
+            ) : (
+              <span className="text-muted-foreground">Off</span>
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

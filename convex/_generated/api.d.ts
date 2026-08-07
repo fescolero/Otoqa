@@ -80,6 +80,7 @@ import type * as fuelReceiptImport from "../fuelReceiptImport.js";
 import type * as fuelReports from "../fuelReports.js";
 import type * as fuelVendors from "../fuelVendors.js";
 import type * as geofenceEvaluator from "../geofenceEvaluator.js";
+import type * as geofenceEvents from "../geofenceEvents.js";
 import type * as getContractLaneFull from "../getContractLaneFull.js";
 import type * as googleMaps from "../googleMaps.js";
 import type * as googleRoads from "../googleRoads.js";
@@ -286,6 +287,7 @@ declare const fullApi: ApiFromModules<{
   fuelReports: typeof fuelReports;
   fuelVendors: typeof fuelVendors;
   geofenceEvaluator: typeof geofenceEvaluator;
+  geofenceEvents: typeof geofenceEvents;
   getContractLaneFull: typeof getContractLaneFull;
   googleMaps: typeof googleMaps;
   googleRoads: typeof googleRoads;
