@@ -301,6 +301,18 @@ crons.interval(
   job('org-health-snapshots', 'platform/snapshots:rebuildAllOrgHealthSnapshots', 'mutation'),
 );
 
+// ✅ Invoice cycle close (2nd of the month, 03:00 UTC — after the nightly
+// usage recalc has settled the closed month). Drafts one invoice per org
+// with billable lines; idempotent by (org, period). Staff review drafts on
+// the console billing board and issue manually (spec D-B1: manual until
+// two clean cycles).
+crons.cron(
+  'platform-invoice-cycle-close',
+  '0 3 2 * *',
+  internal.platform.cronRunner.run,
+  job('platform-invoice-cycle-close', 'platform/invoices:cycleClose', 'mutation'),
+);
+
 // ✅ Platform alert evaluator (every 5 min): checks the alerting matrix
 // (crons failing ≥3×, webhook dead-letters, FourKites all_failed), keeps
 // one deduped alert per incident, notifies Slack on open, auto-resolves.
