@@ -294,6 +294,28 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   // KPI/margin calc and the LoadPayPlanCard both subscribe, so the figure
   // stays in lockstep with the card through every recalc.
   const payPlanData = useAuthQuery(api.payItems.listForLoad, { loadId: loadId as Id<'loadInformation'> });
+  // Geofence detections for the stops table's fence column (GPS-detected
+  // arrival time next to the manual tap in the "In" column).
+  const geofenceEventsData = useAuthQuery(api.geofenceEvents.listForLoad, {
+    loadId: loadId as Id<'loadInformation'>,
+  });
+  // ARRIVED detection per stop sequence — pairs the automatic
+  // boundary-crossing timestamp with the driver's manual tap so the stops
+  // table shows both (fence column = GPS time, "In" column = tap time).
+  // Lives up here with the other hooks: stopCols below sits past the
+  // loading early-returns.
+  const arrivedBySequence = React.useMemo(() => {
+    const map = new Map<number, { triggeredAt: number; distanceMeters: number }>();
+    for (const e of geofenceEventsData ?? []) {
+      if (e.eventType === 'ARRIVED') {
+        map.set(e.stopSequenceNumber, {
+          triggeredAt: e.triggeredAt,
+          distanceMeters: e.distanceMeters,
+        });
+      }
+    }
+    return map;
+  }, [geofenceEventsData]);
   const invoiceData = useAuthQuery(api.invoices.getInvoiceByLoad, { loadId: loadId as Id<'loadInformation'> });
   // GPS pings powering the modal's "GPS pings" tab. Uses the detailed
   // query so each row can surface accuracy + the sync-delay between
@@ -1073,13 +1095,42 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
             </span>
           );
         }
-        // Clean in-fence check-in: show the distance instead of a blank —
-        // pin quality is visible on every row, not just the problem ones.
+        // GPS-detected arrival: the fence column shows WHEN the geofence
+        // fired; the "In" column next to it shows when the driver tapped.
+        // Tooltip carries the delta + check-in distance for the full story.
+        const detected = arrivedBySequence.get(r.sequenceNumber);
+        if (detected) {
+          const gpsTime = new Date(detected.triggeredAt).toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+          });
+          const tapMs = r.checkedInAt ? Date.parse(r.checkedInAt) : NaN;
+          const deltaMin = Number.isFinite(tapMs)
+            ? Math.round((tapMs - detected.triggeredAt) / 60_000)
+            : null;
+          const deltaLabel =
+            deltaMin === null
+              ? 'no manual check-in yet'
+              : deltaMin >= 0
+                ? `driver tapped check-in ${deltaMin}m later`
+                : `driver tapped ${-deltaMin}m before detection`;
+          return (
+            <span
+              className="cursor-help"
+              title={`Geofence detected arrival at ${gpsTime} — ${deltaLabel}${typeof r.checkinDistanceMeters === 'number' ? `, ${r.checkinDistanceMeters}m from the pin` : ''}.`}
+            >
+              <Chip status="valid" label={`GPS ${gpsTime}`} />
+            </span>
+          );
+        }
+        // No detection (offline stretch, pre-geofence history): fall back
+        // to the check-in distance so pin quality is still visible.
         if (r.checkedInAt && typeof r.checkinDistanceMeters === 'number') {
           return (
             <span
               className="cursor-help"
-              title={`Checked in ${r.checkinDistanceMeters}m from the pin, inside the geofence.`}
+              title={`Checked in ${r.checkinDistanceMeters}m from the pin, inside the geofence. No GPS-detected arrival on record for this stop.`}
             >
               <Chip status="valid" label={`✓ ${r.checkinDistanceMeters}m`} />
             </span>
