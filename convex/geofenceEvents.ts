@@ -60,6 +60,65 @@ export const listForLoad = query({
 });
 
 /**
+ * Detection-vs-tap timeline per stop for one load — the same pairing the
+ * load-detail stops table shows (GPS-detected arrival next to the manual
+ * check-in), packaged for surfaces that don't already hold the stop rows
+ * (the sessions activity panel's trip cards). Two bounded reads: stops and
+ * events for the load, joined in memory.
+ */
+export const stopTimelineForLoad = query({
+  args: { loadId: v.id('loadInformation') },
+  returns: v.array(
+    v.object({
+      sequenceNumber: v.number(),
+      checkedInAt: v.union(v.string(), v.null()),
+      checkedOutAt: v.union(v.string(), v.null()),
+      checkinDistanceMeters: v.union(v.number(), v.null()),
+      checkinOverride: v.boolean(),
+      checkinOutsideGeofence: v.boolean(),
+      arrivedAt: v.union(v.number(), v.null()),
+      departedAt: v.union(v.number(), v.null()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const load = await ctx.db.get(args.loadId);
+    if (!load || load.workosOrgId !== callerOrgId) return [];
+
+    const [stops, events] = await Promise.all([
+      ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect(),
+      ctx.db
+        .query('geofenceEvents')
+        .withIndex('by_load', (q) => q.eq('loadId', args.loadId))
+        .collect(),
+    ]);
+
+    const arrived = new Map<number, number>();
+    const departed = new Map<number, number>();
+    for (const e of events) {
+      if (e.eventType === 'ARRIVED') arrived.set(e.stopSequenceNumber, e.triggeredAt);
+      if (e.eventType === 'DEPARTED') departed.set(e.stopSequenceNumber, e.triggeredAt);
+    }
+
+    return stops
+      .sort((a, b) => a.sequenceNumber - b.sequenceNumber)
+      .map((s) => ({
+        sequenceNumber: s.sequenceNumber,
+        checkedInAt: s.checkedInAt ?? null,
+        checkedOutAt: s.checkedOutAt ?? null,
+        checkinDistanceMeters: s.checkinDistanceMeters ?? null,
+        checkinOverride: s.checkinOverride === true,
+        checkinOutsideGeofence: s.checkinOutsideGeofence === true,
+        arrivedAt: arrived.get(s.sequenceNumber) ?? null,
+        departedAt: departed.get(s.sequenceNumber) ?? null,
+      }));
+  },
+});
+
+/**
  * Effective geofence ring radii per stop for one load, honoring the linked
  * facility's radiusMeters override (the same value manual check-in
  * enforcement uses). The map draws the real boundaries from this instead of

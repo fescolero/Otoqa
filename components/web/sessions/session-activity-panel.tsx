@@ -22,6 +22,9 @@
 'use client';
 
 import * as React from 'react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { Chip, WBtn, WIcon } from '@/components/web';
 import {
   STATUS_TONE,
@@ -364,6 +367,16 @@ function TripCard({
   onToggleFocus: () => void;
 }) {
   const [open, setOpen] = React.useState(defaultOpen);
+  // Detection-vs-tap timeline (same data as the load page's stops table),
+  // fetched only while the card is expanded.
+  const stopTimeline = useAuthQuery(
+    api.geofenceEvents.stopTimelineForLoad,
+    open ? { loadId: trip.loadId as Id<'loadInformation'> } : 'skip',
+  );
+  const timelineBySequence = React.useMemo(() => {
+    if (!stopTimeline) return undefined;
+    return new Map(stopTimeline.map((s) => [s.sequenceNumber, s]));
+  }, [stopTimeline]);
   return (
     <div
       style={{
@@ -473,14 +486,22 @@ function TripCard({
         </button>
       </div>
 
-      {/* Expanded body — stop labels */}
+      {/* Expanded body — stop labels + detection-vs-tap timeline */}
       {open && (
         <div className="px-4 pb-3 pl-[42px]">
           {trip.startStop && (
-            <TripStopRow kind="pickup" stop={trip.startStop} />
+            <TripStopRow
+              kind="pickup"
+              stop={trip.startStop}
+              timeline={timelineBySequence?.get(trip.startStop.sequence)}
+            />
           )}
           {trip.endStop && (
-            <TripStopRow kind="delivery" stop={trip.endStop} />
+            <TripStopRow
+              kind="delivery"
+              stop={trip.endStop}
+              timeline={timelineBySequence?.get(trip.endStop.sequence)}
+            />
           )}
         </div>
       )}
@@ -488,12 +509,23 @@ function TripCard({
   );
 }
 
+type StopTimeline = {
+  checkedInAt: string | null;
+  checkinDistanceMeters: number | null;
+  checkinOverride: boolean;
+  checkinOutsideGeofence: boolean;
+  arrivedAt: number | null;
+  departedAt: number | null;
+};
+
 function TripStopRow({
   kind,
   stop,
+  timeline,
 }: {
   kind: 'pickup' | 'delivery';
   stop: NonNullable<TripInfo['startStop']>;
+  timeline?: StopTimeline;
 }) {
   const label =
     kind === 'pickup'
@@ -509,27 +541,101 @@ function TripStopRow({
           : 'Detour';
   const cityState = [stop.city, stop.state].filter(Boolean).join(', ');
   return (
-    <div className="flex items-baseline gap-2 py-1 text-[11.5px]">
-      <span
-        className="shrink-0 text-[10.5px] uppercase tracking-[0.4px]"
-        style={{ color: 'var(--text-tertiary)' }}
-      >
-        {label}
-      </span>
-      <span
-        className="min-w-0 flex-1 truncate"
-        style={{ color: 'var(--text-secondary)' }}
-      >
-        {stop.referenceName ?? cityState ?? 'Unnamed stop'}
-        {stop.referenceName && cityState && (
-          <span
-            className="ml-1"
-            style={{ color: 'var(--text-tertiary)' }}
-          >
-            · {cityState}
+    <div className="py-1">
+      <div className="flex items-baseline gap-2 text-[11.5px]">
+        <span
+          className="shrink-0 text-[10.5px] uppercase tracking-[0.4px]"
+          style={{ color: 'var(--text-tertiary)' }}
+        >
+          {label}
+        </span>
+        <span
+          className="min-w-0 flex-1 truncate"
+          style={{ color: 'var(--text-secondary)' }}
+        >
+          {stop.referenceName ?? cityState ?? 'Unnamed stop'}
+          {stop.referenceName && cityState && (
+            <span
+              className="ml-1"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              · {cityState}
+            </span>
+          )}
+        </span>
+      </div>
+      {timeline && <StopTimelineLine timeline={timeline} />}
+    </div>
+  );
+}
+
+/**
+ * Detection-vs-tap line under a trip stop — the same pairing as the load
+ * page's Geofence column: when the fence fired, when the driver tapped,
+ * with override/off-pin warnings taking precedence.
+ */
+function StopTimelineLine({ timeline }: { timeline: StopTimeline }) {
+  const hhmm = (ms: number) =>
+    new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  const tapTime = timeline.checkedInAt
+    ? hhmm(Date.parse(timeline.checkedInAt))
+    : null;
+
+  const parts: React.ReactNode[] = [];
+  if (timeline.checkinOverride) {
+    parts.push(
+      <span key="ov" style={{ color: '#B43030', fontWeight: 600 }}>
+        Override
+        {timeline.checkinDistanceMeters != null ? ` · ${timeline.checkinDistanceMeters}m off` : ''}
+      </span>,
+    );
+  } else if (timeline.checkinOutsideGeofence) {
+    parts.push(
+      <span key="off" style={{ color: '#B45309', fontWeight: 600 }}>
+        {timeline.checkinDistanceMeters ?? '?'}m off pin
+      </span>,
+    );
+  }
+  if (timeline.arrivedAt != null) {
+    parts.push(
+      <span key="gps" style={{ color: '#0F8C5F', fontWeight: 600 }}>
+        GPS {hhmm(timeline.arrivedAt)}
+      </span>,
+    );
+  }
+  if (tapTime) {
+    const deltaMin =
+      timeline.arrivedAt != null && timeline.checkedInAt
+        ? Math.round((Date.parse(timeline.checkedInAt) - timeline.arrivedAt) / 60_000)
+        : null;
+    parts.push(
+      <span key="tap">
+        tap {tapTime}
+        {deltaMin != null && deltaMin !== 0 && (
+          <span style={{ color: 'var(--text-tertiary)' }}>
+            {' '}
+            ({deltaMin > 0 ? `+${deltaMin}m` : `${deltaMin}m`})
           </span>
         )}
-      </span>
+      </span>,
+    );
+  }
+  if (timeline.departedAt != null) {
+    parts.push(<span key="dep">out {hhmm(timeline.departedAt)}</span>);
+  }
+  if (parts.length === 0) return null;
+
+  return (
+    <div
+      className="mt-0.5 flex flex-wrap items-center gap-x-2 pl-[calc(10.5px+8px)] text-[10.5px] tabular-nums"
+      style={{ color: 'var(--text-secondary)' }}
+    >
+      {parts.map((p, i) => (
+        <React.Fragment key={i}>
+          {i > 0 && <span style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>·</span>}
+          {p}
+        </React.Fragment>
+      ))}
     </div>
   );
 }
