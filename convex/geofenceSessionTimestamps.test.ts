@@ -342,6 +342,67 @@ describe('geofenceEvaluator.evaluatePing — departure watch', () => {
     });
   });
 
+  it('stamps DEPARTED with the candidate fix — where the truck crossed out', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      await ctx.db.insert('loadTrackingState', trackingRow(f));
+
+      // Candidate at ~2 km out, confirmation ping much farther at ~6 km.
+      await evaluatePing(ctx, { loadId: f.loadId, ping: { ...KM_2, recordedAt: 10_000, accuracy: 4 } });
+      await evaluatePing(ctx, { loadId: f.loadId, ping: { ...KM_6, recordedAt: 20_000, accuracy: 9 } });
+
+      const departed = (await ctx.db.query('geofenceEvents').collect()).filter(
+        (e) => e.eventType === 'DEPARTED',
+      );
+      expect(departed).toHaveLength(1);
+      // Position, distance, and accuracy all come from the candidate fix,
+      // matching its triggeredAt — not from the confirming ping 6 km away.
+      expect(departed[0].latitude).toBeCloseTo(KM_2.latitude, 6);
+      expect(departed[0].distanceMeters).toBeGreaterThan(1900);
+      expect(departed[0].distanceMeters).toBeLessThan(2100);
+      expect(departed[0].accuracy).toBe(4);
+    });
+  });
+
+  it('honors per-facility radius overrides snapshotted on the watches', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      // Tight 300 m facility: arrival must NOT fire at ~500 m (inside the
+      // 804 m default), and exit confirms just past 450 m (1.5 × 300),
+      // well inside the 1207 m default.
+      await ctx.db.insert('loadTrackingState', {
+        ...trackingRow(f),
+        currentStopSequenceNumber: 2,
+        currentStopLat: STOP.lat,
+        currentStopLng: STOP.lng,
+        currentStopArrivalRadiusMeters: 300,
+        departureWatch: { ...trackingRow(f).departureWatch!, exitRadiusMeters: 450 },
+      });
+
+      const M_500 = { latitude: STOP.lat + 0.5 * KM, longitude: STOP.lng };
+      const M_600 = { latitude: STOP.lat + 0.6 * KM, longitude: STOP.lng };
+      const M_200 = { latitude: STOP.lat + 0.2 * KM, longitude: STOP.lng };
+
+      await evaluatePing(ctx, { loadId: f.loadId, ping: { ...M_500, recordedAt: 10_000 } });
+      let events = await ctx.db.query('geofenceEvents').collect();
+      expect(events.filter((e) => e.eventType === 'ARRIVED')).toHaveLength(0);
+      // ...but 500 m IS outside the 450 m exit ring → departure candidate set.
+      let state = (await ctx.db.query('loadTrackingState').collect())[0];
+      expect(state.departureWatch?.candidateAt).toBe(10_000);
+
+      await evaluatePing(ctx, { loadId: f.loadId, ping: { ...M_600, recordedAt: 20_000 } });
+      events = await ctx.db.query('geofenceEvents').collect();
+      expect(events.filter((e) => e.eventType === 'DEPARTED')).toHaveLength(1);
+
+      // Arrival inside the tight radius still fires.
+      await evaluatePing(ctx, { loadId: f.loadId, ping: { ...M_200, recordedAt: 30_000 } });
+      events = await ctx.db.query('geofenceEvents').collect();
+      expect(events.filter((e) => e.eventType === 'ARRIVED')).toHaveLength(1);
+    });
+  });
+
   it('deletes a loadCompleted row once the final departure confirms', async () => {
     const t = convexTest(schema);
     await t.run(async (ctx) => {
@@ -389,6 +450,46 @@ describe('loadTrackingState frontier helpers', () => {
       expect(state.approachingFired).toBe(false);
       expect(state.arrivedFired).toBe(false);
       expect(state.sessionId).toBe(f.sessionId);
+    });
+  });
+
+  it('snapshots facility radius overrides onto both watches at check-in', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const facilityId = await ctx.db.insert('facilities', {
+        workosOrgId: ORG,
+        customerId: f.customerId,
+        name: 'Tight Yard',
+        city: 'Philadelphia',
+        state: 'PA',
+        latitude: STOP.lat,
+        longitude: STOP.lng,
+        radiusMeters: 300,
+        verificationState: 'VERIFIED',
+        isDeleted: false,
+        createdBy: 'user_test',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      // Link both stops to the tight facility.
+      await ctx.db.patch(f.stop1Id, { facilityId });
+      await ctx.db.patch(f.stop2Id, { facilityId });
+
+      const stop1 = (await ctx.db.get(f.stop1Id))!;
+      await setFrontierOnCheckIn(ctx, {
+        stop: stop1,
+        sessionId: f.sessionId,
+        driverId: f.driverId,
+        organizationId: ORG,
+        now: Date.now(),
+      });
+
+      const state = (await ctx.db.query('loadTrackingState').collect())[0];
+      // Arrival watch (stop 2) uses stop 2's facility radius…
+      expect(state.currentStopArrivalRadiusMeters).toBe(300);
+      // …and the exit ring for stop 1 is ratio-scaled from its radius.
+      expect(state.departureWatch?.exitRadiusMeters).toBe(450);
     });
   });
 

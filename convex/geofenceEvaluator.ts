@@ -145,7 +145,8 @@ export async function evaluatePing(
       patch.approachingFired = true;
     }
 
-    if (distance < INNER_RING_METERS && !state.arrivedFired) {
+    const arrivalRadius = state.currentStopArrivalRadiusMeters ?? INNER_RING_METERS;
+    if (distance < arrivalRadius && !state.arrivedFired) {
       await insertEventOnce(ctx, state, eventSessionId, {
         stopSequenceNumber: state.currentStopSequenceNumber!,
         eventType: 'ARRIVED',
@@ -173,20 +174,33 @@ export async function evaluatePing(
       watch.lng
     );
 
-    if (distance > DEPARTURE_RING_METERS) {
+    const exitRadius = watch.exitRadiusMeters ?? DEPARTURE_RING_METERS;
+    if (distance > exitRadius) {
       if (watch.candidateAt === undefined) {
-        // First ping outside the exit ring — remember when.
-        patch.departureWatch = { ...watch, candidateAt: args.ping.recordedAt };
+        // First ping outside the exit ring — remember when AND where. The
+        // eventual DEPARTED is stamped with this fix so the map pin sits
+        // exactly where the truck crossed out.
+        patch.departureWatch = {
+          ...watch,
+          candidateAt: args.ping.recordedAt,
+          candidateLat: args.ping.latitude,
+          candidateLng: args.ping.longitude,
+          candidateAccuracy: args.ping.accuracy,
+        };
       } else if (args.ping.recordedAt > watch.candidateAt) {
-        // Second, newer outside ping — departure confirmed.
+        // Second, newer outside ping — departure confirmed. Event carries
+        // the candidate fix (position + time move together); pre-upgrade
+        // rows without candidate coords fall back to the confirming ping.
+        const evLat = watch.candidateLat ?? args.ping.latitude;
+        const evLng = watch.candidateLng ?? args.ping.longitude;
         await insertEventOnce(ctx, state, eventSessionId, {
           stopSequenceNumber: watch.stopSequenceNumber,
           eventType: 'DEPARTED',
           triggeredAt: watch.candidateAt,
-          latitude: args.ping.latitude,
-          longitude: args.ping.longitude,
-          distanceMeters: distance,
-          accuracy: args.ping.accuracy,
+          latitude: evLat,
+          longitude: evLng,
+          distanceMeters: calculateDistanceMeters(evLat, evLng, watch.lat, watch.lng),
+          accuracy: watch.candidateLat !== undefined ? watch.candidateAccuracy : args.ping.accuracy,
         });
 
         // The load is complete and its last departure just resolved —
@@ -200,7 +214,13 @@ export async function evaluatePing(
     } else if (watch.candidateAt !== undefined && args.ping.recordedAt > watch.candidateAt) {
       // A newer ping back inside the ring — the excursion was jitter, not a
       // departure. (An older ping proves nothing about the candidate.)
-      patch.departureWatch = { ...watch, candidateAt: undefined };
+      patch.departureWatch = {
+        ...watch,
+        candidateAt: undefined,
+        candidateLat: undefined,
+        candidateLng: undefined,
+        candidateAccuracy: undefined,
+      };
     }
   }
 

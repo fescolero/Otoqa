@@ -1,5 +1,6 @@
 import { QueryCtx, MutationCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
+import { exitRadiusFor } from './lib/geo';
 
 /**
  * loadTrackingState — per-load geofence frontier.
@@ -37,6 +38,22 @@ export async function getByLoadId(
     .first();
 }
 
+/**
+ * The stop's facility ARRIVED-radius override (facilities.radiusMeters),
+ * or undefined for the INNER_RING_METERS default. Shared by the check-in
+ * snapshot above and the map's ring query.
+ */
+export async function facilityArrivalRadius(
+  ctx: QueryCtx | MutationCtx,
+  stop: Pick<Doc<'loadStops'>, 'facilityId'> | undefined
+): Promise<number | undefined> {
+  if (!stop?.facilityId) return undefined;
+  const facility = await ctx.db.get(stop.facilityId);
+  return facility && !facility.isDeleted && facility.radiusMeters && facility.radiusMeters > 0
+    ? facility.radiusMeters
+    : undefined;
+}
+
 async function getActiveSessionForDriver(
   ctx: QueryCtx | MutationCtx,
   driverId: Id<'drivers'>
@@ -59,6 +76,13 @@ async function getActiveSessionForDriver(
  *   - loadCompleted cleared — a post-completion re-check-in (possible via
  *     the legacy primaryDriverId access path) revives the row as a normal
  *     mid-load frontier instead of leaving it flagged for deletion.
+ *
+ * Facility radius overrides (facilities.radiusMeters — the same value the
+ * manual check-in geofence honors) are snapshotted onto the watches here:
+ * the NEXT stop's radius shapes the arrival ring, the checked-in stop's
+ * radius shapes the exit ring (× EXIT_RADIUS_RATIO). Snapshot-at-check-in
+ * keeps the evaluator read-free per ping and makes each leg's thresholds
+ * stable even if a dispatcher retunes the facility mid-drive.
  */
 export async function setFrontierOnCheckIn(
   ctx: MutationCtx,
@@ -87,10 +111,16 @@ export async function setFrontierOnCheckIn(
     )
     .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
 
+  const [upcomingRadius, thisStopRadius] = await Promise.all([
+    facilityArrivalRadius(ctx, upcoming),
+    facilityArrivalRadius(ctx, stop),
+  ]);
+
   const watches = {
     currentStopSequenceNumber: upcoming?.sequenceNumber,
     currentStopLat: upcoming?.latitude,
     currentStopLng: upcoming?.longitude,
+    currentStopArrivalRadiusMeters: upcomingRadius,
     approachingFired: false,
     arrivedFired: false,
     // A coordinate-less stop (possible on detours) clears the departure
@@ -102,6 +132,7 @@ export async function setFrontierOnCheckIn(
             lat: stop.latitude,
             lng: stop.longitude,
             armedAt: args.now,
+            exitRadiusMeters: exitRadiusFor(thisStopRadius),
           }
         : undefined,
     loadCompleted: undefined,
