@@ -43,6 +43,29 @@ NEXT_PUBLIC_CONVEX_URL=<same Convex deployment as the tenant app>
 - Enable Vercel Authentication on preview deployments.
 - Recommended ignored-build-step (both projects) so pushes only rebuild what changed.
 
+### 3b. Atomic Convex deploys (vercel.json)
+
+`apps/admin/vercel.json` makes THIS project the owner of production Convex
+deploys: on **production** builds it runs `convex deploy` from the repo root
+first (deploying every backend change on `main`) and then builds the console
+against the freshly deployed backend, with `NEXT_PUBLIC_CONVEX_URL` injected
+by the CLI. Preview builds skip the deploy and build normally. This kills the
+"frontend deployed but Convex didn't" failure mode and stops laptop/side-
+session `convex dev` runs from being the last word on production code —
+whatever is on `main` is what's deployed.
+
+One-time setup:
+1. Convex dashboard → your project → **Settings → Deploy Keys** → generate a
+   **Production** deploy key.
+2. Vercel → this project → Settings → Environment Variables → add
+   `CONVEX_DEPLOY_KEY` = that key, **Production environment ONLY** (never
+   Preview — a preview must never be able to deploy backend code).
+3. Redeploy. The build log should show `convex deploy` running before
+   `next build`.
+
+Note: keep the other Vercel project (tenant app) on a plain build — exactly
+ONE project owns the Convex deploy, or every push deploys the backend twice.
+
 ### 4. Staff accounts
 Use dedicated Google accounts for console access; enforce 2-step verification.
 Offboarding = disable the Google account **and** remove the email from
