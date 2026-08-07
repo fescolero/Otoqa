@@ -114,13 +114,16 @@ export function Table<R>({
 
   // Infinite-scroll trigger. Fires `onEndReached` once per scroll-into-zone
   // crossing, so the caller can `loadMore()` without de-bouncing themselves.
-  // A `firedRef` latch resets only when the user scrolls back above the
-  // threshold — that way arrivals of new rows (which extend the scroll
-  // height) re-arm the trigger automatically.
+  // The `firedRef` latch resets when the user scrolls back above the
+  // threshold, and whenever the effect re-runs (new rows arrived or the
+  // callback changed). The re-run reset matters when a page arrives too
+  // short to fill the viewport: with no scrollbar there are no scroll
+  // events, so without it loading would stall with more rows available.
   const firedRef = React.useRef(false);
   React.useEffect(() => {
     const el = scrollRef.current;
     if (!el || !onEndReached) return;
+    firedRef.current = false;
     const onScroll = () => {
       const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
       if (remaining <= endReachedOffset) {

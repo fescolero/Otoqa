@@ -4144,11 +4144,17 @@ export default defineSchema({
     voidReason: v.optional(v.string()),
     driftDetectedAt: v.optional(v.number()), // recalc raised an invoiced period
     backfilled: v.optional(v.boolean()), // historical row created by backfill
+    // Stripe linkage (Phase 4). Stripe is the payment record; this ledger
+    // remains the billing record of truth — the reconcile cron flags
+    // mismatches as systemEvents, never auto-corrects amounts.
+    stripeInvoiceId: v.optional(v.string()),
+    stripeHostedInvoiceUrl: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index('by_org_period', ['workosOrgId', 'periodKey'])
-    .index('by_status', ['status', 'periodKey']),
+    .index('by_status', ['status', 'periodKey'])
+    .index('by_stripe_invoice', ['stripeInvoiceId']),
 
   // Support tickets — user-reported problems (web + mobile report-a-problem),
   // staff-filed issues, and automated escalations. The ticket row IS the
