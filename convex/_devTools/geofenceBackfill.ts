@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { internalAction, internalMutation } from '../_generated/server';
+import { internalAction, internalMutation, type MutationCtx } from '../_generated/server';
 import { internal } from '../_generated/api';
 import type { Doc, Id } from '../_generated/dataModel';
 
@@ -56,6 +56,16 @@ import { facilityArrivalRadius } from '../loadTrackingState';
  *   # done — leftovers from the pre-departure-watch era). List, then delete:
  *   npx convex run _devTools/geofenceBackfill:cleanupTrackingState '{}'
  *   npx convex run _devTools/geofenceBackfill:cleanupTrackingState '{"commit": true}'
+ *
+ *   # One-time repair of DEPARTED event positions. Events stamped before
+ *   # the candidate-fix change carried the CONFIRMING ping's coordinates
+ *   # with the CANDIDATE ping's timestamp, so map pins sat down-road from
+ *   # the actual crossing. The candidate ping still exists in
+ *   # driverLocations (event.triggeredAt === ping.recordedAt exactly), so
+ *   # this re-stamps position/accuracy/distance from the true ping.
+ *   # Correction of a stamping bug — timestamps are never altered.
+ *   npx convex run _devTools/geofenceBackfill:repairDepartedPositions '{"organizationId": "org_..."}'
+ *   npx convex run _devTools/geofenceBackfill:repairDepartedPositions '{"organizationId": "org_...", "commit": true}'
  *
  * Limits: only pings still in hot storage are replayed (30-day archive
  * window — see convex/gpsArchive.ts). Per-load ping reads are capped; a
@@ -518,6 +528,179 @@ export const run = internalAction({
         `inserted ${summary.totalInserted}`,
     );
     return summary;
+  },
+});
+
+// Events whose stored position is within this of the true ping are left
+// alone — float jitter, not the confirming-ping bug.
+const REPAIR_TOLERANCE_METERS = 25;
+
+/**
+ * Core of repairDepartedPositions, exported for tests. Finds each DEPARTED
+ * event's triggering ping (exact recordedAt === triggeredAt match, via the
+ * event's session then the load as fallback) and re-stamps the event's
+ * position, accuracy, and stop distance from it.
+ */
+export async function repairDepartedEventsCore(
+  ctx: MutationCtx,
+  args: { organizationId: string; commit: boolean; maxEvents: number },
+): Promise<{
+  mode: string;
+  examined: number;
+  repaired: number;
+  alreadyAccurate: number;
+  skippedNoPing: number;
+  skippedNoStop: number;
+  samples: Array<{ loadId: Id<'loadInformation'>; stopSequenceNumber: number; movedMeters: number }>;
+}> {
+  const all = await ctx.db.query('geofenceEvents').take(10_000);
+  const departed = all
+    .filter((e) => e.organizationId === args.organizationId && e.eventType === 'DEPARTED')
+    .slice(0, args.maxEvents);
+
+  const stopsCache = new Map<string, Doc<'loadStops'>[]>();
+  const stopsForLoad = async (loadId: Id<'loadInformation'>) => {
+    const key = loadId as string;
+    if (!stopsCache.has(key)) {
+      stopsCache.set(
+        key,
+        await ctx.db
+          .query('loadStops')
+          .withIndex('by_load', (q) => q.eq('loadId', loadId))
+          .collect(),
+      );
+    }
+    return stopsCache.get(key)!;
+  };
+
+  let repaired = 0;
+  let alreadyAccurate = 0;
+  let skippedNoPing = 0;
+  let skippedNoStop = 0;
+  const samples: Array<{
+    loadId: Id<'loadInformation'>;
+    stopSequenceNumber: number;
+    movedMeters: number;
+  }> = [];
+
+  for (const event of departed) {
+    // The triggering (candidate) ping: recordedAt matches the event's
+    // triggeredAt exactly — both were copied from the same device fix.
+    const ping =
+      (await ctx.db
+        .query('driverLocations')
+        .withIndex('by_session_time', (q) =>
+          q.eq('sessionId', event.sessionId).eq('recordedAt', event.triggeredAt),
+        )
+        .first()) ??
+      (await ctx.db
+        .query('driverLocations')
+        .withIndex('by_load', (q) =>
+          q.eq('loadId', event.loadId).eq('recordedAt', event.triggeredAt),
+        )
+        .first());
+    if (!ping) {
+      skippedNoPing++; // archived out of hot storage — position unrecoverable
+      continue;
+    }
+
+    const movedMeters = calculateDistanceMeters(
+      event.latitude,
+      event.longitude,
+      ping.latitude,
+      ping.longitude,
+    );
+    if (movedMeters < REPAIR_TOLERANCE_METERS) {
+      alreadyAccurate++;
+      continue;
+    }
+
+    const stop = (await stopsForLoad(event.loadId)).find(
+      (s) => s.sequenceNumber === event.stopSequenceNumber,
+    );
+    if (!stop || stop.latitude === undefined || stop.longitude === undefined) {
+      skippedNoStop++;
+      continue;
+    }
+
+    if (args.commit) {
+      await ctx.db.patch(event._id, {
+        latitude: ping.latitude,
+        longitude: ping.longitude,
+        accuracy: ping.accuracy,
+        distanceMeters: calculateDistanceMeters(
+          ping.latitude,
+          ping.longitude,
+          stop.latitude,
+          stop.longitude,
+        ),
+      });
+    }
+    repaired++;
+    if (samples.length < 10) {
+      samples.push({
+        loadId: event.loadId,
+        stopSequenceNumber: event.stopSequenceNumber,
+        movedMeters: Math.round(movedMeters),
+      });
+    }
+  }
+
+  return {
+    mode: args.commit ? 'COMMIT' : 'DRY_RUN',
+    examined: departed.length,
+    repaired,
+    alreadyAccurate,
+    skippedNoPing,
+    skippedNoStop,
+    samples,
+  };
+}
+
+/**
+ * Re-stamp pre-fix DEPARTED events onto their true triggering ping. See
+ * the header doc; dry-run by default, commit gated on the env flag.
+ */
+export const repairDepartedPositions = internalMutation({
+  args: {
+    organizationId: v.string(),
+    commit: v.optional(v.boolean()),
+    maxEvents: v.optional(v.number()),
+  },
+  returns: v.object({
+    mode: v.string(),
+    examined: v.number(),
+    repaired: v.number(),
+    alreadyAccurate: v.number(),
+    skippedNoPing: v.number(),
+    skippedNoStop: v.number(),
+    samples: v.array(
+      v.object({
+        loadId: v.id('loadInformation'),
+        stopSequenceNumber: v.number(),
+        movedMeters: v.number(),
+      }),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    const commit = args.commit ?? false;
+    if (commit && process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error(
+        'Commit disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable writes ' +
+          '(dry runs need no flag)',
+      );
+    }
+    const result = await repairDepartedEventsCore(ctx, {
+      organizationId: args.organizationId,
+      commit,
+      maxEvents: args.maxEvents ?? 2000,
+    });
+    console.log(
+      `[geofenceBackfill.repairDepartedPositions] ${result.mode}: ` +
+        `${result.repaired} ${commit ? 'repaired' : 'would repair'} of ${result.examined} DEPARTED events ` +
+        `(${result.alreadyAccurate} already accurate, ${result.skippedNoPing} pings archived)`,
+    );
+    return result;
   },
 });
 

@@ -25,6 +25,7 @@ import {
   transferCompletedRowsToSession,
 } from './loadTrackingState';
 import { buildSessionStopTimeline } from './driverSessions';
+import { repairDepartedEventsCore } from './_devTools/geofenceBackfill';
 import type { Doc, Id } from './_generated/dataModel';
 import type { MutationCtx } from './_generated/server';
 
@@ -389,7 +390,7 @@ describe('geofenceEvaluator.evaluatePing — departure watch', () => {
       let events = await ctx.db.query('geofenceEvents').collect();
       expect(events.filter((e) => e.eventType === 'ARRIVED')).toHaveLength(0);
       // ...but 500 m IS outside the 450 m exit ring → departure candidate set.
-      let state = (await ctx.db.query('loadTrackingState').collect())[0];
+      const state = (await ctx.db.query('loadTrackingState').collect())[0];
       expect(state.departureWatch?.candidateAt).toBe(10_000);
 
       await evaluatePing(ctx, { loadId: f.loadId, ping: { ...M_600, recordedAt: 20_000 } });
@@ -691,6 +692,74 @@ describe('loadTrackingState frontier helpers', () => {
       expect(row.sessionId).toBe(newSessionId);
       expect(row.loadCompleted).toBe(true);
       expect(row.departureWatch?.stopSequenceNumber).toBe(1); // watch survives
+    });
+  });
+});
+
+describe('geofenceBackfill.repairDepartedEventsCore', () => {
+  it('re-stamps a pre-fix DEPARTED event onto its true triggering ping', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      // The candidate (triggering) ping, ~2 km out, stored in driverLocations.
+      await ctx.db.insert('driverLocations', {
+        driverId: f.driverId,
+        loadId: f.loadId,
+        sessionId: f.sessionId,
+        organizationId: ORG,
+        latitude: KM_2.latitude,
+        longitude: KM_2.longitude,
+        accuracy: 4,
+        trackingType: 'LOAD_ROUTE',
+        recordedAt: 10_000,
+        createdAt: 11_000,
+      });
+      // Old-style event: candidate's timestamp, CONFIRMING ping's position
+      // (~6 km out) — the bug being repaired.
+      const eventId = await ctx.db.insert('geofenceEvents', {
+        sessionId: f.sessionId,
+        loadId: f.loadId,
+        stopSequenceNumber: 1,
+        driverId: f.driverId,
+        organizationId: ORG,
+        eventType: 'DEPARTED',
+        triggeredAt: 10_000,
+        latitude: KM_6.latitude,
+        longitude: KM_6.longitude,
+        distanceMeters: 6000,
+        accuracy: 9,
+      });
+
+      const dry = await repairDepartedEventsCore(ctx, {
+        organizationId: ORG,
+        commit: false,
+        maxEvents: 100,
+      });
+      expect(dry.repaired).toBe(1);
+      // Dry run wrote nothing.
+      expect((await ctx.db.get(eventId))!.latitude).toBeCloseTo(KM_6.latitude, 6);
+
+      const committed = await repairDepartedEventsCore(ctx, {
+        organizationId: ORG,
+        commit: true,
+        maxEvents: 100,
+      });
+      expect(committed.repaired).toBe(1);
+      const fixed = (await ctx.db.get(eventId))!;
+      expect(fixed.latitude).toBeCloseTo(KM_2.latitude, 6);
+      expect(fixed.accuracy).toBe(4);
+      expect(fixed.distanceMeters).toBeGreaterThan(1900);
+      expect(fixed.distanceMeters).toBeLessThan(2100);
+      expect(fixed.triggeredAt).toBe(10_000); // timestamp untouched
+
+      // Idempotent: second run finds it already accurate.
+      const again = await repairDepartedEventsCore(ctx, {
+        organizationId: ORG,
+        commit: true,
+        maxEvents: 100,
+      });
+      expect(again.repaired).toBe(0);
+      expect(again.alreadyAccurate).toBe(1);
     });
   });
 });
