@@ -37,6 +37,7 @@ import { useQuery } from 'convex/react';
 import { toast } from 'sonner';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { usePermissions } from '@/lib/use-permissions';
 
@@ -593,7 +594,10 @@ export default function TeamSettingsPage() {
     memberUserIds.length > 0 ? { userIds: memberUserIds } : 'skip',
   );
 
-  const summary = useQuery(
+  // useAuthQuery, not useQuery: getWorkspaceSummary calls assertCallerOwnsOrg,
+  // and `organizationId` arrives from the server-rendered layout, so the
+  // org-id gate alone still lets this fire before the Convex auth handshake.
+  const summary = useAuthQuery(
     api.settings.getWorkspaceSummary,
     organizationId ? { workosOrgId: organizationId } : 'skip',
   );
