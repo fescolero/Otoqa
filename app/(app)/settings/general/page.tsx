@@ -31,11 +31,12 @@
 
 import * as React from 'react';
 import { useEffect, useRef, useState } from 'react';
-import { useMutation, useQuery } from 'convex/react';
+import { useMutation } from 'convex/react';
 import type { FunctionArgs, FunctionReturnType } from 'convex/server';
 import { toast } from 'sonner';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { usePermissions } from '@/lib/use-permissions';
 
@@ -705,11 +706,17 @@ export default function GeneralSettingsPage() {
   const { can } = usePermissions();
   const canEdit = can('settings', 'edit');
 
-  const org = useQuery(
+  // useAuthQuery, not useQuery: both endpoints call assertCallerOwnsOrg, and
+  // `organizationId` is already populated from the server-rendered layout on
+  // first render — so the org-id gate alone still lets these fire before the
+  // Convex auth handshake, and the server throws Unauthenticated. Skipping
+  // until the token lands is indistinguishable from the existing loading
+  // state (both leave the value `undefined`).
+  const org = useAuthQuery(
     api.settings.getOrgSettings,
     organizationId ? { workosOrgId: organizationId } : 'skip',
   );
-  const summary = useQuery(
+  const summary = useAuthQuery(
     api.settings.getWorkspaceSummary,
     organizationId ? { workosOrgId: organizationId } : 'skip',
   );

@@ -12,8 +12,8 @@
 'use client';
 
 import * as React from 'react';
-import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { OrganizationProvider, useOrganizationId } from '@/contexts/organization-context';
 import { GoogleMapsProvider } from '@/contexts/google-maps-context';
 import { Avatar, OrgMark } from '@/components/web';
@@ -92,8 +92,19 @@ function ShellLayout({
   // snapshot from the layout; subscribing here keeps the sidebar name/logo
   // in sync when they're edited on Settings → General. Falls back to the
   // snapshot while the client query loads.
+  //
+  // Must go through useAuthQuery: getOrgSettings calls assertCallerOwnsOrg,
+  // and `organizationId` comes from the server-rendered layout, so a plain
+  // useQuery fires with valid args on the shell's very first render — while
+  // the Convex client still has no token. The server then throws
+  // ConvexError('Unauthenticated') and Convex re-throws it out of useQuery
+  // during render, taking down every page that mounts the shell. Holding at
+  // 'skip' until the handshake lands costs nothing here because the snapshot
+  // prop already covers the pre-hydration paint.
   const organizationId = useOrganizationId();
-  const liveOrgSettings = useQuery(api.settings.getOrgSettings, { workosOrgId: organizationId });
+  const liveOrgSettings = useAuthQuery(api.settings.getOrgSettings, {
+    workosOrgId: organizationId,
+  });
   const org = liveOrgSettings === undefined ? orgSettings : liveOrgSettings;
 
   // Publish the workspace's Regional & formats preferences so the shared
