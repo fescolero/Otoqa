@@ -115,7 +115,9 @@ export default function CreateFuelEntryPage() {
               ? 'Fuel entry saved. Ready for the next one.'
               : 'Fuel entry saved.',
           );
-          if (!andNew) router.push(`/operations/diesel/${id}`);
+          // Mirror the DEF create route and pass the type explicitly so the
+          // shared detail route doesn't have to resolve the id's table.
+          if (!andNew) router.push(`/operations/diesel/${id}?type=fuel`);
         } catch (err) {
           console.error('Failed to create fuel entry:', err);
           toast.error('Failed to create fuel entry. Please try again.');

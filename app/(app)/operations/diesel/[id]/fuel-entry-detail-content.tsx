@@ -62,7 +62,25 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user } = useAuth();
-  const entryType = searchParams.get('type') === 'def' ? 'def' : 'fuel';
+  // `?type=` is a HINT, not the source of truth. It's absent whenever the
+  // URL didn't come from an in-app row click — bookmarks, shared links, a
+  // pasted path. We can't default to 'fuel' there: feeding a `defEntries`
+  // id to `fuelEntries.get` fails Convex argument validation before the
+  // handler runs, which throws past this component instead of resolving
+  // to null. So when the hint is missing, ask the backend which table
+  // owns the id and only then run the typed query.
+  const typeParam = searchParams.get('type');
+  const hintedType: 'fuel' | 'def' | null =
+    typeParam === 'def' ? 'def' : typeParam === 'fuel' ? 'fuel' : null;
+
+  const resolvedType = useAuthQuery(
+    api.fuelEntries.resolveEntryType,
+    hintedType ? 'skip' : { entryId: id },
+  );
+  // `undefined` while the resolver is in flight; `null` once it has
+  // answered "no such entry in your org".
+  const isResolvingType = !hintedType && resolvedType === undefined;
+  const entryType: 'fuel' | 'def' | null = hintedType ?? resolvedType ?? null;
 
   const fuelEntry = useAuthQuery(
     api.fuelEntries.get,
@@ -72,7 +90,8 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
     api.defEntries.get,
     entryType === 'def' ? { entryId: id as Id<'defEntries'> } : 'skip',
   );
-  const entry = entryType === 'def' ? defEntry : fuelEntry;
+  const entry =
+    entryType === 'def' ? defEntry : entryType === 'fuel' ? fuelEntry : undefined;
 
   const removeFuelEntry = useMutation(api.fuelEntries.remove);
   const removeDefEntry = useMutation(api.defEntries.remove);
@@ -157,21 +176,19 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entryType, id, user, entry]);
 
-  if (entry === undefined) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <Loader2 className="h-5 w-5 animate-spin text-[var(--text-tertiary)]" />
-      </div>
-    );
-  }
+  const backToList = () => router.push('/operations/diesel');
+
+  // Guards run as separate sequential checks (rather than one combined
+  // condition) so TypeScript can narrow `entryType` and `entry` for the
+  // render body below.
+  if (isResolvingType) return <DetailSpinner />;
+  // The resolver found no fuel OR DEF entry with this id in the caller's
+  // org — same user-facing outcome as a null record.
+  if (entryType === null) return <EntryNotFound label="Diesel" onBack={backToList} />;
+  if (entry === undefined) return <DetailSpinner />;
   if (entry === null) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center">
-        <p className="m-0 text-[14px] text-foreground font-medium">{entryType === 'def' ? 'DEF' : 'Fuel'} entry not found</p>
-        <WBtn size="sm" leading="chevron-left" onClick={() => router.push('/operations/diesel')}>
-          Back to Diesel
-        </WBtn>
-      </div>
+      <EntryNotFound label={entryType === 'def' ? 'DEF' : 'Fuel'} onBack={backToList} />
     );
   }
 
@@ -646,6 +663,28 @@ export function FuelEntryDetailContent({ id }: { id: string }) {
 }
 
 // ─── Inner pieces ───────────────────────────────────────────────────────
+
+/** Centered spinner for the record-loading and type-resolving gates. */
+function DetailSpinner() {
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <Loader2 className="h-5 w-5 animate-spin text-[var(--text-tertiary)]" />
+    </div>
+  );
+}
+
+/** Shown when the id matches no entry the caller can read. `label` is
+ *  'Diesel' when we never learned the type, 'Fuel' / 'DEF' when we did. */
+function EntryNotFound({ label, onBack }: { label: string; onBack: () => void }) {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center">
+      <p className="m-0 text-[14px] text-foreground font-medium">{label} entry not found</p>
+      <WBtn size="sm" leading="chevron-left" onClick={onBack}>
+        Back to Diesel
+      </WBtn>
+    </div>
+  );
+}
 
 type FuelEntry = NonNullable<ReturnType<typeof useAuthQuery<typeof api.fuelEntries.get>>>;
 type DefEntry  = NonNullable<ReturnType<typeof useAuthQuery<typeof api.defEntries.get>>>;

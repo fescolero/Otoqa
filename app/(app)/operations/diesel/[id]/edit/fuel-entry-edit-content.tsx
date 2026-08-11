@@ -37,14 +37,29 @@ import {
 export function FuelEntryEditContent({ id }: { id: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const type = searchParams.get('type') === 'def' ? 'def' : 'fuel';
   const { user } = useAuth();
   const organizationId = useOrganizationId();
 
   // ── Record load ─────────────────────────────────────────────────
-  // Same `?type=` partition as the legacy edit page: fuel record from
-  // `fuelEntries`, DEF record from `defEntries`. Only one query is
-  // active at a time via the `'skip'` sentinel.
+  // `?type=` partitions the record: fuel from `fuelEntries`, DEF from
+  // `defEntries`. The param is only a hint though — a pasted or
+  // bookmarked edit URL carries no `type`, and defaulting to 'fuel'
+  // would send a `defEntries` id into `v.id('fuelEntries')`, failing
+  // Convex argument validation before the handler runs. Resolve the
+  // owning table from the id itself whenever the hint is absent.
+  const typeParam = searchParams.get('type');
+  const hintedType: 'fuel' | 'def' | null =
+    typeParam === 'def' ? 'def' : typeParam === 'fuel' ? 'fuel' : null;
+
+  const resolvedType = useAuthQuery(
+    api.fuelEntries.resolveEntryType,
+    hintedType ? 'skip' : { entryId: id },
+  );
+  const isResolvingType = !hintedType && resolvedType === undefined;
+  const type: 'fuel' | 'def' | null = hintedType ?? resolvedType ?? null;
+
+  // Only one record query is active at a time via the `'skip'` sentinel;
+  // both skip until the type is known.
   const fuelEntry = useAuthQuery(
     api.fuelEntries.get,
     type === 'fuel' ? { entryId: id as Id<'fuelEntries'> } : 'skip',
@@ -53,7 +68,7 @@ export function FuelEntryEditContent({ id }: { id: string }) {
     api.defEntries.get,
     type === 'def' ? { entryId: id as Id<'defEntries'> } : 'skip',
   );
-  const entry = type === 'def' ? defEntry : fuelEntry;
+  const entry = type === 'def' ? defEntry : type === 'fuel' ? fuelEntry : undefined;
 
   // ── Option-source queries (same shape as the create page) ────────
   const driversQ = useAuthQuery(
@@ -97,7 +112,10 @@ export function FuelEntryEditContent({ id }: { id: string }) {
     () =>
       bindUploaders(
         buildFuelEntrySchema({
-          kind: type,
+          // `type` is still null while the resolver is in flight. The
+          // render gates below keep the form unmounted until it settles,
+          // so this placeholder kind is never shown to the user.
+          kind: type ?? 'fuel',
           mode: 'edit',
           vendors: vendorsQ ?? [],
           drivers: driversQ ?? [],
@@ -120,30 +138,22 @@ export function FuelEntryEditContent({ id }: { id: string }) {
     return mapRecordToFuelEntryVals(entry as FuelEntryRecord);
   }, [entry]);
 
-  const typeLabel = type === 'def' ? 'DEF' : 'Fuel';
+  const typeLabel = type === 'def' ? 'DEF' : type === 'fuel' ? 'Fuel' : 'Diesel';
 
   // ── Render gates — match the legacy edit page's loading and
-  // not-found states so dispatchers see consistent fallbacks.
-  if (entry === undefined) {
-    return (
-      <div className="flex items-center justify-center h-screen">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    );
+  // not-found states so dispatchers see consistent fallbacks. These run
+  // as separate sequential checks (rather than one combined condition) so
+  // TypeScript can narrow `type` and `entry` for the render body below.
+  if (isResolvingType) return <EditSpinner />;
+  // `type === null` means no fuel OR DEF entry with this id exists in the
+  // caller's org — same user-facing outcome as a null record. `typeLabel`
+  // reads 'Diesel' in that case since we never learned the record type.
+  if (type === null) {
+    return <EditNotFound label={typeLabel} onBack={() => router.push('/operations/diesel')} />;
   }
+  if (entry === undefined) return <EditSpinner />;
   if (entry === null) {
-    return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-center">
-          <p className="text-muted-foreground mb-4">
-            {typeLabel} entry not found
-          </p>
-          <Button onClick={() => router.push('/operations/diesel')}>
-            Back to Diesel
-          </Button>
-        </div>
-      </div>
-    );
+    return <EditNotFound label={typeLabel} onBack={() => router.push('/operations/diesel')} />;
   }
 
   return (
@@ -188,5 +198,26 @@ export function FuelEntryEditContent({ id }: { id: string }) {
         }
       }}
     />
+  );
+}
+
+/** Full-height spinner for the record-loading and type-resolving gates. */
+function EditSpinner() {
+  return (
+    <div className="flex items-center justify-center h-screen">
+      <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+    </div>
+  );
+}
+
+/** Shown when the id matches no entry the caller can read. */
+function EditNotFound({ label, onBack }: { label: string; onBack: () => void }) {
+  return (
+    <div className="flex items-center justify-center h-screen">
+      <div className="text-center">
+        <p className="text-muted-foreground mb-4">{label} entry not found</p>
+        <Button onClick={onBack}>Back to Diesel</Button>
+      </div>
+    </div>
   );
 }
