@@ -334,6 +334,49 @@ export const get = query({
   },
 });
 
+/**
+ * Resolve which diesel table owns a raw entry id — `fuelEntries` or
+ * `defEntries`.
+ *
+ * The diesel detail / edit routes are shared by both record types and
+ * discriminate on a `?type=` search param. That param is a hint that is
+ * easily lost: bookmarks, shared links, and the post-create redirect all
+ * produce a bare `/operations/diesel/<id>`. Defaulting to 'fuel' in that
+ * case hands a `defEntries` id to `v.id('fuelEntries')`, which Convex
+ * rejects during ARGUMENT VALIDATION — before the handler runs — so the
+ * page cannot recover by falling back to the other query.
+ *
+ * Normalizing the raw string here lets the client learn the type first
+ * and then call the correctly-typed query. `normalizeId` returns null
+ * when the string isn't a well-formed id for the given table, so an
+ * arbitrary path segment resolves to null rather than throwing.
+ *
+ * Ownership is checked against the caller's org before answering, so
+ * this never discloses which table a foreign org's id lives in.
+ */
+export const resolveEntryType = query({
+  args: {
+    entryId: v.string(),
+  },
+  handler: async (ctx, args): Promise<'fuel' | 'def' | null> => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+
+    const fuelId = ctx.db.normalizeId('fuelEntries', args.entryId);
+    if (fuelId) {
+      const entry = await ctx.db.get(fuelId);
+      if (entry && entry.organizationId === callerOrgId) return 'fuel';
+    }
+
+    const defId = ctx.db.normalizeId('defEntries', args.entryId);
+    if (defId) {
+      const entry = await ctx.db.get(defId);
+      if (entry && entry.organizationId === callerOrgId) return 'def';
+    }
+
+    return null;
+  },
+});
+
 export const create = mutation({
   args: {
     organizationId: v.string(),

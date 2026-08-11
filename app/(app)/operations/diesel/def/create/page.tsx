@@ -99,7 +99,10 @@ export default function CreateDefEntryPage() {
               ? 'DEF entry saved. Ready for the next one.'
               : 'DEF entry saved.',
           );
-          if (!andNew) router.push(`/operations/diesel/${id}`);
+          // `?type=def` is required here: the shared detail route reads it
+          // to pick `defEntries.get` over `fuelEntries.get`. Without it the
+          // page has to round-trip to resolve the id's table first.
+          if (!andNew) router.push(`/operations/diesel/${id}?type=def`);
         } catch (err) {
           console.error('Failed to create DEF entry:', err);
           toast.error('Failed to create DEF entry. Please try again.');
