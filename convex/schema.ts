@@ -3228,6 +3228,15 @@ export default defineSchema({
     // then deleted by the evaluator (or by session-end cleanup).
     loadCompleted: v.optional(v.boolean()),
 
+    // Pre-trip arrival watch: the row was armed from the driver's session
+    // (next pending leg) BEFORE any check-in, so stop 1 gets GPS-detected
+    // APPROACHING/ARRIVED from shift start. Cleared by the first check-in
+    // (setFrontierOnCheckIn), which converts it into a normal mid-load
+    // frontier. Pre-trip rows never carry a departure watch, and the lazy
+    // arm hook in ingestBatch deletes them when the leg they were armed
+    // for is no longer the driver's next.
+    preTrip: v.optional(v.boolean()),
+
     updatedAt: v.float64(),
   })
     .index('by_load', ['loadId'])

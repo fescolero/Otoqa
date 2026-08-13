@@ -168,6 +168,9 @@ export async function setFrontierOnCheckIn(
           }
         : undefined,
     loadCompleted: undefined,
+    // A pre-trip row (armed at session start toward stop 1) graduates to a
+    // normal mid-load frontier on first check-in.
+    preTrip: undefined,
     updatedAt: args.now,
   };
 
@@ -185,6 +188,149 @@ export async function setFrontierOnCheckIn(
       driverId: args.driverId,
       organizationId: args.organizationId,
       ...watches,
+    });
+  }
+}
+
+// Shift-plausibility window for picking the driver's next pending leg —
+// mirrors the upNext filter in driverMobile.getMySessionLoads so the fence
+// arms for the same load the driver sees at the top of their mobile queue.
+const PRETRIP_GRACE_BEFORE_MS = 2 * 60 * 60 * 1000;
+const PRETRIP_GRACE_AFTER_MS = 18 * 60 * 60 * 1000;
+
+/**
+ * Pre-trip arming — the session starts the tracking, not the first
+ * check-in. Called lazily from ingestBatch whenever a session-only
+ * (SESSION_ROUTE) batch lands for an active session: on shift the driver
+ * pings without a loadId until their first check-in, which previously
+ * meant no fence existed and stop 1 never got a GPS-detected arrival.
+ *
+ * This arms an arrival-only watch (no departure watch) at the first
+ * unvisited stop of the driver's NEXT pending leg. Scope rules keep each
+ * load's dataset its own:
+ *   - Only ONE pre-trip watch at a time — the next leg by plannedStartAt
+ *     within the shift window. Other queued loads get nothing until they
+ *     become next, so a fence can't fire for a load the driver isn't
+ *     heading to.
+ *   - The raw session pings stay session-scoped in driverLocations; a
+ *     load's route history remains only the pings stamped with its own
+ *     loadId (ACTIVE-leg validated). The only thing recorded against the
+ *     load pre-trip is the fence-crossing fix at the load's own facility.
+ *   - Mid-load rows (no preTrip flag) are never touched here — check-in /
+ *     checkout / handoff flows own them.
+ *
+ * Self-healing: pre-trip rows whose load is no longer the driver's next
+ * (reassigned, canceled, or the driver went ACTIVE on another leg) are
+ * deleted on the next session batch, and a pre-trip row left bound to a
+ * previous session is re-bound when the same load is next again.
+ */
+export async function armPreTripWatchForDriver(
+  ctx: MutationCtx,
+  session: Doc<'driverSessions'>,
+  now: number
+): Promise<void> {
+  const [activeLeg, pendingLegs, sessionRows] = await Promise.all([
+    ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', session.driverId).eq('status', 'ACTIVE'))
+      .first(),
+    ctx.db
+      .query('dispatchLegs')
+      .withIndex('by_driver', (q) => q.eq('driverId', session.driverId).eq('status', 'PENDING'))
+      .collect(),
+    ctx.db
+      .query('loadTrackingState')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+      .collect(),
+  ]);
+
+  // A driver actively on a leg has a real frontier (or is about to create
+  // one at check-in); pre-trip watches only exist between loads.
+  let nextLeg: Doc<'dispatchLegs'> | undefined;
+  if (!activeLeg) {
+    const lowerBound = session.startedAt - PRETRIP_GRACE_BEFORE_MS;
+    const upperBound = session.startedAt + PRETRIP_GRACE_AFTER_MS;
+    nextLeg = pendingLegs
+      .filter(
+        (leg) =>
+          leg.plannedStartAt === undefined ||
+          (leg.plannedStartAt >= lowerBound && leg.plannedStartAt <= upperBound)
+      )
+      .sort(
+        (a, b) =>
+          (a.plannedStartAt ?? Number.POSITIVE_INFINITY) -
+          (b.plannedStartAt ?? Number.POSITIVE_INFINITY)
+      )[0];
+  }
+
+  // Drop stale pre-trip rows: anything armed for a load that is no longer
+  // the driver's next. Mid-load and loadCompleted rows are left alone.
+  for (const row of sessionRows) {
+    if (row.preTrip && row.loadId !== nextLeg?.loadId) {
+      await ctx.db.delete(row._id);
+    }
+  }
+  if (!nextLeg) return;
+  const nextLoadId = nextLeg.loadId;
+
+  // First unvisited, coordinate-bearing stop of the next leg's load.
+  const stops = await ctx.db
+    .query('loadStops')
+    .withIndex('by_load', (q) => q.eq('loadId', nextLoadId))
+    .collect();
+  const target = stops
+    .filter(
+      (s) =>
+        s.stopType !== 'DETOUR' &&
+        s.status !== 'Canceled' &&
+        s.checkedInAt === undefined &&
+        s.latitude !== undefined &&
+        s.longitude !== undefined
+    )
+    .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
+  if (!target) return;
+
+  const existing = await getByLoadId(ctx, nextLoadId);
+  // A non-pre-trip row means the load already has a real frontier (e.g.
+  // another driver mid-load before a handoff) — never clobber it.
+  if (existing && !existing.preTrip) return;
+
+  // No-op when the existing pre-trip row already points at this session,
+  // driver, and stop — this runs on every session-only batch, and writes
+  // here must stay rare relative to ping volume.
+  if (
+    existing &&
+    existing.sessionId === session._id &&
+    existing.driverId === session.driverId &&
+    existing.currentStopSequenceNumber === target.sequenceNumber
+  ) {
+    return;
+  }
+
+  const fence = await facilityFence(ctx, target);
+  const watch = {
+    sessionId: session._id,
+    driverId: session.driverId,
+    currentStopSequenceNumber: target.sequenceNumber,
+    currentStopLat: target.latitude,
+    currentStopLng: target.longitude,
+    currentStopArrivalRadiusMeters: fence.radiusMeters,
+    currentStopPolygon: fence.polygon,
+    approachingFired: false,
+    arrivedFired: false,
+    departureWatch: undefined,
+    loadCompleted: undefined,
+    preTrip: true,
+    updatedAt: now,
+  };
+
+  if (existing) {
+    await ctx.db.patch(existing._id, watch);
+  } else {
+    await ctx.db.insert('loadTrackingState', {
+      loadId: nextLeg.loadId,
+      organizationId: session.organizationId,
+      ...watch,
     });
   }
 }

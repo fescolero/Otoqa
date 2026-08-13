@@ -11,6 +11,7 @@ import {
 import { internal } from './_generated/api';
 import { Id, Doc } from './_generated/dataModel';
 import { assertCallerOwnsOrg, requireCallerOrgId } from './lib/auth';
+import { armPreTripWatchForDriver } from './loadTrackingState';
 
 // ============================================
 // DRIVER LOCATION TRACKING
@@ -584,6 +585,14 @@ export async function ingestBatch(
     if (!group.some((p) => !p.loadId)) continue;
     const session = sessionCache.get(sessionId);
     if (!session || session.status !== 'active') continue;
+    // Lazy pre-trip arming: a session-only batch means the driver is on
+    // shift but not on a load — make sure the arrival fence for their next
+    // pending leg exists (or is cleaned up if the assignment changed), so
+    // stop 1 gets GPS detection from session start. One choke point covers
+    // every way a leg can appear: shift start, mid-shift dispatch,
+    // post-checkout next load. Same-transaction: the watchRows read below
+    // sees the row this creates.
+    await armPreTripWatchForDriver(ctx, session, now);
     const watchRows = await ctx.db
       .query('loadTrackingState')
       .withIndex('by_session', (q) => q.eq('sessionId', sessionId))
