@@ -511,9 +511,6 @@ function TripCard({
 
 type StopTimeline = {
   checkedInAt: string | null;
-  checkinDistanceMeters: number | null;
-  checkinOverride: boolean;
-  checkinOutsideGeofence: boolean;
   arrivedAt: number | null;
   departedAt: number | null;
 };
@@ -571,8 +568,9 @@ function TripStopRow({
 
 /**
  * Detection-vs-tap line under a trip stop — the same pairing as the load
- * page's Geofence column: when the fence fired, when the driver tapped,
- * with override/off-pin warnings taking precedence.
+ * page's Geofence column: when the fence fired, when the driver tapped.
+ * Anomalies (overrides, off-pin check-ins) are platform review items —
+ * they're logged to the Otoqa console at check-in time, not rendered here.
  */
 function StopTimelineLine({ timeline }: { timeline: StopTimeline }) {
   const hhmm = (ms: number) =>
@@ -582,20 +580,6 @@ function StopTimelineLine({ timeline }: { timeline: StopTimeline }) {
     : null;
 
   const parts: React.ReactNode[] = [];
-  if (timeline.checkinOverride) {
-    parts.push(
-      <span key="ov" style={{ color: '#B43030', fontWeight: 600 }}>
-        Override
-        {timeline.checkinDistanceMeters != null ? ` · ${timeline.checkinDistanceMeters}m off` : ''}
-      </span>,
-    );
-  } else if (timeline.checkinOutsideGeofence) {
-    parts.push(
-      <span key="off" style={{ color: '#B45309', fontWeight: 600 }}>
-        {timeline.checkinDistanceMeters ?? '?'}m off pin
-      </span>,
-    );
-  }
   if (timeline.arrivedAt != null) {
     parts.push(
       <span key="gps" style={{ color: '#0F8C5F', fontWeight: 600 }}>

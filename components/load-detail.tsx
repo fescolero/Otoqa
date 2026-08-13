@@ -1073,70 +1073,32 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
       label: 'Geofence',
       width: '110px',
       render: (r) => {
-        // Tooltip carries distance + reason so dispatch can judge whether
-        // the pin is wrong without leaving the table.
-        if (r.checkinOverride) {
-          return (
-            <span
-              className="cursor-help"
-              title={`Driver checked in ${r.checkinDistanceMeters ?? '?'}m from the pin via "Check in anyway"${r.checkinOverrideReason ? ` — ${r.checkinOverrideReason}` : ''}. Repeated overrides flag the facility for review.`}
-            >
-              <Chip status="danger" label="Override" />
-            </span>
-          );
-        }
-        if (r.checkinOutsideGeofence) {
-          return (
-            <span
-              className="cursor-help"
-              title={`Checked in ${r.checkinDistanceMeters ?? '?'}m from the pinned location — the pin may be off.`}
-            >
-              <Chip status="warning" label={`${r.checkinDistanceMeters ?? '?'}m off`} />
-            </span>
-          );
-        }
-        // GPS-detected arrival: the fence column shows WHEN the geofence
-        // fired; the "In" column next to it shows when the driver tapped.
-        // Tooltip carries the delta + check-in distance for the full story.
+        // ONE meaning for the client: when the geofence detected arrival.
+        // Anomalies (overrides, off-pin check-ins) are platform review
+        // items — they're logged to the Otoqa console at check-in time,
+        // not rendered as chip states here.
         const detected = arrivedBySequence.get(r.sequenceNumber);
-        if (detected) {
-          const gpsTime = new Date(detected.triggeredAt).toLocaleTimeString('en-US', {
-            hour: 'numeric',
-            minute: '2-digit',
-            hour12: true,
-          });
-          const tapMs = r.checkedInAt ? Date.parse(r.checkedInAt) : NaN;
-          const deltaMin = Number.isFinite(tapMs)
-            ? Math.round((tapMs - detected.triggeredAt) / 60_000)
-            : null;
-          const deltaLabel =
-            deltaMin === null
-              ? 'no manual check-in yet'
-              : deltaMin >= 0
-                ? `driver tapped check-in ${deltaMin}m later`
-                : `driver tapped ${-deltaMin}m before detection`;
-          return (
-            <span
-              className="cursor-help"
-              title={`Geofence detected arrival at ${gpsTime} — ${deltaLabel}${typeof r.checkinDistanceMeters === 'number' ? `, ${r.checkinDistanceMeters}m from the pin` : ''}.`}
-            >
-              <Chip status="valid" label={`GPS ${gpsTime}`} />
-            </span>
-          );
-        }
-        // No detection (offline stretch, pre-geofence history): fall back
-        // to the check-in distance so pin quality is still visible.
-        if (r.checkedInAt && typeof r.checkinDistanceMeters === 'number') {
-          return (
-            <span
-              className="cursor-help"
-              title={`Checked in ${r.checkinDistanceMeters}m from the pin, inside the geofence. No GPS-detected arrival on record for this stop.`}
-            >
-              <Chip status="valid" label={`✓ ${r.checkinDistanceMeters}m`} />
-            </span>
-          );
-        }
-        return <span className="text-[var(--text-tertiary)]">—</span>;
+        if (!detected) return <span className="text-[var(--text-tertiary)]">—</span>;
+        const gpsTime = new Date(detected.triggeredAt).toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+        });
+        const tapMs = r.checkedInAt ? Date.parse(r.checkedInAt) : NaN;
+        const deltaMin = Number.isFinite(tapMs)
+          ? Math.round((tapMs - detected.triggeredAt) / 60_000)
+          : null;
+        const deltaLabel =
+          deltaMin === null
+            ? 'no manual check-in yet'
+            : deltaMin >= 0
+              ? `driver tapped check-in ${deltaMin}m later`
+              : `driver tapped ${-deltaMin}m before detection`;
+        return (
+          <span className="cursor-help" title={`Geofence detected arrival at ${gpsTime} — ${deltaLabel}.`}>
+            <Chip status="valid" label={`GPS ${gpsTime}`} />
+          </span>
+        );
       },
     },
   ];

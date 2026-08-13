@@ -15,6 +15,7 @@ import {
   OVERRIDE_DEMOTION_WINDOW_MS,
 } from './lib/facilityEvidence';
 import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrackingState';
+import { logSystemEvent } from './lib/systemEvents';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 
@@ -1032,6 +1033,30 @@ export const checkInAtStop = mutation({
         : {}),
       updatedAt: serverNow, // Server timestamp for audit
     });
+
+    // Geofence anomalies are PLATFORM review items, not tenant UI states:
+    // the client surfaces show only the detection time, and off-pin /
+    // override check-ins land in the Otoqa console's needs-attention feed
+    // (systemEvents) where pin quality gets reviewed and fixed.
+    if (isOverride || outsideGeofence) {
+      await logSystemEvent(ctx, {
+        severity: 'warn',
+        source: 'geofence',
+        code: isOverride ? 'geofence.checkin_override' : 'geofence.checkin_off_pin',
+        message:
+          `${driver.firstName} ${driver.lastName} checked in ` +
+          `${distanceFromStop !== undefined ? `${Math.round(distanceFromStop)}m` : 'an unknown distance'} ` +
+          `from the pin at stop ${stop.sequenceNumber} of load ${stop.internalId}` +
+          (isOverride ? ` via "Check in anyway"${args.overrideReason ? ` — ${args.overrideReason}` : ''}` : '') +
+          ' (possible wrong facility pin)',
+        orgId: driver.organizationId,
+        context: {
+          stopId: args.stopId,
+          loadInternalId: stop.internalId,
+          distanceMeters: distanceFromStop !== undefined ? Math.round(distanceFromStop) : null,
+        },
+      });
+    }
 
     // Transition the matching leg into the active state on first check-in.
     // Idempotent: already-ACTIVE legs are untouched. Only stamps sessionId
