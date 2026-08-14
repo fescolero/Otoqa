@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 import { formatPhoneNumber, getPhoneLink } from '@/lib/format-phone';
 
@@ -1314,7 +1315,11 @@ function DriverLoadsTab({
  * payload (from / to / reason / note / effectiveDate) into `metadata`.
  */
 function DriverStatusHistoryCard({ driverId }: { driverId: Id<'drivers'> }) {
-  const log = useQuery(api.auditLog.getEntityAuditLog, {
+  // This card is mounted unconditionally with the Overview tab, so a plain
+  // `useQuery` fires before the Convex auth handshake completes.
+  // `getEntityAuditLog` scopes itself with `requireCallerOrgId`, which throws
+  // ConvexError('Unauthenticated') on a tokenless call — gate it instead.
+  const log = useAuthQuery(api.auditLog.getEntityAuditLog, {
     entityType: 'driver',
     entityId: driverId as unknown as string,
     limit: 50,
