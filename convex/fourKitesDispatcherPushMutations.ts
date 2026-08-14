@@ -1,7 +1,14 @@
 import { v } from 'convex/values';
 import { internalMutation, internalQuery } from './_generated/server';
 import type { Id } from './_generated/dataModel';
-import { parseStopDateTime } from './_helpers/timeUtils';
+// Session-per-leg resolution and the approach-window isolation policy —
+// shared with externalTracking so the push tooling and the partner reads
+// can never drift apart on window math.
+import {
+  resolveLegSession,
+  legPickupAnchorMs,
+  approachFloorMs,
+} from './lib/legTracking';
 
 // ============================================
 // FOURKITES DISPATCHER PUSH — V8-runtime queries and mutations
@@ -573,8 +580,6 @@ export const getFourKitesPushHealth = internalQuery({
 // pings outside the approach window.
 // ============================================
 
-const APPROACH_WINDOW_MS = 30 * 60 * 1000;
-
 export const diagnoseFourKitesPushForLoad = internalQuery({
   args: {
     workosOrgId: v.string(),
@@ -780,7 +785,9 @@ export const diagnoseFourKitesPushForLoad = internalQuery({
     let anyEligiblePing = false;
 
     for (const leg of legs) {
-      // Resolve session for this leg.
+      // Resolve session for this leg — the same two-path rule as
+      // lib/legTracking.resolveLegSession, kept unrolled here so the diag
+      // can report WHICH path resolved (sessionIdOnLeg vs open session).
       let resolvedSessionId: any = leg.sessionId ?? null;
       let driverOpenSessionId: any = undefined;
       if (!resolvedSessionId && leg.driverId) {
@@ -794,29 +801,14 @@ export const diagnoseFourKitesPushForLoad = internalQuery({
         resolvedSessionId = openSession?._id ?? null;
       }
 
-      // Pickup anchor.
-      let pickupAnchorMs: number | undefined = leg.scheduledStartMs;
-      let startStopWindowParsedMs: number | undefined;
-      if (pickupAnchorMs === undefined) {
-        const startStop = await ctx.db.get(leg.startStopId);
-        if (startStop?.windowBeginDate && startStop?.windowBeginTime) {
-          const combined = startStop.windowBeginTime.includes('T')
-            ? startStop.windowBeginTime
-            : `${startStop.windowBeginDate}T${startStop.windowBeginTime}`;
-          const parsed = new Date(combined).getTime();
-          if (!isNaN(parsed)) {
-            startStopWindowParsedMs = parsed;
-            pickupAnchorMs = parsed;
-          }
-        }
-      }
-      const approachFloorMs =
-        pickupAnchorMs !== undefined
-          ? pickupAnchorMs - APPROACH_WINDOW_MS
-          : undefined;
+      // Pickup anchor + approach floor via the shared policy.
+      const anchorMs = await legPickupAnchorMs(ctx, leg);
+      const startStopWindowParsedMs =
+        leg.scheduledStartMs === undefined && anchorMs !== null ? anchorMs : undefined;
+      const legApproachFloorMs = approachFloorMs(anchorMs) ?? undefined;
       const secondsUntilApproachOpens =
-        approachFloorMs !== undefined
-          ? Math.floor((approachFloorMs - now) / 1000)
+        legApproachFloorMs !== undefined
+          ? Math.floor((legApproachFloorMs - now) / 1000)
           : undefined;
 
       // Session ping count + latest + source breakdown.
@@ -835,8 +827,8 @@ export const diagnoseFourKitesPushForLoad = internalQuery({
         : undefined;
       const sessionLatestPingPassesApproachFloor =
         sessionLatestPingRecordedAtMs !== undefined &&
-        (approachFloorMs === undefined ||
-          sessionLatestPingRecordedAtMs >= approachFloorMs);
+        (legApproachFloorMs === undefined ||
+          sessionLatestPingRecordedAtMs >= legApproachFloorMs);
       const sessionPingSources = { mobile: 0, samsara: 0, unknown: 0 };
       let sessionSamsaraEarliestMs: number | undefined = undefined;
       let sessionSamsaraLatestMs: number | undefined = undefined;
@@ -905,7 +897,7 @@ export const diagnoseFourKitesPushForLoad = internalQuery({
         resolvedSessionId: resolvedSessionId ?? undefined,
         scheduledStartMs: leg.scheduledStartMs,
         startStopWindowParsedMs,
-        approachFloorMs,
+        approachFloorMs: legApproachFloorMs,
         secondsUntilApproachOpens,
         sessionPingCount,
         sessionLatestPingRecordedAtMs,
@@ -1159,7 +1151,6 @@ export const listLoadsInApproachWindow = internalQuery({
     }),
   ),
   handler: async (ctx, args) => {
-    const APPROACH_WINDOW_MS = 30 * 60 * 1000;
     const now = Date.now();
 
     const loads = await ctx.db
@@ -1200,19 +1191,11 @@ export const listLoadsInApproachWindow = internalQuery({
       legs.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
       const firstLeg = legs[0];
 
-      // Pickup anchor (denormalized scheduledStartMs, fall back to stop).
-      let pickupAnchorMs: number | undefined = firstLeg.scheduledStartMs;
-      if (pickupAnchorMs === undefined) {
-        const startStop = await ctx.db.get(firstLeg.startStopId);
-        if (startStop?.windowBeginDate && startStop?.windowBeginTime) {
-          const parsed = parseStopDateTime(
-            startStop.windowBeginDate,
-            startStop.windowBeginTime,
-          );
-          if (parsed !== null) pickupAnchorMs = parsed;
-        }
-      }
-      if (pickupAnchorMs === undefined) continue;
+      // Pickup anchor via the shared policy (denormalized scheduledStartMs,
+      // fall back to the stop's parsed window).
+      const anchorMs = await legPickupAnchorMs(ctx, firstLeg);
+      if (anchorMs === null) continue;
+      const pickupAnchorMs = anchorMs;
 
       const minutesUntilPickup = (pickupAnchorMs - now) / 60000;
       // In or near the approach window: pickup is within the next 30 min,
@@ -1220,24 +1203,12 @@ export const listLoadsInApproachWindow = internalQuery({
       // perspective — drivers running late are common).
       if (minutesUntilPickup < -30 || minutesUntilPickup > 30) continue;
 
-      const approachFloorMs = pickupAnchorMs - APPROACH_WINDOW_MS;
+      const legApproachFloorMs = approachFloorMs(anchorMs)!;
 
-      // Resolve session: leg.sessionId if set, else driver's open session.
-      let resolvedSessionId: Id<'driverSessions'> | undefined =
-        firstLeg.sessionId ?? undefined;
-      let hasActiveSession = !!resolvedSessionId;
-      if (!resolvedSessionId && firstLeg.driverId) {
-        const openSession = await ctx.db
-          .query('driverSessions')
-          .withIndex('by_driver_status', (q) =>
-            q.eq('driverId', firstLeg.driverId!).eq('status', 'active'),
-          )
-          .first();
-        if (openSession) {
-          resolvedSessionId = openSession._id;
-          hasActiveSession = true;
-        }
-      }
+      // Session for the leg — stamped, else the driver's open session.
+      const session = await resolveLegSession(ctx, firstLeg);
+      const resolvedSessionId = session?._id;
+      const hasActiveSession = !!session;
 
       // Latest eligible ping on that session (recorded >= approachFloor).
       let latestEligiblePingMs: number | undefined = undefined;
@@ -1245,7 +1216,7 @@ export const listLoadsInApproachWindow = internalQuery({
         const latest = await ctx.db
           .query('driverLocations')
           .withIndex('by_session_time', (q: any) =>
-            q.eq('sessionId', resolvedSessionId).gte('recordedAt', approachFloorMs),
+            q.eq('sessionId', resolvedSessionId).gte('recordedAt', legApproachFloorMs),
           )
           .order('desc')
           .first();
@@ -1287,7 +1258,7 @@ export const listLoadsInApproachWindow = internalQuery({
         trackingStatus: load.trackingStatus,
         pickupAtMs: pickupAnchorMs,
         minutesUntilPickup,
-        approachFloorMs,
+        approachFloorMs: legApproachFloorMs,
         driverId: firstLeg.driverId,
         hasActiveSession,
         resolvedSessionId,
@@ -1447,8 +1418,6 @@ export const findFourKitesLoadsWithFallbackOrderNumber = internalQuery({
 // dropped without affecting runtime push behavior.
 // ============================================
 
-const APPROACH_WINDOW_MS_RECON = 30 * 60 * 1000;
-
 export const getPushHistoryReconstructionInputs = internalQuery({
   args: {
     workosOrgId: v.string(),
@@ -1536,35 +1505,15 @@ export const getPushHistoryReconstructionInputs = internalQuery({
     let anyLegOngoing = false;
 
     for (const leg of legRows) {
-      let resolvedSessionId: any = leg.sessionId ?? undefined;
-      if (!resolvedSessionId && leg.driverId) {
-        const openSession = await ctx.db
-          .query('driverSessions')
-          .withIndex('by_driver_status', (q) =>
-            q.eq('driverId', leg.driverId!).eq('status', 'active'),
-          )
-          .first();
-        resolvedSessionId = openSession?._id ?? undefined;
-      }
+      const session = await resolveLegSession(ctx, leg);
+      const resolvedSessionId = session?._id;
 
-      let pickupAnchorMs: number | undefined = leg.scheduledStartMs;
-      if (pickupAnchorMs === undefined) {
-        const startStop = await ctx.db.get(leg.startStopId);
-        if (startStop?.windowBeginDate && startStop?.windowBeginTime) {
-          const parsed = parseStopDateTime(
-            startStop.windowBeginDate,
-            startStop.windowBeginTime,
-          );
-          if (parsed !== null) pickupAnchorMs = parsed;
-        }
-      }
-      const approachFloorMs =
-        pickupAnchorMs !== undefined
-          ? pickupAnchorMs - APPROACH_WINDOW_MS_RECON
-          : 0;
+      // No resolvable anchor → no floor (0), preserving the recon's
+      // legacy include-everything behavior for un-backfilled legs.
+      const legApproachFloorMs = approachFloorMs(await legPickupAnchorMs(ctx, leg)) ?? 0;
 
-      if (approachFloorMs < earliestApproachFloor) {
-        earliestApproachFloor = approachFloorMs;
+      if (legApproachFloorMs < earliestApproachFloor) {
+        earliestApproachFloor = legApproachFloorMs;
       }
       if (leg.endedAt !== undefined && leg.endedAt > latestLegEnd) {
         latestLegEnd = leg.endedAt;
@@ -1575,7 +1524,7 @@ export const getPushHistoryReconstructionInputs = internalQuery({
       legs.push({
         legId: leg._id,
         legStatus: leg.status,
-        approachFloorMs,
+        approachFloorMs: legApproachFloorMs,
         legStartedAt: leg.startedAt,
         legEndedAt: leg.endedAt,
         resolvedSessionId,

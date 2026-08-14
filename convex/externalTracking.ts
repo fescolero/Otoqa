@@ -1,15 +1,13 @@
 import { v } from 'convex/values';
 import { internalQuery } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
-import { parseStopDateTime } from './_helpers/timeUtils';
-
-// Approach window: how far before the leg's pickup appointment partner
-// reads are allowed to surface session pings. Caps the otherwise-unbounded
-// "since session start" window so a driver who started shift hours before
-// pickup doesn't leak unrelated pre-approach pings (other loads, deadhead,
-// yard moves) to a broker querying this load. Tighter than the FourKites
-// 2–4h convention — partners only need to see the truck *arriving*.
-const APPROACH_WINDOW_MS = 30 * 60 * 1000;
+// Session-per-leg resolution and the approach-window isolation policy
+// live in lib/legTracking — shared with the FourKites push tooling.
+import {
+  resolveLegSession,
+  legPickupAnchorMs,
+  approachFloorMs,
+} from './lib/legTracking';
 
 // ============================================
 // EXTERNAL TRACKING API - DATA LAYER
@@ -288,65 +286,23 @@ export const getPositions = internalQuery({
         .withIndex('by_load', (q: any) => q.eq('loadId', loadIdId))
         .collect();
 
-      // 2) Build per-session windows.
-      //    leg.sessionId is stamped on FIRST check-in. Three cases:
-      //      a) leg.sessionId present (post-check-in) — use it directly.
-      //      b) leg.sessionId absent but leg.driverId set (pre-check-in
-      //         on a dispatched load) — fall back to the driver's
-      //         currently-open session so partners see approach pings
-      //         BEFORE the driver taps Check In. The approach-window cap
-      //         below (pickupAppt - APPROACH_WINDOW_MS) prevents any
-      //         leak of unrelated earlier-shift pings.
-      //      c) leg.sessionId absent AND leg.driverId absent — truly
-      //         orphan leg or legacy pre-Phase-1 data; load-tagged read
-      //         below picks up anything historical.
+      // 2) Build per-session windows. Session-per-leg resolution and the
+      //    approach-window policy are lib/legTracking's (see its doc
+      //    comments for the three resolution cases). A leg with no
+      //    resolvable pickup anchor falls back to session.startedAt as
+      //    the floor — preserves legacy behavior so partners don't lose
+      //    all pings on un-backfilled or detour-only legs.
       const sessionWindows: Array<{
         sessionId: Id<'driverSessions'>;
         from: number;
         to: number;
       }> = [];
       for (const leg of legs) {
-        let session: Doc<'driverSessions'> | null = null;
-
-        if (leg.sessionId) {
-          session = await ctx.db.get(leg.sessionId);
-        } else if (leg.driverId) {
-          // Pre-check-in fallback — find the driver's currently-open
-          // session. by_driver_status index keyed on (driverId, status).
-          session = await ctx.db
-            .query('driverSessions')
-            .withIndex('by_driver_status', (q: any) =>
-              q.eq('driverId', leg.driverId!).eq('status', 'active'),
-            )
-            .first();
-        }
-
+        const session = await resolveLegSession(ctx, leg);
         if (!session) continue;
 
-        // Resolve this leg's pickup appointment. Prefer the denormalized
-        // scheduledStartMs cache; fall back to live read for legacy rows
-        // not yet backfilled (see schema note on dispatchLegs).
-        let pickupAnchorMs: number | null = leg.scheduledStartMs ?? null;
-        if (pickupAnchorMs === null) {
-          const startStop = await ctx.db.get(leg.startStopId);
-          if (startStop) {
-            pickupAnchorMs = parseStopDateTime(
-              startStop.windowBeginDate,
-              startStop.windowBeginTime,
-            );
-          }
-        }
-
-        // Approach-window floor: at most APPROACH_WINDOW_MS before pickup.
-        // No anchor (no scheduledStartMs and unparseable stop window) falls
-        // back to session.startedAt — preserves legacy behavior so partners
-        // don't lose all pings on un-backfilled or detour-only legs.
-        const approachFloor =
-          pickupAnchorMs !== null
-            ? pickupAnchorMs - APPROACH_WINDOW_MS
-            : Number.NEGATIVE_INFINITY;
-
-        const from = Math.max(since, session.startedAt, approachFloor);
+        const floor = approachFloorMs(await legPickupAnchorMs(ctx, leg));
+        const from = Math.max(since, session.startedAt, floor ?? Number.NEGATIVE_INFINITY);
         const to = Math.min(effectiveUntil, session.endedAt ?? effectiveUntil);
         if (from > to) continue;
         sessionWindows.push({ sessionId: session._id, from, to });
@@ -480,34 +436,17 @@ async function resolveLatestPositionForLoad(
 
     const sessionLatestArr = await Promise.all(
       legs.map(async (leg: any) => {
-        let sessionId: Id<'driverSessions'> | null = leg.sessionId ?? null;
-        if (!sessionId && leg.driverId) {
-          const openSession = await ctx.db
-            .query('driverSessions')
-            .withIndex('by_driver_status', (q: any) =>
-              q.eq('driverId', leg.driverId!).eq('status', 'active'),
-            )
-            .first();
-          sessionId = openSession?._id ?? null;
-        }
-        if (!sessionId) return null;
+        const session = await resolveLegSession(ctx, leg);
+        if (!session) return null;
+        const sessionId = session._id;
 
-        let pickupAnchorMs: number | null = leg.scheduledStartMs ?? null;
-        if (pickupAnchorMs === null) {
-          const startStop = await ctx.db.get(leg.startStopId);
-          if (startStop) {
-            pickupAnchorMs = parseStopDateTime(
-              startStop.windowBeginDate,
-              startStop.windowBeginTime,
-            );
-          }
-        }
-        const approachFloor =
-          pickupAnchorMs !== null ? pickupAnchorMs - APPROACH_WINDOW_MS : 0;
+        // No resolvable anchor → no floor (gte 0), matching the window
+        // query's session-start fallback for legacy legs.
+        const floor = approachFloorMs(await legPickupAnchorMs(ctx, leg)) ?? 0;
         return ctx.db
           .query('driverLocations')
           .withIndex('by_session_time', (q: any) =>
-            q.eq('sessionId', sessionId!).gte('recordedAt', approachFloor),
+            q.eq('sessionId', sessionId).gte('recordedAt', floor),
           )
           .order('desc')
           .first();
