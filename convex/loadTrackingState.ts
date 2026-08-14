@@ -84,11 +84,103 @@ async function getActiveSessionForDriver(
     .first();
 }
 
+// ---------------------------------------------------------------------------
+// Watch builders — the three primitives every frontier writer composes.
+// Check-in, pre-trip arming, and the evaluator's auto-advance all target
+// stops and snapshot fences the same way; these are the single home for
+// that logic.
+// ---------------------------------------------------------------------------
+
+/**
+ * The next stop a geofence arrival watch should aim at: lowest-sequence
+ * stop (after `afterSequence`, when given) that is not a detour, not
+ * canceled, not already checked in, and has coordinates. Undefined when
+ * nothing qualifies (end of trip).
+ */
+export function nextArrivalTarget(
+  stops: Doc<'loadStops'>[],
+  afterSequence?: number
+): Doc<'loadStops'> | undefined {
+  return stops
+    .filter(
+      (s) =>
+        (afterSequence === undefined || s.sequenceNumber > afterSequence) &&
+        s.stopType !== 'DETOUR' &&
+        s.status !== 'Canceled' &&
+        s.checkedInAt === undefined &&
+        s.latitude !== undefined &&
+        s.longitude !== undefined
+    )
+    .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
+}
+
+/**
+ * Arrival-watch fields aimed at `target` (cleared fields when undefined —
+ * nothing left to approach). Snapshots the target's facility fence so the
+ * evaluator stays read-free per ping.
+ */
+export async function buildArrivalWatch(
+  ctx: QueryCtx | MutationCtx,
+  target: Doc<'loadStops'> | undefined
+): Promise<{
+  currentStopSequenceNumber: number | undefined;
+  currentStopLat: number | undefined;
+  currentStopLng: number | undefined;
+  currentStopArrivalRadiusMeters: number | undefined;
+  currentStopPolygon: { lat: number; lng: number }[] | undefined;
+  approachingFired: boolean;
+  arrivedFired: boolean;
+}> {
+  const fence = target ? await facilityFence(ctx, target) : {};
+  return {
+    currentStopSequenceNumber: target?.sequenceNumber,
+    currentStopLat: target?.latitude,
+    currentStopLng: target?.longitude,
+    currentStopArrivalRadiusMeters: fence.radiusMeters,
+    currentStopPolygon: fence.polygon,
+    approachingFired: false,
+    arrivedFired: false,
+  };
+}
+
+/**
+ * Departure-watch object for `stop`, freshly armed at `armedAt`, with the
+ * exit boundary snapshotted from the stop's facility fence. Polygon
+ * hysteresis mirrors the circle's: the exit boundary is the arrival
+ * polygon pushed out by the same delta the exit ring adds to the arrival
+ * ring (ratio − 1 × radius, defaulting the radius base). Undefined for a
+ * coordinate-less stop (possible on detours) — the watch clears rather
+ * than staying aimed at the previous stop.
+ */
+export async function buildDepartureWatch(
+  ctx: QueryCtx | MutationCtx,
+  stop: Doc<'loadStops'>,
+  armedAt: number
+): Promise<NonNullable<Doc<'loadTrackingState'>['departureWatch']> | undefined> {
+  if (stop.latitude === undefined || stop.longitude === undefined) return undefined;
+  const fence = await facilityFence(ctx, stop);
+  const exitPolygon = fence.polygon
+    ? expandPolygon(
+        fence.polygon,
+        (EXIT_RADIUS_RATIO - 1) * (fence.radiusMeters ?? INNER_RING_METERS),
+      )
+    : undefined;
+  return {
+    stopSequenceNumber: stop.sequenceNumber,
+    lat: stop.latitude,
+    lng: stop.longitude,
+    armedAt,
+    exitRadiusMeters: exitRadiusFor(fence.radiusMeters),
+    exitPolygon,
+  };
+}
+
 /**
  * Advance the frontier for a check-in at `stop` (creates the row on the
  * load's first check-in):
- *   - arrival watch → the next non-detour, non-canceled stop with
- *     coordinates after this one (absent when this was the final stop);
+ *   - arrival watch → the next unvisited, non-detour, non-canceled stop
+ *     with coordinates after this one (absent when this was the final
+ *     stop);
  *   - departure watch → the checked-in stop itself (when it has
  *     coordinates), freshly armed;
  *   - sessionId/driverId re-stamped, so events after a handoff attribute to
@@ -97,12 +189,10 @@ async function getActiveSessionForDriver(
  *     the legacy primaryDriverId access path) revives the row as a normal
  *     mid-load frontier instead of leaving it flagged for deletion.
  *
- * Facility radius overrides (facilities.radiusMeters — the same value the
- * manual check-in geofence honors) are snapshotted onto the watches here:
- * the NEXT stop's radius shapes the arrival ring, the checked-in stop's
- * radius shapes the exit ring (× EXIT_RADIUS_RATIO). Snapshot-at-check-in
- * keeps the evaluator read-free per ping and makes each leg's thresholds
- * stable even if a dispatcher retunes the facility mid-drive.
+ * Facility fences (the same values the manual check-in geofence honors)
+ * are snapshotted onto the watches by the builders above. Snapshot-at-
+ * check-in keeps the evaluator read-free per ping and makes each leg's
+ * thresholds stable even if a dispatcher retunes the facility mid-drive.
  */
 export async function setFrontierOnCheckIn(
   ctx: MutationCtx,
@@ -120,53 +210,15 @@ export async function setFrontierOnCheckIn(
     .query('loadStops')
     .withIndex('by_load', (q) => q.eq('loadId', stop.loadId))
     .collect();
-  const upcoming = siblingStops
-    .filter(
-      (s) =>
-        s.sequenceNumber > stop.sequenceNumber &&
-        s.stopType !== 'DETOUR' &&
-        s.status !== 'Canceled' &&
-        s.latitude !== undefined &&
-        s.longitude !== undefined
-    )
-    .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
 
-  const [upcomingFence, thisStopFence] = await Promise.all([
-    facilityFence(ctx, upcoming),
-    facilityFence(ctx, stop),
+  const [arrivalWatch, departureWatch] = await Promise.all([
+    buildArrivalWatch(ctx, nextArrivalTarget(siblingStops, stop.sequenceNumber)),
+    buildDepartureWatch(ctx, stop, args.now),
   ]);
 
-  // Polygon hysteresis mirrors the circle's: the exit boundary is the
-  // arrival polygon pushed out by the same delta the exit ring adds to
-  // the arrival ring (ratio − 1 × radius, defaulting the radius base).
-  const exitPolygon = thisStopFence.polygon
-    ? expandPolygon(
-        thisStopFence.polygon,
-        (EXIT_RADIUS_RATIO - 1) * (thisStopFence.radiusMeters ?? INNER_RING_METERS),
-      )
-    : undefined;
-
   const watches = {
-    currentStopSequenceNumber: upcoming?.sequenceNumber,
-    currentStopLat: upcoming?.latitude,
-    currentStopLng: upcoming?.longitude,
-    currentStopArrivalRadiusMeters: upcomingFence.radiusMeters,
-    currentStopPolygon: upcomingFence.polygon,
-    approachingFired: false,
-    arrivedFired: false,
-    // A coordinate-less stop (possible on detours) clears the departure
-    // watch rather than leaving it aimed at the previous stop.
-    departureWatch:
-      stop.latitude !== undefined && stop.longitude !== undefined
-        ? {
-            stopSequenceNumber: stop.sequenceNumber,
-            lat: stop.latitude,
-            lng: stop.longitude,
-            armedAt: args.now,
-            exitRadiusMeters: exitRadiusFor(thisStopFence.radiusMeters),
-            exitPolygon,
-          }
-        : undefined,
+    ...arrivalWatch,
+    departureWatch,
     loadCompleted: undefined,
     // A pre-trip row (armed at session start toward stop 1) graduates to a
     // normal mid-load frontier on first check-in.
@@ -278,16 +330,7 @@ export async function armPreTripWatchForDriver(
     .query('loadStops')
     .withIndex('by_load', (q) => q.eq('loadId', nextLoadId))
     .collect();
-  const target = stops
-    .filter(
-      (s) =>
-        s.stopType !== 'DETOUR' &&
-        s.status !== 'Canceled' &&
-        s.checkedInAt === undefined &&
-        s.latitude !== undefined &&
-        s.longitude !== undefined
-    )
-    .sort((a, b) => a.sequenceNumber - b.sequenceNumber)[0];
+  const target = nextArrivalTarget(stops);
   if (!target) return;
 
   const existing = await getByLoadId(ctx, nextLoadId);
@@ -307,17 +350,10 @@ export async function armPreTripWatchForDriver(
     return;
   }
 
-  const fence = await facilityFence(ctx, target);
   const watch = {
     sessionId: session._id,
     driverId: session.driverId,
-    currentStopSequenceNumber: target.sequenceNumber,
-    currentStopLat: target.latitude,
-    currentStopLng: target.longitude,
-    currentStopArrivalRadiusMeters: fence.radiusMeters,
-    currentStopPolygon: fence.polygon,
-    approachingFired: false,
-    arrivedFired: false,
+    ...(await buildArrivalWatch(ctx, target)),
     departureWatch: undefined,
     loadCompleted: undefined,
     preTrip: true,

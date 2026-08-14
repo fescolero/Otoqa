@@ -1722,6 +1722,15 @@ export default defineSchema({
     checkoutLongitude: v.optional(v.number()),
     dwellTime: v.optional(v.number()), // Minutes
 
+    // Geofence auto-advance fallback (ms epoch). Stamped by the grace
+    // check when the fence detected arrival/departure but the driver never
+    // tapped within the grace window — the GPS-attributed record that
+    // keeps the load's progress live for dispatch without ever writing
+    // into the manual checkedInAt/checkedOutAt fields. Missed taps also
+    // log to the platform console (geofence.missed_checkin/_checkout).
+    autoArrivedAt: v.optional(v.number()),
+    autoDepartedAt: v.optional(v.number()),
+
     // Check-in geofence audit (dispatch-facing; deliberately NOT projected
     // to mobile). Distance from the stop pin at check-in, and whether it
     // exceeded the inner limit under soft mode (see lib/geo.ts
