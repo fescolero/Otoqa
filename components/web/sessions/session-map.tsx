@@ -33,6 +33,10 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import {
+  useGoogleMapsAuthFailure,
+  GOOGLE_MAPS_AUTH_FAILURE_MESSAGE,
+} from '@/lib/google-maps-auth-failure';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { snapPathToRoads } from '@/lib/googleRoads';
 import {
@@ -179,10 +183,14 @@ export function SessionMap(props: Props) {
   const [showPings, setShowPings] = React.useState(false);
   const mapId = useThemedMapId();
   const colorScheme = useMapColorScheme();
+  const authFailed = useGoogleMapsAuthFailure();
   if (!apiKey) {
     return (
       <MapError message="Google Maps API key is missing. Set GOOGLE_MAPS_API_KEY." />
     );
+  }
+  if (authFailed) {
+    return <MapError message={GOOGLE_MAPS_AUTH_FAILURE_MESSAGE} />;
   }
   return (
     <div className="relative h-full w-full">

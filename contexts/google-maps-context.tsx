@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, ReactNode, useMemo } from 'react';
 import { setGoogleMapsApiKey } from '@/lib/googlePlaces';
+import { installGoogleMapsAuthFailureHandler } from '@/lib/google-maps-auth-failure';
 
 interface GoogleMapsContextType {
   googleMapsApiKey: string | undefined;
@@ -20,6 +21,10 @@ export function GoogleMapsProvider({
 
   useEffect(() => {
     setGoogleMapsApiKey(apiKey);
+    // Must be installed before the Maps script loads (it loads lazily on
+    // first map/autocomplete use) so key/billing failures surface in the
+    // UI instead of a silently blank map.
+    installGoogleMapsAuthFailureHandler();
   }, [apiKey]);
 
   return (

@@ -14,6 +14,10 @@ import {
 } from '@vis.gl/react-google-maps';
 import { cn } from '@/lib/utils';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import {
+  useGoogleMapsAuthFailure,
+  GOOGLE_MAPS_AUTH_FAILURE_MESSAGE,
+} from '@/lib/google-maps-auth-failure';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { MapPin, Route, CheckCircle2 } from 'lucide-react';
 import { format } from 'date-fns';
@@ -1141,6 +1145,7 @@ export function LiveRouteMap({
   isInTransit = false,
 }: LiveRouteMapProps) {
   const apiKey = useGoogleMapsKey();
+  const authFailed = useGoogleMapsAuthFailure();
   const mapId = useThemedMapId();
   const colorScheme = useMapColorScheme();
   // The hook only ever resolves LIGHT or DARK (FOLLOW_SYSTEM is in the type
@@ -1357,14 +1362,16 @@ export function LiveRouteMap({
     );
   }
 
-  // No API key
-  if (!apiKey) {
+  // No API key, or Google rejected the key (billing disabled, key invalid…)
+  if (!apiKey || authFailed) {
     return (
       <div className="rounded-lg overflow-hidden bg-slate-100" style={{ height }}>
         <div className="flex items-center justify-center h-full">
           <div className="flex flex-col items-center gap-2">
             <MapPin className="w-8 h-8 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">Maps API not configured</p>
+            <p className="text-sm text-muted-foreground max-w-sm px-4 text-center">
+              {authFailed ? GOOGLE_MAPS_AUTH_FAILURE_MESSAGE : 'Maps API not configured'}
+            </p>
           </div>
         </div>
       </div>

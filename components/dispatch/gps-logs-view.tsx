@@ -13,6 +13,10 @@ import {
   AdvancedMarker,
 } from '@vis.gl/react-google-maps';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import {
+  useGoogleMapsAuthFailure,
+  GOOGLE_MAPS_AUTH_FAILURE_MESSAGE,
+} from '@/lib/google-maps-auth-failure';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -529,6 +533,7 @@ function DiagnosticTable({
 
 export function GpsLogsView({ loadId, organizationId }: GpsLogsViewProps) {
   const apiKey = useGoogleMapsKey();
+  const authFailed = useGoogleMapsAuthFailure();
   const mapId = useThemedMapId();
   const colorScheme = useMapColorScheme();
   const tableRef = useRef<HTMLDivElement>(null);
@@ -706,8 +711,9 @@ export function GpsLogsView({ loadId, organizationId }: GpsLogsViewProps) {
         </div>
       )}
 
-      {/* Map */}
-      {apiKey ? (
+      {/* Map — hidden when the key is missing or Google rejected it
+          (billing disabled, key invalid…) */}
+      {apiKey && !authFailed ? (
         <Card className="overflow-hidden !p-0">
           <div className="relative" style={{ height: '420px' }}>
             <APIProvider apiKey={apiKey}>
@@ -783,7 +789,9 @@ export function GpsLogsView({ loadId, organizationId }: GpsLogsViewProps) {
         <Card className="flex items-center justify-center py-16">
           <div className="text-center">
             <MapPin className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
-            <p className="text-sm text-muted-foreground">Maps API not configured</p>
+            <p className="text-sm text-muted-foreground max-w-sm px-4">
+              {authFailed ? GOOGLE_MAPS_AUTH_FAILURE_MESSAGE : 'Maps API not configured'}
+            </p>
           </div>
         </Card>
       )}

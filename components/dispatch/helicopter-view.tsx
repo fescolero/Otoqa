@@ -11,6 +11,10 @@ import {
   useMap,
 } from '@vis.gl/react-google-maps';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import {
+  useGoogleMapsAuthFailure,
+  GOOGLE_MAPS_AUTH_FAILURE_MESSAGE,
+} from '@/lib/google-maps-auth-failure';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -212,6 +216,7 @@ export function HelicopterView({
   onDriverSelect,
 }: HelicopterViewProps) {
   const apiKey = useGoogleMapsKey();
+  const authFailed = useGoogleMapsAuthFailure();
   const mapId = useThemedMapId();
   const colorScheme = useMapColorScheme();
   const [selectedDriverId, setSelectedDriverId] = useState<Id<'drivers'> | null>(null);
@@ -270,14 +275,16 @@ export function HelicopterView({
     );
   }
 
-  // No API key
-  if (!apiKey) {
+  // No API key, or Google rejected the key (billing disabled, key invalid…)
+  if (!apiKey || authFailed) {
     return (
       <div className="rounded-lg border overflow-hidden" style={{ height }}>
         <div className="flex items-center justify-center h-full bg-muted/50">
           <div className="flex flex-col items-center gap-2">
             <MapPin className="w-8 h-8 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">Google Maps API not configured</p>
+            <p className="text-sm text-muted-foreground max-w-sm px-4 text-center">
+              {authFailed ? GOOGLE_MAPS_AUTH_FAILURE_MESSAGE : 'Google Maps API not configured'}
+            </p>
           </div>
         </div>
       </div>

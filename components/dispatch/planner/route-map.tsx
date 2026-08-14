@@ -9,6 +9,10 @@ import {
   useMapsLibrary,
 } from '@vis.gl/react-google-maps';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
+import {
+  useGoogleMapsAuthFailure,
+  GOOGLE_MAPS_AUTH_FAILURE_MESSAGE,
+} from '@/lib/google-maps-auth-failure';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 
 interface Stop {
@@ -121,6 +125,7 @@ function StopMarker({ stop }: { stop: Stop }) {
 
 export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
   const apiKey = useGoogleMapsKey();
+  const authFailed = useGoogleMapsAuthFailure();
   const mapId = useThemedMapId();
   const colorScheme = useMapColorScheme();
 
@@ -141,13 +146,15 @@ export function RouteMap({ stops, height = '140px' }: RouteMapProps) {
     };
   }, [validStops]);
 
-  if (!apiKey) {
+  if (!apiKey || authFailed) {
     return (
       <div
         className="flex items-center justify-center bg-slate-100 rounded-md border border-dashed"
         style={{ height }}
       >
-        <p className="text-xs text-muted-foreground">Maps API not configured</p>
+        <p className="text-xs text-muted-foreground max-w-sm px-4 text-center">
+          {authFailed ? GOOGLE_MAPS_AUTH_FAILURE_MESSAGE : 'Maps API not configured'}
+        </p>
       </div>
     );
   }
