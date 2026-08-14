@@ -80,3 +80,44 @@ export async function legPickupAnchorMs(
 export function approachFloorMs(pickupAnchor: number | null): number | null {
   return pickupAnchor !== null ? pickupAnchor - APPROACH_WINDOW_MS : null;
 }
+
+/**
+ * Shift-plausibility window for a driver's PENDING legs. Without it, a
+ * driver on a new session would see (and the pre-trip fence would arm
+ * for) every unfinished assignment they ever had — including legs
+ * scheduled months out and stale ones from shifts that were never
+ * properly closed.
+ *
+ * Window: 2h before the session started (grace for slightly-early loads
+ * the dispatcher queued up) through 18h after (covers a 14h DOT shift
+ * plus buffer). Legs with no plannedStartAt stay in — we can't prove
+ * they're out of range, and they're typically the ones the driver is
+ * about to grab.
+ */
+export const SHIFT_GRACE_BEFORE_MS = 2 * 60 * 60 * 1000;
+export const SHIFT_GRACE_AFTER_MS = 18 * 60 * 60 * 1000;
+
+/**
+ * The PENDING legs that plausibly belong to a shift started at
+ * `sessionStartedAt`, sorted soonest-first (undefined plannedStartAt
+ * last). Index 0 is "the driver's next load" — the SAME answer for the
+ * mobile up-next queue and the pre-trip geofence arm, by construction.
+ */
+export function pendingLegsForShift(
+  pendingLegs: Doc<'dispatchLegs'>[],
+  sessionStartedAt: number
+): Doc<'dispatchLegs'>[] {
+  const lowerBound = sessionStartedAt - SHIFT_GRACE_BEFORE_MS;
+  const upperBound = sessionStartedAt + SHIFT_GRACE_AFTER_MS;
+  return pendingLegs
+    .filter(
+      (leg) =>
+        leg.plannedStartAt === undefined ||
+        (leg.plannedStartAt >= lowerBound && leg.plannedStartAt <= upperBound)
+    )
+    .sort(
+      (a, b) =>
+        (a.plannedStartAt ?? Number.POSITIVE_INFINITY) -
+        (b.plannedStartAt ?? Number.POSITIVE_INFINITY)
+    );
+}

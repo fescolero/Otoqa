@@ -2,6 +2,7 @@ import { QueryCtx, MutationCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { exitRadiusFor, EXIT_RADIUS_RATIO, INNER_RING_METERS } from './lib/geo';
 import { expandPolygon } from './lib/polygonGeo';
+import { pendingLegsForShift } from './lib/legTracking';
 
 /**
  * loadTrackingState — per-load geofence frontier.
@@ -244,11 +245,6 @@ export async function setFrontierOnCheckIn(
   }
 }
 
-// Shift-plausibility window for picking the driver's next pending leg —
-// mirrors the upNext filter in driverMobile.getMySessionLoads so the fence
-// arms for the same load the driver sees at the top of their mobile queue.
-const PRETRIP_GRACE_BEFORE_MS = 2 * 60 * 60 * 1000;
-const PRETRIP_GRACE_AFTER_MS = 18 * 60 * 60 * 1000;
 
 /**
  * Pre-trip arming — the session starts the tracking, not the first
@@ -297,23 +293,12 @@ export async function armPreTripWatchForDriver(
   ]);
 
   // A driver actively on a leg has a real frontier (or is about to create
-  // one at check-in); pre-trip watches only exist between loads.
-  let nextLeg: Doc<'dispatchLegs'> | undefined;
-  if (!activeLeg) {
-    const lowerBound = session.startedAt - PRETRIP_GRACE_BEFORE_MS;
-    const upperBound = session.startedAt + PRETRIP_GRACE_AFTER_MS;
-    nextLeg = pendingLegs
-      .filter(
-        (leg) =>
-          leg.plannedStartAt === undefined ||
-          (leg.plannedStartAt >= lowerBound && leg.plannedStartAt <= upperBound)
-      )
-      .sort(
-        (a, b) =>
-          (a.plannedStartAt ?? Number.POSITIVE_INFINITY) -
-          (b.plannedStartAt ?? Number.POSITIVE_INFINITY)
-      )[0];
-  }
+  // one at check-in); pre-trip watches only exist between loads. The
+  // shared shift-window pick guarantees the fence arms for the same load
+  // the driver sees at the top of their mobile up-next queue.
+  const nextLeg: Doc<'dispatchLegs'> | undefined = activeLeg
+    ? undefined
+    : pendingLegsForShift(pendingLegs, session.startedAt)[0];
 
   // Drop stale pre-trip rows: anything armed for a load that is no longer
   // the driver's next. Mid-load and loadCompleted rows are left alone.

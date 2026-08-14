@@ -294,9 +294,9 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   // KPI/margin calc and the LoadPayPlanCard both subscribe, so the figure
   // stays in lockstep with the card through every recalc.
   const payPlanData = useAuthQuery(api.payItems.listForLoad, { loadId: loadId as Id<'loadInformation'> });
-  // Geofence detections for the stops table's fence column (GPS-detected
-  // arrival time next to the manual tap in the "In" column).
-  const geofenceEventsData = useAuthQuery(api.geofenceEvents.listForLoad, {
+  // Geofence detections for the stops table's fence column — the same
+  // per-stop detection-vs-tap join the sessions activity panel uses.
+  const stopTimelineData = useAuthQuery(api.geofenceEvents.stopTimelineForLoad, {
     loadId: loadId as Id<'loadInformation'>,
   });
   // ARRIVED detection per stop sequence — pairs the automatic
@@ -305,17 +305,12 @@ export function LoadDetail({ loadId, organizationId, userId }: LoadDetailProps) 
   // Lives up here with the other hooks: stopCols below sits past the
   // loading early-returns.
   const arrivedBySequence = React.useMemo(() => {
-    const map = new Map<number, { triggeredAt: number; distanceMeters: number }>();
-    for (const e of geofenceEventsData ?? []) {
-      if (e.eventType === 'ARRIVED') {
-        map.set(e.stopSequenceNumber, {
-          triggeredAt: e.triggeredAt,
-          distanceMeters: e.distanceMeters,
-        });
-      }
+    const map = new Map<number, { triggeredAt: number }>();
+    for (const s of stopTimelineData ?? []) {
+      if (s.arrivedAt !== null) map.set(s.sequenceNumber, { triggeredAt: s.arrivedAt });
     }
     return map;
-  }, [geofenceEventsData]);
+  }, [stopTimelineData]);
   const invoiceData = useAuthQuery(api.invoices.getInvoiceByLoad, { loadId: loadId as Id<'loadInformation'> });
   // GPS pings powering the modal's "GPS pings" tab. Uses the detailed
   // query so each row can surface accuracy + the sync-delay between

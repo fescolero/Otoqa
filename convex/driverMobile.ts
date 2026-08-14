@@ -15,6 +15,7 @@ import {
   OVERRIDE_DEMOTION_WINDOW_MS,
 } from './lib/facilityEvidence';
 import { setFrontierOnCheckIn, releaseFrontierOnLoadComplete } from './loadTrackingState';
+import { pendingLegsForShift } from './lib/legTracking';
 import { logSystemEvent } from './lib/systemEvents';
 import { scheduleLegPayRecalc } from './payEngine/legRecalc';
 import { normalizePhoneForMatch } from './_helpers/mobileAuth';
@@ -33,31 +34,15 @@ import { normalizePhoneForMatch } from './_helpers/mobileAuth';
 // uses for ARRIVED) + capped GPS-accuracy allowance; behavior per org via the
 // `checkin_geofence_mode` flag (off | soft | hard, default soft).
 
-// Clerk issuer URL prefix for validating driver tokens
-const CLERK_ISSUER_PREFIX = 'https://clerk.';
-
 /**
  * Helper to extract phone number from Clerk JWT
  * Clerk stores phone in the token claims
  */
 function extractPhoneFromIdentity(identity: {
-  subject: string;
-  tokenIdentifier: string;
-  issuer?: string;
   phoneNumber?: string;
   phone_number?: string;
 }): string | null {
   return identity.phoneNumber || identity.phone_number || null;
-}
-
-/**
- * Verify that the JWT is from Clerk (driver auth), not WorkOS (admin auth)
- * This prevents drivers from accessing admin functions
- */
-function isDriverToken(identity: { issuer?: string }): boolean {
-  if (!identity.issuer) return false;
-  // Clerk issuers start with the Clerk domain
-  return identity.issuer.includes('clerk');
 }
 
 // calculateDistanceMeters lives in convex/lib/geo.ts (imported above).
@@ -74,7 +59,9 @@ export async function resolveAuthenticatedDriver(
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new ConvexError('Unauthenticated');
 
-  const phone = extractPhoneFromIdentity(identity as any);
+  const phone = extractPhoneFromIdentity(
+    identity as { phoneNumber?: string; phone_number?: string },
+  );
   if (!phone) throw new ConvexError('No phone number in identity');
 
   const normalizedPhone = normalizePhoneForMatch(phone);
@@ -500,30 +487,10 @@ export const getSessionLoads = query({
         leg.endedAt <= windowEnd
     );
 
-    // Keep PENDING legs that plausibly belong to this shift. Without this
-    // filter, a driver on a new session sees every unfinished assignment they
-    // ever had — including legs scheduled months out and stale ones from
-    // shifts that were never properly closed.
-    //
-    // Window: 2h before the session started (grace for slightly-early loads
-    // the dispatcher queued up) through 18h after (covers a 14h DOT shift
-    // plus buffer). Legs with no plannedStartAt stay in — we can't prove
-    // they're out of range, and they're typically the ones the driver is
-    // about to grab.
-    const SHIFT_GRACE_BEFORE_MS = 2 * 60 * 60 * 1000;
-    const SHIFT_GRACE_AFTER_MS = 18 * 60 * 60 * 1000;
-    const lowerBound = session.startedAt - SHIFT_GRACE_BEFORE_MS;
-    const upperBound = session.startedAt + SHIFT_GRACE_AFTER_MS;
-    const pendingInShift = pendingLegs.filter((leg) => {
-      if (leg.plannedStartAt === undefined) return true;
-      return leg.plannedStartAt >= lowerBound && leg.plannedStartAt <= upperBound;
-    });
-
-    pendingInShift.sort((a, b) => {
-      const aPlan = a.plannedStartAt ?? Number.POSITIVE_INFINITY;
-      const bPlan = b.plannedStartAt ?? Number.POSITIVE_INFINITY;
-      return aPlan - bPlan;
-    });
+    // Keep PENDING legs that plausibly belong to this shift, soonest
+    // first. Shared with the pre-trip geofence arm (lib/legTracking) so
+    // the fence always targets the same load the driver sees up next.
+    const pendingInShift = pendingLegsForShift(pendingLegs, session.startedAt);
 
     // Enrich a leg with its load + stops for display. Matches the shape
     // getMyAssignedLoads returns so the mobile load-card renderer can be
