@@ -162,7 +162,12 @@ export async function requirePlatformStaff(ctx: AnyCtx): Promise<PlatformStaffId
     );
   }
 
-  const allowlist = (process.env.STAFF_EMAIL_ALLOWLIST ?? '')
+  // Annotated because the Expo app tsconfigs (which compile convex/ via their
+  // own `include`) have no @types/node, so `process.env.X` widens to `any`
+  // there and the `.map` callback below becomes an implicit-any error under
+  // `strict`. Pinning the type here keeps one source of truth for both roots.
+  const allowlistRaw: string = process.env.STAFF_EMAIL_ALLOWLIST ?? '';
+  const allowlist = allowlistRaw
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
