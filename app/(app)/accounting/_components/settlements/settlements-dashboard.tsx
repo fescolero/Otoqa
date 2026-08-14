@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useMemo, useState, startTransition } from 'react';
-import { useMutation, usePaginatedQuery, useConvex } from 'convex/react';
+import { useMutation, usePaginatedQuery, useConvex, useConvexAuth } from 'convex/react';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { toast } from 'sonner';
@@ -209,9 +209,16 @@ export function SettlementsDashboard({ party, organizationId, userId }: Settleme
   );
   const activeData = isCarrier ? carrierActive : driverActive;
 
+  // The stats/active reads above go through `useAuthQuery`, which holds them
+  // until the Convex auth handshake finishes. `useAuthQuery` has no paginated
+  // equivalent, so the two settled reads gate on the same signal inline —
+  // `listSettled` proves org ownership with `assertCallerOwnsOrg` and throws
+  // ConvexError('Unauthenticated') if it runs before the client has a token,
+  // which is exactly what a cold load straight onto a settled view does.
+  const { isAuthenticated } = useConvexAuth();
   const driverSettled = usePaginatedQuery(
     R ? R.listSettled : api.driverSettlements.listSettled,
-    !isCarrier && settledStatus && settledStatus !== 'DISPUTED'
+    isAuthenticated && !isCarrier && settledStatus && settledStatus !== 'DISPUTED'
       ? {
           workosOrgId: organizationId,
           status: settledStatus as 'APPROVED' | 'PAID' | 'VOID',
@@ -222,7 +229,7 @@ export function SettlementsDashboard({ party, organizationId, userId }: Settleme
   );
   const carrierSettled = usePaginatedQuery(
     R ? R.carrierListSettled : api.carrierSettlements.listSettled,
-    isCarrier && settledStatus
+    isAuthenticated && isCarrier && settledStatus
       ? {
           workosOrgId: organizationId,
           status: settledStatus,
