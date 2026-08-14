@@ -14,8 +14,9 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { notFound, useParams } from 'next/navigation';
-import { useQuery, useMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import type { Id, Doc } from '@/convex/_generated/dataModel';
 import { SettingsHeader } from '@/components/web/settings-header';
 import {
@@ -50,7 +51,12 @@ export default function PayProfileEditorPage() {
   const [activeTab, setActiveTab] = React.useState<TabId>('rates');
   const [addLineOpen, setAddLineOpen] = React.useState(false);
 
-  const profile = useQuery(api.payProfiles.get, profileId ? { profileId } : 'skip');
+  // `profileId` comes straight off the URL, so a plain `useQuery` fires on the
+  // very first render — before the Convex auth handshake has produced a token.
+  // Every payProfiles read derives its org from the caller's identity, so the
+  // server then throws ConvexError('Unauthenticated'). `useAuthQuery` holds the
+  // query at 'skip' until the token is established.
+  const profile = useAuthQuery(api.payProfiles.get, profileId ? { profileId } : 'skip');
   const updateProfile = useMutation(api.payProfiles.update);
   const archive = useMutation(api.payProfiles.archive);
   const restore = useMutation(api.payProfiles.restore);
@@ -278,7 +284,7 @@ function UsingProfileCard({
   profileId: Id<'payProfiles'>;
   totals: { inUseDrivers: number; inUseCarriers: number };
 }) {
-  const assignees = useQuery(api.payProfiles.listAssignedPayees, { profileId });
+  const assignees = useAuthQuery(api.payProfiles.listAssignedPayees, { profileId });
 
   return (
     <DSCard
@@ -359,7 +365,7 @@ function UsingProfileCard({
 // ============================================================================
 
 function HistoryTab({ profileId }: { profileId: Id<'payProfiles'> }) {
-  const entries = useQuery(api.payProfiles.getProfileHistory, { profileId });
+  const entries = useAuthQuery(api.payProfiles.getProfileHistory, { profileId });
 
   if (entries === undefined) {
     return (

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation } from 'convex/react';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import {
@@ -40,8 +41,13 @@ export function GenerateStatementsModal({
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Fetch pay plans
-  const payPlans = useQuery(api.payPlans.list, {
+  // Fetch pay plans.
+  // The dialog stays mounted while closed (visibility is driven by `open`), so
+  // this read fires on the settlements page's first render — before the Convex
+  // auth handshake finishes. `payPlans.list` proves org ownership via
+  // `assertCallerOwnsOrg`, which throws ConvexError('Unauthenticated') on a
+  // tokenless call, so gate it on the auth state.
+  const payPlans = useAuthQuery(api.payPlans.list, {
     workosOrgId: organizationId,
   });
 
