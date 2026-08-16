@@ -12,6 +12,7 @@ import {
   RateSchedulePanel,
   ContractPanel,
   ManualInvoicePanel,
+  AllocatePaymentPanel,
 } from '@/components/OrgSupportPanels';
 import { formatAgo, formatCapped, formatMoney, formatWhen } from '@/lib/format';
 
@@ -141,6 +142,8 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
       />
 
       <ManualInvoicePanel organizationId={organizationId} />
+
+      {org.workosOrgId ? <AllocatePaymentPanel workosOrgId={org.workosOrgId} /> : null}
 
       <OrgSupportPanels
         organizationId={organizationId}

@@ -693,6 +693,169 @@ export const documentPayment = mutation({
 });
 
 /**
+ * Record ONE payment against an organization and let it settle their open
+ * invoices oldest-first.
+ *
+ * A customer catching up on arrears sends one transfer covering several
+ * months. Recording that per-invoice by hand means splitting the amount
+ * yourself and getting the arithmetic right across half a dozen rows — easy to
+ * fumble, and the parts only tie back together if you remember to reuse the
+ * reference. This does the split, applies the same date and reference to every
+ * part, and posts any excess as account credit exactly as a single-invoice
+ * overpayment would.
+ *
+ * Oldest-first by due date is the standard application order and the one a
+ * customer will assume: it clears the most overdue balance first, which is also
+ * what makes the aging report settle correctly afterwards.
+ *
+ * Cash only. Applying existing account credit stays a separate, deliberate act
+ * (`applyCreditToInvoice`) — sweeping it in automatically would spend the
+ * customer's balance without anyone choosing to.
+ */
+export const allocatePayment = mutation({
+  args: {
+    workosOrgId: v.string(),
+    amount: v.number(),
+    method: v.union(
+      v.literal('ach'),
+      v.literal('check'),
+      v.literal('wire'),
+      v.literal('other'),
+    ),
+    reference: v.optional(v.string()),
+    receivedAt: v.optional(v.number()),
+    reason: v.string(),
+  },
+  returns: v.object({
+    applied: v.array(
+      v.object({
+        invoiceNumber: v.string(),
+        periodKey: v.string(),
+        amount: v.number(),
+        status: v.string(),
+      }),
+    ),
+    creditPosted: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    if (!(args.amount > 0)) throw new ConvexError('Payment amount must be positive');
+
+    const all = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_org_period', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+
+    const receivedAt = args.receivedAt ?? Date.now();
+    const reference = args.reference?.trim() || undefined;
+
+    // Guard against a double submission turning one transfer into two. The
+    // same reference on the same day for the same money is far more likely to
+    // be a repeated click than a genuine second payment.
+    if (reference) {
+      const duplicate = all.some((inv) =>
+        inv.payments.some(
+          (p) => p.reference === reference && p.receivedAt === receivedAt && p.amount > 0,
+        ),
+      );
+      if (duplicate) {
+        throw new ConvexError(
+          `A payment referenced "${reference}" is already recorded for that date. If this really is a second transfer, give it a distinct reference.`,
+        );
+      }
+    }
+
+    // Oldest obligation first: due date, falling back to issue date and then
+    // the cycle itself for rows that predate those fields.
+    const open = all
+      .filter((inv) => (OPEN_STATUSES as readonly string[]).includes(inv.status))
+      .filter((inv) => money(inv.total - inv.amountPaid) > 0)
+      .sort(
+        (a, b) =>
+          (a.dueAt ?? a.issuedAt ?? 0) - (b.dueAt ?? b.issuedAt ?? 0) ||
+          a.periodKey.localeCompare(b.periodKey),
+      );
+
+    let remaining = money(args.amount);
+    const applied: { invoiceNumber: string; periodKey: string; amount: number; status: string }[] =
+      [];
+
+    for (const invoice of open) {
+      if (remaining <= 0) break;
+      const balance = money(invoice.total - invoice.amountPaid);
+      const part = money(Math.min(balance, remaining));
+      if (part <= 0) continue;
+
+      const payments = [
+        ...invoice.payments,
+        {
+          id: nextPaymentId(invoice),
+          amount: part,
+          method: args.method,
+          reference,
+          recordedByEmail: staff.email,
+          receivedAt,
+        },
+      ];
+      const amountPaid = sumPayments(payments);
+      const paidInFull = amountPaid >= invoice.total;
+      const status = paidInFull ? ('paid' as const) : ('partially_paid' as const);
+
+      await ctx.db.patch(invoice._id, {
+        payments,
+        amountPaid,
+        status,
+        ...(paidInFull ? { paidAt: receivedAt } : {}),
+        updatedAt: Date.now(),
+      });
+      // One audit row per invoice: the per-invoice history has to stand on its
+      // own, and the shared reference is what ties the parts back together.
+      await logPlatformAudit(ctx, {
+        actorEmail: staff.email,
+        action: 'invoice_payment_recorded',
+        targetOrgId: args.workosOrgId,
+        targetTable: 'platformInvoices',
+        targetId: invoice._id,
+        reason: args.reason,
+        metadata: JSON.stringify({
+          allocated: true,
+          amount: part,
+          method: args.method,
+          reference,
+          ofTotal: money(args.amount),
+        }),
+      });
+
+      applied.push({
+        invoiceNumber: invoice.invoiceNumber,
+        periodKey: invoice.periodKey,
+        amount: part,
+        status,
+      });
+      remaining = money(remaining - part);
+    }
+
+    // Anything left over is money paid ahead — same treatment as overpaying a
+    // single invoice: it becomes credit and lands on the next invoice issued.
+    let creditPosted = 0;
+    if (remaining > 0) {
+      creditPosted = remaining;
+      await issueCredit(ctx, {
+        workosOrgId: args.workosOrgId,
+        amount: remaining,
+        source: 'overpayment',
+        reason: reference
+          ? `Paid ahead on ${reference}: ${args.reason}`
+          : `Paid ahead: ${args.reason}`,
+        createdByEmail: staff.email,
+      });
+    }
+
+    return { applied, creditPosted };
+  },
+});
+
+/**
  * Withdraw a claim of payment that has no evidence behind it.
  *
  * The mirror of `documentPayment`, over the same gap and with the same safety:

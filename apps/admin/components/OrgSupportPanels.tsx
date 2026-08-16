@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useAction } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import type { Id } from '@otoqa/convex-client';
-import { formatAgo, formatWhen } from '@/lib/format';
+import { formatAgo, formatMoney, formatWhen } from '@/lib/format';
 import { ReasonAction } from '@/components/ReasonAction';
 
 /**
@@ -521,6 +521,122 @@ export function CreditsPanel({ workosOrgId }: { workosOrgId: string }) {
           <option value="service_credit">Service credit (SLA)</option>
           <option value="manual">Manual</option>
         </select>
+      </ReasonAction>
+    </div>
+  );
+}
+
+/**
+ * One transfer, split across whatever is open — the arrears case. Shows what is
+ * outstanding before, and exactly where the money landed after.
+ */
+export function AllocatePaymentPanel({ workosOrgId }: { workosOrgId: string }) {
+  const invoices = useQuery(api.platform.invoices.listInvoices, { workosOrgId });
+  const allocate = useMutation(api.platform.invoices.allocatePayment);
+  const [result, setResult] = useState<{
+    applied: { invoiceNumber: string; periodKey: string; amount: number; status: string }[];
+    creditPosted: number;
+  } | null>(null);
+
+  const open = (invoices ?? [])
+    .filter(
+      (i) =>
+        i.status === 'issued' || i.status === 'sent' || i.status === 'partially_paid',
+    )
+    .map((i) => ({ ...i, balance: Math.round((i.total - i.amountPaid) * 100) / 100 }))
+    .filter((i) => i.balance > 0)
+    .sort(
+      (a, b) =>
+        (a.dueAt ?? a.issuedAt ?? 0) - (b.dueAt ?? b.issuedAt ?? 0) ||
+        a.periodKey.localeCompare(b.periodKey),
+    );
+  const owed = Math.round(open.reduce((s, i) => s + i.balance, 0) * 100) / 100;
+
+  return (
+    <div className="panel">
+      <h2>Record a payment across invoices</h2>
+      <p className="subtitle">
+        Settles the oldest due invoice first and works forward. Anything beyond what is owed
+        becomes account credit and applies to the next invoice issued.
+      </p>
+
+      {invoices === undefined ? (
+        <div className="empty">Loading…</div>
+      ) : open.length === 0 ? (
+        <div className="empty">Nothing outstanding — a payment here would post entirely as credit.</div>
+      ) : (
+        <>
+          <div className="audit-row">
+            <span className="chip chip-warn">{open.length} open</span>
+            <strong>{formatMoney(owed)} outstanding</strong>
+            <span className="muted">in the order it will be applied:</span>
+          </div>
+          {open.map((i) => (
+            <div className="audit-row" key={i._id}>
+              <span className="action">{i.invoiceNumber}</span>
+              <span className="muted">{i.periodKey}</span>
+              <span>{formatMoney(i.balance)}</span>
+              <span className="muted">
+                {i.dueAt ? `due ${formatWhen(i.dueAt)}` : 'no due date'}
+              </span>
+            </div>
+          ))}
+        </>
+      )}
+
+      {result ? (
+        <div className="panel panel-attention">
+          <h2>Allocated</h2>
+          {result.applied.map((a) => (
+            <div className="audit-row" key={a.invoiceNumber}>
+              <span className="chip chip-ok">{a.status.replace('_', ' ')}</span>
+              <span className="action">{a.invoiceNumber}</span>
+              <span className="muted">{a.periodKey}</span>
+              <span>{formatMoney(a.amount)}</span>
+            </div>
+          ))}
+          {result.creditPosted > 0 ? (
+            <div className="audit-row">
+              <span className="chip chip-ok">credit</span>
+              <span>
+                {formatMoney(result.creditPosted)} beyond what was owed — posted to account credit.
+              </span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <ReasonAction
+        label="Record payment"
+        onSubmit={async (reason, form) => {
+          const data = new FormData(form);
+          const amount = Number(data.get('amount'));
+          if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter a positive amount');
+          const raw = String(data.get('receivedAt') ?? '').trim();
+          const receivedAt = raw ? Date.parse(`${raw}T12:00:00Z`) : undefined;
+          if (receivedAt !== undefined && Number.isNaN(receivedAt)) {
+            throw new Error('Enter the date as YYYY-MM-DD');
+          }
+          const outcome = await allocate({
+            workosOrgId,
+            amount,
+            method: data.get('method') as 'ach' | 'check' | 'wire' | 'other',
+            reference: String(data.get('reference') ?? '') || undefined,
+            ...(receivedAt !== undefined ? { receivedAt } : {}),
+            reason,
+          });
+          setResult(outcome);
+        }}
+      >
+        <input className="input" name="amount" placeholder={`Amount (owed ${formatMoney(owed)})`} />
+        <select className="input" name="method" defaultValue="wire">
+          <option value="wire">Wire</option>
+          <option value="ach">ACH</option>
+          <option value="check">Check</option>
+          <option value="other">Other</option>
+        </select>
+        <input className="input" name="reference" placeholder="Reference / check #" />
+        <input className="input" type="date" name="receivedAt" title="Date received" />
       </ReasonAction>
     </div>
   );

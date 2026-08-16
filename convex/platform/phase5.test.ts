@@ -980,6 +980,163 @@ describe('catching up on months of unpaid cycles', () => {
     expect(balance.available).toBe(700);
   });
 
+  it('allocates one transfer across several overdue cycles, oldest first', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await t.run(async (ctx) => {
+      await ctx.db.insert('platformUsageStats', {
+        workosOrgId: WORKOS_ORG,
+        periodKey: NEXT_PERIOD,
+        loadsWritten: 100,
+        updatedAt: Date.now(),
+      });
+    });
+    const staff = t.withIdentity(freshStaff());
+    // Two $300 cycles, the older one issued first.
+    const oldest = await t.mutation(internal.platform.invoices.cycleClose, { periodKey: PERIOD });
+    void oldest;
+    await t.mutation(internal.platform.invoices.cycleClose, { periodKey: NEXT_PERIOD });
+    const drafts = await staff.query(api.platform.invoices.listInvoices, { status: 'draft' });
+    for (const d of drafts) {
+      await staff.mutation(api.platform.invoices.issueInvoice, {
+        id: d._id,
+        issuedAt: Date.parse(`${d.periodKey}-05T12:00:00Z`),
+      });
+    }
+
+    const paidOn = Date.parse('2026-04-22T12:00:00Z');
+    const result = await staff.mutation(api.platform.invoices.allocatePayment, {
+      workosOrgId: WORKOS_ORG,
+      amount: 450,
+      method: 'wire',
+      reference: 'wire 22-04',
+      receivedAt: paidOn,
+      reason: 'Catch-up payment covering arrears',
+    });
+
+    // $300 clears the oldest, $150 lands on the next.
+    expect(result.applied).toEqual([
+      { invoiceNumber: expect.any(String), periodKey: PERIOD, amount: 300, status: 'paid' },
+      {
+        invoiceNumber: expect.any(String),
+        periodKey: NEXT_PERIOD,
+        amount: 150,
+        status: 'partially_paid',
+      },
+    ]);
+    expect(result.creditPosted).toBe(0);
+
+    const rows = await staff.query(api.platform.invoices.listInvoices, {});
+    const first = rows.find((r) => r.periodKey === PERIOD)!;
+    expect(first.paidAt).toBe(paidOn);
+    expect(first.payments[0]).toMatchObject({ reference: 'wire 22-04', receivedAt: paidOn });
+  });
+
+  it('turns the excess of an over-large transfer into credit', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await issuedInvoice(t); // one $300 cycle
+    const staff = t.withIdentity(freshStaff());
+
+    const result = await staff.mutation(api.platform.invoices.allocatePayment, {
+      workosOrgId: WORKOS_ORG,
+      amount: 500,
+      method: 'wire',
+      reference: 'wire over',
+      reason: 'Paying ahead',
+    });
+    expect(result.applied).toHaveLength(1);
+    expect(result.creditPosted).toBe(200);
+
+    const balance = await staff.query(api.platform.credits.creditBalance, {
+      workosOrgId: WORKOS_ORG,
+    });
+    expect(balance.available).toBe(200);
+  });
+
+  it('refuses a repeat of the same reference on the same day', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+    const receivedAt = Date.parse('2026-05-25T12:00:00Z');
+
+    await staff.mutation(api.platform.invoices.allocatePayment, {
+      workosOrgId: WORKOS_ORG,
+      amount: 100,
+      method: 'wire',
+      reference: 'wire 25-05',
+      receivedAt,
+      reason: 'Catch-up',
+    });
+    // A double-click must not turn one transfer into two.
+    await expect(
+      staff.mutation(api.platform.invoices.allocatePayment, {
+        workosOrgId: WORKOS_ORG,
+        amount: 100,
+        method: 'wire',
+        reference: 'wire 25-05',
+        receivedAt,
+        reason: 'Catch-up',
+      }),
+    ).rejects.toThrow(/already recorded for that date/);
+  });
+
+  it('handles the real sequence: three transfers clearing months of arrears', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx, 0));
+    const staff = t.withIdentity(freshStaff());
+
+    // Four unpaid cycles of $300 each, issued when they were billed.
+    const periods = ['2025-10', '2025-11', '2025-12', '2026-01'];
+    await t.run(async (ctx) => {
+      for (const periodKey of periods) {
+        await ctx.db.insert('platformUsageStats', {
+          workosOrgId: WORKOS_ORG,
+          periodKey,
+          loadsWritten: 100,
+          updatedAt: Date.now(),
+        });
+      }
+    });
+    for (const periodKey of periods) {
+      await t.mutation(internal.platform.invoices.cycleClose, { periodKey });
+    }
+    for (const d of await staff.query(api.platform.invoices.listInvoices, { status: 'draft' })) {
+      await staff.mutation(api.platform.invoices.issueInvoice, {
+        id: d._id,
+        issuedAt: Date.parse(`${d.periodKey}-05T12:00:00Z`),
+      });
+    }
+    let aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(1200);
+
+    const transfers = [
+      { on: '2026-04-22', amount: 500, ref: 'wire 22-04' },
+      { on: '2026-05-25', amount: 400, ref: 'wire 25-05' },
+      { on: '2026-08-04', amount: 300, ref: 'wire 04-08' },
+    ];
+    for (const tr of transfers) {
+      await staff.mutation(api.platform.invoices.allocatePayment, {
+        workosOrgId: WORKOS_ORG,
+        amount: tr.amount,
+        method: 'wire',
+        reference: tr.ref,
+        receivedAt: Date.parse(`${tr.on}T12:00:00Z`),
+        reason: 'Arrears catch-up',
+      });
+    }
+
+    aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(0);
+    const rows = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(rows.every((r) => r.status === 'paid')).toBe(true);
+    // The middle cycle was settled by two different transfers, and the record
+    // shows both — which is the point of allocating rather than lump-summing.
+    const split = rows.find((r) => r.periodKey === '2025-11')!;
+    expect(split.payments.map((p) => p.reference)).toEqual(['wire 22-04', 'wire 25-05']);
+  });
+
   it('splits one late payment across two overdue cycles, oldest first', async () => {
     const t = convexTest(schema);
     await t.run((ctx) => seedOrg(ctx));

@@ -684,10 +684,19 @@ the *undocumented* portion, so neither can alter a payment that was actually
 recorded. Withdrawing a claim walks the invoice back to issued/sent and returns
 it to the aging buckets.
 
-Splitting one transfer across several invoices stays manual: record a payment
-per invoice, oldest first, sharing a reference so the parts tie back to one
-transfer. A proper multi-invoice allocation is worth building if this becomes
-routine.
+**One transfer, many invoices.** `allocatePayment` takes a single payment
+against an ORG and settles its open invoices oldest-first by due date — the
+standard application order, and the one a customer paying down arrears will
+assume. Every part carries the same date and reference so the pieces tie back to
+one transfer, each invoice gets its own audit entry so per-invoice history still
+stands alone, and anything beyond what is owed becomes credit exactly as
+overpaying a single invoice would. A repeat of the same reference on the same
+date is refused, because a double submission turning one transfer into two is
+the expensive mistake here.
+
+It allocates cash only. Sweeping in existing account credit automatically would
+spend the customer's balance without anyone choosing to, so that stays the
+deliberate `applyCreditToInvoice`.
 
 ### Known limitations, stated rather than hidden
 
