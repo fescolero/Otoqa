@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useSignIn } from '@clerk/expo';
+import { useSignIn, useClerk } from '@clerk/expo';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import { useActiveAuth } from '../../lib/convex';
 
@@ -38,7 +38,13 @@ function clerkError(error: unknown) {
 
 export default function SignInScreen() {
   const router = useRouter();
-  const { signIn, setActive, isLoaded } = useSignIn();
+  // Core 3: `useSignIn()` returns a signal with neither `setActive` nor
+  // `isLoaded`. Completing a flow is `signIn.finalize()`, and readiness comes
+  // off the Clerk instance. This app has no <ClerkLoaded> wrapper (unlike the
+  // driver app), so the readiness guard here is doing real work and has to be
+  // preserved rather than dropped.
+  const { signIn } = useSignIn();
+  const { loaded: isLoaded } = useClerk();
   const { selectProvider, signOut } = useActiveAuth();
   const [step, setStep] = React.useState<'phone' | 'otp'>('phone');
   const [phone, setPhone] = React.useState('');
@@ -51,15 +57,12 @@ export default function SignInScreen() {
     if (!isLoaded || !signIn || !valid || busy) return;
     setBusy(true);
     const full = `+1${digits}`;
+    // Core 3 folds create + factor lookup + prepareFirstFactor into one call.
+    // It returns `{ error }` instead of throwing, so rethrow to give the
+    // recovery below and the catch a single failure channel.
     const startPhoneCodeFlow = async () => {
-      const attempt = await signIn.create({ identifier: full });
-      const factor = attempt.supportedFirstFactors?.find(
-        (f): f is Extract<typeof f, { strategy: 'phone_code' }> => f.strategy === 'phone_code',
-      );
-      await signIn.prepareFirstFactor({
-        strategy: 'phone_code',
-        phoneNumberId: factor?.phoneNumberId as string,
-      });
+      const { error } = await signIn.phoneCode.sendCode({ phoneNumber: full });
+      if (error) throw error;
     };
 
     try {
@@ -67,10 +70,10 @@ export default function SignInScreen() {
         await startPhoneCodeFlow();
       } catch (createError) {
         // Same deadlock as the driver app: Clerk can still hold a session
-        // while the app considers the user signed out, and `signIn.create()`
-        // then refuses with `session_exists`. Worse here — this screen has no
-        // auth guard and the catch below reports EVERY failure as "Not
-        // registered", so a stranded user is told their number is invalid.
+        // while the app considers the user signed out, and the sign-in then
+        // refuses with `session_exists`. Worse here — this screen has no auth
+        // guard, and the catch below used to report EVERY failure as "Not
+        // registered", so a stranded user was told their number was invalid.
         // Clear the leftover session and retry once.
         const staleCode = clerkError(createError).code;
         if (
@@ -107,9 +110,11 @@ export default function SignInScreen() {
     if (!isLoaded || !signIn || busy) return;
     setBusy(true);
     try {
-      const attempt = await signIn.attemptFirstFactor({ strategy: 'phone_code', code: full });
-      if (attempt.status === 'complete') {
-        await setActive({ session: attempt.createdSessionId });
+      const { error } = await signIn.phoneCode.verifyCode({ code: full });
+      if (error) throw error;
+      // Status is read off the resource now, not a returned attempt object.
+      if (signIn.status === 'complete') {
+        await signIn.finalize();
         await selectProvider('clerk');
         router.replace('/(app)');
       } else {

@@ -38,19 +38,14 @@ import {
   trackStaleSessionCleared,
 } from '../../lib/analytics';
 import { performSignOut } from '../../lib/logout';
-
-/**
- * Clerk nests its machine-stable error code under `errors[0].code`. Read it
- * without an `any` cast so the catch variables can stay `unknown`.
- */
-function clerkErrorCode(error: unknown): string | undefined {
-  return (error as { errors?: Array<{ code?: string }> } | null)?.errors?.[0]
-    ?.code;
-}
+import { clerkErrorCode, clerkErrorMessage } from '../../lib/clerk-error';
 
 export default function SignInScreen() {
-  const { signIn, isLoaded } = useSignIn();
-  const { signOut } = useClerk();
+  // Core 3: `useSignIn()` returns a signal ({ signIn, errors, fetchStatus })
+  // and no longer carries `isLoaded`. The equivalent readiness flag lives on
+  // the Clerk instance, which is also where `signOut` comes from.
+  const { signIn } = useSignIn();
+  const { loaded: isLoaded, signOut } = useClerk();
   const router = useRouter();
   const { palette } = useTheme();
   const styles = useMemo(() => makeStyles(palette), [palette]);
@@ -121,16 +116,17 @@ export default function SignInScreen() {
 
     // One attempt at the phone-code flow. Extracted so the stale-session
     // recovery below can run it a second time without duplicating it.
+    //
+    // Core 3 collapses create + factor lookup + prepareFirstFactor into a
+    // single call: `sendCode` takes the phone number directly, so there is no
+    // `supportedFirstFactors` array to search for a `phoneNumberId`. It
+    // reports failure by RETURNING `{ error }` rather than throwing, so
+    // rethrow to give both this function's callers a single failure channel.
     const startPhoneCodeFlow = async () => {
-      const result = await signIn.create({ identifier: fullPhoneNumber });
-      const phoneFactor = result.supportedFirstFactors?.find(
-        (factor): factor is Extract<typeof factor, { strategy: 'phone_code' }> =>
-          factor.strategy === 'phone_code',
-      );
-      await signIn.prepareFirstFactor({
-        strategy: 'phone_code',
-        phoneNumberId: phoneFactor?.phoneNumberId as string,
+      const { error } = await signIn.phoneCode.sendCode({
+        phoneNumber: fullPhoneNumber,
       });
+      if (error) throw error;
     };
 
     try {
@@ -141,8 +137,8 @@ export default function SignInScreen() {
         //
         // `useAuth().isSignedIn` is false — that is the ONLY reason this
         // screen is reachable, since (auth)/_layout redirects to /(app) when
-        // it is true. But Clerk's client can still hold a session, and
-        // `signIn.create()` then refuses with `session_exists` (or
+        // it is true. But Clerk's client can still hold a session, and the
+        // sign-in then refuses with `session_exists` (or
         // `identifier_already_signed_in` when the stale session belongs to
         // the number being entered). The driver is left staring at a sign-in
         // form that can never succeed, with no way out from inside the app.
@@ -153,6 +149,9 @@ export default function SignInScreen() {
         // cached push token, resets the location queue and stops the motion
         // service, all of which belong to the dead session anyway, and it
         // tolerates each step failing.
+        //
+        // `clerkErrorCode` reads both the Core 3 flat shape and the Core 2
+        // nested one, so it works whichever channel the error arrived on.
         const staleCode = clerkErrorCode(createError);
         const isStaleSession =
           staleCode === 'session_exists' ||
@@ -178,8 +177,8 @@ export default function SignInScreen() {
     } catch (error: any) {
       clearTimeout(timeoutId);
       const elapsed = Date.now() - startTime;
-      const errorCode = error.errors?.[0]?.code;
-      const errorMessage = error.errors?.[0]?.message || error.errors?.[0]?.longMessage;
+      const errorCode = clerkErrorCode(error);
+      const errorMessage = clerkErrorMessage(error);
 
       trackSignInFailed(fullPhoneNumber, errorCode, errorMessage);
 

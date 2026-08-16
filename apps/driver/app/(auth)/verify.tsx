@@ -21,7 +21,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useSignIn, useAuth } from '@clerk/expo';
+import { useSignIn, useAuth, useClerk } from '@clerk/expo';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -40,7 +40,12 @@ import {
 } from '../../lib/analytics';
 
 export default function VerifyScreen() {
-  const { signIn, setActive, isLoaded } = useSignIn();
+  // Core 3: the signal has no `setActive` or `isLoaded`. Completing a sign-in
+  // is now `signIn.finalize()`; readiness comes off the Clerk instance.
+  // (`setActive` still exists on Clerk itself, but only for switching between
+  // already-existing sessions or organizations — not for finishing a flow.)
+  const { signIn } = useSignIn();
+  const { loaded: isLoaded } = useClerk();
   const { isSignedIn } = useAuth();
   const router = useRouter();
   const { phoneNumber } = useLocalSearchParams<{ phoneNumber: string }>();
@@ -150,17 +155,24 @@ export default function VerifyScreen() {
     trackVerificationStarted();
 
     try {
-      const result = await signIn.attemptFirstFactor({
-        strategy: 'phone_code',
+      // Core 3: `attemptFirstFactor` -> `phoneCode.verifyCode`, which reports
+      // failure by returning `{ error }`. Rethrow so the existing catch below
+      // keeps owning the per-code alerts and failure telemetry.
+      const { error: verifyError } = await signIn.phoneCode.verifyCode({
         code: codeToVerify,
       });
+      if (verifyError) throw verifyError;
 
-      if (result.status === 'complete') {
+      // Status now lives on the resource rather than on a returned result.
+      if (signIn.status === 'complete') {
         trackVerificationSuccess();
         try {
-          await setActive({ session: result.createdSessionId });
+          // `finalize()` replaces `setActive({ session })` for completing a
+          // flow — it reads the session the sign-in just created, so there is
+          // no `createdSessionId` to pass through.
+          await signIn.finalize();
         } catch (activateError: any) {
-          console.error('[Verify] setActive failed:', activateError);
+          console.error('[Verify] finalize failed:', activateError);
           Alert.alert(
             'Session Error',
             "Verification succeeded but we couldn't activate your session. Please close and reopen the app.",
@@ -202,14 +214,12 @@ export default function VerifyScreen() {
     if (!isLoaded || resendTimer > 0) return;
 
     try {
-      const phoneFactor = signIn.supportedFirstFactors?.find(
-        (factor): factor is Extract<typeof factor, { strategy: 'phone_code' }> =>
-          factor.strategy === 'phone_code',
-      );
-      await signIn.prepareFirstFactor({
-        strategy: 'phone_code',
-        phoneNumberId: phoneFactor?.phoneNumberId as string,
-      });
+      // A sign-in attempt already exists at this point (we got here from the
+      // sign-in screen), and the docs say to omit both `phoneNumber` and
+      // `phoneNumberId` in that case — Clerk reuses the identifier already on
+      // the attempt. That replaces the old factor lookup entirely.
+      const { error } = await signIn.phoneCode.sendCode();
+      if (error) throw error;
 
       trackResendCode(true);
       setResendTimer(30);
