@@ -24,7 +24,11 @@ export function formatMoney(n: number): string {
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${(ms / 60_000).toFixed(1)}m`;
+  // Cadences and overdue windows reach hours and days ("1440.0m" reads as
+  // noise on the jobs board), so keep scaling past minutes.
+  if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`;
+  if (ms < 86_400_000) return `${(ms / 3_600_000).toFixed(1)}h`;
+  return `${(ms / 86_400_000).toFixed(1)}d`;
 }
 
 /** Counts capped at 500 server-side render as "500+". */

@@ -15,14 +15,22 @@ import type { NextConfig } from 'next';
  */
 const isDev = process.env.NODE_ENV === 'development';
 
+/**
+ * The Convex origin is only known at BUILD time. On production builds the
+ * Convex CLI injects NEXT_PUBLIC_CONVEX_URL (see vercel.json), but a preview
+ * or a local build without it must not end up with a CSP that silently blocks
+ * the console's own backend — a broken console is worse than a broad
+ * connect-src. So: pin exactly when we know the origin, fall back to
+ * https/wss when we don't.
+ */
 const convexOrigins = () => {
   const url = process.env.NEXT_PUBLIC_CONVEX_URL;
-  if (!url) return [];
+  if (!url) return ['https:', 'wss:'];
   try {
     const { origin, host } = new URL(url);
     return [origin, `wss://${host}`];
   } catch {
-    return [];
+    return ['https:', 'wss:'];
   }
 };
 

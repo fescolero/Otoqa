@@ -533,6 +533,7 @@ repo-wide.**
 | **A.2 member management** | Needs WorkOS API calls server-side; the largest single remaining action gap and worth its own change. |
 | **A.3 org suspend** | Blocked on a product decision: a suspend that doesn't enforce anything is theatre, and enforcement changes tenant behaviour (explicitly a non-goal of the original plan). |
 | **B.7 invoice delivery** | PDF + email on the manual path. `markSent` is still an honour-system flip. |
+| **3.3 PII decision** | Left untouched on purpose: `sensitive_data_revealed` is still an unused enum member because removing it is decision A3, not mine to make. The console still renders no driver PII either way. |
 | **3.1 access page / 3.4 Playwright / 3.5 status page** | Unblocked, not yet started. `auditActors` is the first half of 3.1. |
 
 ### Notes for review
