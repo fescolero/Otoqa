@@ -45,6 +45,8 @@ export type PlatformAuditAction =
   | 'invoice_voided'
   | 'invoice_adjustment_added'
   | 'invoice_draft_edited'
+  | 'invoice_payment_claim_cleared'
+  | 'credit_applied'
   | 'invoice_draft_deleted'
   | 'credit_issued'
   | 'credit_voided'
@@ -67,6 +69,7 @@ const DESTRUCTIVE_ACTIONS: ReadonlySet<PlatformAuditAction> = new Set([
   'driver_phone_corrected',
   'invoice_voided',
   'invoice_payment_reversed',
+  'invoice_payment_claim_cleared',
   'invoice_draft_deleted',
   'invoice_written_off',
   'credit_issued',

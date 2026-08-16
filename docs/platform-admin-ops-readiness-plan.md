@@ -660,6 +660,35 @@ refuses on a paid invoice, so there was no way to fix it.
 - A documented payment is a normal ledger entry, so it can then be reversed like
   any other — which is the practical point of writing it down.
 
+### Catching up on unpaid history (added after review)
+
+Entering months of arrears exposed two more asymmetries:
+
+**Credit could be stranded.** `issueInvoice` consumes credit at issue, which is
+right for the normal path but leaves credit unusable when it arrives *after* the
+invoice — exactly the overdue case, where months of open invoices sit beside an
+overpayment that cannot reach them and aging overstates the receivable.
+`applyCreditToInvoice` applies it by hand to any open invoice, capped at the
+balance so it never overpays, and `agingOverview` now also reports
+`outstandingNetOfCredit` so the true collectable figure is visible without
+touching a single invoice.
+
+**A fabricated payment could not be withdrawn.**
+`backfillHistoricalPaidInvoices` marks every historical cycle `paid` with an
+empty ledger. For cycles genuinely settled that is a fair shortcut; for cycles
+never paid it invents a settlement and hides a real receivable, and nothing
+could take it back. `clearUnevidencedPayment` is the mirror of
+`documentPayment` over the same gap — one says "this money arrived, here is the
+record", the other says "it never arrived, drop the claim" — and both touch only
+the *undocumented* portion, so neither can alter a payment that was actually
+recorded. Withdrawing a claim walks the invoice back to issued/sent and returns
+it to the aging buckets.
+
+Splitting one transfer across several invoices stays manual: record a payment
+per invoice, oldest first, sharing a reference so the parts tie back to one
+transfer. A proper multi-invoice allocation is worth building if this becomes
+routine.
+
 ### Known limitations, stated rather than hidden
 
 - **A payment cannot be recorded against a written-off invoice.** Bad-debt

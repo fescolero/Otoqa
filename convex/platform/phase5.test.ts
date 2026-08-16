@@ -865,6 +865,166 @@ describe('paid with no record of payment', () => {
   });
 });
 
+describe('catching up on months of unpaid cycles', () => {
+  const DAY = 86_400_000;
+
+  it('withdraws a paid claim that was never evidenced, putting the money back on the clock', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    // How the backfill leaves a cycle nobody actually paid.
+    const id = await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert('platformInvoices', {
+        workosOrgId: WORKOS_ORG,
+        periodKey: PERIOD,
+        kind: 'metered',
+        invoiceNumber: 'INV-UNPAID-0001',
+        loadsWritten: 100,
+        ratePerLoad: 3,
+        lines: [{ kind: 'usage', label: '100 loads × $3.00', amount: 300 }],
+        adjustments: [],
+        subtotal: 300,
+        total: 300,
+        payments: [],
+        amountPaid: 300,
+        status: 'paid',
+        issuedAt: now - 120 * DAY,
+        dueAt: now - 105 * DAY,
+        paidAt: now - 100 * DAY,
+        backfilled: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    const staff = t.withIdentity(freshStaff());
+
+    await staff.mutation(api.platform.invoices.clearUnevidencedPayment, {
+      id,
+      reason: 'Backfill marked it paid; no payment was received for this cycle',
+    });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.status).toBe('issued');
+    expect(inv.amountPaid).toBe(0);
+    expect(inv.paidAt).toBeUndefined();
+    // It is a receivable again, and an old one.
+    const aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(300);
+    expect(aging.buckets.d90_plus).toBe(300);
+  });
+
+  it('refuses to withdraw a payment that WAS recorded', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.invoices.recordPayment, { id, amount: 300, method: 'ach' });
+
+    await expect(
+      staff.mutation(api.platform.invoices.clearUnevidencedPayment, { id, reason: 'x' }),
+    ).rejects.toThrow(/reverse the entry instead/);
+  });
+
+  it('applies stranded credit to an invoice that was already issued', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t); // $300, issued before the credit existed
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.credits.createCredit, {
+      workosOrgId: WORKOS_ORG,
+      amount: 120,
+      source: 'goodwill',
+      reason: 'Overpayment on the setup invoice',
+    });
+
+    // Aging knows the receivable is really smaller than the gross figure.
+    let aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(300);
+    expect(aging.outstandingNetOfCredit).toBe(180);
+
+    await staff.mutation(api.platform.invoices.applyCreditToInvoice, {
+      id,
+      reason: 'Applying the account credit to the oldest open invoice',
+    });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.amountPaid).toBe(120);
+    expect(inv.status).toBe('partially_paid');
+    expect(inv.payments[0]).toMatchObject({ method: 'credit', amount: 120 });
+
+    aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(180); // now the gross figure agrees
+    expect(aging.creditAvailable).toBe(0);
+  });
+
+  it('never applies more credit than the invoice owes', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t); // $300
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.credits.createCredit, {
+      workosOrgId: WORKOS_ORG,
+      amount: 1000,
+      source: 'goodwill',
+      reason: 'Large credit',
+    });
+
+    await staff.mutation(api.platform.invoices.applyCreditToInvoice, { id, reason: 'Apply' });
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.amountPaid).toBe(300);
+    expect(inv.status).toBe('paid');
+    // The rest stays on the account for the next invoice.
+    const balance = await staff.query(api.platform.credits.creditBalance, {
+      workosOrgId: WORKOS_ORG,
+    });
+    expect(balance.available).toBe(700);
+  });
+
+  it('splits one late payment across two overdue cycles, oldest first', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await t.run(async (ctx) => {
+      await ctx.db.insert('platformUsageStats', {
+        workosOrgId: WORKOS_ORG,
+        periodKey: NEXT_PERIOD,
+        loadsWritten: 100,
+        updatedAt: Date.now(),
+      });
+    });
+    const oldest = await issuedInvoice(t, PERIOD); // $300
+    const newer = await issuedInvoice(t, NEXT_PERIOD); // $300
+    const staff = t.withIdentity(freshStaff());
+    const paidOn = Date.parse('2026-04-22T12:00:00Z');
+
+    // A single $450 transfer covering the older cycle and part of the next.
+    await staff.mutation(api.platform.invoices.recordPayment, {
+      id: oldest,
+      amount: 300,
+      method: 'wire',
+      reference: 'wire 22-04',
+      receivedAt: paidOn,
+    });
+    await staff.mutation(api.platform.invoices.recordPayment, {
+      id: newer,
+      amount: 150,
+      method: 'wire',
+      reference: 'wire 22-04',
+      receivedAt: paidOn,
+    });
+
+    const rows = await staff.query(api.platform.invoices.listInvoices, {});
+    const a = rows.find((r) => r._id === oldest)!;
+    const b = rows.find((r) => r._id === newer)!;
+    expect(a.status).toBe('paid');
+    expect(a.paidAt).toBe(paidOn);
+    expect(b.status).toBe('partially_paid');
+    expect(b.amountPaid).toBe(150);
+    // The shared reference is what ties the two halves back to one transfer.
+    expect(a.payments[0].reference).toBe('wire 22-04');
+    expect(b.payments[0].reference).toBe('wire 22-04');
+  });
+});
+
 describe('tenant-facing one-off charges', () => {
   it('shows committed one-offs to the tenant, and hides drafts and voids', async () => {
     const t = convexTest(schema);

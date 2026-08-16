@@ -693,6 +693,133 @@ export const documentPayment = mutation({
 });
 
 /**
+ * Withdraw a claim of payment that has no evidence behind it.
+ *
+ * The mirror of `documentPayment`, over the same gap and with the same safety:
+ * that one says "this money did arrive, here is the record", this one says "it
+ * never arrived, drop the claim". Both touch ONLY the undocumented portion, so
+ * neither can alter a payment that was actually recorded.
+ *
+ * The case this exists for: `backfillHistoricalPaidInvoices` marks every
+ * historical cycle `paid` with an empty ledger. For cycles that genuinely were
+ * settled that is a reasonable shortcut; for cycles that were never paid it
+ * fabricates a settlement, hides a real receivable, and there was no way to
+ * take it back.
+ */
+export const clearUnevidencedPayment = mutation({
+  args: { id: v.id('platformInvoices'), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    if (!args.reason.trim()) throw new ConvexError('A reason is required');
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+
+    const documented = sumPayments(invoice.payments);
+    const undocumented = money(invoice.amountPaid - documented);
+    if (undocumented <= 0) {
+      throw new ConvexError(
+        `${invoice.invoiceNumber} has a full payment record — reverse the entry instead, so the correction stays visible.`,
+      );
+    }
+
+    const now = Date.now();
+    const status = statusFromLedger(invoice, documented);
+    await ctx.db.patch(args.id, {
+      amountPaid: documented,
+      status,
+      ...(documented < invoice.total ? { paidAt: undefined } : {}),
+      updatedAt: now,
+    });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_payment_claim_cleared',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify({ amountPaid: invoice.amountPaid, status: invoice.status }),
+      after: JSON.stringify({ amountPaid: documented, status }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/**
+ * Put existing account credit against an invoice that is ALREADY issued.
+ *
+ * `issueInvoice` consumes credit at issue time, which covers the normal path —
+ * but it leaves credit stranded when the credit arrives after the invoice did.
+ * That is precisely the overdue case: months of unpaid invoices sitting open
+ * while a customer's overpayment sits unusable beside them, with the aging
+ * report overstating what is actually owed.
+ *
+ * Capped at the invoice's balance, so a credit never overpays and the unused
+ * remainder stays on the account.
+ */
+export const applyCreditToInvoice = mutation({
+  args: {
+    id: v.id('platformInvoices'),
+    // Omit to apply as much as the balance allows.
+    amount: v.optional(v.number()),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+    if (!(OPEN_STATUSES as readonly string[]).includes(invoice.status)) {
+      throw new ConvexError(`Cannot apply credit to a ${invoice.status.replace('_', ' ')} invoice`);
+    }
+    const balance = money(invoice.total - invoice.amountPaid);
+    if (balance <= 0) throw new ConvexError('Nothing outstanding on this invoice');
+
+    const cap = args.amount !== undefined ? money(Math.min(args.amount, balance)) : balance;
+    if (!(cap > 0)) throw new ConvexError('Amount must be positive');
+
+    const applied = await consumeCredits(ctx, invoice.workosOrgId, cap, {
+      _id: args.id,
+      invoiceNumber: invoice.invoiceNumber,
+    });
+    if (applied <= 0) {
+      throw new ConvexError('This organization has no available credit');
+    }
+
+    const now = Date.now();
+    const payments = [
+      ...invoice.payments,
+      {
+        id: nextPaymentId(invoice),
+        amount: applied,
+        method: 'credit' as const,
+        reference: 'account credit',
+        recordedByEmail: staff.email,
+        receivedAt: now,
+      },
+    ];
+    const amountPaid = sumPayments(payments);
+    await ctx.db.patch(args.id, {
+      payments,
+      amountPaid,
+      status: statusFromLedger(invoice, amountPaid),
+      ...(amountPaid >= invoice.total ? { paidAt: now } : {}),
+      updatedAt: now,
+    });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'credit_applied',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      after: JSON.stringify({ applied, balanceBefore: balance }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/**
  * Invoices whose `amountPaid` doesn't match their payment entries — money the
  * ledger asserts but cannot evidence. Backfilled rows are the usual source.
  */
@@ -1675,8 +1802,17 @@ export const agingOverview = query({
       .withIndex('by_status', (q) => q.eq('status', 'written_off'))
       .take(300);
     const credits = await ctx.db.query('platformCredits').withIndex('by_time').take(500);
+    const creditAvailable = money(
+      credits.filter((c) => c.status === 'available').reduce((s, c) => s + c.remaining, 0),
+    );
+
     return {
       outstanding,
+      // What is actually collectable once account credit is applied. Credit is
+      // consumed at issue, so an overdue invoice raised BEFORE the credit
+      // existed still shows its full balance until someone applies it — which
+      // makes the gross figure overstate the receivable.
+      outstandingNetOfCredit: money(Math.max(0, outstanding - creditAvailable)),
       buckets,
       openCount: open.length,
       draftCount: drafts.length,
@@ -1687,9 +1823,7 @@ export const agingOverview = query({
       ),
       // Credit outstanding is a liability, not a receivable — shown beside
       // aging so an operator sees what will be consumed next cycle.
-      creditAvailable: money(
-        credits.filter((c) => c.status === 'available').reduce((s, c) => s + c.remaining, 0),
-      ),
+      creditAvailable,
     };
   },
 });

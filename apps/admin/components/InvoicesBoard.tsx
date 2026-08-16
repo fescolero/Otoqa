@@ -50,6 +50,12 @@ export function InvoicesBoard() {
       {aging ? (
         <div className="kpi-row">
           <Kpi label="Outstanding" value={formatMoney(aging.outstanding)} />
+          {aging.creditAvailable > 0 ? (
+            <Kpi
+              label="Outstanding net of credit"
+              value={formatMoney(aging.outstandingNetOfCredit)}
+            />
+          ) : null}
           <Kpi label="Current" value={formatMoney(aging.buckets.current)} />
           <Kpi label="1–30 overdue" value={formatMoney(aging.buckets.d1_30)} danger={aging.buckets.d1_30 > 0} />
           <Kpi
@@ -156,6 +162,8 @@ function InvoiceRow({
   const refreshDraft = useMutation(api.platform.invoices.refreshDraft);
   const deleteDraft = useMutation(api.platform.invoices.deleteDraft);
   const documentPayment = useMutation(api.platform.invoices.documentPayment);
+  const clearClaim = useMutation(api.platform.invoices.clearUnevidencedPayment);
+  const applyCredit = useMutation(api.platform.invoices.applyCreditToInvoice);
   const pushToStripe = useAction(api.platform.stripe.pushInvoiceToStripe);
   const [expanded, setExpanded] = useState(false);
 
@@ -349,6 +357,15 @@ function InvoiceRow({
                 <input className="input" name="reference" placeholder="Reference / check #" />
                 <input className="input" type="date" name="receivedAt" title="Date received" />
               </ReasonAction>
+              {/* The other half of the same gap: this money never arrived, so
+                  withdraw the claim and let the invoice go back to owed. */}
+              <ReasonAction
+                label="Never paid"
+                danger
+                onSubmit={async (reason) => {
+                  await clearClaim({ id: inv._id, reason });
+                }}
+              />
             </div>
           ) : null}
           {overpaid > 0 ? (
@@ -517,6 +534,29 @@ function InvoiceRow({
                   </select>
                   <input className="input" name="reference" placeholder="Reference / check #" />
                   <input className="input" type="date" name="receivedAt" title="Date received (blank = today)" />
+                </ReasonAction>
+                {/* Credit is consumed at issue, so credit that arrived after
+                    this invoice did needs applying by hand. */}
+                <ReasonAction
+                  label="Apply credit"
+                  onSubmit={async (reason, form) => {
+                    const raw = String(new FormData(form).get('amount') ?? '').trim();
+                    const amount = raw === '' ? undefined : Number(raw);
+                    if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0)) {
+                      throw new Error('Enter a positive amount, or leave blank for the full balance');
+                    }
+                    await applyCredit({
+                      id: inv._id,
+                      ...(amount !== undefined ? { amount } : {}),
+                      reason,
+                    });
+                  }}
+                >
+                  <input
+                    className="input"
+                    name="amount"
+                    placeholder={`Amount (blank = up to ${formatMoney(balance)})`}
+                  />
                 </ReasonAction>
                 <ReasonAction
                   label="Void"
