@@ -221,7 +221,119 @@ named holders of Convex dashboard access.
 
 ---
 
-## 4. Proposed work, sequenced
+## 4. Action coverage: what you can see vs. what you can do
+
+This is the larger gap, and it cuts across every surface. The console has **21
+exported mutations/actions total**. Everything else is a read. The result is a
+recurring pattern: a board tells you something is wrong, and the fix is still a
+CLI command or a Convex dashboard edit — which is exactly what the console was
+built to eliminate.
+
+| Surface | You can see | You can do | Missing actions that ops will hit |
+| --- | --- | --- | --- |
+| **Billing** | invoices, aging, revenue, usage | issue, mark sent, record payment, void, adjust drafts, next-cycle rate, push to Stripe | edit/reverse a payment; carry credit; back-date a rate; one-off invoices; write-off; refund; resend; edit due date — see §5 |
+| **Orgs** | directory, detail, snapshot, members, flags, usage, audit, recent loads | soft-delete, restore, set flags | **suspend for non-payment**; read-only mode; extend/edit license window; edit billing contact & contract number; rename; change org type; create an org |
+| **Members** | synced list (name, email) | *nothing* | invite; remove; change role; reset password; reset MFA; unlock; force sign-out; resend invite. The tenant app already has these as `/api/team/*` — the console has none of them |
+| **Drivers** | list, phone, Clerk link status | Clerk resync | fix the phone **on the driver row** (only `userIdentityLinks.phone` is editable — the driver record isn't, and phone mismatch is the top driver-app support ticket); deactivate; clear a stuck sync |
+| **Sessions** | active sessions, unacked end-alerts | force-end, ack | extend; reassign a leg; clear stuck geofence/leg state |
+| **Integrations** | FourKites tick health only | *nothing* | test a connection; rotate credentials; re-run a sync; disable push for one org; **no Samsara surface at all** |
+| **Webhooks** | pending / dead-letter counts | *nothing* | **requeue a dead-letter** — no requeue mutation exists anywhere in the codebase, only a prune cron. The alert fires at >10 and the only remedy is the CLI |
+| **Jobs** | last outcome, duration, failure counts | *nothing* | run now; pause; drill into history (`recentRuns` exists, no caller) |
+| **Alerts** | open/acked/resolved | ack | resolve by hand; snooze/mute; add a note; assign |
+| **Tickets** | list, filter | create, status, severity, assign, resolution note | reply to reporter; merge/dedupe; delete; attachments; notify on arrival |
+| **Flags** | global + per-org, string values | set/remove | typed (bool/number) values; percentage rollout; scheduled expiry; apply to a segment; see which orgs a flag actually affects |
+| **Staff access** | your own email | *nothing* | view the allowlist; see last-seen per actor; record an access review |
+
+**The design rule for all of it:** every new write goes through the same three
+gates that already exist and work — `requirePlatformStaff` (or
+`requireRecentStaffAuth` when destructive), a required `reason`, and a
+`platformAuditLog` entry inside the same transaction — plus idempotency keyed on
+target state. That contract is the reason adding actions here is safe; it should
+not be relaxed for convenience on any of them.
+
+## 5. Billing: from a report into a ledger you can operate
+
+Billing deserves its own treatment because the gaps aren't cosmetic — the
+**documented correction workflow is not implemented**, so today there is
+genuinely no supported way to fix a wrong number.
+
+### What's actually broken
+
+1. **Payments are append-only with no correction path.** `recordPayment`
+   (`platform/invoices.ts:360`) only appends. No edit, no delete, no reversal. A
+   staff typo ($5,000 for $500) permanently marks the invoice paid, and the only
+   remedy is a Convex dashboard edit — unaudited, exactly what the console exists
+   to prevent. No handling for a bounced check or an ACH return either.
+2. **Overpayment disappears.** When `amountPaid >= total` the invoice flips to
+   paid; the excess sits in `amountPaid` and is never surfaced or carried. The
+   schema has **no credit concept at all** (verified: zero credit fields).
+3. **Underpayment has no state.** A short-pay leaves the invoice `issued`/`sent`
+   with a silent balance. No `partially_paid` status, no short-pay reason, no
+   write-off, no bad-debt path, no payment-plan note.
+4. **The carry-forward the code tells you to use doesn't exist.**
+   `addAdjustment` rejects non-drafts with "post-issue corrections ride the NEXT
+   cycle (spec §4)" — but nothing carries anything forward. `cycleClose` never
+   looks for pending credits. The error message points at a mechanism that was
+   never built.
+5. **Rates only move forward.** `updateBillingConfig` accepts
+   `ratePerLoadNextCycle` and nothing else. You cannot back-date a rate (the
+   build plan §7.4 explicitly permitted "backdated with reason"), cannot correct
+   the base `billingRatePerLoad`, cannot remove or edit a wrong schedule step,
+   and the schedule isn't visible in the UI at all. A contract signed mid-month
+   at a new rate cannot be honored for the current cycle.
+6. **No one-off invoices.** Implementation fees, onboarding, professional
+   services, hardware — nothing outside metered usage can be billed. Invoices
+   exist only via `cycleClose`.
+7. **Contract fields are display-only.** `billingEmail`, `billingContactName`,
+   `billingPhone`, `platformContractNumber`, `platformLicenseStart/End` render on
+   org detail with no mutation behind them. The license window enforces nothing.
+8. **The manual (non-Stripe) path has no delivery.** `markSent` is an
+   honor-system status flip — no email, no PDF, no hosted link (only the Stripe
+   path produces one), no resend, no due-date edit, no reminders.
+
+### The design answer
+
+Don't make money fields editable. **Make them append-only with corrective
+entries** — standard double-entry practice, and it preserves the immutability
+rule the ledger was built on:
+
+- **Payment ledger with reversals.** Keep `payments` append-only; add a
+  `reversePayment` mutation that appends a negative entry referencing the
+  original, with reason + audit. Recompute `amountPaid` and status from the sum.
+  Nothing is ever edited or deleted; the trail shows the mistake *and* the fix,
+  which is what an auditor and a customer dispute both need.
+- **An org credit ledger.** New `platformCredits` table:
+  `{workosOrgId, amount, source: overpayment|goodwill|dispute|service_credit|manual,
+  reason, createdByEmail, invoiceRef?, consumedByInvoiceId?, createdAt}`.
+  Overpayment auto-posts a credit; `cycleClose` consumes available credit as a
+  negative line on the next invoice; the org page shows the balance and its
+  history. This is the missing carry-forward, and it makes the existing
+  "corrections ride the next cycle" message true.
+- **Payment states that match reality.** Add `partially_paid` and `written_off`
+  to the status union, with `writeOff(reason)` as a distinct audited action so
+  bad debt is a decision on the record rather than an invoice that quietly sits
+  open forever.
+- **Rate changes with an effective date, not just "next".** Replace
+  `ratePerLoadNextCycle` with `effectiveFromPeriod` + rate, allowing a past
+  period **only** when no committed invoice covers it (reuse
+  `orgHasCommittedInvoices`, already written); if one does, refuse and direct the
+  operator to a credit instead. Add step edit/delete and show the schedule.
+- **Manual invoices.** `createManualInvoice(orgId, periodKey, lines[], reason)`
+  producing a draft in the same ledger, same lifecycle, flagged `manual: true`
+  so metered and non-metered revenue stay distinguishable.
+- **Contract editing** for billing contact, contract number and license window,
+  audited like everything else — plus a decision on whether an expired license
+  actually does anything (today: nothing).
+- **Delivery on the manual path:** render the invoice PDF (the repo already has
+  `@react-pdf/renderer` in use for tenant invoices), email it to `billingEmail`,
+  record `sentAt` + recipient, and support resend.
+
+Two invariants worth stating explicitly in code review: the metered number
+(`loadsWritten`) is **never** editable by anyone, and an issued invoice's frozen
+lines are **never** rewritten — every correction is a new entry. Those hold in
+the current design and must survive all of the above.
+
+## 6. Proposed work, sequenced
 
 Effort is rough dev-days for one person. "Impact" is on incident outcomes, not
 looks.
@@ -276,6 +388,38 @@ needs-attention feed can be driven to zero.
 find org, read its timeline, take the action, resolve the ticket — without asking
 an engineer or opening the Convex dashboard.
 
+### Ops-B — Billing operability (~6 days) — §5 in full
+
+Independent of Ops-1/2; can run in parallel since it touches only
+`platform/invoices.ts`, the schema, and the billing board.
+
+| # | Work | Impact |
+| --- | --- | --- |
+| B.1 | `reversePayment` (append-only negative entry, reason + audit); recompute `amountPaid`/status from the sum; bounced-check / ACH-return as a reversal reason | Fixes the "we can't correct what we received" hole |
+| B.2 | `platformCredits` ledger + auto-post on overpayment + consumption as a negative line in `cycleClose` + balance and history on the org page | Makes carry-forward real; the code already tells operators it exists |
+| B.3 | `partially_paid` + `written_off` statuses; `writeOff(reason)` action; short-pay reason on payments | Under-payment stops being an invisible open balance |
+| B.4 | Effective-dated rate changes (past periods allowed only when no committed invoice covers them, via the existing `orgHasCommittedInvoices`); schedule step edit/delete; schedule visible in the UI | Mid-cycle contracts can be honored |
+| B.5 | `createManualInvoice` — one-off fees, onboarding, services, hardware; `manual: true` flag | Non-metered revenue becomes billable |
+| B.6 | Contract editing: billing contact/email/phone, contract number, license window — audited; decide whether license expiry enforces anything | Stops the Convex dashboard being the only editor |
+| B.7 | Manual-path delivery: invoice PDF (reuse `@react-pdf/renderer`), email to `billingEmail`, `sentAt` + recipient recorded, resend, due-date edit | `markSent` stops being an honor system |
+
+**Done when:** a mis-keyed payment, an overpayment carried to next month, a
+short-pay written off, and a back-dated contract rate can each be handled
+end-to-end in the console, with the full trail (mistake *and* correction) visible
+on the invoice.
+
+### Ops-A — Account actions (~5 days) — the rest of §4
+
+| # | Work | Impact |
+| --- | --- | --- |
+| A.1 | **Requeue dead-lettered webhooks** (single + bulk, audited). Currently alerted-on with no remedy anywhere in the codebase | Closes an alert that has no action |
+| A.2 | **Member management** — invite, remove, change role, reset password, reset MFA, force sign-out. The tenant `/api/team/*` routes already do this; wrap them staff-side | The most common support request we can't serve |
+| A.3 | **Org lifecycle** — suspend for non-payment, read-only mode, license extension, rename; keep soft-delete as the heavy option | Suspension is a business lever we don't have |
+| A.4 | **Driver record fixes** — phone on the `drivers` row (not just the identity link), deactivate, clear stuck sync | Top driver-app ticket class |
+| A.5 | **Integration panel** — test connection, rotate credentials, re-run sync, disable push per org; add a Samsara surface | Alerts on FourKites/Samsara become actionable |
+| A.6 | **Alert workflow** — manual resolve, snooze/mute, note, assign | Ack-only isn't a workflow |
+| A.7 | **Flags v2** — typed values, percentage rollout, scheduled expiry, affected-org preview | Safer use of the most powerful lever |
+
 ### Ops-3 — Hardening, compliance, and proof (~4 days)
 
 | # | Work | Impact |
@@ -288,7 +432,7 @@ an engineer or opening the Convex dashboard.
 
 ---
 
-## 5. What I'd cut or defer
+## 7. What I'd cut or defer
 
 Stated so the plan isn't padded:
 
@@ -303,7 +447,7 @@ Stated so the plan isn't padded:
 
 ---
 
-## 6. Decisions I need from you
+## 8. Decisions I need from you
 
 | # | Decision | My recommendation |
 | --- | --- | --- |
@@ -312,19 +456,28 @@ Stated so the plan isn't padded:
 | A3 | Does the console ever show driver PII? | No. Record it as policy and delete the unused audit action |
 | A4 | Status page: public, or customer-link-only? | Link-only to start; public once there are enough tenants that individual emails don't scale |
 | A5 | Is "run now" on crons acceptable given some jobs write money (`platform-invoice-cycle-close`)? | Allow it, but with an explicit deny-list for money-writing jobs; those stay CLI-only |
-| A6 | Sequencing: all three tracks in order, or Ops-0 + Ops-1 now and re-scope after? | Ops-0 + Ops-1 now. Ops-2's priorities will look different once the console has been on-call for two weeks |
+| A6 | Sequencing: everything in order, or Ops-0 + Ops-1 now and re-scope after? | Ops-0 + Ops-1 first, with **Ops-B running in parallel** — billing corrections are blocked on a real workflow today, and that track touches different files so it won't collide |
+| A7 | Payment corrections: reversal entries (append-only, both the error and the fix visible) or editable payment rows? | Reversals. Editable money history is the thing auditors and disputes punish, and it breaks the ledger's immutability rule |
+| A8 | Overpayment default: auto-post a credit for next cycle, or refund? | Auto-credit, with refund as an explicit second action. Credits are cheaper and reversible; refunds need a payment rail |
+| A9 | Back-dated rate changes: allowed when no committed invoice covers the period, or never? | Allowed with reason + audit under that guard. Refusing outright forces manual credits for every mid-month contract signing |
+| A10 | Does an expired `platformLicenseEnd` do anything (block access, alert, nothing)? | Alert + a console badge to start; blocking access is a business decision, not a default |
+| A11 | Member management (invite/remove/reset MFA) from the console — in scope, or stays tenant-side? | In scope. It's the most common support request, and doing it tenant-side means asking the customer to fix their own lockout |
 
 ---
 
-## 7. One-paragraph summary
+## 9. One-paragraph summary
 
 The console is further along than "rough draft" — all five planned phases are
 coded and meaningfully tested, and the security model is the part most teams get
-wrong and this one got right. What's missing is the operational layer: it can't
-tell you a job silently stopped, its attention feed can't be cleared, its
-alerting is inert until an env var nobody has set is set, its step-up path has
-never been proven against a real token, and there are no runbooks behind any of
-it. Ops-0 and Ops-1 (~7 days) fix everything that would let the console be
-confidently wrong. Ops-2 (~7 days) turns it from a set of read-only boards into
-something a non-engineer can finish a job in. Ops-3 (~4 days) is the compliance
-and hardening tail.
+wrong and this one got right. Two things separate it from operations-ready.
+**First, it can be confidently wrong:** a job that stops firing stays green, the
+attention feed can't be cleared, alerting is inert until an env var nobody has
+set is set, and step-up auth has never been proven against a real token. **Second
+— the bigger one — it can see but mostly can't act:** 21 mutations total, so most
+boards end with "now go run a CLI command." Billing is the sharpest case, where
+the code literally tells operators to use a carry-forward mechanism that was
+never built, and a mis-keyed payment can only be fixed from the Convex dashboard.
+Ops-0 + Ops-1 (~7 days) stop the console from lying; Ops-B (~6 days, parallel)
+turns billing from a report into a ledger you can operate; Ops-A (~5 days) and
+Ops-2 (~7 days) close the remaining action gaps; Ops-3 (~4 days) is the
+compliance and hardening tail.
