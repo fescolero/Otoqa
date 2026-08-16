@@ -717,6 +717,200 @@ describe('recording history after the fact', () => {
   });
 });
 
+describe('paid with no record of payment', () => {
+  /** How the historical backfill leaves a row: paid, empty payment ledger. */
+  async function seedBackfilledPaid(t: ReturnType<typeof convexTest>) {
+    return await t.run(async (ctx) => {
+      const now = Date.now();
+      return await ctx.db.insert('platformInvoices', {
+        workosOrgId: WORKOS_ORG,
+        periodKey: PERIOD,
+        kind: 'metered',
+        invoiceNumber: 'INV-LEGACY-0001',
+        loadsWritten: 100,
+        ratePerLoad: 3,
+        lines: [{ kind: 'usage', label: '100 loads × $3.00', amount: 300 }],
+        adjustments: [],
+        subtotal: 300,
+        total: 300,
+        payments: [], // the gap: money claimed, nothing to show for it
+        amountPaid: 300,
+        status: 'paid',
+        issuedAt: now - 40 * 86_400_000,
+        paidAt: now - 30 * 86_400_000,
+        backfilled: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+  }
+
+  it('surfaces the gap between what was paid and what is evidenced', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await seedBackfilledPaid(t);
+
+    const gaps = await t
+      .withIdentity(freshStaff())
+      .query(api.platform.invoices.paymentLedgerGaps, {});
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatchObject({
+      invoiceNumber: 'INV-LEGACY-0001',
+      status: 'paid',
+      amountPaid: 300,
+      documented: 0,
+      undocumented: 300,
+      backfilled: true,
+    });
+  });
+
+  it('documents the payment without changing what was paid', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await seedBackfilledPaid(t);
+    const staff = t.withIdentity(freshStaff());
+    const receivedAt = Date.now() - 30 * 86_400_000;
+
+    await staff.mutation(api.platform.invoices.documentPayment, {
+      id,
+      amount: 300,
+      method: 'check',
+      reference: 'check 2291',
+      receivedAt,
+      reason: 'Reconciling against the bank statement',
+    });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.payments).toHaveLength(1);
+    expect(inv.payments[0]).toMatchObject({ amount: 300, method: 'check', receivedAt });
+    // The money was never in question — only the record of it.
+    expect(inv.amountPaid).toBe(300);
+    expect(inv.status).toBe('paid');
+    expect(await staff.query(api.platform.invoices.paymentLedgerGaps, {})).toHaveLength(0);
+  });
+
+  it('can be filled in across several entries, and refuses to exceed the gap', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await seedBackfilledPaid(t);
+    const staff = t.withIdentity(freshStaff());
+
+    await staff.mutation(api.platform.invoices.documentPayment, {
+      id,
+      amount: 200,
+      method: 'ach',
+      reason: 'First transfer',
+    });
+    let gaps = await staff.query(api.platform.invoices.paymentLedgerGaps, {});
+    expect(gaps[0].undocumented).toBe(100);
+
+    // Documenting more than the invoice ever claimed would invent money.
+    await expect(
+      staff.mutation(api.platform.invoices.documentPayment, {
+        id,
+        amount: 250,
+        method: 'ach',
+        reason: 'too much',
+      }),
+    ).rejects.toThrow(/Only 100.00 is undocumented/);
+
+    await staff.mutation(api.platform.invoices.documentPayment, {
+      id,
+      amount: 100,
+      method: 'ach',
+      reason: 'Second transfer',
+    });
+    gaps = await staff.query(api.platform.invoices.paymentLedgerGaps, {});
+    expect(gaps).toHaveLength(0);
+  });
+
+  it('refuses on an invoice whose payments already add up', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.invoices.recordPayment, { id, amount: 300, method: 'ach' });
+
+    await expect(
+      staff.mutation(api.platform.invoices.documentPayment, {
+        id,
+        amount: 50,
+        method: 'ach',
+        reason: 'x',
+      }),
+    ).rejects.toThrow(/already has a full payment record/);
+  });
+
+  it('makes a documented payment reversible like any other', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await seedBackfilledPaid(t);
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.invoices.documentPayment, {
+      id,
+      amount: 300,
+      method: 'check',
+      reason: 'Reconciled',
+    });
+
+    // The point of documenting: the entry now exists, so it can be corrected.
+    await staff.mutation(api.platform.invoices.reversePayment, {
+      id,
+      paymentIndex: 0,
+      reason: 'Cheque was for a different customer',
+    });
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.amountPaid).toBe(0);
+    expect(inv.status).toBe('issued');
+  });
+});
+
+describe('tenant-facing one-off charges', () => {
+  it('shows committed one-offs to the tenant, and hides drafts and voids', async () => {
+    const t = convexTest(schema);
+    const orgId = await t.run((ctx) => seedOrg(ctx));
+    const staff = t.withIdentity(freshStaff());
+
+    // Two one-offs: one issued and paid, one left as a draft.
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: PERIOD,
+      lines: [{ label: 'Integration setup', amount: 1000 }],
+      reason: 'SOW',
+    });
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: PERIOD,
+      lines: [{ label: 'Not agreed yet', amount: 400 }],
+      reason: 'pending',
+    });
+    const manuals = (await staff.query(api.platform.invoices.listInvoices, {})).filter(
+      (i) => i.kind === 'manual',
+    );
+    const issuedOne = manuals.find((m) => m.lines[0].label === 'Integration setup')!;
+    await staff.mutation(api.platform.invoices.issueInvoice, { id: issuedOne._id });
+
+    const tenant = t.withIdentity({
+      issuer: 'https://api.workos.com/user_management/tenant',
+      subject: 'u',
+      org_id: WORKOS_ORG,
+    } as never);
+    const overview = await tenant.query(api.platformUsage.getBillingOverview, {
+      workosOrgId: WORKOS_ORG,
+    });
+
+    // The draft is the customer's business only once we raise it.
+    expect(overview.oneOffCharges).toHaveLength(1);
+    expect(overview.oneOffCharges[0]).toMatchObject({
+      description: 'Integration setup',
+      amount: 1000,
+      status: 'due',
+    });
+    // And a one-off never disturbs the cycle history.
+    expect(overview.closedCycles.find((c) => c.periodKey === PERIOD)?.amount).toBe(300);
+  });
+});
+
 describe('write-off', () => {
   it('closes an uncollectible balance and keeps it out of receivables', async () => {
     const t = convexTest(schema);

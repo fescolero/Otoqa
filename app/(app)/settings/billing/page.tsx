@@ -557,6 +557,123 @@ interface HistoryRow {
   subLabel: string;
 }
 
+/**
+ * One-off charges — onboarding, integrations, professional services.
+ *
+ * These live in the same ledger as the monthly cycles but outside the usage
+ * meter, so the cycle table deliberately excludes them. Without this card the
+ * customer is billed for work their own billing page never mentions.
+ */
+function BillOneOffTable({
+  rows,
+}: {
+  rows: NonNullable<BillingOverview['oneOffCharges']>;
+}) {
+  const cols = [
+    { key: 'desc', label: 'Charge', width: '1.6fr', align: 'left' as const },
+    { key: 'amount', label: 'Amount', width: '140px', align: 'right' as const },
+    { key: 'status', label: 'Status', width: '150px', align: 'left' as const },
+    { key: 'invoice', label: 'Invoice', width: '150px', align: 'right' as const },
+  ];
+  const grid = cols.map((c) => c.width).join(' ');
+  const now = Date.now();
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: grid,
+          background: 'var(--bg-surface-2)',
+          borderBottom: '1px solid var(--border-hairline)',
+        }}
+      >
+        {cols.map((c, i) => (
+          <div
+            key={c.key}
+            style={{
+              padding: `10px ${i === cols.length - 1 ? 16 : 14}px 10px ${i === 0 ? 16 : 14}px`,
+              fontSize: 10.5,
+              fontWeight: 600,
+              letterSpacing: 0.04,
+              textTransform: 'uppercase',
+              color: 'var(--text-tertiary)',
+              textAlign: c.align,
+            }}
+          >
+            {c.label}
+          </div>
+        ))}
+      </div>
+      {rows.map((r, i) => {
+        const pastDue = r.status === 'due' && r.dueMs > 0 && r.dueMs < now;
+        const partial = r.status === 'due' && r.amountPaid > 0;
+        return (
+          <div
+            key={r.invoiceNo}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: grid,
+              alignItems: 'center',
+              borderBottom: i === rows.length - 1 ? 'none' : '1px solid var(--border-hairline)',
+              background: 'var(--bg-surface)',
+            }}
+          >
+            <div
+              style={{
+                padding: '11px 14px 11px 16px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                minWidth: 0,
+              }}
+            >
+              <div
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 7,
+                  flexShrink: 0,
+                  background: 'var(--bg-surface-2)',
+                  border: '1px solid var(--border-hairline)',
+                  color: 'var(--text-secondary)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <WIcon name="doc-dollar" size={14} />
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{r.description || 'One-off charge'}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                  {r.status === 'paid'
+                    ? `Paid ${dateLabel(r.paidMs ?? r.issuedMs)}`
+                    : `Issued ${dateLabel(r.issuedMs)} · due ${dateLabel(r.dueMs)}`}
+                  {partial ? ` · ${fmtMoney(r.amountPaid)} received` : ''}
+                </div>
+              </div>
+            </div>
+            <div style={{ padding: '11px 14px', textAlign: 'right' }}>
+              <span className="num" style={{ fontSize: 13, fontWeight: 600 }}>
+                {fmtMoney(r.amount)}
+              </span>
+            </div>
+            <div style={{ padding: '11px 14px' }}>
+              <BillStatus status={pastDue ? 'pastdue' : r.status} />
+            </div>
+            <div style={{ padding: '11px 16px 11px 14px', textAlign: 'right' }}>
+              <span className="num" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>
+                {r.invoiceNo}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function BillHistoryTable({
   rows,
   rate,
@@ -1695,6 +1812,7 @@ export default function BillingPage() {
 
   const rate = overview?.rate ?? 0;
   const cycles = useMemo(() => overview?.closedCycles ?? [], [overview]);
+  const oneOffs = useMemo(() => overview?.oneOffCharges ?? [], [overview]);
   const current = overview?.currentCycle;
 
   // Run-rate projection for the open cycle.
@@ -1957,6 +2075,18 @@ export default function BillingPage() {
                   />
                 </BillCard>
               </div>
+              {oneOffs.length > 0 && (
+                <BillCard
+                  title={
+                    <SectionTitle sub="Setup, integrations and services — billed outside the monthly cycle">
+                      One-off charges
+                    </SectionTitle>
+                  }
+                  padded={false}
+                >
+                  <BillOneOffTable rows={oneOffs} />
+                </BillCard>
+              )}
             </div>
 
             {/* Rail */}

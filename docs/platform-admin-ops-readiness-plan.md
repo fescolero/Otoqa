@@ -631,6 +631,35 @@ An overpayment already posted the excess as a credit — that part worked — bu
 nothing said so on the invoice. The row now shows a `+$X credited` chip and the
 detail explains where the money went and when it will apply.
 
+### Tenant view for one-off charges, and payments with no record (added after review)
+
+Two gaps found while entering real history:
+
+**One-offs were invisible to the customer.** The tenant billing page reads
+metered cycles, and this change had deliberately filtered one-offs out of that
+map so they couldn't shadow a cycle — which meant we could bill an org for
+onboarding work their own billing page never mentioned.
+`getBillingOverview` now returns `oneOffCharges` (committed only — a draft has
+not been raised with the customer, a void one was cancelled) and the page renders
+them as their own card, distinct from the cycle table because they carry no
+loads or rate.
+
+**An invoice can be paid with an empty payment ledger.**
+`backfillHistoricalPaidInvoices` creates rows with `status: 'paid'`,
+`amountPaid: subtotal` and `payments: []`, and anything settled before the
+console could record payments looks the same. The money is accounted for but
+cannot be reconciled against a bank statement or reversed, and `recordPayment`
+refuses on a paid invoice, so there was no way to fix it.
+
+- `paymentLedgerGaps` lists every invoice where `amountPaid` exceeds the sum of
+  its payment entries, surfaced as a panel at the top of the billing board.
+- `documentPayment` writes the missing entry — method, reference, real date —
+  capped at the undocumented amount and deliberately NOT recomputing
+  `amountPaid`. It records the payment; it never moves money. Adding genuinely
+  new money is still `recordPayment`, which requires an open invoice.
+- A documented payment is a normal ledger entry, so it can then be reversed like
+  any other — which is the practical point of writing it down.
+
 ### Known limitations, stated rather than hidden
 
 - **A payment cannot be recorded against a written-off invoice.** Bad-debt

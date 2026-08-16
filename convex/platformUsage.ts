@@ -433,6 +433,22 @@ export const getBillingOverview = query({
       invoiceRows.filter((r) => r.kind !== 'manual').map((r) => [r.periodKey, r]),
     );
 
+    // Committed one-offs only: a draft has not been raised with the customer,
+    // and a void one was cancelled.
+    const oneOffCharges = invoiceRows
+      .filter((r) => r.kind === 'manual' && r.status !== 'draft' && r.status !== 'void')
+      .sort((a, b) => (b.issuedAt ?? 0) - (a.issuedAt ?? 0))
+      .map((r) => ({
+        invoiceNo: r.invoiceNumber,
+        description: r.lines.map((l) => l.label).join(' · '),
+        amount: r.total,
+        amountPaid: r.amountPaid,
+        status: (r.status === 'paid' ? 'paid' : 'due') as 'due' | 'paid',
+        issuedMs: r.issuedAt ?? 0,
+        dueMs: r.dueAt ?? 0,
+        paidMs: r.paidAt,
+      }));
+
     const closedCycles = closedKeys.map((key, i) => {
       const invoice = invoiceByPeriod.get(key);
       if (invoice && invoice.status !== 'draft' && invoice.status !== 'void') {
@@ -480,6 +496,10 @@ export const getBillingOverview = query({
       licenseEnd: org?.platformLicenseEnd ?? null,
       currentCycle,
       closedCycles,
+      // One-off charges (onboarding, integrations, services). They live in the
+      // same ledger but outside the usage cycle, so without this the customer
+      // is billed for work their own billing page never mentions.
+      oneOffCharges,
     };
   },
 });

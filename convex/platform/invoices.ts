@@ -606,6 +606,132 @@ export const recordPayment = mutation({
 });
 
 /**
+ * Fill in a payment that was never written down.
+ *
+ * An invoice can be marked paid with an empty payment ledger — the historical
+ * backfill does exactly that (`payments: []`, `amountPaid: subtotal`), and so
+ * does any row settled before the console could record payments. The money is
+ * accounted for, but *how* and *when* it arrived is missing, so it can't be
+ * reconciled against a bank statement and can't be reversed.
+ *
+ * This documents that money without moving any: it only ever fills the gap
+ * between `amountPaid` (what the invoice claims) and the sum of the payment
+ * entries (what it can show), so it cannot invent a payment or change what is
+ * owed. Adding NEW money is `recordPayment`, which needs an open invoice.
+ */
+export const documentPayment = mutation({
+  args: {
+    id: v.id('platformInvoices'),
+    amount: v.number(),
+    method: v.union(
+      v.literal('ach'),
+      v.literal('check'),
+      v.literal('wire'),
+      v.literal('credit'),
+      v.literal('other'),
+    ),
+    reference: v.optional(v.string()),
+    receivedAt: v.optional(v.number()),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+    if (invoice.status === 'draft') {
+      throw new ConvexError('A draft has nothing paid against it yet');
+    }
+
+    const documented = sumPayments(invoice.payments);
+    const undocumented = money(invoice.amountPaid - documented);
+    if (undocumented <= 0) {
+      throw new ConvexError(
+        `${invoice.invoiceNumber} already has a full payment record — use Record payment to add money, or Reverse to correct an entry.`,
+      );
+    }
+    if (!(args.amount > 0)) throw new ConvexError('Amount must be positive');
+    if (money(args.amount) > undocumented) {
+      throw new ConvexError(
+        `Only ${undocumented.toFixed(2)} is undocumented on this invoice. Documenting more would change what was paid — use Record payment for new money.`,
+      );
+    }
+
+    const now = Date.now();
+    const payments = [
+      ...invoice.payments,
+      {
+        id: nextPaymentId(invoice),
+        amount: money(args.amount),
+        method: args.method,
+        reference: args.reference,
+        recordedByEmail: staff.email,
+        receivedAt: args.receivedAt ?? invoice.paidAt ?? invoice.issuedAt ?? now,
+      },
+    ];
+    // amountPaid deliberately NOT recomputed: the invoice already claimed this
+    // money. This writes the record, not the amount.
+    await ctx.db.patch(args.id, { payments, updatedAt: now });
+
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_payment_recorded',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      reason: args.reason,
+      metadata: JSON.stringify({
+        documenting: true,
+        amount: money(args.amount),
+        method: args.method,
+        reference: args.reference,
+        stillUndocumented: money(undocumented - args.amount) || undefined,
+      }),
+    });
+    return null;
+  },
+});
+
+/**
+ * Invoices whose `amountPaid` doesn't match their payment entries — money the
+ * ledger asserts but cannot evidence. Backfilled rows are the usual source.
+ */
+export const paymentLedgerGaps = query({
+  args: {},
+  handler: async (ctx) => {
+    await requirePlatformStaff(ctx);
+    const rows = (
+      await Promise.all(
+        (['paid', 'partially_paid', 'written_off', 'issued', 'sent'] as const).map((status) =>
+          ctx.db
+            .query('platformInvoices')
+            .withIndex('by_status', (q) => q.eq('status', status))
+            .take(300),
+        ),
+      )
+    ).flat();
+
+    return rows
+      .map((r) => ({
+        _id: r._id,
+        invoiceNumber: r.invoiceNumber,
+        workosOrgId: r.workosOrgId,
+        periodKey: r.periodKey,
+        kind: r.kind ?? 'metered',
+        status: r.status,
+        total: r.total,
+        amountPaid: r.amountPaid,
+        documented: sumPayments(r.payments),
+        undocumented: money(r.amountPaid - sumPayments(r.payments)),
+        backfilled: r.backfilled === true,
+        paidAt: r.paidAt,
+      }))
+      .filter((r) => r.undocumented > 0)
+      .sort((a, b) => b.undocumented - a.undocumented);
+  },
+});
+
+/**
  * Correct a wrong payment WITHOUT editing history: appends a negative entry
  * referencing the original, so the invoice shows both the error and the fix.
  * `amountPaid` and status are recomputed from the whole ledger, which walks a

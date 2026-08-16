@@ -71,6 +71,8 @@ export function InvoicesBoard() {
         </div>
       ) : null}
 
+      <LedgerGaps />
+
       <div className="chip-row">
         {FILTERS.map((s) => (
           <button
@@ -100,6 +102,42 @@ export function InvoicesBoard() {
   );
 }
 
+/**
+ * Invoices that claim money they can't evidence: `amountPaid` above the sum of
+ * their payment entries. Historical backfill rows are the usual source — they
+ * were created paid with an empty ledger — as is anything settled before the
+ * console could record payments.
+ */
+function LedgerGaps() {
+  const gaps = useQuery(api.platform.invoices.paymentLedgerGaps, {});
+  if (gaps === undefined || gaps.length === 0) return null;
+
+  return (
+    <div className="panel panel-attention">
+      <h2>Payments without a record ({gaps.length})</h2>
+      <p className="subtitle">
+        These are marked paid but carry no matching payment entry, so there is nothing to
+        reconcile against a bank statement and nothing to reverse. Open the invoice and use
+        <strong> Document payment</strong> to fill in how and when the money arrived — it records
+        the payment without changing what was paid.
+      </p>
+      {gaps.map((g) => (
+        <div className="audit-row" key={g._id}>
+          <span className="chip">{g.status.replace('_', ' ')}</span>
+          <strong>{g.invoiceNumber}</strong>
+          <span className="muted">{g.workosOrgId}</span>
+          <span className="muted">{g.periodKey}</span>
+          <span>
+            {formatMoney(g.amountPaid)} paid · {formatMoney(g.documented)} documented
+          </span>
+          <span className="danger-text">{formatMoney(g.undocumented)} unaccounted</span>
+          {g.backfilled ? <span className="chip">backfilled</span> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function InvoiceRow({
   inv,
 }: {
@@ -117,6 +155,7 @@ function InvoiceRow({
   const updateManualLines = useMutation(api.platform.invoices.updateManualLines);
   const refreshDraft = useMutation(api.platform.invoices.refreshDraft);
   const deleteDraft = useMutation(api.platform.invoices.deleteDraft);
+  const documentPayment = useMutation(api.platform.invoices.documentPayment);
   const pushToStripe = useAction(api.platform.stripe.pushInvoiceToStripe);
   const [expanded, setExpanded] = useState(false);
 
@@ -124,6 +163,10 @@ function InvoiceRow({
   const isDraft = inv.status === 'draft';
   // Paid past the total: the excess was posted to the org's credit balance.
   const overpaid = Math.round((inv.amountPaid - inv.total) * 100) / 100;
+  // Money the invoice claims but cannot evidence — see the ledger-gaps panel.
+  const documented =
+    Math.round(inv.payments.reduce((sum, p) => sum + p.amount, 0) * 100) / 100;
+  const undocumented = Math.round((inv.amountPaid - documented) * 100) / 100;
   const isManual = inv.kind === 'manual';
   const isOpen =
     inv.status === 'issued' || inv.status === 'sent' || inv.status === 'partially_paid';
@@ -263,6 +306,51 @@ function InvoiceRow({
             );
           })}
 
+          {undocumented > 0 ? (
+            <div className="audit-row">
+              <span className="chip chip-warn">no record</span>
+              <span>
+                {formatMoney(undocumented)} of the {formatMoney(inv.amountPaid)} paid has no
+                payment entry behind it.
+              </span>
+              <ReasonAction
+                label="Document payment"
+                onSubmit={async (reason, form) => {
+                  const data = new FormData(form);
+                  const amount = Number(data.get('amount'));
+                  if (!Number.isFinite(amount) || amount <= 0) {
+                    throw new Error('Enter a positive amount');
+                  }
+                  await documentPayment({
+                    id: inv._id,
+                    amount,
+                    method: data.get('method') as 'ach' | 'check' | 'wire' | 'credit' | 'other',
+                    reference: String(data.get('reference') ?? '') || undefined,
+                    ...(dateToMs(data.get('receivedAt')) !== undefined
+                      ? { receivedAt: dateToMs(data.get('receivedAt')) }
+                      : {}),
+                    reason,
+                  });
+                }}
+              >
+                <input
+                  className="input"
+                  name="amount"
+                  defaultValue={String(undocumented)}
+                  placeholder={`Amount (max ${formatMoney(undocumented)})`}
+                />
+                <select className="input" name="method" defaultValue="ach">
+                  <option value="ach">ACH</option>
+                  <option value="check">Check</option>
+                  <option value="wire">Wire</option>
+                  <option value="credit">Credit</option>
+                  <option value="other">Other</option>
+                </select>
+                <input className="input" name="reference" placeholder="Reference / check #" />
+                <input className="input" type="date" name="receivedAt" title="Date received" />
+              </ReasonAction>
+            </div>
+          ) : null}
           {overpaid > 0 ? (
             <div className="audit-row">
               <span className="chip chip-ok">credit</span>
