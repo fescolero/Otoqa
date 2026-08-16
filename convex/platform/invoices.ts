@@ -393,20 +393,36 @@ export const backfillHistoricalPaidInvoices = internalMutation({
 // ─── Staff lifecycle mutations ───────────────────────────────────────────
 
 export const issueInvoice = mutation({
-  args: { id: v.id('platformInvoices') },
+  args: {
+    id: v.id('platformInvoices'),
+    // Recording work that was invoiced (or should have been) in the past:
+    // without this, an invoice for June work entered in August is stamped
+    // August and never looks overdue, so aging and history both lie. The
+    // audit row still carries the real wall-clock time of the action.
+    issuedAt: v.optional(v.number()),
+    dueAt: v.optional(v.number()),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
     const staff = await requirePlatformStaff(ctx);
     const invoice = await ctx.db.get(args.id);
     if (!invoice) throw new ConvexError('Invoice not found');
     if (invoice.status !== 'draft') throw new ConvexError('Only drafts can be issued');
+    if (args.issuedAt !== undefined && args.issuedAt > Date.now()) {
+      throw new ConvexError('An invoice cannot be issued with a future date');
+    }
+    if (args.dueAt !== undefined && args.issuedAt !== undefined && args.dueAt < args.issuedAt) {
+      throw new ConvexError('Due date must be on or after the issue date');
+    }
 
     const org = await ctx.db
       .query('organizations')
       .withIndex('by_organization', (q) => q.eq('workosOrgId', invoice.workosOrgId))
       .unique();
 
-    const issuedAt = Date.now();
+    const now = Date.now();
+    const issuedAt = args.issuedAt ?? now;
+    const backdated = issuedAt < now - 60_000;
     const subtotal = sumSubtotal(invoice);
     const taxRatePercent = org?.taxRatePercent;
     const taxAmount =
@@ -451,8 +467,10 @@ export const issueInvoice = mutation({
       status: paidInFull ? 'paid' : amountPaid > 0 ? 'partially_paid' : 'issued',
       ...(paidInFull ? { paidAt: issuedAt } : {}),
       issuedAt,
-      dueAt: computeDueAt(issuedAt, org?.billingTerms),
-      updatedAt: issuedAt,
+      // Terms run from the issue date, so a back-dated invoice gets a
+      // back-dated due date and lands in the right aging bucket on its own.
+      dueAt: args.dueAt ?? computeDueAt(issuedAt, org?.billingTerms),
+      updatedAt: now,
     });
     await logPlatformAudit(ctx, {
       actorEmail: staff.email,
@@ -464,6 +482,10 @@ export const issueInvoice = mutation({
         invoiceNumber: invoice.invoiceNumber,
         total,
         creditApplied: creditApplied || undefined,
+        // Recorded explicitly so a back-dated issue can never be mistaken for
+        // one entered on the day.
+        issuedAt,
+        backdated: backdated || undefined,
       }),
     });
     return null;
@@ -560,7 +582,7 @@ export const recordPayment = mutation({
       payments,
       amountPaid,
       status: paidInFull ? 'paid' : 'partially_paid',
-      ...(paidInFull ? { paidAt: now } : {}),
+      ...(paidInFull ? { paidAt: args.receivedAt ?? now } : {}),
       updatedAt: now,
     });
     await logPlatformAudit(ctx, {

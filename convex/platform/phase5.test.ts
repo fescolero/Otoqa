@@ -608,6 +608,115 @@ describe('draft editing — a draft is a working document', () => {
   });
 });
 
+describe('recording history after the fact', () => {
+  const DAY = 86_400_000;
+
+  it('back-dates a one-off invoice, takes a late overpayment, and carries the excess forward', async () => {
+    // The real case: integration setup work invoiced in arrears, the customer
+    // paid weeks later and deliberately overpaid to cover the coming month.
+    const t = convexTest(schema);
+    const orgId = await t.run((ctx) => seedOrg(ctx));
+    const staff = t.withIdentity(freshStaff());
+    const workDoneAt = Date.now() - 60 * DAY;
+    const moneyArrivedAt = Date.now() - 10 * DAY;
+
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: PERIOD,
+      lines: [{ label: 'Integration setup', amount: 1000 }],
+      reason: 'Recording work completed in arrears',
+    });
+    const draft = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i.kind === 'manual',
+    )!;
+
+    // Issue AS OF the date the work was billed, not today.
+    await staff.mutation(api.platform.invoices.issueInvoice, {
+      id: draft._id,
+      issuedAt: workDoneAt,
+    });
+    let inv = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i._id === draft._id,
+    )!;
+    expect(inv.issuedAt).toBe(workDoneAt);
+    // Terms run from the issue date, so it was already overdue when paid.
+    expect(inv.dueAt!).toBeLessThan(moneyArrivedAt);
+
+    // They paid $1,300 — $1,000 owed plus $300 toward next month.
+    await staff.mutation(api.platform.invoices.recordPayment, {
+      id: draft._id,
+      amount: 1300,
+      method: 'wire',
+      reference: 'wire 8841',
+      receivedAt: moneyArrivedAt,
+    });
+    inv = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i._id === draft._id,
+    )!;
+    expect(inv.status).toBe('paid');
+    expect(inv.amountPaid).toBe(1300);
+    // Dates reflect reality, not when someone typed it in.
+    expect(inv.payments[0].receivedAt).toBe(moneyArrivedAt);
+    expect(inv.paidAt).toBe(moneyArrivedAt);
+
+    // The extra $300 is sitting on the account, not lost.
+    const balance = await staff.query(api.platform.credits.creditBalance, {
+      workosOrgId: WORKOS_ORG,
+    });
+    expect(balance.available).toBe(300);
+
+    // Next month's metered invoice: $300 of it is already covered.
+    const monthly = await issuedInvoice(t); // 100 loads × $3 = $300
+    const next = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i._id === monthly,
+    )!;
+    expect(next.total).toBe(300);
+    expect(next.payments[0]).toMatchObject({ method: 'credit', amount: 300 });
+    expect(next.status).toBe('paid');
+    expect(next.subtotal).toBe(300); // credit never touched the taxable subtotal
+  });
+
+  it('refuses a future issue date and an inverted due date', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await t.mutation(internal.platform.invoices.cycleClose, { periodKey: PERIOD });
+    const staff = t.withIdentity(freshStaff());
+    const [draft] = await staff.query(api.platform.invoices.listInvoices, {});
+
+    await expect(
+      staff.mutation(api.platform.invoices.issueInvoice, {
+        id: draft._id,
+        issuedAt: Date.now() + 7 * DAY,
+      }),
+    ).rejects.toThrow(/future date/);
+    await expect(
+      staff.mutation(api.platform.invoices.issueInvoice, {
+        id: draft._id,
+        issuedAt: Date.now() - 10 * DAY,
+        dueAt: Date.now() - 20 * DAY,
+      }),
+    ).rejects.toThrow(/on or after the issue date/);
+  });
+
+  it('puts a back-dated unpaid invoice straight into the right aging bucket', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await t.mutation(internal.platform.invoices.cycleClose, { periodKey: PERIOD });
+    const staff = t.withIdentity(freshStaff());
+    const [draft] = await staff.query(api.platform.invoices.listInvoices, {});
+
+    await staff.mutation(api.platform.invoices.issueInvoice, {
+      id: draft._id,
+      issuedAt: Date.now() - 75 * DAY, // net-15 → ~60 days overdue
+    });
+
+    const aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(300);
+    expect(aging.buckets.current).toBe(0);
+    expect(aging.buckets.d31_60).toBe(300);
+  });
+});
+
 describe('write-off', () => {
   it('closes an uncollectible balance and keeps it out of receivables', async () => {
     const t = convexTest(schema);

@@ -612,6 +612,25 @@ Every one of these refuses once the invoice leaves draft, with a message that
 points at the credit / next-cycle-adjustment path instead. The immutability rule
 is unchanged.
 
+### Recording history after the fact (added after review)
+
+Entering work that was billed weeks ago exposed two places where the ledger
+recorded *when someone typed it in* rather than *when it happened*:
+
+- `issueInvoice` stamped `Date.now()` with no override, so an invoice for June
+  work entered in August was dated August, due in 15 days, and never looked
+  overdue. It now takes an optional `issuedAt`/`dueAt` — terms run from the
+  issue date, so a back-dated invoice lands in the correct aging bucket by
+  itself. Future issue dates and inverted due dates are refused, and the audit
+  entry records that the date was back-dated (its own timestamp stays real).
+- `recordPayment` accepted a `receivedAt` that the UI never offered, and set
+  `paidAt` to now regardless. Both now carry the date the money actually
+  arrived.
+
+An overpayment already posted the excess as a credit — that part worked — but
+nothing said so on the invoice. The row now shows a `+$X credited` chip and the
+detail explains where the money went and when it will apply.
+
 ### Known limitations, stated rather than hidden
 
 - **A payment cannot be recorded against a written-off invoice.** Bad-debt

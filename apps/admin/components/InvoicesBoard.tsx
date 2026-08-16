@@ -6,6 +6,18 @@ import { api } from '@otoqa/convex-client';
 import { formatMoney, formatWhen } from '@/lib/format';
 import { ReasonAction } from '@/components/ReasonAction';
 
+/**
+ * A date input gives 'YYYY-MM-DD'. Midday UTC, not midnight, so the date the
+ * operator typed is the date every timezone renders back.
+ */
+function dateToMs(value: FormDataEntryValue | null): number | undefined {
+  const raw = String(value ?? '').trim();
+  if (!raw) return undefined;
+  const ms = Date.parse(`${raw}T12:00:00Z`);
+  if (Number.isNaN(ms)) throw new Error('Enter the date as YYYY-MM-DD');
+  return ms;
+}
+
 type InvoiceStatus =
   | 'draft'
   | 'issued'
@@ -110,6 +122,8 @@ function InvoiceRow({
 
   const balance = Math.round((inv.total - inv.amountPaid) * 100) / 100;
   const isDraft = inv.status === 'draft';
+  // Paid past the total: the excess was posted to the org's credit balance.
+  const overpaid = Math.round((inv.amountPaid - inv.total) * 100) / 100;
   const isManual = inv.kind === 'manual';
   const isOpen =
     inv.status === 'issued' || inv.status === 'sent' || inv.status === 'partially_paid';
@@ -137,6 +151,9 @@ function InvoiceRow({
         <span>{formatMoney(inv.total)}</span>
         {balance > 0 && inv.status !== 'draft' && inv.status !== 'void' ? (
           <span className="muted">balance {formatMoney(balance)}</span>
+        ) : null}
+        {overpaid > 0 ? (
+          <span className="chip chip-ok">+{formatMoney(overpaid)} credited</span>
         ) : null}
         {inv.driftDetectedAt ? <span className="chip chip-danger">drift</span> : null}
         {inv.backfilled ? <span className="chip">backfilled</span> : null}
@@ -246,6 +263,16 @@ function InvoiceRow({
             );
           })}
 
+          {overpaid > 0 ? (
+            <div className="audit-row">
+              <span className="chip chip-ok">credit</span>
+              <span>
+                Paid {formatMoney(inv.amountPaid)} against {formatMoney(inv.total)} — the extra{' '}
+                {formatMoney(overpaid)} is on the organization&apos;s account credit and applies to
+                the next invoice when it is issued.
+              </span>
+            </div>
+          ) : null}
           {inv.writeOffReason ? (
             <p className="ticket-body muted">Written off: {inv.writeOffReason}</p>
           ) : null}
@@ -254,13 +281,26 @@ function InvoiceRow({
           <div className="inline-form">
             {isDraft ? (
               <>
+                {/* Leave the date blank to issue as of today. Set it when
+                    recording work that was billed (or should have been) in the
+                    past — terms run from it, so the due date and aging follow. */}
                 <ReasonAction
                   label="Issue"
                   requireReason={false}
-                  onSubmit={async () => {
-                    await issue({ id: inv._id });
+                  onSubmit={async (_reason, form) => {
+                    const data = new FormData(form);
+                    const issuedAt = dateToMs(data.get('issuedAt'));
+                    const dueAt = dateToMs(data.get('dueAt'));
+                    await issue({
+                      id: inv._id,
+                      ...(issuedAt !== undefined ? { issuedAt } : {}),
+                      ...(dueAt !== undefined ? { dueAt } : {}),
+                    });
                   }}
-                />
+                >
+                  <input className="input" type="date" name="issuedAt" title="Issue date (blank = today)" />
+                  <input className="input" type="date" name="dueAt" title="Due date (blank = from terms)" />
+                </ReasonAction>
                 {/* Re-derive from the CURRENT rate schedule and usage — cycle
                     close runs on the 2nd, so a rate fixed afterwards would
                     otherwise leave the draft stale. Adjustments survive. */}
@@ -372,6 +412,11 @@ function InvoiceRow({
                       amount,
                       method: data.get('method') as 'ach' | 'check' | 'wire' | 'other',
                       reference: String(data.get('reference') ?? '') || undefined,
+                      // The date the money actually arrived, which is often
+                      // not the date someone got around to recording it.
+                      ...(dateToMs(data.get('receivedAt')) !== undefined
+                        ? { receivedAt: dateToMs(data.get('receivedAt')) }
+                        : {}),
                     });
                   }}
                 >
@@ -383,6 +428,7 @@ function InvoiceRow({
                     <option value="other">Other</option>
                   </select>
                   <input className="input" name="reference" placeholder="Reference / check #" />
+                  <input className="input" type="date" name="receivedAt" title="Date received (blank = today)" />
                 </ReasonAction>
                 <ReasonAction
                   label="Void"
