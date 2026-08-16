@@ -3,7 +3,7 @@ import { AppState, AppStateStatus } from 'react-native';
 import { ConvexReactClient } from 'convex/react';
 import { useAuth } from '@clerk/clerk-expo';
 import { trackConvexAuthEvent } from './analytics';
-import { storeAuthToken, clearAuthToken } from './auth-token-store';
+import { storeAuthToken, clearAuthToken, hasStoredAuthToken } from './auth-token-store';
 
 // ============================================
 // CONVEX CLIENT SETUP
@@ -28,6 +28,14 @@ interface ConvexAuthState {
   isLoading: boolean;
   isAuthenticated: boolean;
   /**
+   * True once automatic recovery has exhausted MAX_AUTO_RECOVERY_ATTEMPTS
+   * without a successful handshake. The auto-recovery backstop stops firing
+   * at this point; escape requires a user action (manual Retry or sign out).
+   * Surfaced so gate screens can stop showing an indefinite spinner and
+   * offer that action instead.
+   */
+  isAuthBlocked: boolean;
+  /**
    * Force a fresh Convex auth cycle. Re-registers `convex.setAuth`, which
    * tears down and rebuilds the AuthenticationManager (and nudges the
    * WebSocket to reconnect). This is the imperative the UI's Retry buttons
@@ -35,13 +43,19 @@ interface ConvexAuthState {
    * gate — without it, "Retry" only resets a visual timer and re-auth never
    * actually happens. No-op when not signed in, and debounced so a button
    * tap that races the auto-recovery tick doesn't double-fire.
+   *
+   * `manual: true` marks a user-initiated retry, which is the ONLY thing
+   * that clears the reauth/recovery budgets. Automatic callers must leave it
+   * unset — an automatic trigger that resets its own budget is an unbounded
+   * loop, which is exactly the defect this signature exists to prevent.
    */
-  forceReauth: () => void;
+  forceReauth: (opts?: { manual?: boolean }) => void;
 }
 
 const ConvexAuthContext = createContext<ConvexAuthState>({
   isLoading: true,
   isAuthenticated: false,
+  isAuthBlocked: false,
   forceReauth: () => {},
 });
 
@@ -95,6 +109,18 @@ const AUTH_FALSE_DEBOUNCE_MS = 3_000;
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_REAUTH_ATTEMPTS = 3;
 
+// How many *automatic* recovery cycles we'll run before giving up and
+// handing the user an explicit action (sign out / manual Retry).
+//
+// This cap exists because MAX_REAUTH_ATTEMPTS alone never terminated the
+// loop: `forceReauth` used to zero `reauthAttemptsRef` unconditionally, and
+// the 20s auto-recovery backstop calls it, so the 3-attempt budget was
+// re-armed forever. A permanently unauthable session therefore re-registered
+// `convex.setAuth` indefinitely — and because each registration tears down
+// the AuthenticationManager and pauses the WebSocket, the recovery loop was
+// itself preventing the handshake it was trying to rescue.
+const MAX_AUTO_RECOVERY_ATTEMPTS = 5;
+
 // Reactive half of the context — what actually drives re-renders. The
 // public ConvexAuthState adds the stable `forceReauth` imperative on top.
 type AuthStatus = { isLoading: boolean; isAuthenticated: boolean };
@@ -114,6 +140,11 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
   // Track whether setAuth has been called to avoid calling it again on foreground
   const hasSetAuthRef = useRef(false);
   const reauthAttemptsRef = useRef(0);
+  // Consecutive *automatic* recovery cycles since the last successful auth.
+  // Deliberately NOT reset by forceReauth's automatic path — only a genuine
+  // onChange(true) or a user-initiated retry clears it.
+  const autoRecoveryAttemptsRef = useRef(0);
+  const [isAuthBlocked, setIsAuthBlocked] = useState(false);
   const [reauthTrigger, setReauthTrigger] = useState(0);
   // Wall-clock of the last forceReauth so a manual Retry tap and the
   // auto-recovery tick can't pile setAuth re-registrations on top of each
@@ -211,14 +242,26 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
               return retryToken;
             }
           }
+          // `null_token_after_retry` on its own is undiagnosable — it was
+          // ~20k events/day with no way to tell a locked-keychain read from
+          // an expired session from a dead network. These three properties
+          // are what separate those cases.
           trackConvexAuthEvent('token_fetch_failed', {
             reason, setup_id: setupId,
             error: 'null_token_after_retry',
             retry_count: tokenRetryCount,
+            app_state: AppState.currentState,
+            force_refresh: forceRefreshToken === true,
+            has_cached_token: await hasStoredAuthToken(),
           });
           return null;
         } catch (error) {
-          trackConvexAuthEvent('token_fetch_failed', { reason, setup_id: setupId, error: String(error) });
+          trackConvexAuthEvent('token_fetch_failed', {
+            reason, setup_id: setupId,
+            error: String(error),
+            app_state: AppState.currentState,
+            force_refresh: forceRefreshToken === true,
+          });
           return null;
         }
       },
@@ -229,7 +272,11 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
 
         if (isAuthenticated) {
           wasAuthenticatedRef.current = true;
+          // A completed handshake is the only automatic signal that clears
+          // both budgets — this is what makes the caps below reachable.
           reauthAttemptsRef.current = 0;
+          autoRecoveryAttemptsRef.current = 0;
+          setIsAuthBlocked(false);
           trackConvexAuthEvent('setup_complete', { reason, setup_id: setupId, is_authenticated: true, elapsed_ms: elapsed });
           setAuthState({ isLoading: false, isAuthenticated: true });
           return;
@@ -291,8 +338,17 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
         console.log('[ConvexAuth] App returned to foreground');
         trackConvexAuthEvent('foreground_return', { has_set_auth: hasSetAuthRef.current });
 
-        // Auth was lost while backgrounded — trigger fresh auth cycle
-        if (isSignedInRef.current && !wasAuthenticatedRef.current && hasSetAuthRef.current) {
+        // Auth was lost while backgrounded — trigger fresh auth cycle.
+        // Skipped once automatic recovery is exhausted: this is the second
+        // path that zeroes the reauth budget, so without the guard an app
+        // that flaps between background and foreground re-arms the loop the
+        // same way the 20s backstop used to.
+        if (
+          isSignedInRef.current &&
+          !wasAuthenticatedRef.current &&
+          hasSetAuthRef.current &&
+          autoRecoveryAttemptsRef.current < MAX_AUTO_RECOVERY_ATTEMPTS
+        ) {
           reauthAttemptsRef.current = 0;
           hasSetAuthRef.current = false;
           setAuthState({ isLoading: true, isAuthenticated: false });
@@ -322,18 +378,47 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
   // Imperative recovery — same machinery the foreground-return handler
   // uses, exposed so the UI's Retry buttons and the auto-recovery hook can
   // actually re-drive auth (previously "Retry" only reset a visual timer).
-  // Resets the reauth-attempt budget so a user who's been stuck through the
-  // automatic retries gets a clean run, flips hasSetAuth so the setup effect
-  // re-registers convex.setAuth, and bumps the trigger to re-run it.
-  const forceReauth = useCallback(() => {
+  // A *manual* call resets the reauth-attempt budget so a user who's been
+  // stuck through the automatic retries gets a clean run; an automatic call
+  // spends from that budget instead. Either way it flips hasSetAuth so the
+  // setup effect re-registers convex.setAuth, and bumps the trigger.
+  const forceReauth = useCallback((opts?: { manual?: boolean }) => {
     if (!isSignedInRef.current) return;
+    const manual = opts?.manual === true;
+
+    // Blocked: only a user-initiated retry gets past this point.
+    if (!manual && autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERY_ATTEMPTS) return;
+
+    // Debounce BEFORE spending budget — a call that gets debounced away does
+    // no work, so charging it would let a double-fire burn the budget without
+    // ever attempting a handshake.
     const now = Date.now();
     if (now - lastForceReauthAtRef.current < 4_000) return; // debounce double-fires
     lastForceReauthAtRef.current = now;
 
+    // Automatic recovery is budgeted; a user tapping Retry is not. Without
+    // this split the budget is meaningless — the caller that most needs to be
+    // capped (a repeating timer) was the one zeroing the counter.
+    if (!manual) {
+      autoRecoveryAttemptsRef.current++;
+      if (autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERY_ATTEMPTS) {
+        // Fire once per stuck episode, not once per attempt — the whole point
+        // is a single actionable signal instead of thousands of retry events.
+        trackConvexAuthEvent('recovery_exhausted', {
+          attempts: autoRecoveryAttemptsRef.current,
+          app_state: AppState.currentState,
+        });
+        setIsAuthBlocked(true);
+      }
+    }
+
     clearAuthTimeout();
     clearFalseDebounce();
-    reauthAttemptsRef.current = 0;
+    if (manual) {
+      reauthAttemptsRef.current = 0;
+      autoRecoveryAttemptsRef.current = 0;
+      setIsAuthBlocked(false);
+    }
     hasSetAuthRef.current = false;
     wasAuthenticatedRef.current = false;
     setAuthState({ isLoading: true, isAuthenticated: false });
@@ -344,8 +429,8 @@ export function ConvexAuthProvider({ children }: { children: ReactNode }) {
   // this memo only produces a new object when authState actually transitions
   // — consumers re-render no more often than before this field.
   const contextValue = useMemo<ConvexAuthState>(
-    () => ({ ...authState, forceReauth }),
-    [authState, forceReauth],
+    () => ({ ...authState, isAuthBlocked, forceReauth }),
+    [authState, isAuthBlocked, forceReauth],
   );
 
   return (

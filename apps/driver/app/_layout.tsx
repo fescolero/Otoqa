@@ -30,7 +30,7 @@ import { uploadPODPhoto } from '../lib/s3-upload';
 import { configureQuietChannels } from 'otoqa-shift-status';
 import { LanguageProvider } from '../lib/LanguageContext';
 import { ThemeProvider } from '../lib/ThemeContext';
-import { setPostHogClient, trackErrorBoundary, captureAppException, trackOtaUpdateCheck, getAppVersionContext } from '../lib/analytics';
+import { setPostHogClient, trackErrorBoundary, captureAppException, trackOtaUpdateCheck, getAppVersionContext, trackConvexAuthEvent } from '../lib/analytics';
 
 // ============================================
 // ERROR BOUNDARY
@@ -123,19 +123,48 @@ if (!CLERK_PUBLISHABLE_KEY) {
   throw new Error('EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY is not set');
 }
 
-// Secure token cache for Clerk
+// Secure token cache for Clerk.
+//
+// `keychainAccessible` is set explicitly because expo-secure-store defaults
+// to WHEN_UNLOCKED, which makes the item unreadable while the device is
+// locked. This app runs background location sync on a phone that spends the
+// shift locked in a truck mount, so a cold start in that state cannot
+// rehydrate the Clerk session. AFTER_FIRST_UNLOCK keeps the item readable
+// while locked, once the device has been unlocked at least once since boot.
+//
+// Note this is applied at WRITE time: existing keychain items keep their old
+// attribute until Clerk next saves a token.
+//
+// The errors are reported rather than swallowed. The previous bare
+// `catch {}` is why a keychain read failure was indistinguishable from "no
+// token yet" — the two produce identical downstream behaviour, and only one
+// of them is a bug.
 const tokenCache = {
   async getToken(key: string) {
     try {
-      return SecureStore.getItemAsync(key);
-    } catch {
+      return await SecureStore.getItemAsync(key, {
+        keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+      });
+    } catch (error) {
+      trackConvexAuthEvent('token_cache_error', {
+        operation: 'get',
+        error: String(error),
+        app_state: AppState.currentState,
+      });
       return null;
     }
   },
   async saveToken(key: string, value: string) {
     try {
-      return SecureStore.setItemAsync(key, value);
-    } catch {
+      return await SecureStore.setItemAsync(key, value, {
+        keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+      });
+    } catch (error) {
+      trackConvexAuthEvent('token_cache_error', {
+        operation: 'save',
+        error: String(error),
+        app_state: AppState.currentState,
+      });
       return;
     }
   },

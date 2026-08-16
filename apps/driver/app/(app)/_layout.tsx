@@ -289,6 +289,8 @@ export default function AppLayout() {
     if (rolesGate.isTimedOut) rolesGate.retry();
     if (profileGate.isTimedOut) profileGate.retry();
     if (carrierOrgGate.isTimedOut) carrierOrgGate.retry();
+    // Automatic: no `manual` flag, so this consumes the recovery budget
+    // instead of resetting it.
     convexAuth.forceReauth();
   }, [convexAuthGate, rolesGate, profileGate, carrierOrgGate, convexAuth]);
 
@@ -297,15 +299,26 @@ export default function AppLayout() {
   // only reset the timer, so a genuinely stuck client never recovered.
   const handleRetry = useCallback((gate?: { retry: () => void }, opts?: { auto?: boolean }) => {
     gate?.retry();
-    trackConvexAuthEvent(opts?.auto ? 'auto_recovery' : 'manual_reauth', {});
-    convexAuth.forceReauth();
+    const auto = opts?.auto === true;
+    trackConvexAuthEvent(auto ? 'auto_recovery' : 'manual_reauth', {});
+    // A user tapping Retry is the one caller allowed to clear the budgets —
+    // it's bounded by a human, and it's the documented escape from a blocked
+    // session. Auto callers must not, or the cap can never be reached.
+    convexAuth.forceReauth({ manual: !auto });
   }, [convexAuth]);
 
   // Self-heal: retry automatically when the network returns, and on a
   // periodic backstop while stuck + online. Surfaces live connectivity
   // (NetInfo) AND the real Convex WebSocket state so the error screens can
   // tell three situations apart and guide the user accordingly.
-  const { isOffline, isWebSocketConnected, connectionQuality } = useConnectionRecovery({ isStuck, onRecover: recover });
+  // Once automatic recovery is exhausted, stop the backstop at the source.
+  // forceReauth would no-op anyway, but leaving the timer armed would keep
+  // emitting `auto_recovery` telemetry for a recovery that can't happen —
+  // the same "noise without progress" this change exists to remove.
+  const { isOffline, isWebSocketConnected, connectionQuality } = useConnectionRecovery({
+    isStuck: isStuck && !convexAuth.isAuthBlocked,
+    onRecover: recover,
+  });
 
   // "Sign out" is the action that actually helps when the server is up but
   // our session is bad — either because the live WS proves the server is

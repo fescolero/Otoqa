@@ -28,7 +28,16 @@ import { useNetworkStatus } from './useNetworkStatus';
 import { useConvexConnectionState } from '../convex';
 import { trackConvexAuthEvent } from '../analytics';
 
-const AUTO_RECOVERY_INTERVAL_MS = 20_000;
+// Base delay for the periodic backstop. Each consecutive attempt doubles it
+// (20s → 40s → 80s → 160s), capped at AUTO_RECOVERY_MAX_DELAY_MS.
+//
+// This used to be a fixed 20s `setInterval`, which is what turned a stuck
+// session into ~20k auth cycles/day: every tick re-registered
+// `convex.setAuth`, and each registration tears down the AuthenticationManager
+// and pauses the WebSocket. Retrying faster than a handshake can complete
+// doesn't recover the connection, it prevents it.
+const AUTO_RECOVERY_BASE_DELAY_MS = 20_000;
+const AUTO_RECOVERY_MAX_DELAY_MS = 160_000;
 
 export function useConnectionRecovery({
   isStuck,
@@ -52,12 +61,23 @@ export function useConnectionRecovery({
     connRef.current = { isWebSocketConnected, connectionRetries };
   }, [isWebSocketConnected, connectionRetries]);
 
+  // Consecutive periodic attempts since we were last unstuck. Drives the
+  // backoff below and is cleared the moment `isStuck` goes false, so a
+  // session that recovers gets an eager 20s backstop again next time.
+  const attemptRef = useRef(0);
+  useEffect(() => {
+    if (!isStuck) attemptRef.current = 0;
+  }, [isStuck]);
+
   // (1) Edge trigger: offline → online while stuck.
+  // Not backed off and not budgeted — the radio just returned, which is a
+  // genuinely new condition rather than a blind retry of the same state.
   const wasOfflineRef = useRef(isOffline);
   useEffect(() => {
     const cameBackOnline = wasOfflineRef.current && !isOffline;
     wasOfflineRef.current = isOffline;
     if (cameBackOnline && isStuck) {
+      attemptRef.current = 0;
       trackConvexAuthEvent('auto_recovery', {
         trigger: 'network_return',
         connection_quality: connectionQuality,
@@ -66,18 +86,35 @@ export function useConnectionRecovery({
     }
   }, [isOffline, isStuck, connectionQuality]);
 
-  // (2) Periodic backstop while stuck and online.
+  // (2) Periodic backstop while stuck and online, with exponential backoff.
+  // A self-rescheduling timeout rather than setInterval so each delay can be
+  // computed from the attempt count. The hard stop lives in `forceReauth`,
+  // which ignores automatic callers once its budget is spent.
   useEffect(() => {
     if (!isStuck || isOffline) return;
-    const timer = setInterval(() => {
-      trackConvexAuthEvent('auto_recovery', {
-        trigger: 'periodic',
-        is_websocket_connected: connRef.current.isWebSocketConnected,
-        connection_retries: connRef.current.connectionRetries,
-      });
-      onRecoverRef.current();
-    }, AUTO_RECOVERY_INTERVAL_MS);
-    return () => clearInterval(timer);
+
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      const delay = Math.min(
+        AUTO_RECOVERY_BASE_DELAY_MS * 2 ** attemptRef.current,
+        AUTO_RECOVERY_MAX_DELAY_MS,
+      );
+      timer = setTimeout(() => {
+        attemptRef.current++;
+        trackConvexAuthEvent('auto_recovery', {
+          trigger: 'periodic',
+          attempt: attemptRef.current,
+          delay_ms: delay,
+          is_websocket_connected: connRef.current.isWebSocketConnected,
+          connection_retries: connRef.current.connectionRetries,
+        });
+        onRecoverRef.current();
+        schedule();
+      }, delay);
+    };
+    schedule();
+
+    return () => clearTimeout(timer);
   }, [isStuck, isOffline]);
 
   return { isOffline, connectionQuality, connectionType, isWebSocketConnected, connectionRetries };

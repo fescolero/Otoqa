@@ -384,7 +384,15 @@ export function trackConvexAuthEvent(
     | 'manual_reauth'
     // Recovery fired without user action — network came back, or the
     // periodic backstop tripped while the app was stuck booting.
-    | 'auto_recovery',
+    | 'auto_recovery'
+    // Automatic recovery gave up after MAX_AUTO_RECOVERY_ATTEMPTS. Emitted
+    // ONCE per stuck episode — this is the actionable signal, as opposed to
+    // the per-attempt `token_fetch_failed` firehose it replaces.
+    | 'recovery_exhausted'
+    // Clerk's SecureStore-backed token cache failed a read or write. Was
+    // previously swallowed by a bare `catch {}`, which is why keychain
+    // accessibility could never be ruled in or out as a cause.
+    | 'token_cache_error',
   context?: PostHogEventProperties,
 ) {
   capture(`convex_auth_${event}`, context);

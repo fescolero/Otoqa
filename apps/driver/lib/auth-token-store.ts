@@ -15,6 +15,22 @@ export async function getStoredAuthToken(): Promise<string | null> {
   return await storage.getString(AUTH_TOKEN_KEY);
 }
 
+/**
+ * Whether a previously-minted JWT is sitting in the MMKV mirror.
+ *
+ * Diagnostic only. MMKV has no keychain lock-state restriction, so this
+ * answers a question the Clerk-side failure alone can't: did we ever hold a
+ * token on this device (session existed, Clerk now won't mint a fresh one),
+ * or is the mirror empty too (the session never established)?
+ */
+export async function hasStoredAuthToken(): Promise<boolean> {
+  try {
+    return (await storage.getString(AUTH_TOKEN_KEY)) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export async function clearAuthToken(): Promise<void> {
   await storage.delete(AUTH_TOKEN_KEY);
 }
