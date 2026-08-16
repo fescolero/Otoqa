@@ -46,7 +46,10 @@ NEXT_PUBLIC_CONVEX_URL=<same Convex deployment as the tenant app>
 ### 3b. Atomic Convex deploys (vercel.json)
 
 `apps/admin/vercel.json` makes THIS project the owner of production Convex
-deploys: on **production** builds it runs `convex deploy` from the repo root
+deploys via `scripts/vercel-build.sh` (Vercel caps `buildCommand` at 256
+characters, so the logic lives in the script — run it locally with
+`VERCEL_ENV=production bash apps/admin/scripts/vercel-build.sh` to test the
+guard): on **production** builds it runs `convex deploy` from the repo root
 first (deploying every backend change on `main`) and then builds the console
 against the freshly deployed backend, with `NEXT_PUBLIC_CONVEX_URL` injected
 by the CLI. Preview builds skip the deploy and build normally. This kills the
