@@ -69,14 +69,44 @@ One-time setup:
 Note: keep the other Vercel project (tenant app) on a plain build — exactly
 ONE project owns the Convex deploy, or every push deploys the backend twice.
 
-**If a production build fails with `no Convex deployment configuration found`**
-(or the build's own `PRODUCTION BUILD BLOCKED` banner), step 2 above has not been
-done for this project: `CONVEX_DEPLOY_KEY` is missing from the **Production**
-environment. Preview builds keep succeeding while this is broken — they skip the
-Convex deploy by design — so production can stay red for days with no obvious
-signal. The build refuses rather than falling back to a plain build on purpose:
-shipping the console against a backend that was never deployed is the exact
-failure this setup exists to prevent.
+This is the setup for when a PRODUCTION Convex deployment exists. Until then,
+see §3c.
+
+### 3c. While the project is still on a DEV Convex deployment
+
+`convex deploy` only targets **prod or preview** deployments — there is no CI
+path to a dev deployment (`npx convex dev` is that path). So until a production
+Convex deployment exists, the atomic deploy above is not the setup you want.
+
+Set this on the Vercel project instead, and leave `CONVEX_DEPLOY_KEY` unset:
+
+```
+NEXT_PUBLIC_CONVEX_URL=<your dev deployment URL>
+```
+
+The build then skips the Convex deploy, builds the console against that
+deployment, and prints a banner saying it shipped no backend changes. Functions
+and schema reach the dev deployment when someone runs `npx convex dev` from a
+developer machine — **pushing to `main` does not deploy them**.
+
+The dev deployment also needs the console's own env vars (`STAFF_ISSUER`,
+`STAFF_JWKS_URL`, `STAFF_EMAIL_ALLOWLIST`), or every page shows
+*"Platform console is not enabled on this deployment"* — that check is
+per-deployment, so dev and prod each need their own.
+
+When you move to production, add `CONVEX_DEPLOY_KEY` (Production scope only) and
+the build switches to the atomic path on its own; nothing else changes.
+
+**Build failure decoder**
+
+| Banner / error | Meaning |
+| --- | --- |
+| `BUILD BLOCKED: no Convex backend configured` | Neither env var is set — the console would have no backend at all. |
+| `no Convex deployment configuration found` (Convex CLI) | `CONVEX_DEPLOY_KEY` is set but is not a valid prod/preview key. |
+| `NOTE: this build did NOT deploy backend code` | Expected in the dev setup. Not an error. |
+
+Preview builds skip the Convex deploy in both setups, so they keep passing while
+a production build is broken — production can stay red with no obvious signal.
 
 ### 4. Staff accounts
 Use dedicated Google accounts for console access; enforce 2-step verification.

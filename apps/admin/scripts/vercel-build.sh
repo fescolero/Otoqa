@@ -2,16 +2,22 @@
 #
 # Vercel build for the platform console.
 #
-# This project owns the PRODUCTION Convex deploy (see apps/admin/README.md
-# §3b): on production builds the backend is deployed first, then the console is
-# built against the freshly deployed backend with NEXT_PUBLIC_CONVEX_URL
-# injected by the Convex CLI. Preview builds skip the deploy entirely — a
-# preview must never be able to deploy backend code.
+# Two supported modes, chosen by whether CONVEX_DEPLOY_KEY is set:
 #
-# Lives in a script rather than inline in vercel.json because `buildCommand`
-# is capped at 256 characters, and because a guard worth having is a guard
-# worth being able to run locally:
+#   KEY SET (the eventual production setup — README §3b)
+#     This project owns the Convex deploy: the backend is deployed first, then
+#     the console is built against it with NEXT_PUBLIC_CONVEX_URL injected by
+#     the Convex CLI. Frontend and backend ship together, so "deployed the app
+#     but not the functions" cannot happen.
 #
+#   NO KEY (where the project is today: a DEV Convex deployment)
+#     `convex deploy` only targets prod/preview deployments — there is no CI
+#     path to a dev deployment, that's what `npx convex dev` is for. So the
+#     build must NOT try, and must not block either. It builds the console
+#     against whatever NEXT_PUBLIC_CONVEX_URL is set on the Vercel project,
+#     and warns loudly that this build shipped no backend changes.
+#
+# Run it locally to check either path:
 #   VERCEL_ENV=production bash apps/admin/scripts/vercel-build.sh
 #
 set -euo pipefail
@@ -22,38 +28,68 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
-if [ "${VERCEL_ENV:-}" != "production" ]; then
+plain_build() {
   cd apps/admin && exec bun run build
+}
+
+# Previews never deploy backend code, by design — a preview must not be able to.
+if [ "${VERCEL_ENV:-}" != "production" ]; then
+  plain_build
 fi
 
-if [ -z "${CONVEX_DEPLOY_KEY:-}" ]; then
+if [ -n "${CONVEX_DEPLOY_KEY:-}" ]; then
+  exec bunx convex deploy \
+    --cmd 'cd apps/admin && bun run build' \
+    --cmd-url-env-var-name NEXT_PUBLIC_CONVEX_URL
+fi
+
+# No deploy key: the console still has to know which backend to talk to, and
+# that can only come from the project's env vars here. Without it the build
+# would produce a console that renders "not configured" for everyone, so fail
+# early with the actual fix rather than shipping that.
+if [ -z "${NEXT_PUBLIC_CONVEX_URL:-}" ]; then
   cat >&2 <<'BANNER'
 
 ==============================================================
-PRODUCTION BUILD BLOCKED: CONVEX_DEPLOY_KEY is not set.
+BUILD BLOCKED: no Convex backend configured.
 
-This Vercel project owns the production Convex deploy, so
-building without the key would ship a console against a backend
-that was never deployed. Failing here is deliberate — falling
-back to a plain build is the exact failure this setup prevents.
+Neither CONVEX_DEPLOY_KEY nor NEXT_PUBLIC_CONVEX_URL is set, so
+this build has no backend to point the console at.
 
-Fix (one-time, see apps/admin/README.md section 3b):
-  1. Convex dashboard -> Settings -> Deploy Keys -> generate a
-     PRODUCTION deploy key.
-  2. Vercel -> this project -> Settings -> Environment Variables
-     -> add CONVEX_DEPLOY_KEY, scoped to Production ONLY.
-  3. Redeploy. The log should show `convex deploy` running
-     before `next build`.
+Set ONE of these on the Vercel project:
 
-Note: preview builds keep passing while this is broken, because
-they skip the Convex deploy — so production can stay red without
-an obvious signal.
+  Using a DEV Convex deployment (current setup)
+    NEXT_PUBLIC_CONVEX_URL = your dev deployment URL
+      (Convex dashboard -> the deployment -> Settings -> URL,
+       or `npx convex dev` prints it)
+    Backend changes reach dev via `npx convex dev` from a
+    developer machine — CI cannot deploy to a dev deployment.
+
+  Using a PRODUCTION Convex deployment (see README section 3b)
+    CONVEX_DEPLOY_KEY = a Production deploy key, Production
+    environment ONLY. The build then deploys the backend and
+    injects NEXT_PUBLIC_CONVEX_URL itself.
 ==============================================================
 
 BANNER
   exit 1
 fi
 
-exec bunx convex deploy \
-  --cmd 'cd apps/admin && bun run build' \
-  --cmd-url-env-var-name NEXT_PUBLIC_CONVEX_URL
+cat >&2 <<BANNER
+
+--------------------------------------------------------------
+NOTE: this build did NOT deploy backend code.
+
+CONVEX_DEPLOY_KEY is not set, so the console is being built
+against an existing deployment:
+  ${NEXT_PUBLIC_CONVEX_URL}
+
+Convex functions and schema changes reach that deployment only
+when someone runs `npx convex dev` (dev) or `npx convex deploy`
+(prod). If the console shows "Could not find public function",
+the backend is behind this build.
+--------------------------------------------------------------
+
+BANNER
+
+plain_build
