@@ -3,7 +3,7 @@ import * as TaskManager from 'expo-task-manager';
 import Constants from 'expo-constants';
 import { AppState, Platform } from 'react-native';
 import { storage } from './storage';
-import { convex } from './convex';
+import { convex, isReactClientAuthenticated } from './convex';
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../convex/_generated/api';
 import { Id } from '../../../convex/_generated/dataModel';
@@ -324,33 +324,48 @@ async function syncViaHttpEndpoint(
 }
 
 /**
- * Run a Convex mutation with auth, trying the React client first
- * (works in foreground) then falling back to an HTTP client with
- * the stored JWT (works in background tasks).
+ * Run a Convex mutation with auth, preferring the React client (fast path in
+ * the foreground, where the WebSocket is already open and authenticated) and
+ * otherwise going straight to an HTTP client carrying a fresh Clerk JWT
+ * (works in background tasks, where React is not mounted).
+ *
+ * The React client is only tried when it actually holds auth. It has no
+ * client-side guard of its own: calling `convex.mutation` on an
+ * unauthenticated client does not fail locally, it ships the mutation and
+ * lets the server reject it. The mutation therefore *runs* server-side, throws
+ * ConvexError('Not authenticated'), and is recorded as a backend error — every
+ * single time the queue flushes from a background task or after the Clerk
+ * session has lapsed. Checking first turns those guaranteed-to-fail round
+ * trips into a direct HTTP call (or a local throw when there is no session at
+ * all), without weakening any server-side check.
  */
 async function authedMutation<T>(mutationRef: any, args: any): Promise<T> {
   // Try the React client first with a timeout.
   // The React client queues mutations over WebSocket and may hang indefinitely
   // if the WS is disconnected (background) or auth is in limbo.
-  try {
-    const REACT_CLIENT_TIMEOUT = 5_000;
-    const result = await Promise.race([
-      convex.mutation(mutationRef, args),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT),
-      ),
-    ]);
-    return result;
-  } catch (reactErr) {
-    const msg = reactErr instanceof Error ? reactErr.message : String(reactErr);
-    const isRecoverable =
-      msg.includes('Not authenticated') ||
-      msg.includes('Unauthenticated') ||
-      msg.includes('auth') ||
-      msg.includes('timeout');
-    if (!isRecoverable) throw reactErr;
+  if (isReactClientAuthenticated()) {
+    try {
+      const REACT_CLIENT_TIMEOUT = 5_000;
+      const result = await Promise.race([
+        convex.mutation(mutationRef, args),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT),
+        ),
+      ]);
+      return result;
+    } catch (reactErr) {
+      const msg = reactErr instanceof Error ? reactErr.message : String(reactErr);
+      const isRecoverable =
+        msg.includes('Not authenticated') ||
+        msg.includes('Unauthenticated') ||
+        msg.includes('auth') ||
+        msg.includes('timeout');
+      if (!isRecoverable) throw reactErr;
 
-    lg.debug(`React client failed (${msg}), trying HTTP client...`);
+      lg.debug(`React client failed (${msg}), trying HTTP client...`);
+    }
+  } else {
+    lg.debug('React client has no Convex auth (background or pre-handshake), using HTTP client');
   }
 
   // Fallback: HTTP client with a fresh token from the Clerk singleton.
@@ -381,17 +396,22 @@ async function authedMutation<T>(mutationRef: any, args: any): Promise<T> {
  * throwing). Used by reconcileTrackingStateWithActiveSession below.
  */
 async function authedQueryOrNull<T>(queryRef: any, args: any): Promise<T | null> {
-  try {
-    const REACT_CLIENT_TIMEOUT = 5_000;
-    const result = await Promise.race([
-      convex.query(queryRef, args),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT),
-      ),
-    ]);
-    return result as T;
-  } catch (reactErr) {
-    // Fall through to HTTP client with fresh Clerk token.
+  // Same guard as authedMutation: an unauthenticated ConvexReactClient still
+  // ships the request and lets the server throw, so only take the WebSocket
+  // path when the client actually holds auth.
+  if (isReactClientAuthenticated()) {
+    try {
+      const REACT_CLIENT_TIMEOUT = 5_000;
+      const result = await Promise.race([
+        convex.query(queryRef, args),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('React client timeout')), REACT_CLIENT_TIMEOUT),
+        ),
+      ]);
+      return result as T;
+    } catch (reactErr) {
+      // Fall through to HTTP client with fresh Clerk token.
+    }
   }
   try {
     const { getFreshToken } = require('./auth-token-store');
