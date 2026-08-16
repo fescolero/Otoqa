@@ -412,6 +412,202 @@ describe('credit ledger — overpayment carries forward', () => {
   });
 });
 
+describe('draft editing — a draft is a working document', () => {
+  async function draftInvoice(t: ReturnType<typeof convexTest>) {
+    await t.mutation(internal.platform.invoices.cycleClose, { periodKey: PERIOD });
+    const staff = t.withIdentity(freshStaff());
+    const [draft] = await staff.query(api.platform.invoices.listInvoices, {});
+    return draft._id;
+  }
+
+  it('edits and removes an adjustment, repricing as it goes', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await draftInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+
+    await staff.mutation(api.platform.invoices.addAdjustment, {
+      id,
+      label: 'Godwill credit', // typo, and the wrong amount
+      amountDelta: -500,
+      reason: 'Service credit',
+    });
+    let [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.subtotal).toBe(-200); // 300 - 500
+
+    await staff.mutation(api.platform.invoices.updateAdjustment, {
+      id,
+      index: 0,
+      label: 'Goodwill credit',
+      amountDelta: -50,
+      reason: 'Fixed typo and amount',
+    });
+    [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.adjustments[0].label).toBe('Goodwill credit');
+    expect(inv.subtotal).toBe(250);
+    expect(inv.total).toBe(250);
+
+    await staff.mutation(api.platform.invoices.removeAdjustment, {
+      id,
+      index: 0,
+      reason: 'Not applicable after all',
+    });
+    [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.adjustments).toHaveLength(0);
+    expect(inv.subtotal).toBe(300);
+  });
+
+  it('refreshes a draft from the current rate, keeping adjustments', async () => {
+    const t = convexTest(schema);
+    const orgId = await t.run((ctx) => seedOrg(ctx));
+    const id = await draftInvoice(t); // 100 loads × $3 = $300
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.invoices.addAdjustment, {
+      id,
+      label: 'Agreed discount',
+      amountDelta: -25,
+      reason: 'Sales agreement',
+    });
+
+    // The rate was wrong when cycle close ran; fix it, then refresh.
+    await staff.mutation(api.platform.invoices.setRateStep, {
+      organizationId: orgId,
+      effectiveFromPeriod: PERIOD,
+      ratePerLoad: 2,
+      reason: 'Contract rate corrected',
+    });
+    await staff.mutation(api.platform.invoices.refreshDraft, {
+      id,
+      reason: 'Re-derive after rate fix',
+    });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.ratePerLoad).toBe(2);
+    expect(inv.lines[0].amount).toBe(200);
+    // Operator intent survives a re-derive; only derived data is replaced.
+    expect(inv.adjustments).toHaveLength(1);
+    expect(inv.subtotal).toBe(175);
+  });
+
+  it('picks up a usage correction on refresh', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await draftInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+
+    await t.run(async (ctx) => {
+      const row = await ctx.db
+        .query('platformUsageStats')
+        .withIndex('by_org_period', (q) =>
+          q.eq('workosOrgId', WORKOS_ORG).eq('periodKey', PERIOD),
+        )
+        .first();
+      await ctx.db.patch(row!._id, { loadsWritten: 140 });
+    });
+    await staff.mutation(api.platform.invoices.refreshDraft, { id, reason: 'Late loads landed' });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.loadsWritten).toBe(140);
+    expect(inv.subtotal).toBe(420);
+  });
+
+  it('edits the lines of a one-off, and refuses to on a metered draft', async () => {
+    const t = convexTest(schema);
+    const orgId = await t.run((ctx) => seedOrg(ctx));
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: PERIOD,
+      lines: [{ label: 'Onboarding', amount: 2500 }],
+      reason: 'SOW #12',
+    });
+    const metered = await draftInvoice(t);
+    const manual = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i.kind === 'manual',
+    )!;
+
+    await staff.mutation(api.platform.invoices.updateManualLines, {
+      id: manual._id,
+      lines: [
+        { label: 'Onboarding & implementation', amount: 2000 },
+        { label: 'Data migration', amount: 750 },
+      ],
+      reason: 'Scope changed before sending',
+    });
+    const updated = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i._id === manual._id,
+    )!;
+    expect(updated.lines).toHaveLength(2);
+    expect(updated.total).toBe(2750);
+
+    // Metered lines come from the meter — they are never typed by hand.
+    await expect(
+      staff.mutation(api.platform.invoices.updateManualLines, {
+        id: metered,
+        lines: [{ label: 'made up', amount: 1 }],
+        reason: 'x',
+      }),
+    ).rejects.toThrow(/lines come from the meter/);
+  });
+
+  it('deletes a draft and lets cycle close re-draft the period', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await draftInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+
+    await staff.mutation(api.platform.invoices.deleteDraft, {
+      id,
+      reason: 'Raised against the wrong entity',
+    });
+    expect(await staff.query(api.platform.invoices.listInvoices, {})).toHaveLength(0);
+    // The audit entry outlives the row.
+    const audit = await staff.query(api.platform.access.recentAuditLog, {});
+    expect(audit[0].action).toBe('invoice_draft_deleted');
+
+    await t.mutation(internal.platform.invoices.cycleClose, { periodKey: PERIOD });
+    const after = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe('draft');
+  });
+
+  it('sends void away from drafts, and re-drafts past an already-cancelled row', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await draftInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+
+    await expect(
+      staff.mutation(api.platform.invoices.voidInvoice, { id, reason: 'nope' }),
+    ).rejects.toThrow(/delete the draft instead/);
+
+    // A row voided before that rule existed must not block the cycle forever.
+    await t.run(async (ctx) => {
+      await ctx.db.patch(id, { status: 'void', voidedAt: Date.now(), voidReason: 'legacy' });
+    });
+    await t.mutation(internal.platform.invoices.cycleClose, { periodKey: PERIOD });
+    const rows = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(rows.filter((r) => r.status === 'draft')).toHaveLength(1);
+  });
+
+  it('refuses every edit once the invoice is issued', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+
+    await expect(
+      staff.mutation(api.platform.invoices.refreshDraft, { id, reason: 'x' }),
+    ).rejects.toThrow(/frozen/);
+    await expect(
+      staff.mutation(api.platform.invoices.deleteDraft, { id, reason: 'x' }),
+    ).rejects.toThrow(/frozen/);
+    await expect(
+      staff.mutation(api.platform.invoices.removeAdjustment, { id, index: 0, reason: 'x' }),
+    ).rejects.toThrow(/frozen/);
+  });
+});
+
 describe('write-off', () => {
   it('closes an uncollectible balance and keeps it out of receivables', async () => {
     const t = convexTest(schema);

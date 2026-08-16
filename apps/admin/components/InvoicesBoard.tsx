@@ -100,10 +100,17 @@ function InvoiceRow({
   const reversePayment = useMutation(api.platform.invoices.reversePayment);
   const writeOff = useMutation(api.platform.invoices.writeOffInvoice);
   const addAdjustment = useMutation(api.platform.invoices.addAdjustment);
+  const updateAdjustment = useMutation(api.platform.invoices.updateAdjustment);
+  const removeAdjustment = useMutation(api.platform.invoices.removeAdjustment);
+  const updateManualLines = useMutation(api.platform.invoices.updateManualLines);
+  const refreshDraft = useMutation(api.platform.invoices.refreshDraft);
+  const deleteDraft = useMutation(api.platform.invoices.deleteDraft);
   const pushToStripe = useAction(api.platform.stripe.pushInvoiceToStripe);
   const [expanded, setExpanded] = useState(false);
 
   const balance = Math.round((inv.total - inv.amountPaid) * 100) / 100;
+  const isDraft = inv.status === 'draft';
+  const isManual = inv.kind === 'manual';
   const isOpen =
     inv.status === 'issued' || inv.status === 'sent' || inv.status === 'partially_paid';
   const overdue = isOpen && balance > 0 && inv.dueAt != null && Date.now() > inv.dueAt;
@@ -154,6 +161,46 @@ function InvoiceRow({
                 {a.label} <span className="muted">({a.reason} — {a.addedByEmail})</span>
               </span>
               <span>{formatMoney(a.amountDelta)}</span>
+              {/* Drafts are working documents: a mistyped adjustment is fixed
+                  in place. Once issued these controls disappear. */}
+              {isDraft ? (
+                <>
+                  <ReasonAction
+                    label="Edit"
+                    onSubmit={async (reason, form) => {
+                      const data = new FormData(form);
+                      const label = String(data.get('label') ?? '').trim();
+                      const raw = String(data.get('amountDelta') ?? '').trim();
+                      const amountDelta = raw === '' ? undefined : Number(raw);
+                      if (amountDelta !== undefined && !Number.isFinite(amountDelta)) {
+                        throw new Error('Amount must be a number');
+                      }
+                      await updateAdjustment({
+                        id: inv._id,
+                        index: i,
+                        ...(label ? { label } : {}),
+                        ...(amountDelta !== undefined ? { amountDelta } : {}),
+                        reason,
+                      });
+                    }}
+                  >
+                    <input className="input" name="label" defaultValue={a.label} placeholder="Label" />
+                    <input
+                      className="input"
+                      name="amountDelta"
+                      defaultValue={String(a.amountDelta)}
+                      placeholder="Amount (± USD)"
+                    />
+                  </ReasonAction>
+                  <ReasonAction
+                    label="Remove"
+                    danger
+                    onSubmit={async (reason) => {
+                      await removeAdjustment({ id: inv._id, index: i, reason });
+                    }}
+                  />
+                </>
+              ) : null}
             </div>
           ))}
           {inv.taxAmount != null ? (
@@ -205,13 +252,63 @@ function InvoiceRow({
           {inv.voidReason ? <p className="ticket-body muted">Voided: {inv.voidReason}</p> : null}
 
           <div className="inline-form">
-            {inv.status === 'draft' ? (
+            {isDraft ? (
               <>
                 <ReasonAction
                   label="Issue"
                   requireReason={false}
                   onSubmit={async () => {
                     await issue({ id: inv._id });
+                  }}
+                />
+                {/* Re-derive from the CURRENT rate schedule and usage — cycle
+                    close runs on the 2nd, so a rate fixed afterwards would
+                    otherwise leave the draft stale. Adjustments survive. */}
+                {!isManual ? (
+                  <ReasonAction
+                    label="Refresh from usage"
+                    onSubmit={async (reason) => {
+                      await refreshDraft({ id: inv._id, reason });
+                    }}
+                  />
+                ) : (
+                  <ReasonAction
+                    label="Edit line"
+                    onSubmit={async (reason, form) => {
+                      const data = new FormData(form);
+                      const label = String(data.get('label') ?? '').trim();
+                      const amount = Number(data.get('amount'));
+                      if (!label) throw new Error('A line label is required');
+                      if (!Number.isFinite(amount) || amount === 0) {
+                        throw new Error('Enter a non-zero amount');
+                      }
+                      await updateManualLines({
+                        id: inv._id,
+                        lines: [{ label, amount }],
+                        reason,
+                      });
+                    }}
+                  >
+                    <input
+                      className="input"
+                      name="label"
+                      defaultValue={inv.lines[0]?.label ?? ''}
+                      placeholder="Line description"
+                    />
+                    <input
+                      className="input"
+                      name="amount"
+                      defaultValue={String(inv.lines[0]?.amount ?? '')}
+                      placeholder="Amount $"
+                    />
+                  </ReasonAction>
+                )}
+                <ReasonAction
+                  label="Delete draft"
+                  danger
+                  confirmText={inv.invoiceNumber}
+                  onSubmit={async (reason) => {
+                    await deleteDraft({ id: inv._id, reason });
                   }}
                 />
                 <ReasonAction

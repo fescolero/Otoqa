@@ -39,7 +39,21 @@ export async function meteredInvoiceForPeriod(
     .query('platformInvoices')
     .withIndex('by_org_period', (q) => q.eq('workosOrgId', workosOrgId).eq('periodKey', periodKey))
     .collect();
-  return rows.find((r) => r.kind !== 'manual') ?? null;
+  const metered = rows.filter((r) => r.kind !== 'manual');
+  // A voided row is a cancelled document, not the cycle's live invoice —
+  // prefer a live one so a void in the history never shadows it, and so
+  // cycleClose can re-draft a period whose only invoice was cancelled.
+  return metered.find((r) => r.status !== 'void') ?? metered[0] ?? null;
+}
+
+/** The live (non-void) metered invoice for a period, if the cycle still has one. */
+async function liveMeteredInvoice(
+  ctx: MutationCtx,
+  workosOrgId: string,
+  periodKey: string,
+): Promise<Doc<'platformInvoices'> | null> {
+  const invoice = await meteredInvoiceForPeriod(ctx, workosOrgId, periodKey);
+  return invoice && invoice.status !== 'void' ? invoice : null;
 }
 
 /** Statuses that represent a real, collectible obligation. */
@@ -272,8 +286,11 @@ export const cycleClose = internalMutation({
     for (const org of orgs) {
       if (!org.workosOrgId) continue;
 
-      const existing = await meteredInvoiceForPeriod(ctx, org.workosOrgId, periodKey);
-      if (existing) continue; // never touch — idempotent re-runs
+      // Idempotent re-runs never touch an existing invoice. A CANCELLED one
+      // doesn't count: voiding the cycle's draft used to block that period
+      // from ever being drafted again.
+      const existing = await liveMeteredInvoice(ctx, org.workosOrgId, periodKey);
+      if (existing) continue;
 
       const usageRow = await ctx.db
         .query('platformUsageStats')
@@ -335,7 +352,7 @@ export const backfillHistoricalPaidInvoices = internalMutation({
 
       for (const row of usageRows) {
         if (row.periodKey >= currentPeriod || row.loadsWritten === 0) continue;
-        const existing = await meteredInvoiceForPeriod(ctx, org.workosOrgId, row.periodKey);
+        const existing = await liveMeteredInvoice(ctx, org.workosOrgId, row.periodKey);
         if (existing) continue;
 
         const { lines, ratePerLoad } = computeLines(org, row.periodKey, row.loadsWritten);
@@ -721,6 +738,11 @@ export const voidInvoice = mutation({
     const invoice = await ctx.db.get(args.id);
     if (!invoice) throw new ConvexError('Invoice not found');
     if (invoice.status === 'void') return null; // idempotent
+    // Void cancels a document that exists commercially. A draft doesn't yet —
+    // keeping the two apart is what lets cycle close re-draft the period.
+    if (invoice.status === 'draft') {
+      throw new ConvexError('Drafts are not issued documents — delete the draft instead');
+    }
     if (invoice.status === 'paid' && invoice.payments.some((p) => p.method !== 'credit')) {
       throw new ConvexError('Paid invoices cannot be voided — use a credit on the next cycle');
     }
@@ -824,6 +846,269 @@ export const addAdjustment = mutation({
       targetId: args.id,
       reason: args.reason,
       metadata: JSON.stringify({ label: args.label, amountDelta: args.amountDelta }),
+    });
+    return null;
+  },
+});
+
+// ─── Draft editing ───────────────────────────────────────────────────────
+//
+// A draft is a WORKING document, not a commercial one: nothing has been sent,
+// nothing is owed. So everything on it is editable except the metered count
+// itself, which is only ever re-derived from `platformUsageStats` and never
+// typed by hand. Once issued, all of this stops working — that's the
+// immutability rule, and it is not relaxed here.
+
+/** Fail unless the invoice is still a draft, with a message that says why. */
+function assertDraft(invoice: Doc<'platformInvoices'>): void {
+  if (invoice.status !== 'draft') {
+    throw new ConvexError(
+      `${invoice.invoiceNumber} is ${invoice.status.replace('_', ' ')} — issued invoices are frozen. Correct it with a credit or a next-cycle adjustment.`,
+    );
+  }
+}
+
+/** Recompute the money on a draft after its lines or adjustments changed. */
+async function repriceDraft(
+  ctx: MutationCtx,
+  id: Doc<'platformInvoices'>['_id'],
+  next: Pick<Doc<'platformInvoices'>, 'lines' | 'adjustments'> & { ratePerLoad?: number; loadsWritten?: number },
+): Promise<number> {
+  const subtotal = sumSubtotal(next);
+  await ctx.db.patch(id, {
+    lines: next.lines,
+    adjustments: next.adjustments,
+    ...(next.ratePerLoad !== undefined ? { ratePerLoad: next.ratePerLoad } : {}),
+    ...(next.loadsWritten !== undefined ? { loadsWritten: next.loadsWritten } : {}),
+    subtotal,
+    total: subtotal, // tax is snapshotted at issue, never on a draft
+    updatedAt: Date.now(),
+  });
+  return subtotal;
+}
+
+export const updateAdjustment = mutation({
+  args: {
+    id: v.id('platformInvoices'),
+    index: v.number(),
+    label: v.optional(v.string()),
+    amountDelta: v.optional(v.number()),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+    assertDraft(invoice);
+
+    const existing = invoice.adjustments[args.index];
+    if (!existing) throw new ConvexError('Adjustment not found');
+    if (args.amountDelta !== undefined && !Number.isFinite(args.amountDelta)) {
+      throw new ConvexError('Amount must be a number');
+    }
+
+    const adjustments = invoice.adjustments.map((a, i) =>
+      i === args.index
+        ? {
+            ...a,
+            label: args.label?.trim() || a.label,
+            amountDelta: args.amountDelta !== undefined ? money(args.amountDelta) : a.amountDelta,
+            reason: args.reason,
+            addedByEmail: staff.email, // whoever last touched it owns it
+            addedAt: Date.now(),
+          }
+        : a,
+    );
+    await repriceDraft(ctx, args.id, { lines: invoice.lines, adjustments });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_draft_edited',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify(existing),
+      after: JSON.stringify(adjustments[args.index]),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+export const removeAdjustment = mutation({
+  args: { id: v.id('platformInvoices'), index: v.number(), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+    assertDraft(invoice);
+    const removed = invoice.adjustments[args.index];
+    if (!removed) return null; // idempotent
+
+    const adjustments = invoice.adjustments.filter((_, i) => i !== args.index);
+    await repriceDraft(ctx, args.id, { lines: invoice.lines, adjustments });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_draft_edited',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify(removed),
+      after: JSON.stringify(null),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/** Edit the lines of a one-off invoice. Metered lines are derived, not typed. */
+export const updateManualLines = mutation({
+  args: {
+    id: v.id('platformInvoices'),
+    lines: v.array(v.object({ label: v.string(), amount: v.number() })),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+    assertDraft(invoice);
+    if (invoice.kind !== 'manual') {
+      throw new ConvexError(
+        'This invoice bills metered usage — its lines come from the meter. Use Refresh to re-derive them, or add an adjustment.',
+      );
+    }
+    if (args.lines.length === 0) throw new ConvexError('At least one line is required');
+
+    const lines = args.lines.map((l) => {
+      if (!l.label.trim()) throw new ConvexError('Every line needs a label');
+      if (!Number.isFinite(l.amount) || l.amount === 0) {
+        throw new ConvexError('Every line needs a non-zero amount');
+      }
+      return { kind: 'manual' as const, label: l.label.trim(), amount: money(l.amount) };
+    });
+    const subtotal = await repriceDraft(ctx, args.id, {
+      lines,
+      adjustments: invoice.adjustments,
+    });
+    if (subtotal <= 0) throw new ConvexError('Invoice total must be positive');
+
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_draft_edited',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify(invoice.lines),
+      after: JSON.stringify(lines),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/**
+ * Re-derive a metered draft from the CURRENT rate schedule, recurring charges,
+ * minimum, and usage count.
+ *
+ * Cycle close runs on the 2nd. Fixing an org's rate on the 3rd used to leave
+ * the draft stale with no way to refresh it — you either hand-adjusted the
+ * difference or discarded the cycle. Adjustments are preserved, because they
+ * are operator intent rather than derived data.
+ */
+export const refreshDraft = mutation({
+  args: { id: v.id('platformInvoices'), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+    assertDraft(invoice);
+    if (invoice.kind === 'manual') {
+      throw new ConvexError('One-off invoices have no meter behind them — edit their lines directly');
+    }
+
+    const org = await ctx.db
+      .query('organizations')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', invoice.workosOrgId))
+      .unique();
+    if (!org) throw new ConvexError('Organization not found');
+
+    const usageRow = await ctx.db
+      .query('platformUsageStats')
+      .withIndex('by_org_period', (q) =>
+        q.eq('workosOrgId', invoice.workosOrgId).eq('periodKey', invoice.periodKey),
+      )
+      .first();
+    const loadsWritten = usageRow?.loadsWritten ?? 0;
+
+    const { lines, ratePerLoad } = computeLines(org, invoice.periodKey, loadsWritten);
+    const before = {
+      loadsWritten: invoice.loadsWritten,
+      ratePerLoad: invoice.ratePerLoad,
+      subtotal: invoice.subtotal,
+    };
+    const subtotal = await repriceDraft(ctx, args.id, {
+      lines,
+      adjustments: invoice.adjustments,
+      ratePerLoad,
+      loadsWritten,
+    });
+
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_draft_edited',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify(before),
+      after: JSON.stringify({ loadsWritten, ratePerLoad, subtotal }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/**
+ * Discard a draft entirely.
+ *
+ * Distinct from void, which cancels a document the customer may have seen. A
+ * draft has been seen by nobody, so it is deleted rather than kept as a
+ * cancelled artefact — and deleting it lets cycle close re-draft the period
+ * from scratch, which is usually what "start over" means. The audit entry
+ * survives the row.
+ */
+export const deleteDraft = mutation({
+  args: { id: v.id('platformInvoices'), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    if (!args.reason.trim()) throw new ConvexError('A reason is required');
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) return null; // idempotent
+    assertDraft(invoice);
+    if (invoice.amountPaid !== 0 || invoice.payments.length > 0) {
+      throw new ConvexError('This draft has payments against it — resolve those first');
+    }
+
+    await ctx.db.delete(args.id);
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_draft_deleted',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify({
+        invoiceNumber: invoice.invoiceNumber,
+        periodKey: invoice.periodKey,
+        kind: invoice.kind ?? 'metered',
+        subtotal: invoice.subtotal,
+        lines: invoice.lines,
+        adjustments: invoice.adjustments,
+      }),
+      reason: args.reason,
     });
     return null;
   },

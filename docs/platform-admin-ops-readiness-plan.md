@@ -584,6 +584,34 @@ backend functions with no console caller found `recentRuns` (superseded by
 `jobTrend` — removed, with its test migrated) and `annotateAlert` (exposed but
 unsurfaced — now wired as a "Note" action on each alert).
 
+### Draft editing (added after review)
+
+A draft is a working document — nothing sent, nothing owed — so everything on it
+is editable except the metered count, which is only ever re-derived from
+`platformUsageStats`, never typed. Previously `addAdjustment` was the only thing
+a draft accepted, and there was a trap: voiding a draft blocked that period from
+ever being drafted again, because cycle close skipped any existing metered row
+regardless of status.
+
+- `updateAdjustment` / `removeAdjustment` — fix a mistyped correction in place.
+- `refreshDraft` — re-derive lines from the CURRENT rate schedule, recurring
+  charges, minimum and usage. Cycle close runs on the 2nd, so a rate fixed on
+  the 3rd used to leave the draft stale with no way to refresh it. Adjustments
+  survive a refresh: they are operator intent, not derived data.
+- `updateManualLines` — edit a one-off's lines; refuses on a metered draft,
+  where the lines come from the meter.
+- `deleteDraft` — discard it, which lets cycle close re-draft the period.
+- `voidInvoice` now refuses on drafts and points at delete. Void cancels a
+  document the customer may have seen; a draft has been seen by nobody. Keeping
+  the two apart is what makes re-drafting coherent.
+- `meteredInvoiceForPeriod` prefers a live row over a cancelled one, so a
+  period whose only invoice was voided (before the rule above) can still be
+  re-drafted.
+
+Every one of these refuses once the invoice leaves draft, with a message that
+points at the credit / next-cycle-adjustment path instead. The immutability rule
+is unchanged.
+
 ### Known limitations, stated rather than hidden
 
 - **A payment cannot be recorded against a written-off invoice.** Bad-debt
