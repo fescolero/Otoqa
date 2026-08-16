@@ -1,6 +1,8 @@
 # Platform Console — Operations-Readiness Plan
 
-_Status: proposal for review. Written 2026-08-16 against commit `7931a9e`._
+_Status: reviewed and partially executed. Written 2026-08-16 against commit `7931a9e`._
+_**Implementation progress is tracked in §10** — the audit in §1–§5 describes the
+state BEFORE this work and is kept as written so the reasoning stays legible._
 _Companion to `docs/platform-admin-console-plan.md` (the build plan) and
 `docs/platform-billing-spec.md` (billing). This document does not restate them —
 it audits what actually shipped, compares it to how comparable consoles are run,
@@ -465,7 +467,90 @@ Stated so the plan isn't padded:
 
 ---
 
-## 9. One-paragraph summary
+## 9. Implementation progress
+
+_Updated 2026-08-16. Everything below is merged on `claude/platform-admin-ops-ready-k31m94`._
+
+### Shipped
+
+**Billing operability (Ops-B) — §5 in full except delivery**
+
+| # | Item | Where |
+| --- | --- | --- |
+| B.1 | `reversePayment` — append-only negative entry, status recomputed from the ledger sum, idempotent, step-up + reason | `platform/invoices.ts` |
+| B.2 | `platformCredits` ledger — overpayment auto-posts, consumed at issue as a `credit` payment, FIFO, splits across invoices, released when an invoice is voided | `platform/credits.ts` |
+| B.3 | `partially_paid` + `written_off` statuses, `writeOffInvoice`, aging excludes written-off and clamps overpaid balances | `platform/invoices.ts` |
+| B.4 | `setRateStep` / `removeRateStep` with back-dating guarded by `committedPeriodsFrom` | `platform/invoices.ts` |
+| B.5 | `createManualInvoice` + the `kind` discriminator, with every `by_org_period` lookup routed through `meteredInvoiceForPeriod` | `platform/invoices.ts`, `platformUsage.ts` |
+| B.6 | `updateContract` — billing contact, contract number, license window | `platform/invoices.ts` |
+| — | Console UI for all of the above | `InvoicesBoard.tsx`, `OrgSupportPanels.tsx` |
+
+**Reliability (Ops-1 subset)**
+
+| # | Item | Where |
+| --- | --- | --- |
+| 1.1 | Stale/hung job detection: declared cadence on all 35 jobs, in-flight marker written before the target runs, `jobState()` shared by board and evaluator, `cron_stale`/`cron_hung` alerts, `retireJob` | `crons.ts`, `cronRunner.ts`, `jobHealth.ts`, `alerts.ts` |
+| 1.3 | `systemEvents` dedupe + ack, with recurrence-after-ack resurfacing; bulk ack that never touches `critical` | `lib/systemEvents.ts`, `platform/events.ts` |
+| 1.5 | `PanelBoundary` — one failing panel no longer blanks the console | `apps/admin/components/PanelBoundary.tsx` |
+| 1.7 | Job duration p50/p95 + run history drill-down (`jobTrend`, and `recentRuns` finally has a caller) | `platform/jobs.ts`, `app/jobs/page.tsx` |
+
+**Actions & operability (Ops-A / Ops-2 subset)**
+
+| # | Item | Where |
+| --- | --- | --- |
+| A.1 | `requeueDeadLetters` + the Health-page UI — the dead-letter alert finally has a remedy | `platform/support.ts`, `app/health/page.tsx` |
+| A.4 | `correctDriverPhone` on the driver row (distinct from the identity link) | `platform/support.ts` |
+| A.6 | Alert `resolve` / `snooze` / `annotate`, snooze-aware evaluator so a manual resolve can't re-page every 5 minutes | `platform/alerts.ts` |
+| 2.1 | Staff-actions-on-this-org panel — the `by_target_org` index has a reader | `platform/access.ts`, org detail page |
+| 2.2 | Audit search/filter by org, actor, action, free text; `auditActors` rollup | `platform/access.ts` |
+| 2.7 | Billing-drift escalation into the alert matrix | `platform/alerts.ts` |
+| 0.3 | `consoleSelfCheck` + Overview panel: reports which integrations are unconfigured, never their values | `platform/selfCheck.ts`, `app/page.tsx` |
+| 0.5 | `docs/runbooks/` — one per alert kind plus break-glass; every alert links to its runbook by `kind` | `docs/runbooks/` |
+| 3.2 | Security headers: CSP (Convex ws + WorkOS allowed), HSTS, frame-deny, nosniff, no-referrer, permissions-policy | `apps/admin/next.config.ts` |
+
+**Tests:** 38 new cases in `convex/platform/phase5.test.ts`, biased toward edge
+cases rather than happy paths — double reversal, reversing a spent overpayment
+credit, credit larger than the invoice, void returning credit, re-pricing a
+billed period, manual/metered coexistence (including that the tenant page still
+reads the metered row), staleness thresholds, requeue idempotency, dead
+subscriptions, event ack resurfacing, and secret non-leakage. Two existing
+assertions were updated where behaviour deliberately changed. **969 tests pass
+repo-wide.**
+
+### Deliberately not done, and why
+
+| Item | Why it's still open |
+| --- | --- |
+| **0.1 step-up verification** | Needs a real WorkOS staff token — cannot be checked from here. Still the highest-risk unknown: if `auth_time` is absent, every destructive action (including all the new ones) fails closed. Use `access.debugIdentity` on the deployed console. |
+| **0.2 / 0.4 / 0.6** Axiom, synthetic checks, restore drill | Configuration and vendor decisions (A1), not code. |
+| **1.2 metrics snapshot** | The largest remaining code item. It's a refactor of three live queries onto a cron-built row; worth doing after the current changes settle, since it touches the same files. |
+| **1.4 pagination** | Audit search landed; cursor pagination for orgs/tickets/invoices did not. Not yet load-bearing at current volume. |
+| **1.6 console error tracking** | Needs a PostHog project decision for the admin app. |
+| **2.3 report-a-problem clients** | Touches all three client apps; a separate change with its own review surface. The rate limit on `reportProblem` should land with it. |
+| **2.4 client-errors page** | Needs the PostHog server-side key in the admin Vercel project. |
+| **2.5 jobs "run now"** | Blocked on decision A5 (deny-list for money-writing jobs). |
+| **2.6 health board completion** | Samsara/GPS/sync-stall surfaces — additive, no blockers. |
+| **A.2 member management** | Needs WorkOS API calls server-side; the largest single remaining action gap and worth its own change. |
+| **A.3 org suspend** | Blocked on a product decision: a suspend that doesn't enforce anything is theatre, and enforcement changes tenant behaviour (explicitly a non-goal of the original plan). |
+| **B.7 invoice delivery** | PDF + email on the manual path. `markSent` is still an honour-system flip. |
+| **3.1 access page / 3.4 Playwright / 3.5 status page** | Unblocked, not yet started. `auditActors` is the first half of 3.1. |
+
+### Notes for review
+
+- **Money is never edited.** Reversals and credits are append-only; `amountPaid`
+  is always recomputed as the sum of the ledger. `loadsWritten` and issued
+  invoice lines remain untouchable by any code path added here.
+- **Two schema invariants changed.** `by_org_period` is no longer unique (manual
+  invoices), and `systemEvents` rows are now mutable (dedupe bumps
+  `lastSeenAt`/`occurrences`). Both are handled at every call site, but they're
+  the things most likely to surprise someone reading the old code.
+- **One deliberate behaviour change on the tenant side:** the billing overview
+  now filters to metered invoices so a one-off charge can't shadow a cycle. A
+  consequence is that one-off invoices are currently invisible to tenants —
+  acceptable while they're staff-raised and separately communicated, but it
+  needs a tenant surface before one-offs become routine.
+
+## 10. One-paragraph summary
 
 The console is further along than "rough draft" — all five planned phases are
 coded and meaningfully tested, and the security model is the part most teams get

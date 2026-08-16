@@ -43,6 +43,7 @@ export function OrgSupportPanels({
           <SessionEndAlertsPanel workosOrgId={workosOrgId} />
           <FlagsEditorPanel workosOrgId={workosOrgId} flags={flags} />
           <DriversPanel workosOrgId={workosOrgId} />
+          <CreditsPanel workosOrgId={workosOrgId} />
         </>
       ) : null}
       <IdentityLinksPanel links={identityLinks} />
@@ -182,6 +183,7 @@ function FlagsEditorPanel({
 function DriversPanel({ workosOrgId }: { workosOrgId: string }) {
   const drivers = useQuery(api.platform.support.listDriversForOrg, { workosOrgId });
   const resync = useAction(api.platform.support.resyncDriverClerk);
+  const correctPhone = useMutation(api.platform.support.correctDriverPhone);
 
   return (
     <div className="panel">
@@ -206,6 +208,20 @@ function DriversPanel({ workosOrgId }: { workosOrgId: string }) {
                 if (!result.success) throw new Error(result.error ?? 'Resync failed');
               }}
             />
+            {/* The driver row's phone is what the driver app authenticates
+                against — distinct from the identity link's phone below, and
+                the two can genuinely disagree. */}
+            <ReasonAction
+              label="Fix phone"
+              danger
+              onSubmit={async (reason, form) => {
+                const phone = String(new FormData(form).get('phone') ?? '').trim();
+                if (!phone) throw new Error('Phone is required');
+                await correctPhone({ driverId: d._id, phone, reason });
+              }}
+            >
+              <input className="input" name="phone" placeholder="+1555…" />
+            </ReasonAction>
           </div>
         ))
       )}
@@ -353,6 +369,265 @@ export function BillingConfigPanel({
         <input className="input" name="termsValue" placeholder="N (days or day)" />
         <input className="input" name="tax" placeholder="Tax % (e.g. 8.25)" />
         <input className="input" name="minimum" placeholder="Monthly minimum $" />
+      </ReasonAction>
+    </div>
+  );
+}
+
+/**
+ * The rate schedule as an editable list rather than a one-way "next cycle"
+ * field. Back-dating is allowed by the backend when nothing from that period
+ * on is billed; when it isn't, the error names the periods that block it.
+ */
+export function RateSchedulePanel({
+  organizationId,
+  schedule,
+  currentRate,
+}: {
+  organizationId: Id<'organizations'>;
+  schedule: { effectiveFromPeriod: string; ratePerLoad: number }[];
+  currentRate?: number | null;
+}) {
+  const setStep = useMutation(api.platform.invoices.setRateStep);
+  const removeStep = useMutation(api.platform.invoices.removeRateStep);
+  const sorted = [...schedule].sort((a, b) =>
+    a.effectiveFromPeriod.localeCompare(b.effectiveFromPeriod),
+  );
+
+  return (
+    <div className="panel">
+      <h2>Rate schedule</h2>
+      <p className="subtitle">
+        Base rate {currentRate != null ? `$${currentRate.toFixed(2)}` : 'platform default'} unless a
+        step below covers the cycle. A step applies from its period onward, so it can only be added
+        or removed while no invoice from that period on has been committed.
+      </p>
+      {sorted.length === 0 ? (
+        <div className="empty">No scheduled steps — every cycle bills at the base rate.</div>
+      ) : (
+        sorted.map((step) => (
+          <div className="audit-row" key={step.effectiveFromPeriod}>
+            <span className="action">{step.effectiveFromPeriod} onward</span>
+            <span>${step.ratePerLoad.toFixed(2)}/load</span>
+            <ReasonAction
+              label="Remove"
+              danger
+              onSubmit={async (reason) => {
+                await removeStep({
+                  organizationId,
+                  effectiveFromPeriod: step.effectiveFromPeriod,
+                  reason,
+                });
+              }}
+            />
+          </div>
+        ))
+      )}
+      <ReasonAction
+        label="Set a rate step"
+        danger
+        onSubmit={async (reason, form) => {
+          const data = new FormData(form);
+          const effectiveFromPeriod = String(data.get('period') ?? '').trim();
+          const ratePerLoad = Number(data.get('rate'));
+          if (!effectiveFromPeriod) throw new Error('Period is required (YYYY-MM)');
+          if (!Number.isFinite(ratePerLoad) || ratePerLoad <= 0) {
+            throw new Error('Rate must be a positive number');
+          }
+          await setStep({ organizationId, effectiveFromPeriod, ratePerLoad, reason });
+        }}
+      >
+        <input className="input" name="period" placeholder="From period (YYYY-MM)" />
+        <input className="input" name="rate" placeholder="Rate/load" />
+      </ReasonAction>
+    </div>
+  );
+}
+
+/** Org credit balance + the ledger behind it. */
+export function CreditsPanel({ workosOrgId }: { workosOrgId: string }) {
+  const balance = useQuery(api.platform.credits.creditBalance, { workosOrgId });
+  const credits = useQuery(api.platform.credits.listCredits, { workosOrgId });
+  const createCredit = useMutation(api.platform.credits.createCredit);
+  const voidCredit = useMutation(api.platform.credits.voidCredit);
+
+  return (
+    <div className="panel">
+      <h2>
+        Account credit{' '}
+        {balance ? <span className="chip chip-ok">${balance.available.toFixed(2)} available</span> : null}
+      </h2>
+      <p className="subtitle">
+        Applied automatically to the balance when the next invoice is issued — never to the taxable
+        subtotal. Overpayments post here on their own.
+      </p>
+      {credits === undefined ? (
+        <div className="empty">Loading…</div>
+      ) : credits.length === 0 ? (
+        <div className="empty">No credits on this account.</div>
+      ) : (
+        credits.map((c) => (
+          <div className="audit-row" key={c._id}>
+            <span
+              className={`chip ${
+                c.status === 'available' ? 'chip-ok' : c.status === 'void' ? 'chip-danger' : ''
+              }`}
+            >
+              {c.status}
+            </span>
+            <span className="action">{c.source.replace('_', ' ')}</span>
+            <span>
+              ${c.amount.toFixed(2)}
+              {c.remaining !== c.amount ? ` (${c.remaining.toFixed(2)} left)` : ''}
+            </span>
+            <span className="muted">{c.reason}</span>
+            {c.applications.length > 0 ? (
+              <span className="muted">
+                → {c.applications.map((a) => a.invoiceNumber).join(', ')}
+              </span>
+            ) : null}
+            <span className="muted">{formatAgo(c.createdAt)}</span>
+            {c.status === 'available' && c.applications.length === 0 ? (
+              <ReasonAction
+                label="Void"
+                danger
+                onSubmit={async (reason) => {
+                  await voidCredit({ creditId: c._id, reason });
+                }}
+              />
+            ) : null}
+          </div>
+        ))
+      )}
+      <ReasonAction
+        label="Issue a credit"
+        danger
+        onSubmit={async (reason, form) => {
+          const data = new FormData(form);
+          const amount = Number(data.get('amount'));
+          if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter a positive amount');
+          await createCredit({
+            workosOrgId,
+            amount,
+            source: data.get('source') as 'goodwill' | 'dispute' | 'service_credit' | 'manual',
+            reason,
+          });
+        }}
+      >
+        <input className="input" name="amount" placeholder="Amount $" />
+        <select className="input" name="source" defaultValue="goodwill">
+          <option value="goodwill">Goodwill</option>
+          <option value="dispute">Dispute</option>
+          <option value="service_credit">Service credit (SLA)</option>
+          <option value="manual">Manual</option>
+        </select>
+      </ReasonAction>
+    </div>
+  );
+}
+
+/** Contract/commercial fields — previously display-only on this page. */
+export function ContractPanel({
+  organizationId,
+  current,
+}: {
+  organizationId: Id<'organizations'>;
+  current: {
+    billingEmail?: string;
+    billingContactName?: string | null;
+    billingPhone?: string | null;
+    platformContractNumber?: string | null;
+    platformLicenseStart?: string | null;
+    platformLicenseEnd?: string | null;
+  };
+}) {
+  const update = useMutation(api.platform.invoices.updateContract);
+  const expired =
+    current.platformLicenseEnd != null &&
+    current.platformLicenseEnd < new Date().toISOString().slice(0, 10);
+
+  return (
+    <div className="panel">
+      <h2>Contract</h2>
+      <div className="detail-grid">
+        <span className="muted">Billing contact</span>
+        <span>
+          {current.billingContactName ?? '—'} · {current.billingEmail ?? '—'}
+          {current.billingPhone ? ` · ${current.billingPhone}` : ''}
+        </span>
+        <span className="muted">Contract number</span>
+        <span>{current.platformContractNumber ?? '—'}</span>
+        <span className="muted">License window</span>
+        <span>
+          {current.platformLicenseStart ?? '—'} → {current.platformLicenseEnd ?? '—'}
+          {expired ? <span className="chip chip-warn">expired</span> : null}
+        </span>
+      </div>
+      <ReasonAction
+        label="Edit contract"
+        onSubmit={async (reason, form) => {
+          const data = new FormData(form);
+          const text = (name: string) => {
+            const raw = String(data.get(name) ?? '').trim();
+            return raw === '' ? undefined : raw;
+          };
+          const email = text('billingEmail');
+          await update({
+            organizationId,
+            ...(email !== undefined ? { billingEmail: email } : {}),
+            ...(text('contactName') !== undefined ? { billingContactName: text('contactName') } : {}),
+            ...(text('contractNumber') !== undefined
+              ? { platformContractNumber: text('contractNumber') }
+              : {}),
+            ...(text('licenseStart') !== undefined
+              ? { platformLicenseStart: text('licenseStart') }
+              : {}),
+            ...(text('licenseEnd') !== undefined ? { platformLicenseEnd: text('licenseEnd') } : {}),
+            reason,
+          });
+        }}
+      >
+        <input className="input" name="billingEmail" placeholder="Billing email" />
+        <input className="input" name="contactName" placeholder="Billing contact name" />
+        <input className="input" name="contractNumber" placeholder="Contract number" />
+        <input className="input" name="licenseStart" placeholder="License start (YYYY-MM-DD)" />
+        <input className="input" name="licenseEnd" placeholder="License end (YYYY-MM-DD)" />
+      </ReasonAction>
+    </div>
+  );
+}
+
+/** One-off charges: onboarding, services, hardware. */
+export function ManualInvoicePanel({
+  organizationId,
+}: {
+  organizationId: Id<'organizations'>;
+}) {
+  const create = useMutation(api.platform.invoices.createManualInvoice);
+  const thisPeriod = new Date().toISOString().slice(0, 7);
+
+  return (
+    <div className="panel">
+      <h2>One-off invoice</h2>
+      <p className="subtitle">
+        For anything that isn&apos;t metered usage. Lands in the same ledger as a draft and follows
+        the same lifecycle; it never collides with the cycle&apos;s invoice.
+      </p>
+      <ReasonAction
+        label="Raise a one-off invoice"
+        onSubmit={async (reason, form) => {
+          const data = new FormData(form);
+          const label = String(data.get('label') ?? '').trim();
+          const amount = Number(data.get('amount'));
+          const periodKey = String(data.get('period') ?? '').trim() || thisPeriod;
+          if (!label) throw new Error('A line label is required');
+          if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter a positive amount');
+          await create({ organizationId, periodKey, lines: [{ label, amount }], reason });
+        }}
+      >
+        <input className="input" name="label" placeholder="Line description" />
+        <input className="input" name="amount" placeholder="Amount $" />
+        <input className="input" name="period" placeholder={`Period (default ${thisPeriod})`} />
       </ReasonAction>
     </div>
   );

@@ -71,16 +71,81 @@ export const debugIdentity = query({
 /**
  * Most recent platform-staff audit entries, newest first. Phase 0 surfaces
  * this on the console home so the very first feature is accountability.
+ *
+ * Filters are server-side and index-backed where possible: `targetOrgId` and
+ * `actorEmail` each have their own index, and free-text search runs over a
+ * bounded recent window (the log is append-only and time-ordered, so "recent"
+ * is the only window that matters operationally).
  */
 export const recentAuditLog = query({
-  args: { limit: v.optional(v.number()) },
+  args: {
+    limit: v.optional(v.number()),
+    targetOrgId: v.optional(v.string()),
+    actorEmail: v.optional(v.string()),
+    action: v.optional(v.string()),
+    search: v.optional(v.string()), // matches reason / target id / action
+  },
   handler: async (ctx, args) => {
     await requirePlatformStaff(ctx);
     const limit = Math.min(Math.max(args.limit ?? 50, 1), 200);
-    return await ctx.db
-      .query('platformAuditLog')
-      .withIndex('by_time')
-      .order('desc')
-      .take(limit);
+
+    // Pick the narrowest index the filters allow.
+    const rows =
+      args.targetOrgId !== undefined
+        ? await ctx.db
+            .query('platformAuditLog')
+            .withIndex('by_target_org', (q) => q.eq('targetOrgId', args.targetOrgId))
+            .order('desc')
+            .take(limit * 4)
+        : args.actorEmail !== undefined
+          ? await ctx.db
+              .query('platformAuditLog')
+              .withIndex('by_actor', (q) => q.eq('actorEmail', args.actorEmail!))
+              .order('desc')
+              .take(limit * 4)
+          : await ctx.db
+              .query('platformAuditLog')
+              .withIndex('by_time')
+              .order('desc')
+              .take(args.action !== undefined || args.search !== undefined ? 500 : limit);
+
+    const needle = args.search?.trim().toLowerCase();
+    return rows
+      .filter((r) => args.action === undefined || r.action === args.action)
+      .filter(
+        (r) =>
+          !needle ||
+          r.reason?.toLowerCase().includes(needle) ||
+          r.actorEmail.toLowerCase().includes(needle) ||
+          r.action.toLowerCase().includes(needle) ||
+          (r.targetId ?? '').toLowerCase().includes(needle) ||
+          (r.targetOrgId ?? '').toLowerCase().includes(needle),
+      )
+      .slice(0, limit);
+  },
+});
+
+/** Distinct actors seen in the log — powers the audit filter and, until an
+ * access page exists, is the only in-console answer to "who has been here". */
+export const auditActors = query({
+  args: {},
+  handler: async (ctx) => {
+    await requirePlatformStaff(ctx);
+    const rows = await ctx.db.query('platformAuditLog').withIndex('by_time').order('desc').take(500);
+    const byActor = new Map<string, { actorEmail: string; lastSeenAt: number; actions: number }>();
+    for (const row of rows) {
+      const existing = byActor.get(row.actorEmail);
+      if (existing) {
+        existing.actions++;
+        existing.lastSeenAt = Math.max(existing.lastSeenAt, row.timestamp);
+      } else {
+        byActor.set(row.actorEmail, {
+          actorEmail: row.actorEmail,
+          lastSeenAt: row.timestamp,
+          actions: 1,
+        });
+      }
+    }
+    return [...byActor.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   },
 });

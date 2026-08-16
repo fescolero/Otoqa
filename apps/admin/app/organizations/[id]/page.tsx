@@ -5,7 +5,13 @@ import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import type { Id } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
-import { OrgSupportPanels, BillingConfigPanel } from '@/components/OrgSupportPanels';
+import {
+  OrgSupportPanels,
+  BillingConfigPanel,
+  RateSchedulePanel,
+  ContractPanel,
+  ManualInvoicePanel,
+} from '@/components/OrgSupportPanels';
 import { formatAgo, formatCapped, formatMoney, formatWhen } from '@/lib/format';
 
 export default function OrgDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -121,7 +127,17 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
         )}
       </div>
 
+      <ContractPanel organizationId={organizationId} current={org} />
+
       <BillingConfigPanel organizationId={organizationId} current={org} />
+
+      <RateSchedulePanel
+        organizationId={organizationId}
+        schedule={org.rateSchedule ?? []}
+        currentRate={org.billingRatePerLoad}
+      />
+
+      <ManualInvoicePanel organizationId={organizationId} />
 
       <OrgSupportPanels
         organizationId={organizationId}
@@ -148,6 +164,8 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
         )}
       </div>
 
+      {org.workosOrgId ? <StaffActionsOnOrg workosOrgId={org.workosOrgId} /> : null}
+
       <div className="panel">
         <h2>Recent tenant activity</h2>
         {recentAudit.length === 0 ? (
@@ -166,6 +184,35 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * What have WE already done to this account — the first question in any
+ * support interaction, and previously unanswerable in the console even though
+ * the by_target_org index existed.
+ */
+function StaffActionsOnOrg({ workosOrgId }: { workosOrgId: string }) {
+  const rows = useQuery(api.platform.access.recentAuditLog, { targetOrgId: workosOrgId, limit: 25 });
+
+  return (
+    <div className="panel">
+      <h2>Platform-staff actions on this org</h2>
+      {rows === undefined ? (
+        <div className="empty">Loading…</div>
+      ) : rows.length === 0 ? (
+        <div className="empty">No staff has acted on this organization.</div>
+      ) : (
+        rows.map((r) => (
+          <div className="audit-row" key={r._id}>
+            <span className="when">{formatWhen(r.timestamp)}</span>
+            <span className="action">{r.action}</span>
+            <span className="muted">{r.actorEmail}</span>
+            {r.reason ? <span>— {r.reason}</span> : null}
+          </div>
+        ))
+      )}
+    </div>
   );
 }
 

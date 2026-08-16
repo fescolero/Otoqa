@@ -1,9 +1,12 @@
 'use client';
 
-import { useQuery } from 'convex/react';
+import { useState } from 'react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
-import { formatCapped } from '@/lib/format';
+import { PanelBoundary } from '@/components/PanelBoundary';
+import { ReasonAction } from '@/components/ReasonAction';
+import { formatAgo, formatCapped } from '@/lib/format';
 
 export default function HealthPage() {
   return (
@@ -12,7 +15,9 @@ export default function HealthPage() {
       <p className="subtitle">
         Live rollups: FourKites push ticks per org and the external-tracking webhook queue.
       </p>
-      <HealthBoard />
+      <PanelBoundary label="Integration health">
+        <HealthBoard />
+      </PanelBoundary>
     </ConsoleShell>
   );
 }
@@ -46,6 +51,52 @@ function SloSection() {
   );
 }
 
+/**
+ * Dead-lettered deliveries with the action that was missing: the alert has
+ * fired since Phase 2 with no remedy anywhere in the codebase, so the only
+ * fix was a CLI edit. Requeue resets attempts and reschedules immediately;
+ * the partner's own idempotency key makes a duplicate safe on their side.
+ */
+function DeadLetters() {
+  const rows = useQuery(api.platform.support.listDeadLetters, {});
+  const requeue = useMutation(api.platform.support.requeueDeadLetters);
+  const [result, setResult] = useState<string | null>(null);
+
+  if (rows === undefined || rows.length === 0) return null;
+
+  return (
+    <div className="panel panel-attention">
+      <h2>Dead-lettered webhook deliveries ({rows.length})</h2>
+      {result ? <p className="muted">{result}</p> : null}
+      <ReasonAction
+        label={`Requeue all ${rows.length}`}
+        danger
+        onSubmit={async (reason) => {
+          const r = await requeue({ reason });
+          setResult(`Requeued ${r.requeued}; skipped ${r.skipped} (already moving or endpoint gone).`);
+        }}
+      />
+      {rows.map((r) => (
+        <div className="audit-row" key={r._id}>
+          <span className="muted">{r.workosOrgId}</span>
+          <span className="action">{r.eventType}</span>
+          <span className="muted">{r.attempts} attempts</span>
+          <span className="danger-text">
+            {r.lastHttpStatus ?? ''} {r.lastErrorMessage ?? ''}
+          </span>
+          <span className="muted">{formatAgo(r.createdAt)}</span>
+          <ReasonAction
+            label="Requeue"
+            onSubmit={async (reason) => {
+              await requeue({ deliveryIds: [r._id], reason });
+            }}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function HealthBoard() {
   const health = useQuery(api.platform.health.integrationHealth, {});
   if (health === undefined) return <div className="empty">Loading…</div>;
@@ -65,6 +116,8 @@ function HealthBoard() {
           <div className="kpi-label">Dead-lettered deliveries</div>
         </div>
       </div>
+
+      <DeadLetters />
 
       <div className="panel">
         <h2>FourKites push — per org</h2>

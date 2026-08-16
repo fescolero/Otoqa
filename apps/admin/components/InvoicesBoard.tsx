@@ -6,8 +6,24 @@ import { api } from '@otoqa/convex-client';
 import { formatMoney, formatWhen } from '@/lib/format';
 import { ReasonAction } from '@/components/ReasonAction';
 
-type InvoiceStatus = 'draft' | 'issued' | 'sent' | 'paid' | 'void';
-const FILTERS: (InvoiceStatus | 'all')[] = ['all', 'draft', 'issued', 'sent', 'paid', 'void'];
+type InvoiceStatus =
+  | 'draft'
+  | 'issued'
+  | 'sent'
+  | 'partially_paid'
+  | 'paid'
+  | 'written_off'
+  | 'void';
+const FILTERS: (InvoiceStatus | 'all')[] = [
+  'all',
+  'draft',
+  'issued',
+  'sent',
+  'partially_paid',
+  'paid',
+  'written_off',
+  'void',
+];
 
 export function InvoicesBoard() {
   const aging = useQuery(api.platform.invoices.agingOverview, {});
@@ -30,6 +46,15 @@ export function InvoicesBoard() {
             danger={aging.buckets.d31_60 + aging.buckets.d61_90 + aging.buckets.d90_plus > 0}
           />
           <Kpi label="Drafts awaiting review" value={String(aging.draftCount)} />
+          {aging.creditAvailable > 0 ? (
+            <Kpi label="Credit owed to orgs" value={formatMoney(aging.creditAvailable)} />
+          ) : null}
+          {aging.writtenOffCount > 0 ? (
+            <Kpi
+              label={`Written off (${aging.writtenOffCount})`}
+              value={formatMoney(aging.writtenOffAmount)}
+            />
+          ) : null}
           {aging.driftCount > 0 ? <Kpi label="Drift flags" value={String(aging.driftCount)} danger /> : null}
         </div>
       ) : null}
@@ -72,13 +97,16 @@ function InvoiceRow({
   const markSent = useMutation(api.platform.invoices.markSent);
   const recordPayment = useMutation(api.platform.invoices.recordPayment);
   const voidInvoice = useMutation(api.platform.invoices.voidInvoice);
+  const reversePayment = useMutation(api.platform.invoices.reversePayment);
+  const writeOff = useMutation(api.platform.invoices.writeOffInvoice);
   const addAdjustment = useMutation(api.platform.invoices.addAdjustment);
   const pushToStripe = useAction(api.platform.stripe.pushInvoiceToStripe);
   const [expanded, setExpanded] = useState(false);
 
   const balance = Math.round((inv.total - inv.amountPaid) * 100) / 100;
-  const overdue =
-    (inv.status === 'issued' || inv.status === 'sent') && inv.dueAt != null && Date.now() > inv.dueAt;
+  const isOpen =
+    inv.status === 'issued' || inv.status === 'sent' || inv.status === 'partially_paid';
+  const overdue = isOpen && balance > 0 && inv.dueAt != null && Date.now() > inv.dueAt;
 
   return (
     <div className="ticket-row">
@@ -87,14 +115,14 @@ function InvoiceRow({
           className={`chip ${
             inv.status === 'paid'
               ? 'chip-ok'
-              : inv.status === 'void'
+              : inv.status === 'void' || inv.status === 'written_off'
                 ? ''
                 : overdue
                   ? 'chip-danger'
                   : 'chip-warn'
           }`}
         >
-          {overdue ? 'overdue' : inv.status}
+          {overdue ? 'overdue' : inv.status.replace('_', ' ')}
         </span>
         <strong>{inv.invoiceNumber}</strong>
         <span className="muted">{inv.workosOrgId}</span>
@@ -137,19 +165,44 @@ function InvoiceRow({
               <span>{formatMoney(inv.taxAmount)}</span>
             </div>
           ) : null}
-          {inv.payments.map((p, i) => (
-            <div className="audit-row" key={`pay-${i}`}>
-              <span className="chip chip-ok">payment</span>
-              <span>
-                {p.method}
-                {p.reference ? ` ${p.reference}` : ''}{' '}
-                <span className="muted">
-                  {formatWhen(p.receivedAt)} by {p.recordedByEmail}
+          {inv.payments.map((p, i) => {
+            const isReversal = p.reversalOfId !== undefined;
+            // A payment that has been reversed stays on the record, greyed —
+            // the ledger is append-only, so the mistake is part of the story.
+            const wasReversed = inv.payments.some(
+              (other) => other.reversalOfId === (p.id ?? `idx:${i}`),
+            );
+            return (
+              <div className="audit-row" key={`pay-${i}`}>
+                <span className={`chip ${isReversal ? 'chip-warn' : wasReversed ? '' : 'chip-ok'}`}>
+                  {isReversal ? 'reversal' : 'payment'}
                 </span>
-              </span>
-              <span>{formatMoney(p.amount)}</span>
-            </div>
-          ))}
+                <span className={wasReversed ? 'muted' : undefined}>
+                  {p.method}
+                  {p.reference ? ` ${p.reference}` : ''}{' '}
+                  <span className="muted">
+                    {formatWhen(p.receivedAt)} by {p.recordedByEmail}
+                    {p.reversalReason ? ` — ${p.reversalReason}` : ''}
+                  </span>
+                </span>
+                <span className={wasReversed ? 'muted' : undefined}>{formatMoney(p.amount)}</span>
+                {!isReversal && !wasReversed && p.method !== 'credit' ? (
+                  <ReasonAction
+                    label="Reverse"
+                    danger
+                    onSubmit={async (reason) => {
+                      await reversePayment({ id: inv._id, paymentIndex: i, reason });
+                    }}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
+
+          {inv.writeOffReason ? (
+            <p className="ticket-body muted">Written off: {inv.writeOffReason}</p>
+          ) : null}
+          {inv.voidReason ? <p className="ticket-body muted">Voided: {inv.voidReason}</p> : null}
 
           <div className="inline-form">
             {inv.status === 'draft' ? (
@@ -178,7 +231,7 @@ function InvoiceRow({
                 </ReasonAction>
               </>
             ) : null}
-            {inv.status === 'issued' ? (
+            {inv.status === 'issued' || inv.status === 'partially_paid' ? (
               <>
                 <ReasonAction
                   label="Mark sent"
@@ -208,7 +261,7 @@ function InvoiceRow({
                 Stripe invoice ↗
               </a>
             ) : null}
-            {inv.status === 'issued' || inv.status === 'sent' ? (
+            {isOpen ? (
               <>
                 <ReasonAction
                   label="Record payment"
@@ -241,6 +294,15 @@ function InvoiceRow({
                     await voidInvoice({ id: inv._id, reason });
                   }}
                 />
+                {balance > 0 ? (
+                  <ReasonAction
+                    label="Write off"
+                    danger
+                    onSubmit={async (reason) => {
+                      await writeOff({ id: inv._id, reason });
+                    }}
+                  />
+                ) : null}
               </>
             ) : null}
           </div>
