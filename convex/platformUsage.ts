@@ -425,7 +425,13 @@ export const getBillingOverview = query({
       .query('platformInvoices')
       .withIndex('by_org_period', (q) => q.eq('workosOrgId', args.workosOrgId))
       .collect();
-    const invoiceByPeriod = new Map(invoiceRows.map((r) => [r.periodKey, r]));
+    // Metered only: one-off invoices (kind='manual') can share a period with
+    // the cycle's invoice, and a plain Map would let the last one win and
+    // silently replace the cycle's numbers here. One-off charges are billed
+    // separately and are not part of the usage cycle history.
+    const invoiceByPeriod = new Map(
+      invoiceRows.filter((r) => r.kind !== 'manual').map((r) => [r.periodKey, r]),
+    );
 
     const closedCycles = closedKeys.map((key, i) => {
       const invoice = invoiceByPeriod.get(key);

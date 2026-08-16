@@ -1,7 +1,8 @@
-import { v } from 'convex/values';
+import { v, ConvexError } from 'convex/values';
 import { query, mutation, internalMutation, internalAction } from '../_generated/server';
 import { internal } from '../_generated/api';
 import { requirePlatformStaff } from '../lib/auth';
+import { jobState, overdueMs, formatDurationShort } from './jobHealth';
 
 /**
  * Platform alerting (plan §9): a 5-minute evaluator checks the alerting
@@ -35,9 +36,26 @@ export const evaluate = internalMutation({
     const now = Date.now();
     const active: Condition[] = [];
 
-    // 1. Crons failing repeatedly.
+    // 1. Crons failing repeatedly — or, worse, not running at all.
     const jobs = await ctx.db.query('cronHealth').collect();
     for (const job of jobs) {
+      const state = jobState(job, now);
+      if (state === 'stale') {
+        const late = overdueMs(job, now);
+        active.push({
+          dedupeKey: `cron_stale:${job.jobName}`,
+          kind: 'cron_stale',
+          severity: 'high',
+          message: `Cron ${job.jobName} has not run for ${late ? formatDurationShort(late) : 'longer than expected'} (expected every ${formatDurationShort(job.expectedIntervalMs ?? 0)}). Last outcome was ${job.lastOutcome} — a job that stops firing raises nothing on its own.`,
+        });
+      } else if (state === 'hung') {
+        active.push({
+          dedupeKey: `cron_hung:${job.jobName}`,
+          kind: 'cron_hung',
+          severity: 'high',
+          message: `Cron ${job.jobName} started ${formatDurationShort(now - (job.inFlightSince ?? now))} ago and never reported — the run was killed mid-flight.`,
+        });
+      }
       if (job.consecutiveFailures >= CRON_FAILURE_THRESHOLD) {
         active.push({
           dedupeKey: `cron:${job.jobName}`,
@@ -48,7 +66,34 @@ export const evaluate = internalMutation({
       }
     }
 
-    // 2. Webhook dead-letters piling up.
+    // 2. Billing drift on an invoiced period (alert matrix, plan §9). The
+    // systemEvent was already written by the recalc; this escalates it so a
+    // number moving under a committed invoice reaches a human.
+    const driftedInvoices = [
+      ...(await ctx.db
+        .query('platformInvoices')
+        .withIndex('by_status', (q) => q.eq('status', 'issued'))
+        .take(COUNT_CAP)),
+      ...(await ctx.db
+        .query('platformInvoices')
+        .withIndex('by_status', (q) => q.eq('status', 'sent'))
+        .take(COUNT_CAP)),
+      ...(await ctx.db
+        .query('platformInvoices')
+        .withIndex('by_status', (q) => q.eq('status', 'partially_paid'))
+        .take(COUNT_CAP)),
+    ].filter((i) => i.driftDetectedAt !== undefined);
+    for (const invoice of driftedInvoices) {
+      active.push({
+        dedupeKey: `billing_drift:${invoice.invoiceNumber}`,
+        kind: 'billing_drift',
+        severity: 'medium',
+        message: `Usage rose after ${invoice.invoiceNumber} (${invoice.periodKey}) was committed — bill the delta next cycle or waive it`,
+        orgId: invoice.workosOrgId,
+      });
+    }
+
+    // 3. Webhook dead-letters piling up.
     const deadLetters = await ctx.db
       .query('webhookDeliveryQueue')
       .withIndex('by_status_next', (q) => q.eq('status', 'DEAD_LETTER'))
@@ -62,7 +107,7 @@ export const evaluate = internalMutation({
       });
     }
 
-    // 3. FourKites push fully failing for an org.
+    // 4. FourKites push fully failing for an org.
     const fkRows = await ctx.db.query('fourKitesPushTickHealth').collect();
     for (const row of fkRows) {
       if (row.lastTickKind === 'all_failed') {
@@ -88,7 +133,17 @@ export const evaluate = internalMutation({
         (await ctx.db
           .query('platformAlerts')
           .withIndex('by_dedupe', (q) => q.eq('dedupeKey', cond.dedupeKey).eq('status', 'acked'))
-          .first());
+          .first()) ??
+        // A snoozed row counts as "known" even once resolved: without this,
+        // resolving a still-broken condition would re-open (and re-Slack) it
+        // on the very next tick, which is why snooze exists.
+        (
+          await ctx.db
+            .query('platformAlerts')
+            .withIndex('by_dedupe', (q) => q.eq('dedupeKey', cond.dedupeKey).eq('status', 'resolved'))
+            .order('desc')
+            .take(1)
+        ).find((r) => (r.snoozedUntil ?? 0) > now);
 
       if (open) {
         await ctx.db.patch(open._id, {
@@ -212,6 +267,86 @@ export const ackAlert = mutation({
     await ctx.db.patch(args.alertId, {
       status: 'acked',
       acknowledgedBy: staff.email,
+    });
+    return null;
+  },
+});
+
+/**
+ * Close an incident by hand — for conditions the evaluator can't see clearing
+ * (an upstream vendor confirming a fix, a one-off we've decided is noise).
+ *
+ * If the condition is genuinely still true the next tick re-opens it, which is
+ * the correct behaviour: resolve means "I believe this is over", not "stop
+ * telling me". Use snooze for the latter.
+ */
+export const resolveAlert = mutation({
+  args: { alertId: v.id('platformAlerts'), note: v.optional(v.string()) },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const alert = await ctx.db.get(args.alertId);
+    if (!alert) throw new ConvexError('Alert not found');
+    if (alert.status === 'resolved') return null; // idempotent
+    await ctx.db.patch(args.alertId, {
+      status: 'resolved',
+      resolvedAt: Date.now(),
+      resolvedBy: staff.email,
+      ...(args.note
+        ? { note: args.note.slice(0, 1000), noteBy: staff.email, noteAt: Date.now() }
+        : {}),
+    });
+    return null;
+  },
+});
+
+/**
+ * Suppress a known incident that's already being worked. Resolves the row and
+ * holds the dedupe key quiet until the window expires — no new alert, no
+ * repeat Slack message. When the window lapses and the condition still holds,
+ * it re-opens and pages again, so a snooze can't silently become a forever.
+ */
+export const snoozeAlert = mutation({
+  args: {
+    alertId: v.id('platformAlerts'),
+    hours: v.number(),
+    note: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const alert = await ctx.db.get(args.alertId);
+    if (!alert) throw new ConvexError('Alert not found');
+    if (!(args.hours > 0) || args.hours > 168) {
+      throw new ConvexError('Snooze must be between 0 and 168 hours (7 days)');
+    }
+    const now = Date.now();
+    await ctx.db.patch(args.alertId, {
+      status: 'resolved',
+      resolvedAt: now,
+      resolvedBy: staff.email,
+      snoozedUntil: now + args.hours * 60 * 60 * 1000,
+      snoozedBy: staff.email,
+      ...(args.note
+        ? { note: args.note.slice(0, 1000), noteBy: staff.email, noteAt: now }
+        : {}),
+    });
+    return null;
+  },
+});
+
+/** Carry what's being done about an incident alongside it. */
+export const annotateAlert = mutation({
+  args: { alertId: v.id('platformAlerts'), note: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const alert = await ctx.db.get(args.alertId);
+    if (!alert) throw new ConvexError('Alert not found');
+    await ctx.db.patch(args.alertId, {
+      note: args.note.slice(0, 1000),
+      noteBy: staff.email,
+      noteAt: Date.now(),
     });
     return null;
   },

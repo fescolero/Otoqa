@@ -164,12 +164,16 @@ describe('platform Phase 1 — cron ledger', () => {
     const failures = await staff.query(api.platform.jobs.recentFailures, {});
     expect(failures).toHaveLength(3);
 
+    // Repeats of the same condition COLLAPSE onto one feed row — three ticks
+    // of one stuck job is one thing to look at, not three. The occurrence
+    // counter carries the repetition.
     const events = await staff.query(api.platform.events.recentEvents, {});
-    expect(events).toHaveLength(3);
-    // Third consecutive failure escalates to critical (alerting matrix).
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ code: 'cron.failed', occurrences: 3 });
+    // Escalation still lands: dedupe keeps the HIGHEST severity seen, so the
+    // third consecutive failure's 'critical' is what the operator sees.
     expect(events[0].severity).toBe('critical');
-    expect(events[1].severity).toBe('error');
-    expect(events[0].code).toBe('cron.failed');
+    expect(events[0].message).toContain('boom 3');
 
     // Recovery resets the consecutive counter.
     await tick(undefined);

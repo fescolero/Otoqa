@@ -30,24 +30,44 @@ export type PlatformAuditAction =
   | 'identity_link_updated'
   | 'org_soft_deleted'
   | 'org_restored'
+  | 'driver_phone_corrected'
+  | 'webhook_deliveries_requeued'
+  | 'cron_job_retired'
   // Billing
   | 'billing_config_changed'
+  | 'contract_updated'
   | 'invoice_issued'
   | 'invoice_sent'
   | 'invoice_payment_recorded'
+  | 'invoice_payment_reversed'
+  | 'invoice_written_off'
+  | 'invoice_manual_created'
   | 'invoice_voided'
   | 'invoice_adjustment_added'
+  | 'credit_issued'
+  | 'credit_voided'
   | 'usage_rebaselined'
   // Sensitive reads
   | 'sensitive_data_revealed';
 
-/** Actions that must carry a reason — the helper throws otherwise. */
+/**
+ * Actions that must carry a reason — the helper throws otherwise.
+ *
+ * Money-correcting actions are all here: a reversal, a write-off, or a credit
+ * is someone deciding a number was wrong, and "why" is the only part of that
+ * decision a future reader can't reconstruct from the ledger itself.
+ */
 const DESTRUCTIVE_ACTIONS: ReadonlySet<PlatformAuditAction> = new Set([
   'flag_set_global',
   'session_force_ended',
   'identity_link_updated',
   'org_soft_deleted',
+  'driver_phone_corrected',
   'invoice_voided',
+  'invoice_payment_reversed',
+  'invoice_written_off',
+  'credit_issued',
+  'credit_voided',
   'usage_rebaselined',
   'sensitive_data_revealed',
 ]);

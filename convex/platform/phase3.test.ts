@@ -206,7 +206,9 @@ describe('phase 3 — cycle close & lifecycle', () => {
       reference: '#1042',
     });
     let [inv] = await staff.query(api.platform.invoices.listInvoices, {});
-    expect(inv).toMatchObject({ status: 'issued', amountPaid: 100 }); // partial → still open
+    // Partial payment is its own state — an invoice with money against it is
+    // neither 'issued' nor 'paid', and aging needs to tell them apart.
+    expect(inv).toMatchObject({ status: 'partially_paid', amountPaid: 100 });
 
     // Partial payment blocks void.
     await expect(

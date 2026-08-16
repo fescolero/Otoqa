@@ -4103,6 +4103,20 @@ export default defineSchema({
     totalRuns: v.number(),
     totalFailures: v.number(),
     updatedAt: v.number(),
+    // Declared cadence from the crons.ts descriptor. Without it a job that
+    // STOPS FIRING (scheduler stall, cron deleted, action killed before the
+    // ledger write) keeps its last-good row and reads as healthy forever —
+    // the console's worst failure mode. Optional because rows written before
+    // this field existed only gain it on their next tick.
+    expectedIntervalMs: v.optional(v.number()),
+    // Set before the target runs, cleared when it reports. A value older than
+    // the hang threshold means the run died mid-flight and no outcome will
+    // ever arrive.
+    inFlightSince: v.optional(v.number()),
+    // Set when staff retire a job that no longer exists in crons.ts, so its
+    // stale alert stops without deleting the run history.
+    retiredAt: v.optional(v.number()),
+    retiredBy: v.optional(v.string()),
   }).index('by_job', ['jobName']),
 
   // Append-only run history. Policy (plan §11-6): sub-5-minute jobs write
@@ -4131,12 +4145,23 @@ export default defineSchema({
   platformInvoices: defineTable({
     workosOrgId: v.string(),
     periodKey: v.string(), // 'YYYY-MM' (UTC)
+    // 'metered' (cycle close, at most ONE per org × period) vs 'manual'
+    // (one-off charges: onboarding, services, hardware — any number per
+    // period). Absent = metered (rows predating one-offs). Every by_org_period
+    // lookup that expects a single row MUST filter to metered — see
+    // meteredInvoiceForPeriod() in convex/platform/invoices.ts.
+    kind: v.optional(v.union(v.literal('metered'), v.literal('manual'))),
     invoiceNumber: v.string(), // deterministic scheme (platformInvoiceNumber)
     loadsWritten: v.number(),
     ratePerLoad: v.number(), // from rateSchedule step covering the period
     lines: v.array(
       v.object({
-        kind: v.union(v.literal('usage'), v.literal('recurring'), v.literal('minimum_true_up')),
+        kind: v.union(
+          v.literal('usage'),
+          v.literal('recurring'),
+          v.literal('minimum_true_up'),
+          v.literal('manual'), // operator-entered line on a one-off invoice
+        ),
         label: v.string(),
         amount: v.number(),
       }),
@@ -4155,34 +4180,51 @@ export default defineSchema({
     taxJurisdiction: v.optional(v.string()),
     taxAmount: v.optional(v.number()), // frozen at issue
     total: v.number(), // subtotal + taxAmount
+    // APPEND-ONLY. A wrong payment is never edited or deleted — a reversal
+    // appends a negative entry pointing at the original's `id`, so the trail
+    // shows both the mistake and the correction. `amountPaid` is always the
+    // SUM of this array, never an incremental counter.
     payments: v.array(
       v.object({
-        amount: v.number(),
+        // Absent on rows written before reversals existed; those can still be
+        // reversed by array index (see reversePayment).
+        id: v.optional(v.string()),
+        amount: v.number(), // negative for a reversal entry
         method: v.union(
           v.literal('ach'),
           v.literal('check'),
           v.literal('wire'),
           v.literal('stripe'),
+          v.literal('credit'), // an org credit consumed at issue time
           v.literal('other'),
         ),
         reference: v.optional(v.string()),
         recordedByEmail: v.string(),
         receivedAt: v.number(),
+        // Set on reversal entries: the `id` of the payment being reversed,
+        // plus why. One reversal per original payment (enforced in code).
+        reversalOfId: v.optional(v.string()),
+        reversalReason: v.optional(v.string()),
       }),
     ),
-    amountPaid: v.number(),
+    amountPaid: v.number(), // Σ payments (reversals included)
     status: v.union(
       v.literal('draft'),
       v.literal('issued'),
       v.literal('sent'),
+      v.literal('partially_paid'), // 0 < amountPaid < total
       v.literal('paid'),
+      v.literal('written_off'), // uncollectible; balance stays visible
       v.literal('void'),
     ),
     issuedAt: v.optional(v.number()),
+    sentAt: v.optional(v.number()), // set by markSent / Stripe push
     dueAt: v.optional(v.number()),
     paidAt: v.optional(v.number()),
     voidedAt: v.optional(v.number()),
     voidReason: v.optional(v.string()),
+    writtenOffAt: v.optional(v.number()),
+    writeOffReason: v.optional(v.string()),
     driftDetectedAt: v.optional(v.number()), // recalc raised an invoiced period
     backfilled: v.optional(v.boolean()), // historical row created by backfill
     // Stripe linkage (Phase 4). Stripe is the payment record; this ledger
@@ -4196,6 +4238,56 @@ export default defineSchema({
     .index('by_org_period', ['workosOrgId', 'periodKey'])
     .index('by_status', ['status', 'periodKey'])
     .index('by_stripe_invoice', ['stripeInvoiceId']),
+
+  // Org credit ledger — the carry-forward mechanism the invoice module's
+  // "corrections ride the NEXT cycle" rule depends on. A credit is created by
+  // an overpayment (automatically) or by staff (goodwill, dispute, service
+  // credit) and is consumed at ISSUE time as a `credit`-method payment on the
+  // next invoice.
+  //
+  // Why consumed as a payment and not as an invoice line: a credit for a prior
+  // overpayment must not reduce THIS cycle's taxable subtotal, and issued
+  // invoice lines are frozen. Applying it to the balance keeps both rules.
+  //
+  // Lifecycle: available → consumed (never edited back) or void. Partial
+  // consumption splits: the consumed portion is recorded on the credit and the
+  // remainder stays available via `remaining`.
+  platformCredits: defineTable({
+    workosOrgId: v.string(),
+    amount: v.number(), // positive; the credit's original face value
+    remaining: v.number(), // unconsumed portion; 0 once fully applied
+    source: v.union(
+      v.literal('overpayment'),
+      v.literal('goodwill'),
+      v.literal('dispute'),
+      v.literal('service_credit'),
+      v.literal('manual'),
+    ),
+    reason: v.string(),
+    status: v.union(v.literal('available'), v.literal('consumed'), v.literal('void')),
+    createdByEmail: v.string(),
+    // Provenance for overpayment credits — lets reversePayment claw the credit
+    // back (and refuse the reversal when it has already been spent).
+    sourceInvoiceId: v.optional(v.id('platformInvoices')),
+    sourcePaymentId: v.optional(v.string()),
+    // Where it went. Appended as consumption happens; a credit can be split
+    // across invoices.
+    applications: v.array(
+      v.object({
+        invoiceId: v.id('platformInvoices'),
+        invoiceNumber: v.string(),
+        amount: v.number(),
+        appliedAt: v.number(),
+      }),
+    ),
+    voidedAt: v.optional(v.number()),
+    voidReason: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_org_status', ['workosOrgId', 'status'])
+    .index('by_source_payment', ['sourcePaymentId'])
+    .index('by_time', ['createdAt']),
 
   // Support tickets — user-reported problems (web + mobile report-a-problem),
   // staff-filed issues, and automated escalations. The ticket row IS the
@@ -4240,7 +4332,17 @@ export default defineSchema({
     count: v.number(), // evaluator ticks the condition has held
     acknowledgedBy: v.optional(v.string()),
     resolvedAt: v.optional(v.number()),
+    resolvedBy: v.optional(v.string()), // set on a MANUAL resolve; absent = auto
     slackNotifiedAt: v.optional(v.number()),
+    // Suppression window. While in the future the evaluator keeps the row
+    // updated but raises no new alert and sends no Slack message, so a known
+    // condition being worked on doesn't re-page every 5 minutes.
+    snoozedUntil: v.optional(v.number()),
+    snoozedBy: v.optional(v.string()),
+    // Operator context carried with the incident (what's being done about it).
+    note: v.optional(v.string()),
+    noteBy: v.optional(v.string()),
+    noteAt: v.optional(v.number()),
   })
     .index('by_dedupe', ['dedupeKey', 'status'])
     .index('by_status_time', ['status', 'lastSeenAt']),
@@ -4258,7 +4360,19 @@ export default defineSchema({
     orgId: v.optional(v.string()), // WorkOS org id when org-scoped
     context: v.optional(v.string()), // JSON string
     createdAt: v.number(),
+    // Recurrence collapsing: repeats of (code, orgId) inside the dedupe
+    // window bump `occurrences`/`lastSeenAt` on the existing row instead of
+    // inserting a new one, so a stuck condition is ONE feed entry.
+    dedupeKey: v.optional(v.string()),
+    occurrences: v.optional(v.number()),
+    lastSeenAt: v.optional(v.number()),
+    // Acknowledgement is "seen up to lastSeenAt". A recurrence AFTER the ack
+    // (lastSeenAt > ackedAt) makes the row unacked again — acking a live
+    // problem silences it once, not forever.
+    ackedAt: v.optional(v.number()),
+    ackedBy: v.optional(v.string()),
   })
     .index('by_time', ['createdAt'])
-    .index('by_severity_time', ['severity', 'createdAt']),
+    .index('by_severity_time', ['severity', 'createdAt'])
+    .index('by_dedupe', ['dedupeKey']),
 });

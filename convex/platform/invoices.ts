@@ -1,10 +1,11 @@
 import { v, ConvexError } from 'convex/values';
 import { query, mutation, internalMutation } from '../_generated/server';
-import type { MutationCtx } from '../_generated/server';
+import type { MutationCtx, QueryCtx } from '../_generated/server';
 import type { Doc } from '../_generated/dataModel';
 import { requirePlatformStaff, requireRecentStaffAuth } from '../lib/auth';
 import { logPlatformAudit } from '../lib/platformAudit';
 import { logSystemEvent } from '../lib/systemEvents';
+import { consumeCredits, issueCredit, releaseCreditsForInvoice } from './credits';
 import { DEFAULT_BILLING_RATE_PER_LOAD } from '../platformUsageHelpers';
 import { platformInvoiceNumber } from '../platformUsage';
 import { getPeriodKey } from '../accountingStatsHelpers';
@@ -19,6 +20,74 @@ import { getPeriodKey } from '../accountingStatsHelpers';
  */
 
 const money = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * The ONE metered invoice for an org × period, or null.
+ *
+ * `by_org_period` is no longer unique: one-off invoices (kind='manual') can
+ * share a period with the metered one, so `.unique()` on this index would
+ * throw the moment an operator raises an onboarding fee. Every lookup that
+ * means "the cycle's invoice" must go through here. Rows created before
+ * `kind` existed are metered by definition (cycle close was the only writer).
+ */
+export async function meteredInvoiceForPeriod(
+  ctx: MutationCtx | QueryCtx,
+  workosOrgId: string,
+  periodKey: string,
+): Promise<Doc<'platformInvoices'> | null> {
+  const rows = await ctx.db
+    .query('platformInvoices')
+    .withIndex('by_org_period', (q) => q.eq('workosOrgId', workosOrgId).eq('periodKey', periodKey))
+    .collect();
+  return rows.find((r) => r.kind !== 'manual') ?? null;
+}
+
+/** Statuses that represent a real, collectible obligation. */
+const COMMITTED_STATUSES: ReadonlySet<Doc<'platformInvoices'>['status']> = new Set([
+  'issued',
+  'sent',
+  'partially_paid',
+  'paid',
+  'written_off',
+]);
+
+const OPEN_STATUSES = ['issued', 'sent', 'partially_paid'] as const;
+
+/** Payment ids are per-invoice and derived, never random: the array is append-only. */
+function nextPaymentId(invoice: Doc<'platformInvoices'>): string {
+  return `pay_${invoice.payments.length}_${invoice.periodKey}`;
+}
+
+/** Stable handle for a payment, including legacy rows written without an id. */
+function paymentKey(payment: Doc<'platformInvoices'>['payments'][number], index: number): string {
+  return payment.id ?? `idx:${index}`;
+}
+
+/** amountPaid is ALWAYS the sum of the append-only ledger, never incremented. */
+function sumPayments(payments: Doc<'platformInvoices'>['payments']): number {
+  return money(payments.reduce((s, p) => s + p.amount, 0));
+}
+
+/**
+ * Status implied by the money, for an invoice that has left draft. Keeps
+ * `paid`/`partially_paid`/`issued`/`sent` consistent no matter which direction
+ * the ledger moved — a reversal walks the status back down exactly the way a
+ * payment walked it up.
+ *
+ * `void` and `written_off` are decisions, not arithmetic, so they're preserved.
+ */
+function statusFromLedger(
+  invoice: Doc<'platformInvoices'>,
+  amountPaid: number,
+): Doc<'platformInvoices'>['status'] {
+  if (invoice.status === 'void' || invoice.status === 'written_off' || invoice.status === 'draft') {
+    return invoice.status;
+  }
+  if (amountPaid >= invoice.total && invoice.total > 0) return 'paid';
+  if (amountPaid > 0) return 'partially_paid';
+  // Nothing paid: fall back to whether the customer ever received it.
+  return invoice.sentAt ? 'sent' : 'issued';
+}
 
 // ─── Pure computation helpers (exported for tests) ──────────────────────
 
@@ -125,10 +194,7 @@ export async function flagDriftIfInvoiced(
   periodKey: string,
   newCount: number,
 ): Promise<void> {
-  const invoice = await ctx.db
-    .query('platformInvoices')
-    .withIndex('by_org_period', (q) => q.eq('workosOrgId', workosOrgId).eq('periodKey', periodKey))
-    .unique();
+  const invoice = await meteredInvoiceForPeriod(ctx, workosOrgId, periodKey);
   if (!invoice || invoice.status === 'draft' || invoice.status === 'void') return;
   if (newCount <= invoice.loadsWritten) return;
 
@@ -152,7 +218,30 @@ export async function orgHasCommittedInvoices(
     .query('platformInvoices')
     .withIndex('by_org_period', (q) => q.eq('workosOrgId', workosOrgId))
     .collect();
-  return rows.some((r) => r.status !== 'draft' && r.status !== 'void');
+  return rows.some((r) => COMMITTED_STATUSES.has(r.status));
+}
+
+/**
+ * Periods at or after `fromPeriod` that already carry a committed invoice.
+ *
+ * A rate step at period P re-prices P and every period after it, so a
+ * back-dated rate change is only safe when NOTHING from P onward has been
+ * billed. `orgHasCommittedInvoices` is too coarse for this — it would block
+ * every back-date for any org that has ever invoiced.
+ */
+export async function committedPeriodsFrom(
+  ctx: MutationCtx,
+  workosOrgId: string,
+  fromPeriod: string,
+): Promise<string[]> {
+  const rows = await ctx.db
+    .query('platformInvoices')
+    .withIndex('by_org_period', (q) => q.eq('workosOrgId', workosOrgId))
+    .collect();
+  return rows
+    .filter((r) => r.kind !== 'manual' && r.periodKey >= fromPeriod && COMMITTED_STATUSES.has(r.status))
+    .map((r) => r.periodKey)
+    .sort();
 }
 
 // ─── Cycle close ─────────────────────────────────────────────────────────
@@ -183,12 +272,7 @@ export const cycleClose = internalMutation({
     for (const org of orgs) {
       if (!org.workosOrgId) continue;
 
-      const existing = await ctx.db
-        .query('platformInvoices')
-        .withIndex('by_org_period', (q) =>
-          q.eq('workosOrgId', org.workosOrgId!).eq('periodKey', periodKey),
-        )
-        .unique();
+      const existing = await meteredInvoiceForPeriod(ctx, org.workosOrgId, periodKey);
       if (existing) continue; // never touch — idempotent re-runs
 
       const usageRow = await ctx.db
@@ -207,6 +291,7 @@ export const cycleClose = internalMutation({
       await ctx.db.insert('platformInvoices', {
         workosOrgId: org.workosOrgId,
         periodKey,
+        kind: 'metered',
         invoiceNumber: platformInvoiceNumber(org.workosOrgId, periodKey),
         loadsWritten,
         ratePerLoad,
@@ -250,12 +335,7 @@ export const backfillHistoricalPaidInvoices = internalMutation({
 
       for (const row of usageRows) {
         if (row.periodKey >= currentPeriod || row.loadsWritten === 0) continue;
-        const existing = await ctx.db
-          .query('platformInvoices')
-          .withIndex('by_org_period', (q) =>
-            q.eq('workosOrgId', org.workosOrgId!).eq('periodKey', row.periodKey),
-          )
-          .unique();
+        const existing = await meteredInvoiceForPeriod(ctx, org.workosOrgId, row.periodKey);
         if (existing) continue;
 
         const { lines, ratePerLoad } = computeLines(org, row.periodKey, row.loadsWritten);
@@ -267,6 +347,7 @@ export const backfillHistoricalPaidInvoices = internalMutation({
         await ctx.db.insert('platformInvoices', {
           workosOrgId: org.workosOrgId,
           periodKey: row.periodKey,
+          kind: 'metered',
           invoiceNumber: platformInvoiceNumber(org.workosOrgId, row.periodKey),
           loadsWritten: row.loadsWritten,
           ratePerLoad,
@@ -313,14 +394,45 @@ export const issueInvoice = mutation({
     const taxRatePercent = org?.taxRatePercent;
     const taxAmount =
       taxRatePercent != null ? money(subtotal * (taxRatePercent / 100)) : undefined;
+    const total = money(subtotal + (taxAmount ?? 0));
+
+    // Carry-forward: apply any available org credit to the balance NOW, as a
+    // payment rather than a line. A credit from a prior overpayment must not
+    // shrink this cycle's taxable subtotal, and the lines are about to freeze.
+    // Capped at `total`, so a credit never makes an invoice negative — the
+    // unused remainder stays available for the next cycle.
+    const creditApplied =
+      total > 0
+        ? await consumeCredits(ctx, invoice.workosOrgId, total, {
+            _id: args.id,
+            invoiceNumber: invoice.invoiceNumber,
+          })
+        : 0;
+
+    const payments = [...invoice.payments];
+    if (creditApplied > 0) {
+      payments.push({
+        id: nextPaymentId(invoice),
+        amount: creditApplied,
+        method: 'credit' as const,
+        reference: 'org credit',
+        recordedByEmail: staff.email,
+        receivedAt: issuedAt,
+      });
+    }
+    const amountPaid = sumPayments(payments);
+    const paidInFull = amountPaid >= total && total > 0;
 
     await ctx.db.patch(args.id, {
       subtotal,
       taxRatePercent,
       taxJurisdiction: org?.taxJurisdiction,
       taxAmount,
-      total: money(subtotal + (taxAmount ?? 0)),
-      status: 'issued',
+      total,
+      payments,
+      amountPaid,
+      status: paidInFull ? 'paid' : amountPaid > 0 ? 'partially_paid' : 'issued',
+      ...(paidInFull ? { paidAt: issuedAt } : {}),
       issuedAt,
       dueAt: computeDueAt(issuedAt, org?.billingTerms),
       updatedAt: issuedAt,
@@ -331,7 +443,11 @@ export const issueInvoice = mutation({
       targetOrgId: invoice.workosOrgId,
       targetTable: 'platformInvoices',
       targetId: args.id,
-      after: JSON.stringify({ invoiceNumber: invoice.invoiceNumber, total: money(subtotal + (taxAmount ?? 0)) }),
+      after: JSON.stringify({
+        invoiceNumber: invoice.invoiceNumber,
+        total,
+        creditApplied: creditApplied || undefined,
+      }),
     });
     return null;
   },
@@ -344,8 +460,18 @@ export const markSent = mutation({
     const staff = await requirePlatformStaff(ctx);
     const invoice = await ctx.db.get(args.id);
     if (!invoice) throw new ConvexError('Invoice not found');
-    if (invoice.status !== 'issued') throw new ConvexError('Only issued invoices can be marked sent');
-    await ctx.db.patch(args.id, { status: 'sent', updatedAt: Date.now() });
+    if (invoice.status !== 'issued' && invoice.status !== 'partially_paid') {
+      throw new ConvexError('Only issued invoices can be marked sent');
+    }
+    const now = Date.now();
+    // sentAt is recorded independently of status: a partially-paid invoice
+    // stays 'partially_paid', and a later reversal needs to know the customer
+    // already received it (statusFromLedger reads this).
+    await ctx.db.patch(args.id, {
+      status: invoice.status === 'issued' ? 'sent' : invoice.status,
+      sentAt: now,
+      updatedAt: now,
+    });
     await logPlatformAudit(ctx, {
       actorEmail: staff.email,
       action: 'invoice_sent',
@@ -368,33 +494,57 @@ export const recordPayment = mutation({
       v.literal('other'),
     ),
     reference: v.optional(v.string()),
+    receivedAt: v.optional(v.number()), // back-date to the real deposit date
   },
   returns: v.null(),
   handler: async (ctx, args) => {
     const staff = await requirePlatformStaff(ctx);
     const invoice = await ctx.db.get(args.id);
     if (!invoice) throw new ConvexError('Invoice not found');
-    if (invoice.status !== 'issued' && invoice.status !== 'sent') {
+    if (!(OPEN_STATUSES as readonly string[]).includes(invoice.status)) {
       throw new ConvexError(`Cannot record a payment on a ${invoice.status} invoice`);
     }
     if (!(args.amount > 0)) throw new ConvexError('Payment amount must be positive');
 
-    const amountPaid = money(invoice.amountPaid + args.amount);
+    const now = Date.now();
+    const paymentId = nextPaymentId(invoice);
+    const payments = [
+      ...invoice.payments,
+      {
+        id: paymentId,
+        amount: money(args.amount),
+        method: args.method,
+        reference: args.reference,
+        recordedByEmail: staff.email,
+        receivedAt: args.receivedAt ?? now,
+      },
+    ];
+    const amountPaid = sumPayments(payments);
     const paidInFull = amountPaid >= invoice.total;
+
+    // Overpayment doesn't vanish: the excess becomes an org credit, carried to
+    // the next cycle by issueInvoice. Tied to this payment id so a reversal can
+    // claw it back.
+    const overpaid = money(amountPaid - invoice.total);
+    let creditId: string | undefined;
+    if (overpaid > 0) {
+      creditId = await issueCredit(ctx, {
+        workosOrgId: invoice.workosOrgId,
+        amount: overpaid,
+        source: 'overpayment',
+        reason: `Overpayment on ${invoice.invoiceNumber}`,
+        createdByEmail: staff.email,
+        sourceInvoiceId: args.id,
+        sourcePaymentId: paymentId,
+      });
+    }
+
     await ctx.db.patch(args.id, {
-      payments: [
-        ...invoice.payments,
-        {
-          amount: money(args.amount),
-          method: args.method,
-          reference: args.reference,
-          recordedByEmail: staff.email,
-          receivedAt: Date.now(),
-        },
-      ],
+      payments,
       amountPaid,
-      ...(paidInFull ? { status: 'paid' as const, paidAt: Date.now() } : {}),
-      updatedAt: Date.now(),
+      status: paidInFull ? 'paid' : 'partially_paid',
+      ...(paidInFull ? { paidAt: now } : {}),
+      updatedAt: now,
     });
     await logPlatformAudit(ctx, {
       actorEmail: staff.email,
@@ -403,11 +553,161 @@ export const recordPayment = mutation({
       targetTable: 'platformInvoices',
       targetId: args.id,
       metadata: JSON.stringify({
-        amount: args.amount,
+        paymentId,
+        amount: money(args.amount),
         method: args.method,
         reference: args.reference,
         paidInFull,
+        creditIssued: overpaid > 0 ? overpaid : undefined,
+        creditId,
       }),
+    });
+    return null;
+  },
+});
+
+/**
+ * Correct a wrong payment WITHOUT editing history: appends a negative entry
+ * referencing the original, so the invoice shows both the error and the fix.
+ * `amountPaid` and status are recomputed from the whole ledger, which walks a
+ * 'paid' invoice back down to 'partially_paid'/'sent'/'issued' correctly.
+ *
+ * Covers the real cases: a typo'd amount, a payment recorded against the wrong
+ * invoice, a bounced check, an ACH return.
+ *
+ * Note: this moves OUR ledger only. A reversal on a Stripe-collected payment
+ * does not refund the customer — that's a Stripe-side refund, and the nightly
+ * reconcile will flag the disagreement until both sides match.
+ */
+export const reversePayment = mutation({
+  args: {
+    id: v.id('platformInvoices'),
+    paymentIndex: v.number(), // index into the append-only payments array
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    if (!args.reason.trim()) throw new ConvexError('A reason is required');
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+
+    const target = invoice.payments[args.paymentIndex];
+    if (!target) throw new ConvexError('Payment not found');
+    if (target.amount < 0) throw new ConvexError('That entry is itself a reversal');
+
+    const key = paymentKey(target, args.paymentIndex);
+    if (invoice.payments.some((p) => p.reversalOfId === key)) {
+      return null; // already reversed — idempotent on double-click
+    }
+
+    // A credit created by this payment's overpayment must not survive it. If
+    // that credit has already been spent on another invoice, reversing here
+    // would conjure money — refuse and make the operator unwind the other side.
+    if (target.id) {
+      const sourced = await ctx.db
+        .query('platformCredits')
+        .withIndex('by_source_payment', (q) => q.eq('sourcePaymentId', target.id))
+        .collect();
+      for (const credit of sourced) {
+        if (credit.status === 'void') continue;
+        if (credit.applications.length > 0) {
+          throw new ConvexError(
+            `The overpayment credit from this payment ($${credit.amount.toFixed(2)}) has already been applied to ${credit.applications[0].invoiceNumber}. Void or adjust that invoice first, then reverse this payment.`,
+          );
+        }
+        await ctx.db.patch(credit._id, {
+          status: 'void',
+          remaining: 0,
+          voidedAt: Date.now(),
+          voidReason: `Source payment reversed: ${args.reason}`,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+
+    const now = Date.now();
+    const payments = [
+      ...invoice.payments,
+      {
+        id: nextPaymentId(invoice),
+        amount: money(-target.amount),
+        method: target.method,
+        reference: target.reference,
+        recordedByEmail: staff.email,
+        receivedAt: now,
+        reversalOfId: key,
+        reversalReason: args.reason,
+      },
+    ];
+    const amountPaid = sumPayments(payments);
+
+    await ctx.db.patch(args.id, {
+      payments,
+      amountPaid,
+      status: statusFromLedger(invoice, amountPaid),
+      // Clearing paidAt matters: aging and the tenant page both read it.
+      ...(amountPaid < invoice.total ? { paidAt: undefined } : {}),
+      updatedAt: now,
+    });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_payment_reversed',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify({ amountPaid: invoice.amountPaid, status: invoice.status }),
+      after: JSON.stringify({ amountPaid, reversed: money(target.amount) }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/**
+ * Uncollectible debt as an explicit decision rather than an invoice that sits
+ * open forever. The balance stays visible on the row — a write-off records
+ * that we stopped chasing it, not that it was paid.
+ */
+export const writeOffInvoice = mutation({
+  args: { id: v.id('platformInvoices'), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    if (!args.reason.trim()) throw new ConvexError('A reason is required');
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) throw new ConvexError('Invoice not found');
+    if (invoice.status === 'written_off') return null; // idempotent
+    if (!(OPEN_STATUSES as readonly string[]).includes(invoice.status)) {
+      throw new ConvexError(`Cannot write off a ${invoice.status} invoice`);
+    }
+    const balance = money(invoice.total - invoice.amountPaid);
+    if (balance <= 0) throw new ConvexError('Nothing outstanding to write off');
+
+    const now = Date.now();
+    await ctx.db.patch(args.id, {
+      status: 'written_off',
+      writtenOffAt: now,
+      writeOffReason: args.reason,
+      updatedAt: now,
+    });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_written_off',
+      targetOrgId: invoice.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: args.id,
+      before: JSON.stringify({ status: invoice.status, balance }),
+      after: JSON.stringify({ status: 'written_off' }),
+      reason: args.reason,
+    });
+    await logSystemEvent(ctx, {
+      severity: 'warn',
+      source: 'billing',
+      code: 'billing.written_off',
+      message: `${invoice.invoiceNumber} written off ($${balance.toFixed(2)}): ${args.reason}`,
+      orgId: invoice.workosOrgId,
+      context: { invoiceNumber: invoice.invoiceNumber, balance },
     });
     return null;
   },
@@ -420,12 +720,31 @@ export const voidInvoice = mutation({
     const staff = await requireRecentStaffAuth(ctx);
     const invoice = await ctx.db.get(args.id);
     if (!invoice) throw new ConvexError('Invoice not found');
-    if (invoice.status === 'paid') throw new ConvexError('Paid invoices cannot be voided — use a credit on the next cycle');
-    if (invoice.amountPaid > 0) throw new ConvexError('Invoice has recorded payments — resolve those first');
     if (invoice.status === 'void') return null; // idempotent
+    if (invoice.status === 'paid' && invoice.payments.some((p) => p.method !== 'credit')) {
+      throw new ConvexError('Paid invoices cannot be voided — use a credit on the next cycle');
+    }
+    // Cash received must be reversed first, so the ledger explains where the
+    // money went. Credit applications are different: they're OUR bookkeeping,
+    // and voiding gives them back to the customer below.
+    if (invoice.payments.some((p) => p.method !== 'credit' && p.amount !== 0)) {
+      const cashPaid = money(
+        invoice.payments.filter((p) => p.method !== 'credit').reduce((s, p) => s + p.amount, 0),
+      );
+      if (cashPaid > 0) {
+        throw new ConvexError(
+          'Invoice has recorded payments — reverse those first (Detail → Reverse), then void',
+        );
+      }
+    }
+
+    // Give back any credit this invoice consumed; otherwise voiding would
+    // silently destroy the customer's balance.
+    const creditReleased = await releaseCreditsForInvoice(ctx, invoice.workosOrgId, args.id);
 
     await ctx.db.patch(args.id, {
       status: 'void',
+      amountPaid: creditReleased > 0 ? money(invoice.amountPaid - creditReleased) : invoice.amountPaid,
       voidedAt: Date.now(),
       voidReason: args.reason,
       updatedAt: Date.now(),
@@ -437,6 +756,7 @@ export const voidInvoice = mutation({
       targetTable: 'platformInvoices',
       targetId: args.id,
       reason: args.reason,
+      metadata: creditReleased > 0 ? JSON.stringify({ creditReleased }) : undefined,
     });
     return null;
   },
@@ -573,6 +893,250 @@ export const updateBillingConfig = mutation({
   },
 });
 
+/**
+ * Set (or replace) a rate step at an explicit period — including a PAST one.
+ *
+ * `updateBillingConfig.ratePerLoadNextCycle` can only ever move the rate
+ * forward, which makes a mid-month contract signing unbillable at the agreed
+ * price. Back-dating is allowed here, but only when nothing from that period
+ * onward has been committed: a step at P re-prices P and every period after
+ * it, so a single committed invoice in that range makes the change a silent
+ * rewrite of billed history. When that happens we refuse and name the periods,
+ * because the correct instrument is a credit, not a re-price.
+ */
+export const setRateStep = mutation({
+  args: {
+    organizationId: v.id('organizations'),
+    effectiveFromPeriod: v.string(), // 'YYYY-MM'
+    ratePerLoad: v.number(),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(args.effectiveFromPeriod)) {
+      throw new ConvexError('Period must be formatted YYYY-MM');
+    }
+    if (!(args.ratePerLoad > 0)) throw new ConvexError('Rate must be positive');
+    if (!args.reason.trim()) throw new ConvexError('A reason is required');
+
+    const org = await ctx.db.get(args.organizationId);
+    if (!org || !org.workosOrgId) throw new ConvexError('Organization not found');
+
+    const blocked = await committedPeriodsFrom(ctx, org.workosOrgId, args.effectiveFromPeriod);
+    if (blocked.length > 0) {
+      throw new ConvexError(
+        `Cannot re-price ${args.effectiveFromPeriod} onward: ${blocked.join(', ')} already ${blocked.length === 1 ? 'has a committed invoice' : 'have committed invoices'}. Issue a credit instead.`,
+      );
+    }
+
+    const before = org.rateSchedule ?? null;
+    const rateSchedule = [
+      ...(org.rateSchedule ?? []).filter((s) => s.effectiveFromPeriod !== args.effectiveFromPeriod),
+      { effectiveFromPeriod: args.effectiveFromPeriod, ratePerLoad: args.ratePerLoad },
+    ].sort((a, b) => a.effectiveFromPeriod.localeCompare(b.effectiveFromPeriod));
+
+    await ctx.db.patch(args.organizationId, { rateSchedule, updatedAt: Date.now() });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'billing_config_changed',
+      targetOrgId: org.workosOrgId,
+      targetTable: 'organizations',
+      targetId: args.organizationId,
+      before: JSON.stringify({ rateSchedule: before }),
+      after: JSON.stringify({ rateSchedule }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/** Remove a mis-entered rate step, under the same committed-period guard. */
+export const removeRateStep = mutation({
+  args: {
+    organizationId: v.id('organizations'),
+    effectiveFromPeriod: v.string(),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    const org = await ctx.db.get(args.organizationId);
+    if (!org || !org.workosOrgId) throw new ConvexError('Organization not found');
+    const before = org.rateSchedule ?? [];
+    if (!before.some((s) => s.effectiveFromPeriod === args.effectiveFromPeriod)) return null;
+
+    const blocked = await committedPeriodsFrom(ctx, org.workosOrgId, args.effectiveFromPeriod);
+    if (blocked.length > 0) {
+      throw new ConvexError(
+        `Cannot remove the ${args.effectiveFromPeriod} step: ${blocked.join(', ')} already billed at it.`,
+      );
+    }
+
+    const rateSchedule = before.filter((s) => s.effectiveFromPeriod !== args.effectiveFromPeriod);
+    await ctx.db.patch(args.organizationId, { rateSchedule, updatedAt: Date.now() });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'billing_config_changed',
+      targetOrgId: org.workosOrgId,
+      targetTable: 'organizations',
+      targetId: args.organizationId,
+      before: JSON.stringify({ rateSchedule: before }),
+      after: JSON.stringify({ rateSchedule }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/**
+ * A one-off invoice: onboarding, implementation, professional services,
+ * hardware — anything that isn't metered usage. Shares the ledger and the
+ * whole lifecycle (issue / send / pay / reverse / void), but is marked
+ * `kind: 'manual'` so it never collides with the cycle's metered invoice and
+ * metered vs non-metered revenue stay separable.
+ */
+export const createManualInvoice = mutation({
+  args: {
+    organizationId: v.id('organizations'),
+    periodKey: v.string(), // 'YYYY-MM' — which cycle it belongs to for reporting
+    lines: v.array(v.object({ label: v.string(), amount: v.number() })),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(args.periodKey)) {
+      throw new ConvexError('Period must be formatted YYYY-MM');
+    }
+    if (args.lines.length === 0) throw new ConvexError('At least one line is required');
+    const org = await ctx.db.get(args.organizationId);
+    if (!org || !org.workosOrgId) throw new ConvexError('Organization not found');
+
+    const lines = args.lines.map((l) => {
+      if (!l.label.trim()) throw new ConvexError('Every line needs a label');
+      if (!Number.isFinite(l.amount) || l.amount === 0) {
+        throw new ConvexError('Every line needs a non-zero amount');
+      }
+      return { kind: 'manual' as const, label: l.label.trim(), amount: money(l.amount) };
+    });
+    const subtotal = money(lines.reduce((s, l) => s + l.amount, 0));
+    if (subtotal <= 0) throw new ConvexError('Invoice total must be positive');
+
+    // Distinct number series so a one-off never shadows the cycle invoice.
+    const siblings = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_org_period', (q) =>
+        q.eq('workosOrgId', org.workosOrgId!).eq('periodKey', args.periodKey),
+      )
+      .collect();
+    const seq = siblings.filter((s) => s.kind === 'manual').length + 1;
+    const invoiceNumber = `${platformInvoiceNumber(org.workosOrgId, args.periodKey)}-M${seq}`;
+
+    const now = Date.now();
+    const id = await ctx.db.insert('platformInvoices', {
+      workosOrgId: org.workosOrgId,
+      periodKey: args.periodKey,
+      kind: 'manual',
+      invoiceNumber,
+      loadsWritten: 0,
+      ratePerLoad: 0,
+      lines,
+      adjustments: [],
+      subtotal,
+      total: subtotal, // tax snapshots at issue, same as metered
+      payments: [],
+      amountPaid: 0,
+      status: 'draft',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'invoice_manual_created',
+      targetOrgId: org.workosOrgId,
+      targetTable: 'platformInvoices',
+      targetId: id,
+      after: JSON.stringify({ invoiceNumber, subtotal, lines }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+/**
+ * Contract/commercial fields that were display-only on the org page. Separate
+ * from updateBillingConfig because these describe WHO and UNTIL WHEN, not how
+ * much — different review posture, and no invoice math depends on them.
+ */
+export const updateContract = mutation({
+  args: {
+    organizationId: v.id('organizations'),
+    billingEmail: v.optional(v.string()),
+    billingContactName: v.optional(v.union(v.string(), v.null())),
+    billingPhone: v.optional(v.union(v.string(), v.null())),
+    platformContractNumber: v.optional(v.union(v.string(), v.null())),
+    platformLicenseStart: v.optional(v.union(v.string(), v.null())),
+    platformLicenseEnd: v.optional(v.union(v.string(), v.null())),
+    reason: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    const org = await ctx.db.get(args.organizationId);
+    if (!org) throw new ConvexError('Organization not found');
+
+    const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+    for (const [field, value] of [
+      ['platformLicenseStart', args.platformLicenseStart],
+      ['platformLicenseEnd', args.platformLicenseEnd],
+    ] as const) {
+      if (typeof value === 'string' && value && !isDate(value)) {
+        throw new ConvexError(`${field} must be formatted YYYY-MM-DD`);
+      }
+    }
+    const start = args.platformLicenseStart ?? org.platformLicenseStart;
+    const end = args.platformLicenseEnd ?? org.platformLicenseEnd;
+    if (start && end && start > end) {
+      throw new ConvexError('License start must be on or before license end');
+    }
+    if (args.billingEmail !== undefined && !args.billingEmail.includes('@')) {
+      throw new ConvexError('Billing email looks invalid');
+    }
+
+    const before: Record<string, unknown> = {};
+    const patch: Record<string, unknown> = { updatedAt: Date.now() };
+    const apply = (key: string, value: string | null | undefined, current: unknown) => {
+      if (value === undefined) return;
+      before[key] = current ?? null;
+      patch[key] = value === null || value === '' ? undefined : value;
+    };
+    // billingEmail is required on the org row, so it can be changed but never cleared.
+    if (args.billingEmail !== undefined) {
+      before.billingEmail = org.billingEmail;
+      patch.billingEmail = args.billingEmail.trim();
+    }
+    apply('billingContactName', args.billingContactName, org.billingContactName);
+    apply('billingPhone', args.billingPhone, org.billingPhone);
+    apply('platformContractNumber', args.platformContractNumber, org.platformContractNumber);
+    apply('platformLicenseStart', args.platformLicenseStart, org.platformLicenseStart);
+    apply('platformLicenseEnd', args.platformLicenseEnd, org.platformLicenseEnd);
+
+    await ctx.db.patch(args.organizationId, patch);
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'contract_updated',
+      targetOrgId: org.workosOrgId,
+      targetTable: 'organizations',
+      targetId: args.organizationId,
+      before: JSON.stringify(before),
+      after: JSON.stringify({ ...patch, updatedAt: undefined }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
 // ─── Console queries ─────────────────────────────────────────────────────
 
 export const listInvoices = query({
@@ -582,7 +1146,9 @@ export const listInvoices = query({
         v.literal('draft'),
         v.literal('issued'),
         v.literal('sent'),
+        v.literal('partially_paid'),
         v.literal('paid'),
+        v.literal('written_off'),
         v.literal('void'),
       ),
     ),
@@ -621,20 +1187,24 @@ export const agingOverview = query({
   handler: async (ctx) => {
     await requirePlatformStaff(ctx);
     const now = Date.now();
-    const open = [
-      ...(await ctx.db
-        .query('platformInvoices')
-        .withIndex('by_status', (q) => q.eq('status', 'issued'))
-        .take(300)),
-      ...(await ctx.db
-        .query('platformInvoices')
-        .withIndex('by_status', (q) => q.eq('status', 'sent'))
-        .take(300)),
-    ];
+    const open = (
+      await Promise.all(
+        OPEN_STATUSES.map((status) =>
+          ctx.db
+            .query('platformInvoices')
+            .withIndex('by_status', (q) => q.eq('status', status))
+            .take(300),
+        ),
+      )
+    ).flat();
     const buckets = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
     let outstanding = 0;
     for (const inv of open) {
-      const balance = money(inv.total - inv.amountPaid);
+      // Clamp: an overpaid invoice has a negative raw balance, and letting
+      // that offset other invoices would understate receivables. The excess
+      // lives in the credit ledger, not here.
+      const balance = Math.max(0, money(inv.total - inv.amountPaid));
+      if (balance === 0) continue;
       outstanding = money(outstanding + balance);
       const overdueDays = inv.dueAt ? Math.floor((now - inv.dueAt) / 86_400_000) : 0;
       if (overdueDays <= 0) buckets.current = money(buckets.current + balance);
@@ -647,12 +1217,26 @@ export const agingOverview = query({
       .query('platformInvoices')
       .withIndex('by_status', (q) => q.eq('status', 'draft'))
       .take(300);
+    const writtenOff = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_status', (q) => q.eq('status', 'written_off'))
+      .take(300);
+    const credits = await ctx.db.query('platformCredits').withIndex('by_time').take(500);
     return {
       outstanding,
       buckets,
       openCount: open.length,
       draftCount: drafts.length,
       driftCount: open.filter((i) => i.driftDetectedAt).length,
+      writtenOffCount: writtenOff.length,
+      writtenOffAmount: money(
+        writtenOff.reduce((s, i) => s + Math.max(0, i.total - i.amountPaid), 0),
+      ),
+      // Credit outstanding is a liability, not a receivable — shown beside
+      // aging so an operator sees what will be consumed next cycle.
+      creditAvailable: money(
+        credits.filter((c) => c.status === 'available').reduce((s, c) => s + c.remaining, 0),
+      ),
     };
   },
 });

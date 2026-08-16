@@ -333,6 +333,137 @@ export const recordActionAudit = internalMutation({
   },
 });
 
+/**
+ * Correct a driver's phone number on the DRIVER row.
+ *
+ * `updateIdentityLinkPhone` fixes the Clerk↔org link; this fixes the record
+ * the driver app actually authenticates against, which is the other half of
+ * the most common driver-side support case ("my login doesn't find me"). Both
+ * exist because they can genuinely disagree.
+ */
+export const correctDriverPhone = mutation({
+  args: { driverId: v.id('drivers'), phone: v.string(), reason: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    const driver = await ctx.db.get(args.driverId);
+    if (!driver) throw new ConvexError('Driver not found');
+
+    const phone = args.phone.trim();
+    // Digits-only length check: the repo normalizes at match time, so store
+    // what was typed but refuse something that can't be a phone number.
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length < 10 || digits.length > 15) {
+      throw new ConvexError('Phone number must have between 10 and 15 digits');
+    }
+    if (phone === driver.phone) return null; // idempotent
+
+    await ctx.db.patch(args.driverId, { phone, updatedAt: Date.now() });
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'driver_phone_corrected',
+      targetOrgId: driver.organizationId,
+      targetTable: 'drivers',
+      targetId: args.driverId,
+      before: JSON.stringify({ phone: driver.phone }),
+      after: JSON.stringify({ phone }),
+      reason: args.reason,
+    });
+    return null;
+  },
+});
+
+// ─── Webhook delivery queue ──────────────────────────────────────────────
+
+export const listDeadLetters = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    await requirePlatformStaff(ctx);
+    const limit = Math.min(Math.max(args.limit ?? 50, 1), 200);
+    const rows = await ctx.db
+      .query('webhookDeliveryQueue')
+      .withIndex('by_status_next', (q) => q.eq('status', 'DEAD_LETTER'))
+      .take(limit);
+    return rows.map((r) => ({
+      _id: r._id,
+      workosOrgId: r.workosOrgId,
+      eventType: r.eventType,
+      attempts: r.attempts,
+      lastHttpStatus: r.lastHttpStatus ?? null,
+      lastErrorMessage: r.lastErrorMessage ?? null,
+      createdAt: r.createdAt,
+    }));
+  },
+});
+
+/**
+ * Put dead-lettered deliveries back on the queue.
+ *
+ * The dead-letter alert has existed since Phase 2 with no way to act on it —
+ * the only remedy was a CLI edit. Requeue resets the attempt counter and
+ * schedules immediate redelivery; the partner's own idempotency key
+ * (`deliveryId`) makes a duplicate safe on their side.
+ *
+ * Deliveries whose subscription is gone are skipped rather than resurrected,
+ * and the count of both is returned so the operator sees what actually moved.
+ */
+export const requeueDeadLetters = mutation({
+  args: {
+    deliveryIds: v.optional(v.array(v.id('webhookDeliveryQueue'))),
+    workosOrgId: v.optional(v.string()), // bulk: everything dead for one org
+    reason: v.string(),
+  },
+  returns: v.object({ requeued: v.number(), skipped: v.number() }),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    if (!args.reason.trim()) throw new ConvexError('A reason is required');
+
+    const BULK_CAP = 200;
+    const candidates =
+      args.deliveryIds !== undefined
+        ? (await Promise.all(args.deliveryIds.slice(0, BULK_CAP).map((id) => ctx.db.get(id))))
+            .filter((d): d is NonNullable<typeof d> => d !== null)
+        : (
+            await ctx.db
+              .query('webhookDeliveryQueue')
+              .withIndex('by_status_next', (q) => q.eq('status', 'DEAD_LETTER'))
+              .take(BULK_CAP)
+          ).filter((d) => args.workosOrgId === undefined || d.workosOrgId === args.workosOrgId);
+
+    const now = Date.now();
+    let requeued = 0;
+    let skipped = 0;
+    for (const delivery of candidates) {
+      if (delivery.status !== 'DEAD_LETTER') {
+        skipped++; // already moving — requeue is idempotent
+        continue;
+      }
+      const subscription = await ctx.db.get(delivery.subscriptionId);
+      if (!subscription) {
+        skipped++; // the endpoint is gone; redelivery would fail forever
+        continue;
+      }
+      await ctx.db.patch(delivery._id, {
+        status: 'PENDING',
+        attempts: 0,
+        nextAttemptAt: now,
+        lastErrorMessage: undefined,
+      });
+      requeued++;
+    }
+
+    await logPlatformAudit(ctx, {
+      actorEmail: staff.email,
+      action: 'webhook_deliveries_requeued',
+      targetOrgId: args.workosOrgId,
+      targetTable: 'webhookDeliveryQueue',
+      reason: args.reason,
+      metadata: JSON.stringify({ requeued, skipped }),
+    });
+    return { requeued, skipped };
+  },
+});
+
 // ─── Organization lifecycle ──────────────────────────────────────────────
 
 export const softDeleteOrg = mutation({

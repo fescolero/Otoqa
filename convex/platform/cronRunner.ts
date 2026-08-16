@@ -32,11 +32,25 @@ export const run = internalAction({
     fn: v.string(),
     fnType: v.union(v.literal('mutation'), v.literal('action')),
     recordHistory: v.boolean(),
+    // Declared cadence. Persisted on cronHealth so the console and the alert
+    // evaluator can tell "healthy" from "hasn't run since Tuesday" — without
+    // it, a job that stops firing keeps its last-good row forever.
+    expectedIntervalMs: v.optional(v.number()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
     const startedAt = Date.now();
     let error: string | undefined;
+
+    // Claim the run BEFORE executing. If the action is killed mid-flight
+    // (timeout, deploy, infrastructure), `record` never runs and this marker
+    // is the only evidence the tick happened at all — staleness detection
+    // reads it to distinguish "hung" from "never started".
+    await ctx.runMutation(internal.platform.cronRunner.markStarted, {
+      jobName: args.jobName,
+      startedAt,
+      expectedIntervalMs: args.expectedIntervalMs,
+    });
 
     try {
       if (args.fnType === 'mutation') {
@@ -54,6 +68,7 @@ export const run = internalAction({
       durationMs: Date.now() - startedAt,
       error: error?.slice(0, ERROR_SNIPPET),
       recordHistory: args.recordHistory,
+      expectedIntervalMs: args.expectedIntervalMs,
     });
 
     if (error !== undefined) {
@@ -65,6 +80,36 @@ export const run = internalAction({
   },
 });
 
+/**
+ * Claim a run. Also the place the declared cadence lands, and where a
+ * retired-then-resurrected job clears its retirement.
+ */
+export const markStarted = internalMutation({
+  args: {
+    jobName: v.string(),
+    startedAt: v.number(),
+    expectedIntervalMs: v.optional(v.number()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query('cronHealth')
+      .withIndex('by_job', (q) => q.eq('jobName', args.jobName))
+      .unique();
+    if (!existing) return null; // first-ever tick: `record` creates the row
+
+    await ctx.db.patch(existing._id, {
+      inFlightSince: args.startedAt,
+      ...(args.expectedIntervalMs !== undefined
+        ? { expectedIntervalMs: args.expectedIntervalMs }
+        : {}),
+      // A job that fires again was not retired after all.
+      ...(existing.retiredAt !== undefined ? { retiredAt: undefined, retiredBy: undefined } : {}),
+    });
+    return null;
+  },
+});
+
 export const record = internalMutation({
   args: {
     jobName: v.string(),
@@ -72,6 +117,7 @@ export const record = internalMutation({
     durationMs: v.number(),
     error: v.optional(v.string()),
     recordHistory: v.boolean(),
+    expectedIntervalMs: v.optional(v.number()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -95,6 +141,10 @@ export const record = internalMutation({
         consecutiveFailures,
         totalRuns: existing.totalRuns + 1,
         totalFailures: existing.totalFailures + (failed ? 1 : 0),
+        expectedIntervalMs: args.expectedIntervalMs ?? existing.expectedIntervalMs,
+        inFlightSince: undefined, // the run reported; it is no longer in flight
+        retiredAt: undefined,
+        retiredBy: undefined,
         updatedAt: now,
       });
     } else {
@@ -108,6 +158,7 @@ export const record = internalMutation({
         consecutiveFailures,
         totalRuns: 1,
         totalFailures: failed ? 1 : 0,
+        expectedIntervalMs: args.expectedIntervalMs,
         updatedAt: now,
       });
     }
