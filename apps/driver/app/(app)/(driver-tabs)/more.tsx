@@ -35,7 +35,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useClerk } from '@clerk/clerk-expo';
+import { useClerk } from '@clerk/expo';
 import { performSignOut } from '../../../lib/logout';
 import { useMutation, useQuery } from 'convex/react';
 import * as Application from 'expo-application';

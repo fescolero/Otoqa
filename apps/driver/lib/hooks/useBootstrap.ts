@@ -25,7 +25,7 @@
  * call order — see the hoisting comment on `useRegisterPushToken`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useAuth, useUser } from '@clerk/clerk-expo';
+import { useAuth, useUser } from '@clerk/expo';
 import { useQuery } from 'convex/react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../../../../convex/_generated/api';

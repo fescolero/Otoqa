@@ -10,7 +10,7 @@
     "update:preview": "node scripts/preflight.mjs && eas update --channel preview"
   },
   "dependencies": {
-    "@clerk/clerk-expo": "2.19.22",
+    "@clerk/expo": "4.3.0",
     "@expo/vector-icons": "^15.0.3",
     "@otoqa/convex-client": "workspace:*",
     "@otoqa/mobile-core": "workspace:*",

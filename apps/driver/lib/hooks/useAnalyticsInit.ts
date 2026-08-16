@@ -8,7 +8,10 @@
  * are all truthy.
  */
 import { useEffect, useRef } from 'react';
-import type { UserResource } from '@clerk/types';
+// Core 3 moved the resource types out of `@clerk/types` (a Core 2 package
+// that `@clerk/clerk-js@6` no longer depends on at all) and into
+// `@clerk/shared/types`.
+import type { UserResource } from '@clerk/shared/types';
 import { identifyUser } from '../analytics';
 
 interface AnalyticsRoles {

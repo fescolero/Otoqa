@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo, createContext, useContext, type ReactNode } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import { ConvexReactClient } from 'convex/react';
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { trackConvexAuthEvent } from './analytics';
 import { storeAuthToken, clearAuthToken, hasStoredAuthToken } from './auth-token-store';
 

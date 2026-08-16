@@ -11,7 +11,7 @@
  */
 import * as React from 'react';
 import { ConvexProviderWithAuth, ConvexReactClient } from 'convex/react';
-import { useAuth as useClerkAuth } from '@clerk/clerk-expo';
+import { useAuth as useClerkAuth } from '@clerk/expo';
 import {
   getStoredProvider,
   setStoredProvider,

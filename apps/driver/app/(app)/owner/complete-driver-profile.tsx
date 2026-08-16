@@ -13,7 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { useMutation } from 'convex/react';
-import { useUser } from '@clerk/clerk-expo';
+import { useUser } from '@clerk/expo';
 import { api } from '../../../../../convex/_generated/api';
 import { useCarrierOwner } from '../_layout';
 import { colors, typography, borderRadius, spacing, shadows } from '../../../lib/theme';

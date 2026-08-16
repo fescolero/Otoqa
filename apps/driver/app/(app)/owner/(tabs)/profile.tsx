@@ -11,7 +11,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { colors, typography, borderRadius, spacing, shadows } from '../../../../lib/theme';
 import { useAppMode, useCarrierOwner } from '../../_layout';
-import { useClerk } from '@clerk/clerk-expo';
+import { useClerk } from '@clerk/expo';
 import { useLanguage } from '../../../../lib/LanguageContext';
 import { performSignOut } from '../../../../lib/logout';
 

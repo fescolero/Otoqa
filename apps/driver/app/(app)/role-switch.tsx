@@ -27,7 +27,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Rect, Circle, G, Defs, RadialGradient, Stop } from 'react-native-svg';
 import { useRouter } from 'expo-router';
-import { useClerk } from '@clerk/clerk-expo';
+import { useClerk } from '@clerk/expo';
 import { performSignOut } from '../../lib/logout';
 import { useAppMode } from './_layout';
 import { useDriver } from './_layout';

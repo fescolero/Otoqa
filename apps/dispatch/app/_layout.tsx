@@ -10,7 +10,7 @@ import { Pressable, Text, View } from 'react-native';
 import { Stack, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
-import { ClerkProvider } from '@clerk/clerk-expo';
+import { ClerkProvider } from '@clerk/expo';
 import { PostHogProvider, usePostHog } from 'posthog-react-native';
 import { colors, typography } from '@otoqa/mobile-core';
 import { DispatchAuthProvider } from '../lib/convex';

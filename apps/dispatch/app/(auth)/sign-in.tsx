@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useSignIn } from '@clerk/clerk-expo';
+import { useSignIn } from '@clerk/expo';
 import { borderRadius, colors, typography } from '@otoqa/mobile-core';
 import { useActiveAuth } from '../../lib/convex';
 

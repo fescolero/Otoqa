@@ -5,7 +5,7 @@ import React, { useEffect } from 'react';
 import { View, Text, ScrollView, StyleSheet, AppState, Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { ClerkProvider, ClerkLoaded } from '@clerk/clerk-expo';
+import { ClerkProvider, ClerkLoaded } from '@clerk/expo';
 import { ConvexProvider } from 'convex/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import * as SecureStore from 'expo-secure-store';

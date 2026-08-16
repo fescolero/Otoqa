@@ -24,7 +24,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useSignIn, useClerk } from '@clerk/clerk-expo';
+import { useSignIn, useClerk } from '@clerk/expo';
 import { useRouter } from 'expo-router';
 import { Icon } from '../../lib/design-icons';
 import { useTheme } from '../../lib/ThemeContext';

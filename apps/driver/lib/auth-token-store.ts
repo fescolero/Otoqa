@@ -42,7 +42,7 @@ export async function clearAuthToken(): Promise<void> {
  */
 export async function getFreshToken(): Promise<string | null> {
   try {
-    const { getClerkInstance } = require('@clerk/clerk-expo');
+    const { getClerkInstance } = require('@clerk/expo');
     const clerk = getClerkInstance();
     const session = clerk?.session;
     if (session) {
