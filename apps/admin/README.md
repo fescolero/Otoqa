@@ -66,6 +66,15 @@ One-time setup:
 Note: keep the other Vercel project (tenant app) on a plain build — exactly
 ONE project owns the Convex deploy, or every push deploys the backend twice.
 
+**If a production build fails with `no Convex deployment configuration found`**
+(or the build's own `PRODUCTION BUILD BLOCKED` banner), step 2 above has not been
+done for this project: `CONVEX_DEPLOY_KEY` is missing from the **Production**
+environment. Preview builds keep succeeding while this is broken — they skip the
+Convex deploy by design — so production can stay red for days with no obvious
+signal. The build refuses rather than falling back to a plain build on purpose:
+shipping the console against a backend that was never deployed is the exact
+failure this setup exists to prevent.
+
 ### 4. Staff accounts
 Use dedicated Google accounts for console access; enforce 2-step verification.
 Offboarding = disable the Google account **and** remove the email from
