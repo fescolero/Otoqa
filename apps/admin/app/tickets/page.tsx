@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
+import { PanelBoundary } from '@/components/PanelBoundary';
 import { formatAgo } from '@/lib/format';
 
 type Status = 'open' | 'in_progress' | 'resolved' | 'closed';
@@ -16,7 +17,9 @@ export default function TicketsPage() {
       <p className="subtitle">
         User reports (web + mobile), staff-filed issues, and automated escalations.
       </p>
-      <TicketsBoard />
+      <PanelBoundary label="Tickets">
+        <TicketsBoard />
+      </PanelBoundary>
     </ConsoleShell>
   );
 }

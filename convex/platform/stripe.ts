@@ -161,7 +161,12 @@ export const markPushedToStripe = internalMutation({
     await ctx.db.patch(args.id, {
       stripeInvoiceId: args.stripeInvoiceId,
       stripeHostedInvoiceUrl: args.stripeHostedInvoiceUrl,
-      status: 'sent', // Stripe emails the hosted invoice on send
+      // Stripe emails the hosted invoice on send. A partially-paid invoice
+      // keeps that status — it describes the money, not the delivery — while
+      // `sentAt` records the delivery independently, which is what a later
+      // reversal reads to walk the status back to 'sent' rather than 'issued'.
+      status: invoice.status === 'partially_paid' ? invoice.status : 'sent',
+      sentAt: Date.now(),
       updatedAt: Date.now(),
     });
     await logPlatformAudit(ctx, {
@@ -183,11 +188,24 @@ export const pushInvoiceToStripe = action({
     const data = await ctx.runQuery(internal.platform.stripe.getInvoiceForPush, { id: args.id });
     if (!data || !data.org) throw new ConvexError('Invoice or organization not found');
     const { invoice, org } = data;
-    if (invoice.status !== 'issued') {
+    // 'partially_paid' is pushable: applying an org credit at issue can move
+    // an invoice straight into that state, and refusing here would make a
+    // credited invoice impossible to collect through Stripe.
+    if (invoice.status !== 'issued' && invoice.status !== 'partially_paid') {
       throw new ConvexError('Only issued invoices can be pushed to Stripe');
     }
     if (invoice.stripeInvoiceId) {
       throw new ConvexError(`Already pushed as ${invoice.stripeInvoiceId}`);
+    }
+
+    // Collect the BALANCE, not the face value. Credits applied at issue and
+    // payments already recorded are money we are not owed again — pushing
+    // `total` here would bill the customer twice for the credited portion.
+    const balance = Math.round((invoice.total - invoice.amountPaid) * 100) / 100;
+    if (balance <= 0) {
+      throw new ConvexError(
+        'Nothing left to collect on this invoice — it is already covered by payments or credit',
+      );
     }
 
     // 1. Ensure the Stripe customer.
@@ -205,12 +223,15 @@ export const pushInvoiceToStripe = action({
       });
     }
 
-    // 2. One line item carrying OUR frozen total — Stripe never recomputes.
+    // 2. One line item carrying OUR frozen balance — Stripe never recomputes.
+    const credited = Math.round((invoice.total - balance) * 100) / 100;
     await stripeFetch('/invoiceitems', {
       customer: customerId,
-      amount: String(Math.round(invoice.total * 100)),
+      amount: String(Math.round(balance * 100)),
       currency: 'usd',
-      description: `Otoqa platform — ${invoice.periodKey} (${invoice.invoiceNumber})`,
+      description:
+        `Otoqa platform — ${invoice.periodKey} (${invoice.invoiceNumber})` +
+        (credited > 0 ? ` — $${credited.toFixed(2)} already applied` : ''),
     });
 
     // 3. Hosted invoice, ACH-first, due date mirroring our terms.
@@ -269,23 +290,43 @@ export const applyStripeInvoicePaid = internalMutation({
       return null;
     }
     if (invoice.status === 'paid' || invoice.status === 'void') return null; // idempotent
+    // A Stripe payment landing on an invoice we already gave up on is
+    // bad-debt recovery. Record it, but never let it pass silently — the
+    // write-off was a deliberate decision someone should know was reversed.
+    if (invoice.status === 'written_off') {
+      await logSystemEvent(ctx, {
+        severity: 'warn',
+        source: 'stripe',
+        code: 'stripe.paid_after_write_off',
+        message: `${invoice.invoiceNumber} was written off but Stripe collected payment — recovery recorded`,
+        orgId: invoice.workosOrgId,
+      });
+    }
 
     const amount = Math.round(args.amountPaidCents) / 100;
-    const amountPaid = Math.round((invoice.amountPaid + amount) * 100) / 100;
+    const payments = [
+      ...invoice.payments,
+      {
+        id: `pay_${invoice.payments.length}_${invoice.periodKey}`,
+        amount,
+        method: 'stripe' as const,
+        reference: args.stripeInvoiceId,
+        recordedByEmail: 'system:stripe-webhook',
+        receivedAt: Date.now(),
+      },
+    ];
+    // Sum the ledger rather than incrementing: reversals are negative entries,
+    // so an incremented counter would drift away from the payment history.
+    const amountPaid = Math.round(payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
     const paidInFull = amountPaid >= invoice.total;
     await ctx.db.patch(invoice._id, {
-      payments: [
-        ...invoice.payments,
-        {
-          amount,
-          method: 'stripe' as const,
-          reference: args.stripeInvoiceId,
-          recordedByEmail: 'system:stripe-webhook',
-          receivedAt: Date.now(),
-        },
-      ],
+      payments,
       amountPaid,
-      ...(paidInFull ? { status: 'paid' as const, paidAt: Date.now() } : {}),
+      ...(paidInFull
+        ? { status: 'paid' as const, paidAt: Date.now() }
+        : invoice.status === 'issued' || invoice.status === 'sent'
+          ? { status: 'partially_paid' as const }
+          : {}),
       updatedAt: Date.now(),
     });
     await logPlatformAudit(ctx, {
@@ -324,19 +365,27 @@ export const recordStripePaymentFailed = internalMutation({
 export const listPushedOpenInvoices = internalQuery({
   args: {},
   handler: async (ctx) => {
-    const open = [
-      ...(await ctx.db
-        .query('platformInvoices')
-        .withIndex('by_status', (q) => q.eq('status', 'issued'))
-        .take(200)),
-      ...(await ctx.db
-        .query('platformInvoices')
-        .withIndex('by_status', (q) => q.eq('status', 'sent'))
-        .take(200)),
-    ];
+    // Every status that still represents an open obligation — omitting
+    // 'partially_paid' would drop part-paid invoices out of reconciliation
+    // entirely, which is exactly where a missed webhook hides.
+    const open = (
+      await Promise.all(
+        (['issued', 'sent', 'partially_paid'] as const).map((status) =>
+          ctx.db
+            .query('platformInvoices')
+            .withIndex('by_status', (q) => q.eq('status', status))
+            .take(200),
+        ),
+      )
+    ).flat();
     return open
       .filter((i) => i.stripeInvoiceId)
-      .map((i) => ({ id: i._id, stripeInvoiceId: i.stripeInvoiceId!, total: i.total }));
+      .map((i) => ({
+        id: i._id,
+        stripeInvoiceId: i.stripeInvoiceId!,
+        // The outstanding balance is what Stripe was asked to collect.
+        total: Math.round((i.total - i.amountPaid) * 100) / 100,
+      }));
   },
 });
 

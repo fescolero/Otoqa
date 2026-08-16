@@ -7,18 +7,30 @@ import { requirePlatformStaff } from '../lib/auth';
  *
  * The feed is only useful if it can reach zero. Events collapse by dedupe key
  * (lib/systemEvents.ts) and can be acknowledged; an acknowledged event that
- * HAPPENS AGAIN returns to the feed, because `lastSeenAt` moves past
- * `ackedAt`. So acking is "I've seen this occurrence", never "hide this
- * forever" — which is what makes it safe to ack aggressively.
+ * HAPPENS AGAIN returns to the feed, because its occurrence count passes the
+ * count recorded at ack time. So acking is "I've seen these occurrences",
+ * never "hide this forever" — which is what makes it safe to ack
+ * aggressively.
  */
 
-/** Unacked = never acked, or seen again since the ack. */
+/**
+ * Unacked = never acked, or it has happened again since the ack.
+ *
+ * Compared on the occurrence COUNT rather than on timestamps: an ack and a
+ * recurrence can share a millisecond, and a timestamp comparison then either
+ * swallows the recurrence or instantly un-acks a fresh ack, depending which
+ * way the inequality leans. Rows acked before `ackedOccurrences` existed fall
+ * back to the timestamp rule.
+ */
 function isUnacked(e: {
   ackedAt?: number;
+  ackedOccurrences?: number;
+  occurrences?: number;
   lastSeenAt?: number;
   createdAt: number;
 }): boolean {
   if (e.ackedAt === undefined) return true;
+  if (e.ackedOccurrences !== undefined) return (e.occurrences ?? 1) > e.ackedOccurrences;
   return (e.lastSeenAt ?? e.createdAt) > e.ackedAt;
 }
 
@@ -60,7 +72,11 @@ export const ackEvent = mutation({
     const staff = await requirePlatformStaff(ctx);
     const event = await ctx.db.get(args.eventId);
     if (!event) throw new ConvexError('Event not found');
-    await ctx.db.patch(args.eventId, { ackedAt: Date.now(), ackedBy: staff.email });
+    await ctx.db.patch(args.eventId, {
+      ackedAt: Date.now(),
+      ackedBy: staff.email,
+      ackedOccurrences: event.occurrences ?? 1,
+    });
     return null;
   },
 });
@@ -95,7 +111,11 @@ export const ackAllEvents = mutation({
     );
 
     for (const e of targets.slice(0, BATCH)) {
-      await ctx.db.patch(e._id, { ackedAt: now, ackedBy: staff.email });
+      await ctx.db.patch(e._id, {
+        ackedAt: now,
+        ackedBy: staff.email,
+        ackedOccurrences: e.occurrences ?? 1,
+      });
     }
     return {
       acked: Math.min(targets.length, BATCH),

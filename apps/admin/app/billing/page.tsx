@@ -4,6 +4,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { InvoicesBoard } from '@/components/InvoicesBoard';
+import { PanelBoundary } from '@/components/PanelBoundary';
 import { formatMoney } from '@/lib/format';
 
 export default function BillingPage() {
@@ -12,10 +13,15 @@ export default function BillingPage() {
       <h1>Platform billing</h1>
       <p className="subtitle">
         Receivables from the frozen invoice ledger; the revenue trend below derives the open
-        cycle from live usage.
+        cycle from live usage and counts <strong>metered usage only</strong> — one-off invoices
+        appear in the ledger above, not in the trend.
       </p>
-      <InvoicesBoard />
-      <Revenue />
+      <PanelBoundary label="Invoices">
+        <InvoicesBoard />
+      </PanelBoundary>
+      <PanelBoundary label="Revenue">
+        <Revenue />
+      </PanelBoundary>
     </ConsoleShell>
   );
 }

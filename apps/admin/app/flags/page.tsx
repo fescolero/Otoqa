@@ -3,6 +3,7 @@
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
+import { PanelBoundary } from '@/components/PanelBoundary';
 import { ReasonAction } from '@/components/ReasonAction';
 import { formatAgo } from '@/lib/format';
 
@@ -15,7 +16,9 @@ export default function FlagsPage() {
         Writes require a recent sign-in and a reason; per-org overrides live on each
         organization&apos;s page.
       </p>
-      <GlobalFlags />
+      <PanelBoundary label="Global flags">
+        <GlobalFlags />
+      </PanelBoundary>
     </ConsoleShell>
   );
 }

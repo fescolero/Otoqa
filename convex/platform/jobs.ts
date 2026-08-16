@@ -60,23 +60,6 @@ export const retireJob = mutation({
   },
 });
 
-export const recentRuns = query({
-  args: { jobName: v.optional(v.string()), limit: v.optional(v.number()) },
-  handler: async (ctx, args) => {
-    await requirePlatformStaff(ctx);
-    const limit = Math.min(Math.max(args.limit ?? 50, 1), 200);
-    if (args.jobName !== undefined) {
-      const jobName = args.jobName;
-      return await ctx.db
-        .query('cronRuns')
-        .withIndex('by_job_time', (q) => q.eq('jobName', jobName))
-        .order('desc')
-        .take(limit);
-    }
-    return await ctx.db.query('cronRuns').withIndex('by_time').order('desc').take(limit);
-  },
-});
-
 /**
  * Duration trend for one job: p50/p95 over retained history plus the last runs.
  * A job degrading from 2s to 45s is invisible on last-duration alone, and the

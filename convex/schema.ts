@@ -4366,11 +4366,19 @@ export default defineSchema({
     dedupeKey: v.optional(v.string()),
     occurrences: v.optional(v.number()),
     lastSeenAt: v.optional(v.number()),
-    // Acknowledgement is "seen up to lastSeenAt". A recurrence AFTER the ack
-    // (lastSeenAt > ackedAt) makes the row unacked again — acking a live
-    // problem silences it once, not forever.
+    // Acknowledgement is "seen up to this many occurrences". A further
+    // occurrence makes the row unacked again — acking a live problem silences
+    // it once, not forever.
+    //
+    // The comparison is on the COUNT, not on timestamps: an ack and a
+    // recurrence can land in the same millisecond, and with `lastSeenAt >
+    // ackedAt` that recurrence would be silently swallowed (or, with `>=`, a
+    // just-acked event would immediately resurface). Counts have no such
+    // ambiguity. `ackedAt`/`ackedBy` remain for display and for rows acked
+    // before the counter existed.
     ackedAt: v.optional(v.number()),
     ackedBy: v.optional(v.string()),
+    ackedOccurrences: v.optional(v.number()),
   })
     .index('by_time', ['createdAt'])
     .index('by_severity_time', ['severity', 'createdAt'])

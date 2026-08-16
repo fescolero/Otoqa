@@ -124,6 +124,7 @@ function OpenAlerts() {
   const ack = useMutation(api.platform.alerts.ackAlert);
   const resolve = useMutation(api.platform.alerts.resolveAlert);
   const snooze = useMutation(api.platform.alerts.snoozeAlert);
+  const annotate = useMutation(api.platform.alerts.annotateAlert);
 
   if (!alerts || alerts.length === 0) return null;
   return (
@@ -154,7 +155,7 @@ function OpenAlerts() {
             <span className="muted">
               first seen {formatAgo(a.firstSeenAt)}
               {a.acknowledgedBy ? ` · acked by ${a.acknowledgedBy}` : ''}
-              {a.note ? ` · ${a.note}` : ''}
+              {a.note ? ` · note: ${a.note}${a.noteBy ? ` (${a.noteBy})` : ''}` : ''}
             </span>
             {a.status === 'open' ? (
               <button className="button button-sm" onClick={() => ack({ alertId: a._id })}>
@@ -163,6 +164,14 @@ function OpenAlerts() {
             ) : (
               <span className="chip">{a.status}</span>
             )}
+            {/* A note without changing state — "who is on this and what have
+                they tried" is what the next person needs mid-incident. */}
+            <ReasonAction
+              label="Note"
+              onSubmit={async (note) => {
+                await annotate({ alertId: a._id, note });
+              }}
+            />
             <ReasonAction
               label="Resolve"
               requireReason={false}

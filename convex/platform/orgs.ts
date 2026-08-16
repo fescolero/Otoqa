@@ -106,6 +106,10 @@ export const getOrgDetail = query({
         clerkOrgId: org.clerkOrgId,
         isDeleted: org.isDeleted === true,
         billingEmail: org.billingEmail,
+        // Contact fields are editable from the console's contract panel, so
+        // they have to be readable there too.
+        billingContactName: org.billingContactName,
+        billingPhone: org.billingPhone,
         billingRatePerLoad: org.billingRatePerLoad,
         rateSchedule: org.rateSchedule,
         billingTerms: org.billingTerms,

@@ -24,6 +24,7 @@ const NAV = [
   { label: 'Health', href: '/health' },
   { label: 'Tickets', href: '/tickets' },
   { label: 'Flags', href: '/flags' },
+  { label: 'Audit', href: '/audit' },
 ];
 
 export function ConsoleShell({ children }: { children: ReactNode }) {

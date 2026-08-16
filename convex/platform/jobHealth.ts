@@ -19,6 +19,14 @@ const MISSED_CYCLES = 3;
 const GRACE_MS = 60_000;
 
 /**
+ * Floor for the stale threshold. Without it the 10-second Samsara poll would
+ * alert after 90 seconds, so a brief scheduling hiccup pages someone at high
+ * severity in the middle of the night. Five minutes is still ~30 missed polls
+ * — fast enough to matter, slow enough not to flap.
+ */
+const MIN_STALE_AFTER_MS = 5 * 60 * 1000;
+
+/**
  * A run that claimed a start and never reported. Deliberately longer than any
  * legitimate job: the longest-running jobs here are S3 archive sweeps, which
  * self-reschedule in batches rather than blocking.
@@ -28,7 +36,7 @@ const HUNG_AFTER_MS = 15 * 60 * 1000;
 export type JobState = 'ok' | 'failing' | 'stale' | 'hung' | 'retired' | 'unknown';
 
 export function stalenessThresholdMs(expectedIntervalMs: number): number {
-  return expectedIntervalMs * MISSED_CYCLES + GRACE_MS;
+  return Math.max(expectedIntervalMs * MISSED_CYCLES + GRACE_MS, MIN_STALE_AFTER_MS);
 }
 
 export function jobState(job: Doc<'cronHealth'>, now: number): JobState {

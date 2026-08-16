@@ -132,9 +132,11 @@ describe('platform Phase 1 — cron ledger', () => {
       totalRuns: 1,
     });
 
-    const runs = await staff.query(api.platform.jobs.recentRuns, {});
-    expect(runs).toHaveLength(1); // only the recordHistory job appended
-    expect(runs[0].jobName).toBe('hourly-job');
+    // Volume policy: only the recordHistory job appended run history.
+    const hourly = await staff.query(api.platform.jobs.jobTrend, { jobName: 'hourly-job' });
+    expect(hourly.sample).toBe(1);
+    const highFreq = await staff.query(api.platform.jobs.jobTrend, { jobName: 'high-freq-job' });
+    expect(highFreq.sample).toBe(0);
   });
 
   it('records failures: history always, consecutive counter, escalating events', async () => {

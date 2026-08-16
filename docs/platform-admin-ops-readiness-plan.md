@@ -492,7 +492,7 @@ _Updated 2026-08-16. Everything below is merged on `claude/platform-admin-ops-re
 | 1.1 | Stale/hung job detection: declared cadence on all 35 jobs, in-flight marker written before the target runs, `jobState()` shared by board and evaluator, `cron_stale`/`cron_hung` alerts, `retireJob` | `crons.ts`, `cronRunner.ts`, `jobHealth.ts`, `alerts.ts` |
 | 1.3 | `systemEvents` dedupe + ack, with recurrence-after-ack resurfacing; bulk ack that never touches `critical` | `lib/systemEvents.ts`, `platform/events.ts` |
 | 1.5 | `PanelBoundary` — one failing panel no longer blanks the console | `apps/admin/components/PanelBoundary.tsx` |
-| 1.7 | Job duration p50/p95 + run history drill-down (`jobTrend`, and `recentRuns` finally has a caller) | `platform/jobs.ts`, `app/jobs/page.tsx` |
+| 1.7 | Job duration p50/p95 + run history drill-down (`jobTrend`; it supersedes the never-called `recentRuns`, which was removed) | `platform/jobs.ts`, `app/jobs/page.tsx` |
 
 **Actions & operability (Ops-A / Ops-2 subset)**
 
@@ -502,7 +502,7 @@ _Updated 2026-08-16. Everything below is merged on `claude/platform-admin-ops-re
 | A.4 | `correctDriverPhone` on the driver row (distinct from the identity link) | `platform/support.ts` |
 | A.6 | Alert `resolve` / `snooze` / `annotate`, snooze-aware evaluator so a manual resolve can't re-page every 5 minutes | `platform/alerts.ts` |
 | 2.1 | Staff-actions-on-this-org panel — the `by_target_org` index has a reader | `platform/access.ts`, org detail page |
-| 2.2 | Audit search/filter by org, actor, action, free text; `auditActors` rollup | `platform/access.ts` |
+| 2.2 | Audit page: search/filter by org, actor, action and free text, plus a who-has-used-the-console list | `platform/access.ts`, `app/audit/page.tsx` |
 | 2.7 | Billing-drift escalation into the alert matrix | `platform/alerts.ts` |
 | 0.3 | `consoleSelfCheck` + Overview panel: reports which integrations are unconfigured, never their values | `platform/selfCheck.ts`, `app/page.tsx` |
 | 0.5 | `docs/runbooks/` — one per alert kind plus break-glass; every alert links to its runbook by `kind` | `docs/runbooks/` |
@@ -535,6 +535,71 @@ repo-wide.**
 | **B.7 invoice delivery** | PDF + email on the manual path. `markSent` is still an honour-system flip. |
 | **3.3 PII decision** | Left untouched on purpose: `sensitive_data_revealed` is still an unused enum member because removing it is decision A3, not mine to make. The console still renders no driver PII either way. |
 | **3.1 access page / 3.4 Playwright / 3.5 status page** | Unblocked, not yet started. `auditActors` is the first half of 3.1. |
+
+### Found in self-review (fixed)
+
+A review pass over how the new statuses and the credit ledger interact with
+code I did **not** write turned up four defects in the Stripe path. Recording
+them because the pattern is instructive: the bugs weren't in the new module,
+they were at its seams.
+
+1. **Double-charging through Stripe (money bug).** `pushInvoiceToStripe` billed
+   `invoice.total`. Once credits are applied at issue, the customer would have
+   been charged the full face value again for the credited portion. Now pushes
+   the outstanding **balance**, and refuses when nothing is left to collect.
+2. **Credited invoices became unpushable.** The push required `status ===
+   'issued'`, but applying a credit at issue can land an invoice straight in
+   `partially_paid` — making a credited invoice impossible to collect through
+   Stripe. Both statuses are accepted now.
+3. **Part-paid invoices dropped out of reconciliation.** `listPushedOpenInvoices`
+   queried only `issued`/`sent`, so a partially-paid Stripe invoice was invisible
+   to the nightly cross-check — precisely where a missed webhook hides.
+4. **`amountPaid` drifted from the ledger.** The Stripe webhook incremented the
+   counter instead of summing `payments`, which breaks the invariant reversals
+   depend on. It also set `status: 'sent'` with no `sentAt`, so a later reversal
+   walked back to `issued` instead of `sent`.
+
+**A same-millisecond race in event acknowledgement**, surfaced by a test that
+passed alone and failed in the full suite. Unacked was `lastSeenAt > ackedAt`,
+so a recurrence landing in the same millisecond as the ack was swallowed —
+and flipping to `>=` would instead un-ack every fresh ack. Timestamps can't
+express this; the comparison is now on the occurrence **count** recorded at ack
+time, which has no ambiguity. Rows acked before the counter existed fall back to
+the old rule. Regression test added for the same-millisecond case, and the
+platform suite was run repeatedly to confirm the flake is gone.
+
+Three further fixes from the same pass:
+
+- **Void returned credit without a ledger entry**, leaving `amountPaid` out of
+  step with `payments` on voided rows. The return is now an entry like any other
+  movement, with a test asserting the invariant.
+- **Staleness would have paged on a 90-second blip.** 3× cadence is far too
+  twitchy for the 10-second Samsara poll, so the threshold now has a 5-minute
+  floor (still ~30 missed polls).
+
+Also corrected: the org detail query never returned `billingContactName` /
+`billingPhone`, so the new contract panel displayed em-dashes for fields it
+could edit; error boundaries reached only three of eight pages; and a sweep for
+backend functions with no console caller found `recentRuns` (superseded by
+`jobTrend` — removed, with its test migrated) and `annotateAlert` (exposed but
+unsurfaced — now wired as a "Note" action on each alert).
+
+### Known limitations, stated rather than hidden
+
+- **A payment cannot be recorded against a written-off invoice.** Bad-debt
+  recovery therefore has no path in the console today; the write-off would have
+  to be reversed first, which is not built either. Rare enough to defer, wrong
+  enough to write down.
+- **The revenue trend counts metered usage only.** One-off invoices appear in
+  the ledger and in aging, but not in the monthly trend — the billing page now
+  says so. Fixing it properly belongs with the metrics-snapshot refactor (1.2).
+- **A deduped `systemEvents` row keeps its original `createdAt`**, so a
+  long-running recurring condition can be pruned at 30 days while still active.
+  It would immediately reappear as a new row on the next occurrence.
+- **The alert evaluator cannot detect its own staleness** — it would have to be
+  running to do so. The self-check panel catches it when someone opens the
+  console; catching it when nobody does is exactly what the external dead-man's
+  switch (G2) is for, and that remains unconfigured.
 
 ### Notes for review
 

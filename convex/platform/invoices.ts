@@ -742,9 +742,29 @@ export const voidInvoice = mutation({
     // silently destroy the customer's balance.
     const creditReleased = await releaseCreditsForInvoice(ctx, invoice.workosOrgId, args.id);
 
+    // Returning the credit is itself a ledger movement, so it gets an entry
+    // rather than a silent adjustment of the total — `amountPaid` must stay
+    // equal to the sum of `payments` on every row, void ones included.
+    const payments =
+      creditReleased > 0
+        ? [
+            ...invoice.payments,
+            {
+              id: nextPaymentId(invoice),
+              amount: money(-creditReleased),
+              method: 'credit' as const,
+              reference: 'credit returned on void',
+              recordedByEmail: staff.email,
+              receivedAt: Date.now(),
+              reversalReason: args.reason,
+            },
+          ]
+        : invoice.payments;
+
     await ctx.db.patch(args.id, {
       status: 'void',
-      amountPaid: creditReleased > 0 ? money(invoice.amountPaid - creditReleased) : invoice.amountPaid,
+      payments,
+      amountPaid: sumPayments(payments),
       voidedAt: Date.now(),
       voidReason: args.reason,
       updatedAt: Date.now(),

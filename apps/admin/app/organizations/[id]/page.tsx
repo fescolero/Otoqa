@@ -5,6 +5,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import type { Id } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
+import { PanelBoundary } from '@/components/PanelBoundary';
 import {
   OrgSupportPanels,
   BillingConfigPanel,
@@ -18,7 +19,9 @@ export default function OrgDetailPage({ params }: { params: Promise<{ id: string
   const { id } = use(params);
   return (
     <ConsoleShell>
-      <OrgDetail organizationId={id as Id<'organizations'>} />
+      <PanelBoundary label="Organization detail">
+        <OrgDetail organizationId={id as Id<'organizations'>} />
+      </PanelBoundary>
     </ConsoleShell>
   );
 }

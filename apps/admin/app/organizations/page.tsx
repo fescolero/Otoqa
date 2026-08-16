@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
+import { PanelBoundary } from '@/components/PanelBoundary';
 import { formatAgo, formatCapped } from '@/lib/format';
 
 export default function OrganizationsPage() {
@@ -14,7 +15,9 @@ export default function OrganizationsPage() {
       <p className="subtitle">
         Health snapshots rebuilt every 15 minutes — counts cap at 500.
       </p>
-      <OrgDirectory />
+      <PanelBoundary label="Organization directory">
+        <OrgDirectory />
+      </PanelBoundary>
     </ConsoleShell>
   );
 }

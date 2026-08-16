@@ -370,6 +370,28 @@ describe('credit ledger — overpayment carries forward', () => {
     expect(balance.available).toBe(30); // not destroyed with the invoice
   });
 
+  it('keeps amountPaid equal to the payment ledger after a void returns credit', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx, 10)); // $30 invoice
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.credits.createCredit, {
+      workosOrgId: WORKOS_ORG,
+      amount: 30,
+      source: 'goodwill',
+      reason: 'x',
+    });
+    const id = await issuedInvoice(t);
+    await staff.mutation(api.platform.invoices.voidInvoice, { id, reason: 'wrong entity' });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    // The returned credit is an ENTRY, not a silent adjustment: amountPaid
+    // must still be the sum of payments on every row, void ones included.
+    const ledgerSum = Math.round(inv.payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
+    expect(inv.amountPaid).toBe(ledgerSum);
+    expect(inv.amountPaid).toBe(0);
+    expect(inv.payments).toHaveLength(2); // credit applied, credit returned
+  });
+
   it('refuses to void a credit that is already applied', async () => {
     const t = convexTest(schema);
     await t.run((ctx) => seedOrg(ctx, 10));
@@ -623,7 +645,7 @@ describe('cron staleness — a job that stops firing is not healthy', () => {
 
   it('reports stale only after the missed-cycle threshold', () => {
     const now = Date.now();
-    const every = 60_000;
+    const every = 60 * 60 * 1000; // hourly
     // One missed cycle: still fine (Convex interval scheduling drifts).
     expect(
       jobState({ ...baseJob, lastStartedAt: now - 2 * every, expectedIntervalMs: every } as never, now),
@@ -631,6 +653,19 @@ describe('cron staleness — a job that stops firing is not healthy', () => {
     // Four missed cycles: stale.
     expect(
       jobState({ ...baseJob, lastStartedAt: now - 5 * every, expectedIntervalMs: every } as never, now),
+    ).toBe('stale');
+  });
+
+  it('never alerts a high-frequency job over a brief hiccup', () => {
+    const now = Date.now();
+    const every = 10_000; // the Samsara poll
+    // 3× cadence would be 90s — far too twitchy to page on. The floor keeps
+    // a short scheduling gap out of the alert stream.
+    expect(
+      jobState({ ...baseJob, lastStartedAt: now - 2 * 60_000, expectedIntervalMs: every } as never, now),
+    ).toBe('ok');
+    expect(
+      jobState({ ...baseJob, lastStartedAt: now - 10 * 60_000, expectedIntervalMs: every } as never, now),
     ).toBe('stale');
   });
 
@@ -945,6 +980,38 @@ describe('systemEvents — dedupe and acknowledgement', () => {
     expect(events[0].occurrences).toBe(3);
   });
 
+  it('resurfaces a recurrence that lands in the same millisecond as the ack', async () => {
+    const t = convexTest(schema);
+    const staff = t.withIdentity(freshStaff());
+    const now = Date.now();
+
+    // An event acked at exactly its own lastSeenAt, then one more occurrence
+    // stamped at the SAME instant. A timestamp comparison would swallow this;
+    // the occurrence counter cannot.
+    const id = await t.run(async (ctx) => {
+      return await ctx.db.insert('systemEvents', {
+        severity: 'error',
+        source: 'test',
+        code: 'test.race',
+        message: 'boom',
+        dedupeKey: 'test.race:*',
+        occurrences: 1,
+        lastSeenAt: now,
+        createdAt: now,
+      });
+    });
+    await staff.mutation(api.platform.events.ackEvent, { eventId: id });
+    expect(await staff.query(api.platform.events.recentEvents, {})).toHaveLength(0);
+
+    await t.run(async (ctx) => {
+      const row = await ctx.db.get(id);
+      await ctx.db.patch(id, { occurrences: (row!.occurrences ?? 1) + 1, lastSeenAt: row!.ackedAt });
+    });
+    const events = await staff.query(api.platform.events.recentEvents, {});
+    expect(events).toHaveLength(1);
+    expect(events[0].occurrences).toBe(2);
+  });
+
   it('bulk-ack clears the backlog but never touches critical events', async () => {
     const t = convexTest(schema);
     await t.run(async (ctx) => {
@@ -969,6 +1036,83 @@ describe('systemEvents — dedupe and acknowledgement', () => {
     const left = await staff.query(api.platform.events.recentEvents, {});
     expect(left).toHaveLength(1);
     expect(left[0].severity).toBe('critical');
+  });
+});
+
+describe('Stripe interop with credits and the new statuses', () => {
+  it('reconciliation covers partially_paid, and reports the BALANCE not the face value', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.invoices.recordPayment, { id, amount: 100, method: 'ach' });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(id, { stripeInvoiceId: 'in_test_1' });
+    });
+
+    const open = await t.run(async (ctx) => {
+      // Mirrors listPushedOpenInvoices' status set + balance projection.
+      const rows = (
+        await Promise.all(
+          (['issued', 'sent', 'partially_paid'] as const).map((status) =>
+            ctx.db
+              .query('platformInvoices')
+              .withIndex('by_status', (q) => q.eq('status', status))
+              .take(200),
+          ),
+        )
+      ).flat();
+      return rows
+        .filter((i) => i.stripeInvoiceId)
+        .map((i) => ({ total: Math.round((i.total - i.amountPaid) * 100) / 100 }));
+    });
+    // A partially-paid invoice must not drop out of reconciliation, and the
+    // amount tracked is what is still owed.
+    expect(open).toEqual([{ total: 200 }]);
+  });
+
+  it('a Stripe payment sums the ledger and lands in partially_paid', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(id, { stripeInvoiceId: 'in_test_2' });
+    });
+
+    await t.mutation(internal.platform.stripe.applyStripeInvoicePaid, {
+      stripeInvoiceId: 'in_test_2',
+      amountPaidCents: 12_000, // $120 of $300
+    });
+
+    const [inv] = await t
+      .withIdentity(freshStaff())
+      .query(api.platform.invoices.listInvoices, {});
+    expect(inv.amountPaid).toBe(120);
+    expect(inv.status).toBe('partially_paid');
+    // The entry carries an id, so it can be reversed like any other payment.
+    expect(inv.payments[0].id).toBeDefined();
+  });
+
+  it('flags a Stripe payment arriving after a write-off instead of silently reviving it', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.invoices.writeOffInvoice, {
+      id,
+      reason: 'Uncollectible',
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(id, { stripeInvoiceId: 'in_test_3' });
+    });
+
+    await t.mutation(internal.platform.stripe.applyStripeInvoicePaid, {
+      stripeInvoiceId: 'in_test_3',
+      amountPaidCents: 30_000,
+    });
+
+    const events = await staff.query(api.platform.events.recentEvents, {});
+    expect(events.some((e) => e.code === 'stripe.paid_after_write_off')).toBe(true);
   });
 });
 
