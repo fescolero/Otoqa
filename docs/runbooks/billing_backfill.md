@@ -33,13 +33,18 @@ The board carries those first two figures itself — **Invoiced** and **Paid** �
 and they reconcile exactly:
 
 ```
-Invoiced − Paid + Overpaid − Written off = Outstanding
+Invoiced − Paid − Written off = Outstanding
 ```
 
-**Paid** is everything that settled an invoice; where any of it was account
-credit rather than money, the tile splits it (`… cash · … credit`). Compare
-**Invoiced** against your billing figure and the cash half of **Paid** against
-the bank, and any disagreement is in the ledger, not in your arithmetic.
+**Paid** is how much of what you billed has been settled, counted once no
+matter how many invoices the money passed through: a transfer that overpaid one
+invoice and carried the rest to the next is one payment, not two. When money
+arrived that hasn't settled an invoice yet — or an invoice was settled with
+credit rather than money — the tile adds a second line saying what actually
+reached the bank. No second line means the two agree.
+
+Compare **Invoiced** against your billing figure and **Paid** against the bank,
+and any disagreement is in the ledger, not in your arithmetic.
 
 Every step below should move the console toward that number. If it doesn't,
 stop.
@@ -121,8 +126,8 @@ it and issue a manual credit carrying the correct date.
 
 ## 5. Verify
 
-- **Invoiced** equals your billed figure and the cash half of **Paid** equals
-  what the bank actually received.
+- **Invoiced** equals your billed figure and **Paid** equals what the bank
+  actually received.
 - **Outstanding** equals your billed − received figure from step 0.
 - **Outstanding** and **Outstanding net of credit** agree (credit fully placed),
   or differ by exactly the credit you deliberately left on the account.

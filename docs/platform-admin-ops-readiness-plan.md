@@ -701,20 +701,31 @@ deliberate `applyCreditToInvoice`.
 **The board reconciles itself.** Reconstructing an account meant repeatedly
 checking billed − received against Outstanding by hand, which is exactly the
 arithmetic a console should be doing. `agingOverview` now also returns
-`invoicedTotal` (committed statuses — drafts and voids excluded), `paidTotal`
-(the sum of every payment entry, so reversals net themselves out), its
-`paidCash` / `paidCredit` split, and `overpaid`. Those satisfy an exact
-identity:
+`invoicedTotal` (committed statuses — drafts and voids excluded) and
+`paidTotal`, which satisfy an exact identity:
 
 ```
-invoicedTotal − paidTotal + overpaid − writtenOffAmount = outstanding
+invoicedTotal − paidTotal − writtenOffAmount = outstanding
 ```
 
-The cash/credit split matters because credit is not receipts: an overpayment's
-cash was counted when it landed, and a goodwill credit was never cash at all.
-Counting either as collected would overstate the bank by the amount of credit
-in circulation, so `paidTotal` answers "how much of the bill is settled" and
-`paidCash` answers "how much money arrived" — separately, and both labelled.
+**`paidTotal` caps each invoice at its face value** — `Σ min(amountPaid,
+total)` — and that cap is the whole subtlety. A transfer keyed against one
+invoice for more than that invoice owed leaves the excess as credit, which then
+settles *other* invoices and is recorded as payment there. Summing raw
+`amountPaid` counts that excess twice: once as overpayment on the first
+invoice, once as credit on the second. The first version of this shipped that
+bug — a $19,975 wire against a $10,000 invoice reported $84,538.80 paid against
+$74,563.80 of actual money, with an `overpaid` term in the identity quietly
+cancelling the duplicate instead of not creating it. Capping is the fix; the
+identity then needs no correction term.
+
+`cashReceived` (non-credit entries, uncapped) is the separate question — what
+ties to the bank. It diverges from `paidTotal` when credit settled an invoice
+without new money (goodwill) or when cash sits on the account ahead of the
+invoices it will pay, and the board shows it only then. `overpaid` is still
+returned but not displayed: it is always mirrored by the credit created from
+it, so it describes where money is stored rather than anything owed. What the
+customer is genuinely ahead by is `creditAvailable`, which already has a tile.
 
 The rollup scans a fixed number of rows per status and returns `truncated` when
 it hits the cap, so a book larger than the scan reports a floor with a visible

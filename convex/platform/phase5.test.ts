@@ -1055,12 +1055,12 @@ describe('catching up on months of unpaid cycles', () => {
     expect(aging.outstanding).toBe(9552.8);
     expect(aging.outstandingNetOfCredit).toBe(9552.8); // the two now agree
     // And the board reconciles without anyone doing the arithmetic: billed,
-    // settled, and the gap between them. None of the $20,000 was receipts —
-    // it arrived as credit — so `paidCash` stays zero.
+    // settled, and the gap between them. Nothing arrived through the invoices
+    // themselves — it was all keyed as credit — so `cashReceived` stays zero
+    // and the hint on the board says so.
     expect(aging.invoicedTotal).toBe(owed);
     expect(aging.paidTotal).toBe(20000);
-    expect(aging.paidCash).toBe(0);
-    expect(aging.paidCredit).toBe(20000);
+    expect(aging.cashReceived).toBe(0);
   });
 
   it('dates a credit application to when it could have settled, not to today', async () => {
@@ -1454,7 +1454,7 @@ describe('tenant-facing one-off charges', () => {
 });
 
 describe('receivables rollup — invoiced vs paid', () => {
-  it('reconciles: invoiced − paid + overpaid − written off = outstanding', async () => {
+  it('reconciles: invoiced − paid − written off = outstanding', async () => {
     const t = convexTest(schema);
     const orgId = await t.run((ctx) => seedOrg(ctx));
     const staff = t.withIdentity(freshStaff());
@@ -1527,8 +1527,7 @@ describe('receivables rollup — invoiced vs paid', () => {
     const aging = await staff.query(api.platform.invoices.agingOverview, {});
     expect(aging.invoicedTotal).toBe(900); // 300 + 400 + 200, draft excluded
     expect(aging.paidTotal).toBe(550); // 150 wire + 400 credit
-    expect(aging.paidCash).toBe(150); // the reversal cancelled the duplicate
-    expect(aging.paidCredit).toBe(400);
+    expect(aging.cashReceived).toBe(150); // the reversal cancelled the duplicate
     expect(aging.overpaid).toBe(0);
     expect(aging.writtenOffAmount).toBe(200);
     expect(aging.outstanding).toBe(150);
@@ -1536,37 +1535,52 @@ describe('receivables rollup — invoiced vs paid', () => {
     expect(aging.truncated).toBe(false);
 
     // The identity the board is read against.
-    expect(
-      aging.invoicedTotal - aging.paidTotal + aging.overpaid - aging.writtenOffAmount,
-    ).toBeCloseTo(aging.outstanding, 2);
+    expect(aging.invoicedTotal - aging.paidTotal - aging.writtenOffAmount).toBeCloseTo(
+      aging.outstanding,
+      2,
+    );
   });
 
-  it('counts an overpayment once, as the credit it becomes', async () => {
+  it('counts an overpayment once, not once on each invoice it touches', async () => {
+    // The production shape: one transfer keyed against a single invoice for
+    // more than that invoice owed, with the excess carried to a later cycle.
+    // The excess must not appear both as payment on the first invoice and as
+    // credit on the second.
     const t = convexTest(schema);
     await t.run((ctx) => seedOrg(ctx));
-    const id = await issuedInvoice(t); // $300
+    const first = await issuedInvoice(t); // $300
     const staff = t.withIdentity(freshStaff());
 
-    // $500 against a $300 invoice: $300 settles it, $200 posts as credit.
     await staff.mutation(api.platform.invoices.recordPayment, {
-      id,
+      id: first,
       amount: 500,
       method: 'wire',
       reference: 'wire-over',
     });
+    // $200 of the transfer is now credit; put it on the next cycle.
+    await t.run(async (ctx) => {
+      await ctx.db.insert('platformUsageStats', {
+        workosOrgId: WORKOS_ORG,
+        periodKey: '2026-06',
+        loadsWritten: 100,
+        updatedAt: Date.now(),
+      });
+    });
+    // Issuing consumes available credit, so the excess lands here by itself.
+    await issuedInvoice(t, '2026-06'); // another $300 cycle
 
     const aging = await staff.query(api.platform.invoices.agingOverview, {});
-    expect(aging.invoicedTotal).toBe(300);
-    // The full transfer sits on the invoice; the excess is visible as its own
-    // figure rather than netting against other orgs' receivables.
+    expect(aging.invoicedTotal).toBe(600); // two $300 cycles
+    // $500 arrived and $500 settled invoices — not $700.
     expect(aging.paidTotal).toBe(500);
-    expect(aging.paidCash).toBe(500);
-    expect(aging.overpaid).toBe(200);
-    expect(aging.creditAvailable).toBe(200);
-    expect(aging.outstanding).toBe(0);
-    expect(
-      aging.invoicedTotal - aging.paidTotal + aging.overpaid - aging.writtenOffAmount,
-    ).toBeCloseTo(aging.outstanding, 2);
+    expect(aging.cashReceived).toBe(500);
+    expect(aging.overpaid).toBe(200); // stored on the first invoice
+    expect(aging.creditAvailable).toBe(0); // fully placed
+    expect(aging.outstanding).toBe(100);
+    expect(aging.invoicedTotal - aging.paidTotal - aging.writtenOffAmount).toBeCloseTo(
+      aging.outstanding,
+      2,
+    );
   });
 });
 

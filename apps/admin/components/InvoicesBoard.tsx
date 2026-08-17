@@ -53,16 +53,16 @@ export function InvoicesBoard() {
           <Kpi
             label="Paid"
             value={formatMoney(aging.paidTotal)}
+            // Only worth saying when the two differ — credit settled an
+            // invoice without new cash, or cash is sitting ahead of the
+            // invoices it will pay. When they agree, one number is the story.
             hint={
-              aging.paidCredit !== 0
-                ? `${formatMoney(aging.paidCash)} cash · ${formatMoney(aging.paidCredit)} credit`
+              aging.cashReceived !== aging.paidTotal
+                ? `${formatMoney(aging.cashReceived)} received in cash`
                 : undefined
             }
           />
           <Kpi label="Outstanding" value={formatMoney(aging.outstanding)} />
-          {aging.overpaid > 0 ? (
-            <Kpi label="Overpaid on invoices" value={formatMoney(aging.overpaid)} />
-          ) : null}
           {aging.creditAvailable > 0 ? (
             <Kpi
               label="Outstanding net of credit"

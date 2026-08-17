@@ -2257,33 +2257,39 @@ export const agingOverview = query({
     const committed = [...open, ...paidRows, ...writtenOff];
     let invoicedTotal = 0;
     let paidTotal = 0;
-    let paidCash = 0;
-    let paidCredit = 0;
+    let cashReceived = 0;
     let overpaid = 0;
     for (const inv of committed) {
       invoicedTotal = money(invoicedTotal + inv.total);
-      paidTotal = money(paidTotal + inv.amountPaid);
+      // CAPPED AT THE FACE VALUE. An invoice holding more than it owed has not
+      // settled more than it owed — the excess left as credit and settles
+      // OTHER invoices, where it is counted as their payment. Summing raw
+      // `amountPaid` would therefore count that excess twice.
+      paidTotal = money(paidTotal + Math.min(inv.amountPaid, inv.total));
       overpaid = money(overpaid + Math.max(0, money(inv.amountPaid - inv.total)));
       for (const p of inv.payments) {
-        // A `credit` entry moves money that was already collected once (an
-        // earlier overpayment) or never collected at all (goodwill). Either
-        // way it settles the invoice without being new cash, so it is split
-        // out rather than counted as receipts.
-        if (p.method === 'credit') paidCredit = money(paidCredit + p.amount);
-        else paidCash = money(paidCash + p.amount);
+        // Money that arrived, ties to the bank. Credit entries are excluded:
+        // credit is either cash already counted where it landed, or a goodwill
+        // write-down that was never cash. Reversals are negative entries
+        // carrying the original's method, so this is already net of them.
+        if (p.method !== 'credit') cashReceived = money(cashReceived + p.amount);
       }
     }
 
     return {
       outstanding,
       // Reconciling identity, exact by construction:
-      //   outstanding = invoicedTotal - paidTotal + overpaid - writtenOffAmount
-      // so an operator can check the board against a bank statement without
-      // opening a single invoice.
+      //   outstanding = invoicedTotal - paidTotal - writtenOffAmount
+      // so an operator can check the board without opening a single invoice.
       invoicedTotal,
+      // How much of what we billed has been settled, by any means.
       paidTotal,
-      paidCash,
-      paidCredit,
+      // How much money actually arrived. Differs from paidTotal when credit
+      // settled an invoice without new cash (goodwill), or when cash is on the
+      // account ahead of the invoices it will pay.
+      cashReceived,
+      // Sitting on invoices above their face value. Always mirrored by credit
+      // that was created from it, so it is a storage detail, not a receivable.
       overpaid,
       // What is actually collectable once account credit is applied. Credit is
       // consumed at issue, so an overdue invoice raised BEFORE the credit
