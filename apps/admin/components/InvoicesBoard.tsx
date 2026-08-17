@@ -201,6 +201,11 @@ function InvoiceRow({
   const applyCredit = useMutation(api.platform.invoices.applyCreditToInvoice);
   const pushToStripe = useAction(api.platform.stripe.pushInvoiceToStripe);
   const [expanded, setExpanded] = useState(false);
+  // Only fetched once the row is open, so the board itself stays cheap.
+  const olderOpen = useQuery(
+    api.platform.invoices.olderOpenBalance,
+    expanded ? { id: inv._id } : 'skip',
+  );
 
   const balance = Math.round((inv.total - inv.amountPaid) * 100) / 100;
   const isDraft = inv.status === 'draft';
@@ -585,6 +590,15 @@ function InvoiceRow({
                     });
                   }}
                 >
+                  {olderOpen && olderOpen.count > 0 ? (
+                    <div className="danger-text form-error">
+                      This organization has {olderOpen.count} older unpaid invoice(s) totalling{' '}
+                      {formatMoney(olderOpen.total)}, back to {olderOpen.oldestPeriod}. A payment
+                      recorded here pays THIS invoice and turns the rest into credit. If the
+                      customer was clearing arrears, use “Record a payment across invoices” on the
+                      organization page instead — it applies oldest-first.
+                    </div>
+                  ) : null}
                   <input className="input" name="amount" placeholder={`Amount (bal ${formatMoney(balance)})`} />
                   <select className="input" name="method" defaultValue="ach">
                     <option value="ach">ACH</option>

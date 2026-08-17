@@ -2138,6 +2138,48 @@ export const listInvoices = query({
   },
 });
 
+/**
+ * Older open invoices for the same org — what a payment recorded HERE would
+ * skip over.
+ *
+ * Recording against a single invoice pays that invoice and turns any excess
+ * into credit, which is right when the customer paid that invoice. It is
+ * wrong, and silently so, when they were clearing arrears: the money lands on
+ * the newest thing you happened to have open while months of older debt stay
+ * overdue and the surplus becomes credit nobody asked for. The console can see
+ * that mistake coming, so it should say something.
+ */
+export const olderOpenBalance = query({
+  args: { id: v.id('platformInvoices') },
+  handler: async (ctx, args) => {
+    await requirePlatformStaff(ctx);
+    const invoice = await ctx.db.get(args.id);
+    if (!invoice) return null;
+
+    const all = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_org_period', (q) => q.eq('workosOrgId', invoice.workosOrgId))
+      .collect();
+    const age = (i: Doc<'platformInvoices'>) => i.dueAt ?? i.issuedAt ?? 0;
+
+    const older = all
+      .filter(
+        (i) =>
+          i._id !== invoice._id &&
+          (OPEN_STATUSES as readonly string[]).includes(i.status) &&
+          money(i.total - i.amountPaid) > 0 &&
+          age(i) < age(invoice),
+      )
+      .sort((a, b) => age(a) - age(b));
+
+    return {
+      count: older.length,
+      total: money(older.reduce((s, i) => s + money(i.total - i.amountPaid), 0)),
+      oldestPeriod: older[0]?.periodKey ?? null,
+    };
+  },
+});
+
 /** Receivables rollup: open balances bucketed by age (spec §9). */
 export const agingOverview = query({
   args: {},
