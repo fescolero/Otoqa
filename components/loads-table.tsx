@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
-import { useMutation, useQuery, usePaginatedQuery } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { useAuthQuery } from '@/hooks/use-auth-query';
+import { useAuthQuery, useAuthPaginatedQuery } from '@/hooks/use-auth-query';
 import { useRouter } from 'next/navigation';
 import { Id } from '@/convex/_generated/dataModel';
 import { trackError } from '@/lib/posthog';
@@ -99,13 +99,21 @@ export function LoadsTable({ organizationId, userId }: LoadsTableProps) {
   // Force query refresh by temporarily skipping query
   const [skipQuery, setSkipQuery] = useState(false);
 
-  // Fetch loads with infinite scroll via usePaginatedQuery.
-  // The hook manages cursor state internally and resets when args change.
+  // Fetch loads with infinite scroll. The hook manages cursor state
+  // internally and resets when args change.
+  //
+  // `useAuthPaginatedQuery`, not the raw `usePaginatedQuery`: `skipQuery`
+  // above is a cursor-reset mechanism (flipped true then straight back to
+  // false so the hook rebuilds its pages when filters change), NOT an auth
+  // gate. It initialises to `false`, so this query used to fire on mount
+  // before the Convex auth handshake had attached a token, and
+  // `getLoads` -> `assertCallerOwnsOrg` -> `requireCallerIdentity` threw
+  // `Unauthenticated` server-side on every page load.
   const {
     results,
     status: paginationStatus,
     loadMore,
-  } = usePaginatedQuery(
+  } = useAuthPaginatedQuery(
     api.loads.getLoads,
     skipQuery
       ? 'skip'
