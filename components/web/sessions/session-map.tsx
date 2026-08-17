@@ -2037,7 +2037,14 @@ function ClusteredOverlayPins({ pins }: { pins: OverlayPin[] }) {
     }
     const bounds = new google.maps.LatLngBounds();
     for (const p of cluster.pins) bounds.extend({ lat: p.latitude, lng: p.longitude });
-    map.fitBounds(bounds, 96);
+    // Generous padding so the group's pins land with air around them, not
+    // touching the viewport edges — and cap the zoom so a tight group
+    // doesn't slam to street level. The user zooms further if they want.
+    map.fitBounds(bounds, 140);
+    google.maps.event.addListenerOnce(map, 'idle', () => {
+      const z = map.getZoom();
+      if (z != null && z > CLUSTER_EXPAND_ZOOM - 1) map.setZoom(CLUSTER_EXPAND_ZOOM - 1);
+    });
   };
 
   return (
