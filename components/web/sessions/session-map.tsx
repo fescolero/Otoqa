@@ -40,7 +40,7 @@ import {
   GEOFENCE_EVENT_GLYPH,
   GEOFENCE_EVENT_LABEL,
 } from '@/components/dispatch/live-route-map';
-import { snapPathToRoads } from '@/lib/googleRoads';
+import { snapPathToRoadsIndexed } from '@/lib/googleRoads';
 import {
   STATUS_TONE,
   TRIP_PALETTE,
@@ -915,6 +915,11 @@ function MapInner(
       color: string;
       legIndex: number | null;
       path: google.maps.LatLngLiteral[];
+      // True when this segment starts at a POSITIONAL break (an outlier
+      // jump), as opposed to a mere colour/leg handoff. Only a positional
+      // break makes the geometry discontinuous — which is exactly where
+      // snapping must not span. See the snap-group logic below.
+      breaksFromPrev: boolean;
     };
     const segments: Segment[] = [];
     let current: Segment | null = null;
@@ -937,6 +942,7 @@ function MapInner(
           color: colorForLeg(legIndex),
           legIndex,
           path: [xy],
+          breaksFromPrev: !!ping.breakBefore || segments.length === 0,
         };
         segments.push(current);
         prevLegIndex = legIndex;
@@ -1030,36 +1036,173 @@ function MapInner(
     // compare against this to decide if they qualify as incremental.
     prevRouteRef.current = props.routeHistory;
 
-    // Snap asynchronously. Effect cleanup cancels stale snaps so a
-    // rapid selection change doesn't draw last-driver's lines on top of
-    // current-driver's map.
+    // ── Snap groups ──────────────────────────────────────────────────
+    // Roads API bills per REQUEST (max 100 points), so a 2-point call
+    // costs exactly what a 100-point call costs. Segments exist to paint
+    // per-leg COLOURS, and a colour change does not break the geometry —
+    // so snapping one request per segment is pure waste. Real shifts make
+    // that brutal: dual GPS writers (ELD + phone) interleave LOAD_ROUTE
+    // and SESSION_ROUTE pings, flipping legIndex ~1,200 times in a single
+    // day, which cost ~1,269 requests to draw one map.
+    //
+    // Instead: concatenate consecutive segments into runs that are
+    // geometrically continuous, snap each run whole, then hand each
+    // segment back its own slice via `originalIndex`. Same picture, same
+    // colours, ~16x fewer requests. Runs never span a positional break —
+    // Roads would invent a road across the gap.
+    type GroupMember = {
+      seg: Segment;
+      raw: google.maps.Polyline;
+      startIdx: number; // inclusive index into group.points
+      endIdx: number; // inclusive
+    };
+    type SnapGroup = {
+      members: GroupMember[];
+      points: Array<{ latitude: number; longitude: number }>;
+    };
+    //
+    // Invariant this relies on: `drawables` skips 1-point segments, and a
+    // segment can only stay at 1 point when the segment AFTER it began on
+    // a positional break (otherwise the handoff above appends that ping to
+    // it, making it 2). So a skipped segment is always followed by a break,
+    // which starts a fresh group — two segments that were never adjacent
+    // can't land in the same group and have a real point mistaken for a
+    // shared boundary. Don't drop the break check without revisiting this.
+    const groups: SnapGroup[] = [];
+    for (const { seg, raw } of drawables) {
+      let group = groups[groups.length - 1];
+      if (!group || seg.breaksFromPrev) {
+        group = { members: [], points: [] };
+        groups.push(group);
+      }
+      const isFirst = group.members.length === 0;
+      // Consecutive non-break segments share a boundary point (the
+      // handoff above pushes the next segment's first point onto the
+      // previous one). Contribute it only once.
+      const startIdx = isFirst ? 0 : group.points.length - 1;
+      const contribute = isFirst ? seg.path : seg.path.slice(1);
+      for (const p of contribute) {
+        group.points.push({ latitude: p.lat, longitude: p.lng });
+      }
+      group.members.push({
+        seg,
+        raw,
+        startIdx,
+        endIdx: group.points.length - 1,
+      });
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      const reqs = groups.reduce(
+        (n, g) => n + Math.max(1, Math.ceil((g.points.length - 1) / 99)),
+        0,
+      );
+      // eslint-disable-next-line no-console
+      console.debug('[SessionMap] snap plan', {
+        segments: drawables.length,
+        snapGroups: groups.length,
+        roadsRequests: reqs,
+        wouldHaveBeen: drawables.length,
+      });
+    }
+
     let cancelled = false;
-    if (drawables.length > 0) {
+    if (groups.length > 0) {
       setIsSnapping(true);
-      Promise.all(
-        drawables.map(async ({ seg, raw }) => {
-          const snapped = await snapPathToRoads(
-            seg.path.map((p) => ({ latitude: p.lat, longitude: p.lng })),
-            apiKey,
-          );
-          if (cancelled) return;
-          // Roads API returns the raw input on error → no swap needed.
-          if (snapped.length >= 2) {
-            raw.setPath(
-              snapped.map((p) => ({ lat: p.latitude, lng: p.longitude })),
-            );
-          }
-          // Bump to final opacity. Read focus through the LIVE ref so a
-          // pin toggled while snap was in flight isn't clobbered by the
-          // stale closure value from when this effect first ran.
-          const currentFocus = focusedTripIndexRef.current;
-          const finalOp =
-            currentFocus == null
+      const applyFinalOpacity = (m: GroupMember) => {
+        // Read focus through the LIVE ref so a pin toggled while snap was
+        // in flight isn't clobbered by the stale closure value from when
+        // this effect first ran.
+        const currentFocus = focusedTripIndexRef.current;
+        const finalOp =
+          currentFocus == null
+            ? 0.92
+            : m.seg.legIndex === currentFocus
               ? 0.92
-              : seg.legIndex === currentFocus
-                ? 0.92
-                : 0;
-          raw.setOptions({ strokeOpacity: finalOp });
+              : 0;
+        m.raw.setOptions({ strokeOpacity: finalOp });
+      };
+
+      Promise.all(
+        groups.map(async (group) => {
+          const snapped =
+            group.points.length >= 2
+              ? await snapPathToRoadsIndexed(group.points, apiKey)
+              : null;
+          if (cancelled) return;
+
+          // null = failed, skipped (parked), or breaker tripped. The raw
+          // polyline already on the map is the fallback — leave it.
+          if (snapped) {
+            // Which member owns each input index. Later members win the
+            // shared boundary index, and the crossing logic below re-adds
+            // that point to the earlier member so the lines still meet.
+            const ownerOf = new Int32Array(group.points.length);
+            group.members.forEach((m, i) => {
+              for (let j = m.startIdx; j <= m.endIdx; j++) ownerOf[j] = i;
+            });
+
+            const buckets: google.maps.LatLngLiteral[][] = group.members.map(
+              () => [],
+            );
+            let prevOwner = -1;
+            for (const p of snapped) {
+              const idx = Math.min(
+                Math.max(p.originalIndex, 0),
+                ownerOf.length - 1,
+              );
+              const owner = ownerOf[idx];
+              const xy = { lat: p.latitude, lng: p.longitude };
+              // Close the previous member on the shared point so adjacent
+              // colours touch instead of leaving a hairline gap.
+              if (prevOwner !== -1 && owner !== prevOwner) {
+                buckets[prevOwner].push(xy);
+              }
+              buckets[owner].push(xy);
+              prevOwner = owner;
+            }
+
+            // Roads omits originalIndex for input points it couldn't
+            // match, so a short segment (the dual-writer loadId flapping
+            // makes plenty of 1-2 ping ones) can come back with too few
+            // points to draw. Left alone it would keep its raw stub
+            // wedged between snapped neighbours — a visible kink. Bridge
+            // it from the adjacent buckets instead, so the line stays
+            // continuous and still carries its own leg colour. Snapshot
+            // the edges first: bridging must read the ORIGINAL buckets,
+            // not ones an earlier iteration already widened.
+            const firstOf = buckets.map((b) => b[0]);
+            const lastOf = buckets.map((b) => b[b.length - 1]);
+            for (let i = 0; i < buckets.length; i++) {
+              if (buckets[i].length >= 2) continue;
+              let before: google.maps.LatLngLiteral | undefined;
+              for (let j = i - 1; j >= 0; j--) {
+                if (lastOf[j]) {
+                  before = lastOf[j];
+                  break;
+                }
+              }
+              let after: google.maps.LatLngLiteral | undefined;
+              for (let j = i + 1; j < buckets.length; j++) {
+                if (firstOf[j]) {
+                  after = firstOf[j];
+                  break;
+                }
+              }
+              const bridged = [
+                ...(before ? [before] : []),
+                ...buckets[i],
+                ...(after ? [after] : []),
+              ];
+              if (bridged.length >= 2) buckets[i] = bridged;
+            }
+
+            group.members.forEach((m, i) => {
+              if (buckets[i].length >= 2) m.raw.setPath(buckets[i]);
+            });
+          }
+
+          for (const m of group.members) applyFinalOpacity(m);
         }),
       ).finally(() => {
         if (!cancelled) setIsSnapping(false);
