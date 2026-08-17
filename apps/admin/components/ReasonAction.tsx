@@ -47,6 +47,7 @@ export function ReasonAction({
     setError(null);
     try {
       await onSubmit(reason, form);
+      form.reset();
       setDone(true);
       setOpen(false);
     } catch (err) {
@@ -56,13 +57,28 @@ export function ReasonAction({
     }
   }
 
-  if (done) return <span className="chip chip-ok">done</span>;
-
+  // Collapse back to the button after a success, with the confirmation beside
+  // it. Several of these actions are legitimately repeatable — recording three
+  // payments, issuing more than one credit, adding rate steps — and replacing
+  // the control with a permanent "done" chip made the second one impossible
+  // without reloading the page. Where an action genuinely shouldn't run twice,
+  // the row it belongs to changes state and the control stops rendering on its
+  // own, because every list here is a live query.
   if (!open) {
     return (
-      <button className={`button button-sm${danger ? ' button-danger' : ''}`} onClick={() => setOpen(true)}>
-        {label}
-      </button>
+      <>
+        {done ? <span className="chip chip-ok">done</span> : null}
+        <button
+          className={`button button-sm${danger ? ' button-danger' : ''}`}
+          onClick={() => {
+            setDone(false);
+            setError(null);
+            setOpen(true);
+          }}
+        >
+          {label}
+        </button>
+      </>
     );
   }
 
