@@ -2024,9 +2024,15 @@ function ClusteredOverlayPins({ pins }: { pins: OverlayPin[] }) {
       Math.max(...lats) - Math.min(...lats),
       Math.max(...lngs) - Math.min(...lngs),
     );
-    // Co-located pins (same ping) or already deep: fan out in place.
+    // Co-located pins (same ping) or already deep: open the card. The
+    // click's intent is unambiguous, so bring the card fully into view —
+    // it opens UPWARD from the marker, so pan the marker to sit just
+    // below the viewport center rather than making the user drag the map
+    // to read a card that opened against an edge.
     if (currentZoom >= CLUSTER_EXPAND_ZOOM || span < 0.0005) {
       setExpandedKey(cluster.key);
+      map.panTo({ lat: cluster.latitude, lng: cluster.longitude });
+      map.panBy(0, -110);
       return;
     }
     const bounds = new google.maps.LatLngBounds();
