@@ -1176,6 +1176,9 @@ function MapInner(
       latitude: selectedRow.startLocation.latitude,
       longitude: selectedRow.startLocation.longitude,
       dotColor: '#22B07D',
+      title: 'Shift start',
+      time: hhmm(selectedRow.startedAt),
+      at: selectedRow.startedAt,
       node: (
         <YardPin
           kind="start"
@@ -1194,6 +1197,15 @@ function MapInner(
         latitude: pastRow.endLocation.latitude,
         longitude: pastRow.endLocation.longitude,
         dotColor: presentation.kind === 'timeout-end' ? '#F59E0B' : '#EF4444',
+        title:
+          presentation.kind === 'admin-end'
+            ? 'Shift end — by dispatch'
+            : presentation.kind === 'timeout-end'
+              ? 'Shift end — auto-timeout'
+              : 'Shift end',
+        time: pastRow.endedAt ? hhmm(pastRow.endedAt) : undefined,
+        at: pastRow.endedAt ?? undefined,
+        sub: presentation.detail,
         node: (
           <YardPin
             kind={presentation.kind}
@@ -1220,6 +1232,9 @@ function MapInner(
         latitude: ep.start.latitude,
         longitude: ep.start.longitude,
         dotColor: '#22B07D',
+        title: `Trip ${i + 1} start`,
+        time: hhmm(trip.startedAt ?? 0),
+        at: trip.startedAt ?? undefined,
         node: (
           <YardPin
             kind="start"
@@ -1238,6 +1253,9 @@ function MapInner(
         latitude: ep.end.latitude,
         longitude: ep.end.longitude,
         dotColor: '#EF4444',
+        title: `Trip ${i + 1} end`,
+        time: hhmm(trip.endedAt),
+        at: trip.endedAt,
         node: (
           <YardPin
             kind="end"
@@ -1931,9 +1949,18 @@ interface OverlayPin {
   id: string;
   latitude: number;
   longitude: number;
-  /** Color shown in the cluster badge's dot preview. */
+  /** Color shown in the cluster badge's dot preview and card rows. */
   dotColor: string;
   node: React.ReactNode;
+  /** Card-row text when this pin is inside an expanded cluster. */
+  title: string;
+  time?: string;
+  sub?: string;
+  /** Sort key for card rows (epoch ms). Unset rows sort last. */
+  at?: number;
+  /** Place-identity pins (yard badges) become the card header instead
+   *  of a row. */
+  isPlaceLabel?: boolean;
 }
 
 const CLUSTER_CELL_PX = 44;
@@ -2019,34 +2046,81 @@ function ClusteredOverlayPins({ pins }: { pins: OverlayPin[] }) {
           );
         }
         if (expandedKey === cluster.key) {
-          // Fan-out: members side by side at the shared location, with a
-          // small collapse chip underneath.
+          // Consolidated card — the industry-standard alternative to
+          // spiderfying: every member as a text row (icon dot, label,
+          // time), place-identity pins promoted to the header. Scales to
+          // any member count without icon overlap.
+          const place = cluster.pins.find((p) => p.isPlaceLabel);
+          const rows = cluster.pins
+            .filter((p) => !p.isPlaceLabel)
+            .sort((a, b) => (a.at ?? Number.MAX_SAFE_INTEGER) - (b.at ?? Number.MAX_SAFE_INTEGER));
           return (
-            <React.Fragment key={cluster.key}>
-              {cluster.pins.map((p, i) => (
-                <AdvancedMarker
-                  key={p.id}
-                  position={{ lat: cluster.latitude, lng: cluster.longitude }}
-                  zIndex={700 + i}
-                >
-                  <div style={{ transform: `translateX(${(i - (cluster.pins.length - 1) / 2) * 26}px)` }}>
-                    {p.node}
-                  </div>
-                </AdvancedMarker>
-              ))}
-              <AdvancedMarker
-                position={{ lat: cluster.latitude, lng: cluster.longitude }}
-                zIndex={699}
-                onClick={() => setExpandedKey(null)}
+            <AdvancedMarker
+              key={cluster.key}
+              position={{ lat: cluster.latitude, lng: cluster.longitude }}
+              zIndex={900}
+            >
+              <div
+                className="rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] shadow-md"
+                style={{ minWidth: 200, maxWidth: 260, transform: 'translateY(-6px)' }}
               >
                 <div
-                  className="rounded-full border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-1.5 text-[9px] font-semibold shadow-sm"
-                  style={{ color: 'var(--text-tertiary)', transform: 'translateY(26px)' }}
+                  className="flex items-center justify-between gap-2 border-b border-[var(--border-hairline)] px-2.5 py-1.5"
                 >
-                  ×
+                  <span className="text-[11px] font-semibold text-foreground truncate">
+                    {place ? place.title : `${rows.length} events here`}
+                  </span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setExpandedKey(null);
+                    }}
+                    className="focus-ring inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border-0 bg-transparent cursor-pointer"
+                    style={{ color: 'var(--text-tertiary)' }}
+                  >
+                    ×
+                  </button>
                 </div>
-              </AdvancedMarker>
-            </React.Fragment>
+                <div className="scroll-thin overflow-auto py-1" style={{ maxHeight: 168 }}>
+                  {rows.map((p) => (
+                    <div key={p.id} className="flex items-baseline gap-2 px-2.5 py-1">
+                      <span
+                        aria-hidden
+                        className="shrink-0 self-center"
+                        style={{
+                          width: 8,
+                          height: 8,
+                          borderRadius: 2,
+                          transform: 'rotate(45deg)',
+                          backgroundColor: p.dotColor,
+                        }}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[11px] font-medium text-foreground">
+                          {p.title}
+                        </span>
+                        {p.sub && (
+                          <span
+                            className="block truncate text-[10px]"
+                            style={{ color: 'var(--text-tertiary)' }}
+                          >
+                            {p.sub}
+                          </span>
+                        )}
+                      </span>
+                      {p.time && (
+                        <span
+                          className="num shrink-0 text-[10.5px] tabular-nums"
+                          style={{ color: 'var(--text-secondary)' }}
+                        >
+                          {p.time}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </AdvancedMarker>
           );
         }
         return (
@@ -2130,6 +2204,9 @@ function useGeofencePinDescriptors({
         latitude: event.latitude,
         longitude: event.longitude,
         dotColor: palette[event.eventType],
+        title: `${GEOFENCE_EVENT_LABEL[event.eventType]} · Stop ${event.stopSequenceNumber}`,
+        time: hhmm(event.triggeredAt),
+        at: event.triggeredAt,
         node: (
           <GeofenceDiamond
             color={palette[event.eventType]}
@@ -2170,6 +2247,9 @@ function useGeofencePinDescriptors({
         latitude: event.latitude,
         longitude: event.longitude,
         dotColor: palette[event.eventType],
+        title: `${event.eventType === 'ARRIVED' ? 'Arrived at' : 'Departed'} ${event.yardName}`,
+        time: hhmm(event.triggeredAt),
+        at: event.triggeredAt,
         node: (
           <GeofenceDiamond
             color={palette[event.eventType]}
@@ -2205,6 +2285,8 @@ function useGeofencePinDescriptors({
         latitude: yard.latitude,
         longitude: yard.longitude,
         dotColor: '#9BA3B4',
+        title: `${yard.locationType === 'PARKING' ? 'P' : '⌂'} ${yard.name}`,
+        isPlaceLabel: true,
         node: (
           <div
             title={`${yard.name} · ${yard.locationType === 'PARKING' ? 'Parking' : 'Yard'} · fence ${yard.radiusMeters} m`}
