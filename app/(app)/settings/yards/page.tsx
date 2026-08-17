@@ -17,7 +17,7 @@ import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
 import { YARD_DEFAULT_RADIUS_METERS, EXIT_RADIUS_RATIO } from '@/convex/lib/geo';
-import { Chip, DSCard, DSMiniTable, WBtn } from '@/components/web';
+import { Chip, DSCard, DSMiniTable, SettingsHeader, WBtn } from '@/components/web';
 import {
   Dialog,
   DialogContent,
@@ -222,6 +222,28 @@ function FencePreview({
   );
 }
 
+// Section title — settings-page card vocabulary (same as general/billing).
+function SectionTitle({ children, sub }: { children: React.ReactNode; sub?: React.ReactNode }) {
+  return (
+    <div>
+      <div
+        style={{
+          fontSize: 14,
+          fontWeight: 600,
+          color: 'var(--text-primary)',
+          letterSpacing: -0.005,
+          lineHeight: 1.2,
+        }}
+      >
+        {children}
+      </div>
+      {sub && (
+        <div className="text-[12px] text-[var(--text-tertiary)] mt-1 leading-[16px]">{sub}</div>
+      )}
+    </div>
+  );
+}
+
 export default function YardsSettingsPage() {
   const yards = useYards();
   const createYard = useMutation(api.yardLocations.create);
@@ -326,20 +348,28 @@ export default function YardsSettingsPage() {
   const rows = (yards ?? []).map((y) => ({ ...y, id: y._id as string }));
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-foreground">Yards &amp; parking</h1>
-          <p className="mt-0.5 text-[12.5px] text-[var(--text-secondary)]">
-            Your company&apos;s own locations. Each pin gets a geofence — driver shifts record
-            arriving and departing these places on the Active Sessions map.
-          </p>
-        </div>
-        <WBtn onClick={openCreate}>Add location</WBtn>
-      </div>
+    <div className="flex-1 overflow-hidden flex flex-col min-w-0">
+      <SettingsHeader
+        eyebrow="Settings"
+        title="Yards & parking"
+        subtitle="Your company's own locations — distinct from customer facilities. Each pin gets a geofence, so driver shifts record arriving and departing these places on the Active Sessions map."
+        actions={
+          <WBtn size="sm" variant="primary" leading="plus" onClick={openCreate}>
+            Add location
+          </WBtn>
+        }
+      />
 
-      <DSCard>
-        <DSMiniTable
+      <div className="scroll-thin flex-1 overflow-auto" style={{ background: 'var(--bg-canvas)' }}>
+        <div className="flex flex-col gap-4 min-w-0" style={{ padding: 24, maxWidth: 980 }}>
+          <DSCard
+            title={
+              <SectionTitle sub="The entry fence fires ARRIVED; drivers must cross the wider exit boundary (1.5×) before a DEPARTED records.">
+                Locations
+              </SectionTitle>
+            }
+          >
+            <DSMiniTable
           columns={[
             {
               key: 'name',
@@ -392,14 +422,16 @@ export default function YardsSettingsPage() {
               ),
             },
           ]}
-          rows={rows}
-        />
-        {rows.length === 0 && (
-          <p className="px-4 py-6 text-center text-[12px] italic text-[var(--text-tertiary)]">
-            No yards or parking locations yet — add your first to turn on session geofencing.
-          </p>
-        )}
-      </DSCard>
+              rows={rows}
+            />
+            {rows.length === 0 && (
+              <p className="px-4 py-6 text-center text-[12px] italic text-[var(--text-tertiary)]">
+                No yards or parking locations yet — add your first to turn on session geofencing.
+              </p>
+            )}
+          </DSCard>
+        </div>
+      </div>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg">
