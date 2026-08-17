@@ -506,10 +506,16 @@ export function CreditsPanel({ workosOrgId }: { workosOrgId: string }) {
           const data = new FormData(form);
           const amount = Number(data.get('amount'));
           if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter a positive amount');
+          const raw = String(data.get('createdAt') ?? '').trim();
+          const createdAt = raw ? Date.parse(`${raw}T12:00:00Z`) : undefined;
+          if (createdAt !== undefined && Number.isNaN(createdAt)) {
+            throw new Error('Enter the date as YYYY-MM-DD');
+          }
           await createCredit({
             workosOrgId,
             amount,
             source: data.get('source') as 'goodwill' | 'dispute' | 'service_credit' | 'manual',
+            ...(createdAt !== undefined ? { createdAt } : {}),
             reason,
           });
         }}
@@ -521,6 +527,7 @@ export function CreditsPanel({ workosOrgId }: { workosOrgId: string }) {
           <option value="service_credit">Service credit (SLA)</option>
           <option value="manual">Manual</option>
         </select>
+        <input className="input" type="date" name="createdAt" title="Date the credit arose (blank = today)" />
       </ReasonAction>
     </div>
   );

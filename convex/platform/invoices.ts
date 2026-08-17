@@ -578,6 +578,8 @@ export const recordPayment = mutation({
         createdByEmail: staff.email,
         sourceInvoiceId: args.id,
         sourcePaymentId: paymentId,
+        // The overpayment arrived with the payment, not when it was keyed.
+        createdAt: args.receivedAt ?? now,
       });
     }
 
@@ -851,6 +853,7 @@ export const allocatePayment = mutation({
           ? `Paid ahead on ${reference}: ${args.reason}`
           : `Paid ahead: ${args.reason}`,
         createdByEmail: staff.email,
+        createdAt: receivedAt,
       });
     }
 

@@ -51,11 +51,19 @@ export async function issueCredit(
     createdByEmail: string;
     sourceInvoiceId?: Id<'platformInvoices'>;
     sourcePaymentId?: string;
+    /**
+     * When the credit came into existence — the date the money arrived, not
+     * the date someone keyed it. It decides when the credit could first settle
+     * an invoice, so a credit stamped "today" makes every invoice it later
+     * covers look paid late.
+     */
+    createdAt?: number;
   },
 ): Promise<Id<'platformCredits'>> {
   if (!(args.amount > 0)) throw new ConvexError('Credit amount must be positive');
   const amount = money(args.amount);
   const now = Date.now();
+  const createdAt = Math.min(args.createdAt ?? now, now);
   return await ctx.db.insert('platformCredits', {
     workosOrgId: args.workosOrgId,
     amount,
@@ -67,7 +75,7 @@ export async function issueCredit(
     sourceInvoiceId: args.sourceInvoiceId,
     sourcePaymentId: args.sourcePaymentId,
     applications: [],
-    createdAt: now,
+    createdAt,
     updatedAt: now,
   });
 }
@@ -214,6 +222,8 @@ export const createCredit = mutation({
       v.literal('service_credit'),
       v.literal('manual'),
     ),
+    // The date the credit arose, when that isn't today.
+    createdAt: v.optional(v.number()),
     reason: v.string(),
   },
   returns: v.null(),
@@ -227,6 +237,7 @@ export const createCredit = mutation({
       source: args.source,
       reason: args.reason,
       createdByEmail: staff.email,
+      createdAt: args.createdAt,
     });
     await logPlatformAudit(ctx, {
       actorEmail: staff.email,
