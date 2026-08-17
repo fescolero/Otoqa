@@ -85,17 +85,28 @@ export async function consumeCredits(
   ctx: MutationCtx,
   workosOrgId: string,
   maxAmount: number,
-  invoice: { _id: Id<'platformInvoices'>; invoiceNumber: string },
-): Promise<number> {
-  if (!(maxAmount > 0)) return 0;
+  invoice: { _id: Id<'platformInvoices'>; invoiceNumber: string; issuedAt?: number },
+  explicitAppliedAt?: number,
+): Promise<{ applied: number; appliedAt: number }> {
+  const now = Date.now();
+  if (!(maxAmount > 0)) return { applied: 0, appliedAt: explicitAppliedAt ?? now };
   let budget = money(maxAmount);
   let applied = 0;
-  const now = Date.now();
+  let appliedAt = 0;
 
   for (const credit of await availableCredits(ctx, workosOrgId)) {
     if (budget <= 0) break;
     const take = money(Math.min(credit.remaining, budget));
     if (take <= 0) continue;
+
+    // WHEN this credit could first have settled this invoice: both had to
+    // exist. Stamping "now" instead would make a credit that sat unused for
+    // months read as a payment made months late — the opposite of the truth,
+    // and the customer's reputation is what pays for that mistake. Clamped to
+    // now so a future-dated row can never appear.
+    const effectiveAt =
+      explicitAppliedAt ?? Math.min(now, Math.max(credit.createdAt, invoice.issuedAt ?? 0));
+
     const remaining = money(credit.remaining - take);
     await ctx.db.patch(credit._id, {
       remaining,
@@ -106,15 +117,18 @@ export async function consumeCredits(
           invoiceId: invoice._id,
           invoiceNumber: invoice.invoiceNumber,
           amount: take,
-          appliedAt: now,
+          appliedAt: effectiveAt,
         },
       ],
       updatedAt: now,
     });
     applied = money(applied + take);
     budget = money(budget - take);
+    // An invoice covered by several credits is only settled once the last of
+    // them arrived, so the latest date wins.
+    appliedAt = Math.max(appliedAt, effectiveAt);
   }
-  return applied;
+  return { applied, appliedAt: applied > 0 ? appliedAt : (explicitAppliedAt ?? now) };
 }
 
 /**

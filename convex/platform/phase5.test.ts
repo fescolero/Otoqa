@@ -1056,6 +1056,88 @@ describe('catching up on months of unpaid cycles', () => {
     expect(aging.outstandingNetOfCredit).toBe(9552.8); // the two now agree
   });
 
+  it('dates a credit application to when it could have settled, not to today', async () => {
+    // Credit created in October against an invoice issued in November: the
+    // money was available the whole time, so the invoice was never really
+    // 9 months late — stamping "now" would say it was.
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx, 0));
+    const staff = t.withIdentity(freshStaff());
+    const creditAt = Date.parse('2025-10-15T12:00:00Z');
+    const issuedAt = Date.parse('2025-11-05T12:00:00Z');
+
+    const invoiceId = await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert('platformCredits', {
+        workosOrgId: WORKOS_ORG,
+        amount: 500,
+        remaining: 500,
+        source: 'overpayment',
+        reason: 'Paid ahead in October',
+        status: 'available',
+        createdByEmail: STAFF_EMAIL,
+        applications: [],
+        createdAt: creditAt,
+        updatedAt: creditAt,
+      });
+      return await ctx.db.insert('platformInvoices', {
+        workosOrgId: WORKOS_ORG,
+        periodKey: '2025-11',
+        kind: 'metered',
+        invoiceNumber: 'INV-NOV',
+        loadsWritten: 100,
+        ratePerLoad: 2,
+        lines: [{ kind: 'usage', label: 'usage', amount: 200 }],
+        adjustments: [],
+        subtotal: 200,
+        total: 200,
+        payments: [],
+        amountPaid: 0,
+        status: 'issued',
+        issuedAt,
+        dueAt: issuedAt + 15 * 86_400_000,
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    await staff.mutation(api.platform.invoices.applyCreditToInvoice, {
+      id: invoiceId,
+      reason: 'Applying the October balance',
+    });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.status).toBe('paid');
+    // Settled the day the invoice was issued — the credit already existed.
+    expect(inv.payments[0].receivedAt).toBe(issuedAt);
+    expect(inv.paidAt).toBe(issuedAt);
+    // Which means it reads as paid BEFORE its due date, not months late.
+    expect(inv.paidAt!).toBeLessThan(inv.dueAt!);
+  });
+
+  it('dates to the credit when the credit arrived after the invoice', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+    // Credit created now, invoice issued a moment earlier: the later of the
+    // two is when it could have been settled.
+    await staff.mutation(api.platform.credits.createCredit, {
+      workosOrgId: WORKOS_ORG,
+      amount: 300,
+      source: 'goodwill',
+      reason: 'Later credit',
+    });
+    await staff.mutation(api.platform.invoices.applyCreditToInvoice, {
+      id,
+      reason: 'Apply',
+    });
+
+    const [inv] = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(inv.payments[0].receivedAt).toBeGreaterThanOrEqual(inv.issuedAt!);
+    expect(inv.payments[0].receivedAt).toBeLessThanOrEqual(Date.now());
+  });
+
   it('leaves credit on the account when the invoices cannot absorb it', async () => {
     const t = convexTest(schema);
     await t.run((ctx) => seedOrg(ctx));

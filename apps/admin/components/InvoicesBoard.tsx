@@ -214,6 +214,15 @@ function InvoiceRow({
   const isOpen =
     inv.status === 'issued' || inv.status === 'sent' || inv.status === 'partially_paid';
   const overdue = isOpen && balance > 0 && inv.dueAt != null && Date.now() > inv.dueAt;
+  // How late it was actually settled. Once everything is paid the aging report
+  // reads zero and this history disappears with it — but "always pays 90 days
+  // late" is exactly what you want to know about an account.
+  const daysLate =
+    inv.paidAt != null && inv.dueAt != null
+      ? Math.floor((inv.paidAt - inv.dueAt) / 86_400_000)
+      : null;
+  const daysOverdue =
+    overdue && inv.dueAt != null ? Math.floor((Date.now() - inv.dueAt) / 86_400_000) : null;
 
   return (
     <div className="ticket-row">
@@ -240,6 +249,14 @@ function InvoiceRow({
         ) : null}
         {overpaid > 0 ? (
           <span className="chip chip-ok">+{formatMoney(overpaid)} credited</span>
+        ) : null}
+        {daysOverdue !== null && daysOverdue > 0 ? (
+          <span className="muted">{daysOverdue}d overdue</span>
+        ) : null}
+        {daysLate !== null ? (
+          <span className={daysLate > 0 ? 'chip chip-warn' : 'chip chip-ok'}>
+            {daysLate > 0 ? `paid ${daysLate}d late` : 'paid on time'}
+          </span>
         ) : null}
         {inv.driftDetectedAt ? <span className="chip chip-danger">drift</span> : null}
         {inv.backfilled ? <span className="chip">backfilled</span> : null}
@@ -331,7 +348,15 @@ function InvoiceRow({
                   {p.method}
                   {p.reference ? ` ${p.reference}` : ''}{' '}
                   <span className="muted">
-                    {formatWhen(p.receivedAt)} by {p.recordedByEmail}
+                    {formatWhen(p.receivedAt)}
+                    {inv.dueAt != null && p.amount > 0
+                      ? ` (${
+                          p.receivedAt > inv.dueAt
+                            ? `${Math.floor((p.receivedAt - inv.dueAt) / 86_400_000)}d after due`
+                            : 'before due'
+                        })`
+                      : ''}{' '}
+                    by {p.recordedByEmail}
                     {p.reversalReason ? ` — ${p.reversalReason}` : ''}
                   </span>
                 </span>

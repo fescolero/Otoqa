@@ -434,13 +434,16 @@ export const issueInvoice = mutation({
     // shrink this cycle's taxable subtotal, and the lines are about to freeze.
     // Capped at `total`, so a credit never makes an invoice negative — the
     // unused remainder stays available for the next cycle.
-    const creditApplied =
+    const { applied: creditApplied } =
       total > 0
-        ? await consumeCredits(ctx, invoice.workosOrgId, total, {
-            _id: args.id,
-            invoiceNumber: invoice.invoiceNumber,
-          })
-        : 0;
+        ? await consumeCredits(
+            ctx,
+            invoice.workosOrgId,
+            total,
+            { _id: args.id, invoiceNumber: invoice.invoiceNumber, issuedAt },
+            issuedAt, // credit applied AT issue, by definition
+          )
+        : { applied: 0 };
 
     const payments = [...invoice.payments];
     if (creditApplied > 0) {
@@ -989,6 +992,8 @@ export const allocateCredit = mutation({
     workosOrgId: v.string(),
     // Omit to spend as much as the open invoices can absorb.
     amount: v.optional(v.number()),
+    // Override the derived application date (rarely needed).
+    appliedAt: v.optional(v.number()),
     reason: v.string(),
   },
   returns: v.object({
@@ -1034,10 +1039,13 @@ export const allocateCredit = mutation({
       const want = money(Math.min(balance, budget === Number.POSITIVE_INFINITY ? balance : budget));
       if (want <= 0) continue;
 
-      const part = await consumeCredits(ctx, args.workosOrgId, want, {
-        _id: invoice._id,
-        invoiceNumber: invoice.invoiceNumber,
-      });
+      const { applied: part, appliedAt } = await consumeCredits(
+        ctx,
+        args.workosOrgId,
+        want,
+        { _id: invoice._id, invoiceNumber: invoice.invoiceNumber, issuedAt: invoice.issuedAt },
+        args.appliedAt,
+      );
       if (part <= 0) break; // credit exhausted
 
       const payments = [
@@ -1048,7 +1056,7 @@ export const allocateCredit = mutation({
           method: 'credit' as const,
           reference: 'account credit',
           recordedByEmail: staff.email,
-          receivedAt: now,
+          receivedAt: appliedAt,
         },
       ];
       const amountPaid = sumPayments(payments);
@@ -1059,7 +1067,7 @@ export const allocateCredit = mutation({
         payments,
         amountPaid,
         status,
-        ...(paidInFull ? { paidAt: now } : {}),
+        ...(paidInFull ? { paidAt: appliedAt } : {}),
         updatedAt: now,
       });
       await logPlatformAudit(ctx, {
@@ -1121,6 +1129,8 @@ export const applyCreditToInvoice = mutation({
     id: v.id('platformInvoices'),
     // Omit to apply as much as the balance allows.
     amount: v.optional(v.number()),
+    // Override the derived application date (rarely needed).
+    appliedAt: v.optional(v.number()),
     reason: v.string(),
   },
   returns: v.null(),
@@ -1137,10 +1147,13 @@ export const applyCreditToInvoice = mutation({
     const cap = args.amount !== undefined ? money(Math.min(args.amount, balance)) : balance;
     if (!(cap > 0)) throw new ConvexError('Amount must be positive');
 
-    const applied = await consumeCredits(ctx, invoice.workosOrgId, cap, {
-      _id: args.id,
-      invoiceNumber: invoice.invoiceNumber,
-    });
+    const { applied, appliedAt } = await consumeCredits(
+      ctx,
+      invoice.workosOrgId,
+      cap,
+      { _id: args.id, invoiceNumber: invoice.invoiceNumber, issuedAt: invoice.issuedAt },
+      args.appliedAt,
+    );
     if (applied <= 0) {
       throw new ConvexError('This organization has no available credit');
     }
@@ -1154,7 +1167,9 @@ export const applyCreditToInvoice = mutation({
         method: 'credit' as const,
         reference: 'account credit',
         recordedByEmail: staff.email,
-        receivedAt: now,
+        // Dated when the credit could first have settled this invoice, not
+        // when someone got round to clicking.
+        receivedAt: appliedAt,
       },
     ];
     const amountPaid = sumPayments(payments);
@@ -1162,7 +1177,7 @@ export const applyCreditToInvoice = mutation({
       payments,
       amountPaid,
       status: statusFromLedger(invoice, amountPaid),
-      ...(amountPaid >= invoice.total ? { paidAt: now } : {}),
+      ...(amountPaid >= invoice.total ? { paidAt: appliedAt } : {}),
       updatedAt: now,
     });
     await logPlatformAudit(ctx, {
@@ -1171,7 +1186,7 @@ export const applyCreditToInvoice = mutation({
       targetOrgId: invoice.workosOrgId,
       targetTable: 'platformInvoices',
       targetId: args.id,
-      after: JSON.stringify({ applied, balanceBefore: balance }),
+      after: JSON.stringify({ applied, balanceBefore: balance, appliedAt }),
       reason: args.reason,
     });
     return null;
