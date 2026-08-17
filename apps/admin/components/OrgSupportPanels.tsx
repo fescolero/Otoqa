@@ -533,6 +533,8 @@ export function CreditsPanel({ workosOrgId }: { workosOrgId: string }) {
 export function AllocatePaymentPanel({ workosOrgId }: { workosOrgId: string }) {
   const invoices = useQuery(api.platform.invoices.listInvoices, { workosOrgId });
   const allocate = useMutation(api.platform.invoices.allocatePayment);
+  const allocateCredit = useMutation(api.platform.invoices.allocateCredit);
+  const [creditResult, setCreditResult] = useState<string | null>(null);
   const [result, setResult] = useState<{
     applied: { invoiceNumber: string; periodKey: string; amount: number; status: string }[];
     creditPosted: number;
@@ -605,6 +607,36 @@ export function AllocatePaymentPanel({ workosOrgId }: { workosOrgId: string }) {
           ) : null}
         </div>
       ) : null}
+
+      {/* Credit is never swept in automatically — spending a customer's
+          balance is a decision, so it gets its own button. */}
+      <ReasonAction
+        label="Apply credit across invoices"
+        onSubmit={async (reason, form) => {
+          const raw = String(new FormData(form).get('creditAmount') ?? '').trim();
+          const amount = raw === '' ? undefined : Number(raw);
+          if (amount !== undefined && (!Number.isFinite(amount) || amount <= 0)) {
+            throw new Error('Enter a positive amount, or leave blank to use all of it');
+          }
+          const outcome = await allocateCredit({
+            workosOrgId,
+            ...(amount !== undefined ? { amount } : {}),
+            reason,
+          });
+          setCreditResult(
+            `Applied to ${outcome.applied.length} invoice(s). Still owed ${formatMoney(
+              outcome.stillOwed,
+            )}; credit remaining ${formatMoney(outcome.creditRemaining)}.`,
+          );
+        }}
+      >
+        <input
+          className="input"
+          name="creditAmount"
+          placeholder="Amount (blank = all available credit)"
+        />
+      </ReasonAction>
+      {creditResult ? <p className="muted">{creditResult}</p> : null}
 
       <ReasonAction
         label="Record payment"

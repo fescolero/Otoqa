@@ -980,6 +980,102 @@ describe('catching up on months of unpaid cycles', () => {
     expect(balance.available).toBe(700);
   });
 
+  it('reconstructs an account backfilled as paid: clear the lot, then spend the credit', async () => {
+    // The shape found in production: every metered cycle marked paid by the
+    // backfill, and real payments that had nowhere to land so they became
+    // credit. Outstanding reads $0 while a large credit balance sits beside it.
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx, 0));
+    const staff = t.withIdentity(freshStaff());
+    const periods = ['2025-11', '2025-12', '2026-01', '2026-02'];
+    const amounts = [238.5, 11805.75, 7904.95, 9603.6];
+    const owed = 29552.8;
+
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (const [i, periodKey] of periods.entries()) {
+        await ctx.db.insert('platformInvoices', {
+          workosOrgId: WORKOS_ORG,
+          periodKey,
+          kind: 'metered',
+          invoiceNumber: `INV-BACKFILL-${i}`,
+          loadsWritten: 100,
+          ratePerLoad: 2.65,
+          lines: [{ kind: 'usage', label: 'usage', amount: amounts[i] }],
+          adjustments: [],
+          subtotal: amounts[i],
+          total: amounts[i],
+          payments: [],
+          amountPaid: amounts[i], // the fiction
+          status: 'paid',
+          issuedAt: Date.parse(`${periodKey}-05T12:00:00Z`),
+          dueAt: Date.parse(`${periodKey}-20T12:00:00Z`),
+          backfilled: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+    // Real cash that landed as credit because nothing was open.
+    await staff.mutation(api.platform.credits.createCredit, {
+      workosOrgId: WORKOS_ORG,
+      amount: 20000,
+      source: 'manual',
+      reason: 'Transfers recorded while every invoice was marked paid',
+    });
+
+    let aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(0); // the misleading picture
+    expect(aging.creditAvailable).toBe(20000);
+
+    // 1. Withdraw every unevidenced claim in one action.
+    const cleared = await staff.mutation(api.platform.invoices.clearUnevidencedPayments, {
+      workosOrgId: WORKOS_ORG,
+      reason: 'Backfill assumed payment; none was received for these cycles',
+    });
+    expect(cleared.cleared).toHaveLength(4);
+    expect(cleared.totalRestored).toBe(owed);
+
+    aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(owed);
+    expect(aging.outstandingNetOfCredit).toBe(9552.8); // 29,552.80 − 20,000
+
+    // 2. Spend the credit across them, oldest first.
+    const applied = await staff.mutation(api.platform.invoices.allocateCredit, {
+      workosOrgId: WORKOS_ORG,
+      reason: 'Applying the account balance to the arrears',
+    });
+    expect(applied.stillOwed).toBe(9552.8);
+    expect(applied.creditRemaining).toBe(0);
+    // Oldest cleared first; the cycle the credit ran out on is part-paid.
+    expect(applied.applied[0].periodKey).toBe('2025-11');
+    expect(applied.applied.at(-1)!.status).toBe('partially_paid');
+
+    aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.outstanding).toBe(9552.8);
+    expect(aging.outstandingNetOfCredit).toBe(9552.8); // the two now agree
+  });
+
+  it('leaves credit on the account when the invoices cannot absorb it', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await issuedInvoice(t); // $300 owed
+    const staff = t.withIdentity(freshStaff());
+    await staff.mutation(api.platform.credits.createCredit, {
+      workosOrgId: WORKOS_ORG,
+      amount: 1000,
+      source: 'manual',
+      reason: 'Paid well ahead',
+    });
+
+    const result = await staff.mutation(api.platform.invoices.allocateCredit, {
+      workosOrgId: WORKOS_ORG,
+      reason: 'Apply what fits',
+    });
+    expect(result.stillOwed).toBe(0);
+    expect(result.creditRemaining).toBe(700); // genuinely owed back to them
+  });
+
   it('allocates one transfer across several overdue cycles, oldest first', async () => {
     const t = convexTest(schema);
     await t.run((ctx) => seedOrg(ctx));

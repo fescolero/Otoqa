@@ -116,30 +116,65 @@ export function InvoicesBoard() {
  */
 function LedgerGaps() {
   const gaps = useQuery(api.platform.invoices.paymentLedgerGaps, {});
+  const clearAll = useMutation(api.platform.invoices.clearUnevidencedPayments);
+  const [result, setResult] = useState<string | null>(null);
+
   if (gaps === undefined || gaps.length === 0) return null;
+
+  // Grouped because the usual cause is one backfill over one org's whole
+  // history — the decision is per organization, not per invoice.
+  const byOrg = new Map<string, typeof gaps>();
+  for (const g of gaps) {
+    byOrg.set(g.workosOrgId, [...(byOrg.get(g.workosOrgId) ?? []), g]);
+  }
 
   return (
     <div className="panel panel-attention">
       <h2>Payments without a record ({gaps.length})</h2>
       <p className="subtitle">
-        These are marked paid but carry no matching payment entry, so there is nothing to
-        reconcile against a bank statement and nothing to reverse. Open the invoice and use
-        <strong> Document payment</strong> to fill in how and when the money arrived — it records
-        the payment without changing what was paid.
+        These are marked paid but carry no matching payment entry. Decide which they are:
+        if the money <strong>did</strong> arrive, open the invoice and use{' '}
+        <strong>Document payment</strong> to record how and when. If it never arrived — a
+        backfill assumed it — clear the claim and the invoice goes back to being owed.
       </p>
-      {gaps.map((g) => (
-        <div className="audit-row" key={g._id}>
-          <span className="chip">{g.status.replace('_', ' ')}</span>
-          <strong>{g.invoiceNumber}</strong>
-          <span className="muted">{g.workosOrgId}</span>
-          <span className="muted">{g.periodKey}</span>
-          <span>
-            {formatMoney(g.amountPaid)} paid · {formatMoney(g.documented)} documented
-          </span>
-          <span className="danger-text">{formatMoney(g.undocumented)} unaccounted</span>
-          {g.backfilled ? <span className="chip">backfilled</span> : null}
-        </div>
-      ))}
+      {result ? <p className="muted">{result}</p> : null}
+
+      {[...byOrg.entries()].map(([orgId, rows]) => {
+        const total = Math.round(rows.reduce((s, r) => s + r.undocumented, 0) * 100) / 100;
+        return (
+          <div className="ticket-row" key={orgId}>
+            <div className="audit-row">
+              <strong>{orgId}</strong>
+              <span className="chip chip-warn">{rows.length} invoices</span>
+              <span className="danger-text">{formatMoney(total)} unaccounted</span>
+              <ReasonAction
+                label={`Never paid — clear all ${rows.length}`}
+                danger
+                onSubmit={async (reason) => {
+                  const outcome = await clearAll({ workosOrgId: orgId, reason });
+                  setResult(
+                    `Cleared ${outcome.cleared.length} invoice(s) — ${formatMoney(
+                      outcome.totalRestored,
+                    )} is owed again. Apply the account credit next.`,
+                  );
+                }}
+              />
+            </div>
+            {rows.map((g) => (
+              <div className="audit-row" key={g._id}>
+                <span className="chip">{g.status.replace('_', ' ')}</span>
+                <strong>{g.invoiceNumber}</strong>
+                <span className="muted">{g.periodKey}</span>
+                <span>
+                  {formatMoney(g.amountPaid)} paid · {formatMoney(g.documented)} documented
+                </span>
+                <span className="danger-text">{formatMoney(g.undocumented)} unaccounted</span>
+                {g.backfilled ? <span className="chip">backfilled</span> : null}
+              </div>
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 }

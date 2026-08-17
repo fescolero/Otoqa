@@ -909,6 +909,202 @@ export const clearUnevidencedPayment = mutation({
 });
 
 /**
+ * Withdraw every unevidenced paid claim for one organization.
+ *
+ * The backfill marks a whole history paid in one go, so undoing it one invoice
+ * at a time is a dozen identical decisions with a dozen chances to mistype.
+ * This applies the same rule as the single version to every row that has one:
+ * only the undocumented portion, never a payment that was actually recorded.
+ */
+export const clearUnevidencedPayments = mutation({
+  args: { workosOrgId: v.string(), reason: v.string() },
+  returns: v.object({
+    cleared: v.array(
+      v.object({ invoiceNumber: v.string(), periodKey: v.string(), restored: v.number() }),
+    ),
+    totalRestored: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await requireRecentStaffAuth(ctx);
+    if (!args.reason.trim()) throw new ConvexError('A reason is required');
+
+    const rows = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_org_period', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+
+    const cleared: { invoiceNumber: string; periodKey: string; restored: number }[] = [];
+    let totalRestored = 0;
+
+    for (const invoice of rows) {
+      if (invoice.status === 'draft' || invoice.status === 'void') continue;
+      const documented = sumPayments(invoice.payments);
+      const undocumented = money(invoice.amountPaid - documented);
+      if (undocumented <= 0) continue;
+
+      const status = statusFromLedger(invoice, documented);
+      await ctx.db.patch(invoice._id, {
+        amountPaid: documented,
+        status,
+        ...(documented < invoice.total ? { paidAt: undefined } : {}),
+        updatedAt: Date.now(),
+      });
+      await logPlatformAudit(ctx, {
+        actorEmail: staff.email,
+        action: 'invoice_payment_claim_cleared',
+        targetOrgId: args.workosOrgId,
+        targetTable: 'platformInvoices',
+        targetId: invoice._id,
+        before: JSON.stringify({ amountPaid: invoice.amountPaid, status: invoice.status }),
+        after: JSON.stringify({ amountPaid: documented, status }),
+        reason: args.reason,
+      });
+      cleared.push({
+        invoiceNumber: invoice.invoiceNumber,
+        periodKey: invoice.periodKey,
+        restored: undocumented,
+      });
+      totalRestored = money(totalRestored + undocumented);
+    }
+
+    cleared.sort((a, b) => a.periodKey.localeCompare(b.periodKey));
+    return { cleared, totalRestored };
+  },
+});
+
+/**
+ * Spend an organization's account credit across its open invoices,
+ * oldest-first — the credit counterpart of `allocatePayment`.
+ *
+ * Credit is consumed at issue time, so a balance that accumulated while
+ * invoices sat open (or arrived before those invoices were corrected) has to
+ * be placed by hand. Doing that per invoice is fine for one; for a year of
+ * arrears it is the same tedium as the single-invoice payment split.
+ *
+ * Explicit by design: `allocatePayment` will never sweep credit in on its own,
+ * because spending a customer's balance should be somebody's decision.
+ */
+export const allocateCredit = mutation({
+  args: {
+    workosOrgId: v.string(),
+    // Omit to spend as much as the open invoices can absorb.
+    amount: v.optional(v.number()),
+    reason: v.string(),
+  },
+  returns: v.object({
+    applied: v.array(
+      v.object({
+        invoiceNumber: v.string(),
+        periodKey: v.string(),
+        amount: v.number(),
+        status: v.string(),
+      }),
+    ),
+    creditRemaining: v.number(),
+    stillOwed: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const staff = await requirePlatformStaff(ctx);
+    if (args.amount !== undefined && !(args.amount > 0)) {
+      throw new ConvexError('Amount must be positive');
+    }
+
+    const all = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_org_period', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+    const open = all
+      .filter((inv) => (OPEN_STATUSES as readonly string[]).includes(inv.status))
+      .filter((inv) => money(inv.total - inv.amountPaid) > 0)
+      .sort(
+        (a, b) =>
+          (a.dueAt ?? a.issuedAt ?? 0) - (b.dueAt ?? b.issuedAt ?? 0) ||
+          a.periodKey.localeCompare(b.periodKey),
+      );
+    if (open.length === 0) throw new ConvexError('No open invoices to apply credit to');
+
+    let budget = args.amount !== undefined ? money(args.amount) : Number.POSITIVE_INFINITY;
+    const applied: { invoiceNumber: string; periodKey: string; amount: number; status: string }[] =
+      [];
+    const now = Date.now();
+
+    for (const invoice of open) {
+      if (budget <= 0) break;
+      const balance = money(invoice.total - invoice.amountPaid);
+      const want = money(Math.min(balance, budget === Number.POSITIVE_INFINITY ? balance : budget));
+      if (want <= 0) continue;
+
+      const part = await consumeCredits(ctx, args.workosOrgId, want, {
+        _id: invoice._id,
+        invoiceNumber: invoice.invoiceNumber,
+      });
+      if (part <= 0) break; // credit exhausted
+
+      const payments = [
+        ...invoice.payments,
+        {
+          id: nextPaymentId(invoice),
+          amount: part,
+          method: 'credit' as const,
+          reference: 'account credit',
+          recordedByEmail: staff.email,
+          receivedAt: now,
+        },
+      ];
+      const amountPaid = sumPayments(payments);
+      const paidInFull = amountPaid >= invoice.total;
+      const status = paidInFull ? ('paid' as const) : ('partially_paid' as const);
+
+      await ctx.db.patch(invoice._id, {
+        payments,
+        amountPaid,
+        status,
+        ...(paidInFull ? { paidAt: now } : {}),
+        updatedAt: now,
+      });
+      await logPlatformAudit(ctx, {
+        actorEmail: staff.email,
+        action: 'credit_applied',
+        targetOrgId: args.workosOrgId,
+        targetTable: 'platformInvoices',
+        targetId: invoice._id,
+        after: JSON.stringify({ applied: part, balanceBefore: balance }),
+        reason: args.reason,
+      });
+
+      applied.push({
+        invoiceNumber: invoice.invoiceNumber,
+        periodKey: invoice.periodKey,
+        amount: part,
+        status,
+      });
+      if (budget !== Number.POSITIVE_INFINITY) budget = money(budget - part);
+    }
+
+    // What the account looks like afterwards, so the operator doesn't have to
+    // work it out from three separate figures.
+    const after = await ctx.db
+      .query('platformInvoices')
+      .withIndex('by_org_period', (q) => q.eq('workosOrgId', args.workosOrgId))
+      .collect();
+    const stillOwed = money(
+      after
+        .filter((inv) => (OPEN_STATUSES as readonly string[]).includes(inv.status))
+        .reduce((s, inv) => s + Math.max(0, money(inv.total - inv.amountPaid)), 0),
+    );
+    const remainingCredits = await ctx.db
+      .query('platformCredits')
+      .withIndex('by_org_status', (q) =>
+        q.eq('workosOrgId', args.workosOrgId).eq('status', 'available'),
+      )
+      .collect();
+    const creditRemaining = money(remainingCredits.reduce((s, c) => s + c.remaining, 0));
+
+    return { applied, creditRemaining, stillOwed };
+  },
+});
+
+/**
  * Put existing account credit against an invoice that is ALREADY issued.
  *
  * `issueInvoice` consumes credit at issue time, which covers the normal path —
