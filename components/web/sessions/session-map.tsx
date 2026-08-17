@@ -1149,14 +1149,16 @@ function MapInner(
     });
   }, [trips, props.routeHistory]);
 
-  // Render one trip's bookends. Hidden when focus is set on a different
-  // trip. End pin is only rendered for completed trips — for ACTIVE
-  // ones the driver pin (avatar) is the natural "current" anchor and
-  // adding a red pin would suggest the trip is done.
+  // Render trip bookends ONLY for the pinned (focused) trip. The default
+  // driver view shows just the SESSION's start/end pins — every trip's
+  // bookends at once buried them in load-level noise. End pin is only
+  // rendered for completed trips — for ACTIVE ones the driver pin
+  // (avatar) is the natural "current" anchor and adding a red pin would
+  // suggest the trip is done.
   const renderTripEndpoints = (sessionId: string, driverName: string) => {
     const focused = props.focusedTripIndex ?? null;
     return trips.flatMap((trip, i) => {
-      if (focused != null && focused !== i) return [];
+      if (focused !== i) return [];
       const ep = tripEndpoints[i];
       if (!ep) return [];
       const nodes: React.ReactNode[] = [];
