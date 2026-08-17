@@ -101,6 +101,7 @@ export const NAV: NavSection[] = [
     area: 'settings',
     items: [
       { id: 'general',      label: 'General',         href: '/settings/general' },
+      { id: 'yards',        label: 'Yards & parking', href: '/settings/yards' },
       { id: 'team',         label: 'Team & roles',    href: '/settings/team', area: 'team' },
       { id: 'pay-profiles', label: 'Pay profiles',    href: '/org-settings/pay-profiles', area: 'accounting' },
       { id: 'integrations', label: 'Integrations',    href: '/settings/integrations' },

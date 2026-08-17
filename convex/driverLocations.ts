@@ -618,6 +618,38 @@ export async function ingestBatch(
     });
   }
 
+  // Session-level yard geofence: the batch's latest ping per session is
+  // checked against org yard/parking fences (convex/yardGeofence.ts).
+  // Evaluates ALL pings' sessions (loaded or not — a truck rolling through
+  // the yard mid-load is still a yard visit). Gated on the org having any
+  // yard at all so orgs without them pay one indexed read per batch and
+  // schedule nothing.
+  if (sessionGroups.size > 0) {
+    const hasYards =
+      (await ctx.db
+        .query('yardLocations')
+        .withIndex('by_org', (q) => q.eq('workosOrgId', orgId).eq('isDeleted', false))
+        .first()) !== null;
+    if (hasYards) {
+      for (const [sessionId, group] of sessionGroups) {
+        const session = sessionCache.get(sessionId);
+        if (!session || session.status !== 'active') continue;
+        const latest = group.reduce(newerPing);
+        await ctx.scheduler.runAfter(0, internal.yardGeofence.evaluateSessionYards, {
+          sessionId,
+          driverId: session.driverId,
+          organizationId: orgId,
+          ping: {
+            latitude: latest.latitude,
+            longitude: latest.longitude,
+            recordedAt: latest.recordedAt,
+            accuracy: latest.accuracy,
+          },
+        });
+      }
+    }
+  }
+
   // Phase 1: debounced driverSessions.lastPingAt patch. Reuses the
   // session doc already loaded into sessionCache during validation — no
   // extra reads. Only advances the timestamp; the comparison uses >

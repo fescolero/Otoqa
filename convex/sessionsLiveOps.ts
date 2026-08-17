@@ -500,6 +500,22 @@ export type PastSessionRow = {
   startLocation: { latitude: number; longitude: number } | null;
   endLocation: { latitude: number; longitude: number } | null;
 
+  /**
+   * How the shift ended — drives the end-pin styling on the map.
+   * dispatch_override (with endedByReasonCode) and auto_timeout mean the
+   * driver did NOT end the shift where the end pin sits: the pin is the
+   * last known position, not a deliberate shift end.
+   */
+  endReason:
+    | 'driver_manual'
+    | 'dispatch_override'
+    | 'auto_timeout'
+    | 'next_session_opened'
+    | 'handoff_complete'
+    | 'role_switch'
+    | null;
+  endedByReasonCode: 'emergency' | 'unreachable_driver' | 'phone_issues' | null;
+
   /** Crude distance estimate from successive pings via Haversine. */
   distanceKm: number;
   /** Total pings recorded under this session. */
@@ -609,6 +625,8 @@ export const listSessionsForDay = query({
         activeMs: sessEnd - session.startedAt,
         startLocation: startLoc,
         endLocation: endLoc,
+        endReason: session.endReason ?? null,
+        endedByReasonCode: session.endedByReasonCode ?? null,
         // Distance + ping count are derived client-side once the user
         // selects the driver and `listSessionPingsPage` paginates in.
         // Left as 0 here so the sidebar row + header stats still render

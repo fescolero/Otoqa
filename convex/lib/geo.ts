@@ -44,6 +44,11 @@ export function exitRadiusFor(arrivalRadiusMeters: number | undefined): number {
     : DEPARTURE_RING_METERS;
 }
 
+// Default fence radius for org yard/parking locations (yardLocations table).
+// Yards are far smaller than the load-stop arrival ring — 250 m matches the
+// telematics-industry default for depot fences.
+export const YARD_DEFAULT_RADIUS_METERS = 250;
+
 // Pings with horizontal accuracy worse than this are ignored for departure
 // decisions. Mobile already drops fixes over 50 m before syncing; this is
 // server-side defense in depth (rows without accuracy still count).

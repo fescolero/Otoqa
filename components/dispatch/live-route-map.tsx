@@ -97,19 +97,19 @@ function decodePolylineWithPrecision(
 // per-theme steps validated for CVD separation and surface contrast
 // (dataviz six-checks); every pin also carries a glyph and the legend
 // carries text labels, so type is never encoded by color alone.
-const GEOFENCE_EVENT_STYLE: Record<
+export const GEOFENCE_EVENT_STYLE: Record<
   'LIGHT' | 'DARK',
   Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string>
 > = {
   LIGHT: { APPROACHING: '#F59E0B', ARRIVED: '#10B981', DEPARTED: '#2E5CFF' },
   DARK: { APPROACHING: '#D97706', ARRIVED: '#059669', DEPARTED: '#4C6FFF' },
 };
-const GEOFENCE_EVENT_GLYPH: Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string> = {
+export const GEOFENCE_EVENT_GLYPH: Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string> = {
   APPROACHING: '→',
   ARRIVED: '✓',
   DEPARTED: '↗',
 };
-const GEOFENCE_EVENT_LABEL: Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string> = {
+export const GEOFENCE_EVENT_LABEL: Record<'APPROACHING' | 'ARRIVED' | 'DEPARTED', string> = {
   APPROACHING: 'Approach',
   ARRIVED: 'Arrived',
   DEPARTED: 'Departed',

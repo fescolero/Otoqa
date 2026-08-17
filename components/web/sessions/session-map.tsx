@@ -34,6 +34,11 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { useGoogleMapsKey } from '@/contexts/google-maps-context';
 import { useThemedMapId, useMapColorScheme } from '@/lib/google-map-id';
+import {
+  GEOFENCE_EVENT_STYLE,
+  GEOFENCE_EVENT_GLYPH,
+  GEOFENCE_EVENT_LABEL,
+} from '@/components/dispatch/live-route-map';
 import { snapPathToRoads } from '@/lib/googleRoads';
 import {
   STATUS_TONE,
@@ -1225,11 +1230,36 @@ function MapInner(
           );
         })}
         {props.selectedId && <SelectedDriverPulse {...props} />}
+        {/* Where the selected driver's shift began — the live map's only
+            fixed session bookend (no end yet while active). */}
+        {selectedSession && selectedSession.startLocation && (
+          <AdvancedMarker
+            key={`${selectedSession.sessionId}-session-start`}
+            position={{
+              lat: selectedSession.startLocation.latitude,
+              lng: selectedSession.startLocation.longitude,
+            }}
+            zIndex={600}
+          >
+            <YardPin
+              kind="start"
+              label={selectedSession.driverName}
+              timeLabel={hhmm(selectedSession.startedAt)}
+            />
+          </AdvancedMarker>
+        )}
         {selectedSession &&
           renderTripEndpoints(
             selectedSession.sessionId,
             selectedSession.driverName,
           )}
+        {selectedSession && (
+          <SessionGeofenceLayer
+            sessionId={selectedSession.sessionId}
+            trips={trips}
+            focusedTripIndex={props.focusedTripIndex ?? null}
+          />
+        )}
         {props.showPings && props.routeHistory && selectedSession && (
           <PingDotsLayer
             pings={props.routeHistory}
@@ -1292,6 +1322,7 @@ function MapInner(
             );
           }
           if (s.endLocation) {
+            const endPresentation = endPinPresentation(s);
             pins.push(
               <AdvancedMarker
                 key={`${s.sessionId}-end`}
@@ -1303,17 +1334,61 @@ function MapInner(
                 onClick={() => props.onSelectDriver(s.sessionId)}
               >
                 <YardPin
-                  kind="end"
+                  kind={endPresentation.kind}
                   label={s.driverName}
                   timeLabel={s.endedAt ? hhmm(s.endedAt) : '…'}
+                  detail={endPresentation.detail}
                 />
               </AdvancedMarker>,
             );
           }
           return pins;
         })}
+      {/* Selected driver: session bookends render ALONGSIDE the per-trip
+          pins — the shift's own start/end (styled for dispatch force-end /
+          auto-timeout) frame the trips. */}
+      {selectedPast && selectedPast.startLocation && (
+        <AdvancedMarker
+          key={`${selectedPast.sessionId}-session-start`}
+          position={{
+            lat: selectedPast.startLocation.latitude,
+            lng: selectedPast.startLocation.longitude,
+          }}
+          zIndex={600}
+        >
+          <YardPin
+            kind="start"
+            label={selectedPast.driverName}
+            timeLabel={hhmm(selectedPast.startedAt)}
+          />
+        </AdvancedMarker>
+      )}
+      {selectedPast && selectedPast.endLocation && (
+        <AdvancedMarker
+          key={`${selectedPast.sessionId}-session-end`}
+          position={{
+            lat: selectedPast.endLocation.latitude,
+            lng: selectedPast.endLocation.longitude,
+          }}
+          zIndex={600}
+        >
+          <YardPin
+            kind={endPinPresentation(selectedPast).kind}
+            label={selectedPast.driverName}
+            timeLabel={selectedPast.endedAt ? hhmm(selectedPast.endedAt) : '…'}
+            detail={endPinPresentation(selectedPast).detail}
+          />
+        </AdvancedMarker>
+      )}
       {selectedPast &&
         renderTripEndpoints(selectedPast.sessionId, selectedPast.driverName)}
+      {selectedPast && (
+        <SessionGeofenceLayer
+          sessionId={selectedPast.sessionId}
+          trips={trips}
+          focusedTripIndex={props.focusedTripIndex ?? null}
+        />
+      )}
       {props.showPings && props.routeHistory && selectedPast && (
         <PingDotsLayer
           pings={props.routeHistory}
@@ -1684,19 +1759,43 @@ function LiveDriverPin({
   );
 }
 
+/**
+ * Bookend pin. `start`/`end` are the classic green/red ring-with-dot.
+ * `admin-end` (dispatch force-ended the shift) and `timeout-end`
+ * (auto-timeout) mark that the pin is the LAST KNOWN POSITION, not a
+ * deliberate driver shift end: a square badge with an exclamation glyph
+ * instead of the round dot, red for dispatch, amber for timeout. The
+ * `detail` line joins the hover title (e.g. the force-end reason).
+ */
 function YardPin({
   kind,
   label,
   timeLabel,
+  detail,
 }: {
-  kind: 'start' | 'end';
+  kind: 'start' | 'end' | 'admin-end' | 'timeout-end';
   label: string;
   timeLabel: string;
+  detail?: string;
 }) {
-  const color = kind === 'start' ? '#22B07D' : '#EF4444';
+  const color =
+    kind === 'start'
+      ? '#22B07D'
+      : kind === 'timeout-end'
+        ? '#F59E0B'
+        : '#EF4444';
+  const kindLabel =
+    kind === 'start'
+      ? 'shift start'
+      : kind === 'end'
+        ? 'shift end'
+        : kind === 'timeout-end'
+          ? 'auto-timeout · last known position'
+          : 'ended by dispatch · last known position';
+  const irregular = kind === 'admin-end' || kind === 'timeout-end';
   return (
     <div
-      title={`${label} · ${kind === 'start' ? 'shift start' : 'shift end'} ${timeLabel}`}
+      title={`${label} · ${kindLabel} ${timeLabel}${detail ? ` · ${detail}` : ''}`}
       style={{
         position: 'relative',
         width: 22,
@@ -1708,24 +1807,321 @@ function YardPin({
         style={{
           width: 22,
           height: 22,
-          borderRadius: '50%',
+          borderRadius: irregular ? 5 : '50%',
           background: '#FFFFFF',
           border: `3px solid ${color}`,
         }}
       />
-      <div
-        style={{
-          position: 'absolute',
-          top: 6,
-          left: 6,
-          width: 10,
-          height: 10,
-          borderRadius: '50%',
-          background: color,
-        }}
-      />
+      {irregular ? (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color,
+            fontSize: 12,
+            fontWeight: 800,
+            lineHeight: 1,
+          }}
+        >
+          !
+        </div>
+      ) : (
+        <div
+          style={{
+            position: 'absolute',
+            top: 6,
+            left: 6,
+            width: 10,
+            height: 10,
+            borderRadius: '50%',
+            background: color,
+          }}
+        />
+      )}
     </div>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Geofence layer — selection-scoped:
+//   • a trip is focused (pinned)   → that load's geofence event diamonds
+//     (same pins as the load tracking map; StopFencesLayer draws the rings)
+//   • no trip focused              → SESSION-level geofence: the org's
+//     yard/parking fences as rings + this shift's yard ARRIVED/DEPARTED
+//     trigger diamonds
+// ─────────────────────────────────────────────────────────────────────────
+
+function useGeofenceScheme(): 'LIGHT' | 'DARK' {
+  const colorScheme = useMapColorScheme();
+  return colorScheme === 'DARK' ? 'DARK' : 'LIGHT';
+}
+
+/** Shared diamond marker + click-to-open audit card. */
+function GeofenceDiamond({
+  color,
+  glyph,
+  open,
+  onToggle,
+  card,
+}: {
+  color: string;
+  glyph: string;
+  open: boolean;
+  onToggle: () => void;
+  card: React.ReactNode;
+}) {
+  const scheme = useGeofenceScheme();
+  const ring = scheme === 'DARK' ? '#12151C' : '#FFFFFF';
+  return (
+    <div
+      style={{ position: 'relative', width: 16, height: 16, transform: 'translateY(50%)' }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+    >
+      {open && (
+        <div
+          className="rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-2.5 py-1.5 shadow-md"
+          style={{
+            position: 'absolute',
+            bottom: 24,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            minWidth: 168,
+            zIndex: 5,
+          }}
+        >
+          {card}
+        </div>
+      )}
+      <div
+        className="flex items-center justify-center"
+        style={{
+          width: 16,
+          height: 16,
+          transform: 'rotate(45deg)',
+          borderRadius: 4,
+          backgroundColor: color,
+          border: `2px solid ${ring}`,
+          boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
+        }}
+      >
+        <span
+          style={{
+            transform: 'rotate(-45deg)',
+            color: '#fff',
+            fontSize: 9,
+            fontWeight: 700,
+            lineHeight: 1,
+          }}
+        >
+          {glyph}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** The focused trip's load geofence events (APPROACHING/ARRIVED/DEPARTED). */
+function LoadGeofencePins({ loadId }: { loadId: Id<'loadInformation'> }) {
+  const scheme = useGeofenceScheme();
+  const events = useAuthQuery(api.geofenceEvents.listForLoad, { loadId });
+  const [openId, setOpenId] = React.useState<string | null>(null);
+  if (!events || events.length === 0) return null;
+  const palette = GEOFENCE_EVENT_STYLE[scheme];
+  return (
+    <>
+      {events.map((event) => (
+        <AdvancedMarker
+          key={event._id}
+          position={{ lat: event.latitude, lng: event.longitude }}
+          zIndex={openId === event._id ? 700 : 550}
+        >
+          <GeofenceDiamond
+            color={palette[event.eventType]}
+            glyph={GEOFENCE_EVENT_GLYPH[event.eventType]}
+            open={openId === event._id}
+            onToggle={() => setOpenId(openId === event._id ? null : event._id)}
+            card={
+              <>
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground whitespace-nowrap">
+                  <span style={{ color: palette[event.eventType] }}>
+                    {GEOFENCE_EVENT_GLYPH[event.eventType]}
+                  </span>
+                  {GEOFENCE_EVENT_LABEL[event.eventType]} · Stop {event.stopSequenceNumber}
+                </div>
+                <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground whitespace-nowrap">
+                  {hhmm(event.triggeredAt)}
+                  {' · '}
+                  {event.distanceMeters >= 1000
+                    ? `${(event.distanceMeters / 1000).toFixed(1)} km from stop`
+                    : `${Math.round(event.distanceMeters)} m from stop`}
+                </div>
+                {event.backfilled && (
+                  <div className="mt-0.5 text-[10px] italic text-muted-foreground whitespace-nowrap">
+                    Computed retroactively
+                  </div>
+                )}
+              </>
+            }
+          />
+        </AdvancedMarker>
+      ))}
+    </>
+  );
+}
+
+/** This shift's yard/parking triggers (session-level geofence events). */
+function SessionYardEventPins({ sessionId }: { sessionId: string }) {
+  const scheme = useGeofenceScheme();
+  const events = useAuthQuery(api.yardGeofence.listForSession, {
+    sessionId: sessionId as Id<'driverSessions'>,
+  });
+  const [openId, setOpenId] = React.useState<string | null>(null);
+  if (!events || events.length === 0) return null;
+  const palette = GEOFENCE_EVENT_STYLE[scheme];
+  return (
+    <>
+      {events.map((event) => (
+        <AdvancedMarker
+          key={event._id}
+          position={{ lat: event.latitude, lng: event.longitude }}
+          zIndex={openId === event._id ? 700 : 550}
+        >
+          <GeofenceDiamond
+            color={palette[event.eventType]}
+            glyph={GEOFENCE_EVENT_GLYPH[event.eventType]}
+            open={openId === event._id}
+            onToggle={() => setOpenId(openId === event._id ? null : event._id)}
+            card={
+              <>
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-foreground whitespace-nowrap">
+                  <span style={{ color: palette[event.eventType] }}>
+                    {GEOFENCE_EVENT_GLYPH[event.eventType]}
+                  </span>
+                  {event.eventType === 'ARRIVED' ? 'Arrived at' : 'Departed'} {event.yardName}
+                </div>
+                <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground whitespace-nowrap">
+                  {hhmm(event.triggeredAt)}
+                  {' · '}
+                  {event.yardType === 'PARKING' ? 'Parking' : 'Yard'}
+                  {' · '}
+                  {Math.round(event.distanceMeters)} m from pin
+                </div>
+              </>
+            }
+          />
+        </AdvancedMarker>
+      ))}
+    </>
+  );
+}
+
+/** Org yard/parking fences as rings (entry solid, exit faint). */
+function YardRingsLayer() {
+  const scheme = useGeofenceScheme();
+  const map = useMap();
+  const mapsLibrary = useMapsLibrary('maps');
+  const yards = useAuthQuery(api.yardLocations.list, {});
+
+  React.useEffect(() => {
+    if (!map || !mapsLibrary || !yards || yards.length === 0) return;
+    const stroke = scheme === 'DARK' ? '#5A6172' : '#94a3b8';
+    const circles: google.maps.Circle[] = [];
+    for (const yard of yards) {
+      circles.push(
+        new mapsLibrary.Circle({
+          center: { lat: yard.latitude, lng: yard.longitude },
+          radius: yard.radiusMeters,
+          strokeColor: stroke,
+          strokeOpacity: 0.65,
+          strokeWeight: 2,
+          fillColor: stroke,
+          fillOpacity: 0.08,
+          map,
+        }),
+        new mapsLibrary.Circle({
+          center: { lat: yard.latitude, lng: yard.longitude },
+          radius: yard.exitRadiusMeters,
+          strokeColor: stroke,
+          strokeOpacity: 0.3,
+          strokeWeight: 1.5,
+          fillOpacity: 0,
+          map,
+        }),
+      );
+    }
+    return () => circles.forEach((c) => c.setMap(null));
+  }, [map, mapsLibrary, yards, scheme]);
+
+  if (!yards) return null;
+  return (
+    <>
+      {yards.map((yard) => (
+        <AdvancedMarker
+          key={yard._id}
+          position={{ lat: yard.latitude, lng: yard.longitude }}
+          zIndex={400}
+        >
+          <div
+            title={`${yard.name} · ${yard.locationType === 'PARKING' ? 'Parking' : 'Yard'} · fence ${yard.radiusMeters} m`}
+            className="rounded border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[9px] font-semibold text-foreground shadow-sm"
+          >
+            {yard.locationType === 'PARKING' ? 'P' : '⌂'} {yard.name}
+          </div>
+        </AdvancedMarker>
+      ))}
+    </>
+  );
+}
+
+/**
+ * Selection-scoped dispatcher for the pieces above. Trip focused → that
+ * load's event pins. No focus → yard rings + this session's yard triggers.
+ */
+function SessionGeofenceLayer({
+  sessionId,
+  trips,
+  focusedTripIndex,
+}: {
+  sessionId: string;
+  trips: TripInfo[];
+  focusedTripIndex: number | null;
+}) {
+  const focusedTrip = focusedTripIndex != null ? trips[focusedTripIndex] : undefined;
+  if (focusedTrip?.loadId) {
+    return <LoadGeofencePins loadId={focusedTrip.loadId as Id<'loadInformation'>} />;
+  }
+  return (
+    <>
+      <YardRingsLayer />
+      <SessionYardEventPins sessionId={sessionId} />
+    </>
+  );
+}
+
+/** Bookend-pin kind + hover detail for how a past shift ended. */
+function endPinPresentation(s: {
+  endReason?: PastSessionRow['endReason'];
+  endedByReasonCode?: PastSessionRow['endedByReasonCode'];
+}): { kind: 'end' | 'admin-end' | 'timeout-end'; detail?: string } {
+  if (s.endReason === 'dispatch_override') {
+    const reason =
+      s.endedByReasonCode === 'emergency'
+        ? 'emergency'
+        : s.endedByReasonCode === 'unreachable_driver'
+          ? 'driver unreachable'
+          : s.endedByReasonCode === 'phone_issues'
+            ? 'phone issues'
+            : undefined;
+    return { kind: 'admin-end', detail: reason };
+  }
+  if (s.endReason === 'auto_timeout') return { kind: 'timeout-end' };
+  return { kind: 'end' };
 }
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -3288,6 +3288,64 @@ export default defineSchema({
     .index('by_session', ['sessionId', 'triggeredAt']),
 
   /**
+   * yardLocations — org-owned places (yards, parking lots) with geofence
+   * semantics. Distinct from `facilities`, which are customer-scoped
+   * shipper/receiver sites: a yard belongs to the carrier itself and
+   * anchors SESSION-level geofence triggers (shift start/end at the yard,
+   * mid-shift yard visits) rather than load-stop events.
+   */
+  yardLocations: defineTable({
+    workosOrgId: v.string(),
+    name: v.string(),
+    locationType: v.union(v.literal('YARD'), v.literal('PARKING')),
+
+    // Display address (optional — the pin is authoritative).
+    addressLine1: v.optional(v.string()),
+    city: v.optional(v.string()),
+    state: v.optional(v.string()),
+
+    // The pin + fence. Unset radius = YARD_DEFAULT_RADIUS_METERS; the exit
+    // boundary is EXIT_RADIUS_RATIO × the effective radius, same hysteresis
+    // pattern as load-stop fences.
+    latitude: v.float64(),
+    longitude: v.float64(),
+    radiusMeters: v.optional(v.float64()),
+
+    notes: v.optional(v.string()),
+    isDeleted: v.boolean(),
+    createdBy: v.string(),
+    createdAt: v.float64(),
+    updatedAt: v.float64(),
+  }).index('by_org', ['workosOrgId', 'isDeleted']),
+
+  /**
+   * sessionGeofenceEvents — session-scoped yard triggers: ARRIVED/DEPARTED
+   * at an org yard/parking location, detected from a shift's GPS pings.
+   * The session-level counterpart of geofenceEvents (which requires a
+   * load + stop): powers "left the yard at 6:02 AM / back at 5:41 PM" on
+   * the Active Sessions map and session timelines. Append-only.
+   */
+  sessionGeofenceEvents: defineTable({
+    sessionId: v.id('driverSessions'),
+    driverId: v.id('drivers'),
+    organizationId: v.string(),
+    yardId: v.id('yardLocations'),
+
+    eventType: v.union(v.literal('ARRIVED'), v.literal('DEPARTED')),
+
+    triggeredAt: v.float64(),
+    latitude: v.float64(),
+    longitude: v.float64(),
+    distanceMeters: v.float64(),
+    accuracy: v.optional(v.float64()),
+  })
+    .index('by_session', ['sessionId', 'triggeredAt'])
+    // Last-event lookup per (session, yard) — drives the stateless
+    // arrive/depart alternation in the yard evaluator.
+    .index('by_session_yard', ['sessionId', 'yardId', 'triggeredAt'])
+    .index('by_yard', ['yardId', 'triggeredAt']),
+
+  /**
    * gpsArchiveLog — audit table for the nightly GPS archive cron.
    *
    * One row per successful S3 upload chunk. Write-once, read for retrieval

@@ -104,6 +104,18 @@ export interface PastSessionRow {
   startLocation: { latitude: number; longitude: number } | null;
   endLocation: { latitude: number; longitude: number } | null;
 
+  /** How the shift ended; dispatch_override/auto_timeout style the end pin
+   *  as "last known position", not a deliberate driver shift end. */
+  endReason:
+    | 'driver_manual'
+    | 'dispatch_override'
+    | 'auto_timeout'
+    | 'next_session_opened'
+    | 'handoff_complete'
+    | 'role_switch'
+    | null;
+  endedByReasonCode: 'emergency' | 'unreachable_driver' | 'phone_issues' | null;
+
   distanceKm: number;
   pingCount: number;
   incidents: number;
