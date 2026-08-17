@@ -6,15 +6,16 @@ import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
+import { Badge, EmptyState, PageHeader, Panel } from '@/components/ui';
 import { formatAgo, formatCapped } from '@/lib/format';
 
 export default function OrganizationsPage() {
   return (
     <ConsoleShell>
-      <h1>Organizations</h1>
-      <p className="subtitle">
-        Health snapshots rebuilt every 15 minutes — counts cap at 500.
-      </p>
+      <PageHeader
+        title="Organizations"
+        subtitle="Health snapshots rebuilt every 15 minutes — counts cap at 500."
+      />
       <PanelBoundary label="Organization directory">
         <OrgDirectory />
       </PanelBoundary>
@@ -32,8 +33,7 @@ function OrgDirectory() {
     const rows = q
       ? orgs.filter(
           (o) =>
-            o.name.toLowerCase().includes(q) ||
-            (o.workosOrgId ?? '').toLowerCase().includes(q),
+            o.name.toLowerCase().includes(q) || (o.workosOrgId ?? '').toLowerCase().includes(q),
         )
       : [...orgs];
     rows.sort((a, b) => b.loadsThisCycle - a.loadsThisCycle);
@@ -41,17 +41,27 @@ function OrgDirectory() {
   }, [orgs, search]);
 
   return (
-    <div className="panel">
-      <input
-        className="search"
-        placeholder="Search by name or WorkOS org id…"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-      />
+    <Panel
+      title="Directory"
+      count={filtered?.length}
+      subtitle="sorted by loads this cycle"
+      flush
+      actions={
+        <input
+          className="search"
+          style={{ marginBottom: 0, maxWidth: 260 }}
+          placeholder="Search name or org id…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      }
+    >
       {filtered === undefined ? (
-        <div className="empty">Loading…</div>
+        <EmptyState>Loading…</EmptyState>
       ) : filtered.length === 0 ? (
-        <div className="empty">No organizations match.</div>
+        <EmptyState hint={search ? 'Search matches name and WorkOS org id.' : undefined}>
+          {search ? 'No organizations match that search.' : 'No organizations yet.'}
+        </EmptyState>
       ) : (
         <div className="table-scroll">
           <table className="data-table">
@@ -59,12 +69,12 @@ function OrgDirectory() {
               <tr>
                 <th>Organization</th>
                 <th>Type</th>
-                <th>Loads (cycle)</th>
-                <th>Drivers</th>
-                <th>Members</th>
-                <th>Active shifts</th>
-                <th>Open alerts</th>
-                <th>Flags</th>
+                <th className="num">Loads (cycle)</th>
+                <th className="num">Drivers</th>
+                <th className="num">Members</th>
+                <th className="num">Active shifts</th>
+                <th className="num">Open alerts</th>
+                <th className="num">Flags</th>
                 <th>Snapshot</th>
               </tr>
             </thead>
@@ -75,21 +85,21 @@ function OrgDirectory() {
                     <Link href={`/organizations/${o.organizationId}`} className="row-link">
                       {o.name}
                     </Link>
-                    {o.isDeleted ? <span className="chip chip-danger">deleted</span> : null}
+                    {o.isDeleted ? <Badge tone="danger">deleted</Badge> : null}
                   </td>
-                  <td>{o.orgType ?? '—'}</td>
-                  <td>{formatCapped(o.loadsThisCycle)}</td>
-                  <td>{formatCapped(o.driverCount)}</td>
-                  <td>{formatCapped(o.memberCount)}</td>
-                  <td>{formatCapped(o.activeSessionCount)}</td>
-                  <td>
+                  <td className="muted">{o.orgType ?? '—'}</td>
+                  <td className="num">{formatCapped(o.loadsThisCycle)}</td>
+                  <td className="num">{formatCapped(o.driverCount)}</td>
+                  <td className="num">{formatCapped(o.memberCount)}</td>
+                  <td className="num">{formatCapped(o.activeSessionCount)}</td>
+                  <td className="num">
                     {o.openDispatchAlerts > 0 ? (
-                      <span className="chip chip-warn">{formatCapped(o.openDispatchAlerts)}</span>
+                      <Badge tone="warn">{formatCapped(o.openDispatchAlerts)}</Badge>
                     ) : (
                       '0'
                     )}
                   </td>
-                  <td>{formatCapped(o.flagOverrideCount)}</td>
+                  <td className="num">{formatCapped(o.flagOverrideCount)}</td>
                   <td className="muted">{formatAgo(o.updatedAt)}</td>
                 </tr>
               ))}
@@ -97,6 +107,6 @@ function OrgDirectory() {
           </table>
         </div>
       )}
-    </div>
+    </Panel>
   );
 }

@@ -5,6 +5,7 @@ import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
 import { ReasonAction } from '@/components/ReasonAction';
+import { Badge, EmptyState, PageHeader, Panel } from '@/components/ui';
 import { formatAgo } from '@/lib/format';
 
 /**
@@ -18,8 +19,10 @@ const RUNBOOK_BASE =
 export default function OverviewPage() {
   return (
     <ConsoleShell>
-      <h1>Overview</h1>
-      <p className="subtitle">Open alerts, needs-attention events, and recent staff activity.</p>
+      <PageHeader
+        title="Overview"
+        subtitle="Open alerts, needs-attention events, and recent staff activity."
+      />
       <PanelBoundary label="Self-check">
         <SelfCheck />
       </PanelBoundary>
@@ -51,26 +54,24 @@ function SelfCheck() {
 
   if (unconfigured.length === 0 && jobsBad === 0 && !evaluatorBad) {
     return (
-      <div className="panel">
-        <h2>Self-check</h2>
+      <Panel title="Self-check" tone="ok" flush>
         <div className="audit-row">
-          <span className="chip chip-ok">healthy</span>
+          <Badge tone="ok">healthy</Badge>
           <span className="muted">
             {check.jobs.ok}/{check.jobs.total} jobs on schedule · alert evaluator ran{' '}
             {formatAgo(check.evaluator!.lastRunAt)} · {check.staffAllowlistSize} staff on the
             allowlist
           </span>
         </div>
-      </div>
+      </Panel>
     );
   }
 
   return (
-    <div className="panel panel-attention">
-      <h2>Self-check</h2>
+    <Panel title="Self-check" tone="warn" flush>
       {check.evaluator === null ? (
         <div className="audit-row">
-          <span className="chip chip-danger">alerting</span>
+          <Badge tone="danger">alerting</Badge>
           <span>
             The alert evaluator has never run on this deployment — no alert in this console can
             fire.
@@ -78,7 +79,7 @@ function SelfCheck() {
         </div>
       ) : check.evaluator.state !== 'ok' ? (
         <div className="audit-row">
-          <span className="chip chip-danger">alerting</span>
+          <Badge tone="danger">alerting</Badge>
           <span>
             Alert evaluator is <strong>{check.evaluator.state}</strong> (last run{' '}
             {formatAgo(check.evaluator.lastRunAt)}) — alerts may be silently stalled.
@@ -88,7 +89,7 @@ function SelfCheck() {
 
       {unconfigured.map((i) => (
         <div className="audit-row" key={i.key}>
-          <span className="chip chip-warn">not configured</span>
+          <Badge tone="warn">not configured</Badge>
           <span className="action">{i.label}</span>
           <span className="muted">{i.impact}</span>
         </div>
@@ -96,26 +97,28 @@ function SelfCheck() {
 
       {jobsBad > 0 ? (
         <div className="audit-row">
-          <span className="chip chip-warn">jobs</span>
+          <Badge tone="warn">jobs</Badge>
           <span>
             {check.jobs.stale} stale · {check.jobs.hung} hung · {check.jobs.failing} failing
           </span>
-          <a className="button button-sm" href="/jobs">
-            Jobs board
-          </a>
+          <span className="row-actions">
+            <a className="button button-sm" href="/jobs">
+              Jobs board
+            </a>
+          </span>
         </div>
       ) : null}
 
       {check.jobs.unknown > 0 ? (
         <div className="audit-row">
-          <span className="chip">pending</span>
+          <Badge>pending</Badge>
           <span className="muted">
             {check.jobs.unknown} job(s) have no declared cadence recorded yet — they can&apos;t be
             checked for staleness until their next tick.
           </span>
         </div>
       ) : null}
-    </div>
+    </Panel>
   );
 }
 
@@ -128,28 +131,27 @@ function OpenAlerts() {
 
   if (!alerts || alerts.length === 0) return null;
   return (
-    <div className="panel panel-danger">
-      <h2>Active alerts</h2>
+    <Panel title="Active alerts" count={alerts.length} tone="danger" flush>
       {alerts.map((a) => (
         <div className="ticket-row" key={a._id}>
           <div className="audit-row">
-            <span className={a.severity === 'high' ? 'chip chip-danger' : 'chip chip-warn'}>
-              {a.severity}
-            </span>
+            <Badge tone={a.severity === 'high' ? 'danger' : 'warn'}>{a.severity}</Badge>
             <span className="action">{a.kind}</span>
             <span>{a.message}</span>
             <span className="muted">×{a.count}</span>
             {/* Runbook filenames match the alert kind exactly — see
                 docs/runbooks/README.md. An alert without a remedy attached is
                 just a notification. */}
-            <a
-              className="button button-sm"
-              href={`${RUNBOOK_BASE}/${a.kind}.md`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Runbook ↗
-            </a>
+            <span className="row-actions">
+              <a
+                className="button button-sm"
+                href={`${RUNBOOK_BASE}/${a.kind}.md`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Runbook ↗
+              </a>
+            </span>
           </div>
           <div className="audit-row">
             <span className="muted">
@@ -157,12 +159,13 @@ function OpenAlerts() {
               {a.acknowledgedBy ? ` · acked by ${a.acknowledgedBy}` : ''}
               {a.note ? ` · note: ${a.note}${a.noteBy ? ` (${a.noteBy})` : ''}` : ''}
             </span>
+            <span className="row-actions">
             {a.status === 'open' ? (
               <button className="button button-sm" onClick={() => ack({ alertId: a._id })}>
                 Ack
               </button>
             ) : (
-              <span className="chip">{a.status}</span>
+              <Badge outline>{a.status}</Badge>
             )}
             {/* A note without changing state — "who is on this and what have
                 they tried" is what the next person needs mid-incident. */}
@@ -197,10 +200,11 @@ function OpenAlerts() {
                 <option value="72">3 days</option>
               </select>
             </ReasonAction>
+            </span>
           </div>
         </div>
       ))}
-    </div>
+    </Panel>
   );
 }
 
@@ -210,36 +214,15 @@ function NeedsAttention() {
   const ackAll = useMutation(api.platform.events.ackAllEvents);
 
   return (
-    <div className={events && events.length > 0 ? 'panel panel-attention' : 'panel'}>
-      <h2>Needs attention</h2>
-      {events === undefined ? (
-        <div className="empty">Loading…</div>
-      ) : events.length === 0 ? (
-        <div className="empty">Nothing needs attention. 🎉</div>
-      ) : (
-        <>
-          {events.map((e) => (
-            <div className="audit-row" key={e._id}>
-              <span className="when">{new Date(e.lastSeenAt ?? e.createdAt).toLocaleString()}</span>
-              <span
-                className={`chip ${
-                  e.severity === 'critical' || e.severity === 'error' ? 'chip-danger' : 'chip-warn'
-                }`}
-              >
-                {e.severity}
-              </span>
-              <span className="action">{e.code}</span>
-              <span>{e.message}</span>
-              {(e.occurrences ?? 1) > 1 ? (
-                <span className="muted">×{e.occurrences}</span>
-              ) : null}
-              <button className="button button-sm" onClick={() => ack({ eventId: e._id })}>
-                Ack
-              </button>
-            </div>
-          ))}
-          {/* Acking is safe: an event that recurs after its ack comes back,
-              so the feed can be driven to zero without hiding live problems. */}
+    <Panel
+      title="Needs attention"
+      count={events?.length}
+      tone={events && events.length > 0 ? 'warn' : 'neutral'}
+      flush
+      actions={
+        events && events.length > 0 ? (
+          /* Acking is safe: an event that recurs after its ack comes back, so
+             the feed can be driven to zero without hiding live problems. */
           <ReasonAction
             label="Ack everything older than a day"
             requireReason={false}
@@ -247,33 +230,73 @@ function NeedsAttention() {
               await ackAll({ olderThanMs: 24 * 60 * 60 * 1000 });
             }}
           />
-        </>
+        ) : null
+      }
+    >
+      {events === undefined ? (
+        <EmptyState>Loading…</EmptyState>
+      ) : events.length === 0 ? (
+        <EmptyState hint="Warn-and-above events land here. An acked event returns if the condition recurs.">
+          Nothing needs attention.
+        </EmptyState>
+      ) : (
+        events.map((e) => (
+          <div className="audit-row" key={e._id}>
+            <span className="when">{new Date(e.lastSeenAt ?? e.createdAt).toLocaleString()}</span>
+            <Badge tone={e.severity === 'critical' || e.severity === 'error' ? 'danger' : 'warn'}>
+              {e.severity}
+            </Badge>
+            <span className="action">{e.code}</span>
+            <span>{e.message}</span>
+            {(e.occurrences ?? 1) > 1 ? <span className="muted">×{e.occurrences}</span> : null}
+            <span className="row-actions">
+              <button className="button button-sm" onClick={() => ack({ eventId: e._id })}>
+                Ack
+              </button>
+            </span>
+          </div>
+        ))
       )}
-    </div>
+    </Panel>
   );
 }
 
 function RecentStaffActivity() {
   const rows = useQuery(api.platform.access.recentAuditLog, { limit: 50 });
+  const shown = rows?.slice(0, 12) ?? [];
 
   return (
-    <div className="panel">
-      <h2>Recent platform-staff activity</h2>
+    <Panel
+      title="Recent platform-staff activity"
+      flush
+      actions={
+        <a className="button button-sm" href="/audit">
+          Open audit trail
+        </a>
+      }
+      footer={
+        rows && rows.length > shown.length
+          ? `Showing the ${shown.length} most recent of ${rows.length} in the window — the audit trail has all of them.`
+          : null
+      }
+    >
       {rows === undefined ? (
-        <div className="empty">Loading…</div>
+        <EmptyState>Loading…</EmptyState>
       ) : rows.length === 0 ? (
-        <div className="empty">No staff actions recorded yet.</div>
+        <EmptyState hint="Every staff write is recorded here, including the reason it was given.">
+          No staff actions recorded yet.
+        </EmptyState>
       ) : (
-        rows.map((row) => (
+        shown.map((row) => (
           <div className="audit-row" key={row._id}>
             <span className="when">{new Date(row.timestamp).toLocaleString()}</span>
             <span className="action">{row.action}</span>
             <span>{row.actorEmail}</span>
-            {row.targetOrgId ? <span>org: {row.targetOrgId}</span> : null}
-            {row.reason ? <span>— {row.reason}</span> : null}
+            {row.targetOrgId ? <span className="mono">{row.targetOrgId}</span> : null}
+            {row.reason ? <span className="muted">— {row.reason}</span> : null}
           </div>
         ))
       )}
-    </div>
+    </Panel>
   );
 }

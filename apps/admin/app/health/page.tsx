@@ -6,15 +6,16 @@ import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
 import { ReasonAction } from '@/components/ReasonAction';
+import { Badge, EmptyState, Kpi, PageHeader, Panel, toneFor } from '@/components/ui';
 import { formatAgo, formatCapped } from '@/lib/format';
 
 export default function HealthPage() {
   return (
     <ConsoleShell>
-      <h1>Integration health</h1>
-      <p className="subtitle">
-        Live rollups: FourKites push ticks per org and the external-tracking webhook queue.
-      </p>
+      <PageHeader
+        title="Integration health"
+        subtitle="Live rollups: FourKites push ticks per org and the external-tracking webhook queue."
+      />
       <PanelBoundary label="Integration health">
         <HealthBoard />
       </PanelBoundary>
@@ -28,25 +29,35 @@ function SloSection() {
 
   const pct = (n: number | null) => (n === null ? '—' : `${(n * 100).toFixed(2)}%`);
   const ms = (n: number | null) => (n === null ? '—' : `${n}ms`);
+  const errorRateHigh = slo.partnerApi.errorRate !== null && slo.partnerApi.errorRate > 0.01;
 
   return (
     <div className="kpi-row">
-      <div className={slo.cron.failingNow > 0 ? 'kpi kpi-danger' : 'kpi'}>
-        <div className="kpi-value">{pct(slo.cron.successRate)}</div>
-        <div className="kpi-label">Cron success ({slo.cron.jobs} jobs, {slo.cron.failingNow} failing now)</div>
-      </div>
-      <div className="kpi">
-        <div className="kpi-value">{ms(slo.partnerApi.p95Ms)}</div>
-        <div className="kpi-label">Partner API p95 (last {slo.partnerApi.sample} reqs, p50 {ms(slo.partnerApi.p50Ms)})</div>
-      </div>
-      <div className={slo.partnerApi.errorRate !== null && slo.partnerApi.errorRate > 0.01 ? 'kpi kpi-danger' : 'kpi'}>
-        <div className="kpi-value">{pct(slo.partnerApi.errorRate)}</div>
-        <div className="kpi-label">Partner API 5xx rate</div>
-      </div>
-      <div className="kpi">
-        <div className="kpi-value">{pct(slo.webhooks.successRate)}</div>
-        <div className="kpi-label">Webhook delivery success (retained window)</div>
-      </div>
+      <Kpi
+        label="Cron success"
+        value={pct(slo.cron.successRate)}
+        meter={slo.cron.successRate ?? undefined}
+        tone={slo.cron.failingNow > 0 ? 'danger' : 'ok'}
+        hint={`${slo.cron.jobs} jobs · ${slo.cron.failingNow} failing now`}
+      />
+      <Kpi
+        label="Partner API p95"
+        value={ms(slo.partnerApi.p95Ms)}
+        hint={`last ${slo.partnerApi.sample} reqs · p50 ${ms(slo.partnerApi.p50Ms)}`}
+      />
+      <Kpi
+        label="Partner API 5xx rate"
+        value={pct(slo.partnerApi.errorRate)}
+        tone={errorRateHigh ? 'danger' : 'neutral'}
+        hint={errorRateHigh ? 'above the 1% budget' : 'within the 1% budget'}
+      />
+      <Kpi
+        label="Webhook delivery success"
+        value={pct(slo.webhooks.successRate)}
+        meter={slo.webhooks.successRate ?? undefined}
+        tone="ok"
+        hint="retained window only"
+      />
     </div>
   );
 }
@@ -65,41 +76,51 @@ function DeadLetters() {
   if (rows === undefined || rows.length === 0) return null;
 
   return (
-    <div className="panel panel-attention">
-      <h2>Dead-lettered webhook deliveries ({rows.length})</h2>
-      {result ? <p className="muted">{result}</p> : null}
-      <ReasonAction
-        label={`Requeue all ${rows.length}`}
-        danger
-        onSubmit={async (reason) => {
-          const r = await requeue({ reason });
-          setResult(`Requeued ${r.requeued}; skipped ${r.skipped} (already moving or endpoint gone).`);
-        }}
-      />
+    <Panel
+      title="Dead-lettered webhook deliveries"
+      count={rows.length}
+      tone="warn"
+      flush
+      footer={result}
+      actions={
+        <ReasonAction
+          label={`Requeue all ${rows.length}`}
+          danger
+          onSubmit={async (reason) => {
+            const r = await requeue({ reason });
+            setResult(
+              `Requeued ${r.requeued}; skipped ${r.skipped} (already moving or endpoint gone).`,
+            );
+          }}
+        />
+      }
+    >
       {rows.map((r) => (
         <div className="audit-row" key={r._id}>
-          <span className="muted">{r.workosOrgId}</span>
+          <span className="mono">{r.workosOrgId}</span>
           <span className="action">{r.eventType}</span>
           <span className="muted">{r.attempts} attempts</span>
           <span className="danger-text">
             {r.lastHttpStatus ?? ''} {r.lastErrorMessage ?? ''}
           </span>
           <span className="muted">{formatAgo(r.createdAt)}</span>
-          <ReasonAction
-            label="Requeue"
-            onSubmit={async (reason) => {
-              await requeue({ deliveryIds: [r._id], reason });
-            }}
-          />
+          <span className="row-actions">
+            <ReasonAction
+              label="Requeue"
+              onSubmit={async (reason) => {
+                await requeue({ deliveryIds: [r._id], reason });
+              }}
+            />
+          </span>
         </div>
       ))}
-    </div>
+    </Panel>
   );
 }
 
 function HealthBoard() {
   const health = useQuery(api.platform.health.integrationHealth, {});
-  if (health === undefined) return <div className="empty">Loading…</div>;
+  if (health === undefined) return <EmptyState>Loading…</EmptyState>;
 
   const { fourKites, webhookQueue } = health;
 
@@ -107,22 +128,24 @@ function HealthBoard() {
     <>
       <SloSection />
       <div className="kpi-row">
-        <div className="kpi">
-          <div className="kpi-value">{formatCapped(webhookQueue.pending, webhookQueue.countCap)}</div>
-          <div className="kpi-label">Webhook deliveries pending</div>
-        </div>
-        <div className={webhookQueue.deadLetter > 0 ? 'kpi kpi-danger' : 'kpi'}>
-          <div className="kpi-value">{formatCapped(webhookQueue.deadLetter, webhookQueue.countCap)}</div>
-          <div className="kpi-label">Dead-lettered deliveries</div>
-        </div>
+        <Kpi
+          label="Webhook deliveries pending"
+          value={formatCapped(webhookQueue.pending, webhookQueue.countCap)}
+          hint={`counts cap at ${webhookQueue.countCap}`}
+        />
+        <Kpi
+          label="Dead-lettered deliveries"
+          value={formatCapped(webhookQueue.deadLetter, webhookQueue.countCap)}
+          tone={webhookQueue.deadLetter > 0 ? 'danger' : 'neutral'}
+          hint={webhookQueue.deadLetter > 0 ? 'requeue below' : 'nothing stuck'}
+        />
       </div>
 
       <DeadLetters />
 
-      <div className="panel">
-        <h2>FourKites push — per org</h2>
+      <Panel title="FourKites push" subtitle="per org" count={fourKites.length} flush>
         {fourKites.length === 0 ? (
-          <div className="empty">No orgs with FourKites push configured.</div>
+          <EmptyState>No orgs with FourKites push configured.</EmptyState>
         ) : (
           <div className="table-scroll">
             <table className="data-table">
@@ -130,28 +153,20 @@ function HealthBoard() {
                 <tr>
                   <th>Org (WorkOS id)</th>
                   <th>Last tick</th>
-                  <th>Consecutive transient</th>
+                  <th className="num">Consecutive transient</th>
                   <th>Last error</th>
                 </tr>
               </thead>
               <tbody>
                 {fourKites.map((row) => (
                   <tr key={row._id}>
-                    <td className="muted">{row.workosOrgId}</td>
+                    <td className="mono">{row.workosOrgId}</td>
                     <td>
-                      <span
-                        className={
-                          row.lastTickKind === 'ok' || row.lastTickKind === 'empty'
-                            ? 'chip chip-ok'
-                            : row.lastTickKind === 'all_failed'
-                              ? 'chip chip-danger'
-                              : 'chip chip-warn'
-                        }
-                      >
+                      <Badge tone={toneFor(row.lastTickKind ?? 'unknown')}>
                         {row.lastTickKind ?? 'unknown'}
-                      </span>
+                      </Badge>
                     </td>
-                    <td>{row.consecutiveTransientTicks ?? 0}</td>
+                    <td className="num">{row.consecutiveTransientTicks ?? 0}</td>
                     <td className="danger-text">
                       {row.lastErrorKind
                         ? `${row.lastErrorKind}${row.lastErrorStatus ? ` (${row.lastErrorStatus})` : ''}`
@@ -163,7 +178,7 @@ function HealthBoard() {
             </table>
           </div>
         )}
-      </div>
+      </Panel>
     </>
   );
 }

@@ -179,6 +179,7 @@ import type * as platform_health from "../platform/health.js";
 import type * as platform_invoices from "../platform/invoices.js";
 import type * as platform_jobHealth from "../platform/jobHealth.js";
 import type * as platform_jobs from "../platform/jobs.js";
+import type * as platform_navCounts from "../platform/navCounts.js";
 import type * as platform_orgs from "../platform/orgs.js";
 import type * as platform_selfCheck from "../platform/selfCheck.js";
 import type * as platform_slo from "../platform/slo.js";
@@ -398,6 +399,7 @@ declare const fullApi: ApiFromModules<{
   "platform/invoices": typeof platform_invoices;
   "platform/jobHealth": typeof platform_jobHealth;
   "platform/jobs": typeof platform_jobs;
+  "platform/navCounts": typeof platform_navCounts;
   "platform/orgs": typeof platform_orgs;
   "platform/selfCheck": typeof platform_selfCheck;
   "platform/slo": typeof platform_slo;

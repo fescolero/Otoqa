@@ -15,16 +15,92 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '@otoqa/convex-client';
+import {
+  Activity,
+  Building2,
+  LayoutDashboard,
+  LifeBuoy,
+  Receipt,
+  ScrollText,
+  Timer,
+  ToggleLeft,
+  type LucideIcon,
+} from 'lucide-react';
 
-const NAV = [
-  { label: 'Overview', href: '/' },
-  { label: 'Organizations', href: '/organizations' },
-  { label: 'Billing', href: '/billing' },
-  { label: 'Jobs', href: '/jobs' },
-  { label: 'Health', href: '/health' },
-  { label: 'Tickets', href: '/tickets' },
-  { label: 'Flags', href: '/flags' },
-  { label: 'Audit', href: '/audit' },
+type NavCounts = {
+  alerts: number;
+  alertsHigh: number;
+  tickets: number;
+  jobsBad: number;
+  billingOverdue: number;
+  billingDrafts: number;
+};
+
+type NavItem = {
+  label: string;
+  href: string;
+  icon: LucideIcon;
+  /** Count and dot shown on the item. Absent = nothing to say about it. */
+  signal?: (c: NavCounts) => { count?: number; tone?: 'ok' | 'warn' | 'danger' } | null;
+};
+
+/**
+ * Grouped so the sidebar reads as three jobs rather than eight pages: who we
+ * serve, what the machine is doing, and the record of what we did to it.
+ */
+const NAV: { label: string | null; items: NavItem[] }[] = [
+  {
+    label: null,
+    items: [
+      {
+        label: 'Overview',
+        href: '/',
+        icon: LayoutDashboard,
+        signal: (c) =>
+          c.alerts > 0 ? { count: c.alerts, tone: c.alertsHigh > 0 ? 'danger' : 'warn' } : null,
+      },
+    ],
+  },
+  {
+    label: 'Customers',
+    items: [
+      { label: 'Organizations', href: '/organizations', icon: Building2 },
+      {
+        label: 'Billing',
+        href: '/billing',
+        icon: Receipt,
+        signal: (c) =>
+          c.billingOverdue > 0
+            ? { count: c.billingOverdue, tone: 'danger' }
+            : c.billingDrafts > 0
+              ? { count: c.billingDrafts, tone: 'warn' }
+              : null,
+      },
+      {
+        label: 'Tickets',
+        href: '/tickets',
+        icon: LifeBuoy,
+        signal: (c) => (c.tickets > 0 ? { count: c.tickets, tone: 'warn' } : null),
+      },
+    ],
+  },
+  {
+    label: 'Platform',
+    items: [
+      {
+        label: 'Jobs',
+        href: '/jobs',
+        icon: Timer,
+        signal: (c) => (c.jobsBad > 0 ? { count: c.jobsBad, tone: 'danger' } : null),
+      },
+      { label: 'Health', href: '/health', icon: Activity },
+      { label: 'Flags', href: '/flags', icon: ToggleLeft },
+    ],
+  },
+  {
+    label: 'Record',
+    items: [{ label: 'Audit', href: '/audit', icon: ScrollText }],
+  },
 ];
 
 export function ConsoleShell({ children }: { children: ReactNode }) {
@@ -61,12 +137,19 @@ function GatedShell({ children }: { children: ReactNode }) {
     <div className="console-shell">
       <aside className="console-sidebar">
         <div className="console-brand">
-          otoqa <span>console</span>
+          {/* The mark, inline rather than <img>: it must render before any
+              network round-trip, because this shell is what an operator sees
+              when everything else is broken. */}
+          <svg className="console-brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+            <rect width="64" height="64" rx="14" fill="#2E5CFF" />
+            <circle cx="32" cy="32" r="14.5" fill="none" stroke="#FFFFFF" strokeWidth="7" />
+          </svg>
+          <span className="console-brand-word">otoqa</span>
+          <span className="console-brand-suffix">console</span>
         </div>
         <ShellNav />
         <div className="console-sidebar-footer">
-          {me.email}
-          <br />
+          <span>{me.email}</span>
           <a href="/sign-out">Sign out</a>
         </div>
       </aside>
@@ -77,22 +160,33 @@ function GatedShell({ children }: { children: ReactNode }) {
 
 function ShellNav() {
   const pathname = usePathname();
+  // Counts are advisory chrome: if this query fails or is still in flight the
+  // nav still renders, just without its signals.
+  const counts = useQuery(api.platform.navCounts.navCounts, {});
   return (
-    <>
-      {NAV.map((item) => {
-        const active =
-          item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
-        return (
-          <Link
-            key={item.label}
-            href={item.href}
-            className={`console-nav-item${active ? ' active' : ''}`}
-          >
-            {item.label}
-          </Link>
-        );
-      })}
-    </>
+    <nav className="console-nav">
+      {NAV.map((section, i) => (
+        <div className="nav-section" key={section.label ?? i}>
+          {section.label ? <div className="nav-eyebrow">{section.label}</div> : null}
+          {section.items.map((item) => {
+            const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
+            const signal = counts && item.signal ? item.signal(counts) : null;
+            return (
+              <Link
+                key={item.label}
+                href={item.href}
+                className={`console-nav-item${active ? ' active' : ''}`}
+              >
+                <item.icon strokeWidth={1.75} aria-hidden="true" />
+                <span className="nav-label">{item.label}</span>
+                {signal?.count != null ? <span className="nav-count">{signal.count}</span> : null}
+                {signal?.tone ? <span className={`nav-dot nav-dot-${signal.tone}`} /> : null}
+              </Link>
+            );
+          })}
+        </div>
+      ))}
+    </nav>
   );
 }
 

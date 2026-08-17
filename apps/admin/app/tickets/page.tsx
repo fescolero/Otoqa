@@ -5,6 +5,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
+import { Badge, EmptyState, PageHeader, Panel, toneFor } from '@/components/ui';
 import { formatAgo } from '@/lib/format';
 
 type Status = 'open' | 'in_progress' | 'resolved' | 'closed';
@@ -13,10 +14,10 @@ const STATUSES: (Status | 'all')[] = ['all', 'open', 'in_progress', 'resolved', 
 export default function TicketsPage() {
   return (
     <ConsoleShell>
-      <h1>Support tickets</h1>
-      <p className="subtitle">
-        User reports (web + mobile), staff-filed issues, and automated escalations.
-      </p>
+      <PageHeader
+        title="Support tickets"
+        subtitle="User reports (web + mobile), staff-filed issues, and automated escalations."
+      />
       <PanelBoundary label="Tickets">
         <TicketsBoard />
       </PanelBoundary>
@@ -36,9 +37,10 @@ function TicketsBoard() {
 
   return (
     <>
-      <div className="panel">
+      <Panel title="File a ticket" subtitle="filed as normal severity, assigned to nobody">
         <form
           className="inline-form"
+          style={{ marginTop: 0 }}
           onSubmit={async (e) => {
             e.preventDefault();
             if (!newTitle.trim()) return;
@@ -48,45 +50,56 @@ function TicketsBoard() {
         >
           <input
             className="input input-wide"
-            placeholder="File a ticket…"
+            placeholder="What happened?"
             value={newTitle}
             onChange={(e) => setNewTitle(e.target.value)}
           />
-          <button className="button button-sm" type="submit">
+          <button className="button" type="submit">
             Create
           </button>
         </form>
-      </div>
+      </Panel>
 
-      <div className="chip-row">
-        {STATUSES.map((s) => (
-          <button
-            key={s}
-            className={`chip chip-button${filter === s ? ' chip-ok' : ''}`}
-            onClick={() => setFilter(s)}
-          >
-            {s.replace('_', ' ')}
-          </button>
-        ))}
-      </div>
-
-      <div className="panel">
+      <Panel
+        title="Tickets"
+        count={tickets?.length}
+        flush
+        footer={
+          tickets && tickets.length >= 100
+            ? 'Showing the most recent 100 — narrow with a status filter to see older ones.'
+            : null
+        }
+      >
+        <div className="chip-row" style={{ padding: '10px 12px 0', marginBottom: 0 }}>
+          {STATUSES.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className={`chip chip-button${filter === s ? ' chip-active' : ''}`}
+              onClick={() => setFilter(s)}
+            >
+              {s.replace('_', ' ')}
+            </button>
+          ))}
+        </div>
         {tickets === undefined ? (
-          <div className="empty">Loading…</div>
+          <EmptyState>Loading…</EmptyState>
         ) : tickets.length === 0 ? (
-          <div className="empty">No tickets.</div>
+          <EmptyState
+            hint={
+              filter === 'all'
+                ? 'Reports from the web and mobile apps land here automatically.'
+                : undefined
+            }
+          >
+            {filter === 'all' ? 'No tickets yet.' : `No ${filter.replace('_', ' ')} tickets.`}
+          </EmptyState>
         ) : (
           tickets.map((t) => (
             <div className="ticket-row" key={t._id}>
               <div className="audit-row">
-                <span
-                  className={`chip ${
-                    t.severity === 'urgent' || t.severity === 'high' ? 'chip-danger' : ''
-                  }`}
-                >
-                  {t.severity}
-                </span>
-                <span className="chip">{t.status.replace('_', ' ')}</span>
+                <Badge tone={toneFor(t.severity)}>{t.severity}</Badge>
+                <Badge tone={toneFor(t.status)}>{t.status.replace('_', ' ')}</Badge>
                 <strong>{t.title}</strong>
                 <span className="muted">{formatAgo(t.createdAt)}</span>
               </div>
@@ -96,25 +109,27 @@ function TicketsBoard() {
                   {t.orgId ? ` · org ${t.orgId}` : ''}
                   {t.assignee ? ` · assigned to ${t.assignee}` : ''}
                 </span>
-                <select
-                  className="input"
-                  value={t.status}
-                  onChange={(e) => update({ id: t._id, status: e.target.value as Status })}
-                >
-                  {(['open', 'in_progress', 'resolved', 'closed'] as Status[]).map((s) => (
-                    <option key={s} value={s}>
-                      {s.replace('_', ' ')}
-                    </option>
-                  ))}
-                </select>
-                {!t.assignee ? (
-                  <button
-                    className="button button-sm"
-                    onClick={() => update({ id: t._id, assignToMe: true })}
+                <span className="row-actions">
+                  <select
+                    className="input input-sm"
+                    value={t.status}
+                    onChange={(e) => update({ id: t._id, status: e.target.value as Status })}
                   >
-                    Assign to me
-                  </button>
-                ) : null}
+                    {(['open', 'in_progress', 'resolved', 'closed'] as Status[]).map((s) => (
+                      <option key={s} value={s}>
+                        {s.replace('_', ' ')}
+                      </option>
+                    ))}
+                  </select>
+                  {!t.assignee ? (
+                    <button
+                      className="button button-sm"
+                      onClick={() => update({ id: t._id, assignToMe: true })}
+                    >
+                      Assign to me
+                    </button>
+                  ) : null}
+                </span>
               </div>
               {t.body ? <p className="ticket-body">{t.body}</p> : null}
               {t.resolutionNote ? (
@@ -123,7 +138,7 @@ function TicketsBoard() {
             </div>
           ))
         )}
-      </div>
+      </Panel>
     </>
   );
 }
