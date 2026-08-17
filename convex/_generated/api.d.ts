@@ -181,6 +181,7 @@ import type * as platform_jobHealth from "../platform/jobHealth.js";
 import type * as platform_jobs from "../platform/jobs.js";
 import type * as platform_navCounts from "../platform/navCounts.js";
 import type * as platform_orgs from "../platform/orgs.js";
+import type * as platform_pulse from "../platform/pulse.js";
 import type * as platform_selfCheck from "../platform/selfCheck.js";
 import type * as platform_slo from "../platform/slo.js";
 import type * as platform_snapshots from "../platform/snapshots.js";
@@ -401,6 +402,7 @@ declare const fullApi: ApiFromModules<{
   "platform/jobs": typeof platform_jobs;
   "platform/navCounts": typeof platform_navCounts;
   "platform/orgs": typeof platform_orgs;
+  "platform/pulse": typeof platform_pulse;
   "platform/selfCheck": typeof platform_selfCheck;
   "platform/slo": typeof platform_slo;
   "platform/snapshots": typeof platform_snapshots;

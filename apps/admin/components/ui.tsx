@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Console UI primitives.
  *
@@ -5,12 +7,11 @@
  * class names against app/globals.css rather than inline styles, so the whole
  * console re-skins from one stylesheet and a panel costs no runtime work.
  *
- * They are deliberately thin. Anything that needs state (ReasonAction,
- * PanelBoundary) lives in its own client component; everything here is
- * presentational and safe to render on the server.
+ * They are deliberately thin: only MoreRows and FilterChips hold state, and
+ * anything heavier (ReasonAction, PanelBoundary) lives in its own file.
  */
 
-import type { ReactNode } from 'react';
+import { Children, useState, type ReactNode } from 'react';
 
 export type Tone = 'neutral' | 'ok' | 'warn' | 'danger' | 'info';
 
@@ -196,18 +197,26 @@ export function Badge({
   tone = 'neutral',
   outline = false,
   mono = false,
+  dot = false,
   children,
 }: {
   tone?: Tone;
   outline?: boolean;
   mono?: boolean;
+  /** A leading dot, for a chip that reports a live state rather than a label. */
+  dot?: boolean;
   children: ReactNode;
 }) {
   const classes = ['chip'];
   if (outline) classes.push('chip-outline');
   else if (tone !== 'neutral') classes.push(`chip-${tone}`);
   if (mono) classes.push('chip-mono');
-  return <span className={classes.join(' ')}>{children}</span>;
+  return (
+    <span className={classes.join(' ')}>
+      {dot ? <span className="chip-dot" aria-hidden="true" /> : null}
+      {children}
+    </span>
+  );
 }
 
 /* ------------------------------------------------------------- EmptyState */
@@ -273,5 +282,38 @@ export function FilterChips<T extends string>({
         </button>
       ))}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------- MoreRows */
+
+/**
+ * Shows the first `max` children behind a "+n more" toggle.
+ *
+ * A long feed beside a short panel stretches the page and buries whatever is
+ * under it. Truncating is the design system's first answer for that — before
+ * a bounded scroll, and well before a panel that runs 50 rows down the screen.
+ */
+export function MoreRows({
+  max,
+  moreLabel,
+  children,
+}: {
+  max: number;
+  moreLabel?: (hidden: number) => string;
+  children: ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const all = Children.toArray(children).filter(Boolean);
+  const hidden = expanded ? 0 : Math.max(0, all.length - max);
+  return (
+    <>
+      {hidden ? all.slice(0, max) : all}
+      {hidden || expanded ? (
+        <button type="button" className="more-toggle" onClick={() => setExpanded((e) => !e)}>
+          {expanded ? 'Show fewer' : (moreLabel?.(hidden) ?? `+${hidden} more`)}
+        </button>
+      ) : null}
+    </>
   );
 }

@@ -90,6 +90,20 @@
   --status-neutral-fg: var(--ink-500);
   --status-neutral-bg: var(--ink-100);
 
+  /* ---- Tone applied to a panel: border + header band. Semantic because the
+         dark theme needs translucent tints, not the light 50-step. ---- */
+  --tone-ok-border: rgba(16, 185, 129, 0.38);
+  --tone-ok-head: var(--green-50);
+  --tone-warn-border: rgba(245, 158, 11, 0.4);
+  --tone-warn-head: var(--amber-50);
+  --tone-danger-border: rgba(239, 68, 68, 0.42);
+  --tone-danger-head: var(--red-50);
+  --surface-danger-tint: var(--red-50);
+
+  /* ---- Two surfaces that are neither card nor plate. ---- */
+  --surface-table-head: var(--ink-50);
+  --surface-meter-track: var(--ink-100);
+
   /* ---- Type. --font-display / --font-sans / --font-mono are injected by
          next/font in app/layout.tsx; the stacks here are the fallback. ---- */
   --font-display-fallback: 'Iowan Old Style', Georgia, serif;
@@ -113,6 +127,7 @@
 
   /* ---- Spacing / geometry ---- */
   --sidebar-w: 232px;
+  --topbar-h: 52px;
   --page-max: 1180px;
   --page-px: 28px;
   --page-py: 24px;
@@ -152,6 +167,199 @@
   --transition-control: background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
     box-shadow var(--dur-fast) var(--ease);
+}
+
+
+/* ============================================================ DARK
+
+   Warm-dark, not blue-black: the light theme is paper, so the dark theme is
+   ink on unlit paper rather than a different product. Only the SEMANTIC layer
+   is redefined — every rule below the token block is theme-agnostic, which is
+   why the whole console flips from this one block.
+
+   Status tints invert their CONSTRUCTION, not just their values. On light they
+   are a 50-step wash under a 700-step foreground; on dark, a low-alpha wash of
+   the 500 under a lightened foreground — a solid dark-green chip on a dark
+   plate has nothing separating it from the plate.
+
+   Three states, deliberately: an explicit choice stamps data-theme on <html>,
+   and the default (no attribute) follows the operating system. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    /* The ink scale, unlit. */
+    --ink-900: #f3f3ef;
+    --ink-700: #d6d6d0;
+    --ink-500: #a3a39c;
+    --ink-400: #8a8a83;
+    --ink-300: #5c5c56;
+    --ink-200: #33332f;
+    --ink-100: #262623;
+    --ink-50: #1c1c1a;
+    --paper: #121211;
+    --white: #201f1d;
+
+    --text-primary: var(--ink-900);
+    --text-secondary: var(--ink-500);
+    --text-muted: var(--ink-400);
+    --text-disabled: var(--ink-300);
+    /* A solid action stays the highest-contrast thing on the page. On dark
+       that is near-white with dark text — the inverse of the light theme, not
+       a copy of it. */
+    --text-on-solid: #121211;
+    --text-link: #8ba3ff;
+    --text-danger: #f87171;
+    --text-success: #34d399;
+    --text-warning: #fbbf24;
+
+    --surface-canvas: #121211;
+    --surface-card: #1a1a18;
+    --surface-raised: #201f1d;
+    --surface-sunken: #262623;
+    --surface-nav-active: #2a2a26;
+    --surface-row-hover: rgba(255, 255, 255, 0.035);
+    --surface-overlay: rgba(0, 0, 0, 0.55);
+    --surface-table-head: #1a1a18;
+    --surface-meter-track: #2c2c28;
+    --surface-danger-tint: rgba(239, 68, 68, 0.14);
+
+    --border-card: #32322e;
+    --border-hairline: rgba(255, 255, 255, 0.08);
+    --border-strong: #454540;
+    --border-focus: #6f8dff;
+
+    --accent: #6f8dff;
+    --accent-hover: #8ba3ff;
+    --accent-tint: rgba(46, 92, 255, 0.16);
+    --action-solid: #ededea;
+    --action-solid-hover: #ffffff;
+    --action-quiet-hover: rgba(255, 255, 255, 0.07);
+    --action-quiet-pressed: rgba(255, 255, 255, 0.11);
+
+    --status-ok-fg: #34d399;
+    --status-ok-bg: rgba(16, 185, 129, 0.15);
+    --status-warn-fg: #fbbf24;
+    --status-warn-bg: rgba(245, 158, 11, 0.15);
+    --status-danger-fg: #f87171;
+    --status-danger-bg: rgba(239, 68, 68, 0.16);
+    --status-info-fg: #9db4ff;
+    --status-info-bg: rgba(46, 92, 255, 0.2);
+    --status-neutral-fg: var(--ink-500);
+    --status-neutral-bg: rgba(255, 255, 255, 0.07);
+
+    --tone-ok-border: rgba(16, 185, 129, 0.34);
+    --tone-ok-head: rgba(16, 185, 129, 0.1);
+    --tone-warn-border: rgba(245, 158, 11, 0.36);
+    --tone-warn-head: rgba(245, 158, 11, 0.1);
+    --tone-danger-border: rgba(239, 68, 68, 0.38);
+    --tone-danger-head: rgba(239, 68, 68, 0.11);
+
+    --shadow-popover: 0 8px 24px -8px rgba(0, 0, 0, 0.6), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+    --shadow-focus: 0 0 0 3px rgba(111, 141, 255, 0.25);
+  }
+}
+
+/* An explicit choice wins over the operating system, in both directions.
+   Duplicated rather than shared because a token block cannot be @extended and
+   a preprocessor would be a build step for one file. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --ink-900: #f3f3ef;
+  --ink-700: #d6d6d0;
+  --ink-500: #a3a39c;
+  --ink-400: #8a8a83;
+  --ink-300: #5c5c56;
+  --ink-200: #33332f;
+  --ink-100: #262623;
+  --ink-50: #1c1c1a;
+  --paper: #121211;
+  --white: #201f1d;
+
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-500);
+  --text-muted: var(--ink-400);
+  --text-disabled: var(--ink-300);
+  --text-on-solid: #121211;
+  --text-link: #8ba3ff;
+  --text-danger: #f87171;
+  --text-success: #34d399;
+  --text-warning: #fbbf24;
+
+  --surface-canvas: #121211;
+  --surface-card: #1a1a18;
+  --surface-raised: #201f1d;
+  --surface-sunken: #262623;
+  --surface-nav-active: #2a2a26;
+  --surface-row-hover: rgba(255, 255, 255, 0.035);
+  --surface-overlay: rgba(0, 0, 0, 0.55);
+  --surface-table-head: #1a1a18;
+  --surface-meter-track: #2c2c28;
+  --surface-danger-tint: rgba(239, 68, 68, 0.14);
+
+  --border-card: #32322e;
+  --border-hairline: rgba(255, 255, 255, 0.08);
+  --border-strong: #454540;
+  --border-focus: #6f8dff;
+
+  --accent: #6f8dff;
+  --accent-hover: #8ba3ff;
+  --accent-tint: rgba(46, 92, 255, 0.16);
+  --action-solid: #ededea;
+  --action-solid-hover: #ffffff;
+  --action-quiet-hover: rgba(255, 255, 255, 0.07);
+  --action-quiet-pressed: rgba(255, 255, 255, 0.11);
+
+  --status-ok-fg: #34d399;
+  --status-ok-bg: rgba(16, 185, 129, 0.15);
+  --status-warn-fg: #fbbf24;
+  --status-warn-bg: rgba(245, 158, 11, 0.15);
+  --status-danger-fg: #f87171;
+  --status-danger-bg: rgba(239, 68, 68, 0.16);
+  --status-info-fg: #9db4ff;
+  --status-info-bg: rgba(46, 92, 255, 0.2);
+  --status-neutral-fg: var(--ink-500);
+  --status-neutral-bg: rgba(255, 255, 255, 0.07);
+
+  --tone-ok-border: rgba(16, 185, 129, 0.34);
+  --tone-ok-head: rgba(16, 185, 129, 0.1);
+  --tone-warn-border: rgba(245, 158, 11, 0.36);
+  --tone-warn-head: rgba(245, 158, 11, 0.1);
+  --tone-danger-border: rgba(239, 68, 68, 0.38);
+  --tone-danger-head: rgba(239, 68, 68, 0.11);
+
+  --shadow-popover: 0 8px 24px -8px rgba(0, 0, 0, 0.6), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+  --shadow-focus: 0 0 0 3px rgba(111, 141, 255, 0.25);
+}
+
+/* Two base rules move the wrong way on dark: the link hover darkens toward
+   blue-700, which heads INTO the background. Lighten instead. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) a:hover {
+    color: var(--accent-hover);
+  }
+
+  :root:not([data-theme='light']) ::selection {
+    background: rgba(111, 141, 255, 0.3);
+  }
+
+  :root:not([data-theme='light']) .console-brand-mark {
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+}
+
+:root[data-theme='dark'] a:hover {
+  color: var(--accent-hover);
+}
+
+:root[data-theme='dark'] ::selection {
+  background: rgba(111, 141, 255, 0.3);
+}
+
+:root[data-theme='dark'] .console-brand-mark {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -388,10 +596,111 @@ samp {
 }
 
 .console-main {
-  flex: 1;
   min-width: 0;
   padding: var(--page-py) var(--page-px) 48px;
   max-width: var(--page-max);
+}
+
+/* ============================================================ TOPBAR
+
+   A 52px band above the content column. It carries the two things that are
+   true of the whole session rather than of any one page: WHICH DEPLOYMENT you
+   are about to write to, and whether alerting is actually live. Both belong
+   above every page because getting either wrong is expensive — a write on the
+   wrong deployment, or silence mistaken for calm. */
+
+.console-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.console-topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--topbar-h);
+  flex-shrink: 0;
+  padding: 0 var(--page-px);
+  border-bottom: var(--border-width) solid var(--border-card);
+  background: var(--surface-canvas);
+  font-size: var(--text-data-size);
+  color: var(--text-secondary);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.console-topbar-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.console-topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-topbar svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  flex-shrink: 0;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: var(--btn-h);
+  height: var(--btn-h);
+  padding: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: var(--transition-control);
+}
+
+.icon-button:hover {
+  background: var(--action-quiet-hover);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.icon-button-outline {
+  background: var(--surface-raised);
+  border-color: var(--border-card);
+}
+
+.icon-button svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+/* A count on the bell. Never the only signal — the tone is repeated in the
+   nav dot beside Overview. */
+.icon-button-count {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--red-500);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 
 /* ============================================================ PAGE HEADER */
@@ -561,27 +870,27 @@ samp {
 
 /* Tone tints the border and the header band only. Never a coloured left edge. */
 .panel-attention {
-  border-color: rgba(245, 158, 11, 0.4);
+  border-color: var(--tone-warn-border);
 }
 
 .panel-attention > .panel-head {
-  background: var(--amber-50);
+  background: var(--tone-warn-head);
 }
 
 .panel-danger {
-  border-color: rgba(239, 68, 68, 0.42);
+  border-color: var(--tone-danger-border);
 }
 
 .panel-danger > .panel-head {
-  background: var(--red-50);
+  background: var(--tone-danger-head);
 }
 
 .panel-ok {
-  border-color: rgba(16, 185, 129, 0.38);
+  border-color: var(--tone-ok-border);
 }
 
 .panel-ok > .panel-head {
-  background: var(--green-50);
+  background: var(--tone-ok-head);
 }
 
 .panel p:last-child,
@@ -621,7 +930,7 @@ samp {
 }
 
 .kpi-danger {
-  border-color: rgba(239, 68, 68, 0.42);
+  border-color: var(--tone-danger-border);
 }
 
 .kpi-danger .kpi-value {
@@ -663,7 +972,7 @@ samp {
   flex: 1;
   height: 3px;
   border-radius: 1px;
-  background: var(--ink-100);
+  background: var(--surface-meter-track);
 }
 
 .kpi-meter span.on {
@@ -704,7 +1013,7 @@ samp {
   color: var(--text-muted);
   white-space: nowrap;
   border-bottom: var(--border-width) solid var(--border-card);
-  background: var(--ink-50);
+  background: var(--surface-table-head);
 }
 
 /* Pinned headers for a table that owns its page. */
@@ -743,7 +1052,7 @@ samp {
   height: 4px;
   margin-right: 8px;
   border-radius: 2px;
-  background: var(--ink-100);
+  background: var(--surface-meter-track);
   overflow: hidden;
 }
 
@@ -983,7 +1292,7 @@ samp {
 }
 
 .button-danger:hover {
-  background: var(--red-50);
+  background: var(--surface-danger-tint);
   color: var(--text-danger);
 }
 
@@ -1152,4 +1461,46 @@ select.input {
 
 .denied .button {
   margin-top: 12px;
+}
+
+/* Truncation toggle at the foot of a feed (see MoreRows). */
+.more-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px var(--cell-px);
+  border: none;
+  border-top: var(--border-width) solid var(--border-hairline);
+  background: transparent;
+  color: var(--text-link);
+  font-family: inherit;
+  font-size: var(--text-label-size);
+  text-align: left;
+  cursor: pointer;
+}
+
+.more-toggle:hover {
+  background: var(--surface-row-hover);
+}
+
+.chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+
+/* An alert carries a lot on one line. The message takes the slack and
+   ellipsizes; the actions never wrap away from the thing they act on. */
+.alert-row {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.alert-message {
+  min-width: 0;
+  flex: 1 1 240px;
 }

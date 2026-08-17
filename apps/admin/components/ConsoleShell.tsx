@@ -17,21 +17,26 @@ import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import {
   Activity,
+  Bell,
   Building2,
+  CalendarDays,
   LayoutDashboard,
   LifeBuoy,
+  LogOut,
   Receipt,
   ScrollText,
   Timer,
   ToggleLeft,
   type LucideIcon,
 } from 'lucide-react';
+import { ThemeToggle } from './ThemeToggle';
 
 type NavCounts = {
   alerts: number;
   alertsHigh: number;
   tickets: number;
   jobsBad: number;
+  deadLetters: number;
   billingOverdue: number;
   billingDrafts: number;
 };
@@ -45,8 +50,9 @@ type NavItem = {
 };
 
 /**
- * Grouped so the sidebar reads as three jobs rather than eight pages: who we
- * serve, what the machine is doing, and the record of what we did to it.
+ * The design system's sections: Platform (who we serve and what they owe),
+ * Reliability (is the machine running), Support (the human queue and the
+ * record). Grouping is what turns eight flat links into three questions.
  */
 const NAV: { label: string | null; items: NavItem[] }[] = [
   {
@@ -62,7 +68,7 @@ const NAV: { label: string | null; items: NavItem[] }[] = [
     ],
   },
   {
-    label: 'Customers',
+    label: 'Platform',
     items: [
       { label: 'Organizations', href: '/organizations', icon: Building2 },
       {
@@ -76,16 +82,10 @@ const NAV: { label: string | null; items: NavItem[] }[] = [
               ? { count: c.billingDrafts, tone: 'warn' }
               : null,
       },
-      {
-        label: 'Tickets',
-        href: '/tickets',
-        icon: LifeBuoy,
-        signal: (c) => (c.tickets > 0 ? { count: c.tickets, tone: 'warn' } : null),
-      },
     ],
   },
   {
-    label: 'Platform',
+    label: 'Reliability',
     items: [
       {
         label: 'Jobs',
@@ -93,13 +93,26 @@ const NAV: { label: string | null; items: NavItem[] }[] = [
         icon: Timer,
         signal: (c) => (c.jobsBad > 0 ? { count: c.jobsBad, tone: 'danger' } : null),
       },
-      { label: 'Health', href: '/health', icon: Activity },
-      { label: 'Flags', href: '/flags', icon: ToggleLeft },
+      {
+        label: 'Health',
+        href: '/health',
+        icon: Activity,
+        signal: (c) => (c.deadLetters > 0 ? { count: c.deadLetters, tone: 'warn' } : null),
+      },
     ],
   },
   {
-    label: 'Record',
-    items: [{ label: 'Audit', href: '/audit', icon: ScrollText }],
+    label: 'Support',
+    items: [
+      {
+        label: 'Tickets',
+        href: '/tickets',
+        icon: LifeBuoy,
+        signal: (c) => (c.tickets > 0 ? { count: c.tickets, tone: 'warn' } : null),
+      },
+      { label: 'Flags', href: '/flags', icon: ToggleLeft },
+      { label: 'Audit', href: '/audit', icon: ScrollText },
+    ],
   },
 ];
 
@@ -150,11 +163,92 @@ function GatedShell({ children }: { children: ReactNode }) {
         <ShellNav />
         <div className="console-sidebar-footer">
           <span>{me.email}</span>
-          <a href="/sign-out">Sign out</a>
         </div>
       </aside>
-      <main className="console-main">{children}</main>
+      <div className="console-column">
+        <TopBar />
+        <main className="console-main">{children}</main>
+      </div>
     </div>
+  );
+}
+
+/**
+ * The Convex deployment this console is pointed at, as a human would say it.
+ *
+ * This is the most important string on the page and it used to be nowhere:
+ * the dev and production consoles are visually identical, and every control
+ * here writes money or ends someone's shift. NEXT_PUBLIC_CONSOLE_ENV overrides
+ * it where a friendlier word than the deployment slug is wanted.
+ */
+function deploymentName(): string {
+  const override = process.env.NEXT_PUBLIC_CONSOLE_ENV;
+  if (override) return override;
+  const url = process.env.NEXT_PUBLIC_CONVEX_URL;
+  if (!url) return 'unknown deployment';
+  try {
+    return new URL(url).hostname.split('.')[0];
+  } catch {
+    return 'unknown deployment';
+  }
+}
+
+function TopBar() {
+  const counts = useQuery(api.platform.navCounts.navCounts, {});
+  const check = useQuery(api.platform.selfCheck.consoleSelfCheck, {});
+
+  // "Alerting live" is a claim, so it is derived rather than decorative: the
+  // evaluator must actually be running AND a delivery channel must actually be
+  // configured. Alerts that are recorded and never delivered are not alerting.
+  const evaluatorOk = check?.evaluator != null && check.evaluator.state === 'ok';
+  const deliveryOk = check?.integrations.find((i) => i.key === 'slack_alerts')?.configured ?? false;
+  const alerting = check === undefined ? null : evaluatorOk && deliveryOk;
+  const alertingLabel = !evaluatorOk
+    ? 'evaluator not running'
+    : !deliveryOk
+      ? 'recorded, not delivered'
+      : 'alerting live';
+
+  return (
+    <header className="console-topbar">
+      <span className="console-topbar-left">
+        <CalendarDays strokeWidth={1.75} aria-hidden="true" />
+        {new Date().toLocaleDateString(undefined, {
+          weekday: 'long',
+          month: 'short',
+          day: 'numeric',
+        })}
+        {' · '}
+        <span className="mono" title="Convex deployment this console writes to">
+          {deploymentName()}
+        </span>
+      </span>
+      <span className="console-topbar-right">
+        {alerting === null ? null : (
+          <span
+            className={alerting ? 'chip chip-ok' : 'chip chip-danger'}
+            title="Whether an alert raised right now would actually reach a human"
+          >
+            {alertingLabel}
+          </span>
+        )}
+        <Link
+          className="icon-button icon-button-outline"
+          href="/"
+          aria-label={
+            counts?.alerts ? `${counts.alerts} open alert(s)` : 'No open alerts'
+          }
+          title={counts?.alerts ? `${counts.alerts} open alert(s)` : 'No open alerts'}
+        >
+          <Bell strokeWidth={1.75} aria-hidden="true" />
+          {counts?.alerts ? <span className="icon-button-count">{counts.alerts}</span> : null}
+        </Link>
+        <ThemeToggle />
+        <a className="icon-button" href="/sign-out" aria-label="Sign out" title="Sign out">
+          <LogOut strokeWidth={1.75} aria-hidden="true" />
+        </a>
+      </span>
+    </header>
   );
 }
 

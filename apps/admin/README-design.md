@@ -10,7 +10,8 @@ from the system's own delivery.
 | --- | --- |
 | `app/globals.css` | Tokens and every component class. The whole console re-skins from here. |
 | `components/ui.tsx` | `Panel` `PageHeader` `Kpi` `Badge` `EmptyState` `DetailGrid` `FilterChips` + `toneFor` |
-| `components/ConsoleShell.tsx` | Sidebar, nav groups, nav signals, the access gate |
+| `components/ConsoleShell.tsx` | Sidebar, nav groups, nav signals, the topbar, the access gate |
+| `components/ThemeToggle.tsx` | system / light / dark, written to `<html data-theme>` |
 | `components/ReasonAction.tsx` | The audited-write primitive — every mutation goes through it |
 | `components/PanelBoundary.tsx` | One panel fails, the page survives |
 | `app/layout.tsx` | Instrument Serif / Geist / Geist Mono via `next/font` |
@@ -26,6 +27,15 @@ rather than needing a pass over 40 call sites.
 `#FAFAF8` card, `#E5E5E5` border, `#0E0E0C` ink. Never grey-blue. One accent —
 Otoqa blue `#2E5CFF` — used only for links, focus rings and the active nav
 plate. **Solid buttons are near-black, not blue.**
+
+**Dark is the same product unlit, not a second one.** Only the *semantic* token
+layer is redefined, so every rule below the token block is theme-agnostic and
+the whole console flips from one CSS block. Two things invert rather than
+darken: a solid action becomes near-white with dark text (it is still the
+highest-contrast thing on the page), and a status chip becomes a low-alpha wash
+of the 500-step under a lightened foreground — a solid dark-green chip on a
+dark plate has nothing separating it from the plate. Add a token to `:root` and
+you must add it to **both** dark selectors; there is no preprocessor here.
 
 **Instrument Serif appears exactly twice:** page titles and KPI figures.
 Everything else is Geist; machine values are Geist Mono.
@@ -66,12 +76,26 @@ staleness or cap is unstated cannot be acted on.
   nothing here yet needs one. Adding it before a screen requires it would be
   inventing a pattern to maintain.
 
+## The topbar
+
+52px above the content column, carrying the two facts that are true of the
+whole session rather than of any one page:
+
+- **Which deployment you are about to write to.** The dev and production
+  consoles are visually identical and every control here writes money or ends
+  someone's shift. Derived from `NEXT_PUBLIC_CONVEX_URL`; override the label
+  with `NEXT_PUBLIC_CONSOLE_ENV`.
+- **Whether alerting is live.** Derived, never decorative: the evaluator must
+  be running *and* a delivery channel must be configured. Alerts that are
+  recorded and never delivered are not alerting, and the chip says so.
+
+Plus the bell (open-alert count, links to Overview), the theme toggle, and sign
+out. Sign out lives here rather than in the sidebar footer — it is a session
+action, and it was previously a bare blue link sitting under the staff email
+where it read as part of the address.
+
 ## Not done
 
-- **Dark mode.** The system defines one palette, and inventing a dark ramp for
-  it would be guesswork. If staff want it, the tokens are all in `:root` and a
-  `prefers-color-scheme` block is the whole job — but the ramps need designing,
-  not deriving.
 - **Mobile.** The shell is a fixed 232px sidebar beside a content column; below
   ~900px it does not collapse. Nobody has asked to run the console from a
   phone, and the tables would be unusable there regardless.
@@ -79,3 +103,6 @@ staleness or cap is unstated cannot be acted on.
   a surface is already one click. Worth revisiting if the page count grows.
 - **`prefers-reduced-motion`** zeroes the durations, but nothing in the console
   animates yet beyond control transitions.
+- **The bell is a link, not an inbox.** It shows the open-alert count and goes
+  to Overview. A real notification store would be a feature, not a chrome
+  detail, and Overview already is the list.

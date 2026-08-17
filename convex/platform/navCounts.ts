@@ -40,6 +40,13 @@ export const navCounts = query({
       ctx.db.query('cronHealth').collect(),
     ]);
 
+    // Dead-lettered deliveries: the one Health-page condition that needs a
+    // human rather than just watching.
+    const dead = await ctx.db
+      .query('webhookDeliveryQueue')
+      .withIndex('by_status_next', (q) => q.eq('status', 'DEAD_LETTER'))
+      .take(NAV_SCAN);
+
     // Overdue invoices, not open ones: an invoice inside its terms is not a
     // reason to open the billing board.
     const openInvoices = (
@@ -68,6 +75,7 @@ export const navCounts = query({
       alertsHigh: openAlerts.filter((a) => a.severity === 'high').length,
       tickets: openTickets.length + inProgressTickets.length,
       jobsBad,
+      deadLetters: dead.length,
       billingOverdue: overdue,
       billingDrafts: drafts.length,
     };
