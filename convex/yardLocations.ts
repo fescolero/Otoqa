@@ -24,6 +24,7 @@ const yardValidator = v.object({
   radiusMeters: v.number(), // effective (default applied)
   exitRadiusMeters: v.number(),
   notes: v.union(v.string(), v.null()),
+  updatedAt: v.number(),
 });
 
 function toClientYard(yard: {
@@ -37,6 +38,7 @@ function toClientYard(yard: {
   longitude: number;
   radiusMeters?: number;
   notes?: string;
+  updatedAt: number;
 }) {
   const radius =
     yard.radiusMeters && yard.radiusMeters > 0 ? yard.radiusMeters : YARD_DEFAULT_RADIUS_METERS;
@@ -52,6 +54,7 @@ function toClientYard(yard: {
     radiusMeters: radius,
     exitRadiusMeters: exitRadiusFor(radius),
     notes: yard.notes ?? null,
+    updatedAt: yard.updatedAt,
   };
 }
 
