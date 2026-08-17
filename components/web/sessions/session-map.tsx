@@ -28,6 +28,7 @@ import {
   useMap,
 } from '@vis.gl/react-google-maps';
 import { MarkerClusterer, type Marker } from '@googlemaps/markerclusterer';
+import type { FunctionReturnType } from 'convex/server';
 import { useMapsLibrary } from '@vis.gl/react-google-maps';
 import { useAuthQuery } from '@/hooks/use-auth-query';
 import { api } from '@/convex/_generated/api';
@@ -1149,55 +1150,105 @@ function MapInner(
     });
   }, [trips, props.routeHistory]);
 
-  // Render trip bookends ONLY for the pinned (focused) trip. The default
-  // driver view shows just the SESSION's start/end pins — every trip's
-  // bookends at once buried them in load-level noise. End pin is only
-  // rendered for completed trips — for ACTIVE ones the driver pin
-  // (avatar) is the natural "current" anchor and adding a red pin would
-  // suggest the trip is done.
-  const renderTripEndpoints = (sessionId: string, driverName: string) => {
-    const focused = props.focusedTripIndex ?? null;
-    return trips.flatMap((trip, i) => {
-      if (focused !== i) return [];
-      const ep = tripEndpoints[i];
-      if (!ep) return [];
-      const nodes: React.ReactNode[] = [];
-      if (ep.start) {
-        nodes.push(
-          <AdvancedMarker
-            key={`${sessionId}-trip-${i}-start`}
-            position={{ lat: ep.start.latitude, lng: ep.start.longitude }}
-            zIndex={500}
-          >
-            <YardPin
-              kind="start"
-              label={`${driverName} · Trip ${i + 1}`}
-              timeLabel={hhmm(trip.startedAt ?? 0)}
-            />
-          </AdvancedMarker>,
-        );
-      }
-      // End pin only when the trip has actually completed. Active legs
-      // (no endedAt) intentionally omit it — the live avatar marker
-      // serves that visual role.
-      if (ep.end && trip.endedAt != null && trip.status !== 'ACTIVE') {
-        nodes.push(
-          <AdvancedMarker
-            key={`${sessionId}-trip-${i}-end`}
-            position={{ lat: ep.end.latitude, lng: ep.end.longitude }}
-            zIndex={500}
-          >
-            <YardPin
-              kind="end"
-              label={`${driverName} · Trip ${i + 1}`}
-              timeLabel={hhmm(trip.endedAt)}
-            />
-          </AdvancedMarker>,
-        );
-      }
-      return nodes;
+  // Selected session row (mode-agnostic view of the union).
+  const selectedRow = props.selectedId
+    ? ((props.sessions as Array<LiveSessionRow | PastSessionRow>).find(
+        (s) => s.sessionId === props.selectedId,
+      ) ?? null)
+    : null;
+  const focusedTrip =
+    props.focusedTripIndex != null ? trips[props.focusedTripIndex] : undefined;
+  // Geofence scope: pinned trip -> its load's events; otherwise the
+  // session-level yard layer.
+  const geofence = useGeofencePinDescriptors({
+    loadId: focusedTrip?.loadId ?? null,
+    sessionId: selectedRow && !focusedTrip?.loadId ? selectedRow.sessionId : null,
+  });
+
+  // Bookend descriptors: the SESSION's start/end pins (end styled by how
+  // the shift ended; live shifts have no end yet — the avatar is
+  // "current"), plus the pinned trip's bookends. All flow through
+  // ClusteredOverlayPins so co-located icons stack instead of piling up.
+  const bookendPins: OverlayPin[] = [];
+  if (selectedRow?.startLocation) {
+    bookendPins.push({
+      id: `${selectedRow.sessionId}-session-start`,
+      latitude: selectedRow.startLocation.latitude,
+      longitude: selectedRow.startLocation.longitude,
+      dotColor: '#22B07D',
+      node: (
+        <YardPin
+          kind="start"
+          label={selectedRow.driverName}
+          timeLabel={hhmm(selectedRow.startedAt)}
+        />
+      ),
     });
-  };
+  }
+  if (props.mode === 'past' && selectedRow) {
+    const pastRow = selectedRow as PastSessionRow;
+    if (pastRow.endLocation) {
+      const presentation = endPinPresentation(pastRow);
+      bookendPins.push({
+        id: `${pastRow.sessionId}-session-end`,
+        latitude: pastRow.endLocation.latitude,
+        longitude: pastRow.endLocation.longitude,
+        dotColor: presentation.kind === 'timeout-end' ? '#F59E0B' : '#EF4444',
+        node: (
+          <YardPin
+            kind={presentation.kind}
+            label={pastRow.driverName}
+            timeLabel={pastRow.endedAt ? hhmm(pastRow.endedAt) : '…'}
+            detail={presentation.detail}
+          />
+        ),
+      });
+    }
+  }
+  if (
+    selectedRow &&
+    props.focusedTripIndex != null &&
+    trips[props.focusedTripIndex] &&
+    tripEndpoints[props.focusedTripIndex]
+  ) {
+    const i = props.focusedTripIndex;
+    const trip = trips[i];
+    const ep = tripEndpoints[i];
+    if (ep.start) {
+      bookendPins.push({
+        id: `${selectedRow.sessionId}-trip-${i}-start`,
+        latitude: ep.start.latitude,
+        longitude: ep.start.longitude,
+        dotColor: '#22B07D',
+        node: (
+          <YardPin
+            kind="start"
+            label={`${selectedRow.driverName} · Trip ${i + 1}`}
+            timeLabel={hhmm(trip.startedAt ?? 0)}
+          />
+        ),
+      });
+    }
+    // End pin only when the trip has actually completed. Active legs
+    // (no endedAt) intentionally omit it — the live avatar marker
+    // serves that visual role.
+    if (ep.end && trip.endedAt != null && trip.status !== 'ACTIVE') {
+      bookendPins.push({
+        id: `${selectedRow.sessionId}-trip-${i}-end`,
+        latitude: ep.end.latitude,
+        longitude: ep.end.longitude,
+        dotColor: '#EF4444',
+        node: (
+          <YardPin
+            kind="end"
+            label={`${selectedRow.driverName} · Trip ${i + 1}`}
+            timeLabel={hhmm(trip.endedAt)}
+          />
+        ),
+      });
+    }
+  }
+  const overlayPins = [...bookendPins, ...geofence.pins];
 
   if (props.mode === 'live') {
     const selectedSession = props.selectedId
@@ -1232,36 +1283,10 @@ function MapInner(
           );
         })}
         {props.selectedId && <SelectedDriverPulse {...props} />}
-        {/* Where the selected driver's shift began — the live map's only
-            fixed session bookend (no end yet while active). */}
-        {selectedSession && selectedSession.startLocation && (
-          <AdvancedMarker
-            key={`${selectedSession.sessionId}-session-start`}
-            position={{
-              lat: selectedSession.startLocation.latitude,
-              lng: selectedSession.startLocation.longitude,
-            }}
-            zIndex={600}
-          >
-            <YardPin
-              kind="start"
-              label={selectedSession.driverName}
-              timeLabel={hhmm(selectedSession.startedAt)}
-            />
-          </AdvancedMarker>
-        )}
-        {selectedSession &&
-          renderTripEndpoints(
-            selectedSession.sessionId,
-            selectedSession.driverName,
-          )}
-        {selectedSession && (
-          <SessionGeofenceLayer
-            sessionId={selectedSession.sessionId}
-            trips={trips}
-            focusedTripIndex={props.focusedTripIndex ?? null}
-          />
-        )}
+        {/* Session bookends + geofence pins, clustered so co-located
+            icons stack into a count badge at low zoom. */}
+        {selectedSession && !focusedTrip?.loadId && <YardRingCircles yards={geofence.yards} />}
+        {selectedSession && <ClusteredOverlayPins pins={overlayPins} />}
         {props.showPings && props.routeHistory && selectedSession && (
           <PingDotsLayer
             pings={props.routeHistory}
@@ -1346,51 +1371,11 @@ function MapInner(
           }
           return pins;
         })}
-      {/* Selected driver: session bookends render ALONGSIDE the per-trip
-          pins — the shift's own start/end (styled for dispatch force-end /
-          auto-timeout) frame the trips. */}
-      {selectedPast && selectedPast.startLocation && (
-        <AdvancedMarker
-          key={`${selectedPast.sessionId}-session-start`}
-          position={{
-            lat: selectedPast.startLocation.latitude,
-            lng: selectedPast.startLocation.longitude,
-          }}
-          zIndex={600}
-        >
-          <YardPin
-            kind="start"
-            label={selectedPast.driverName}
-            timeLabel={hhmm(selectedPast.startedAt)}
-          />
-        </AdvancedMarker>
-      )}
-      {selectedPast && selectedPast.endLocation && (
-        <AdvancedMarker
-          key={`${selectedPast.sessionId}-session-end`}
-          position={{
-            lat: selectedPast.endLocation.latitude,
-            lng: selectedPast.endLocation.longitude,
-          }}
-          zIndex={600}
-        >
-          <YardPin
-            kind={endPinPresentation(selectedPast).kind}
-            label={selectedPast.driverName}
-            timeLabel={selectedPast.endedAt ? hhmm(selectedPast.endedAt) : '…'}
-            detail={endPinPresentation(selectedPast).detail}
-          />
-        </AdvancedMarker>
-      )}
-      {selectedPast &&
-        renderTripEndpoints(selectedPast.sessionId, selectedPast.driverName)}
-      {selectedPast && (
-        <SessionGeofenceLayer
-          sessionId={selectedPast.sessionId}
-          trips={trips}
-          focusedTripIndex={props.focusedTripIndex ?? null}
-        />
-      )}
+      {/* Selected driver: session bookends (end pin styled for dispatch
+          force-end / auto-timeout), pinned-trip bookends, and geofence
+          pins — clustered so co-located icons stack at low zoom. */}
+      {selectedPast && !focusedTrip?.loadId && <YardRingCircles yards={geofence.yards} />}
+      {selectedPast && <ClusteredOverlayPins pins={overlayPins} />}
       {props.showPings && props.routeHistory && selectedPast && (
         <PingDotsLayer
           pings={props.routeHistory}
@@ -1928,21 +1913,224 @@ function GeofenceDiamond({
   );
 }
 
-/** The focused trip's load geofence events (APPROACHING/ARRIVED/DEPARTED). */
-function LoadGeofencePins({ loadId }: { loadId: Id<'loadInformation'> }) {
-  const scheme = useGeofenceScheme();
-  const events = useAuthQuery(api.geofenceEvents.listForLoad, { loadId });
-  const [openId, setOpenId] = React.useState<string | null>(null);
-  if (!events || events.length === 0) return null;
-  const palette = GEOFENCE_EVENT_STYLE[scheme];
+// ─────────────────────────────────────────────────────────────────────────
+// Overlay pins + zoom-aware clustering.
+//
+// Session bookends, trip bookends, yard badges, and geofence event
+// diamonds frequently share a location (a shift starts AT the yard where
+// its yard-ARRIVED fired, on the very same ping). Rendering them all
+// individually makes zoomed-out views a pile of overlapping icons. Every
+// overlay pin is therefore a descriptor { position, dotColor, node }, and
+// ClusteredOverlayPins groups them by SCREEN distance at the current
+// zoom: singles render normally; groups render as a count badge with the
+// members' color dots. Clicking a badge zooms into the group — or, when
+// the pins share (nearly) one point, fans them out side by side.
+// ─────────────────────────────────────────────────────────────────────────
+
+interface OverlayPin {
+  id: string;
+  latitude: number;
+  longitude: number;
+  /** Color shown in the cluster badge's dot preview. */
+  dotColor: string;
+  node: React.ReactNode;
+}
+
+const CLUSTER_CELL_PX = 44;
+/** At/above this zoom a cluster click fans out instead of zooming in. */
+const CLUSTER_EXPAND_ZOOM = 16;
+
+function worldPx(latitude: number, longitude: number, zoom: number) {
+  const scale = 256 * Math.pow(2, zoom);
+  const x = ((longitude + 180) / 360) * scale;
+  const sin = Math.min(0.9999, Math.max(-0.9999, Math.sin((latitude * Math.PI) / 180)));
+  const y = (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale;
+  return { x, y };
+}
+
+function ClusteredOverlayPins({ pins }: { pins: OverlayPin[] }) {
+  const map = useMap();
+  const [zoom, setZoom] = React.useState<number | null>(map?.getZoom() ?? null);
+  const [expandedKey, setExpandedKey] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!map) return;
+    // Deferred initial read: the map may mount after us, and a sync
+    // setState inside the effect would cascade a render.
+    const t = setTimeout(() => setZoom(map.getZoom() ?? null), 0);
+    const l = map.addListener('zoom_changed', () => {
+      setZoom(map.getZoom() ?? null);
+      setExpandedKey(null); // a fan-out is zoom-specific
+    });
+    return () => {
+      clearTimeout(t);
+      l.remove();
+    };
+  }, [map]);
+
+  const clusters = React.useMemo(() => {
+    if (zoom == null) {
+      return pins.map((p) => ({ key: p.id, pins: [p], latitude: p.latitude, longitude: p.longitude }));
+    }
+    const buckets = new Map<string, OverlayPin[]>();
+    for (const p of pins) {
+      const { x, y } = worldPx(p.latitude, p.longitude, zoom);
+      const key = `${Math.round(x / CLUSTER_CELL_PX)}:${Math.round(y / CLUSTER_CELL_PX)}`;
+      const list = buckets.get(key);
+      if (list) list.push(p);
+      else buckets.set(key, [p]);
+    }
+    return [...buckets.entries()].map(([key, group]) => ({
+      key,
+      pins: group,
+      latitude: group.reduce((s, p) => s + p.latitude, 0) / group.length,
+      longitude: group.reduce((s, p) => s + p.longitude, 0) / group.length,
+    }));
+  }, [pins, zoom]);
+
+  const onClusterClick = (cluster: (typeof clusters)[number]) => {
+    if (!map) return;
+    const currentZoom = map.getZoom() ?? 0;
+    const lats = cluster.pins.map((p) => p.latitude);
+    const lngs = cluster.pins.map((p) => p.longitude);
+    const span = Math.max(
+      Math.max(...lats) - Math.min(...lats),
+      Math.max(...lngs) - Math.min(...lngs),
+    );
+    // Co-located pins (same ping) or already deep: fan out in place.
+    if (currentZoom >= CLUSTER_EXPAND_ZOOM || span < 0.0005) {
+      setExpandedKey(cluster.key);
+      return;
+    }
+    const bounds = new google.maps.LatLngBounds();
+    for (const p of cluster.pins) bounds.extend({ lat: p.latitude, lng: p.longitude });
+    map.fitBounds(bounds, 96);
+  };
+
   return (
     <>
-      {events.map((event) => (
-        <AdvancedMarker
-          key={event._id}
-          position={{ lat: event.latitude, lng: event.longitude }}
-          zIndex={openId === event._id ? 700 : 550}
-        >
+      {clusters.map((cluster) => {
+        if (cluster.pins.length === 1) {
+          const p = cluster.pins[0];
+          return (
+            <AdvancedMarker key={p.id} position={{ lat: p.latitude, lng: p.longitude }} zIndex={600}>
+              {p.node}
+            </AdvancedMarker>
+          );
+        }
+        if (expandedKey === cluster.key) {
+          // Fan-out: members side by side at the shared location, with a
+          // small collapse chip underneath.
+          return (
+            <React.Fragment key={cluster.key}>
+              {cluster.pins.map((p, i) => (
+                <AdvancedMarker
+                  key={p.id}
+                  position={{ lat: cluster.latitude, lng: cluster.longitude }}
+                  zIndex={700 + i}
+                >
+                  <div style={{ transform: `translateX(${(i - (cluster.pins.length - 1) / 2) * 26}px)` }}>
+                    {p.node}
+                  </div>
+                </AdvancedMarker>
+              ))}
+              <AdvancedMarker
+                position={{ lat: cluster.latitude, lng: cluster.longitude }}
+                zIndex={699}
+                onClick={() => setExpandedKey(null)}
+              >
+                <div
+                  className="rounded-full border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-1.5 text-[9px] font-semibold shadow-sm"
+                  style={{ color: 'var(--text-tertiary)', transform: 'translateY(26px)' }}
+                >
+                  ×
+                </div>
+              </AdvancedMarker>
+            </React.Fragment>
+          );
+        }
+        return (
+          <AdvancedMarker
+            key={cluster.key}
+            position={{ lat: cluster.latitude, lng: cluster.longitude }}
+            zIndex={800}
+            onClick={() => onClusterClick(cluster)}
+          >
+            <ClusterBadge pins={cluster.pins} />
+          </AdvancedMarker>
+        );
+      })}
+    </>
+  );
+}
+
+function ClusterBadge({ pins }: { pins: OverlayPin[] }) {
+  return (
+    <div
+      title={`${pins.length} markers — click to expand`}
+      className="flex cursor-pointer items-center gap-1 rounded-full border border-[var(--border-hairline)] bg-[var(--bg-surface)] py-0.5 pl-1 pr-1.5 shadow-md"
+      style={{ transform: 'translateY(50%)' }}
+    >
+      <span className="flex items-center">
+        {pins.slice(0, 3).map((p, i) => (
+          <span
+            key={p.id}
+            aria-hidden
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: '50%',
+              backgroundColor: p.dotColor,
+              border: '1.5px solid var(--bg-surface)',
+              marginLeft: i === 0 ? 0 : -4,
+              display: 'inline-block',
+            }}
+          />
+        ))}
+      </span>
+      <span className="num text-[11px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+        {pins.length}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Geofence pin descriptors for the selected session, selection-scoped:
+ * `loadId` set (a trip is pinned) → that load's event diamonds;
+ * `sessionId` set (no pin) → the org yard badges + this shift's yard
+ * trigger diamonds. Also returns the yard list for the ring circles.
+ * Click-card open state lives here so descriptors stay plain data.
+ */
+function useGeofencePinDescriptors({
+  loadId,
+  sessionId,
+}: {
+  loadId: string | null;
+  sessionId: string | null;
+}): { pins: OverlayPin[]; yards: YardRows } {
+  const scheme = useGeofenceScheme();
+  const [openId, setOpenId] = React.useState<string | null>(null);
+  const loadEvents = useAuthQuery(
+    api.geofenceEvents.listForLoad,
+    loadId ? { loadId: loadId as Id<'loadInformation'> } : 'skip',
+  );
+  const yardEvents = useAuthQuery(
+    api.yardGeofence.listForSession,
+    sessionId ? { sessionId: sessionId as Id<'driverSessions'> } : 'skip',
+  );
+  const yardList = useAuthQuery(api.yardLocations.list, sessionId ? {} : 'skip');
+  const palette = GEOFENCE_EVENT_STYLE[scheme];
+
+  const pins: OverlayPin[] = [];
+  if (loadId && loadEvents) {
+    for (const event of loadEvents) {
+      pins.push({
+        id: event._id,
+        latitude: event.latitude,
+        longitude: event.longitude,
+        dotColor: palette[event.eventType],
+        node: (
           <GeofenceDiamond
             color={palette[event.eventType]}
             glyph={GEOFENCE_EVENT_GLYPH[event.eventType]}
@@ -1971,29 +2159,18 @@ function LoadGeofencePins({ loadId }: { loadId: Id<'loadInformation'> }) {
               </>
             }
           />
-        </AdvancedMarker>
-      ))}
-    </>
-  );
-}
-
-/** This shift's yard/parking triggers (session-level geofence events). */
-function SessionYardEventPins({ sessionId }: { sessionId: string }) {
-  const scheme = useGeofenceScheme();
-  const events = useAuthQuery(api.yardGeofence.listForSession, {
-    sessionId: sessionId as Id<'driverSessions'>,
-  });
-  const [openId, setOpenId] = React.useState<string | null>(null);
-  if (!events || events.length === 0) return null;
-  const palette = GEOFENCE_EVENT_STYLE[scheme];
-  return (
-    <>
-      {events.map((event) => (
-        <AdvancedMarker
-          key={event._id}
-          position={{ lat: event.latitude, lng: event.longitude }}
-          zIndex={openId === event._id ? 700 : 550}
-        >
+        ),
+      });
+    }
+  }
+  if (sessionId && yardEvents) {
+    for (const event of yardEvents) {
+      pins.push({
+        id: event._id,
+        latitude: event.latitude,
+        longitude: event.longitude,
+        dotColor: palette[event.eventType],
+        node: (
           <GeofenceDiamond
             color={palette[event.eventType]}
             glyph={GEOFENCE_EVENT_GLYPH[event.eventType]}
@@ -2017,21 +2194,42 @@ function SessionYardEventPins({ sessionId }: { sessionId: string }) {
               </>
             }
           />
-        </AdvancedMarker>
-      ))}
-    </>
-  );
+        ),
+      });
+    }
+  }
+  if (sessionId && yardList) {
+    for (const yard of yardList) {
+      pins.push({
+        id: `yard-${yard._id}`,
+        latitude: yard.latitude,
+        longitude: yard.longitude,
+        dotColor: '#9BA3B4',
+        node: (
+          <div
+            title={`${yard.name} · ${yard.locationType === 'PARKING' ? 'Parking' : 'Yard'} · fence ${yard.radiusMeters} m`}
+            className="rounded border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[9px] font-semibold text-foreground shadow-sm"
+          >
+            {yard.locationType === 'PARKING' ? 'P' : '⌂'} {yard.name}
+          </div>
+        ),
+      });
+    }
+  }
+
+  return { pins, yards: yardList ?? [] };
 }
 
-/** Org yard/parking fences as rings (entry solid, exit faint). */
-function YardRingsLayer() {
+type YardRows = FunctionReturnType<typeof api.yardLocations.list>;
+
+/** Org yard/parking fences as ring circles (entry solid, exit faint). */
+function YardRingCircles({ yards }: { yards: YardRows }) {
   const scheme = useGeofenceScheme();
   const map = useMap();
   const mapsLibrary = useMapsLibrary('maps');
-  const yards = useAuthQuery(api.yardLocations.list, {});
 
   React.useEffect(() => {
-    if (!map || !mapsLibrary || !yards || yards.length === 0) return;
+    if (!map || !mapsLibrary || yards.length === 0) return;
     const stroke = scheme === 'DARK' ? '#5A6172' : '#94a3b8';
     const circles: google.maps.Circle[] = [];
     for (const yard of yards) {
@@ -2060,50 +2258,7 @@ function YardRingsLayer() {
     return () => circles.forEach((c) => c.setMap(null));
   }, [map, mapsLibrary, yards, scheme]);
 
-  if (!yards) return null;
-  return (
-    <>
-      {yards.map((yard) => (
-        <AdvancedMarker
-          key={yard._id}
-          position={{ lat: yard.latitude, lng: yard.longitude }}
-          zIndex={400}
-        >
-          <div
-            title={`${yard.name} · ${yard.locationType === 'PARKING' ? 'Parking' : 'Yard'} · fence ${yard.radiusMeters} m`}
-            className="rounded border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[9px] font-semibold text-foreground shadow-sm"
-          >
-            {yard.locationType === 'PARKING' ? 'P' : '⌂'} {yard.name}
-          </div>
-        </AdvancedMarker>
-      ))}
-    </>
-  );
-}
-
-/**
- * Selection-scoped dispatcher for the pieces above. Trip focused → that
- * load's event pins. No focus → yard rings + this session's yard triggers.
- */
-function SessionGeofenceLayer({
-  sessionId,
-  trips,
-  focusedTripIndex,
-}: {
-  sessionId: string;
-  trips: TripInfo[];
-  focusedTripIndex: number | null;
-}) {
-  const focusedTrip = focusedTripIndex != null ? trips[focusedTripIndex] : undefined;
-  if (focusedTrip?.loadId) {
-    return <LoadGeofencePins loadId={focusedTrip.loadId as Id<'loadInformation'>} />;
-  }
-  return (
-    <>
-      <YardRingsLayer />
-      <SessionYardEventPins sessionId={sessionId} />
-    </>
-  );
+  return null;
 }
 
 /** Bookend-pin kind + hover detail for how a past shift ended. */
