@@ -2096,6 +2096,20 @@ export const updateContract = mutation({
 
 // ─── Console queries ─────────────────────────────────────────────────────
 
+/**
+ * Newest cycle first, one-offs after the metered invoice of the same period.
+ * The default index orders by creation time, which for a backfilled history is
+ * the order rows happened to be written — so 2025-11 lands below 2026-07 and
+ * the board is unreadable exactly when you most need to scan it.
+ */
+function byNewestPeriod(a: Doc<'platformInvoices'>, b: Doc<'platformInvoices'>): number {
+  return (
+    b.periodKey.localeCompare(a.periodKey) ||
+    (a.kind === 'manual' ? 1 : 0) - (b.kind === 'manual' ? 1 : 0) ||
+    a.invoiceNumber.localeCompare(b.invoiceNumber)
+  );
+}
+
 export const listInvoices = query({
   args: {
     status: v.optional(
@@ -2123,18 +2137,25 @@ export const listInvoices = query({
         .collect();
       return rows
         .filter((r) => args.status === undefined || r.status === args.status)
-        .sort((a, b) => b.periodKey.localeCompare(a.periodKey))
+        .sort(byNewestPeriod)
         .slice(0, limit);
     }
     if (args.status !== undefined) {
       const status = args.status;
-      return await ctx.db
+      const rows = await ctx.db
         .query('platformInvoices')
         .withIndex('by_status', (q) => q.eq('status', status))
         .order('desc')
         .take(limit);
+      return rows.sort(byNewestPeriod);
     }
-    return await ctx.db.query('platformInvoices').order('desc').take(limit);
+    // Over-fetch then sort: the newest CYCLE is not the newest ROW, so taking
+    // `limit` by creation order would drop periods that belong on screen.
+    const rows = await ctx.db
+      .query('platformInvoices')
+      .order('desc')
+      .take(Math.max(limit * 2, 300));
+    return rows.sort(byNewestPeriod).slice(0, limit);
   },
 });
 

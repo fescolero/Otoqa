@@ -1360,6 +1360,46 @@ describe('catching up on months of unpaid cycles', () => {
   });
 });
 
+describe('invoice ordering', () => {
+  it('lists the newest cycle first regardless of the order rows were written', async () => {
+    const t = convexTest(schema);
+    const orgId = await t.run((ctx) => seedOrg(ctx, 0));
+    const staff = t.withIdentity(freshStaff());
+
+    // Written deliberately out of order, the way a backfill produces them.
+    const periods = ['2026-03', '2025-11', '2026-01', '2025-12'];
+    await t.run(async (ctx) => {
+      for (const periodKey of periods) {
+        await ctx.db.insert('platformUsageStats', {
+          workosOrgId: WORKOS_ORG,
+          periodKey,
+          loadsWritten: 10,
+          updatedAt: Date.now(),
+        });
+      }
+    });
+    for (const periodKey of periods) {
+      await t.mutation(internal.platform.invoices.cycleClose, { periodKey });
+    }
+    // A one-off sharing a period with a metered invoice sorts after it.
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: '2026-01',
+      lines: [{ label: 'Setup', amount: 500 }],
+      reason: 'SOW',
+    });
+
+    const rows = await staff.query(api.platform.invoices.listInvoices, {});
+    expect(rows.map((r) => `${r.periodKey}${r.kind === 'manual' ? '-M' : ''}`)).toEqual([
+      '2026-03',
+      '2026-01',
+      '2026-01-M',
+      '2025-12',
+      '2025-11',
+    ]);
+  });
+});
+
 describe('tenant-facing one-off charges', () => {
   it('shows committed one-offs to the tenant, and hides drafts and voids', async () => {
     const t = convexTest(schema);
