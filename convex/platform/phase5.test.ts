@@ -1054,6 +1054,13 @@ describe('catching up on months of unpaid cycles', () => {
     aging = await staff.query(api.platform.invoices.agingOverview, {});
     expect(aging.outstanding).toBe(9552.8);
     expect(aging.outstandingNetOfCredit).toBe(9552.8); // the two now agree
+    // And the board reconciles without anyone doing the arithmetic: billed,
+    // settled, and the gap between them. None of the $20,000 was receipts —
+    // it arrived as credit — so `paidCash` stays zero.
+    expect(aging.invoicedTotal).toBe(owed);
+    expect(aging.paidTotal).toBe(20000);
+    expect(aging.paidCash).toBe(0);
+    expect(aging.paidCredit).toBe(20000);
   });
 
   it('dates a credit application to when it could have settled, not to today', async () => {
@@ -1443,6 +1450,123 @@ describe('tenant-facing one-off charges', () => {
     });
     // And a one-off never disturbs the cycle history.
     expect(overview.closedCycles.find((c) => c.periodKey === PERIOD)?.amount).toBe(300);
+  });
+});
+
+describe('receivables rollup — invoiced vs paid', () => {
+  it('reconciles: invoiced − paid + overpaid − written off = outstanding', async () => {
+    const t = convexTest(schema);
+    const orgId = await t.run((ctx) => seedOrg(ctx));
+    const staff = t.withIdentity(freshStaff());
+
+    // Metered cycle: $300, half settled by wire, plus a fat-fingered entry
+    // that gets reversed. The reversal must not inflate what was collected.
+    const meteredId = await issuedInvoice(t);
+    await staff.mutation(api.platform.invoices.recordPayment, {
+      id: meteredId,
+      amount: 150,
+      method: 'wire',
+      reference: 'wire-1',
+    });
+    await staff.mutation(api.platform.invoices.recordPayment, {
+      id: meteredId,
+      amount: 100,
+      method: 'wire',
+      reference: 'keyed twice',
+    });
+    await staff.mutation(api.platform.invoices.reversePayment, {
+      id: meteredId,
+      paymentIndex: 1,
+      reason: 'Applied to the wrong account',
+    });
+
+    // A one-off invoice settled entirely out of account credit at issue. That
+    // is settlement, not receipts — it belongs in `paid`, not in `paidCash`.
+    await staff.mutation(api.platform.credits.createCredit, {
+      workosOrgId: WORKOS_ORG,
+      amount: 400,
+      source: 'goodwill',
+      reason: 'Onboarding concession',
+    });
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: '2026-03',
+      lines: [{ label: 'Integration setup', amount: 400 }],
+      reason: 'Setup work billed in arrears',
+    });
+    const setup = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i.periodKey === '2026-03',
+    )!;
+    await staff.mutation(api.platform.invoices.issueInvoice, { id: setup._id });
+
+    // A third invoice, never collected and abandoned.
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: '2026-04',
+      lines: [{ label: 'Overage', amount: 200 }],
+      reason: 'Overage billed separately',
+    });
+    const bad = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i.periodKey === '2026-04',
+    )!;
+    await staff.mutation(api.platform.invoices.issueInvoice, { id: bad._id });
+    await staff.mutation(api.platform.invoices.writeOffInvoice, {
+      id: bad._id,
+      reason: 'Customer insolvent — sent to collections and abandoned',
+    });
+
+    // A draft: work we intend to bill but have not committed to. It must not
+    // appear in what we have invoiced.
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: '2026-05',
+      lines: [{ label: 'Not yet agreed', amount: 999 }],
+      reason: 'Pending customer sign-off',
+    });
+
+    const aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.invoicedTotal).toBe(900); // 300 + 400 + 200, draft excluded
+    expect(aging.paidTotal).toBe(550); // 150 wire + 400 credit
+    expect(aging.paidCash).toBe(150); // the reversal cancelled the duplicate
+    expect(aging.paidCredit).toBe(400);
+    expect(aging.overpaid).toBe(0);
+    expect(aging.writtenOffAmount).toBe(200);
+    expect(aging.outstanding).toBe(150);
+    expect(aging.draftCount).toBe(1);
+    expect(aging.truncated).toBe(false);
+
+    // The identity the board is read against.
+    expect(
+      aging.invoicedTotal - aging.paidTotal + aging.overpaid - aging.writtenOffAmount,
+    ).toBeCloseTo(aging.outstanding, 2);
+  });
+
+  it('counts an overpayment once, as the credit it becomes', async () => {
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    const id = await issuedInvoice(t); // $300
+    const staff = t.withIdentity(freshStaff());
+
+    // $500 against a $300 invoice: $300 settles it, $200 posts as credit.
+    await staff.mutation(api.platform.invoices.recordPayment, {
+      id,
+      amount: 500,
+      method: 'wire',
+      reference: 'wire-over',
+    });
+
+    const aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.invoicedTotal).toBe(300);
+    // The full transfer sits on the invoice; the excess is visible as its own
+    // figure rather than netting against other orgs' receivables.
+    expect(aging.paidTotal).toBe(500);
+    expect(aging.paidCash).toBe(500);
+    expect(aging.overpaid).toBe(200);
+    expect(aging.creditAvailable).toBe(200);
+    expect(aging.outstanding).toBe(0);
+    expect(
+      aging.invoicedTotal - aging.paidTotal + aging.overpaid - aging.writtenOffAmount,
+    ).toBeCloseTo(aging.outstanding, 2);
   });
 });
 

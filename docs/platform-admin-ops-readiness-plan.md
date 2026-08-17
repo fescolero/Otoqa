@@ -698,6 +698,28 @@ It allocates cash only. Sweeping in existing account credit automatically would
 spend the customer's balance without anyone choosing to, so that stays the
 deliberate `applyCreditToInvoice`.
 
+**The board reconciles itself.** Reconstructing an account meant repeatedly
+checking billed − received against Outstanding by hand, which is exactly the
+arithmetic a console should be doing. `agingOverview` now also returns
+`invoicedTotal` (committed statuses — drafts and voids excluded), `paidTotal`
+(the sum of every payment entry, so reversals net themselves out), its
+`paidCash` / `paidCredit` split, and `overpaid`. Those satisfy an exact
+identity:
+
+```
+invoicedTotal − paidTotal + overpaid − writtenOffAmount = outstanding
+```
+
+The cash/credit split matters because credit is not receipts: an overpayment's
+cash was counted when it landed, and a goodwill credit was never cash at all.
+Counting either as collected would overstate the bank by the amount of credit
+in circulation, so `paidTotal` answers "how much of the bill is settled" and
+`paidCash` answers "how much money arrived" — separately, and both labelled.
+
+The rollup scans a fixed number of rows per status and returns `truncated` when
+it hits the cap, so a book larger than the scan reports a floor with a visible
+caveat rather than a quietly smaller "Paid".
+
 ### Known limitations, stated rather than hidden
 
 - **A payment cannot be recorded against a written-off invoice.** Bad-debt

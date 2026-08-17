@@ -2201,22 +2201,30 @@ export const olderOpenBalance = query({
   },
 });
 
+/**
+ * Per-status scan cap for the rollup. Hitting it does not corrupt the numbers,
+ * it truncates them — so we report `truncated` rather than quietly reporting a
+ * smaller "collected" figure than the business actually collected.
+ */
+const AGING_SCAN_LIMIT = 1000;
+
 /** Receivables rollup: open balances bucketed by age (spec §9). */
 export const agingOverview = query({
   args: {},
   handler: async (ctx) => {
     await requirePlatformStaff(ctx);
     const now = Date.now();
-    const open = (
-      await Promise.all(
-        OPEN_STATUSES.map((status) =>
-          ctx.db
-            .query('platformInvoices')
-            .withIndex('by_status', (q) => q.eq('status', status))
-            .take(300),
-        ),
-      )
-    ).flat();
+    let truncated = false;
+    const scan = async (status: Doc<'platformInvoices'>['status']) => {
+      const rows = await ctx.db
+        .query('platformInvoices')
+        .withIndex('by_status', (q) => q.eq('status', status))
+        .take(AGING_SCAN_LIMIT + 1);
+      if (rows.length > AGING_SCAN_LIMIT) truncated = true;
+      return rows.slice(0, AGING_SCAN_LIMIT);
+    };
+
+    const open = (await Promise.all(OPEN_STATUSES.map(scan))).flat();
     const buckets = { current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 };
     let outstanding = 0;
     for (const inv of open) {
@@ -2233,21 +2241,50 @@ export const agingOverview = query({
       else if (overdueDays <= 90) buckets.d61_90 = money(buckets.d61_90 + balance);
       else buckets.d90_plus = money(buckets.d90_plus + balance);
     }
-    const drafts = await ctx.db
-      .query('platformInvoices')
-      .withIndex('by_status', (q) => q.eq('status', 'draft'))
-      .take(300);
-    const writtenOff = await ctx.db
-      .query('platformInvoices')
-      .withIndex('by_status', (q) => q.eq('status', 'written_off'))
-      .take(300);
+    const [drafts, paidRows, writtenOff] = await Promise.all([
+      scan('draft'),
+      scan('paid'),
+      scan('written_off'),
+    ]);
     const credits = await ctx.db.query('platformCredits').withIndex('by_time').take(500);
     const creditAvailable = money(
       credits.filter((c) => c.status === 'available').reduce((s, c) => s + c.remaining, 0),
     );
 
+    // Everything we have committed to (draft and void excluded), and what has
+    // landed against it. Reversals are negative entries carrying the original's
+    // method, so a plain sum is already net of them.
+    const committed = [...open, ...paidRows, ...writtenOff];
+    let invoicedTotal = 0;
+    let paidTotal = 0;
+    let paidCash = 0;
+    let paidCredit = 0;
+    let overpaid = 0;
+    for (const inv of committed) {
+      invoicedTotal = money(invoicedTotal + inv.total);
+      paidTotal = money(paidTotal + inv.amountPaid);
+      overpaid = money(overpaid + Math.max(0, money(inv.amountPaid - inv.total)));
+      for (const p of inv.payments) {
+        // A `credit` entry moves money that was already collected once (an
+        // earlier overpayment) or never collected at all (goodwill). Either
+        // way it settles the invoice without being new cash, so it is split
+        // out rather than counted as receipts.
+        if (p.method === 'credit') paidCredit = money(paidCredit + p.amount);
+        else paidCash = money(paidCash + p.amount);
+      }
+    }
+
     return {
       outstanding,
+      // Reconciling identity, exact by construction:
+      //   outstanding = invoicedTotal - paidTotal + overpaid - writtenOffAmount
+      // so an operator can check the board against a bank statement without
+      // opening a single invoice.
+      invoicedTotal,
+      paidTotal,
+      paidCash,
+      paidCredit,
+      overpaid,
       // What is actually collectable once account credit is applied. Credit is
       // consumed at issue, so an overdue invoice raised BEFORE the credit
       // existed still shows its full balance until someone applies it — which
@@ -2264,6 +2301,9 @@ export const agingOverview = query({
       // Credit outstanding is a liability, not a receivable — shown beside
       // aging so an operator sees what will be consumed next cycle.
       creditAvailable,
+      // True when a status had more rows than we scanned: the totals above are
+      // then a floor, not the whole book.
+      truncated,
     };
   },
 });

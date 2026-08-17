@@ -297,6 +297,13 @@ a {
   margin-top: 2px;
 }
 
+.kpi-hint {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 4px;
+  opacity: 0.75;
+}
+
 .panel-attention {
   border-color: rgba(251, 191, 36, 0.4);
 }

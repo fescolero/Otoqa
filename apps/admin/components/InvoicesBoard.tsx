@@ -49,7 +49,20 @@ export function InvoicesBoard() {
     <>
       {aging ? (
         <div className="kpi-row">
+          <Kpi label="Invoiced" value={formatMoney(aging.invoicedTotal)} />
+          <Kpi
+            label="Paid"
+            value={formatMoney(aging.paidTotal)}
+            hint={
+              aging.paidCredit !== 0
+                ? `${formatMoney(aging.paidCash)} cash · ${formatMoney(aging.paidCredit)} credit`
+                : undefined
+            }
+          />
           <Kpi label="Outstanding" value={formatMoney(aging.outstanding)} />
+          {aging.overpaid > 0 ? (
+            <Kpi label="Overpaid on invoices" value={formatMoney(aging.overpaid)} />
+          ) : null}
           {aging.creditAvailable > 0 ? (
             <Kpi
               label="Outstanding net of credit"
@@ -75,6 +88,12 @@ export function InvoicesBoard() {
           ) : null}
           {aging.driftCount > 0 ? <Kpi label="Drift flags" value={String(aging.driftCount)} danger /> : null}
         </div>
+      ) : null}
+      {aging?.truncated ? (
+        <p className="ticket-body muted">
+          More invoices exist than this rollup scans — Invoiced, Paid and Outstanding are floors,
+          not the full book.
+        </p>
       ) : null}
 
       <LedgerGaps />
@@ -657,11 +676,22 @@ function InvoiceRow({
   );
 }
 
-function Kpi({ label, value, danger }: { label: string; value: string; danger?: boolean }) {
+function Kpi({
+  label,
+  value,
+  danger,
+  hint,
+}: {
+  label: string;
+  value: string;
+  danger?: boolean;
+  hint?: string;
+}) {
   return (
     <div className={danger ? 'kpi kpi-danger' : 'kpi'}>
       <div className="kpi-value">{value}</div>
       <div className="kpi-label">{label}</div>
+      {hint ? <div className="kpi-hint">{hint}</div> : null}
     </div>
   );
 }

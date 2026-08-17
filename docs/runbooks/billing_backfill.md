@@ -29,6 +29,18 @@ Write down, before touching anything:
 - total cash actually received (bank statements — not the console)
 - expected closing balance = billed − received
 
+The board carries those first two figures itself — **Invoiced** and **Paid** —
+and they reconcile exactly:
+
+```
+Invoiced − Paid + Overpaid − Written off = Outstanding
+```
+
+**Paid** is everything that settled an invoice; where any of it was account
+credit rather than money, the tile splits it (`… cash · … credit`). Compare
+**Invoiced** against your billing figure and the cash half of **Paid** against
+the bank, and any disagreement is in the ledger, not in your arithmetic.
+
 Every step below should move the console toward that number. If it doesn't,
 stop.
 
@@ -109,6 +121,8 @@ it and issue a manual credit carrying the correct date.
 
 ## 5. Verify
 
+- **Invoiced** equals your billed figure and the cash half of **Paid** equals
+  what the bank actually received.
 - **Outstanding** equals your billed − received figure from step 0.
 - **Outstanding** and **Outstanding net of credit** agree (credit fully placed),
   or differ by exactly the credit you deliberately left on the account.
