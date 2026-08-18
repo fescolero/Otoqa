@@ -14,25 +14,40 @@ import { useEffect } from 'react';
  * which is the whole point: "this chip is wrong" stops being a screenshot and
  * a hunt, and becomes a paste.
  *
- * DEVELOPMENT ONLY, for two reasons that both matter:
+ * WHERE IT RUNS — local dev, and PREVIEW deployments. Not production.
  *
- *  1. It binds ⌘C. Staff copy org ids, invoice numbers and bank references out
- *     of this console constantly, and a selection overlay that intercepts the
- *     copy key would break the console's most-used interaction.
- *  2. It walks the React tree and reads source paths. That is fine on a laptop
- *     and wrong to ship to a page rendering customer billing data.
+ * Preview is included because that is where a design change is actually
+ * reviewed, and its audience is the same as a laptop's: preview URLs sit
+ * behind Vercel Authentication. React Grab reads the DOM and the React tree
+ * and writes to the operator's own clipboard; it transmits nothing, so a
+ * preview pointing at the shared Convex deployment is not an exfiltration
+ * path.
  *
- * The condition is statically false in a production build, so the import is
- * eliminated rather than merely skipped — verified by grepping the built
- * chunks (see README-design.md).
+ * Production is excluded on a different argument, and the argument is ⌘C.
+ * Staff copy org ids, invoice numbers and bank references out of this console
+ * constantly during support work; an overlay that owns the copy key would
+ * break its most-used interaction. That cost is worth paying on a preview
+ * you opened to look at a layout, and not on the console someone is working
+ * an account in.
  *
- * Imported from node_modules rather than the CDN <script> the README suggests:
- * this console does not load executable third-party code, and the same rule
- * that made the fonts self-hosted applies harder to a script with DOM access.
+ * The flag is resolved in next.config.ts and inlined as a literal, so a
+ * production build ELIMINATES this import rather than merely not taking it.
+ * Reading NEXT_PUBLIC_VERCEL_ENV here directly does not work: Next only
+ * inlines a NEXT_PUBLIC_ var that is set, so a build without Vercel's system
+ * variables would leave the comparison as a runtime lookup and ship the whole
+ * library. `grep -r "react-grab\|bippy" .next/static` after a production
+ * build must return nothing; that grep is the regression check.
+ *
+ * Imported from node_modules rather than the CDN <script> the package README
+ * suggests: this console does not load executable third-party code, and the
+ * rule that made the fonts self-hosted applies harder to a script with full
+ * DOM access.
  */
+const ENABLED = process.env.NEXT_PUBLIC_ENABLE_GRAB === '1';
+
 export function DevTools() {
   useEffect(() => {
-    if (process.env.NODE_ENV !== 'development') return;
+    if (!ENABLED) return;
     void import('react-grab');
   }, []);
 

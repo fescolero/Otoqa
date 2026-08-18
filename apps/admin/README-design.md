@@ -106,30 +106,50 @@ staleness or cap is unstated cannot be acted on.
 
 ## Pointing at an element
 
-`react-grab` is mounted in development. Hover any element in the console, press
-**⌘C / Ctrl+C**, and the clipboard gets the element plus its component and
-source location:
+`react-grab` is mounted on **local dev and preview deployments** — never
+production. Hover any element in the console, press **⌘C / Ctrl+C**, and the
+clipboard gets the element plus its component and source location:
 
 ```
 [<span class="chip chip-warn">paid 50d late</span> in InvoiceRow
  (at components/InvoicesBoard.tsx:341:11)]
 ```
 
-Paste that at an agent instead of describing which chip you mean. Two rules
-about it:
+Paste that at an agent instead of describing which chip you mean.
 
-- **Development only, and not merely by preference.** It binds ⌘C, and staff
-  copy org ids, invoice numbers and bank references out of this console
-  constantly — a selection overlay owning the copy key would break the
-  console's most-used interaction. It also walks the React tree and reads
-  source paths, which is fine on a laptop and wrong on a page rendering
-  customer billing data. The guard is statically false in a production build,
-  so the import is *eliminated*, not skipped: `grep -r "react-grab\|bippy"
-  .next/static` after a build returns nothing, and that is the check to re-run
-  if this ever changes.
-- **Imported from `node_modules`, not the CDN `<script>` the README suggests.**
-  The rule that made the fonts self-hosted applies harder to executable
-  third-party code with full DOM access.
+**Preview is in; production is out, and the argument is ⌘C.** Staff copy org
+ids, invoice numbers and bank references out of this console constantly during
+support work, and the overlay owns the copy key — a cost worth paying on a
+preview you opened to look at a layout, and not on the console someone is
+working an account in. Preview's audience is the same as a laptop's (Vercel
+Authentication), and React Grab reads the DOM and writes to your own clipboard;
+it transmits nothing, so a preview pointing at the shared Convex deployment is
+not an exfiltration path.
+
+**The flag is resolved in `next.config.ts`, not read from the client bundle**,
+and that detail is load-bearing. Next only inlines a `NEXT_PUBLIC_` variable
+that is actually **set**; an unset one stays a runtime lookup, nothing folds,
+and the whole ~300KB library ships. Gating on `NEXT_PUBLIC_VERCEL_ENV`
+directly therefore works on Vercel and fails silently anywhere Vercel's system
+variables are absent — a local `next build`, or a project with "expose system
+environment variables" switched off. Deciding it in the config makes the value
+a literal in every build, so the dead branch is eliminated rather than merely
+not taken.
+
+The regression check, verified across all three paths:
+
+```
+                                   react-grab in .next/static
+local `next build` (no VERCEL_ENV)  absent
+VERCEL_ENV=production               absent
+VERCEL_ENV=preview                  present (~300KB)
+```
+
+**Imported from `node_modules`, not the CDN `<script>` the package README
+suggests.** The rule that made the fonts self-hosted applies harder to
+executable third-party code with full DOM access. It uses no `eval`, no
+`Function` constructor and no workers, so the console's CSP does not need
+loosening for it.
 
 ## The topbar
 
