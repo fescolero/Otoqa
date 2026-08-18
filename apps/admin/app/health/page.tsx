@@ -6,15 +6,15 @@ import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
 import { ReasonAction } from '@/components/ReasonAction';
-import { Badge, EmptyState, Kpi, PageHeader, Panel, toneFor } from '@/components/ui';
-import { formatAgo, formatCapped } from '@/lib/format';
+import { Badge, EmptyState, Kpi, PageHeader, Panel, type Tone } from '@/components/ui';
+import { formatAgo, formatCapped, formatDuration } from '@/lib/format';
 
 export default function HealthPage() {
   return (
     <ConsoleShell>
       <PageHeader
         title="Integration health"
-        subtitle="Live rollups: FourKites push ticks per org and the external-tracking webhook queue."
+        subtitle="Every configured integration, whatever the provider — plus the outbound webhook queue and the inbound partner API."
       />
       <PanelBoundary label="Integration health">
         <HealthBoard />
@@ -23,42 +23,147 @@ export default function HealthPage() {
   );
 }
 
-function SloSection() {
-  const slo = useQuery(api.platform.slo.sloOverview, {});
-  if (slo === undefined) return null;
+/** The state vocabulary, mapped once so the chip and the KPI agree. */
+const STATE_TONE: Record<string, Tone> = {
+  ok: 'ok',
+  failing: 'danger',
+  stale: 'danger',
+  never_run: 'warn',
+  disabled: 'neutral',
+};
 
-  const pct = (n: number | null) => (n === null ? '—' : `${(n * 100).toFixed(2)}%`);
-  const ms = (n: number | null) => (n === null ? '—' : `${n}ms`);
-  const errorRateHigh = slo.partnerApi.errorRate !== null && slo.partnerApi.errorRate > 0.01;
+const STATE_HELP: Record<string, string> = {
+  failing: 'Its last word was an error — a tick that logs no success is not a recovery.',
+  stale: 'No activity within three expected cycles. Check the schedule, not the credentials.',
+  never_run: 'Configured but has never reported. Usually credentials or a disabled cron.',
+  disabled: 'Switched off in the org’s integration settings. Not alerting.',
+};
+
+function HealthBoard() {
+  const health = useQuery(api.platform.health.integrationHealth, {});
+  if (health === undefined) return <EmptyState>Loading…</EmptyState>;
+
+  const { integrations, summary, webhookQueue } = health;
+  const needsHuman = summary.failing + summary.stale + summary.neverRun;
 
   return (
-    <div className="kpi-row">
-      <Kpi
-        label="Cron success"
-        value={pct(slo.cron.successRate)}
-        meter={slo.cron.successRate ?? undefined}
-        tone={slo.cron.failingNow > 0 ? 'danger' : 'ok'}
-        hint={`${slo.cron.jobs} jobs · ${slo.cron.failingNow} failing now`}
-      />
-      <Kpi
-        label="Partner API p95"
-        value={ms(slo.partnerApi.p95Ms)}
-        hint={`last ${slo.partnerApi.sample} reqs · p50 ${ms(slo.partnerApi.p50Ms)}`}
-      />
-      <Kpi
-        label="Partner API 5xx rate"
-        value={pct(slo.partnerApi.errorRate)}
-        tone={errorRateHigh ? 'danger' : 'neutral'}
-        hint={errorRateHigh ? 'above the 1% budget' : 'within the 1% budget'}
-      />
-      <Kpi
-        label="Webhook delivery success"
-        value={pct(slo.webhooks.successRate)}
-        meter={slo.webhooks.successRate ?? undefined}
-        tone="ok"
-        hint="retained window only"
-      />
-    </div>
+    <>
+      <div className="kpi-row">
+        <Kpi
+          label="Integrations configured"
+          value={String(summary.total)}
+          hint={summary.providers.length ? summary.providers.join(' · ') : 'no providers yet'}
+        />
+        <Kpi
+          label="Needing a human"
+          value={String(needsHuman)}
+          tone={needsHuman > 0 ? 'danger' : 'ok'}
+          hint={`${summary.failing} failing · ${summary.stale} stale · ${summary.neverRun} never run`}
+        />
+        <Kpi
+          label="Webhook deliveries pending"
+          value={formatCapped(webhookQueue.pending, webhookQueue.countCap)}
+          hint={`counts cap at ${webhookQueue.countCap}`}
+        />
+        <Kpi
+          label="Dead-lettered deliveries"
+          value={formatCapped(webhookQueue.deadLetter, webhookQueue.countCap)}
+          tone={webhookQueue.deadLetter > 0 ? 'danger' : 'neutral'}
+          hint={webhookQueue.deadLetter > 0 ? 'requeue below' : 'nothing stuck'}
+        />
+      </div>
+
+      <Integrations rows={integrations} />
+      <DeadLetters />
+      <InboundApi />
+    </>
+  );
+}
+
+/**
+ * One row per org × provider, straight off `orgIntegrations`. A provider that
+ * gets configured tomorrow appears here without a code change — which is the
+ * whole reason this replaced the FourKites-only panel.
+ */
+function Integrations({
+  rows,
+}: {
+  rows: NonNullable<
+    ReturnType<typeof useQuery<typeof api.platform.health.integrationHealth>>
+  >['integrations'];
+}) {
+  return (
+    <Panel
+      title="Integrations"
+      count={rows.length}
+      subtitle="worst first"
+      flush
+      footer="Driven by each org's integration settings, so any provider configured appears here. Cadence comes from the integration's own pull interval where it declares one, otherwise from the cron that drives it."
+    >
+      {rows.length === 0 ? (
+        <EmptyState hint="Orgs configure these in their own integration settings; nothing is provisioned from this console.">
+          No integrations configured on any organization.
+        </EmptyState>
+      ) : (
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Organization</th>
+                <th>State</th>
+                <th>Direction</th>
+                <th>Last activity</th>
+                <th>Every</th>
+                <th className="num">Records</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r._id}>
+                  <td className="mono">{r.provider}</td>
+                  <td className="muted mono">{r.workosOrgId}</td>
+                  <td>
+                    <span title={STATE_HELP[r.state] ?? ''}>
+                      <Badge tone={STATE_TONE[r.state] ?? 'neutral'}>
+                        {r.state.replace('_', ' ')}
+                      </Badge>
+                    </span>
+                  </td>
+                  <td className="muted">
+                    {[r.pullEnabled ? 'pull' : null, r.pushEnabled ? 'push' : null]
+                      .filter(Boolean)
+                      .join(' + ') || '—'}
+                  </td>
+                  <td className="muted">
+                    {r.lastActivityAt ? formatAgo(r.lastActivityAt) : 'never'}
+                  </td>
+                  <td className="muted">{formatDuration(r.cadenceMs)}</td>
+                  <td className="num">{r.recordsProcessed ?? '—'}</td>
+                  <td style={{ whiteSpace: 'normal' }}>
+                    {r.lastError ? (
+                      <span className="danger-text">{r.lastError}</span>
+                    ) : r.samsaraPingsLastTick !== null ? (
+                      <span className="muted">{r.samsaraPingsLastTick} pings last tick</span>
+                    ) : r.pushTickKind ? (
+                      <span className="muted">
+                        last tick {r.pushTickKind}
+                        {r.consecutiveTransientTicks
+                          ? ` · ${r.consecutiveTransientTicks} consecutive transient`
+                          : ''}
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -78,6 +183,7 @@ function DeadLetters() {
   return (
     <Panel
       title="Dead-lettered webhook deliveries"
+      subtitle="outbound, to partners"
       count={rows.length}
       tone="warn"
       flush
@@ -118,67 +224,55 @@ function DeadLetters() {
   );
 }
 
-function HealthBoard() {
-  const health = useQuery(api.platform.health.integrationHealth, {});
-  if (health === undefined) return <EmptyState>Loading…</EmptyState>;
+/**
+ * The inbound half, kept separate and labelled.
+ *
+ * These figures come from apiAuditLog — partners calling OUR API — which is
+ * the opposite direction from everything above. They sat in the same KPI row
+ * as the outbound integrations, which made "Partner API 5xx rate" read as a
+ * partner being down when it means we were returning errors to them.
+ */
+function InboundApi() {
+  const slo = useQuery(api.platform.slo.sloOverview, {});
+  if (slo === undefined) return null;
 
-  const { fourKites, webhookQueue } = health;
+  const pct = (n: number | null) => (n === null ? '—' : `${(n * 100).toFixed(2)}%`);
+  const ms = (n: number | null) => (n === null ? '—' : `${n}ms`);
+  const errorRateHigh = slo.partnerApi.errorRate !== null && slo.partnerApi.errorRate > 0.01;
 
   return (
-    <>
-      <SloSection />
-      <div className="kpi-row">
+    <Panel
+      title="Inbound partner API"
+      subtitle="partners calling us"
+      footer="Response times and error rate we served to partner API keys, over the retained window. Cron success covers all scheduled jobs and lives on the Jobs board."
+    >
+      <div className="kpi-row" style={{ marginBottom: 0 }}>
         <Kpi
-          label="Webhook deliveries pending"
-          value={formatCapped(webhookQueue.pending, webhookQueue.countCap)}
-          hint={`counts cap at ${webhookQueue.countCap}`}
+          label="p95 response"
+          value={ms(slo.partnerApi.p95Ms)}
+          hint={`last ${slo.partnerApi.sample} reqs · p50 ${ms(slo.partnerApi.p50Ms)}`}
         />
         <Kpi
-          label="Dead-lettered deliveries"
-          value={formatCapped(webhookQueue.deadLetter, webhookQueue.countCap)}
-          tone={webhookQueue.deadLetter > 0 ? 'danger' : 'neutral'}
-          hint={webhookQueue.deadLetter > 0 ? 'requeue below' : 'nothing stuck'}
+          label="5xx we returned"
+          value={pct(slo.partnerApi.errorRate)}
+          tone={errorRateHigh ? 'danger' : 'neutral'}
+          hint={errorRateHigh ? 'above the 1% budget' : 'within the 1% budget'}
+        />
+        <Kpi
+          label="Webhook delivery success"
+          value={pct(slo.webhooks.successRate)}
+          meter={slo.webhooks.successRate ?? undefined}
+          tone="ok"
+          hint="retained window only"
+        />
+        <Kpi
+          label="Cron success"
+          value={pct(slo.cron.successRate)}
+          meter={slo.cron.successRate ?? undefined}
+          tone={slo.cron.failingNow > 0 ? 'danger' : 'ok'}
+          hint={`${slo.cron.jobs} jobs · ${slo.cron.failingNow} failing now`}
         />
       </div>
-
-      <DeadLetters />
-
-      <Panel title="FourKites push" subtitle="per org" count={fourKites.length} flush>
-        {fourKites.length === 0 ? (
-          <EmptyState>No orgs with FourKites push configured.</EmptyState>
-        ) : (
-          <div className="table-scroll">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Org (WorkOS id)</th>
-                  <th>Last tick</th>
-                  <th className="num">Consecutive transient</th>
-                  <th>Last error</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fourKites.map((row) => (
-                  <tr key={row._id}>
-                    <td className="mono">{row.workosOrgId}</td>
-                    <td>
-                      <Badge tone={toneFor(row.lastTickKind ?? 'unknown')}>
-                        {row.lastTickKind ?? 'unknown'}
-                      </Badge>
-                    </td>
-                    <td className="num">{row.consecutiveTransientTicks ?? 0}</td>
-                    <td className="danger-text">
-                      {row.lastErrorKind
-                        ? `${row.lastErrorKind}${row.lastErrorStatus ? ` (${row.lastErrorStatus})` : ''}`
-                        : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Panel>
-    </>
+    </Panel>
   );
 }

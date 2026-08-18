@@ -192,6 +192,37 @@ KPI counting orgs the directory refuses to list is a number nobody can
 reconcile against anything. `phase1.test.ts` asserts the KPI org count equals
 the directory row count.
 
+## What Integration health covers
+
+Driven by **`orgIntegrations`** — the registry of one row per org × provider —
+rather than a panel per vendor. Both FourKites and Samsara already write
+`lastSyncStats` there, it carries the enabled flag and the declared pull
+cadence, and it has a `by_provider_only` index. A provider configured tomorrow
+appears without a code change; the previous page was FourKites-only and said
+nothing about Samsara, which is the integration that was actually failing.
+
+Richer per-provider records are joined on top where they exist:
+`samsaraSyncState` for the 10s GPS poll (it writes no `lastSyncTime` at all, so
+without this join Samsara reads as never-run) and `fourKitesPushTickHealth` for
+the 60s Dispatcher Update push and its funnel counters.
+
+State is derived, on the jobs board's policy: late by three expected cycles
+with a five-minute floor, so a 10s integration does not flap. `failing` means
+**the last word was an error** — a tick that ran afterwards but logged no
+success is not a recovery. `disabled` is its own state, never `stale`: an
+operator must not be paged for a deliberate switch-off.
+
+**Not scoped to client orgs**, unlike the directory and the Overview KPIs.
+Those answer "who are our customers"; this answers "is our machinery working".
+A failing poll we run on someone's behalf has to be visible whoever they are,
+so rows carry the opaque WorkOS org id and never a name.
+
+**Inbound is separated from outbound.** The `apiAuditLog` figures — p95 and 5xx
+— are partners calling *us*, the opposite direction from everything else on the
+page. They sat in the same KPI row as the integrations, where "Partner API 5xx
+rate" read as a partner being down when it means we returned errors to them.
+They now live in their own panel, labelled.
+
 ## The topbar
 
 52px above the content column, carrying the two facts that are true of the
