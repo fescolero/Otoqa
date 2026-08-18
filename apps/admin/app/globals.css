@@ -1504,3 +1504,124 @@ select.input {
   min-width: 0;
   flex: 1 1 240px;
 }
+
+/* ============================================================ RECORD LIST
+
+   A list of homogeneous records that must SCAN like a table but expand like a
+   feed row. A <table> can do the first and not the second; a flex row can do
+   the second and not the first — the chip widths differ per row, so every
+   column after the status starts at a different x and nothing lines up.
+
+   Grid gives both: fixed tracks for alignment, and the expanded detail as a
+   sibling block that spans the full width. */
+
+.record-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* Wraps one record and its expanded detail. Carries no padding or border of
+   its own — the row inside owns both, or the two sets stack and the list
+   loosens by 20px a row. */
+.record-group + .record-group > .record-row {
+  border-top: var(--border-width) solid var(--border-hairline);
+}
+
+.record-head,
+.record-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 9px var(--cell-px);
+  min-width: 940px;
+}
+
+.record-head {
+  border-bottom: var(--border-width) solid var(--border-card);
+  background: var(--surface-table-head);
+  font-size: var(--text-label-size);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.record-row {
+  min-height: var(--row-h);
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
+}
+
+.record-head + .record-group > .record-row {
+  border-top: none;
+}
+
+.record-row:hover {
+  background: var(--surface-row-hover);
+}
+
+/* Each cell clips rather than pushing the next column out of alignment —
+   that push is the whole defect this grid exists to fix. */
+.record-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Trailing annotations: several chips that all begin at the same x.
+   These WRAP rather than clip — a row that carries both "credited" and "paid
+   on time" is exactly the row you want to read, and hiding the second chip to
+   keep every row the same height loses the fact to save the rhythm. */
+.record-notes {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.record-notes .chip + .chip {
+  margin-left: 0;
+}
+
+.record-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Invoice ledger. Kept here rather than inline so the header and the rows
+   cannot drift apart. */
+.record-invoices {
+  /* Sized so two chips fit on one line: the notes column wraps rather than
+     clips, so anything the fixed columns take is a row that goes two-high. */
+  grid-template-columns:
+    94px /* status — widest chip is "partially paid" */
+    158px /* number */
+    minmax(128px, 150px) /* org */
+    70px /* cycle */
+    104px /* total */
+    112px /* balance */
+    minmax(240px, 1fr) /* notes */
+    76px; /* action */
+}
+
+/* Unevidenced-payment rows, grouped under their org. */
+.record-gaps {
+  grid-template-columns:
+    96px /* status */
+    168px /* invoice */
+    76px /* cycle */
+    124px /* paid */
+    124px /* documented */
+    136px /* unaccounted */
+    minmax(0, 1fr); /* flags */
+}
+
+.record-expanded {
+  padding: 4px var(--cell-px) 12px;
+  border-top: var(--border-width) solid var(--border-hairline);
+}

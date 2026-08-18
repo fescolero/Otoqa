@@ -59,6 +59,17 @@ never changes.
 **Empty copy says why it is empty.** "No data" tells an operator nothing;
 `EmptyState`'s `hint` is where the reason goes.
 
+**A list of records is a table, even when it expands.** The invoice ledger and
+the unevidenced-payment list use `.record-row` — a CSS grid with fixed tracks —
+rather than the flex `.audit-row` a feed uses. Flex rows look fine until the
+status chips differ in width, at which point every column after the status
+starts at a different x and a homogeneous list stops scanning. Grid gives
+aligned columns *and* lets the expanded detail sit beside the row as a
+full-width sibling, which a `<table>` cannot do cleanly. Money cells get
+`.record-num` (right-aligned, tabular). Trailing chips live in `.record-notes`,
+which wraps rather than clips: a row is allowed to grow, but a fact is never
+hidden to keep the rhythm — so the tracks are sized for two chips on one line.
+
 **Caveats are part of the copy.** Panel `footer` is for them: "counts cap at
 500", "metered usage only", "showing the first 200 matches". A number whose
 staleness or cap is unstated cannot be acted on.
