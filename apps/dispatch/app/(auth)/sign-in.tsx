@@ -27,10 +27,19 @@ const fmtPhone = (raw: string) => {
   return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
 };
 
+/** Clerk nests its error code under `errors[0]`; read it without an `any`. */
+function clerkError(error: unknown) {
+  return (
+    (error as {
+      errors?: Array<{ code?: string; message?: string; longMessage?: string }>;
+    } | null)?.errors?.[0] ?? {}
+  );
+}
+
 export default function SignInScreen() {
   const router = useRouter();
   const { signIn, setActive, isLoaded } = useSignIn();
-  const { selectProvider } = useActiveAuth();
+  const { selectProvider, signOut } = useActiveAuth();
   const [step, setStep] = React.useState<'phone' | 'otp'>('phone');
   const [phone, setPhone] = React.useState('');
   const [code, setCode] = React.useState('');
@@ -41,8 +50,8 @@ export default function SignInScreen() {
   const sendCode = async () => {
     if (!isLoaded || !signIn || !valid || busy) return;
     setBusy(true);
-    try {
-      const full = `+1${digits}`;
+    const full = `+1${digits}`;
+    const startPhoneCodeFlow = async () => {
       const attempt = await signIn.create({ identifier: full });
       const factor = attempt.supportedFirstFactors?.find(
         (f): f is Extract<typeof f, { strategy: 'phone_code' }> => f.strategy === 'phone_code',
@@ -51,12 +60,44 @@ export default function SignInScreen() {
         strategy: 'phone_code',
         phoneNumberId: factor?.phoneNumberId as string,
       });
+    };
+
+    try {
+      try {
+        await startPhoneCodeFlow();
+      } catch (createError) {
+        // Same deadlock as the driver app: Clerk can still hold a session
+        // while the app considers the user signed out, and `signIn.create()`
+        // then refuses with `session_exists`. Worse here — this screen has no
+        // auth guard and the catch below reports EVERY failure as "Not
+        // registered", so a stranded user is told their number is invalid.
+        // Clear the leftover session and retry once.
+        const staleCode = clerkError(createError).code;
+        if (
+          staleCode !== 'session_exists' &&
+          staleCode !== 'identifier_already_signed_in'
+        ) {
+          throw createError;
+        }
+        await signOut();
+        await startPhoneCodeFlow();
+      }
       setStep('otp');
-    } catch {
-      Alert.alert(
-        'Not registered',
-        'This phone number is not registered. Otoqa Dispatch is invite-only — contact your administrator.',
-      );
+    } catch (error) {
+      // Keep the invite-only message for the case it was written for, but
+      // stop applying it to unrelated failures.
+      const { code, message, longMessage } = clerkError(error);
+      if (code === 'form_identifier_not_found') {
+        Alert.alert(
+          'Not registered',
+          'This phone number is not registered. Otoqa Dispatch is invite-only — contact your administrator.',
+        );
+      } else {
+        Alert.alert(
+          "Couldn't send code",
+          longMessage || message || 'Something went wrong. Please try again.',
+        );
+      }
     } finally {
       setBusy(false);
     }
