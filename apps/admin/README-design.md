@@ -182,12 +182,15 @@ Two orgs are never hidden regardless of type, and both exceptions matter:
   paying account off the directory while its balance kept appearing in aging.
 
 So the filter can only hide an org that is both typed `CARRIER` *and* never
-invoiced. The panel footer reports how many were hidden — a directory that
-drops rows silently reads as a complete list.
+invoiced.
 
-Platform-wide aggregates (the Overview KPIs) deliberately still count every
-org: "active driver shifts" is meaningful precisely because carrier orgs have
-drivers, and a total exposes no client's identity.
+**The Overview KPIs use the same rule**, from the same module
+(`convex/platform/clientOrgs.ts`), so the two cannot drift. "Active driver
+shifts" and "loads this cycle" therefore count activity at orgs we bill, and
+read lower than the raw platform total — which is the intended reading, since a
+KPI counting orgs the directory refuses to list is a number nobody can
+reconcile against anything. `phase1.test.ts` asserts the KPI org count equals
+the directory row count.
 
 ## The topbar
 

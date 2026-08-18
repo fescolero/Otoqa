@@ -5,6 +5,7 @@
 import { convexTest } from 'convex-test';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import schema from '../schema';
+import { getPeriodKey } from '../accountingStatsHelpers';
 import { api, internal } from '../_generated/api';
 import type { MutationCtx } from '../_generated/server';
 
@@ -370,6 +371,71 @@ describe('platform Phase 1 — org health snapshots', () => {
     expect(
       await staff.query(api.platform.orgs.getOrgDetail, { organizationId: orgId }),
     ).not.toBeNull();
+  });
+
+  it('scopes the Overview KPIs to the same orgs the directory lists', async () => {
+    // A KPI counting orgs the directory refuses to show is a number nobody
+    // can reconcile against anything, so the two share one rule.
+    const t = convexTest(schema);
+    await t.run(seedOrg); // BROKER_CARRIER: 1 driver, 42 loads this cycle
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const carrier = await ctx.db.insert('organizations', {
+        name: "Somebody Else's Carrier",
+        workosOrgId: 'org_carrier_1',
+        orgType: 'CARRIER',
+        billingEmail: 'b@test.example',
+        billingAddress: {
+          addressLine1: '1 Test St',
+          city: 'Oakland',
+          state: 'California',
+          zip: '94601',
+          country: 'USA',
+        },
+        subscriptionPlan: 'Enterprise',
+        subscriptionStatus: 'Active',
+        billingCycle: 'Annual',
+        createdAt: now,
+        updatedAt: now,
+      });
+      // Give the carrier its own drivers and load volume, so a leak would
+      // show up as inflated KPIs rather than as nothing at all.
+      await ctx.db.insert('drivers', {
+        firstName: 'Their',
+        lastName: 'Driver',
+        email: 'd@carrier.example',
+        phone: '+15305550991',
+        licenseState: 'CA',
+        licenseExpiration: '2030-01-01',
+        licenseClass: 'A',
+        hireDate: '2024-01-01',
+        employmentStatus: 'Active',
+        employmentType: 'Full-time',
+        organizationId: 'org_carrier_1',
+        createdBy: 'u',
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert('platformUsageStats', {
+        workosOrgId: 'org_carrier_1',
+        periodKey: getPeriodKey(now),
+        loadsWritten: 999,
+        updatedAt: now,
+      });
+      return carrier;
+    });
+    await t.mutation(internal.platform.snapshots.rebuildAllOrgHealthSnapshots, {});
+
+    const staff = t.withIdentity(staffIdentity);
+    const pulse = await staff.query(api.platform.pulse.platformPulse, {});
+    const orgs = await staff.query(api.platform.orgs.listOrgs, {});
+
+    // The KPI org count and the directory row count are the same number.
+    expect(pulse.orgCount).toBe(orgs.rows.length);
+    expect(pulse.orgCount).toBe(1);
+    // The carrier's 999 loads and its driver are not ours to claim.
+    expect(pulse.loadsThisCycle).toBe(42);
+    expect(pulse.driverCount).toBe(1);
   });
 
   it('org detail returns targeted per-org data, staff-only', async () => {

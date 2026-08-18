@@ -55,11 +55,6 @@ function OrgDirectory() {
           onChange={(e) => setSearch(e.target.value)}
         />
       }
-      footer={
-        orgs && orgs.hiddenCarrierCount > 0
-          ? `${orgs.hiddenCarrierCount} carrier org(s) hidden — carriers onboarded by a broker are that broker's counterparties, not our customers, and they are never invoiced here. An org we have billed stays listed whatever its type says.`
-          : null
-      }
     >
       {filtered === undefined ? (
         <EmptyState>Loading…</EmptyState>
