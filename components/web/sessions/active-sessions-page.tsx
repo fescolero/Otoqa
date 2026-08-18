@@ -100,14 +100,32 @@ export function ActiveSessionsPage() {
     setHoveredPing(null);
   }, [selectedId]);
 
-  // Ticking "14:23 now" label — refreshed once a minute
-  const [nowMs, setNowMs] = React.useState(() => Date.now());
+  // Ticking "14:23 now" label — refreshed once a minute.
+  //
+  // `nowMs` deliberately starts as null and is only ever populated from an
+  // effect, because effects don't run during SSR. Seeding it with `Date.now()`
+  // in the useState initializer made this label hydration-unsafe: the
+  // initializer DOES run while Next prerenders this client component, and
+  // `getHours()/getMinutes()` format in the *server's* timezone (UTC on
+  // Vercel) while hydration re-renders the very same text node in the
+  // browser's timezone. For any viewer not on UTC the two strings differed
+  // ("06:20 now" vs "02:20 now"), React threw away the server HTML for this
+  // tree and reported hydration error #418 on every visit to the route.
+  //
+  // Rendering a fixed placeholder until the clock is established keeps the
+  // server and client first paints byte-identical, and the real time appears
+  // on the same tick the interval is installed.
+  const [nowMs, setNowMs] = React.useState<number | null>(null);
   React.useEffect(() => {
     if (!isLive) return;
+    setNowMs(Date.now());
     const id = setInterval(() => setNowMs(Date.now()), 30_000);
     return () => clearInterval(id);
   }, [isLive]);
-  const nowLabel = `${String(new Date(nowMs).getHours()).padStart(2, '0')}:${String(new Date(nowMs).getMinutes()).padStart(2, '0')} now`;
+  const nowLabel =
+    nowMs === null
+      ? '--:-- now'
+      : `${String(new Date(nowMs).getHours()).padStart(2, '0')}:${String(new Date(nowMs).getMinutes()).padStart(2, '0')} now`;
   const pastDateLabel = date.toLocaleDateString(undefined, {
     weekday: 'short',
     month: 'short',
