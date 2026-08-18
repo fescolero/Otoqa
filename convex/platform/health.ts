@@ -78,7 +78,16 @@ export const integrationHealth = query({
         push?.lastTickAt ?? 0,
       ) || null;
 
-      const lastErrorAt = Math.max(samsara?.lastErrorAt ?? 0, push?.lastErrorAt ?? 0) || null;
+      const lastErrorAt =
+        Math.max(
+          samsara?.lastErrorAt ?? 0,
+          push?.lastErrorAt ?? 0,
+          // lastSyncStats carries a message but NO timestamp of its own, so a
+          // failed sync's error is dated by the sync that produced it.
+          integration.lastSyncStats.lastSyncStatus === 'failed'
+            ? (integration.lastSyncStats.lastSyncTime ?? 0)
+            : 0,
+        ) || null;
       const lastError =
         integration.lastSyncStats.errorMessage ??
         samsara?.lastErrorMessage ??
@@ -112,11 +121,36 @@ export const integrationHealth = query({
               ? 'stale'
               : 'ok';
 
+      /**
+       * What this integration actually does, in its own terms.
+       *
+       * `pull`/`push` come from the org's sync settings, but Samsara's GPS
+       * ingest declares neither — it is a cron-driven poll — and rendering an
+       * em dash for it said "we don't know" about something we know exactly.
+       */
+      const direction =
+        [integration.syncSettings.pull?.loadsEnabled ? 'pull' : null,
+         (integration.syncSettings.push?.gpsTrackingEnabled ||
+          integration.syncSettings.push?.driverAssignmentsEnabled) ? 'push' : null]
+          .filter(Boolean)
+          .join(' + ') || (samsara ? 'poll' : null);
+
       return {
         _id: integration._id,
         workosOrgId: integration.workosOrgId,
         provider: integration.provider,
         state,
+        direction,
+        /**
+         * Whether the recorded error IS the current state.
+         *
+         * Samsara clears neither lastErrorMessage nor lastErrorAt on a
+         * successful poll, so the last error outlives the outage it describes.
+         * Shown as a live failure it claims an outage that has passed; dropped
+         * entirely it hides the intermittent faults that are hardest to catch.
+         * So it is kept, and labelled with its age.
+         */
+        lastErrorIsCurrent: state === 'failing',
         enabled: integration.syncSettings.isEnabled,
         pullEnabled: integration.syncSettings.pull?.loadsEnabled ?? false,
         pushEnabled:
@@ -125,7 +159,10 @@ export const integrationHealth = query({
         cadenceMs,
         lastActivityAt,
         lastSyncStatus: integration.lastSyncStats.lastSyncStatus ?? null,
-        recordsProcessed: integration.lastSyncStats.recordsProcessed ?? null,
+        // Samsara counts GPS pings rather than "records", and reports them
+        // where its own tick state lives.
+        recordsProcessed:
+          integration.lastSyncStats.recordsProcessed ?? samsara?.lastTickPingsIngested ?? null,
         lastError,
         lastErrorAt,
         // Provider detail, present only where the richer record exists.

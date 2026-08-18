@@ -143,19 +143,24 @@ function Integrations({
                       </Badge>
                     </span>
                   </td>
-                  <td className="muted">
-                    {[r.pullEnabled ? 'pull' : null, r.pushEnabled ? 'push' : null]
-                      .filter(Boolean)
-                      .join(' + ') || '—'}
-                  </td>
+                  <td className="muted">{r.direction ?? '—'}</td>
                   <td className="muted">
                     {r.lastActivityAt ? formatAgo(r.lastActivityAt) : 'never'}
                   </td>
                   <td className="muted">{formatDuration(r.cadenceMs)}</td>
                   <td className="num">{r.recordsProcessed ?? '—'}</td>
                   <td style={{ whiteSpace: 'normal' }}>
-                    {r.lastError ? (
+                    {r.lastError && r.lastErrorIsCurrent ? (
                       <span className="danger-text">{r.lastError}</span>
+                    ) : r.lastError ? (
+                      /* A past error, not a live one. Red here would claim an
+                         outage that has already ended — but dropping it would
+                         hide the intermittent faults that are hardest to see,
+                         so it stays, dated and quiet. */
+                      <span className="muted">
+                        recovered · last error
+                        {r.lastErrorAt ? ` ${formatAgo(r.lastErrorAt)}` : ''}: {r.lastError}
+                      </span>
                     ) : r.samsaraPingsLastTick !== null ? (
                       <span className="muted">{r.samsaraPingsLastTick} pings last tick</span>
                     ) : r.pushTickKind ? (

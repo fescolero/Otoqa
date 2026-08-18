@@ -178,6 +178,61 @@ describe('integration health — provider-agnostic board', () => {
     expect(health.integrations[0].lastError).toBe('Rate Limited by Aws');
   });
 
+  it('does not paint a recovered error as a live one', async () => {
+    // The bug this pins: Samsara clears neither lastErrorMessage nor
+    // lastErrorAt on a successful poll, so the last error outlives the outage
+    // it describes. The board shipped showing state `ok` beside a red error —
+    // a row contradicting itself. The error is kept (intermittent faults are
+    // the hardest to catch) but must be marked as past, not current.
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const id = await seedIntegration(ctx, { org: 'org_s', provider: 'samsara' });
+      await ctx.db.insert('samsaraSyncState', {
+        integrationId: id,
+        workosOrgId: 'org_s',
+        // A later successful poll, over a stale error from a minute ago.
+        lastPolledAt: now,
+        lastTickPingsIngested: 7,
+        lastErrorAt: now - MINUTE,
+        lastErrorMessage: 'transient_error status=n/a msg=fetch failed',
+        updatedAt: now,
+      });
+    });
+
+    const health = await t.withIdentity(staff).query(api.platform.health.integrationHealth, {});
+    const row = health.integrations[0];
+    expect(row.state).toBe('ok');
+    expect(row.lastError).toBe('transient_error status=n/a msg=fetch failed');
+    expect(row.lastErrorIsCurrent).toBe(false);
+    // Samsara counts pings, not "records", and says so in its own tick state.
+    expect(row.recordsProcessed).toBe(7);
+    // A cron-driven poll declares no pull/push flags; "—" claimed we did not
+    // know something we know exactly.
+    expect(row.direction).toBe('poll');
+  });
+
+  it('marks the error current while the failure is the latest word', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const id = await seedIntegration(ctx, { org: 'org_s', provider: 'samsara' });
+      await ctx.db.insert('samsaraSyncState', {
+        integrationId: id,
+        workosOrgId: 'org_s',
+        // The failing tick stamps both with the same `now`.
+        lastPolledAt: now,
+        lastErrorAt: now,
+        lastErrorMessage: 'fetch failed',
+        updatedAt: now,
+      });
+    });
+
+    const health = await t.withIdentity(staff).query(api.platform.health.integrationHealth, {});
+    expect(health.integrations[0].state).toBe('failing');
+    expect(health.integrations[0].lastErrorIsCurrent).toBe(true);
+  });
+
   it('surfaces the FourKites push tick, including an all-failed tick', async () => {
     const t = convexTest(schema);
     await t.run(async (ctx) => {
