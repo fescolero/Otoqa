@@ -253,34 +253,51 @@ export function DetailGrid({
 /* ------------------------------------------------------------ FilterChips */
 
 /**
- * State filter chips with counts, for a table that owns its page. The counts
- * are the point: "issued 4" tells you whether a filter is worth clicking
- * before you click it.
+ * State filter chips for a list that owns a panel.
+ *
+ * The counts are the whole point. A filtered query can only ever describe the
+ * rows it returned, so without them "void" and "written off" look identical to
+ * a filter holding forty rows — you learn which by clicking each in turn.
+ * With them, an empty state is visible before it costs a round trip, and the
+ * chip for it is dimmed rather than removed, because "there are none" is an
+ * answer and a missing chip is not.
+ *
+ * Renders as a bar at the top of the panel body, hairline-separated from the
+ * rows beneath, so the control that governs the list is attached to it.
  */
 export function FilterChips<T extends string>({
   options,
   value,
   onChange,
   counts,
+  label = 'Filter by status',
 }: {
   options: readonly T[];
   value: T;
   onChange: (next: T) => void;
   counts?: Partial<Record<T, number>>;
+  label?: string;
 }) {
   return (
-    <div className="chip-row">
-      {options.map((option) => (
-        <button
-          key={option}
-          type="button"
-          className={`chip chip-button${value === option ? ' chip-active' : ''}`}
-          onClick={() => onChange(option)}
-        >
-          {option.replace(/_/g, ' ')}
-          {counts?.[option] != null ? ` ${counts[option]}` : ''}
-        </button>
-      ))}
+    <div className="filter-bar" role="group" aria-label={label}>
+      {options.map((option) => {
+        const count = counts?.[option];
+        const empty = count === 0 && option !== value;
+        return (
+          <button
+            key={option}
+            type="button"
+            aria-pressed={value === option}
+            className={`chip chip-button${value === option ? ' chip-active' : ''}${
+              empty ? ' chip-empty' : ''
+            }`}
+            onClick={() => onChange(option)}
+          >
+            {option.replace(/_/g, ' ')}
+            {count != null ? <span className="chip-count">{count}</span> : null}
+          </button>
+        );
+      })}
     </div>
   );
 }

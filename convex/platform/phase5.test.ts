@@ -1453,6 +1453,93 @@ describe('tenant-facing one-off charges', () => {
   });
 });
 
+describe('board filters', () => {
+  const DAY2 = 86_400_000;
+
+  it('filters to overdue — the state the rows are badged with but never stored', async () => {
+    const t = convexTest(schema);
+    const orgId = await t.run((ctx) => seedOrg(ctx));
+    const staff = t.withIdentity(freshStaff());
+
+    // Inside its terms: open, but not late.
+    const current = await issuedInvoice(t);
+
+    // Past its terms and unpaid.
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: '2026-03',
+      lines: [{ label: 'Setup', amount: 400 }],
+      reason: 'Setup billed in arrears',
+    });
+    const late = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i.periodKey === '2026-03',
+    )!;
+    await staff.mutation(api.platform.invoices.issueInvoice, {
+      id: late._id,
+      issuedAt: Date.now() - 90 * DAY2,
+    });
+
+    // Past its terms but settled — late once, not overdue now.
+    await staff.mutation(api.platform.invoices.createManualInvoice, {
+      organizationId: orgId,
+      periodKey: '2026-04',
+      lines: [{ label: 'Overage', amount: 200 }],
+      reason: 'Overage billed separately',
+    });
+    const settled = (await staff.query(api.platform.invoices.listInvoices, {})).find(
+      (i) => i.periodKey === '2026-04',
+    )!;
+    await staff.mutation(api.platform.invoices.issueInvoice, {
+      id: settled._id,
+      issuedAt: Date.now() - 90 * DAY2,
+    });
+    await staff.mutation(api.platform.invoices.recordPayment, {
+      id: settled._id,
+      amount: 200,
+      method: 'wire',
+      reference: 'late but paid',
+    });
+
+    const overdue = await staff.query(api.platform.invoices.listInvoices, { overdueOnly: true });
+    expect(overdue.map((i) => i.periodKey)).toEqual(['2026-03']);
+    expect(overdue.map((i) => i._id)).not.toContain(current);
+    expect(overdue.map((i) => i._id)).not.toContain(settled._id);
+
+    // The chip count and the filtered list must agree, or the chip is a lie.
+    const aging = await staff.query(api.platform.invoices.agingOverview, {});
+    expect(aging.statusCounts.overdue).toBe(overdue.length);
+    expect(aging.statusCounts.all).toBe(3);
+    expect(aging.statusCounts.paid).toBe(1);
+    expect(aging.statusCounts.draft).toBe(0);
+  });
+
+  it('counts every status, including the ones with nothing in them', async () => {
+    // A chip with no count reads as "unknown"; a chip reading 0 reads as
+    // "none". The filter bar dims the second and must never render the first.
+    const t = convexTest(schema);
+    await t.run((ctx) => seedOrg(ctx));
+    await issuedInvoice(t);
+    const staff = t.withIdentity(freshStaff());
+
+    const aging = await staff.query(api.platform.invoices.agingOverview, {});
+    for (const key of [
+      'all',
+      'overdue',
+      'draft',
+      'issued',
+      'sent',
+      'partially_paid',
+      'paid',
+      'written_off',
+      'void',
+    ] as const) {
+      expect(typeof aging.statusCounts[key]).toBe('number');
+    }
+    expect(aging.statusCounts.issued).toBe(1);
+    expect(aging.statusCounts.void).toBe(0);
+  });
+});
+
 describe('receivables rollup — invoiced vs paid', () => {
   it('reconciles: invoiced − paid − written off = outstanding', async () => {
     const t = convexTest(schema);

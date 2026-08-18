@@ -5,7 +5,7 @@ import { useQuery, useMutation, useAction } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { formatMoney, formatWhen } from '@/lib/format';
 import { ReasonAction } from '@/components/ReasonAction';
-import { Badge, EmptyState, Kpi, Panel, toneFor } from '@/components/ui';
+import { Badge, EmptyState, FilterChips, Kpi, Panel, toneFor } from '@/components/ui';
 
 /**
  * Every WorkOS org id begins `org_01`, so a trailing ellipsis truncates away
@@ -36,8 +36,15 @@ type InvoiceStatus =
   | 'paid'
   | 'written_off'
   | 'void';
-const FILTERS: (InvoiceStatus | 'all')[] = [
+/**
+ * `overdue` is derived rather than stored — it CUTS ACROSS issued, sent and
+ * partially_paid rather than partitioning with them. It leads the list because
+ * it is the question a receivables board exists to answer.
+ */
+type InvoiceFilter = InvoiceStatus | 'all' | 'overdue';
+const FILTERS: InvoiceFilter[] = [
   'all',
+  'overdue',
   'draft',
   'issued',
   'sent',
@@ -49,11 +56,12 @@ const FILTERS: (InvoiceStatus | 'all')[] = [
 
 export function InvoicesBoard() {
   const aging = useQuery(api.platform.invoices.agingOverview, {});
-  const [filter, setFilter] = useState<InvoiceStatus | 'all'>('all');
+  const [filter, setFilter] = useState<InvoiceFilter>('all');
   const invoices = useQuery(
     api.platform.invoices.listInvoices,
-    filter === 'all' ? {} : { status: filter },
+    filter === 'all' ? {} : filter === 'overdue' ? { overdueOnly: true } : { status: filter },
   );
+  const filterTotal = aging?.statusCounts?.[filter];
 
   return (
     <>
@@ -118,24 +126,41 @@ export function InvoicesBoard() {
 
       <LedgerGaps />
 
-      <Panel title="Invoices" count={invoices?.length} subtitle="newest cycle first" flush>
-        <div className="chip-row" style={{ padding: '10px 12px 0', marginBottom: 0 }}>
-          {FILTERS.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className={`chip chip-button${filter === s ? ' chip-active' : ''}`}
-              onClick={() => setFilter(s)}
-            >
-              {s.replace(/_/g, ' ')}
-            </button>
-          ))}
-        </div>
+      {/* listInvoices caps at 100 rows; the chip counts come from a wider
+          scan. Say so rather than letting a chip promise 240 rows and the
+          list show 100. */}
+      <Panel
+        title="Invoices"
+        count={invoices?.length}
+        subtitle="newest cycle first"
+        flush
+        footer={
+          invoices && filterTotal != null && filterTotal > invoices.length
+            ? `Showing the newest ${invoices.length} of ${filterTotal}. Narrow with a status filter to reach older cycles.`
+            : null
+        }
+      >
+        <FilterChips
+          options={FILTERS}
+          value={filter}
+          onChange={setFilter}
+          counts={aging?.statusCounts}
+        />
         {invoices === undefined ? (
           <EmptyState>Loading…</EmptyState>
         ) : invoices.length === 0 ? (
-          <EmptyState hint="Cycle close runs on the 2nd; run the backfill for history.">
-            No invoices{filter !== 'all' ? ` with status ${filter.replace(/_/g, ' ')}` : ''}.
+          <EmptyState
+            hint={
+              filter === 'overdue'
+                ? 'Every open invoice is still inside its terms.'
+                : 'Cycle close runs on the 2nd; run the backfill for history.'
+            }
+          >
+            {filter === 'all'
+              ? 'No invoices.'
+              : filter === 'overdue'
+                ? 'Nothing overdue.'
+                : `No invoices with status ${filter.replace(/_/g, ' ')}.`}
           </EmptyState>
         ) : (
           <div className="record-scroll">

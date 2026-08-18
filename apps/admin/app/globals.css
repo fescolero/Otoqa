@@ -1625,3 +1625,33 @@ select.input {
   padding: 4px var(--cell-px) 12px;
   border-top: var(--border-width) solid var(--border-hairline);
 }
+
+/* ============================================================ FILTER BAR
+
+   The control that governs a list, attached to it: a band at the top of the
+   panel body with a hairline under it, rather than chips floating free above
+   the rows they filter. */
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px var(--cell-px);
+  border-bottom: var(--border-width) solid var(--border-hairline);
+}
+
+/* The count is subordinate to the label it qualifies — same chip, less ink. */
+.chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+/* A filter with nothing behind it stays clickable and legible, just quiet:
+   "none of these" is an answer, and removing the chip hides it. */
+.chip-empty {
+  opacity: 0.45;
+}
+
+.chip-empty:hover {
+  opacity: 1;
+}

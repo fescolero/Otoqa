@@ -5,7 +5,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
-import { Badge, EmptyState, PageHeader, Panel, toneFor } from '@/components/ui';
+import { Badge, EmptyState, FilterChips, PageHeader, Panel, toneFor } from '@/components/ui';
 import { formatAgo } from '@/lib/format';
 
 type Status = 'open' | 'in_progress' | 'resolved' | 'closed';
@@ -31,6 +31,7 @@ function TicketsBoard() {
     api.platform.tickets.listTickets,
     filter === 'all' ? {} : { status: filter },
   );
+  const counts = useQuery(api.platform.tickets.ticketStatusCounts, {});
   const update = useMutation(api.platform.tickets.updateTicket);
   const create = useMutation(api.platform.tickets.createTicket);
   const [newTitle, setNewTitle] = useState('');
@@ -65,23 +66,12 @@ function TicketsBoard() {
         count={tickets?.length}
         flush
         footer={
-          tickets && tickets.length >= 100
-            ? 'Showing the most recent 100 — narrow with a status filter to see older ones.'
+          tickets && counts && counts[filter] > tickets.length
+            ? `Showing the ${tickets.length} most recent of ${counts[filter]}. Narrow with a status filter to see older ones.`
             : null
         }
       >
-        <div className="chip-row" style={{ padding: '10px 12px 0', marginBottom: 0 }}>
-          {STATUSES.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className={`chip chip-button${filter === s ? ' chip-active' : ''}`}
-              onClick={() => setFilter(s)}
-            >
-              {s.replace('_', ' ')}
-            </button>
-          ))}
-        </div>
+        <FilterChips options={STATUSES} value={filter} onChange={setFilter} counts={counts} />
         {tickets === undefined ? (
           <EmptyState>Loading…</EmptyState>
         ) : tickets.length === 0 ? (

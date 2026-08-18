@@ -6,7 +6,7 @@ import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
 import { ReasonAction } from '@/components/ReasonAction';
-import { Badge, EmptyState, Kpi, PageHeader, Panel, toneFor } from '@/components/ui';
+import { Badge, EmptyState, FilterChips, Kpi, PageHeader, Panel, toneFor } from '@/components/ui';
 import { formatAgo, formatDuration, formatWhen } from '@/lib/format';
 
 export default function JobsPage() {
@@ -50,8 +50,12 @@ function JobsBoard() {
 
   // Counts on the chips, so a filter is worth clicking before it is clicked.
   const counts = useMemo(() => {
-    const out: Partial<Record<Filter, number>> = { all: jobs?.length ?? 0 };
-    for (const j of jobs ?? []) out[j.state as Filter] = (out[j.state as Filter] ?? 0) + 1;
+    if (!jobs) return undefined;
+    // Seeded with zeroes: a chip with no count reads as "unknown", which is a
+    // different claim from "none".
+    const out = Object.fromEntries(FILTERS.map((f) => [f, 0])) as Record<Filter, number>;
+    out.all = jobs.length;
+    for (const j of jobs) out[j.state as Filter] = (out[j.state as Filter] ?? 0) + 1;
     return out;
   }, [jobs]);
 
@@ -126,19 +130,7 @@ function JobsBoard() {
             : null
         }
       >
-        <div className="chip-row" style={{ padding: '10px 12px 0', marginBottom: 0 }}>
-          {FILTERS.map((f) => (
-            <button
-              key={f}
-              type="button"
-              className={`chip chip-button${filter === f ? ' chip-active' : ''}`}
-              onClick={() => setFilter(f)}
-            >
-              {f}
-              {counts[f] ? ` ${counts[f]}` : ''}
-            </button>
-          ))}
-        </div>
+        <FilterChips options={FILTERS} value={filter} onChange={setFilter} counts={counts} />
         {jobs === undefined ? (
           <EmptyState>Loading…</EmptyState>
         ) : jobs.length === 0 ? (

@@ -70,6 +70,22 @@ full-width sibling, which a `<table>` cannot do cleanly. Money cells get
 which wraps rather than clips: a row is allowed to grow, but a fact is never
 hidden to keep the rhythm — so the tracks are sized for two chips on one line.
 
+**A filter chip carries its count, or it is a guess.** `FilterChips` is the
+only implementation — three hand-rolled copies had drifted, and two of them
+showed no counts at all, so `void` and `written_off` looked identical to a
+filter holding forty rows until you clicked each in turn. A count of zero dims
+the chip rather than removing it: "there are none" is an answer, and a missing
+chip is not. Where the list query caps below the counted total, the panel
+footer says so — a chip promising 240 rows over a list showing 100 is worse
+than no chip.
+
+**A derived state gets a filter too.** The board badges rows `overdue`, which
+is not a stored status — it is an open invoice past its due date with a
+balance. Without a chip for it, the one question a receivables board exists to
+answer could only be reached by clicking `issued`, then `sent`, then reading
+dates. `listInvoices({ overdueOnly: true })` computes it server-side so the
+chip count and the filtered list cannot disagree.
+
 **Caveats are part of the copy.** Panel `footer` is for them: "counts cap at
 500", "metered usage only", "showing the first 200 matches". A number whose
 staleness or cap is unstated cannot be acted on.
