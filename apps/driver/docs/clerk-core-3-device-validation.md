@@ -51,6 +51,21 @@ failure.
       `form_identifier_not_found` still maps through `clerkErrorCode()`.
 - [ ] Sign out, then sign in again in the same app session.
 
+### Stale-session recovery (ported from main)
+- [ ] Force the deadlock: sign in, then clear the app's view of the session
+      without clearing Clerk's (e.g. interrupt a sign-out, or reinstall over
+      an existing keychain entry) so the sign-in screen is reachable while
+      Clerk still holds a session.
+- [ ] Requesting a code in that state should now succeed: the app clears the
+      leftover session and retries once, rather than dead-ending.
+- [ ] `sign_in_stale_session_cleared` fires with `recovered: true`.
+- [ ] It retries **once** only — a second failure must surface an alert, not
+      loop.
+- [ ] Confirm the Core 3 error channel works here: `phoneCode.sendCode()`
+      RETURNS `{ error }` rather than throwing, so verify `session_exists` is
+      actually detected on this path and not silently swallowed. This is the
+      part of the port that could not be checked statically.
+
 ### Dispatch app
 - [ ] Same phone → code → verify path.
 - [ ] Readiness guard: this app has **no** `<ClerkLoaded>` wrapper, so

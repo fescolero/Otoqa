@@ -174,7 +174,7 @@ export default function SignInScreen() {
       clearTimeout(timeoutId);
       trackSignInCodeSent(fullPhoneNumber);
       setNavigateTo(fullPhoneNumber);
-    } catch (error: any) {
+    } catch (error) {
       clearTimeout(timeoutId);
       const elapsed = Date.now() - startTime;
       const errorCode = clerkErrorCode(error);
