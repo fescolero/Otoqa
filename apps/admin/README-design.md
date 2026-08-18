@@ -151,6 +151,44 @@ executable third-party code with full DOM access. It uses no `eval`, no
 `Function` constructor and no workers, so the console's CSP does not need
 loosening for it.
 
+**Its toolbar font is bound to ours** by the `[data-react-grab]` rule at the
+foot of `globals.css`. Its shadow root declares
+`@layer theme { :host { --font-sans: "Geist" } }` and `@import`s Geist from
+Google Fonts, which our CSP blocks — and today that costs nothing, because
+next/font self-hosts a face named literally `Geist` and document `@font-face`
+rules apply inside shadow roots. But it resolves by *coincidence*: change the
+console's sans face and the toolbar would keep asking for "Geist", find
+nothing, and drop to a system font. Binding the variables makes it follow.
+The rule wins over the shadow root twice — unlayered beats `@layer`, and an
+outer-document rule matching the host beats a `:host` rule inside it.
+
+## Who appears under Organizations
+
+The directory lists **Otoqa's own customers**: `BROKER` and `BROKER_CARRIER`
+orgs. A plain `CARRIER` is a carrier some broker onboarded — their
+counterparty, on the mobile app, invoiced by nobody here. Its name, drivers and
+load volume are the *broker's* client data, not ours to display.
+
+Enforced in `convex/platform/orgs.ts`, server-side, so the rows never cross the
+wire — and applied to `getOrgDetail` too, because a URL is not a permission and
+a directory-only filter would be decoration.
+
+Two orgs are never hidden regardless of type, and both exceptions matter:
+
+- **No type recorded.** Absent is not `CARRIER`; it is a data gap staff need to
+  see and fix. It renders with a `—` type, which is the signal.
+- **Any invoice against it.** If we have billed an org it is a customer
+  whatever its label says. Without this, one mistyped row would take a live
+  paying account off the directory while its balance kept appearing in aging.
+
+So the filter can only hide an org that is both typed `CARRIER` *and* never
+invoiced. The panel footer reports how many were hidden — a directory that
+drops rows silently reads as a complete list.
+
+Platform-wide aggregates (the Overview KPIs) deliberately still count every
+org: "active driver shifts" is meaningful precisely because carrier orgs have
+drivers, and a total exposes no client's identity.
+
 ## The topbar
 
 52px above the content column, carrying the two facts that are true of the

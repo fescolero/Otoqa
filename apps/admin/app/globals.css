@@ -110,6 +110,13 @@
   --font-sans-fallback: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono-fallback: ui-monospace, SFMono-Regular, Menlo, monospace;
 
+  /* The resolved stacks, under names nothing else redefines. Needed because a
+     third-party shadow root can shadow --font-sans for its own subtree (see
+     the React Grab rule at the foot of this file), and a rule cannot set a
+     custom property to var() of itself. */
+  --console-sans: var(--font-sans, var(--font-sans-fallback));
+  --console-mono: var(--font-mono, var(--font-mono-fallback));
+
   --text-title-size: 24px;
   --text-title-line: 32px;
   --text-title-md-size: 20px;
@@ -1654,4 +1661,29 @@ select.input {
 
 .chip-empty:hover {
   opacity: 1;
+}
+
+/* ============================================================ REACT GRAB
+
+   React Grab (dev + preview only) renders its toolbar in a shadow root whose
+   stylesheet declares `@layer theme { :root, :host { --font-sans: "Geist" } }`
+   and `@import`s Geist from Google Fonts.
+
+   That import is blocked by the console's CSP, and today it does not matter:
+   next/font self-hosts a face named literally `Geist`, document-level
+   @font-face rules apply inside shadow roots, so the toolbar already resolves
+   to our copy. But it resolves by COINCIDENCE — the two happen to name the
+   same family. Change the console's sans face and the toolbar would keep
+   asking for "Geist", find nothing, and silently drop to a system font.
+
+   Binding its variables to ours turns that coincidence into a guarantee. This
+   rule wins over the shadow root's own declaration twice over: unlayered
+   styles beat @layer, and an outer-document rule matching the host beats a
+   :host rule inside it. */
+
+[data-react-grab] {
+  --font-sans: var(--console-sans);
+  --font-mono: var(--console-mono);
+  --default-font-family: var(--console-sans);
+  --default-mono-font-family: var(--console-mono);
 }

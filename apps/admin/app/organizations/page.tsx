@@ -14,7 +14,7 @@ export default function OrganizationsPage() {
     <ConsoleShell>
       <PageHeader
         title="Organizations"
-        subtitle="Health snapshots rebuilt every 15 minutes — counts cap at 500."
+        subtitle="Otoqa's own customers — brokers and broker-carriers. Health snapshots rebuilt every 15 minutes; counts cap at 500."
       />
       <PanelBoundary label="Organization directory">
         <OrgDirectory />
@@ -31,11 +31,11 @@ function OrgDirectory() {
     if (!orgs) return undefined;
     const q = search.trim().toLowerCase();
     const rows = q
-      ? orgs.filter(
+      ? orgs.rows.filter(
           (o) =>
             o.name.toLowerCase().includes(q) || (o.workosOrgId ?? '').toLowerCase().includes(q),
         )
-      : [...orgs];
+      : [...orgs.rows];
     rows.sort((a, b) => b.loadsThisCycle - a.loadsThisCycle);
     return rows;
   }, [orgs, search]);
@@ -54,6 +54,11 @@ function OrgDirectory() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+      }
+      footer={
+        orgs && orgs.hiddenCarrierCount > 0
+          ? `${orgs.hiddenCarrierCount} carrier org(s) hidden — carriers onboarded by a broker are that broker's counterparties, not our customers, and they are never invoiced here. An org we have billed stays listed whatever its type says.`
+          : null
       }
     >
       {filtered === undefined ? (

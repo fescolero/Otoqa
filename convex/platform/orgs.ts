@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { query } from '../_generated/server';
+import type { QueryCtx } from '../_generated/server';
 import { requirePlatformStaff } from '../lib/auth';
 
 /**
@@ -12,12 +13,68 @@ import { requirePlatformStaff } from '../lib/auth';
  * sanctioned shape for platform reads of operational tables.
  */
 
+/**
+ * Who is OURS.
+ *
+ * `BROKER` and `BROKER_CARRIER` orgs are Otoqa's customers: they hold the
+ * contract, they accrue metered usage, they get invoiced. A plain `CARRIER`
+ * org is a carrier a broker onboarded — the broker's counterparty, on the
+ * mobile app, billed by nobody here. Its name, driver count and load volume
+ * are the BROKER'S client data, and this console has no business listing them
+ * beside our own customers.
+ *
+ * Enforced server-side rather than filtered in the UI, so the rows never cross
+ * the wire, and applied to getOrgDetail as well — a URL is not a permission,
+ * and a directory filter alone would be decoration.
+ */
+const CLIENT_ORG_TYPES = new Set(['BROKER', 'BROKER_CARRIER']);
+
+/**
+ * The type field is the RULE, not the whole test.
+ *
+ * Two orgs must never be hidden regardless of what `orgType` says:
+ *
+ *  - One with **no type recorded**. Absent is not the same as `CARRIER`, and a
+ *    missing type is a data gap staff need to see and fix. It renders with a
+ *    `—` type, which is the signal.
+ *  - One we have **actually billed**. If an invoice exists against an org then
+ *    it is a paying customer whatever its label, and a mistyped row must not
+ *    take a live account off the board — the account whose receivables the
+ *    billing page is tracking would vanish from the directory while its
+ *    outstanding balance kept showing up in aging.
+ *
+ * So the filter can only ever hide an org that is BOTH typed `CARRIER` AND has
+ * never been invoiced, which is exactly the population meant.
+ */
+function isClientOrg(orgType: string | undefined, hasBeenInvoiced: boolean): boolean {
+  if (orgType === undefined) return true;
+  if (CLIENT_ORG_TYPES.has(orgType)) return true;
+  return hasBeenInvoiced;
+}
+
+/** WorkOS org ids we have ever raised an invoice against. */
+const INVOICE_SCAN = 2000;
+async function invoicedOrgIds(ctx: QueryCtx): Promise<Set<string>> {
+  const rows = await ctx.db.query('platformInvoices').take(INVOICE_SCAN);
+  return new Set(rows.map((r) => r.workosOrgId));
+}
+
 export const listOrgs = query({
   args: {},
   handler: async (ctx) => {
     await requirePlatformStaff(ctx);
     // Bounded: one row per org.
-    return await ctx.db.query('orgHealthSnapshots').collect();
+    const all = await ctx.db.query('orgHealthSnapshots').collect();
+    const invoiced = await invoicedOrgIds(ctx);
+    const rows = all.filter((o) =>
+      isClientOrg(o.orgType, o.workosOrgId != null && invoiced.has(o.workosOrgId)),
+    );
+    return {
+      rows,
+      // Said out loud rather than silently dropped: a directory that hides
+      // rows without saying how many reads as a complete list.
+      hiddenCarrierCount: all.length - rows.length,
+    };
   },
 });
 
@@ -28,6 +85,15 @@ export const getOrgDetail = query({
 
     const org = await ctx.db.get(args.organizationId);
     if (!org) return null;
+    // Same rule as the directory. Reached by URL, this is the only thing
+    // standing between a broker's carrier and a staff screen.
+    const everInvoiced =
+      org.workosOrgId != null &&
+      (await ctx.db
+        .query('platformInvoices')
+        .withIndex('by_org_period', (q) => q.eq('workosOrgId', org.workosOrgId!))
+        .first()) !== null;
+    if (!isClientOrg(org.orgType, everInvoiced)) return null;
 
     const snapshot = await ctx.db
       .query('orgHealthSnapshots')

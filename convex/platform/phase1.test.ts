@@ -41,7 +41,9 @@ async function seedOrg(ctx: MutationCtx) {
   const orgId = await ctx.db.insert('organizations', {
     name: 'Phase1 Carrier LLC',
     workosOrgId: WORKOS_ORG,
-    orgType: 'CARRIER',
+    // A paying customer on an Enterprise plan: a broker-carrier, not a
+    // broker's counterparty. See platform/orgs.ts for the distinction.
+    orgType: 'BROKER_CARRIER',
     billingEmail: 'billing@p1.test',
     billingAddress: {
       addressLine1: '1 Test St',
@@ -239,8 +241,8 @@ describe('platform Phase 1 — org health snapshots', () => {
 
     const staff = t.withIdentity(staffIdentity);
     const orgs = await staff.query(api.platform.orgs.listOrgs, {});
-    expect(orgs).toHaveLength(1);
-    expect(orgs[0]).toMatchObject({
+    expect(orgs.rows).toHaveLength(1);
+    expect(orgs.rows[0]).toMatchObject({
       name: 'Phase1 Carrier LLC',
       workosOrgId: WORKOS_ORG,
       isDeleted: false,
@@ -250,6 +252,124 @@ describe('platform Phase 1 — org health snapshots', () => {
       loadsThisCycle: 42,
       flagOverrideCount: 1,
     });
+  });
+
+  it("hides a broker's carriers from the directory, and by URL", async () => {
+    // The console lists OUR customers. A plain CARRIER org is a carrier some
+    // broker onboarded — their counterparty, never invoiced by us, and their
+    // client data to hold, not ours to display.
+    const t = convexTest(schema);
+    await t.run(seedOrg); // BROKER_CARRIER — our customer
+    const carrierOrgId = await t.run(async (ctx) => {
+      const now = Date.now();
+      await ctx.db.insert('organizations', {
+        name: 'Northline Freight',
+        workosOrgId: 'org_broker_1',
+        orgType: 'BROKER',
+        billingEmail: 'b@test.example',
+        billingAddress: {
+          addressLine1: '1 Test St',
+          city: 'Oakland',
+          state: 'California',
+          zip: '94601',
+          country: 'USA',
+        },
+        subscriptionPlan: 'Enterprise',
+        subscriptionStatus: 'Active',
+        billingCycle: 'Annual',
+        createdAt: now,
+        updatedAt: now,
+      });
+      // A carrier some broker onboarded. Never invoiced by us.
+      return await ctx.db.insert('organizations', {
+        name: "Somebody Else's Carrier",
+        workosOrgId: 'org_carrier_1',
+        orgType: 'CARRIER',
+        billingEmail: 'b@test.example',
+        billingAddress: {
+          addressLine1: '1 Test St',
+          city: 'Oakland',
+          state: 'California',
+          zip: '94601',
+          country: 'USA',
+        },
+        subscriptionPlan: 'Enterprise',
+        subscriptionStatus: 'Active',
+        billingCycle: 'Annual',
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+    await t.mutation(internal.platform.snapshots.rebuildAllOrgHealthSnapshots, {});
+
+    const staff = t.withIdentity(staffIdentity);
+    const orgs = await staff.query(api.platform.orgs.listOrgs, {});
+    expect(orgs.rows.map((o) => o.name).sort()).toEqual([
+      'Northline Freight',
+      'Phase1 Carrier LLC',
+    ]);
+    expect(orgs.hiddenCarrierCount).toBe(1);
+
+    // A URL is not a permission: the detail page refuses the same org.
+    expect(
+      await staff.query(api.platform.orgs.getOrgDetail, { organizationId: carrierOrgId }),
+    ).toBeNull();
+  });
+
+  it('never hides an org we have actually invoiced, whatever its type says', async () => {
+    // The type field is the rule, not the whole test. A mistyped row must not
+    // take a live paying account off the board while its balance keeps
+    // showing up in aging.
+    const t = convexTest(schema);
+    const orgId = await t.run(async (ctx) => {
+      const now = Date.now();
+      // Typed CARRIER, but we have billed them — so they are a customer.
+      const id = await ctx.db.insert('organizations', {
+        name: 'Mislabelled But Paying',
+        workosOrgId: 'org_mistyped_1',
+        orgType: 'CARRIER',
+        billingEmail: 'b@test.example',
+        billingAddress: {
+          addressLine1: '1 Test St',
+          city: 'Oakland',
+          state: 'California',
+          zip: '94601',
+          country: 'USA',
+        },
+        subscriptionPlan: 'Enterprise',
+        subscriptionStatus: 'Active',
+        billingCycle: 'Annual',
+        createdAt: now,
+        updatedAt: now,
+      });
+      await ctx.db.insert('platformInvoices', {
+        workosOrgId: 'org_mistyped_1',
+        periodKey: '2026-01',
+        kind: 'metered',
+        invoiceNumber: 'INV-TYPED-WRONG',
+        loadsWritten: 10,
+        ratePerLoad: 3,
+        lines: [{ kind: 'usage', label: 'usage', amount: 30 }],
+        adjustments: [],
+        subtotal: 30,
+        total: 30,
+        payments: [],
+        amountPaid: 0,
+        status: 'issued',
+        createdAt: now,
+        updatedAt: now,
+      });
+      return id;
+    });
+    await t.mutation(internal.platform.snapshots.rebuildAllOrgHealthSnapshots, {});
+
+    const staff = t.withIdentity(staffIdentity);
+    const orgs = await staff.query(api.platform.orgs.listOrgs, {});
+    expect(orgs.rows.map((o) => o.name)).toEqual(['Mislabelled But Paying']);
+    expect(orgs.hiddenCarrierCount).toBe(0);
+    expect(
+      await staff.query(api.platform.orgs.getOrgDetail, { organizationId: orgId }),
+    ).not.toBeNull();
   });
 
   it('org detail returns targeted per-org data, staff-only', async () => {
