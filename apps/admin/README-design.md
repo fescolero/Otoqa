@@ -15,6 +15,7 @@ from the system's own delivery.
 | `components/ReasonAction.tsx` | The audited-write primitive — every mutation goes through it |
 | `components/PanelBoundary.tsx` | One panel fails, the page survives |
 | `app/layout.tsx` | Instrument Serif / Geist / Geist Mono via `next/font` |
+| `components/DevTools.tsx` | React Grab, development only — see below |
 
 The design system ships its components as inline-styled JSX for prototyping.
 Here they are **class names against one stylesheet** instead: a panel then
@@ -102,6 +103,33 @@ staleness or cap is unstated cannot be acted on.
 - **No `Sheet`, no `Toast`, no `Tabs`.** The system offers a right-side sheet;
   nothing here yet needs one. Adding it before a screen requires it would be
   inventing a pattern to maintain.
+
+## Pointing at an element
+
+`react-grab` is mounted in development. Hover any element in the console, press
+**⌘C / Ctrl+C**, and the clipboard gets the element plus its component and
+source location:
+
+```
+[<span class="chip chip-warn">paid 50d late</span> in InvoiceRow
+ (at components/InvoicesBoard.tsx:341:11)]
+```
+
+Paste that at an agent instead of describing which chip you mean. Two rules
+about it:
+
+- **Development only, and not merely by preference.** It binds ⌘C, and staff
+  copy org ids, invoice numbers and bank references out of this console
+  constantly — a selection overlay owning the copy key would break the
+  console's most-used interaction. It also walks the React tree and reads
+  source paths, which is fine on a laptop and wrong on a page rendering
+  customer billing data. The guard is statically false in a production build,
+  so the import is *eliminated*, not skipped: `grep -r "react-grab\|bippy"
+  .next/static` after a build returns nothing, and that is the check to re-run
+  if this ever changes.
+- **Imported from `node_modules`, not the CDN `<script>` the README suggests.**
+  The rule that made the fonts self-hosted applies harder to executable
+  third-party code with full DOM access.
 
 ## The topbar
 

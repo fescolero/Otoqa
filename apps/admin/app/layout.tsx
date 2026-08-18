@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { Geist, Geist_Mono, Instrument_Serif } from 'next/font/google';
 import { ConvexClientProvider } from '@/components/ConvexClientProvider';
+import { DevTools } from '@/components/DevTools';
 import './globals.css';
 
 /**
@@ -53,6 +54,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         />
       </head>
       <body>
+        <DevTools />
         <ConvexClientProvider>{children}</ConvexClientProvider>
       </body>
     </html>
