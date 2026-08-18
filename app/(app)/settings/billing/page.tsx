@@ -25,9 +25,9 @@
 
 import * as React from 'react';
 import { useMemo, useRef, useState } from 'react';
-import { useQuery } from 'convex/react';
 import type { FunctionReturnType } from 'convex/server';
 import { api } from '@/convex/_generated/api';
+import { useAuthQuery } from '@/hooks/use-auth-query';
 import { useOrganizationId } from '@/contexts/organization-context';
 
 import { Chip, SettingsHeader, WBtn, WIcon, type ChipStatus } from '@/components/web';
@@ -1805,7 +1805,15 @@ export default function BillingPage() {
   // stay pure; day-level precision is all this needs).
   const [nowMs] = useState(() => Date.now());
 
-  const overview = useQuery(
+  // useAuthQuery, not useQuery: getBillingOverview calls assertCallerOwnsOrg,
+  // and `organizationId` is already populated from the server-rendered layout
+  // on the very first render — so the org-id gate alone still lets this fire
+  // before the Convex auth handshake completes, and the server throws
+  // ConvexError('Unauthenticated'). Convex re-throws that out of useQuery
+  // during render, which takes the whole billing page down. Holding the query
+  // at 'skip' until the token lands is indistinguishable from the loading
+  // state this page already handles (both leave `overview` undefined).
+  const overview = useAuthQuery(
     api.platformUsage.getBillingOverview,
     organizationId ? { workosOrgId: organizationId } : 'skip',
   );
