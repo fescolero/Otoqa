@@ -4,6 +4,7 @@ import type { ActionCtx } from './_generated/server';
 import { internal, api } from './_generated/api';
 import type { Doc } from './_generated/dataModel';
 import { requireCallerOrgId } from './lib/auth';
+import { trackedFetch } from './lib/externalHealth';
 
 // Local aliases for the row shapes this module iterates over. Pin explicit
 // types on the inline lambdas below — Convex's fresh codegen infers the
@@ -56,7 +57,7 @@ export const fetchFuelPrices = action({
         url.searchParams.append('sort[0][direction]', 'desc');
         url.searchParams.append('length', '1');
 
-        const response = await fetch(url.toString());
+        const response = await trackedFetch(ctx, 'eia', url.toString());
         if (!response.ok) continue;
 
         const data = await response.json();
@@ -105,7 +106,7 @@ export const fetchTollEstimate = action({
     }
 
     try {
-      const response = await fetch('https://apis.tollguru.com/toll/v2/origin-destination-waypoints', {
+      const response = await trackedFetch(ctx, 'tollguru', 'https://apis.tollguru.com/toll/v2/origin-destination-waypoints', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -185,7 +186,7 @@ export const geocodeAndCalculateRoute = action({
       let originLat = entry.originLat;
       let originLng = entry.originLng;
       if (!originLat || !originLng) {
-        const originGeo = await geocodeAddress(
+        const originGeo = await geocodeAddress(ctx, 
           `${entry.originAddress}, ${entry.originCity}, ${entry.originState} ${entry.originZip}`,
           apiKey,
         );
@@ -197,7 +198,7 @@ export const geocodeAndCalculateRoute = action({
       let destLat = entry.destinationLat;
       let destLng = entry.destinationLng;
       if (!destLat || !destLng) {
-        const destGeo = await geocodeAddress(
+        const destGeo = await geocodeAddress(ctx, 
           `${entry.destinationAddress}, ${entry.destinationCity}, ${entry.destinationState} ${entry.destinationZip}`,
           apiKey,
         );
@@ -216,7 +217,7 @@ export const geocodeAndCalculateRoute = action({
           let lat = stop.lat;
           let lng = stop.lng;
           if (!lat || !lng) {
-            const geo = await geocodeAddress(
+            const geo = await geocodeAddress(ctx, 
               `${stop.address}, ${stop.city}, ${stop.state} ${stop.zip}`,
               apiKey,
             );
@@ -230,7 +231,7 @@ export const geocodeAndCalculateRoute = action({
       stops.push({ latitude: destLat, longitude: destLng });
 
       // Calculate route distance using Google Maps
-      const routeResult = await calculateRouteDistanceFromStops(stops);
+      const routeResult = await calculateRouteDistanceFromStops(ctx, stops);
 
       // Update entry with geocoded coordinates and route metrics
       await ctx.runMutation(internal.laneAnalyzerActions.updateEntryRoute, {
@@ -295,10 +296,10 @@ export const runAnalysisWithExternalData = action({
             // Geocode origin + dest in parallel
             const [originGeo, destGeo] = await Promise.all([
               (!oLat || !oLng)
-                ? geocodeAddress([entry.originAddress, entry.originCity, entry.originState, entry.originZip].filter(Boolean).join(', '), apiKey)
+                ? geocodeAddress(ctx, [entry.originAddress, entry.originCity, entry.originState, entry.originZip].filter(Boolean).join(', '), apiKey)
                 : null,
               (!dLat || !dLng)
-                ? geocodeAddress([entry.destinationAddress, entry.destinationCity, entry.destinationState, entry.destinationZip].filter(Boolean).join(', '), apiKey)
+                ? geocodeAddress(ctx, [entry.destinationAddress, entry.destinationCity, entry.destinationState, entry.destinationZip].filter(Boolean).join(', '), apiKey)
                 : null,
             ]);
 
@@ -309,7 +310,7 @@ export const runAnalysisWithExternalData = action({
             let miles = entry.routeMiles, hours = entry.routeDurationHours;
             if ((!miles || !hours) && oLat && oLng && dLat && dLng) {
               try {
-                const r = await calculateRouteDistanceFromStops([
+                const r = await calculateRouteDistanceFromStops(ctx, [
                   { latitude: oLat, longitude: oLng },
                   { latitude: dLat, longitude: dLng },
                 ]);
@@ -345,7 +346,7 @@ export const runAnalysisWithExternalData = action({
       if (basesNeedGeo.length > 0) {
         await Promise.all(basesNeedGeo.map(async (base: LaneBaseDoc) => {
           try {
-            const geo = await geocodeAddress(
+            const geo = await geocodeAddress(ctx, 
               [base.address, base.city, base.state, base.zip].filter(Boolean).join(', '), apiKey
             );
             await ctx.runMutation(internal.laneAnalyzerActions.updateBaseGeocode, {
@@ -373,7 +374,7 @@ export const runAnalysisWithExternalData = action({
         });
         if (!cached || cached.expiresAt < Date.now()) {
           try {
-            const tollCost = await fetchTollCostFromApi(
+            const tollCost = await fetchTollCostFromApi(ctx, 
               entry.originLat!, entry.originLng!, entry.destinationLat!, entry.destinationLng!,
             );
             await ctx.runMutation(internal.laneAnalyzerActions.writeTollEstimate, {
@@ -650,7 +651,7 @@ async function fetchAndCacheFuelPrices(ctx: Pick<ActionCtx, 'runMutation'>) {
       url.searchParams.append('sort[0][direction]', 'desc');
       url.searchParams.append('length', '1');
 
-      const response = await fetch(url.toString());
+      const response = await trackedFetch(ctx, 'eia', url.toString());
       if (!response.ok) continue;
 
       const data = await response.json();
@@ -671,6 +672,7 @@ async function fetchAndCacheFuelPrices(ctx: Pick<ActionCtx, 'runMutation'>) {
 
 // Helper: fetch toll cost from TollGuru API
 async function fetchTollCostFromApi(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   originLat: number,
   originLng: number,
   destLat: number,
@@ -680,7 +682,7 @@ async function fetchTollCostFromApi(
   if (!apiKey) return 0;
 
   try {
-    const response = await fetch('https://apis.tollguru.com/toll/v2/origin-destination-waypoints', {
+    const response = await trackedFetch(ctx, 'tollguru', 'https://apis.tollguru.com/toll/v2/origin-destination-waypoints', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
       body: JSON.stringify({
@@ -710,6 +712,7 @@ async function fetchTollCostFromApi(
 
 // Helper: calculate route distance from stops using Google Maps API
 async function calculateRouteDistanceFromStops(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   stops: Array<{ latitude: number; longitude: number }>,
 ): Promise<{ miles: number; durationHours: number }> {
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
@@ -729,7 +732,7 @@ async function calculateRouteDistanceFromStops(
     url.searchParams.append('key', apiKey);
     url.searchParams.append('units', 'imperial');
 
-    const response = await fetch(url.toString());
+    const response = await trackedFetch(ctx, 'google_maps', url.toString());
     if (!response.ok) throw new ConvexError(`API request failed: ${response.status}`);
 
     const data = await response.json();
@@ -752,6 +755,7 @@ async function calculateRouteDistanceFromStops(
 
 // Helper: geocode an address string using Google Maps Geocoding API
 async function geocodeAddress(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   address: string,
   apiKey: string,
 ): Promise<{ lat: number; lng: number }> {
@@ -759,7 +763,7 @@ async function geocodeAddress(
   url.searchParams.append('address', address);
   url.searchParams.append('key', apiKey);
 
-  const response = await fetch(url.toString());
+  const response = await trackedFetch(ctx, 'google_maps', url.toString());
   if (!response.ok) throw new ConvexError(`Geocoding API error: ${response.status}`);
 
   const data = await response.json();
@@ -824,7 +828,7 @@ export const runExternalSolver = internalAction({
 
     console.log(`Calling weekly solver at ${args.solverUrl}/solve-weekly with ${data.entries.length} lanes, ${data.bases.length} base(s)...`);
 
-    const response = await fetch(`${args.solverUrl}/solve-weekly`, {
+    const response = await trackedFetch(ctx, 'solver', `${args.solverUrl}/solve-weekly`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: payload,

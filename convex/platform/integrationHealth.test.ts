@@ -1,7 +1,7 @@
 import { convexTest } from 'convex-test';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import schema from '../schema';
-import { api } from '../_generated/api';
+import { api, internal } from '../_generated/api';
 import type { MutationCtx } from '../_generated/server';
 
 const STAFF_ISSUER = 'https://staff.example.com';
@@ -213,6 +213,133 @@ describe('integration health — provider-agnostic board', () => {
   it('is staff-only', async () => {
     const t = convexTest(schema);
     await expect(t.query(api.platform.health.integrationHealth, {})).rejects.toThrow(
+      /Not platform staff|Unauthenticated/,
+    );
+  });
+});
+
+describe('external service health — our own dependencies', () => {
+  it('lists every declared service, called or not, and never leaks a secret', async () => {
+    const t = convexTest(schema);
+    const health = await t
+      .withIdentity(staff)
+      .query(api.platform.health.externalServiceHealth, {});
+
+    // The registry is the inventory: a dependency we have never called is
+    // still a dependency, and the board has to be able to say so.
+    expect(health.services.length).toBeGreaterThanOrEqual(15);
+    expect(health.services.map((s) => s.key)).toContain('stripe');
+    expect(health.services.map((s) => s.key)).toContain('slack');
+
+    // Only the variable NAME is ever returned, never a value.
+    const serialised = JSON.stringify(health);
+    expect(serialised).toContain('STRIPE_SECRET_KEY');
+    expect(serialised).not.toMatch(/sk_live|sk_test|Bearer /);
+  });
+
+  it('records a failure, counts consecutive ones, and clears on success', async () => {
+    const t = convexTest(schema);
+    const call = (ok: boolean, errorMessage?: string) =>
+      t.mutation(internal.lib.externalHealth.recordExternalCall, {
+        service: 'stripe',
+        ok,
+        durationMs: 12,
+        statusCode: ok ? 200 : 503,
+        errorMessage,
+      });
+
+    await call(false, 'HTTP 503 Service Unavailable');
+    await call(false, 'HTTP 503 Service Unavailable');
+    let row = await t.run(async (ctx) =>
+      ctx.db
+        .query('externalServiceHealth')
+        .withIndex('by_service', (q) => q.eq('service', 'stripe'))
+        .unique(),
+    );
+    expect(row?.consecutiveFailures).toBe(2);
+    expect(row?.lastErrorMessage).toBe('HTTP 503 Service Unavailable');
+
+    // A success is a recovery: the streak resets rather than decaying.
+    await call(true);
+    row = await t.run(async (ctx) =>
+      ctx.db
+        .query('externalServiceHealth')
+        .withIndex('by_service', (q) => q.eq('service', 'stripe'))
+        .unique(),
+    );
+    expect(row?.consecutiveFailures).toBe(0);
+    expect(row?.lastOkAt).toBeGreaterThan(0);
+  });
+
+  it('throttles repeated successes but never throttles a failure', async () => {
+    // A hot dependency must not turn telemetry into write contention on one
+    // row; an outage must never be the thing that gets dropped.
+    const t = convexTest(schema);
+    const ok = () =>
+      t.mutation(internal.lib.externalHealth.recordExternalCall, {
+        service: 'google_maps',
+        ok: true,
+        durationMs: 5,
+      });
+
+    await ok();
+    const first = await t.run(async (ctx) =>
+      ctx.db
+        .query('externalServiceHealth')
+        .withIndex('by_service', (q) => q.eq('service', 'google_maps'))
+        .unique(),
+    );
+    await ok();
+    await ok();
+    const later = await t.run(async (ctx) =>
+      ctx.db
+        .query('externalServiceHealth')
+        .withIndex('by_service', (q) => q.eq('service', 'google_maps'))
+        .unique(),
+    );
+    // Within the throttle window the row is left completely alone.
+    expect(later!.lastOkAt).toBe(first!.lastOkAt);
+
+    await t.mutation(internal.lib.externalHealth.recordExternalCall, {
+      service: 'google_maps',
+      ok: false,
+      durationMs: 9,
+      errorMessage: 'quota exceeded',
+    });
+    const afterFailure = await t.run(async (ctx) =>
+      ctx.db
+        .query('externalServiceHealth')
+        .withIndex('by_service', (q) => q.eq('service', 'google_maps'))
+        .unique(),
+    );
+    expect(afterFailure!.consecutiveFailures).toBe(1);
+    expect(afterFailure!.lastErrorMessage).toBe('quota exceeded');
+  });
+
+  it('lets a recorded failure outrank a missing key', async () => {
+    // DEEPGRAM_API_KEY is unset here, so this service would otherwise report
+    // "not configured" — while sitting on a live 401. If we recorded a
+    // failure we plainly called it, and the error is what to act on.
+    const t = convexTest(schema);
+    await t.mutation(internal.lib.externalHealth.recordExternalCall, {
+      service: 'deepgram',
+      ok: false,
+      durationMs: 3,
+      errorMessage: 'HTTP 401 Unauthorized',
+    });
+    const health = await t
+      .withIdentity(staff)
+      .query(api.platform.health.externalServiceHealth, {});
+    const row = health.services.find((s) => s.key === 'deepgram')!;
+    expect(row.state).toBe('failing');
+    expect(row.lastError).toBe('HTTP 401 Unauthorized');
+    // Worst first, so what needs a human is not below the fold.
+    expect(health.services[0].state).toBe('failing');
+  });
+
+  it('is staff-only', async () => {
+    const t = convexTest(schema);
+    await expect(t.query(api.platform.health.externalServiceHealth, {})).rejects.toThrow(
       /Not platform staff|Unauthenticated/,
     );
   });

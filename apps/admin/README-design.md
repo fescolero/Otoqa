@@ -217,6 +217,34 @@ Those answer "who are our customers"; this answers "is our machinery working".
 A failing poll we run on someone's behalf has to be visible whoever they are,
 so rows carry the opaque WorkOS org id and never a name.
 
+**Our own dependencies get their own panel**, driven by the declared inventory
+in `convex/lib/externalHealth.ts` — Stripe, Slack, Clerk, Maps, Roads, Mapbox,
+FCM, Expo, an LLM, Deepgram, TollGuru, EIA, FMCSA, Socrata, NHTSA, the solver,
+object storage. Recorded by `trackedFetch(ctx, service, url, init)`, a drop-in
+for `fetch` that returns the same Response and rethrows the same error: a
+health board that can break what it watches is not worth having.
+
+Three rules that shape it:
+
+- **Every declared service is listed, called or not.** "We depend on this and
+  have never seen it work" is a finding, and a board showing only what has
+  reported cannot express it.
+- **Successes write at most once a minute per service; failures always write.**
+  Without the throttle a hot dependency would hammer one row from concurrent
+  actions and trade OCC retries for telemetry nobody reads. That is also why
+  there are no lifetime call counters — they would be wrong under the throttle.
+- **No `stale` state.** These are called on demand, not on a schedule. A VIN
+  decoder nobody used this week is not broken, and inventing a cadence would
+  manufacture alerts out of quiet.
+
+A recorded failure outranks a missing key: if it failed we called it, and
+sending an operator to check an env var while the service sits on a live 401
+is the wrong place. Only the variable NAME is ever returned, never its value.
+
+FourKites and Samsara are deliberately *not* in this inventory — they are
+customer integrations, covered above by `orgIntegrations`. Counting them twice
+would blur "our dependency" into "their configuration".
+
 **Inbound is separated from outbound.** The `apiAuditLog` figures — p95 and 5xx
 — are partners calling *us*, the opposite direction from everything else on the
 page. They sat in the same KPI row as the integrations, where "Partner API 5xx

@@ -5,6 +5,8 @@ import {
   internalQuery,
 } from './_generated/server';
 import { internal } from './_generated/api';
+import type { ActionCtx } from './_generated/server';
+import { trackedFetch } from './lib/externalHealth';
 
 // ============================================================================
 // FCM WAKE-UP — server-side stale-session wake dispatch
@@ -22,7 +24,7 @@ import { internal } from './_generated/api';
 //                                      │       backoff, aborts if blocked,
 //                                      │       patches fcmLastPushAt=now
 //                                      │
-//                                      ├── mintFcmAccessToken()
+//                                      ├── mintFcmAccessToken(ctx)
 //                                      │       signs a short-lived JWT
 //                                      │       with the service-account
 //                                      │       private key, exchanges it
@@ -153,7 +155,7 @@ function base64urlFromString(s: string): string {
  * this raw mint is what that helper falls back to when the cache is
  * stale or empty. ~150ms per call (network + sign).
  */
-async function mintFcmAccessToken(): Promise<{
+async function mintFcmAccessToken(ctx: Pick<ActionCtx, 'runMutation'>): Promise<{
   accessToken: string;
   expiresAtMs: number;
 }> {
@@ -192,7 +194,7 @@ async function mintFcmAccessToken(): Promise<{
   );
   const jwt = `${signingInput}.${base64urlFromBytes(new Uint8Array(sig))}`;
 
-  const res = await fetch(sa.token_uri ?? GOOGLE_TOKEN_ENDPOINT, {
+  const res = await trackedFetch(ctx, 'fcm', sa.token_uri ?? GOOGLE_TOKEN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -250,7 +252,7 @@ async function getCachedOrMintFcmAccessToken(ctx: any): Promise<string> {
     return cached.accessToken;
   }
 
-  const fresh = await mintFcmAccessToken();
+  const fresh = await mintFcmAccessToken(ctx);
   console.warn(
     `[fcmWake.mintFcmAccessToken] minted ttlMs=${fresh.expiresAtMs - now}`,
   );
@@ -801,7 +803,7 @@ export const sendWake = internalAction({
         },
       };
 
-      const res = await fetch(url, {
+      const res = await trackedFetch(ctx, 'fcm', url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -970,7 +972,7 @@ export const sendSessionEnded = internalAction({
         },
       };
 
-      const res = await fetch(url, {
+      const res = await trackedFetch(ctx, 'fcm', url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken}`,

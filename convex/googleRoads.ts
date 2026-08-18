@@ -2,6 +2,7 @@
 
 import { v } from 'convex/values';
 import { action } from './_generated/server';
+import { trackedFetch } from './lib/externalHealth';
 
 // ============================================
 // MAP MATCHING APIs
@@ -91,7 +92,7 @@ export const snapToRoads = action({
         url.searchParams.set('key', apiKey);
 
         console.log(`[GoogleRoads] Requesting snap for ${batch.length} points...`);
-        const response = await fetch(url.toString());
+        const response = await trackedFetch(ctx, 'google_roads', url.toString());
         
         if (!response.ok) {
           const errorText = await response.text();
@@ -244,7 +245,7 @@ export const mapMatchRoute = action({
         url.searchParams.set('radiuses', radiuses);
 
         console.log(`[MapboxMatching] Matching ${batch.length} coordinates...`);
-        const response = await fetch(url.toString());
+        const response = await trackedFetch(ctx, 'mapbox', url.toString());
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -461,7 +462,7 @@ export const mapMatchRouteWithDiagnostics = action({
         url.searchParams.set('radiuses', radiuses);
 
         console.log(`[MapboxDiag] Batch ${batchIndex}: matching ${batch.length} coordinates (indices ${i}-${batchEnd - 1})...`);
-        const response = await fetch(url.toString());
+        const response = await trackedFetch(ctx, 'mapbox', url.toString());
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -638,7 +639,7 @@ export const getRoutePath = action({
           url.searchParams.set('key', apiKey);
 
           try {
-            const response = await fetch(url.toString());
+            const response = await trackedFetch(ctx, 'google_maps', url.toString());
             
             if (!response.ok) {
               results.push({ 

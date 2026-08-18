@@ -18,6 +18,7 @@
 import { v } from 'convex/values';
 import { internalAction, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
+import { trackedFetch } from './lib/externalHealth';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const EXPO_RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
@@ -58,7 +59,7 @@ export const sendBatch = internalAction({
   handler: async (ctx, args) => {
     for (let i = 0; i < args.messages.length; i += BATCH) {
       const chunk = args.messages.slice(i, i + BATCH);
-      const res = await fetch(EXPO_PUSH_URL, {
+      const res = await trackedFetch(ctx, 'expo_push', EXPO_PUSH_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(chunk),
@@ -92,7 +93,7 @@ export const checkReceipts = internalAction({
   args: { receiptToToken: v.record(v.string(), v.string()) },
   handler: async (ctx, args) => {
     const ids = Object.keys(args.receiptToToken);
-    const res = await fetch(EXPO_RECEIPTS_URL, {
+    const res = await trackedFetch(ctx, 'expo_push', EXPO_RECEIPTS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),

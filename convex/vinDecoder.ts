@@ -1,6 +1,7 @@
 import { action } from './_generated/server';
 import { ConvexError, v } from 'convex/values';
 import { requireCallerOrgId } from './lib/auth';
+import { trackedFetch } from './lib/externalHealth';
 
 // NHTSA VIN Decoder API integration
 // https://vpic.nhtsa.dot.gov/api/
@@ -29,7 +30,7 @@ export const decodeVIN = action({
     }
 
     try {
-      const response = await fetch(
+      const response = await trackedFetch(ctx, 'nhtsa', 
         `https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/${vin}?format=json`
       );
 

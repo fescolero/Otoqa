@@ -4147,6 +4147,35 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index('by_organization', ['organizationId']),
 
+  /**
+   * externalServiceHealth — one row per third-party service the platform
+   * depends on. Written by lib/externalHealth.ts `trackedFetch`, read by the
+   * console's Integration health board.
+   *
+   * Deliberately NOT per-org: these are platform-wide dependencies (Google
+   * Maps, Stripe, Clerk, an LLM), unlike orgIntegrations which is a customer's
+   * own configured integration.
+   *
+   * Successful calls are throttled to one write a minute per service; failures
+   * always write. Without that, a hot dependency like Maps would hammer a
+   * single row from concurrent actions and trade OCC retries for telemetry
+   * nobody reads. There are therefore no lifetime call counters here — they
+   * would be wrong under the throttle, and a number that implies a precision
+   * it does not have is worse than no number.
+   */
+  externalServiceHealth: defineTable({
+    service: v.string(), // stable machine key; see EXTERNAL_SERVICES
+    lastOkAt: v.optional(v.number()),
+    lastErrorAt: v.optional(v.number()),
+    lastErrorMessage: v.optional(v.string()), // truncated
+    lastStatusCode: v.optional(v.number()),
+    lastDurationMs: v.optional(v.number()),
+    // Resets to 0 on any success. The actionable number: one failure is
+    // weather, ten in a row is an outage.
+    consecutiveFailures: v.number(),
+    updatedAt: v.number(),
+  }).index('by_service', ['service']),
+
   // One row per cron job, upserted EVERY tick by platform/cronRunner —
   // cheap enough even for the 10s Samsara poll. This is the jobs board's
   // source of truth for "is it healthy right now".

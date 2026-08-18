@@ -1,5 +1,6 @@
 import { ConvexError, v } from 'convex/values';
 import { action } from './_generated/server';
+import { trackedFetch } from './lib/externalHealth';
 
 /**
  * Calculate the total distance for a route using Google Maps Distance Matrix API
@@ -44,7 +45,7 @@ export const calculateRouteDistance = action({
         url.searchParams.append('key', apiKey);
         url.searchParams.append('units', 'imperial'); // Use miles
 
-        const response = await fetch(url.toString());
+        const response = await trackedFetch(ctx, 'google_maps', url.toString());
         
         if (!response.ok) {
           throw new ConvexError(`API request failed with status ${response.status}`);
@@ -105,7 +106,7 @@ export const geocodeAddress = action({
       url.searchParams.append('address', args.address);
       url.searchParams.append('key', apiKey);
 
-      const response = await fetch(url.toString());
+      const response = await trackedFetch(ctx, 'google_maps', url.toString());
       
       if (!response.ok) {
         throw new ConvexError(`API request failed with status ${response.status}`);

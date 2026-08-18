@@ -11,6 +11,7 @@ import {
   POLYGON_MIN_DISTINCT_DAYS,
 } from './lib/polygonGeo';
 import { logAudit } from './lib/audit';
+import { trackedFetch } from './lib/externalHealth';
 
 /**
  * Facility geofence sizing — layers 1 & 2 of the auto-sizing plan.
@@ -231,7 +232,7 @@ export const seedRadiusFromViewport = internalAction({
       const url = new URL('https://maps.googleapis.com/maps/api/geocode/json');
       url.searchParams.append('address', address);
       url.searchParams.append('key', apiKey);
-      const response = await fetch(url.toString());
+      const response = await trackedFetch(ctx, 'google_maps', url.toString());
       if (!response.ok) throw new ConvexError(`geocode HTTP ${response.status}`);
       const data = await response.json();
       if (data.status !== 'OK' || !data.results?.length) return null;

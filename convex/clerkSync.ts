@@ -4,6 +4,7 @@ import { ConvexError, v } from 'convex/values';
 import { internalAction } from './_generated/server';
 import { internal } from './_generated/api';
 import type { Id } from './_generated/dataModel';
+import { trackedFetch } from './lib/externalHealth';
 
 /**
  * Normalize phone number to E.164 format for Clerk
@@ -152,7 +153,7 @@ export const createClerkUserForDriver = internalAction({
     });
 
     try {
-      const response = await fetch('https://api.clerk.com/v1/users', {
+      const response = await trackedFetch(ctx, 'clerk', 'https://api.clerk.com/v1/users', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${clerkSecretKey}`,
@@ -175,7 +176,7 @@ export const createClerkUserForDriver = internalAction({
           // real ID instead of the 'existing' sentinel.
           let existingId = 'existing';
           try {
-            const lookupResponse = await fetch(
+            const lookupResponse = await trackedFetch(ctx, 'clerk', 
               `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`,
               { headers: { 'Authorization': `Bearer ${clerkSecretKey}` } }
             );
@@ -400,7 +401,7 @@ export const backfillDriverClerkSyncStatus = internalAction({
 
       let clerkUsers: Array<{ id: string }>;
       try {
-        const lookupResponse = await fetch(
+        const lookupResponse = await trackedFetch(ctx, 'clerk', 
           `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`,
           { headers: { 'Authorization': `Bearer ${clerkSecretKey}` } }
         );
@@ -511,7 +512,7 @@ export const updateClerkUserPhone = internalAction({
       const tryPatch = async (
         payload: Record<string, unknown>
       ): Promise<{ ok: boolean; error?: string }> => {
-        const patchResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+        const patchResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/users/${userId}`, {
           method: 'PATCH',
           headers: {
             'Authorization': `Bearer ${clerkSecretKey}`,
@@ -532,7 +533,7 @@ export const updateClerkUserPhone = internalAction({
         } | null;
 
         // Verify the phone was actually updated; some API variants return 200 but ignore payload.
-        const verifyResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+        const verifyResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/users/${userId}`, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${clerkSecretKey}`,
@@ -580,7 +581,7 @@ export const updateClerkUserPhone = internalAction({
     try {
       // If we already know which Clerk user should be updated, prefer that over phone search.
       if (args.targetClerkUserId) {
-        const userResponse = await fetch(`https://api.clerk.com/v1/users/${args.targetClerkUserId}`, {
+        const userResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/users/${args.targetClerkUserId}`, {
           method: 'GET',
           headers: {
             'Authorization': `Bearer ${clerkSecretKey}`,
@@ -598,7 +599,7 @@ export const updateClerkUserPhone = internalAction({
             return { success: true, action: 'already_current' };
           }
 
-          const addPhoneResponse = await fetch(`https://api.clerk.com/v1/phone_numbers`, {
+          const addPhoneResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/phone_numbers`, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${clerkSecretKey}`,
@@ -628,7 +629,7 @@ export const updateClerkUserPhone = internalAction({
                 return { success: true, action: 'updated_target_user_patch' };
               }
               // Target user did not actually update. Resolve by current new-phone ownership.
-              const oldOwnershipResponse = await fetch(
+              const oldOwnershipResponse = await trackedFetch(ctx, 'clerk', 
                 `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(oldE164)}`,
                 {
                   headers: {
@@ -636,7 +637,7 @@ export const updateClerkUserPhone = internalAction({
                   },
                 }
               );
-              const ownershipResponse = await fetch(
+              const ownershipResponse = await trackedFetch(ctx, 'clerk', 
                 `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(newE164)}`,
                 {
                   headers: {
@@ -769,7 +770,7 @@ export const updateClerkUserPhone = internalAction({
 
           const oldPhoneRecord = phoneNumbers.find((p) => p.phone_number === oldE164);
           if (oldPhoneRecord) {
-            await fetch(`https://api.clerk.com/v1/phone_numbers/${oldPhoneRecord.id}`, {
+            await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/phone_numbers/${oldPhoneRecord.id}`, {
               method: 'DELETE',
               headers: {
                 'Authorization': `Bearer ${clerkSecretKey}`,
@@ -787,7 +788,7 @@ export const updateClerkUserPhone = internalAction({
       }
 
       // First, find the user by their old phone number
-      const searchResponse = await fetch(
+      const searchResponse = await trackedFetch(ctx, 'clerk', 
         `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(oldE164)}`,
         {
           headers: {
@@ -811,7 +812,7 @@ export const updateClerkUserPhone = internalAction({
       });
 
       // Additional diagnostics: which Clerk account currently owns old/new phone.
-      const newPhoneLookupResponse = await fetch(
+      const newPhoneLookupResponse = await trackedFetch(ctx, 'clerk', 
         `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(newE164)}`,
         {
           headers: {
@@ -859,7 +860,7 @@ export const updateClerkUserPhone = internalAction({
       const userId = users[0].id;
 
       // Add the new phone number to the user
-      const addPhoneResponse = await fetch(`https://api.clerk.com/v1/phone_numbers`, {
+      const addPhoneResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/phone_numbers`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${clerkSecretKey}`,
@@ -903,7 +904,7 @@ export const updateClerkUserPhone = internalAction({
       const phoneNumbers = users[0].phone_numbers || [];
       const oldPhoneRecord = phoneNumbers.find((p: { phone_number: string; id: string }) => p.phone_number === oldE164);
       if (oldPhoneRecord) {
-        const deleteResponse = await fetch(`https://api.clerk.com/v1/phone_numbers/${oldPhoneRecord.id}`, {
+        const deleteResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/phone_numbers/${oldPhoneRecord.id}`, {
           method: 'DELETE',
           headers: {
             'Authorization': `Bearer ${clerkSecretKey}`,
@@ -1003,7 +1004,7 @@ export const deleteClerkUser = internalAction({
 
     try {
       // Find user by phone
-      const searchResponse = await fetch(
+      const searchResponse = await trackedFetch(ctx, 'clerk', 
         `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`,
         {
           headers: {
@@ -1025,7 +1026,7 @@ export const deleteClerkUser = internalAction({
       const userId = users[0].id;
 
       // Delete the user
-      const deleteResponse = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+      const deleteResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/users/${userId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${clerkSecretKey}`,
@@ -1069,7 +1070,7 @@ export const deleteClerkUserById = internalAction({
       console.log(`Deleting Clerk user ${args.clerkUserId}. Reason: ${args.reason || 'Not specified'}`);
       
       // Delete the user directly by ID
-      const deleteResponse = await fetch(`https://api.clerk.com/v1/users/${args.clerkUserId}`, {
+      const deleteResponse = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/users/${args.clerkUserId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${clerkSecretKey}`,
@@ -1117,7 +1118,7 @@ export const findClerkUserByPhone = internalAction({
     phone: v.string(),
   },
   returns: v.union(v.string(), v.null()),
-  handler: async (_ctx, args): Promise<string | null> => {
+  handler: async (ctx, args): Promise<string | null> => {
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) {
       console.error('CLERK_SECRET_KEY not configured');
@@ -1129,7 +1130,7 @@ export const findClerkUserByPhone = internalAction({
 
     try {
       // Search for user by phone number
-      const response = await fetch(`https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`, {
+      const response = await trackedFetch(ctx, 'clerk', `https://api.clerk.com/v1/users?phone_number=${encodeURIComponent(e164Phone)}`, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${clerkSecretKey}`,
@@ -1200,7 +1201,7 @@ export const createClerkUserForCarrierOwner = internalAction({
         skip_password_requirement: true,
       };
 
-      const response = await fetch('https://api.clerk.com/v1/users', {
+      const response = await trackedFetch(ctx, 'clerk', 'https://api.clerk.com/v1/users', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${clerkSecretKey}`,

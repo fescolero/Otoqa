@@ -20,6 +20,8 @@ import { ConvexError, v } from 'convex/values';
 import { action, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { resolveOrgForRead, orgDrivers } from './dispatchMobile';
+import type { ActionCtx } from './_generated/server';
+import { trackedFetch } from './lib/externalHealth';
 import {
   buildDeepgramUrl,
   buildNluInput,
@@ -69,6 +71,7 @@ export const voiceContext = internalQuery({
 
 /** Tool-forced Haiku call returning the raw tool input; null on any failure. */
 async function haikuToolCall(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   system: string,
   tool: typeof INTENT_TOOL | typeof LOAD_DRAFT_TOOL,
   transcript: string,
@@ -79,7 +82,7 @@ async function haikuToolCall(
     return null;
   }
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const res = await trackedFetch(ctx, 'llm', 'https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'x-api-key': key,
@@ -114,6 +117,7 @@ async function haikuToolCall(
 
 /** Shared STT leg: keyterm-seeded Nova-3 over the uploaded clip. */
 async function deepgramTranscribe(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   keyterms: string[],
   audioBase64: string,
   mimeType: string,
@@ -131,7 +135,7 @@ async function deepgramTranscribe(
     `[voice] Deepgram request: ${bytes.length} bytes ${mimeType}, ${Math.min(keyterms.length, 100)} keyterms`,
   );
 
-  const res = await fetch(buildDeepgramUrl(keyterms), {
+  const res = await trackedFetch(ctx, 'deepgram', buildDeepgramUrl(keyterms), {
     method: 'POST',
     headers: { Authorization: `Token ${key}`, 'Content-Type': mimeType },
     body: bytes,
@@ -180,14 +184,14 @@ export const transcribeAndParse = action({
   ): Promise<{ transcript: string; intent: CoercedIntent | null }> => {
     // Resolves org + keyterms AND enforces auth before any vendor call.
     const { keyterms } = await ctx.runQuery(internal.voice.voiceContext, {});
-    const transcript = await deepgramTranscribe(keyterms, args.audioBase64, args.mimeType);
+    const transcript = await deepgramTranscribe(ctx, keyterms, args.audioBase64, args.mimeType);
     if (!transcript) return { transcript: '', intent: null };
     const todayISO = new Date().toISOString().slice(0, 10);
     const nluInput = buildNluInput(transcript, args.history, args.contextText);
     if (nluInput !== transcript) {
       console.log(`[voice] NLU context: ${args.history?.length ?? 0} turns${args.contextText ? ' + clarify bridge' : ''}`);
     }
-    const raw = await haikuToolCall(haikuCommandSystem(todayISO), INTENT_TOOL, nluInput);
+    const raw = await haikuToolCall(ctx, haikuCommandSystem(todayISO), INTENT_TOOL, nluInput);
     return { transcript, intent: coerceIntent(raw) };
   },
 });
@@ -211,10 +215,10 @@ export const transcribeLoadDraft = action({
     args,
   ): Promise<{ transcript: string; draft: LoadDraft | null }> => {
     const { keyterms } = await ctx.runQuery(internal.voice.voiceContext, {});
-    const transcript = await deepgramTranscribe(keyterms, args.audioBase64, args.mimeType);
+    const transcript = await deepgramTranscribe(ctx, keyterms, args.audioBase64, args.mimeType);
     if (!transcript) return { transcript: '', draft: null };
     const todayISO = new Date().toISOString().slice(0, 10);
-    const raw = await haikuToolCall(haikuLoadSystem(todayISO), LOAD_DRAFT_TOOL, transcript);
+    const raw = await haikuToolCall(ctx, haikuLoadSystem(todayISO), LOAD_DRAFT_TOOL, transcript);
     return { transcript, draft: coerceLoadDraft(raw) };
   },
 });

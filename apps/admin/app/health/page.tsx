@@ -14,7 +14,7 @@ export default function HealthPage() {
     <ConsoleShell>
       <PageHeader
         title="Integration health"
-        subtitle="Every configured integration, whatever the provider — plus the outbound webhook queue and the inbound partner API."
+        subtitle="What our customers connect, what we depend on, and the traffic in both directions."
       />
       <PanelBoundary label="Integration health">
         <HealthBoard />
@@ -37,6 +37,15 @@ const STATE_HELP: Record<string, string> = {
   stale: 'No activity within three expected cycles. Check the schedule, not the credentials.',
   never_run: 'Configured but has never reported. Usually credentials or a disabled cron.',
   disabled: 'Switched off in the org’s integration settings. Not alerting.',
+  not_configured: 'No key set on this deployment, so it has never been callable.',
+  never_called: 'Configured, but nothing has called it yet on this deployment.',
+};
+
+const SERVICE_TONE: Record<string, Tone> = {
+  ok: 'ok',
+  failing: 'danger',
+  not_configured: 'warn',
+  never_called: 'neutral',
 };
 
 function HealthBoard() {
@@ -74,6 +83,9 @@ function HealthBoard() {
       </div>
 
       <Integrations rows={integrations} />
+      <PanelBoundary label="Our dependencies">
+        <ExternalServices />
+      </PanelBoundary>
       <DeadLetters />
       <InboundApi />
     </>
@@ -272,6 +284,90 @@ function InboundApi() {
           tone={slo.cron.failingNow > 0 ? 'danger' : 'ok'}
           hint={`${slo.cron.jobs} jobs · ${slo.cron.failingNow} failing now`}
         />
+      </div>
+    </Panel>
+  );
+}
+
+/**
+ * The services WE call out to, as opposed to the ones a customer configures.
+ *
+ * Every declared dependency is listed even if it has never been called —
+ * "we depend on this and have never seen it work" is exactly the finding a
+ * board like this exists to surface, and it cannot be expressed by a list of
+ * only what has reported.
+ */
+function ExternalServices() {
+  const health = useQuery(api.platform.health.externalServiceHealth, {});
+  if (health === undefined) return null;
+  const { services, summary } = health;
+
+  return (
+    <Panel
+      title="Our dependencies"
+      subtitle="services we call out to"
+      count={services.length}
+      tone={summary.failing > 0 ? 'danger' : 'neutral'}
+      flush
+      footer={
+        <>
+          {summary.ok} healthy · {summary.failing} failing · {summary.neverCalled} never called ·{' '}
+          {summary.notConfigured} not configured. Recorded on every outbound call; successful calls
+          write at most once a minute per service, so a timestamp can be up to a minute behind.
+          There is no <strong>stale</strong> state here — these are called on demand, so silence is
+          not a symptom.
+        </>
+      }
+    >
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Service</th>
+              <th>What it does</th>
+              <th>State</th>
+              <th>Last ok</th>
+              <th className="num">Consecutive failures</th>
+              <th>Last error</th>
+            </tr>
+          </thead>
+          <tbody>
+            {services.map((s) => (
+              <tr key={s.key}>
+                <td>{s.label}</td>
+                <td className="muted">{s.purpose}</td>
+                <td>
+                  <span title={STATE_HELP[s.state] ?? ''}>
+                    <Badge tone={SERVICE_TONE[s.state] ?? 'neutral'}>
+                      {s.state.replace('_', ' ')}
+                    </Badge>
+                  </span>
+                </td>
+                <td className="muted">{s.lastOkAt ? formatAgo(s.lastOkAt) : '—'}</td>
+                <td className="num">
+                  {s.consecutiveFailures > 0 ? (
+                    <span className="danger-text">{s.consecutiveFailures}</span>
+                  ) : (
+                    '0'
+                  )}
+                </td>
+                <td style={{ whiteSpace: 'normal' }}>
+                  {s.state === 'not_configured' ? (
+                    /* The variable NAME helps fix it; the value never leaves the server. */
+                    <span className="muted mono">{s.env} not set</span>
+                  ) : s.lastError ? (
+                    <span className="danger-text">
+                      {s.lastError}
+                      {s.lastErrorAt ? <span className="muted"> · {formatAgo(s.lastErrorAt)}</span> : null}
+                    </span>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </Panel>
   );

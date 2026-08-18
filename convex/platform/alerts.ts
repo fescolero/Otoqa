@@ -3,6 +3,7 @@ import { query, mutation, internalMutation, internalAction } from '../_generated
 import { internal } from '../_generated/api';
 import { requirePlatformStaff } from '../lib/auth';
 import { jobState, overdueMs, formatDurationShort } from './jobHealth';
+import { trackedFetch } from '../lib/externalHealth';
 
 /**
  * Platform alerting (plan §9): a 5-minute evaluator checks the alerting
@@ -201,7 +202,7 @@ export const notifySlack = internalAction({
 
     const icon = args.severity === 'high' ? '🔴' : '🟠';
     try {
-      const res = await fetch(webhookUrl, {
+      const res = await trackedFetch(ctx, 'slack', webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: `${icon} [otoqa-platform] ${args.message}` }),

@@ -1,5 +1,6 @@
 import { query } from '../_generated/server';
 import { requirePlatformStaff } from '../lib/auth';
+import { EXTERNAL_SERVICES } from '../lib/externalHealth';
 
 /**
  * Platform console — integration health board. Staff-only.
@@ -174,6 +175,86 @@ export const integrationHealth = query({
         pending: await countByStatus('PENDING'),
         deadLetter: await countByStatus('DEAD_LETTER'),
         countCap: QUEUE_COUNT_CAP, // UI shows "500+" at the cap
+      },
+    };
+  },
+});
+
+
+/**
+ * The services WE call out to — Maps, Stripe, Clerk, an LLM, object storage.
+ *
+ * Separate from `integrationHealth` because it answers a different question:
+ * that one is "is the customer's integration working", this is "are our own
+ * dependencies up". Both are platform health; only one of them is anybody's
+ * account.
+ *
+ * Every declared service is returned whether or not it has ever been called.
+ * "We depend on this and have never seen it work" is a finding, and a board
+ * that lists only what has reported cannot express it.
+ *
+ * There is deliberately no `stale` state here. These are called on demand, not
+ * on a schedule — a VIN decoder nobody has used this week is not broken, and
+ * inventing a cadence for it would manufacture alerts out of quiet.
+ */
+export const externalServiceHealth = query({
+  args: {},
+  handler: async (ctx) => {
+    await requirePlatformStaff(ctx);
+
+    const recorded = await ctx.db.query('externalServiceHealth').collect();
+    const byService = new Map(recorded.map((r) => [r.service, r]));
+
+    const rows = EXTERNAL_SERVICES.map((declared) => {
+      const health = byService.get(declared.key);
+      // Reports only WHETHER a secret is set, never any part of its value.
+      const configured = declared.env === null ? true : Boolean(process.env[declared.env]);
+
+      // A recorded failure outranks "not configured": if it failed, we called
+      // it, and the error is the actionable fact. Reporting a missing key over
+      // a live 401 would send an operator to the wrong place.
+      const state =
+        health && health.consecutiveFailures > 0
+          ? 'failing'
+          : !configured
+            ? 'not_configured'
+            : health === undefined || (health.lastOkAt == null && health.lastErrorAt == null)
+              ? 'never_called'
+              : 'ok';
+
+      return {
+        key: declared.key,
+        label: declared.label,
+        purpose: declared.purpose,
+        // The variable NAME is useful for fixing it; the value never leaves.
+        env: declared.env,
+        configured,
+        state,
+        lastOkAt: health?.lastOkAt ?? null,
+        lastErrorAt: health?.lastErrorAt ?? null,
+        lastError: health?.lastErrorMessage ?? null,
+        lastStatusCode: health?.lastStatusCode ?? null,
+        lastDurationMs: health?.lastDurationMs ?? null,
+        consecutiveFailures: health?.consecutiveFailures ?? 0,
+      };
+    });
+
+    const ORDER: Record<string, number> = {
+      failing: 0,
+      not_configured: 1,
+      never_called: 2,
+      ok: 3,
+    };
+    rows.sort((a, b) => ORDER[a.state] - ORDER[b.state] || a.label.localeCompare(b.label));
+
+    return {
+      services: rows,
+      summary: {
+        total: rows.length,
+        failing: rows.filter((r) => r.state === 'failing').length,
+        notConfigured: rows.filter((r) => r.state === 'not_configured').length,
+        neverCalled: rows.filter((r) => r.state === 'never_called').length,
+        ok: rows.filter((r) => r.state === 'ok').length,
       },
     };
   },

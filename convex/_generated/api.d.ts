@@ -100,6 +100,7 @@ import type * as laneAnalyzerOptimization from "../laneAnalyzerOptimization.js";
 import type * as laneScheduleImport from "../laneScheduleImport.js";
 import type * as lanes from "../lanes.js";
 import type * as lazyLoadPromotion from "../lazyLoadPromotion.js";
+import type * as lib_externalHealth from "../lib/externalHealth.js";
 import type * as lib_audit from "../lib/audit.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_facilityLink from "../lib/facilityLink.js";
@@ -321,6 +322,7 @@ declare const fullApi: ApiFromModules<{
   laneScheduleImport: typeof laneScheduleImport;
   lanes: typeof lanes;
   lazyLoadPromotion: typeof lazyLoadPromotion;
+  "lib/externalHealth": typeof lib_externalHealth;
   "lib/audit": typeof lib_audit;
   "lib/auth": typeof lib_auth;
   "lib/facilityLink": typeof lib_facilityLink;

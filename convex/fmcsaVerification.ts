@@ -39,6 +39,8 @@ import {
 } from './_generated/server';
 import { internal } from './_generated/api';
 import { assertOrgPermission } from './lib/auth';
+import { trackedFetch } from './lib/externalHealth';
+import type { ActionCtx } from './_generated/server';
 
 const QCMOBILE_BASE_URL = 'https://mobile.fmcsa.dot.gov/qc/services';
 const SOCRATA_BASE_URL = 'https://data.transportation.gov/resource';
@@ -157,8 +159,8 @@ export const storeResult = internalMutation({
 // ─── Provider 1: QCMobile (live, keyed) ───────────────────────────────────
 
 /** Fetch one QCMobile endpoint, returning parsed JSON or null on 404. */
-async function qcMobileGet(path: string, webKey: string): Promise<unknown | null> {
-  const res = await fetch(`${QCMOBILE_BASE_URL}${path}?webKey=${encodeURIComponent(webKey)}`, {
+async function qcMobileGet(ctx: Pick<ActionCtx, 'runMutation'>, path: string, webKey: string): Promise<unknown | null> {
+  const res = await trackedFetch(ctx, 'fmcsa', `${QCMOBILE_BASE_URL}${path}?webKey=${encodeURIComponent(webKey)}`, {
     headers: { Accept: 'application/json' },
   });
   if (res.status === 404) return null;
@@ -167,12 +169,13 @@ async function qcMobileGet(path: string, webKey: string): Promise<unknown | null
 }
 
 async function checkWithQcMobile(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   dot: string,
   mcNumber: string | undefined,
   webKey: string,
 ): Promise<VerificationResult> {
   // Carrier snapshot — existence, operating status, safety rating.
-  const snapshot = (await qcMobileGet(`/carriers/${dot}`, webKey)) as {
+  const snapshot = (await qcMobileGet(ctx, `/carriers/${dot}`, webKey)) as {
     content?: { carrier?: Record<string, unknown> } | null;
   } | null;
   const carrier = snapshot?.content?.carrier;
@@ -192,7 +195,7 @@ async function checkWithQcMobile(
   const wantedDocket = mcNumber ? docketDigits(mcNumber) : '';
   if (wantedDocket) {
     try {
-      const dockets = (await qcMobileGet(`/carriers/${dot}/docket-numbers`, webKey)) as {
+      const dockets = (await qcMobileGet(ctx, `/carriers/${dot}/docket-numbers`, webKey)) as {
         content?: Array<{ docketNumber?: number | string }> | null;
       } | null;
       const registered = (dockets?.content ?? []).map((d) => docketDigits(String(d.docketNumber ?? '')));
@@ -218,12 +221,13 @@ async function checkWithQcMobile(
 // ─── Provider 2: FMCSA Open Data (Socrata) ────────────────────────────────
 
 async function socrataGet(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   dataset: string,
   params: Record<string, string>,
 ): Promise<Array<Record<string, unknown>>> {
   const qs = new URLSearchParams(params).toString();
   const token = process.env.SOCRATA_APP_TOKEN;
-  const res = await fetch(`${SOCRATA_BASE_URL}/${dataset}.json?${qs}`, {
+  const res = await trackedFetch(ctx, 'socrata', `${SOCRATA_BASE_URL}/${dataset}.json?${qs}`, {
     headers: {
       Accept: 'application/json',
       ...(token ? { 'X-App-Token': token } : {}),
@@ -323,6 +327,7 @@ export function rowsMatchingDot(
  *                 this as "couldn't check", never "not on file".
  */
 async function fetchAuthorityRows(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   dot: string,
 ): Promise<Array<Record<string, unknown>> | null> {
   let conclusiveEmpty = false;
@@ -330,7 +335,7 @@ async function fetchAuthorityRows(
     let answered = false;
     for (const column of DOT_FILTER_COLUMNS) {
       try {
-        const rows = await socrataGet(id, { [column]: dot, $limit: '5000' });
+        const rows = await socrataGet(ctx, id, { [column]: dot, $limit: '5000' });
         answered = true;
         if (rows.length > 0) return rows;
         break; // dataset answered with no rows — its other column won't differ
@@ -343,7 +348,7 @@ async function fetchAuthorityRows(
       // verify client-side. `dot` is digits-only, so the SoQL is inert.
       for (const column of DOT_FILTER_COLUMNS) {
         try {
-          const rows = await socrataGet(id, {
+          const rows = await socrataGet(ctx, id, {
             $where: `${column} like '%${dot}'`,
             $limit: '5000',
           });
@@ -361,10 +366,11 @@ async function fetchAuthorityRows(
 }
 
 async function checkWithOpenData(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   dot: string,
   mcNumber: string | undefined,
 ): Promise<VerificationResult> {
-  const censusRows = await socrataGet(CENSUS_DATASET, { dot_number: dot, $limit: '1' });
+  const censusRows = await socrataGet(ctx, CENSUS_DATASET, { dot_number: dot, $limit: '1' });
   const census = parseCensusRecord(censusRows);
 
   if (!census.found) {
@@ -377,7 +383,7 @@ async function checkWithOpenData(
     };
   }
 
-  const authRows = await fetchAuthorityRows(dot);
+  const authRows = await fetchAuthorityRows(ctx, dot);
 
   let mcStatus: McStatus = 'unchecked';
   const wantedDocket = mcNumber ? docketDigits(mcNumber) : '';
@@ -429,7 +435,7 @@ export const verifyOrg = internalAction({
       const webKey = process.env.FMCSA_WEBKEY;
       if (webKey) {
         try {
-          result = await checkWithQcMobile(dot, authority.mcNumber, webKey);
+          result = await checkWithQcMobile(ctx, dot, authority.mcNumber, webKey);
         } catch (error) {
           failures.push(
             `QCMobile: ${error instanceof Error ? error.message : 'lookup failed'}`,
@@ -439,7 +445,7 @@ export const verifyOrg = internalAction({
 
       if (!result) {
         try {
-          result = await checkWithOpenData(dot, authority.mcNumber);
+          result = await checkWithOpenData(ctx, dot, authority.mcNumber);
         } catch (error) {
           failures.push(
             `Open data: ${error instanceof Error ? error.message : 'lookup failed'}`,
