@@ -392,6 +392,61 @@ describe('external service health — our own dependencies', () => {
     expect(health.services[0].state).toBe('failing');
   });
 
+  it('lets a recorded success outrank a missing key', async () => {
+    // The Socrata bug: the board read "not configured — SOCRATA_APP_TOKEN not
+    // set" on the same row as "last ok: just now". An operator sent to set a
+    // variable for a dependency that had just answered us is being sent to fix
+    // nothing. A call that worked is proof the thing works, whatever the
+    // declaration says about its key.
+    const t = convexTest(schema);
+    const savedToken = process.env.SOCRATA_APP_TOKEN;
+    delete process.env.SOCRATA_APP_TOKEN;
+    try {
+      await t.mutation(internal.lib.externalHealth.recordExternalCall, {
+        service: 'socrata',
+        ok: true,
+        durationMs: 88,
+        statusCode: 200,
+      });
+      const health = await t
+        .withIdentity(staff)
+        .query(api.platform.health.externalServiceHealth, {});
+      const row = health.services.find((s) => s.key === 'socrata')!;
+      expect(row.state).toBe('ok');
+      expect(row.lastOkAt).toBeGreaterThan(0);
+    } finally {
+      if (savedToken === undefined) delete process.env.SOCRATA_APP_TOKEN;
+      else process.env.SOCRATA_APP_TOKEN = savedToken;
+    }
+  });
+
+  it('does not call an optional key a fault', async () => {
+    // Socrata's open data answers unauthenticated; the token only lifts the
+    // rate limit. Flagging its absence as "not configured" spends an
+    // operator's attention on a service that is working as designed — the
+    // registry now says so, and the state follows the call site's behaviour.
+    const t = convexTest(schema);
+    const savedToken = process.env.SOCRATA_APP_TOKEN;
+    delete process.env.SOCRATA_APP_TOKEN;
+    try {
+      const health = await t
+        .withIdentity(staff)
+        .query(api.platform.health.externalServiceHealth, {});
+      const socrata = health.services.find((s) => s.key === 'socrata')!;
+      expect(socrata.envOptional).toBe(true);
+      expect(socrata.envSet).toBe(false);
+      expect(socrata.state).toBe('never_called');
+
+      // A mandatory key with nothing set still reports the fault it is.
+      const deepgram = health.services.find((s) => s.key === 'deepgram')!;
+      expect(deepgram.envOptional).toBe(false);
+      expect(deepgram.state).toBe('not_configured');
+    } finally {
+      if (savedToken === undefined) delete process.env.SOCRATA_APP_TOKEN;
+      else process.env.SOCRATA_APP_TOKEN = savedToken;
+    }
+  });
+
   it('is staff-only', async () => {
     const t = convexTest(schema);
     await expect(t.query(api.platform.health.externalServiceHealth, {})).rejects.toThrow(

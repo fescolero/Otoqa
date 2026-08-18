@@ -245,19 +245,34 @@ export const externalServiceHealth = query({
     const rows = EXTERNAL_SERVICES.map((declared) => {
       const health = byService.get(declared.key);
       // Reports only WHETHER a secret is set, never any part of its value.
-      const configured = declared.env === null ? true : Boolean(process.env[declared.env]);
+      const envSet = declared.env === null ? true : Boolean(process.env[declared.env]);
+      // An optional key changes how well a service runs, not whether it runs.
+      // Read defensively: `as const` on the registry narrows each entry, so
+      // the flag exists only on the ones that declare it — and keeping that
+      // narrowing is what gives trackedFetch a literal union of service names
+      // instead of bare `string`.
+      const envOptional = 'envOptional' in declared && declared.envOptional === true;
+      const configured = envSet || envOptional;
 
-      // A recorded failure outranks "not configured": if it failed, we called
-      // it, and the error is the actionable fact. Reporting a missing key over
-      // a live 401 would send an operator to the wrong place.
+      /**
+       * What we OBSERVED beats what we inferred, in both directions.
+       *
+       * A recorded failure outranks a missing key: if it failed we called it,
+       * and pointing an operator at an env var while the service sits on a
+       * live 401 sends them to the wrong place. A recorded success outranks it
+       * just as hard — Socrata shipped reading "not configured" beside "last
+       * ok: just now", because the registry called an optional token
+       * mandatory. Whatever the declaration says, a call that worked is proof
+       * the thing works.
+       */
       const state =
         health && health.consecutiveFailures > 0
           ? 'failing'
-          : !configured
-            ? 'not_configured'
-            : health === undefined || (health.lastOkAt == null && health.lastErrorAt == null)
-              ? 'never_called'
-              : 'ok';
+          : health?.lastOkAt != null
+            ? 'ok'
+            : !configured
+              ? 'not_configured'
+              : 'never_called';
 
       return {
         key: declared.key,
@@ -265,6 +280,8 @@ export const externalServiceHealth = query({
         purpose: declared.purpose,
         // The variable NAME is useful for fixing it; the value never leaves.
         env: declared.env,
+        envOptional,
+        envSet,
         configured,
         state,
         lastOkAt: health?.lastOkAt ?? null,

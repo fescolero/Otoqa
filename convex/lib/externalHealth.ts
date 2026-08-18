@@ -32,6 +32,12 @@ import { internal } from '../_generated/api';
 /**
  * The declared inventory.
  *
+ * `env` names the variable that configures a service, and `envOptional` marks
+ * the ones that work without it — Socrata answers unauthenticated and the
+ * token merely lifts its rate limit. Getting that wrong reports a working
+ * dependency as broken, so the flag follows what the call site actually does
+ * with the value, not whether a variable exists for it.
+ *
  * Every outbound dependency is listed here whether or not it has ever been
  * called, because "we depend on this and have never seen it work" is exactly
  * the finding a health board exists to surface. A service missing from this
@@ -120,7 +126,10 @@ export const EXTERNAL_SERVICES = [
     key: 'socrata',
     label: 'Socrata',
     purpose: 'FMCSA open-data lookups',
+    // OPTIONAL. The open-data API answers unauthenticated; the token only
+    // lifts the rate limit, so an absent one is not a broken dependency.
     env: 'SOCRATA_APP_TOKEN',
+    envOptional: true,
   },
   {
     key: 'nhtsa',

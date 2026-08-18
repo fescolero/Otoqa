@@ -360,6 +360,13 @@ function ExternalServices() {
                   {s.state === 'not_configured' ? (
                     /* The variable NAME helps fix it; the value never leaves the server. */
                     <span className="muted mono">{s.env} not set</span>
+                  ) : s.envOptional && !s.envSet ? (
+                    /* Works without the key — saying "not configured" here
+                       would report a working dependency as broken. */
+                    <span className="muted">
+                      working unauthenticated · <span className="mono">{s.env}</span> would lift the
+                      rate limit
+                    </span>
                   ) : s.lastError ? (
                     <span className="danger-text">
                       {s.lastError}

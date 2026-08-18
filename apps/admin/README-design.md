@@ -237,9 +237,20 @@ Three rules that shape it:
   decoder nobody used this week is not broken, and inventing a cadence would
   manufacture alerts out of quiet.
 
-A recorded failure outranks a missing key: if it failed we called it, and
-sending an operator to check an env var while the service sits on a live 401
-is the wrong place. Only the variable NAME is ever returned, never its value.
+**What we observed beats what we inferred, in both directions.** A recorded
+failure outranks a missing key: if it failed we called it, and sending an
+operator to check an env var while the service sits on a live 401 is the wrong
+place. A recorded *success* outranks it just as hard — the board shipped
+reading "not configured — SOCRATA_APP_TOKEN not set" on the same row as "last
+ok: just now", which sends someone to fix a dependency that had just answered
+us. A call that worked is proof the thing works.
+
+**An optional key is not a fault.** Socrata's open-data API answers
+unauthenticated; the token only lifts the rate limit. The registry marks that
+with `envOptional`, and the flag follows what the *call site* does with the
+value — a missing optional key renders as "working unauthenticated · VAR would
+lift the rate limit", not as a red state. Only the variable NAME is ever
+returned, never its value.
 
 FourKites and Samsara are deliberately *not* in this inventory — they are
 customer integrations, covered above by `orgIntegrations`. Counting them twice
