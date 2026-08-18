@@ -17,6 +17,7 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useQuery, useMutation } from 'convex/react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';

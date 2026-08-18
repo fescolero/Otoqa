@@ -19,6 +19,7 @@
 
 import * as React from 'react';
 import { useState, useMemo } from 'react';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useOrganizationId } from '@/contexts/organization-context';

@@ -15,6 +15,7 @@ import {
 import { AutoAssignmentSettings } from '@/components/auto-assignment-settings';
 import { PartnerApiSettings } from '@/components/partner-api-settings';
 import { useEffect, useState } from 'react';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { FourKitesConnectModal } from '@/components/fourkites-connect-modal';

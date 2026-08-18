@@ -28,6 +28,7 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useQuery, useMutation, usePaginatedQuery, useConvexAuth } from 'convex/react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useAuthQuery } from '@/hooks/use-auth-query';

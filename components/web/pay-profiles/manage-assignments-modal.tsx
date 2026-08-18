@@ -23,6 +23,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { createPortal } from 'react-dom';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
