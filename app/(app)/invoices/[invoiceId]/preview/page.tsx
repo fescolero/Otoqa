@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useQuery, useMutation } from "convex/react";
 import { useAuth } from "@workos-inc/authkit-nextjs/components";
 import { api } from "@/convex/_generated/api";

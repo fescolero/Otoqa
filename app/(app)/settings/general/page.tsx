@@ -31,6 +31,7 @@
 
 import * as React from 'react';
 import { useEffect, useRef, useState } from 'react';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useMutation, useQuery } from 'convex/react';
 import type { FunctionArgs, FunctionReturnType } from 'convex/server';
 import { toast } from 'sonner';

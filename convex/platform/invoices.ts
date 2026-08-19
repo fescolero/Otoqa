@@ -2124,11 +2124,41 @@ export const listInvoices = query({
       ),
     ),
     workosOrgId: v.optional(v.string()),
+    /**
+     * Overdue is DERIVED, not stored: it is an open invoice past its due date
+     * with a balance. The board badges rows `overdue` but no such status
+     * exists, so without this the one filter a receivables operator reaches
+     * for first cannot be expressed — you would click `issued`, then `sent`,
+     * then read dates.
+     */
+    overdueOnly: v.optional(v.boolean()),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     await requirePlatformStaff(ctx);
     const limit = Math.min(Math.max(args.limit ?? 100, 1), 300);
+    if (args.overdueOnly) {
+      const now = Date.now();
+      const rows = (
+        await Promise.all(
+          OPEN_STATUSES.map((status) =>
+            ctx.db
+              .query('platformInvoices')
+              .withIndex('by_status', (q) => q.eq('status', status))
+              .take(limit),
+          ),
+        )
+      )
+        .flat()
+        .filter(
+          (i) =>
+            (args.workosOrgId === undefined || i.workosOrgId === args.workosOrgId) &&
+            i.dueAt != null &&
+            i.dueAt < now &&
+            money(i.total - i.amountPaid) > 0,
+        );
+      return rows.sort(byNewestPeriod).slice(0, limit);
+    }
     if (args.workosOrgId !== undefined) {
       const workosOrgId = args.workosOrgId;
       const rows = await ctx.db
@@ -2241,10 +2271,14 @@ export const agingOverview = query({
       else if (overdueDays <= 90) buckets.d61_90 = money(buckets.d61_90 + balance);
       else buckets.d90_plus = money(buckets.d90_plus + balance);
     }
-    const [drafts, paidRows, writtenOff] = await Promise.all([
+    const [drafts, paidRows, writtenOff, voided] = await Promise.all([
       scan('draft'),
       scan('paid'),
       scan('written_off'),
+      // Scanned only for its count: a void invoice is not a receivable and
+      // contributes to nothing else here. The filter chips need it so the
+      // "void" chip can say whether it is worth clicking.
+      scan('void'),
     ]);
     const credits = await ctx.db.query('platformCredits').withIndex('by_time').take(500);
     const creditAvailable = money(
@@ -2307,6 +2341,25 @@ export const agingOverview = query({
       // Credit outstanding is a liability, not a receivable — shown beside
       // aging so an operator sees what will be consumed next cycle.
       creditAvailable,
+      // Per-status row counts, for the board's filter chips. Free here: every
+      // status is already scanned above.
+      statusCounts: {
+        all:
+          open.length + drafts.length + paidRows.length + writtenOff.length + voided.length,
+        // Derived, so it overlaps issued/sent/partially_paid rather than
+        // partitioning with them. That is what an operator wants: "show me
+        // what is late" cuts across the stored statuses.
+        overdue: open.filter(
+          (i) => i.dueAt != null && i.dueAt < now && money(i.total - i.amountPaid) > 0,
+        ).length,
+        draft: drafts.length,
+        issued: open.filter((i) => i.status === 'issued').length,
+        sent: open.filter((i) => i.status === 'sent').length,
+        partially_paid: open.filter((i) => i.status === 'partially_paid').length,
+        paid: paidRows.length,
+        written_off: writtenOff.length,
+        void: voided.length,
+      },
       // True when a status had more rows than we scanned: the totals above are
       // then a floor, not the whole book.
       truncated,

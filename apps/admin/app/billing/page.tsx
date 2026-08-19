@@ -5,17 +5,22 @@ import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { InvoicesBoard } from '@/components/InvoicesBoard';
 import { PanelBoundary } from '@/components/PanelBoundary';
+import { Badge, EmptyState, Kpi, PageHeader, Panel } from '@/components/ui';
 import { formatMoney } from '@/lib/format';
 
 export default function BillingPage() {
   return (
     <ConsoleShell>
-      <h1>Platform billing</h1>
-      <p className="subtitle">
-        Receivables from the frozen invoice ledger; the revenue trend below derives the open
-        cycle from live usage and counts <strong>metered usage only</strong> — one-off invoices
-        appear in the ledger above, not in the trend.
-      </p>
+      <PageHeader
+        title="Platform billing"
+        subtitle={
+          <>
+            Receivables from the frozen invoice ledger; the revenue trend below derives the open
+            cycle from live usage and counts <strong>metered usage only</strong> — one-off invoices
+            appear in the ledger above, not in the trend.
+          </>
+        }
+      />
       <PanelBoundary label="Invoices">
         <InvoicesBoard />
       </PanelBoundary>
@@ -28,10 +33,14 @@ export default function BillingPage() {
 
 function Revenue() {
   const revenue = useQuery(api.platform.billing.revenueOverview, {});
-  if (revenue === undefined) return <div className="empty">Loading…</div>;
+  if (revenue === undefined) return <EmptyState>Loading…</EmptyState>;
 
   const open = revenue.months.find((m) => m.isOpenCycle);
   const lastClosed = [...revenue.months].reverse().find((m) => !m.isOpenCycle);
+  const months = [...revenue.months].reverse();
+  // The meter reads each cycle against the biggest one in the window, so the
+  // trend is legible without a chart library.
+  const peak = Math.max(1, ...revenue.months.map((m) => m.amount));
 
   return (
     <>
@@ -45,70 +54,79 @@ function Revenue() {
         <Kpi label="Default rate" value={`${formatMoney(revenue.defaultRate)}/load`} />
       </div>
 
-      <div className="panel">
-        <h2>Monthly revenue (last 12 cycles + open)</h2>
+      <Panel
+        title="Monthly revenue"
+        subtitle="last 12 cycles + open"
+        flush
+        footer="Metered usage only. The open cycle is derived from live usage and still moves."
+      >
         <div className="table-scroll">
           <table className="data-table">
             <thead>
               <tr>
                 <th>Cycle</th>
-                <th>Loads</th>
-                <th>Amount</th>
-                <th></th>
+                <th className="num">Loads</th>
+                <th className="num">Amount</th>
+                <th style={{ width: '38%' }}></th>
               </tr>
             </thead>
             <tbody>
-              {[...revenue.months].reverse().map((m) => (
+              {months.map((m) => (
                 <tr key={m.periodKey}>
-                  <td>{m.periodKey}</td>
-                  <td>{m.loads}</td>
-                  <td>{formatMoney(m.amount)}</td>
-                  <td>{m.isOpenCycle ? <span className="chip chip-ok">accruing</span> : null}</td>
+                  <td className="mono">{m.periodKey}</td>
+                  <td className="num">{m.loads.toLocaleString()}</td>
+                  <td className="num">{formatMoney(m.amount)}</td>
+                  <td>
+                    <span className="row-meter" aria-hidden="true">
+                      <span
+                        className={m.isOpenCycle ? 'row-meter-fill open' : 'row-meter-fill'}
+                        style={{ width: `${Math.round((m.amount / peak) * 100)}%` }}
+                      />
+                    </span>
+                    {m.isOpenCycle ? <Badge tone="ok">accruing</Badge> : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      </div>
+      </Panel>
 
-      <div className="panel">
-        <h2>Top organizations — current cycle</h2>
+      <Panel
+        title="Top organizations"
+        subtitle="current cycle"
+        count={revenue.currentCycleTopOrgs.length}
+        flush
+      >
         {revenue.currentCycleTopOrgs.length === 0 ? (
-          <div className="empty">No metered usage yet this cycle.</div>
+          <EmptyState hint="Usage lands here as loads are written; the cycle closes on the 1st.">
+            No metered usage yet this cycle.
+          </EmptyState>
         ) : (
           <div className="table-scroll">
             <table className="data-table">
               <thead>
                 <tr>
                   <th>Organization</th>
-                  <th>Loads</th>
-                  <th>Rate</th>
-                  <th>Amount</th>
+                  <th className="num">Loads</th>
+                  <th className="num">Rate</th>
+                  <th className="num">Amount</th>
                 </tr>
               </thead>
               <tbody>
                 {revenue.currentCycleTopOrgs.map((o) => (
                   <tr key={o.organizationId}>
                     <td>{o.name}</td>
-                    <td>{o.loads}</td>
-                    <td>{formatMoney(o.rate)}</td>
-                    <td>{formatMoney(o.amount)}</td>
+                    <td className="num">{o.loads.toLocaleString()}</td>
+                    <td className="num">{formatMoney(o.rate)}</td>
+                    <td className="num">{formatMoney(o.amount)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-      </div>
+      </Panel>
     </>
-  );
-}
-
-function Kpi({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="kpi">
-      <div className="kpi-value">{value}</div>
-      <div className="kpi-label">{label}</div>
-    </div>
   );
 }

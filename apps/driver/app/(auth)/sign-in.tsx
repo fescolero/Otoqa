@@ -24,7 +24,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useSignIn } from '@clerk/clerk-expo';
+import { useSignIn, useClerk } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { Icon } from '../../lib/design-icons';
 import { useTheme } from '../../lib/ThemeContext';
@@ -35,10 +35,22 @@ import {
   trackSignInCodeSent,
   trackSignInFailed,
   trackSignInStarted,
+  trackStaleSessionCleared,
 } from '../../lib/analytics';
+import { performSignOut } from '../../lib/logout';
+
+/**
+ * Clerk nests its machine-stable error code under `errors[0].code`. Read it
+ * without an `any` cast so the catch variables can stay `unknown`.
+ */
+function clerkErrorCode(error: unknown): string | undefined {
+  return (error as { errors?: Array<{ code?: string }> } | null)?.errors?.[0]
+    ?.code;
+}
 
 export default function SignInScreen() {
   const { signIn, isLoaded } = useSignIn();
+  const { signOut } = useClerk();
   const router = useRouter();
   const { palette } = useTheme();
   const styles = useMemo(() => makeStyles(palette), [palette]);
@@ -107,7 +119,9 @@ export default function SignInScreen() {
       });
     }, SIGN_IN_TIMEOUT_MS);
 
-    try {
+    // One attempt at the phone-code flow. Extracted so the stale-session
+    // recovery below can run it a second time without duplicating it.
+    const startPhoneCodeFlow = async () => {
       const result = await signIn.create({ identifier: fullPhoneNumber });
       const phoneFactor = result.supportedFirstFactors?.find(
         (factor): factor is Extract<typeof factor, { strategy: 'phone_code' }> =>
@@ -117,6 +131,46 @@ export default function SignInScreen() {
         strategy: 'phone_code',
         phoneNumberId: phoneFactor?.phoneNumberId as string,
       });
+    };
+
+    try {
+      try {
+        await startPhoneCodeFlow();
+      } catch (createError) {
+        // Deadlock recovery.
+        //
+        // `useAuth().isSignedIn` is false — that is the ONLY reason this
+        // screen is reachable, since (auth)/_layout redirects to /(app) when
+        // it is true. But Clerk's client can still hold a session, and
+        // `signIn.create()` then refuses with `session_exists` (or
+        // `identifier_already_signed_in` when the stale session belongs to
+        // the number being entered). The driver is left staring at a sign-in
+        // form that can never succeed, with no way out from inside the app.
+        //
+        // Being signed out is exactly when a new session SHOULD be allowed,
+        // so treat the leftover session as garbage: clear it and retry once.
+        // performSignOut is the app's canonical sign-out — it also drops the
+        // cached push token, resets the location queue and stops the motion
+        // service, all of which belong to the dead session anyway, and it
+        // tolerates each step failing.
+        const staleCode = clerkErrorCode(createError);
+        const isStaleSession =
+          staleCode === 'session_exists' ||
+          staleCode === 'identifier_already_signed_in';
+        if (!isStaleSession) throw createError;
+
+        try {
+          await performSignOut(signOut, 'stale_session_blocking_sign_in');
+          await startPhoneCodeFlow();
+          trackStaleSessionCleared(fullPhoneNumber, staleCode, true);
+        } catch (retryError) {
+          // Retry ONCE only — a second failure is a real problem, not a
+          // stale session, and looping here would lock the user out just as
+          // effectively as the original bug.
+          trackStaleSessionCleared(fullPhoneNumber, staleCode, false);
+          throw retryError;
+        }
+      }
 
       clearTimeout(timeoutId);
       trackSignInCodeSent(fullPhoneNumber);

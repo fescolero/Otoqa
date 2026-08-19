@@ -4,6 +4,7 @@ import { ConvexError, v } from 'convex/values';
 import { action } from './_generated/server';
 import OpenAI from 'openai';
 import { requireCallerOrgId } from './lib/auth';
+import { trackedFetch } from './lib/externalHealth';
 
 const extractionConfigValidator = v.object({
   includeLogistics: v.boolean(),
@@ -529,7 +530,7 @@ export const verifyAndEnrichStops = action({
         url.searchParams.append('address', addressStr);
         url.searchParams.append('key', apiKey!);
 
-        const response = await fetch(url.toString());
+        const response = await trackedFetch(ctx, 'google_maps', url.toString());
         if (!response.ok) {
           geocodeCache.set(addressStr, null);
           return null;
@@ -595,7 +596,7 @@ export const verifyAndEnrichStops = action({
           url.searchParams.append('key', apiKey!);
           url.searchParams.append('units', 'imperial');
 
-          const response = await fetch(url.toString());
+          const response = await trackedFetch(ctx, 'google_maps', url.toString());
           if (!response.ok) continue;
 
           const data = await response.json();

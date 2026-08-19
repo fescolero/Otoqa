@@ -1,6 +1,7 @@
 'use client';
 
 import { use } from 'react';
+import Link from 'next/link';
 import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import type { Id } from '@otoqa/convex-client';
@@ -14,6 +15,7 @@ import {
   ManualInvoicePanel,
   AllocatePaymentPanel,
 } from '@/components/OrgSupportPanels';
+import { Badge, DetailGrid, EmptyState, Kpi, PageHeader, Panel, toneFor } from '@/components/ui';
 import { formatAgo, formatCapped, formatMoney, formatWhen } from '@/lib/format';
 
 export default function OrgDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -30,22 +32,25 @@ export default function OrgDetailPage({ params }: { params: Promise<{ id: string
 function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) {
   const detail = useQuery(api.platform.orgs.getOrgDetail, { organizationId });
 
-  if (detail === undefined) return <div className="empty">Loading…</div>;
-  if (detail === null) return <div className="empty">Organization not found.</div>;
+  if (detail === undefined) return <EmptyState>Loading…</EmptyState>;
+  if (detail === null) return <EmptyState>Organization not found.</EmptyState>;
 
   const { org, snapshot, members, identityLinks, flags, usage, recentAudit, fkTickHealth, recentLoads } =
     detail;
 
   return (
     <>
-      <h1>
-        {org.name}
-        {org.isDeleted ? <span className="chip chip-danger">deleted</span> : null}
-      </h1>
-      <p className="subtitle">
-        {org.orgType ?? 'unknown type'} · {org.workosOrgId ?? 'no WorkOS id'}
-        {org.platformContractNumber ? ` · contract ${org.platformContractNumber}` : ''}
-      </p>
+      <PageHeader
+        back={<Link href="/organizations">← Organizations</Link>}
+        title={org.name}
+        badge={org.isDeleted ? <Badge tone="danger">deleted</Badge> : null}
+        subtitle={
+          <>
+            {org.orgType ?? 'unknown type'} · <span className="mono">{org.workosOrgId ?? 'no WorkOS id'}</span>
+            {org.platformContractNumber ? ` · contract ${org.platformContractNumber}` : ''}
+          </>
+        }
+      />
 
       {snapshot ? (
         <div className="kpi-row">
@@ -57,68 +62,82 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
         </div>
       ) : null}
 
-      <div className="panel">
-        <h2>Billing</h2>
-        <div className="detail-grid">
-          <span className="muted">Rate/load</span>
-          <span>{org.billingRatePerLoad != null ? formatMoney(org.billingRatePerLoad) : 'default'}</span>
-          <span className="muted">Billing email</span>
-          <span>{org.billingEmail ?? '—'}</span>
-          <span className="muted">License</span>
-          <span>
-            {org.platformLicenseStart ?? '—'} → {org.platformLicenseEnd ?? '—'}
-          </span>
-        </div>
+      <Panel title="Billing">
+        <DetailGrid
+          items={[
+            {
+              label: 'Rate/load',
+              value:
+                org.billingRatePerLoad != null ? formatMoney(org.billingRatePerLoad) : 'default',
+            },
+            { label: 'Billing email', value: org.billingEmail ?? '—' },
+            {
+              label: 'License',
+              value: `${org.platformLicenseStart ?? '—'} → ${org.platformLicenseEnd ?? '—'}`,
+            },
+          ]}
+        />
         {usage.length > 0 ? (
           <div className="table-scroll">
             <table className="data-table">
               <thead>
                 <tr>
                   <th>Cycle</th>
-                  <th>Loads written</th>
+                  <th className="num">Loads written</th>
                 </tr>
               </thead>
               <tbody>
                 {[...usage].reverse().map((u) => (
                   <tr key={u.periodKey}>
-                    <td>{u.periodKey}</td>
-                    <td>{u.loadsWritten}</td>
+                    <td className="mono">{u.periodKey}</td>
+                    <td className="num">{u.loadsWritten.toLocaleString()}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         ) : (
-          <div className="empty">No metered usage recorded.</div>
+          <EmptyState>No metered usage recorded.</EmptyState>
         )}
-      </div>
+      </Panel>
 
       {fkTickHealth ? (
-        <div className="panel">
-          <h2>FourKites push health</h2>
-          <div className="detail-grid">
-            <span className="muted">Last tick</span>
-            <span>
-              <TickChip kind={fkTickHealth.lastTickKind} /> {formatAgo(fkTickHealth.lastTickAt)}
-            </span>
-            <span className="muted">Consecutive transient</span>
-            <span>{fkTickHealth.consecutiveTransientTicks ?? 0}</span>
-            {fkTickHealth.lastErrorKind ? (
-              <>
-                <span className="muted">Last error</span>
-                <span>
-                  {fkTickHealth.lastErrorKind} {fkTickHealth.lastErrorStatus ?? ''}
-                </span>
-              </>
-            ) : null}
-          </div>
-        </div>
+        <Panel title="FourKites push health">
+          <DetailGrid
+            items={[
+              {
+                label: 'Last tick',
+                value: (
+                  <>
+                    <Badge tone={toneFor(fkTickHealth.lastTickKind ?? 'unknown')}>
+                      {fkTickHealth.lastTickKind ?? 'unknown'}
+                    </Badge>{' '}
+                    {formatAgo(fkTickHealth.lastTickAt)}
+                  </>
+                ),
+              },
+              {
+                label: 'Consecutive transient',
+                value: fkTickHealth.consecutiveTransientTicks ?? 0,
+              },
+              ...(fkTickHealth.lastErrorKind
+                ? [
+                    {
+                      label: 'Last error',
+                      value: `${fkTickHealth.lastErrorKind} ${fkTickHealth.lastErrorStatus ?? ''}`,
+                    },
+                  ]
+                : []),
+            ]}
+          />
+        </Panel>
       ) : null}
 
-      <div className="panel">
-        <h2>Members ({members.length})</h2>
+      <Panel title="Members" count={members.length} flush>
         {members.length === 0 ? (
-          <div className="empty">No synced members.</div>
+          <EmptyState hint="Members sync from WorkOS; an empty list usually means the directory connection is not set up.">
+            No synced members.
+          </EmptyState>
         ) : (
           members.map((m) => (
             <div className="audit-row" key={m.workosUserId}>
@@ -129,7 +148,7 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
             </div>
           ))
         )}
-      </div>
+      </Panel>
 
       <ContractPanel organizationId={organizationId} current={org} />
 
@@ -154,28 +173,34 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
         identityLinks={identityLinks}
       />
 
-      <div className="panel">
-        <h2>Recent loads (read-only view)</h2>
+      <Panel
+        title="Recent loads"
+        subtitle="read-only"
+        count={recentLoads.length}
+        flush
+        footer={`The newest ${recentLoads.length} of this org's loads. The dispatch app owns loads — this is a window onto it, not the list.`}
+      >
         {recentLoads.length === 0 ? (
-          <div className="empty">No loads.</div>
+          <EmptyState>No loads.</EmptyState>
         ) : (
           recentLoads.map((l) => (
             <div className="audit-row" key={l._id}>
               <span className="action">{l.internalId ?? l._id}</span>
-              <span className="chip">{l.status}</span>
+              <Badge tone={toneFor(l.status)}>{l.status}</Badge>
               <span className="muted">first stop {l.firstStopDate ?? '—'}</span>
               <span className="muted">{formatAgo(l.createdAt)}</span>
             </div>
           ))
         )}
-      </div>
+      </Panel>
 
       {org.workosOrgId ? <StaffActionsOnOrg workosOrgId={org.workosOrgId} /> : null}
 
-      <div className="panel">
-        <h2>Recent tenant activity</h2>
+      <Panel title="Recent tenant activity" count={recentAudit.length} flush>
         {recentAudit.length === 0 ? (
-          <div className="empty">No audit entries.</div>
+          <EmptyState hint="This is the org's own audit log, written by their staff — not ours.">
+            No audit entries.
+          </EmptyState>
         ) : (
           recentAudit.map((a) => (
             <div className="audit-row" key={a._id}>
@@ -188,7 +213,7 @@ function OrgDetail({ organizationId }: { organizationId: Id<'organizations'> }) 
             </div>
           ))
         )}
-      </div>
+      </Panel>
     </>
   );
 }
@@ -202,38 +227,32 @@ function StaffActionsOnOrg({ workosOrgId }: { workosOrgId: string }) {
   const rows = useQuery(api.platform.access.recentAuditLog, { targetOrgId: workosOrgId, limit: 25 });
 
   return (
-    <div className="panel">
-      <h2>Platform-staff actions on this org</h2>
+    <Panel
+      title="Platform-staff actions on this org"
+      count={rows?.length}
+      flush
+      actions={
+        <a className="button button-sm" href={`/audit`}>
+          Full trail
+        </a>
+      }
+    >
       {rows === undefined ? (
-        <div className="empty">Loading…</div>
+        <EmptyState>Loading…</EmptyState>
       ) : rows.length === 0 ? (
-        <div className="empty">No staff has acted on this organization.</div>
+        <EmptyState hint="This is the first question in any support conversation, so it gets its own panel.">
+          No staff has acted on this organization.
+        </EmptyState>
       ) : (
         rows.map((r) => (
           <div className="audit-row" key={r._id}>
             <span className="when">{formatWhen(r.timestamp)}</span>
             <span className="action">{r.action}</span>
             <span className="muted">{r.actorEmail}</span>
-            {r.reason ? <span>— {r.reason}</span> : null}
+            {r.reason ? <span className="muted">— {r.reason}</span> : null}
           </div>
         ))
       )}
-    </div>
+    </Panel>
   );
-}
-
-function Kpi({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="kpi">
-      <div className="kpi-value">{value}</div>
-      <div className="kpi-label">{label}</div>
-    </div>
-  );
-}
-
-function TickChip({ kind }: { kind?: string }) {
-  if (!kind) return <span className="chip">unknown</span>;
-  const cls =
-    kind === 'ok' ? 'chip chip-ok' : kind === 'all_failed' ? 'chip chip-danger' : 'chip chip-warn';
-  return <span className={cls}>{kind}</span>;
 }

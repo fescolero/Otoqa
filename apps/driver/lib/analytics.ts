@@ -233,6 +233,28 @@ export function trackSignInFailed(phone: string, errorCode?: string, errorMessag
   });
 }
 
+/**
+ * A sign-in attempt was blocked because Clerk still held a session, and we
+ * cleared it so the user could start a fresh one.
+ *
+ * This is the deadlock state: `useAuth().isSignedIn` reads false — so the
+ * auth guard lets the user onto the sign-in screen — while Clerk's client
+ * still holds a session, so `signIn.create()` refuses with `session_exists`.
+ * The driver is shown a sign-in form that can never succeed. Tracked so the
+ * frequency is visible rather than inferred from support reports.
+ */
+export function trackStaleSessionCleared(
+  phone: string,
+  errorCode: string,
+  recovered: boolean,
+) {
+  capture('sign_in_stale_session_cleared', {
+    phone_masked: maskPhone(phone),
+    error_code: errorCode,
+    recovered,
+  });
+}
+
 export function trackVerificationStarted() {
   capture('verification_started');
 }

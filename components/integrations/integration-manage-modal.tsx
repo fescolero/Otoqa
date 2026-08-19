@@ -35,6 +35,7 @@
  */
 
 import * as React from 'react';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useMutation, useAction, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Avatar, Kbd, WBtn, WIcon, type IconName } from '@/components/web';

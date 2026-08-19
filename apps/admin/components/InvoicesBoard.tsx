@@ -5,6 +5,16 @@ import { useQuery, useMutation, useAction } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { formatMoney, formatWhen } from '@/lib/format';
 import { ReasonAction } from '@/components/ReasonAction';
+import { Badge, EmptyState, FilterChips, Kpi, Panel, toneFor } from '@/components/ui';
+
+/**
+ * Every WorkOS org id begins `org_01`, so a trailing ellipsis truncates away
+ * the only part that tells two orgs apart. Keep both ends; the full value stays
+ * on the title attribute for copying.
+ */
+function shortOrgId(id: string): string {
+  return id.length <= 22 ? id : `${id.slice(0, 9)}…${id.slice(-8)}`;
+}
 
 /**
  * A date input gives 'YYYY-MM-DD'. Midday UTC, not midnight, so the date the
@@ -26,8 +36,15 @@ type InvoiceStatus =
   | 'paid'
   | 'written_off'
   | 'void';
-const FILTERS: (InvoiceStatus | 'all')[] = [
+/**
+ * `overdue` is derived rather than stored — it CUTS ACROSS issued, sent and
+ * partially_paid rather than partitioning with them. It leads the list because
+ * it is the question a receivables board exists to answer.
+ */
+type InvoiceFilter = InvoiceStatus | 'all' | 'overdue';
+const FILTERS: InvoiceFilter[] = [
   'all',
+  'overdue',
   'draft',
   'issued',
   'sent',
@@ -39,11 +56,12 @@ const FILTERS: (InvoiceStatus | 'all')[] = [
 
 export function InvoicesBoard() {
   const aging = useQuery(api.platform.invoices.agingOverview, {});
-  const [filter, setFilter] = useState<InvoiceStatus | 'all'>('all');
+  const [filter, setFilter] = useState<InvoiceFilter>('all');
   const invoices = useQuery(
     api.platform.invoices.listInvoices,
-    filter === 'all' ? {} : { status: filter },
+    filter === 'all' ? {} : filter === 'overdue' ? { overdueOnly: true } : { status: filter },
   );
+  const filterTotal = aging?.statusCounts?.[filter];
 
   return (
     <>
@@ -70,11 +88,19 @@ export function InvoicesBoard() {
             />
           ) : null}
           <Kpi label="Current" value={formatMoney(aging.buckets.current)} />
-          <Kpi label="1–30 overdue" value={formatMoney(aging.buckets.d1_30)} danger={aging.buckets.d1_30 > 0} />
+          <Kpi
+            label="1–30 overdue"
+            value={formatMoney(aging.buckets.d1_30)}
+            tone={aging.buckets.d1_30 > 0 ? 'danger' : 'neutral'}
+          />
           <Kpi
             label="31+ overdue"
             value={formatMoney(aging.buckets.d31_60 + aging.buckets.d61_90 + aging.buckets.d90_plus)}
-            danger={aging.buckets.d31_60 + aging.buckets.d61_90 + aging.buckets.d90_plus > 0}
+            tone={
+              aging.buckets.d31_60 + aging.buckets.d61_90 + aging.buckets.d90_plus > 0
+                ? 'danger'
+                : 'neutral'
+            }
           />
           <Kpi label="Drafts awaiting review" value={String(aging.draftCount)} />
           {aging.creditAvailable > 0 ? (
@@ -86,11 +112,13 @@ export function InvoicesBoard() {
               value={formatMoney(aging.writtenOffAmount)}
             />
           ) : null}
-          {aging.driftCount > 0 ? <Kpi label="Drift flags" value={String(aging.driftCount)} danger /> : null}
+          {aging.driftCount > 0 ? (
+            <Kpi label="Drift flags" value={String(aging.driftCount)} tone="danger" />
+          ) : null}
         </div>
       ) : null}
       {aging?.truncated ? (
-        <p className="ticket-body muted">
+        <p className="subtitle" style={{ marginTop: -8, marginBottom: 16 }}>
           More invoices exist than this rollup scans — Invoiced, Paid and Outstanding are floors,
           not the full book.
         </p>
@@ -98,31 +126,60 @@ export function InvoicesBoard() {
 
       <LedgerGaps />
 
-      <div className="chip-row">
-        {FILTERS.map((s) => (
-          <button
-            key={s}
-            className={`chip chip-button${filter === s ? ' chip-ok' : ''}`}
-            onClick={() => setFilter(s)}
-          >
-            {s}
-          </button>
-        ))}
-      </div>
-
-      <div className="panel">
-        <h2>Invoices</h2>
+      {/* listInvoices caps at 100 rows; the chip counts come from a wider
+          scan. Say so rather than letting a chip promise 240 rows and the
+          list show 100. */}
+      <Panel
+        title="Invoices"
+        count={invoices?.length}
+        subtitle="newest cycle first"
+        flush
+        footer={
+          invoices && filterTotal != null && filterTotal > invoices.length
+            ? `Showing the newest ${invoices.length} of ${filterTotal}. Narrow with a status filter to reach older cycles.`
+            : null
+        }
+      >
+        <FilterChips
+          options={FILTERS}
+          value={filter}
+          onChange={setFilter}
+          counts={aging?.statusCounts}
+        />
         {invoices === undefined ? (
-          <div className="empty">Loading…</div>
+          <EmptyState>Loading…</EmptyState>
         ) : invoices.length === 0 ? (
-          <div className="empty">
-            No invoices{filter !== 'all' ? ` with status ${filter}` : ''} — cycle close runs on
-            the 2nd, or run the backfill for history.
-          </div>
+          <EmptyState
+            hint={
+              filter === 'overdue'
+                ? 'Every open invoice is still inside its terms.'
+                : 'Cycle close runs on the 2nd; run the backfill for history.'
+            }
+          >
+            {filter === 'all'
+              ? 'No invoices.'
+              : filter === 'overdue'
+                ? 'Nothing overdue.'
+                : `No invoices with status ${filter.replace(/_/g, ' ')}.`}
+          </EmptyState>
         ) : (
-          invoices.map((inv) => <InvoiceRow key={inv._id} inv={inv} />)
+          <div className="record-scroll">
+            <div className="record-head record-invoices">
+              <span>Status</span>
+              <span>Invoice</span>
+              <span>Organization</span>
+              <span>Cycle</span>
+              <span className="record-num">Total</span>
+              <span className="record-num">Balance</span>
+              <span></span>
+              <span></span>
+            </div>
+            {invoices.map((inv) => (
+              <InvoiceRow key={inv._id} inv={inv} />
+            ))}
+          </div>
         )}
-      </div>
+      </Panel>
     </>
   );
 }
@@ -148,53 +205,77 @@ function LedgerGaps() {
   }
 
   return (
-    <div className="panel panel-attention">
-      <h2>Payments without a record ({gaps.length})</h2>
-      <p className="subtitle">
-        These are marked paid but carry no matching payment entry. Decide which they are:
-        if the money <strong>did</strong> arrive, open the invoice and use{' '}
-        <strong>Document payment</strong> to record how and when. If it never arrived — a
-        backfill assumed it — clear the claim and the invoice goes back to being owed.
-      </p>
-      {result ? <p className="muted">{result}</p> : null}
-
+    <Panel
+      title="Payments without a record"
+      count={gaps.length}
+      tone="warn"
+      flush
+      footer={
+        result ?? (
+          <>
+            These are marked paid but carry no matching payment entry. If the money{' '}
+            <strong>did</strong> arrive, open the invoice and use <strong>Document payment</strong>{' '}
+            to record how and when. If it never arrived — a backfill assumed it — clear the claim
+            and the invoice goes back to being owed.
+          </>
+        )
+      }
+    >
       {[...byOrg.entries()].map(([orgId, rows]) => {
         const total = Math.round(rows.reduce((s, r) => s + r.undocumented, 0) * 100) / 100;
         return (
           <div className="ticket-row" key={orgId}>
             <div className="audit-row">
-              <strong>{orgId}</strong>
-              <span className="chip chip-warn">{rows.length} invoices</span>
+              <strong className="mono">{orgId}</strong>
+              <Badge tone="warn">{rows.length} invoices</Badge>
               <span className="danger-text">{formatMoney(total)} unaccounted</span>
-              <ReasonAction
-                label={`Never paid — clear all ${rows.length}`}
-                danger
-                onSubmit={async (reason) => {
-                  const outcome = await clearAll({ workosOrgId: orgId, reason });
-                  setResult(
-                    `Cleared ${outcome.cleared.length} invoice(s) — ${formatMoney(
-                      outcome.totalRestored,
-                    )} is owed again. Apply the account credit next.`,
-                  );
-                }}
-              />
+              <span className="row-actions">
+                <ReasonAction
+                  label={`Never paid — clear all ${rows.length}`}
+                  danger
+                  onSubmit={async (reason) => {
+                    const outcome = await clearAll({ workosOrgId: orgId, reason });
+                    setResult(
+                      `Cleared ${outcome.cleared.length} invoice(s) — ${formatMoney(
+                        outcome.totalRestored,
+                      )} is owed again. Apply the account credit next.`,
+                    );
+                  }}
+                />
+              </span>
+            </div>
+            <div className="record-scroll">
+            <div className="record-head record-gaps">
+              <span>Status</span>
+              <span>Invoice</span>
+              <span>Cycle</span>
+              <span className="record-num">Claimed paid</span>
+              <span className="record-num">Documented</span>
+              <span className="record-num">Unaccounted</span>
+              <span></span>
             </div>
             {rows.map((g) => (
-              <div className="audit-row" key={g._id}>
-                <span className="chip">{g.status.replace('_', ' ')}</span>
-                <strong>{g.invoiceNumber}</strong>
-                <span className="muted">{g.periodKey}</span>
-                <span>
-                  {formatMoney(g.amountPaid)} paid · {formatMoney(g.documented)} documented
+              <div className="record-row record-gaps" key={g._id}>
+                <span className="record-cell">
+                  <Badge tone={toneFor(g.status)}>{g.status.replace('_', ' ')}</Badge>
                 </span>
-                <span className="danger-text">{formatMoney(g.undocumented)} unaccounted</span>
-                {g.backfilled ? <span className="chip">backfilled</span> : null}
+                <strong className="record-cell">{g.invoiceNumber}</strong>
+                <span className="record-cell mono muted">{g.periodKey}</span>
+                <span className="record-cell record-num">{formatMoney(g.amountPaid)}</span>
+                <span className="record-cell record-num">{formatMoney(g.documented)}</span>
+                <span className="record-cell record-num danger-text">
+                  {formatMoney(g.undocumented)}
+                </span>
+                <span className="record-notes">
+                  {g.backfilled ? <Badge outline>backfilled</Badge> : null}
+                </span>
               </div>
             ))}
+            </div>
           </div>
         );
       })}
-    </div>
+    </Panel>
   );
 }
 
@@ -248,59 +329,73 @@ function InvoiceRow({
   const daysOverdue =
     overdue && inv.dueAt != null ? Math.floor((Date.now() - inv.dueAt) / 86_400_000) : null;
 
+  const showBalance = balance > 0 && inv.status !== 'draft' && inv.status !== 'void';
+
   return (
-    <div className="ticket-row">
-      <div className="audit-row">
-        <span
-          className={`chip ${
-            inv.status === 'paid'
-              ? 'chip-ok'
-              : inv.status === 'void' || inv.status === 'written_off'
-                ? ''
-                : overdue
-                  ? 'chip-danger'
-                  : 'chip-warn'
-          }`}
-        >
-          {overdue ? 'overdue' : inv.status.replace('_', ' ')}
+    <div className="record-group">
+      <div className="record-row record-invoices">
+        <span className="record-cell">
+          <Badge
+            tone={
+              inv.status === 'paid'
+                ? 'ok'
+                : inv.status === 'void' || inv.status === 'written_off'
+                  ? 'neutral'
+                  : overdue
+                    ? 'danger'
+                    : 'warn'
+            }
+          >
+            {overdue ? 'overdue' : inv.status.replace('_', ' ')}
+          </Badge>
         </span>
-        <strong>{inv.invoiceNumber}</strong>
-        <span className="muted">{inv.workosOrgId}</span>
-        <span>{inv.periodKey}</span>
-        <span>{formatMoney(inv.total)}</span>
-        {balance > 0 && inv.status !== 'draft' && inv.status !== 'void' ? (
-          <span className="muted">balance {formatMoney(balance)}</span>
-        ) : null}
-        {overpaid > 0 ? (
-          <span className="chip chip-ok">+{formatMoney(overpaid)} credited</span>
-        ) : null}
-        {daysOverdue !== null && daysOverdue > 0 ? (
-          <span className="muted">{daysOverdue}d overdue</span>
-        ) : null}
-        {daysLate !== null ? (
-          <span className={daysLate > 0 ? 'chip chip-warn' : 'chip chip-ok'}>
-            {daysLate > 0 ? `paid ${daysLate}d late` : 'paid on time'}
-          </span>
-        ) : null}
-        {inv.driftDetectedAt ? <span className="chip chip-danger">drift</span> : null}
-        {inv.backfilled ? <span className="chip">backfilled</span> : null}
-        <button className="button button-sm" onClick={() => setExpanded(!expanded)}>
-          {expanded ? 'Hide' : 'Detail'}
-        </button>
+        <strong className="record-cell">{inv.invoiceNumber}</strong>
+        <span className="record-cell muted mono" title={inv.workosOrgId}>
+          {shortOrgId(inv.workosOrgId)}
+        </span>
+        <span className="record-cell mono">{inv.periodKey}</span>
+        <span className="record-cell record-num">{formatMoney(inv.total)}</span>
+        {/* An empty cell rather than a missing one: a settled invoice keeps
+            the column, so the money below it still lines up. */}
+        <span className="record-cell record-num">
+          {showBalance ? (
+            formatMoney(balance)
+          ) : (
+            <span className="muted">—</span>
+          )}
+        </span>
+        <span className="record-notes">
+          {overpaid > 0 ? <Badge tone="ok">+{formatMoney(overpaid)} credited</Badge> : null}
+          {daysOverdue !== null && daysOverdue > 0 ? (
+            <span className="muted">{daysOverdue}d overdue</span>
+          ) : null}
+          {daysLate !== null ? (
+            <Badge tone={daysLate > 0 ? 'warn' : 'ok'}>
+              {daysLate > 0 ? `paid ${daysLate}d late` : 'paid on time'}
+            </Badge>
+          ) : null}
+          {inv.driftDetectedAt ? <Badge tone="danger">drift</Badge> : null}
+          {inv.backfilled ? <Badge outline>backfilled</Badge> : null}
+        </span>
+        <span className="record-action">
+          <button className="button button-sm" onClick={() => setExpanded(!expanded)}>
+            {expanded ? 'Hide' : 'Detail'}
+          </button>
+        </span>
       </div>
 
       {expanded ? (
-        <div className="invoice-detail">
+        <div className="invoice-detail record-expanded">
           {inv.lines.map((l, i) => (
             <div className="audit-row" key={i}>
-              <span className="chip">{l.kind}</span>
+              <Badge outline>{l.kind}</Badge>
               <span>{l.label}</span>
               <span>{formatMoney(l.amount)}</span>
             </div>
           ))}
           {inv.adjustments.map((a, i) => (
             <div className="audit-row" key={`adj-${i}`}>
-              <span className="chip chip-warn">adjustment</span>
+              <Badge tone="warn">adjustment</Badge>
               <span>
                 {a.label} <span className="muted">({a.reason} — {a.addedByEmail})</span>
               </span>
@@ -349,7 +444,7 @@ function InvoiceRow({
           ))}
           {inv.taxAmount != null ? (
             <div className="audit-row">
-              <span className="chip">tax</span>
+              <Badge outline>tax</Badge>
               <span>
                 {inv.taxJurisdiction ?? ''} {inv.taxRatePercent}%
               </span>
@@ -365,9 +460,9 @@ function InvoiceRow({
             );
             return (
               <div className="audit-row" key={`pay-${i}`}>
-                <span className={`chip ${isReversal ? 'chip-warn' : wasReversed ? '' : 'chip-ok'}`}>
+                <Badge tone={isReversal ? 'warn' : wasReversed ? 'neutral' : 'ok'}>
                   {isReversal ? 'reversal' : 'payment'}
-                </span>
+                </Badge>
                 <span className={wasReversed ? 'muted' : undefined}>
                   {p.method}
                   {p.reference ? ` ${p.reference}` : ''}{' '}
@@ -400,7 +495,7 @@ function InvoiceRow({
 
           {undocumented > 0 ? (
             <div className="audit-row">
-              <span className="chip chip-warn">no record</span>
+              <Badge tone="warn">no record</Badge>
               <span>
                 {formatMoney(undocumented)} of the {formatMoney(inv.amountPaid)} paid has no
                 payment entry behind it.
@@ -454,7 +549,7 @@ function InvoiceRow({
           ) : null}
           {overpaid > 0 ? (
             <div className="audit-row">
-              <span className="chip chip-ok">credit</span>
+              <Badge tone="ok">credit</Badge>
               <span>
                 Paid {formatMoney(inv.amountPaid)} against {formatMoney(inv.total)} — the extra{' '}
                 {formatMoney(overpaid)} is on the organization&apos;s account credit and applies to
@@ -676,22 +771,3 @@ function InvoiceRow({
   );
 }
 
-function Kpi({
-  label,
-  value,
-  danger,
-  hint,
-}: {
-  label: string;
-  value: string;
-  danger?: boolean;
-  hint?: string;
-}) {
-  return (
-    <div className={danger ? 'kpi kpi-danger' : 'kpi'}>
-      <div className="kpi-value">{value}</div>
-      <div className="kpi-label">{label}</div>
-      {hint ? <div className="kpi-hint">{hint}</div> : null}
-    </div>
-  );
-}

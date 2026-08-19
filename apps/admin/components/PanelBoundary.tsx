@@ -1,6 +1,7 @@
 'use client';
 
 import { Component, ReactNode } from 'react';
+import { Panel } from './ui';
 
 /**
  * Failure isolation for one section of a page.
@@ -32,17 +33,23 @@ export class PanelBoundary extends Component<
   render() {
     if (this.state.error !== null) {
       return (
-        <div className="panel panel-danger">
-          <h2>{this.props.label} — unavailable</h2>
-          <p className="danger-text">{this.state.error}</p>
-          <p className="muted">
+        <Panel
+          title={`${this.props.label} — unavailable`}
+          tone="danger"
+          actions={
+            <button className="button button-sm" onClick={() => this.setState({ error: null })}>
+              Retry
+            </button>
+          }
+        >
+          <p className="danger-text mono" style={{ margin: 0, overflowWrap: 'anywhere' }}>
+            {this.state.error}
+          </p>
+          <p className="empty-hint">
             The rest of the console is unaffected. If this persists, check that the Convex backend
             is deployed with the console&apos;s current functions.
           </p>
-          <button className="button button-sm" onClick={() => this.setState({ error: null })}>
-            Retry
-          </button>
-        </div>
+        </Panel>
       );
     }
     return this.props.children;

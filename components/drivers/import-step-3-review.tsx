@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Loader2, AlertCircle, CheckCircle, Wand2 } from 'lucide-react';
 import { CSVRow, ColumnMapping, ValidationError, DuplicateDriver } from './csv-import-wizard';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';

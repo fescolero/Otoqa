@@ -12,6 +12,7 @@
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useConvexAuth, useMutation, usePaginatedQuery } from 'convex/react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';

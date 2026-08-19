@@ -27,6 +27,7 @@ import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { Loader2, ChevronDown, AlertCircle, Check, ChevronsUpDown, Plus } from 'lucide-react';
 import { WBtn, WIcon, Chip } from '@/components/web';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';

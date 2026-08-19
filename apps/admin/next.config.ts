@@ -16,6 +16,23 @@ import type { NextConfig } from 'next';
 const isDev = process.env.NODE_ENV === 'development';
 
 /**
+ * React Grab (components/DevTools.tsx) runs on local dev and PREVIEW
+ * deployments, never production.
+ *
+ * The flag is resolved HERE, and inlined as a literal into every build,
+ * because reading `process.env.NEXT_PUBLIC_VERCEL_ENV` from the client bundle
+ * is not safe for this: Next only inlines a NEXT_PUBLIC_ var that is actually
+ * SET, so on any build where Vercel's system variables are absent — a local
+ * `next build`, or a project with "expose system environment variables" turned
+ * off — the comparison stays a runtime lookup, nothing folds, and ~300KB of
+ * tree-walking overlay ships to production with nothing to announce it.
+ *
+ * Deciding it in the config makes the value a literal in all three cases, so
+ * the dead branch is eliminated rather than merely not taken.
+ */
+const enableGrab = isDev || process.env.VERCEL_ENV === 'preview';
+
+/**
  * The Convex origin is only known at BUILD time. On production builds the
  * Convex CLI injects NEXT_PUBLIC_CONVEX_URL (see vercel.json), but a preview
  * or a local build without it must not end up with a CSP that silently blocks
@@ -50,6 +67,7 @@ const csp = [
   .join('; ');
 
 const nextConfig: NextConfig = {
+  env: { NEXT_PUBLIC_ENABLE_GRAB: enableGrab ? '1' : '0' },
   async headers() {
     return [
       {

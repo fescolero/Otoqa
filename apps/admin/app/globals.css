@@ -1,15 +1,383 @@
-/* Platform console — deliberately minimal, dependency-free styling for
-   Phase 0. A design pass can replace this wholesale later. */
+/* Otoqa Platform Console — design system.
+   Ported from the Otoqa Console Design System (tokens/, components/).
+
+   The console is used during incidents and every write is audited, so two
+   rules outrank aesthetics: a broken panel must not take the page with it,
+   and no state may be carried by colour alone. Density is deliberate — an
+   operator scans hundreds of rows.
+
+   Structure: tokens first, then base elements, then one block per component
+   class. Class names match the markup in app/ and components/. */
+
+/* ============================================================ TOKENS */
 
 :root {
-  --bg: #0d0f12;
-  --panel: #16191e;
-  --border: #262b33;
-  --text: #e6e8eb;
-  --muted: #8b929c;
-  --accent: #f97316; /* Otoqa orange */
-  --danger: #ef4444;
+  /* ---- Warm neutrals. Paper, not grey-blue. ---- */
+  --ink-900: #0e0e0c;
+  --ink-700: #3a3a38;
+  --ink-500: #747474;
+  --ink-400: #969695;
+  --ink-300: #c4c4c1;
+  --ink-200: #e5e5e5;
+  --ink-100: #efefec;
+  --ink-50: #fafaf8;
+  --paper: #fafafa;
+  --white: #ffffff;
+
+  /* ---- Otoqa blue: the mark's colour and the tenant app's accent. ---- */
+  --blue-50: #eef2ff;
+  --blue-100: #dee5ff;
+  --blue-500: #2e5cff;
+  --blue-600: #1a47e6;
+  --blue-700: #1539bf;
+
+  /* ---- Status. Shared with the dispatch app so a chip means the same
+         thing in both products. ---- */
+  --green-50: #e7f6ef;
+  --green-500: #10b981;
+  --green-700: #047857;
+  --amber-50: #fdf3e0;
+  --amber-500: #f59e0b;
+  --amber-700: #b45309;
+  --red-50: #fdecec;
+  --red-500: #ef4444;
+  --red-700: #b91c1c;
+
+  /* ---- Text ---- */
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-500);
+  --text-muted: var(--ink-400);
+  --text-disabled: var(--ink-300);
+  --text-on-solid: var(--white);
+  --text-link: var(--blue-600);
+  --text-danger: var(--red-700);
+  --text-success: var(--green-700);
+  --text-warning: var(--amber-700);
+
+  /* ---- Surfaces ---- */
+  --surface-canvas: var(--paper);
+  --surface-card: var(--ink-50);
+  --surface-raised: var(--white);
+  --surface-sunken: var(--ink-100);
+  --surface-nav-active: var(--white);
+  --surface-row-hover: rgba(14, 14, 12, 0.03);
+  --surface-overlay: rgba(14, 14, 12, 0.28);
+
+  /* ---- Borders ---- */
+  --border-card: var(--ink-200);
+  --border-hairline: rgba(14, 14, 12, 0.08);
+  --border-strong: var(--ink-300);
+  --border-focus: var(--blue-500);
+
+  /* ---- Accent + actions. Solid actions are near-black, never blue. ---- */
+  --accent: var(--blue-500);
+  --accent-hover: var(--blue-600);
+  --accent-tint: var(--blue-50);
+  --action-solid: var(--ink-900);
+  --action-solid-hover: #26261f;
+  --action-quiet-hover: var(--ink-100);
+  --action-quiet-pressed: rgba(14, 14, 12, 0.09);
+
+  /* ---- Status pairs ---- */
+  --status-ok-fg: var(--green-700);
+  --status-ok-bg: var(--green-50);
+  --status-warn-fg: var(--amber-700);
+  --status-warn-bg: var(--amber-50);
+  --status-danger-fg: var(--red-700);
+  --status-danger-bg: var(--red-50);
+  --status-info-fg: var(--blue-700);
+  --status-info-bg: var(--blue-50);
+  --status-neutral-fg: var(--ink-500);
+  --status-neutral-bg: var(--ink-100);
+
+  /* ---- Tone applied to a panel: border + header band. Semantic because the
+         dark theme needs translucent tints, not the light 50-step. ---- */
+  --tone-ok-border: rgba(16, 185, 129, 0.38);
+  --tone-ok-head: var(--green-50);
+  --tone-warn-border: rgba(245, 158, 11, 0.4);
+  --tone-warn-head: var(--amber-50);
+  --tone-danger-border: rgba(239, 68, 68, 0.42);
+  --tone-danger-head: var(--red-50);
+  --surface-danger-tint: var(--red-50);
+
+  /* ---- Two surfaces that are neither card nor plate. ---- */
+  --surface-table-head: var(--ink-50);
+  --surface-meter-track: var(--ink-100);
+
+  /* ---- Type. --font-display / --font-sans / --font-mono are injected by
+         next/font in app/layout.tsx; the stacks here are the fallback. ---- */
+  --font-display-fallback: 'Iowan Old Style', Georgia, serif;
+  --font-sans-fallback: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono-fallback: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* The resolved stacks, under names nothing else redefines. Needed because a
+     third-party shadow root can shadow --font-sans for its own subtree (see
+     the React Grab rule at the foot of this file), and a rule cannot set a
+     custom property to var() of itself. */
+  --console-sans: var(--font-sans, var(--font-sans-fallback));
+  --console-mono: var(--font-mono, var(--font-mono-fallback));
+
+  --text-title-size: 24px;
+  --text-title-line: 32px;
+  --text-title-md-size: 20px;
+  --text-title-md-line: 24px;
+  --text-body-size: 14px;
+  --text-body-line: 20px;
+  --text-label-size: 12px;
+  --text-label-line: 18px;
+  --text-data-size: 13px;
+  --text-data-line: 18px;
+  --text-micro-size: 11px;
+  --text-micro-line: 14px;
+  --tracking-tight: -0.01em;
+  --tracking-caps: 0.06em;
+
+  /* ---- Spacing / geometry ---- */
+  --sidebar-w: 232px;
+  --topbar-h: 52px;
+  --page-max: 1180px;
+  --page-px: 28px;
+  --page-py: 24px;
+  --row-h: 36px;
+  --cell-px: 12px;
+  --cell-py: 8px;
+  --stack-gap: 16px;
+  --panel-gap: 12px;
+
+  /* ---- Shape. Nothing between 8px and a full pill. ---- */
+  --radius-xs: 4px;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 50px;
+  --border-width: 1px;
+  --shadow-popover: 0 8px 24px -8px rgba(14, 14, 12, 0.16), 0 2px 6px -2px rgba(14, 14, 12, 0.08);
+  --shadow-focus: 0 0 0 3px rgba(46, 92, 255, 0.18);
+
+  /* ---- Controls ---- */
+  --btn-h: 32px;
+  --btn-h-sm: 26px;
+  --btn-px: 8px;
+  --btn-px-roomy: 12px;
+  --badge-h: 20px;
+  --input-h: 32px;
+  --card-padding: 4px;
+  --card-content-padding: 14px;
+  --icon-sm: 16px;
+  --icon-stroke: 1.75;
+
+  /* ---- Motion. Flat and short: nothing bounces, nothing scales. ---- */
+  --dur-fast: 120ms;
+  --dur: 160ms;
+  --dur-slow: 220ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --transition-control: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
+
+
+/* ============================================================ DARK
+
+   Warm-dark, not blue-black: the light theme is paper, so the dark theme is
+   ink on unlit paper rather than a different product. Only the SEMANTIC layer
+   is redefined — every rule below the token block is theme-agnostic, which is
+   why the whole console flips from this one block.
+
+   Status tints invert their CONSTRUCTION, not just their values. On light they
+   are a 50-step wash under a 700-step foreground; on dark, a low-alpha wash of
+   the 500 under a lightened foreground — a solid dark-green chip on a dark
+   plate has nothing separating it from the plate.
+
+   Three states, deliberately: an explicit choice stamps data-theme on <html>,
+   and the default (no attribute) follows the operating system. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    /* The ink scale, unlit. */
+    --ink-900: #f3f3ef;
+    --ink-700: #d6d6d0;
+    --ink-500: #a3a39c;
+    --ink-400: #8a8a83;
+    --ink-300: #5c5c56;
+    --ink-200: #33332f;
+    --ink-100: #262623;
+    --ink-50: #1c1c1a;
+    --paper: #121211;
+    --white: #201f1d;
+
+    --text-primary: var(--ink-900);
+    --text-secondary: var(--ink-500);
+    --text-muted: var(--ink-400);
+    --text-disabled: var(--ink-300);
+    /* A solid action stays the highest-contrast thing on the page. On dark
+       that is near-white with dark text — the inverse of the light theme, not
+       a copy of it. */
+    --text-on-solid: #121211;
+    --text-link: #8ba3ff;
+    --text-danger: #f87171;
+    --text-success: #34d399;
+    --text-warning: #fbbf24;
+
+    --surface-canvas: #121211;
+    --surface-card: #1a1a18;
+    --surface-raised: #201f1d;
+    --surface-sunken: #262623;
+    --surface-nav-active: #2a2a26;
+    --surface-row-hover: rgba(255, 255, 255, 0.035);
+    --surface-overlay: rgba(0, 0, 0, 0.55);
+    --surface-table-head: #1a1a18;
+    --surface-meter-track: #2c2c28;
+    --surface-danger-tint: rgba(239, 68, 68, 0.14);
+
+    --border-card: #32322e;
+    --border-hairline: rgba(255, 255, 255, 0.08);
+    --border-strong: #454540;
+    --border-focus: #6f8dff;
+
+    --accent: #6f8dff;
+    --accent-hover: #8ba3ff;
+    --accent-tint: rgba(46, 92, 255, 0.16);
+    --action-solid: #ededea;
+    --action-solid-hover: #ffffff;
+    --action-quiet-hover: rgba(255, 255, 255, 0.07);
+    --action-quiet-pressed: rgba(255, 255, 255, 0.11);
+
+    --status-ok-fg: #34d399;
+    --status-ok-bg: rgba(16, 185, 129, 0.15);
+    --status-warn-fg: #fbbf24;
+    --status-warn-bg: rgba(245, 158, 11, 0.15);
+    --status-danger-fg: #f87171;
+    --status-danger-bg: rgba(239, 68, 68, 0.16);
+    --status-info-fg: #9db4ff;
+    --status-info-bg: rgba(46, 92, 255, 0.2);
+    --status-neutral-fg: var(--ink-500);
+    --status-neutral-bg: rgba(255, 255, 255, 0.07);
+
+    --tone-ok-border: rgba(16, 185, 129, 0.34);
+    --tone-ok-head: rgba(16, 185, 129, 0.1);
+    --tone-warn-border: rgba(245, 158, 11, 0.36);
+    --tone-warn-head: rgba(245, 158, 11, 0.1);
+    --tone-danger-border: rgba(239, 68, 68, 0.38);
+    --tone-danger-head: rgba(239, 68, 68, 0.11);
+
+    --shadow-popover: 0 8px 24px -8px rgba(0, 0, 0, 0.6), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+    --shadow-focus: 0 0 0 3px rgba(111, 141, 255, 0.25);
+  }
+}
+
+/* An explicit choice wins over the operating system, in both directions.
+   Duplicated rather than shared because a token block cannot be @extended and
+   a preprocessor would be a build step for one file. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --ink-900: #f3f3ef;
+  --ink-700: #d6d6d0;
+  --ink-500: #a3a39c;
+  --ink-400: #8a8a83;
+  --ink-300: #5c5c56;
+  --ink-200: #33332f;
+  --ink-100: #262623;
+  --ink-50: #1c1c1a;
+  --paper: #121211;
+  --white: #201f1d;
+
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-500);
+  --text-muted: var(--ink-400);
+  --text-disabled: var(--ink-300);
+  --text-on-solid: #121211;
+  --text-link: #8ba3ff;
+  --text-danger: #f87171;
+  --text-success: #34d399;
+  --text-warning: #fbbf24;
+
+  --surface-canvas: #121211;
+  --surface-card: #1a1a18;
+  --surface-raised: #201f1d;
+  --surface-sunken: #262623;
+  --surface-nav-active: #2a2a26;
+  --surface-row-hover: rgba(255, 255, 255, 0.035);
+  --surface-overlay: rgba(0, 0, 0, 0.55);
+  --surface-table-head: #1a1a18;
+  --surface-meter-track: #2c2c28;
+  --surface-danger-tint: rgba(239, 68, 68, 0.14);
+
+  --border-card: #32322e;
+  --border-hairline: rgba(255, 255, 255, 0.08);
+  --border-strong: #454540;
+  --border-focus: #6f8dff;
+
+  --accent: #6f8dff;
+  --accent-hover: #8ba3ff;
+  --accent-tint: rgba(46, 92, 255, 0.16);
+  --action-solid: #ededea;
+  --action-solid-hover: #ffffff;
+  --action-quiet-hover: rgba(255, 255, 255, 0.07);
+  --action-quiet-pressed: rgba(255, 255, 255, 0.11);
+
+  --status-ok-fg: #34d399;
+  --status-ok-bg: rgba(16, 185, 129, 0.15);
+  --status-warn-fg: #fbbf24;
+  --status-warn-bg: rgba(245, 158, 11, 0.15);
+  --status-danger-fg: #f87171;
+  --status-danger-bg: rgba(239, 68, 68, 0.16);
+  --status-info-fg: #9db4ff;
+  --status-info-bg: rgba(46, 92, 255, 0.2);
+  --status-neutral-fg: var(--ink-500);
+  --status-neutral-bg: rgba(255, 255, 255, 0.07);
+
+  --tone-ok-border: rgba(16, 185, 129, 0.34);
+  --tone-ok-head: rgba(16, 185, 129, 0.1);
+  --tone-warn-border: rgba(245, 158, 11, 0.36);
+  --tone-warn-head: rgba(245, 158, 11, 0.1);
+  --tone-danger-border: rgba(239, 68, 68, 0.38);
+  --tone-danger-head: rgba(239, 68, 68, 0.11);
+
+  --shadow-popover: 0 8px 24px -8px rgba(0, 0, 0, 0.6), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+  --shadow-focus: 0 0 0 3px rgba(111, 141, 255, 0.25);
+}
+
+/* Two base rules move the wrong way on dark: the link hover darkens toward
+   blue-700, which heads INTO the background. Lighten instead. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) a:hover {
+    color: var(--accent-hover);
+  }
+
+  :root:not([data-theme='light']) ::selection {
+    background: rgba(111, 141, 255, 0.3);
+  }
+
+  :root:not([data-theme='light']) .console-brand-mark {
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+}
+
+:root[data-theme='dark'] a:hover {
+  color: var(--accent-hover);
+}
+
+:root[data-theme='dark'] ::selection {
+  background: rgba(111, 141, 255, 0.3);
+}
+
+:root[data-theme='dark'] .console-brand-mark {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur: 0ms;
+    --dur-slow: 0ms;
+  }
+}
+
+/* ============================================================ BASE */
 
 * {
   box-sizing: border-box;
@@ -17,23 +385,49 @@
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family:
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
+  background: var(--surface-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans, var(--font-sans-fallback));
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
-  color: inherit;
+  color: var(--text-link);
   text-decoration: none;
 }
+
+a:hover {
+  color: var(--blue-700);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+code,
+kbd,
+samp {
+  font-family: var(--font-mono, var(--font-mono-fallback));
+  font-size: 0.92em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--blue-100);
+}
+
+/* ============================================================ SHELL */
 
 .console-shell {
   display: flex;
@@ -41,35 +435,109 @@ a {
 }
 
 .console-sidebar {
-  width: 220px;
+  width: var(--sidebar-w);
   flex-shrink: 0;
-  border-right: 1px solid var(--border);
-  padding: 16px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 16px;
+  padding: 14px 10px 12px;
+  border-right: var(--border-width) solid var(--border-card);
+  position: sticky;
+  top: 0;
+  height: 100vh;
 }
 
 .console-brand {
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  padding: 4px 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 2px;
 }
 
-.console-brand span {
-  color: var(--accent);
+.console-brand-mark {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 5px;
+}
+
+.console-brand-word {
+  font-family: var(--font-display, var(--font-display-fallback));
+  font-size: 20px;
+  line-height: 24px;
+  color: var(--text-primary);
+}
+
+/* The "console" eyebrow only — NOT .console-brand-word, which is the serif
+   wordmark and must not be uppercased. */
+.console-brand-suffix {
+  font-size: var(--text-micro-size);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding-top: 3px;
+}
+
+.console-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.nav-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-eyebrow {
+  padding: 0 8px 4px;
+  font-size: var(--text-micro-size);
+  line-height: var(--text-micro-line);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
 
 .console-nav-item {
-  padding: 7px 8px;
-  border-radius: 6px;
-  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  padding: 0 8px;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  font-size: var(--text-data-size);
+  transition: var(--transition-control);
 }
 
-.console-nav-item.active,
 .console-nav-item:hover {
-  background: var(--panel);
-  color: var(--text);
+  background: var(--action-quiet-hover);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+/* Active is position and weight, not colour: a white plate on the paper
+   canvas, hairline-bordered like the cards it leads to. */
+.console-nav-item.active {
+  background: var(--surface-nav-active);
+  border-color: var(--border-card);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.console-nav-item svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.console-nav-item.active svg {
+  color: var(--text-primary);
 }
 
 .console-nav-item.disabled {
@@ -77,143 +545,494 @@ a {
   pointer-events: none;
 }
 
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A count or a dot on a nav item answers "where do I need to go" before the
+   click. Both sit right-aligned; the dot is never the only signal. */
+.nav-count {
+  margin-left: auto;
+  font-family: var(--font-mono, var(--font-mono-fallback));
+  font-size: var(--text-micro-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.nav-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: var(--ink-300);
+}
+
+.nav-count + .nav-dot {
+  margin-left: 6px;
+}
+
+.nav-dot:first-of-type:not(.nav-count + .nav-dot) {
+  margin-left: auto;
+}
+
+.nav-dot-ok {
+  background: var(--green-500);
+}
+
+.nav-dot-warn {
+  background: var(--amber-500);
+}
+
+.nav-dot-danger {
+  background: var(--red-500);
+}
+
 .console-sidebar-footer {
   margin-top: auto;
-  padding: 8px;
-  color: var(--muted);
-  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 8px 0;
+  border-top: var(--border-width) solid var(--border-hairline);
+  color: var(--text-muted);
+  font-size: var(--text-micro-size);
+  line-height: 16px;
   overflow-wrap: anywhere;
 }
 
 .console-main {
+  min-width: 0;
+  padding: var(--page-py) var(--page-px) 48px;
+  max-width: var(--page-max);
+}
+
+/* ============================================================ TOPBAR
+
+   A 52px band above the content column. It carries the two things that are
+   true of the whole session rather than of any one page: WHICH DEPLOYMENT you
+   are about to write to, and whether alerting is actually live. Both belong
+   above every page because getting either wrong is expensive — a write on the
+   wrong deployment, or silence mistaken for calm. */
+
+.console-column {
   flex: 1;
-  padding: 24px 28px;
-  max-width: 1100px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
+.console-topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--topbar-h);
+  flex-shrink: 0;
+  padding: 0 var(--page-px);
+  border-bottom: var(--border-width) solid var(--border-card);
+  background: var(--surface-canvas);
+  font-size: var(--text-data-size);
+  color: var(--text-secondary);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.console-topbar-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.console-topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-topbar svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  flex-shrink: 0;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: var(--btn-h);
+  height: var(--btn-h);
+  padding: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: var(--transition-control);
+}
+
+.icon-button:hover {
+  background: var(--action-quiet-hover);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.icon-button-outline {
+  background: var(--surface-raised);
+  border-color: var(--border-card);
+}
+
+.icon-button svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+}
+
+/* A count on the bell. Never the only signal — the tone is repeated in the
+   nav dot beside Overview. */
+.icon-button-count {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--red-500);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* ============================================================ PAGE HEADER */
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.page-head-main {
+  min-width: 0;
+}
+
+.page-head h1,
 .console-main h1 {
-  font-size: 18px;
-  margin: 0 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-family: var(--font-display, var(--font-display-fallback));
+  font-size: var(--text-title-size);
+  line-height: var(--text-title-line);
+  font-weight: 400;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-primary);
 }
 
-.console-main .subtitle {
-  color: var(--muted);
-  margin: 0 0 24px;
+.subtitle {
+  margin: 2px 0 0;
+  max-width: 76ch;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  color: var(--text-secondary);
+  text-wrap: pretty;
 }
+
+.console-main > .subtitle:last-of-type {
+  margin-bottom: 20px;
+}
+
+.page-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.back-link {
+  display: inline-block;
+  margin-bottom: 4px;
+  font-size: var(--text-label-size);
+}
+
+/* ============================================================ PANEL
+
+   The signature card: an 8px shell in #FAFAF8 with 4px of padding, holding a
+   white content plate. The header sits in the shell, so tone tints the band
+   without touching the content. No shadow — a hairline does the separating. */
 
 .panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
-}
-
-.panel h2 {
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  margin: 0 0 12px;
-}
-
-.audit-row {
   display: flex;
-  gap: 12px;
-  padding: 8px 0;
-  border-top: 1px solid var(--border);
-  font-size: 13px;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface-card);
+  border: var(--border-width) solid var(--border-card);
+  border-radius: var(--radius-card);
+  padding: var(--card-padding);
+  margin-bottom: var(--stack-gap);
 }
 
-.audit-row:first-of-type {
-  border-top: none;
+.panel-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: calc(var(--radius-card) - 3px);
 }
 
-.audit-row .when {
-  color: var(--muted);
+/* The 6px square marker. Not a bullet, not an icon — a printer's mark. */
+.panel-head::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  background: var(--text-primary);
+}
+
+.panel-head h2,
+.panel > h2 {
+  margin: 0;
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-primary);
+}
+
+.panel-count {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.panel-subtitle {
+  font-size: var(--text-label-size);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.audit-row .action {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--accent);
+.panel-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 6px;
+  gap: 6px;
+  min-width: 0;
 }
 
-.empty {
-  color: var(--muted);
-  padding: 8px 0;
+.panel-body {
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-hairline);
+  border-radius: calc(var(--radius-card) - 3px);
+  padding: var(--card-content-padding);
+  overflow: hidden;
+  min-height: 0;
 }
 
-.denied {
-  max-width: 460px;
-  margin: 18vh auto 0;
-  text-align: center;
+/* Tables and feeds bring their own cell padding. */
+.panel-body-flush {
+  padding: 0;
 }
 
-.denied h1 {
-  color: var(--danger);
-  font-size: 18px;
+/* …but a flush panel often ends with a bare form or action. Inset those to
+   the same gutter the rows use, so nothing sits flush against the edge. */
+.panel-body-flush > form,
+.panel-body-flush > .inline-form,
+.panel-body-flush > p,
+.panel-body-flush > .detail-grid,
+.panel-body-flush > .button,
+.panel-body-flush > button {
+  margin: 10px var(--cell-px);
 }
 
-.denied p {
-  color: var(--muted);
+.panel-scroll {
+  overflow-y: auto;
+  min-height: 0;
+  scrollbar-width: thin;
 }
 
-.button {
-  display: inline-block;
-  margin-top: 12px;
-  padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 13px;
+.panel-foot {
+  padding: 8px var(--cell-px);
+  border-top: var(--border-width) solid var(--border-hairline);
+  font-size: var(--text-label-size);
+  color: var(--text-muted);
 }
 
-.loading {
-  color: var(--muted);
-  padding: 18vh 0;
-  text-align: center;
+/* Tone tints the border and the header band only. Never a coloured left edge. */
+.panel-attention {
+  border-color: var(--tone-warn-border);
 }
 
-/* ===== Phase 1: tables, chips, KPIs ===== */
-
-.search {
-  width: 100%;
-  max-width: 380px;
-  margin-bottom: 12px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 13px;
+.panel-attention > .panel-head {
+  background: var(--tone-warn-head);
 }
+
+.panel-danger {
+  border-color: var(--tone-danger-border);
+}
+
+.panel-danger > .panel-head {
+  background: var(--tone-danger-head);
+}
+
+.panel-ok {
+  border-color: var(--tone-ok-border);
+}
+
+.panel-ok > .panel-head {
+  background: var(--tone-ok-head);
+}
+
+.panel p:last-child,
+.panel-body > p:last-child {
+  margin-bottom: 0;
+}
+
+/* Two short paired panels side by side; never for a long feed. */
+.panel-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  align-items: start;
+  gap: var(--stack-gap);
+}
+
+.panel-pair > .panel {
+  margin-bottom: 0;
+}
+
+/* ============================================================ KPI */
+
+/* A grid, not a flex wrap: with nine KPIs the last row would otherwise
+   stretch two tiles across the full width and read as a different section. */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--panel-gap);
+  margin-bottom: var(--stack-gap);
+}
+
+.kpi {
+  min-width: 0;
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-card);
+  border-radius: var(--radius-card);
+  padding: 10px 12px 12px;
+}
+
+.kpi-danger {
+  border-color: var(--tone-danger-border);
+}
+
+.kpi-danger .kpi-value {
+  color: var(--text-danger);
+}
+
+/* The figure is the one other place Instrument Serif appears. */
+.kpi-value {
+  font-family: var(--font-display, var(--font-display-fallback));
+  font-weight: 400;
+  font-size: 32px;
+  line-height: 38px;
+  letter-spacing: var(--tracking-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.kpi-label {
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.kpi-hint {
+  margin-top: 4px;
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line);
+  color: var(--text-muted);
+}
+
+.kpi-meter {
+  display: flex;
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.kpi-meter span {
+  flex: 1;
+  height: 3px;
+  border-radius: 1px;
+  background: var(--surface-meter-track);
+}
+
+.kpi-meter span.on {
+  background: var(--ink-300);
+}
+
+.kpi-meter-ok span.on {
+  background: var(--green-500);
+}
+
+.kpi-meter-warn span.on {
+  background: var(--amber-500);
+}
+
+.kpi-meter-danger span.on {
+  background: var(--red-500);
+}
+
+/* ============================================================ TABLES */
 
 .table-scroll {
   overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
 }
 
 .data-table th {
   text-align: left;
-  color: var(--muted);
-  font-weight: 500;
-  font-size: 12px;
-  padding: 6px 12px 6px 0;
-  border-bottom: 1px solid var(--border);
+  padding: var(--cell-py) var(--cell-px);
+  font-size: var(--text-label-size);
+  font-weight: 400;
+  color: var(--text-muted);
   white-space: nowrap;
+  border-bottom: var(--border-width) solid var(--border-card);
+  background: var(--surface-table-head);
+}
+
+/* Pinned headers for a table that owns its page. */
+.table-sticky th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .data-table td {
-  padding: 7px 12px 7px 0;
-  border-bottom: 1px solid var(--border);
+  padding: var(--cell-py) var(--cell-px);
+  border-bottom: var(--border-width) solid var(--border-hairline);
   white-space: nowrap;
 }
 
@@ -221,161 +1040,96 @@ a {
   border-bottom: none;
 }
 
+.data-table tbody tr:hover td {
+  background: var(--surface-row-hover);
+}
+
+.data-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* An inline bar in a table cell — the only chart in the console, and only
+   where a row's magnitude relative to its neighbours is the point. */
+.row-meter {
+  display: inline-block;
+  vertical-align: middle;
+  width: 140px;
+  max-width: 100%;
+  height: 4px;
+  margin-right: 8px;
+  border-radius: 2px;
+  background: var(--surface-meter-track);
+  overflow: hidden;
+}
+
+.row-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ink-300);
+}
+
+.row-meter-fill.open {
+  background: var(--green-500);
+}
+
 .row-link {
-  color: var(--text);
-  font-weight: 600;
+  color: var(--text-primary);
+  font-weight: 500;
 }
 
 .row-link:hover {
-  color: var(--accent);
+  color: var(--text-link);
 }
 
-.muted {
-  color: var(--muted);
-}
+/* ============================================================ FEED ROWS */
 
-.danger-text {
-  color: var(--danger);
-}
-
-.chip {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.chip:first-child {
-  margin-left: 0;
-}
-
-.chip-ok {
-  color: #4ade80;
-  border-color: rgba(74, 222, 128, 0.35);
-}
-
-.chip-warn {
-  color: #fbbf24;
-  border-color: rgba(251, 191, 36, 0.35);
-}
-
-.chip-danger {
-  color: var(--danger);
-  border-color: rgba(239, 68, 68, 0.4);
-}
-
-.kpi-row {
+.audit-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.kpi {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  min-width: 150px;
-}
-
-.kpi-danger {
-  border-color: rgba(239, 68, 68, 0.5);
-}
-
-.kpi-value {
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.kpi-label {
-  color: var(--muted);
-  font-size: 12px;
-  margin-top: 2px;
-}
-
-.kpi-hint {
-  color: var(--muted);
-  font-size: 11px;
-  margin-top: 4px;
-  opacity: 0.75;
-}
-
-.panel-attention {
-  border-color: rgba(251, 191, 36, 0.4);
-}
-
-.detail-grid {
-  display: grid;
-  grid-template-columns: 160px 1fr;
-  gap: 6px 12px;
-  margin-bottom: 12px;
-  font-size: 13px;
-}
-
-/* ===== Phase 2: forms, actions, tickets ===== */
-
-.input {
-  padding: 6px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 12px;
-  max-width: 220px;
-}
-
-.input-wide {
-  max-width: 420px;
-  flex: 1;
-}
-
-.inline-form {
-  display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  margin-top: 8px;
+  gap: 10px;
+  min-height: var(--row-h);
+  padding: 9px var(--cell-px);
+  border-top: var(--border-width) solid var(--border-hairline);
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
 }
 
-.form-error {
-  width: 100%;
-  font-size: 12px;
+.audit-row:first-of-type {
+  border-top: none;
 }
 
-.button-sm {
-  margin-top: 0;
-  padding: 5px 10px;
-  font-size: 12px;
+.audit-row:hover {
+  background: var(--surface-row-hover);
 }
 
-.button-danger {
-  border-color: rgba(239, 68, 68, 0.5);
-  color: var(--danger);
+.audit-row .when {
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
-.panel-danger {
-  border-color: rgba(239, 68, 68, 0.45);
+/* Machine values stay mono and verbatim — never title-cased, never prettified. */
+.audit-row .action,
+.mono {
+  font-family: var(--font-mono, var(--font-mono-fallback));
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
-.chip-row {
+.row-actions {
+  margin-left: auto;
   display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 6px;
-  margin-bottom: 12px;
-}
-
-.chip-button {
-  cursor: pointer;
-  background: var(--panel);
-  margin-left: 0;
+  flex-shrink: 0;
 }
 
 .ticket-row {
-  border-top: 1px solid var(--border);
-  padding: 10px 0;
+  border-top: var(--border-width) solid var(--border-hairline);
+  padding: 10px var(--cell-px);
 }
 
 .ticket-row:first-of-type {
@@ -389,6 +1143,547 @@ a {
 
 .ticket-body {
   margin: 4px 0 0;
-  font-size: 13px;
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
   white-space: pre-wrap;
+}
+
+/* ============================================================ BADGES */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: var(--badge-h);
+  padding: 0 var(--btn-px);
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+  font-size: var(--text-micro-size);
+  line-height: 1;
+  font-weight: 500;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.chip + .chip {
+  margin-left: 6px;
+}
+
+.chip-ok {
+  background: var(--status-ok-bg);
+  color: var(--status-ok-fg);
+}
+
+.chip-warn {
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+}
+
+.chip-danger {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.chip-info {
+  background: var(--status-info-bg);
+  color: var(--status-info-fg);
+}
+
+.chip-outline {
+  background: transparent;
+  border-color: var(--border-card);
+  color: var(--text-secondary);
+}
+
+.chip-mono {
+  font-family: var(--font-mono, var(--font-mono-fallback));
+}
+
+/* Filter chips on a table that owns its page. */
+.chip-button {
+  margin-left: 0;
+  cursor: pointer;
+  background: transparent;
+  border-color: var(--border-card);
+  color: var(--text-secondary);
+  transition: var(--transition-control);
+}
+
+.chip-button:hover {
+  background: var(--action-quiet-hover);
+  color: var(--text-primary);
+}
+
+.chip-active {
+  background: var(--action-solid);
+  border-color: var(--action-solid);
+  color: var(--text-on-solid);
+}
+
+.chip-active:hover {
+  background: var(--action-solid-hover);
+  color: var(--text-on-solid);
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: var(--panel-gap);
+}
+
+/* ============================================================ CONTROLS */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--btn-h);
+  padding: 0 var(--btn-px-roomy);
+  font-size: var(--text-label-size);
+  line-height: 1;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-card);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-control);
+}
+
+.button:hover {
+  background: var(--action-quiet-hover);
+  text-decoration: none;
+  color: var(--text-primary);
+}
+
+.button:active {
+  background: var(--action-quiet-pressed);
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.button-solid {
+  background: var(--action-solid);
+  border-color: transparent;
+  color: var(--text-on-solid);
+}
+
+.button-solid:hover {
+  background: var(--action-solid-hover);
+  color: var(--text-on-solid);
+}
+
+.button-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.button-sm {
+  height: var(--btn-h-sm);
+  padding: 0 var(--btn-px);
+  font-size: var(--text-micro-size);
+}
+
+.button-danger {
+  color: var(--text-danger);
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.button-danger:hover {
+  background: var(--surface-danger-tint);
+  color: var(--text-danger);
+}
+
+.button svg {
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  flex-shrink: 0;
+}
+
+.input {
+  height: var(--input-h);
+  max-width: 220px;
+  padding: 0 10px;
+  font-size: var(--text-label-size);
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-card);
+  border-radius: var(--radius-control);
+  outline: none;
+  transition: var(--transition-control);
+}
+
+.input:focus {
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-focus);
+}
+
+.input-sm {
+  height: var(--btn-h-sm);
+}
+
+.input-wide {
+  max-width: 420px;
+  flex: 1;
+}
+
+textarea.input {
+  height: auto;
+  min-height: 64px;
+  padding: 8px 10px;
+  line-height: var(--text-body-line);
+  resize: vertical;
+}
+
+select.input {
+  appearance: none;
+  padding-right: 24px;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 13px) 14px, calc(100% - 9px) 14px;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+
+.search {
+  width: 100%;
+  max-width: 380px;
+  height: var(--input-h);
+  margin-bottom: var(--panel-gap);
+  padding: 0 10px;
+  font-size: var(--text-label-size);
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: var(--border-width) solid var(--border-card);
+  border-radius: var(--radius-control);
+  outline: none;
+  transition: var(--transition-control);
+}
+
+.search:focus {
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-focus);
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.audit-row .inline-form,
+.row-actions .inline-form {
+  margin-top: 0;
+}
+
+.form-error {
+  width: 100%;
+  font-size: var(--text-label-size);
+  color: var(--text-danger);
+}
+
+/* ============================================================ TEXT UTILITIES */
+
+.muted {
+  color: var(--text-muted);
+}
+
+.danger-text {
+  color: var(--text-danger);
+}
+
+.empty {
+  padding: 18px var(--card-content-padding);
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
+  color: var(--text-secondary);
+}
+
+.panel-body:not(.panel-body-flush) > .empty {
+  padding: 4px 0;
+}
+
+.empty-hint {
+  margin: 4px 0 0;
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line);
+  color: var(--text-muted);
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 6px 12px;
+  margin: 0 0 12px;
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
+}
+
+.detail-grid dt {
+  color: var(--text-muted);
+}
+
+.detail-grid dd {
+  margin: 0;
+}
+
+/* ============================================================ FULL-PAGE STATES */
+
+.loading {
+  padding: 18vh 0;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.denied {
+  max-width: 460px;
+  margin: 18vh auto 0;
+  text-align: center;
+}
+
+.denied h1 {
+  justify-content: center;
+  font-family: var(--font-display, var(--font-display-fallback));
+  font-size: var(--text-title-size);
+  line-height: var(--text-title-line);
+  font-weight: 400;
+  color: var(--text-danger);
+}
+
+.denied p {
+  color: var(--text-secondary);
+}
+
+.denied .button {
+  margin-top: 12px;
+}
+
+/* Truncation toggle at the foot of a feed (see MoreRows). */
+.more-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px var(--cell-px);
+  border: none;
+  border-top: var(--border-width) solid var(--border-hairline);
+  background: transparent;
+  color: var(--text-link);
+  font-family: inherit;
+  font-size: var(--text-label-size);
+  text-align: left;
+  cursor: pointer;
+}
+
+.more-toggle:hover {
+  background: var(--surface-row-hover);
+}
+
+.chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+
+/* An alert carries a lot on one line. The message takes the slack and
+   ellipsizes; the actions never wrap away from the thing they act on. */
+.alert-row {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.alert-message {
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+/* ============================================================ RECORD LIST
+
+   A list of homogeneous records that must SCAN like a table but expand like a
+   feed row. A <table> can do the first and not the second; a flex row can do
+   the second and not the first — the chip widths differ per row, so every
+   column after the status starts at a different x and nothing lines up.
+
+   Grid gives both: fixed tracks for alignment, and the expanded detail as a
+   sibling block that spans the full width. */
+
+.record-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* Wraps one record and its expanded detail. Carries no padding or border of
+   its own — the row inside owns both, or the two sets stack and the list
+   loosens by 20px a row. */
+.record-group + .record-group > .record-row {
+  border-top: var(--border-width) solid var(--border-hairline);
+}
+
+.record-head,
+.record-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 9px var(--cell-px);
+  min-width: 940px;
+}
+
+.record-head {
+  border-bottom: var(--border-width) solid var(--border-card);
+  background: var(--surface-table-head);
+  font-size: var(--text-label-size);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.record-row {
+  min-height: var(--row-h);
+  font-size: var(--text-data-size);
+  line-height: var(--text-data-line);
+}
+
+.record-head + .record-group > .record-row {
+  border-top: none;
+}
+
+.record-row:hover {
+  background: var(--surface-row-hover);
+}
+
+/* Each cell clips rather than pushing the next column out of alignment —
+   that push is the whole defect this grid exists to fix. */
+.record-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Trailing annotations: several chips that all begin at the same x.
+   These WRAP rather than clip — a row that carries both "credited" and "paid
+   on time" is exactly the row you want to read, and hiding the second chip to
+   keep every row the same height loses the fact to save the rhythm. */
+.record-notes {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.record-notes .chip + .chip {
+  margin-left: 0;
+}
+
+.record-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Invoice ledger. Kept here rather than inline so the header and the rows
+   cannot drift apart. */
+.record-invoices {
+  /* Sized so two chips fit on one line: the notes column wraps rather than
+     clips, so anything the fixed columns take is a row that goes two-high. */
+  grid-template-columns:
+    94px /* status — widest chip is "partially paid" */
+    158px /* number */
+    minmax(128px, 150px) /* org */
+    70px /* cycle */
+    104px /* total */
+    112px /* balance */
+    minmax(240px, 1fr) /* notes */
+    76px; /* action */
+}
+
+/* Unevidenced-payment rows, grouped under their org. */
+.record-gaps {
+  grid-template-columns:
+    96px /* status */
+    168px /* invoice */
+    76px /* cycle */
+    124px /* paid */
+    124px /* documented */
+    136px /* unaccounted */
+    minmax(0, 1fr); /* flags */
+}
+
+.record-expanded {
+  padding: 4px var(--cell-px) 12px;
+  border-top: var(--border-width) solid var(--border-hairline);
+}
+
+/* ============================================================ FILTER BAR
+
+   The control that governs a list, attached to it: a band at the top of the
+   panel body with a hairline under it, rather than chips floating free above
+   the rows they filter. */
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px var(--cell-px);
+  border-bottom: var(--border-width) solid var(--border-hairline);
+}
+
+/* The count is subordinate to the label it qualifies — same chip, less ink. */
+.chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+/* A filter with nothing behind it stays clickable and legible, just quiet:
+   "none of these" is an answer, and removing the chip hides it. */
+.chip-empty {
+  opacity: 0.45;
+}
+
+.chip-empty:hover {
+  opacity: 1;
+}
+
+/* ============================================================ REACT GRAB
+
+   React Grab (dev + preview only) renders its toolbar in a shadow root whose
+   stylesheet declares `@layer theme { :root, :host { --font-sans: "Geist" } }`
+   and `@import`s Geist from Google Fonts.
+
+   That import is blocked by the console's CSP, and today it does not matter:
+   next/font self-hosts a face named literally `Geist`, document-level
+   @font-face rules apply inside shadow roots, so the toolbar already resolves
+   to our copy. But it resolves by COINCIDENCE — the two happen to name the
+   same family. Change the console's sans face and the toolbar would keep
+   asking for "Geist", find nothing, and silently drop to a system font.
+
+   Binding its variables to ours turns that coincidence into a guarantee. This
+   rule wins over the shadow root's own declaration twice over: unlayered
+   styles beat @layer, and an outer-document rule matching the host beats a
+   :host rule inside it. */
+
+[data-react-grab] {
+  --font-sans: var(--console-sans);
+  --font-mono: var(--console-mono);
+  --default-font-family: var(--console-sans);
+  --default-mono-font-family: var(--console-mono);
 }

@@ -33,6 +33,7 @@ import * as React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
+// eslint-disable-next-line no-restricted-imports -- pre-existing raw Convex query; migrate to useAuthQuery/useAuthPaginatedQuery
 import { useQuery } from 'convex/react';
 import { toast } from 'sonner';
 import { useAuth } from '@workos-inc/authkit-nextjs/components';

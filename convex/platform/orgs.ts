@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { query } from '../_generated/server';
 import { requirePlatformStaff } from '../lib/auth';
+import { hasBeenInvoiced, invoicedOrgIds, isClientOrg } from './clientOrgs';
 
 /**
  * Platform console — organization directory & detail. Staff-only
@@ -17,7 +18,17 @@ export const listOrgs = query({
   handler: async (ctx) => {
     await requirePlatformStaff(ctx);
     // Bounded: one row per org.
-    return await ctx.db.query('orgHealthSnapshots').collect();
+    const all = await ctx.db.query('orgHealthSnapshots').collect();
+    const invoiced = await invoicedOrgIds(ctx);
+    const rows = all.filter((o) =>
+      isClientOrg(o.orgType, o.workosOrgId != null && invoiced.has(o.workosOrgId)),
+    );
+    return {
+      rows,
+      // Said out loud rather than silently dropped: a directory that hides
+      // rows without saying how many reads as a complete list.
+      hiddenCarrierCount: all.length - rows.length,
+    };
   },
 });
 
@@ -28,6 +39,9 @@ export const getOrgDetail = query({
 
     const org = await ctx.db.get(args.organizationId);
     if (!org) return null;
+    // Same rule as the directory. Reached by URL, this is the only thing
+    // standing between a broker's carrier and a staff screen.
+    if (!isClientOrg(org.orgType, await hasBeenInvoiced(ctx, org.workosOrgId))) return null;
 
     const snapshot = await ctx.db
       .query('orgHealthSnapshots')

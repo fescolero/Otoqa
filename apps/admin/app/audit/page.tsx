@@ -5,6 +5,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@otoqa/convex-client';
 import { ConsoleShell } from '@/components/ConsoleShell';
 import { PanelBoundary } from '@/components/PanelBoundary';
+import { EmptyState, PageHeader, Panel } from '@/components/ui';
 import { formatAgo, formatWhen } from '@/lib/format';
 
 /**
@@ -22,11 +23,15 @@ import { formatAgo, formatWhen } from '@/lib/format';
 export default function AuditPage() {
   return (
     <ConsoleShell>
-      <h1>Audit trail</h1>
-      <p className="subtitle">
-        Every platform-staff write and sensitive read. Destructive actions cannot be recorded
-        without a reason, so the &ldquo;why&rdquo; column is never empty for those.
-      </p>
+      <PageHeader
+        title="Audit trail"
+        subtitle={
+          <>
+            Every platform-staff write and sensitive read. Destructive actions cannot be recorded
+            without a reason, so the &ldquo;why&rdquo; column is never empty for those.
+          </>
+        }
+      />
       <PanelBoundary label="Audit trail">
         <AuditBoard />
       </PanelBoundary>
@@ -49,75 +54,89 @@ function AuditBoard() {
 
   return (
     <>
-      <div className="panel">
-        <h2>Who has used the console</h2>
+      <Panel
+        title="Who has used the console"
+        count={actors?.length}
+        flush
+        footer="Actors seen in the log, not the allowlist itself — someone added to STAFF_EMAIL_ALLOWLIST who has never signed in will not appear here. Review both when offboarding."
+      >
         {actors === undefined ? (
-          <div className="empty">Loading…</div>
+          <EmptyState>Loading…</EmptyState>
         ) : actors.length === 0 ? (
-          <div className="empty">No staff activity recorded yet.</div>
+          <EmptyState>No staff activity recorded yet.</EmptyState>
         ) : (
           actors.map((a) => (
             <div className="audit-row" key={a.actorEmail}>
               <span className="action">{a.actorEmail}</span>
               <span className="muted">last seen {formatAgo(a.lastSeenAt)}</span>
               <span className="muted">{a.actions} action(s) in the recent window</span>
-              <button className="button button-sm" onClick={() => setActor(a.actorEmail)}>
-                Filter
-              </button>
+              <span className="row-actions">
+                <button className="button button-sm" onClick={() => setActor(a.actorEmail)}>
+                  Filter
+                </button>
+              </span>
             </div>
           ))
         )}
-        <p className="muted">
-          This lists actors seen in the log, not the allowlist itself — someone added to
-          STAFF_EMAIL_ALLOWLIST who has never signed in will not appear here. Review both when
-          offboarding.
-        </p>
-      </div>
+      </Panel>
 
-      <div className="panel">
-        <form className="inline-form" onSubmit={(e) => e.preventDefault()}>
-          <select className="input" value={actor} onChange={(e) => setActor(e.target.value)}>
-            <option value="">All actors</option>
-            {(actors ?? []).map((a) => (
-              <option key={a.actorEmail} value={a.actorEmail}>
-                {a.actorEmail}
-              </option>
-            ))}
-          </select>
-          <input
-            className="input"
-            placeholder="WorkOS org id"
-            value={org}
-            onChange={(e) => setOrg(e.target.value)}
-          />
-          <input
-            className="input input-wide"
-            placeholder="Search reason, action, target…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          {actor || org || search ? (
-            <button
-              className="button button-sm"
-              type="button"
-              onClick={() => {
-                setActor('');
-                setOrg('');
-                setSearch('');
-              }}
-            >
-              Clear
-            </button>
-          ) : null}
-        </form>
-
+      <Panel
+        title="Trail"
+        count={rows?.length}
+        flush
+        actions={
+          <form className="inline-form" style={{ marginTop: 0 }} onSubmit={(e) => e.preventDefault()}>
+            <select className="input input-sm" value={actor} onChange={(e) => setActor(e.target.value)}>
+              <option value="">All actors</option>
+              {(actors ?? []).map((a) => (
+                <option key={a.actorEmail} value={a.actorEmail}>
+                  {a.actorEmail}
+                </option>
+              ))}
+            </select>
+            <input
+              className="input input-sm"
+              placeholder="WorkOS org id"
+              value={org}
+              onChange={(e) => setOrg(e.target.value)}
+            />
+            <input
+              className="input input-sm"
+              style={{ minWidth: 220 }}
+              placeholder="Search reason, action, target…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {actor || org || search ? (
+              <button
+                className="button button-sm button-quiet"
+                type="button"
+                onClick={() => {
+                  setActor('');
+                  setOrg('');
+                  setSearch('');
+                }}
+              >
+                Clear
+              </button>
+            ) : null}
+          </form>
+        }
+        footer={
+          rows && rows.length === 200
+            ? 'Showing the first 200 matches — narrow the filters to see older entries.'
+            : null
+        }
+      >
         {rows === undefined ? (
-          <div className="empty">Loading…</div>
+          <EmptyState>Loading…</EmptyState>
         ) : rows.length === 0 ? (
-          <div className="empty">No entries match.</div>
+          <EmptyState hint="Filters apply server-side against by_actor and by_target_org.">
+            No entries match those filters.
+          </EmptyState>
         ) : (
           <div className="table-scroll">
-            <table className="data-table">
+            <table className="data-table table-sticky">
               <thead>
                 <tr>
                   <th>When</th>
@@ -132,25 +151,20 @@ function AuditBoard() {
                 {rows.map((r) => (
                   <tr key={r._id}>
                     <td className="muted">{formatWhen(r.timestamp)}</td>
-                    <td>{r.action}</td>
+                    <td className="mono">{r.action}</td>
                     <td className="muted">{r.actorEmail}</td>
                     <td className="muted">{r.targetOrgId ?? '—'}</td>
                     <td className="muted">
                       {r.targetTable ? `${r.targetTable}${r.targetId ? `/${r.targetId}` : ''}` : '—'}
                     </td>
-                    <td>{r.reason ?? '—'}</td>
+                    <td style={{ whiteSpace: 'normal' }}>{r.reason ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-        {rows && rows.length === 200 ? (
-          <p className="muted">
-            Showing the first 200 matches — narrow the filters to see older entries.
-          </p>
-        ) : null}
-      </div>
+      </Panel>
     </>
   );
 }

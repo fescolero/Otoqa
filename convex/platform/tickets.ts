@@ -102,6 +102,35 @@ export const listTickets = query({
   },
 });
 
+/**
+ * Row counts per status, for the board's filter chips.
+ *
+ * Separate from listTickets because that query returns ONE status at a time —
+ * the filtered list can never say how many rows the other filters hold, which
+ * is exactly what makes a chip worth clicking or not.
+ */
+export const ticketStatusCounts = query({
+  args: {},
+  handler: async (ctx) => {
+    await requirePlatformStaff(ctx);
+    const CAP = 500;
+    const statuses = ['open', 'in_progress', 'resolved', 'closed'] as const;
+    const rows = await Promise.all(
+      statuses.map((status) =>
+        ctx.db
+          .query('supportTickets')
+          .withIndex('by_status_time', (q) => q.eq('status', status))
+          .take(CAP),
+      ),
+    );
+    const counts = Object.fromEntries(statuses.map((s, i) => [s, rows[i].length])) as Record<
+      (typeof statuses)[number],
+      number
+    >;
+    return { ...counts, all: rows.reduce((sum, r) => sum + r.length, 0) };
+  },
+});
+
 export const updateTicket = mutation({
   args: {
     id: v.id('supportTickets'),

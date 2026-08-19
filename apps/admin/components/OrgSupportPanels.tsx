@@ -6,6 +6,7 @@ import { api } from '@otoqa/convex-client';
 import type { Id } from '@otoqa/convex-client';
 import { formatAgo, formatMoney, formatWhen } from '@/lib/format';
 import { ReasonAction } from '@/components/ReasonAction';
+import { Badge, EmptyState, Panel, toneFor } from '@/components/ui';
 
 /**
  * The interactive support sections of the org detail page (Phase 2). Every
@@ -57,12 +58,11 @@ function ActiveSessionsPanel({ workosOrgId }: { workosOrgId: string }) {
   const forceEnd = useMutation(api.platform.support.forceEndSession);
 
   return (
-    <div className="panel">
-      <h2>Active driver sessions {sessions ? `(${sessions.length})` : ''}</h2>
+    <Panel title="Active driver sessions" count={sessions?.length} flush>
       {sessions === undefined ? (
-        <div className="empty">Loading…</div>
+        <EmptyState>Loading…</EmptyState>
       ) : sessions.length === 0 ? (
-        <div className="empty">No active sessions.</div>
+        <EmptyState>No active sessions.</EmptyState>
       ) : (
         sessions.map((s) => (
           <div className="audit-row" key={s._id}>
@@ -91,7 +91,7 @@ function ActiveSessionsPanel({ workosOrgId }: { workosOrgId: string }) {
           </div>
         ))
       )}
-    </div>
+    </Panel>
   );
 }
 
@@ -101,8 +101,7 @@ function SessionEndAlertsPanel({ workosOrgId }: { workosOrgId: string }) {
 
   if (!rows || rows.length === 0) return null;
   return (
-    <div className="panel panel-attention">
-      <h2>Sessions ended with active loads (unacknowledged)</h2>
+    <Panel title="Sessions ended with active loads (unacknowledged)" tone="warn" flush>
       {rows.map((r) => (
         <div className="audit-row" key={r._id}>
           <span className="when">{formatWhen(r.endedAt)}</span>
@@ -115,7 +114,7 @@ function SessionEndAlertsPanel({ workosOrgId }: { workosOrgId: string }) {
           </button>
         </div>
       ))}
-    </div>
+    </Panel>
   );
 }
 
@@ -132,9 +131,8 @@ function FlagsEditorPanel({
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <div className="panel">
-      <h2>Feature flags (org overrides)</h2>
-      {flags.length === 0 ? <div className="empty">No org-scoped overrides.</div> : null}
+    <Panel title="Feature flags (org overrides)" flush>
+      {flags.length === 0 ? <EmptyState hint="Without an override this org follows the global flag, then the code default.">No org-scoped overrides.</EmptyState> : null}
       {flags.map((f) => (
         <div className="audit-row" key={f._id}>
           <span className="action">{f.key}</span>
@@ -176,7 +174,7 @@ function FlagsEditorPanel({
         </button>
         {error ? <div className="danger-text form-error">{error}</div> : null}
       </form>
-    </div>
+    </Panel>
   );
 }
 
@@ -186,12 +184,11 @@ function DriversPanel({ workosOrgId }: { workosOrgId: string }) {
   const correctPhone = useMutation(api.platform.support.correctDriverPhone);
 
   return (
-    <div className="panel">
-      <h2>Drivers {drivers ? `(${drivers.length})` : ''}</h2>
+    <Panel title="Drivers" count={drivers?.length} flush>
       {drivers === undefined ? (
-        <div className="empty">Loading…</div>
+        <EmptyState>Loading…</EmptyState>
       ) : drivers.length === 0 ? (
-        <div className="empty">No drivers.</div>
+        <EmptyState>No drivers.</EmptyState>
       ) : (
         drivers.map((d) => (
           <div className="audit-row" key={d._id}>
@@ -225,7 +222,7 @@ function DriversPanel({ workosOrgId }: { workosOrgId: string }) {
           </div>
         ))
       )}
-    </div>
+    </Panel>
   );
 }
 
@@ -245,11 +242,10 @@ function IdentityLinksPanel({
 
   if (links.length === 0) return null;
   return (
-    <div className="panel">
-      <h2>Identity link actions</h2>
+    <Panel title="Identity link actions" flush>
       {links.map((l) => (
         <div className="audit-row" key={l._id}>
-          <span className="chip">{l.role}</span>
+          <Badge outline>{l.role}</Badge>
           <span>{l.phone ?? l.email ?? l.clerkUserId}</span>
           <ReasonAction
             label="Change phone"
@@ -271,7 +267,7 @@ function IdentityLinksPanel({
           />
         </div>
       ))}
-    </div>
+    </Panel>
   );
 }
 
@@ -296,8 +292,7 @@ export function BillingConfigPanel({
     .at(-1);
 
   return (
-    <div className="panel">
-      <h2>Billing configuration</h2>
+    <Panel title="Billing configuration" flush>
       <div className="detail-grid">
         <span className="muted">Current rate</span>
         <span>
@@ -370,7 +365,7 @@ export function BillingConfigPanel({
         <input className="input" name="tax" placeholder="Tax % (e.g. 8.25)" />
         <input className="input" name="minimum" placeholder="Monthly minimum $" />
       </ReasonAction>
-    </div>
+    </Panel>
   );
 }
 
@@ -395,15 +390,20 @@ export function RateSchedulePanel({
   );
 
   return (
-    <div className="panel">
-      <h2>Rate schedule</h2>
-      <p className="subtitle">
-        Base rate {currentRate != null ? `$${currentRate.toFixed(2)}` : 'platform default'} unless a
-        step below covers the cycle. A step applies from its period onward, so it can only be added
-        or removed while no invoice from that period on has been committed.
-      </p>
+    <Panel
+      title="Rate schedule"
+      count={sorted.length}
+      flush
+      footer={
+        <>
+          Base rate {currentRate != null ? `$${currentRate.toFixed(2)}` : 'platform default'} unless
+          a step below covers the cycle. A step applies from its period onward, so it can only be
+          added or removed while no invoice from that period on has been committed.
+        </>
+      }
+    >
       {sorted.length === 0 ? (
-        <div className="empty">No scheduled steps — every cycle bills at the base rate.</div>
+        <EmptyState>No scheduled steps — every cycle bills at the base rate.</EmptyState>
       ) : (
         sorted.map((step) => (
           <div className="audit-row" key={step.effectiveFromPeriod}>
@@ -440,7 +440,7 @@ export function RateSchedulePanel({
         <input className="input" name="period" placeholder="From period (YYYY-MM)" />
         <input className="input" name="rate" placeholder="Rate/load" />
       </ReasonAction>
-    </div>
+    </Panel>
   );
 }
 
@@ -452,29 +452,25 @@ export function CreditsPanel({ workosOrgId }: { workosOrgId: string }) {
   const voidCredit = useMutation(api.platform.credits.voidCredit);
 
   return (
-    <div className="panel">
-      <h2>
-        Account credit{' '}
-        {balance ? <span className="chip chip-ok">${balance.available.toFixed(2)} available</span> : null}
-      </h2>
-      <p className="subtitle">
-        Applied automatically to the balance when the next invoice is issued — never to the taxable
-        subtotal. Overpayments post here on their own.
-      </p>
+    <Panel
+      title="Account credit"
+      subtitle={balance ? `$${balance.available.toFixed(2)} available` : undefined}
+      count={credits?.length}
+      flush
+      footer="Applied automatically to the balance when the next invoice is issued — never to the taxable subtotal. Overpayments post here on their own."
+    >
       {credits === undefined ? (
-        <div className="empty">Loading…</div>
+        <EmptyState>Loading…</EmptyState>
       ) : credits.length === 0 ? (
-        <div className="empty">No credits on this account.</div>
+        <EmptyState hint="An overpayment posts here automatically; goodwill and service credits are issued by staff.">No credits on this account.</EmptyState>
       ) : (
         credits.map((c) => (
           <div className="audit-row" key={c._id}>
-            <span
-              className={`chip ${
-                c.status === 'available' ? 'chip-ok' : c.status === 'void' ? 'chip-danger' : ''
-              }`}
+            <Badge
+              tone={c.status === 'available' ? 'ok' : c.status === 'void' ? 'danger' : 'neutral'}
             >
               {c.status}
-            </span>
+            </Badge>
             <span className="action">{c.source.replace('_', ' ')}</span>
             <span>
               ${c.amount.toFixed(2)}
@@ -529,7 +525,7 @@ export function CreditsPanel({ workosOrgId }: { workosOrgId: string }) {
         </select>
         <input className="input" type="date" name="createdAt" title="Date the credit arose (blank = today)" />
       </ReasonAction>
-    </div>
+    </Panel>
   );
 }
 
@@ -562,21 +558,20 @@ export function AllocatePaymentPanel({ workosOrgId }: { workosOrgId: string }) {
   const owed = Math.round(open.reduce((s, i) => s + i.balance, 0) * 100) / 100;
 
   return (
-    <div className="panel">
-      <h2>Record a payment across invoices</h2>
-      <p className="subtitle">
-        Settles the oldest due invoice first and works forward. Anything beyond what is owed
-        becomes account credit and applies to the next invoice issued.
-      </p>
+    <Panel
+      title="Record a payment across invoices"
+      flush
+      footer="Settles the oldest due invoice first and works forward. Anything beyond what is owed becomes account credit and applies to the next invoice issued."
+    >
 
       {invoices === undefined ? (
-        <div className="empty">Loading…</div>
+        <EmptyState>Loading…</EmptyState>
       ) : open.length === 0 ? (
-        <div className="empty">Nothing outstanding — a payment here would post entirely as credit.</div>
+        <EmptyState>Nothing outstanding — a payment here would post entirely as credit.</EmptyState>
       ) : (
         <>
           <div className="audit-row">
-            <span className="chip chip-warn">{open.length} open</span>
+            <Badge tone="warn">{open.length} open</Badge>
             <strong>{formatMoney(owed)} outstanding</strong>
             <span className="muted">in the order it will be applied:</span>
           </div>
@@ -594,11 +589,10 @@ export function AllocatePaymentPanel({ workosOrgId }: { workosOrgId: string }) {
       )}
 
       {result ? (
-        <div className="panel panel-attention">
-          <h2>Allocated</h2>
+        <Panel title="Allocated" tone="warn" flush>
           {result.applied.map((a) => (
             <div className="audit-row" key={a.invoiceNumber}>
-              <span className="chip chip-ok">{a.status.replace('_', ' ')}</span>
+              <Badge tone={toneFor(a.status)}>{a.status.replace('_', ' ')}</Badge>
               <span className="action">{a.invoiceNumber}</span>
               <span className="muted">{a.periodKey}</span>
               <span>{formatMoney(a.amount)}</span>
@@ -606,13 +600,13 @@ export function AllocatePaymentPanel({ workosOrgId }: { workosOrgId: string }) {
           ))}
           {result.creditPosted > 0 ? (
             <div className="audit-row">
-              <span className="chip chip-ok">credit</span>
+              <Badge tone="ok">credit</Badge>
               <span>
                 {formatMoney(result.creditPosted)} beyond what was owed — posted to account credit.
               </span>
             </div>
           ) : null}
-        </div>
+        </Panel>
       ) : null}
 
       {/* Credit is never swept in automatically — spending a customer's
@@ -677,7 +671,7 @@ export function AllocatePaymentPanel({ workosOrgId }: { workosOrgId: string }) {
         <input className="input" name="reference" placeholder="Reference / check #" />
         <input className="input" type="date" name="receivedAt" title="Date received" />
       </ReasonAction>
-    </div>
+    </Panel>
   );
 }
 
@@ -702,8 +696,7 @@ export function ContractPanel({
     current.platformLicenseEnd < new Date().toISOString().slice(0, 10);
 
   return (
-    <div className="panel">
-      <h2>Contract</h2>
+    <Panel title="Contract" flush>
       <div className="detail-grid">
         <span className="muted">Billing contact</span>
         <span>
@@ -715,7 +708,7 @@ export function ContractPanel({
         <span className="muted">License window</span>
         <span>
           {current.platformLicenseStart ?? '—'} → {current.platformLicenseEnd ?? '—'}
-          {expired ? <span className="chip chip-warn">expired</span> : null}
+          {expired ? <Badge tone="warn">expired</Badge> : null}
         </span>
       </div>
       <ReasonAction
@@ -748,7 +741,7 @@ export function ContractPanel({
         <input className="input" name="licenseStart" placeholder="License start (YYYY-MM-DD)" />
         <input className="input" name="licenseEnd" placeholder="License end (YYYY-MM-DD)" />
       </ReasonAction>
-    </div>
+    </Panel>
   );
 }
 
@@ -762,12 +755,16 @@ export function ManualInvoicePanel({
   const thisPeriod = new Date().toISOString().slice(0, 7);
 
   return (
-    <div className="panel">
-      <h2>One-off invoice</h2>
-      <p className="subtitle">
-        For anything that isn&apos;t metered usage. Lands in the same ledger as a draft and follows
-        the same lifecycle; it never collides with the cycle&apos;s invoice.
-      </p>
+    <Panel
+      title="One-off invoice"
+      flush
+      footer={
+        <>
+          For anything that isn&apos;t metered usage. Lands in the same ledger as a draft and
+          follows the same lifecycle; it never collides with the cycle&apos;s invoice.
+        </>
+      }
+    >
       <ReasonAction
         label="Raise a one-off invoice"
         onSubmit={async (reason, form) => {
@@ -784,7 +781,7 @@ export function ManualInvoicePanel({
         <input className="input" name="amount" placeholder="Amount $" />
         <input className="input" name="period" placeholder={`Period (default ${thisPeriod})`} />
       </ReasonAction>
-    </div>
+    </Panel>
   );
 }
 
@@ -801,8 +798,7 @@ function DangerZone({
   const restore = useMutation(api.platform.support.restoreOrg);
 
   return (
-    <div className="panel panel-danger">
-      <h2>Danger zone</h2>
+    <Panel title="Danger zone" tone="danger" flush>
       {isDeleted ? (
         <ReasonAction
           label="Restore organization"
@@ -820,6 +816,6 @@ function DangerZone({
           }}
         />
       )}
-    </div>
+    </Panel>
   );
 }

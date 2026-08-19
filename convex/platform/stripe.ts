@@ -4,6 +4,8 @@ import { internal } from '../_generated/api';
 import { requireRecentStaffAuth } from '../lib/auth';
 import { logPlatformAudit } from '../lib/platformAudit';
 import { logSystemEvent } from '../lib/systemEvents';
+import type { ActionCtx } from '../_generated/server';
+import { trackedFetch } from '../lib/externalHealth';
 
 /**
  * Stripe integration (Phase 4 — spec §7). ACH-first Stripe Invoicing:
@@ -28,11 +30,12 @@ function stripeKey(): string {
 }
 
 async function stripeFetch(
+  ctx: Pick<ActionCtx, 'runMutation'>,
   path: string,
   params?: Record<string, string>,
   method: 'POST' | 'GET' = params ? 'POST' : 'GET',
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${STRIPE_API}${path}`, {
+  const res = await trackedFetch(ctx, 'stripe', `${STRIPE_API}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${stripeKey()}`,
@@ -211,7 +214,7 @@ export const pushInvoiceToStripe = action({
     // 1. Ensure the Stripe customer.
     let customerId = data.stripeCustomerId;
     if (!customerId) {
-      const customer = await stripeFetch('/customers', {
+      const customer = await stripeFetch(ctx, '/customers', {
         name: org.name,
         email: org.billingEmail ?? '',
         'metadata[workosOrgId]': invoice.workosOrgId,
@@ -225,7 +228,7 @@ export const pushInvoiceToStripe = action({
 
     // 2. One line item carrying OUR frozen balance — Stripe never recomputes.
     const credited = Math.round((invoice.total - balance) * 100) / 100;
-    await stripeFetch('/invoiceitems', {
+    await stripeFetch(ctx, '/invoiceitems', {
       customer: customerId,
       amount: String(Math.round(balance * 100)),
       currency: 'usd',
@@ -238,7 +241,7 @@ export const pushInvoiceToStripe = action({
     const daysUntilDue = invoice.dueAt
       ? Math.max(1, Math.ceil((invoice.dueAt - Date.now()) / 86_400_000))
       : 15;
-    const stripeInvoice = await stripeFetch('/invoices', {
+    const stripeInvoice = await stripeFetch(ctx, '/invoices', {
       customer: customerId,
       collection_method: 'send_invoice',
       days_until_due: String(daysUntilDue),
@@ -248,8 +251,8 @@ export const pushInvoiceToStripe = action({
       'metadata[periodKey]': invoice.periodKey,
     });
     const stripeInvoiceId = stripeInvoice.id as string;
-    const finalized = await stripeFetch(`/invoices/${stripeInvoiceId}/finalize`, {});
-    await stripeFetch(`/invoices/${stripeInvoiceId}/send`, {});
+    const finalized = await stripeFetch(ctx, `/invoices/${stripeInvoiceId}/finalize`, {});
+    await stripeFetch(ctx, `/invoices/${stripeInvoiceId}/send`, {});
 
     await ctx.runMutation(internal.platform.stripe.markPushedToStripe, {
       id: args.id,
@@ -411,7 +414,7 @@ export const reconcileStripeInvoices = internalAction({
     const open = await ctx.runQuery(internal.platform.stripe.listPushedOpenInvoices, {});
     for (const row of open) {
       try {
-        const stripeInvoice = await stripeFetch(`/invoices/${row.stripeInvoiceId}`);
+        const stripeInvoice = await stripeFetch(ctx, `/invoices/${row.stripeInvoiceId}`);
         if (stripeInvoice.status === 'paid') {
           // Missed/failed webhook — apply now (idempotent).
           await ctx.runMutation(internal.platform.stripe.applyStripeInvoicePaid, {
