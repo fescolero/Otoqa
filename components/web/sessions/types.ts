@@ -81,6 +81,21 @@ export interface LiveSessionRow {
 
   trips: TripInfo[];
   incidents: number;
+
+  /** Next pending leg when nothing is ACTIVE — what the geofence
+   *  pre-trip arming is watching. Mirrors UpNextLeg server-side. */
+  upNext: {
+    legId: Id<'dispatchLegs'>;
+    loadId: Id<'loadInformation'>;
+    loadInternalId: string;
+    orderNumber: string | null;
+    hcr: string | null;
+    tripNumber: string | null;
+    plannedStartAt: number | null;
+    pickup: { city: string | null; state: string | null } | null;
+    drop: { city: string | null; state: string | null } | null;
+    fenceArmed: boolean;
+  } | null;
 }
 
 /**

@@ -261,6 +261,7 @@ export function SessionActivityPanel(props: Props) {
         {props.tab === 'trips' ? (
           <TripsBody
             trips={session.trips}
+            upNext={props.mode === 'live' ? props.session.upNext : null}
             isLive={isLive}
             focusedTripIndex={props.focusedTripIndex}
             onFocusTrip={props.onFocusTrip}
@@ -303,31 +304,120 @@ export function SessionActivityPanel(props: Props) {
 // Trips body — one TripCard per dispatch leg in the shift
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * The driver's next pending leg — pending legs aren't session-bound yet,
+ * so they never appear as trip cards; without this the rail claimed "no
+ * loads dispatched" while the geofence pre-trip fence was armed on the
+ * leg and already firing arrivals. Shows exactly what the fence system
+ * is watching, including whether the pickup fence is live.
+ */
+function UpNextCard({ upNext }: { upNext: NonNullable<LiveSessionRow['upNext']> }) {
+  const place = (p: { city: string | null; state: string | null } | null) =>
+    p ? [p.city, p.state].filter(Boolean).join(', ') : null;
+  return (
+    <div className="border-b border-[var(--border-hairline)] px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span
+          className="inline-flex items-center rounded-full px-2 py-[2px] text-[10.5px] font-semibold uppercase tracking-[0.04em]"
+          style={{ background: 'rgba(46,92,255,0.10)', color: '#1A47E6' }}
+        >
+          Up next
+        </span>
+        <span className="text-[12.5px] font-semibold text-foreground">
+          #{upNext.orderNumber ?? upNext.loadInternalId}
+        </span>
+        {upNext.plannedStartAt != null && (
+          <span
+            className="num ml-auto text-[11px] tabular-nums"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            planned{' '}
+            {new Date(upNext.plannedStartAt).toLocaleTimeString('en-US', {
+              hour: 'numeric',
+              minute: '2-digit',
+            })}
+          </span>
+        )}
+      </div>
+      {(upNext.hcr || upNext.tripNumber) && (
+        <div className="mt-1.5 flex items-center gap-1.5">
+          {upNext.hcr && (
+            <span
+              className="rounded px-1.5 py-[1px] text-[10.5px] font-medium"
+              style={{ background: 'var(--bg-surface-2)', color: 'var(--text-secondary)' }}
+            >
+              HCR {upNext.hcr}
+            </span>
+          )}
+          {upNext.tripNumber && (
+            <span
+              className="rounded px-1.5 py-[1px] text-[10.5px] font-medium"
+              style={{ background: 'var(--bg-surface-2)', color: 'var(--text-secondary)' }}
+            >
+              Trip {upNext.tripNumber}
+            </span>
+          )}
+        </div>
+      )}
+      <div className="mt-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+        {place(upNext.pickup) ?? '—'}
+        <span style={{ color: 'var(--text-tertiary)' }}> → </span>
+        {place(upNext.drop) ?? '—'}
+      </div>
+      <div className="mt-1 flex items-center gap-1.5 text-[11px]">
+        <span
+          aria-hidden
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: '50%',
+            background: upNext.fenceArmed ? '#10B981' : 'var(--text-tertiary)',
+            display: 'inline-block',
+          }}
+        />
+        <span style={{ color: upNext.fenceArmed ? 'var(--text-secondary)' : 'var(--text-tertiary)' }}>
+          {upNext.fenceArmed
+            ? 'Geofence armed at pickup — arrival will be detected automatically'
+            : 'Geofence arming on next GPS sync'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function TripsBody({
   trips,
+  upNext,
   isLive,
   focusedTripIndex,
   onFocusTrip,
 }: {
   trips: TripInfo[];
+  upNext: LiveSessionRow['upNext'];
   isLive: boolean;
   focusedTripIndex: number | null;
   onFocusTrip: (next: number | null) => void;
 }) {
   if (trips.length === 0) {
     return (
-      <div
-        className="px-4 py-6 text-center text-[12px]"
-        style={{ color: 'var(--text-tertiary)' }}
-      >
-        {isLive
-          ? 'Driver is on shift but no loads are dispatched right now.'
-          : 'No loads were dispatched during this shift.'}
+      <div>
+        {upNext && <UpNextCard upNext={upNext} />}
+        <div
+          className="px-4 py-6 text-center text-[12px]"
+          style={{ color: 'var(--text-tertiary)' }}
+        >
+          {isLive
+            ? upNext
+              ? 'No trip started yet — the next dispatched load is queued above.'
+              : 'Driver is on shift but no loads are dispatched right now.'
+            : 'No loads were dispatched during this shift.'}
+        </div>
       </div>
     );
   }
   return (
     <div>
+      {upNext && <UpNextCard upNext={upNext} />}
       {trips.map((trip, i) => (
         <TripCard
           key={trip.legId}

@@ -42,6 +42,7 @@ import { query, QueryCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { requireCallerOrgId } from './lib/auth';
 import { getLoadFacets } from './lib/loadFacets';
+import { pendingLegsForShift } from './lib/legTracking';
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
 const DRIVING_SPEED_THRESHOLD_MPH = 5;
@@ -105,6 +106,25 @@ export type TripInfo = {
   } | null;
 };
 
+/**
+ * The pending leg the geofence pre-trip arming targets. Pending legs are
+ * not yet session-bound, so they never appear in `trips` — without this
+ * the rail claims "no loads dispatched" while a fence is armed and firing.
+ */
+export type UpNextLeg = {
+  legId: Id<'dispatchLegs'>;
+  loadId: Id<'loadInformation'>;
+  loadInternalId: string;
+  orderNumber: string | null;
+  hcr: string | null;
+  tripNumber: string | null;
+  plannedStartAt: number | null;
+  pickup: { city: string | null; state: string | null } | null;
+  drop: { city: string | null; state: string | null } | null;
+  /** A pre-trip tracking row exists for this load — the arrival fence is live. */
+  fenceArmed: boolean;
+};
+
 export type LiveSession = {
   sessionId: Id<'driverSessions'>;
   driverId: Id<'drivers'>;
@@ -148,6 +168,9 @@ export type LiveSession = {
 
   /** Soft alert count — soft-cap hits + (future) HOS / hard-brake events. */
   incidents: number;
+
+  /** Next pending leg when nothing is ACTIVE (see UpNextLeg). */
+  upNext: UpNextLeg | null;
 };
 
 function deriveStatus(
@@ -352,6 +375,56 @@ export const listLiveSessions = query({
       if (session.softCap10hAt) incidents++;
       if (session.softCap14hAt) incidents++;
 
+      // Up-next pending leg (only when nothing is ACTIVE): the same pick
+      // the geofence pre-trip arming uses, so the rail shows exactly what
+      // the fence system is watching.
+      let upNext: UpNextLeg | null = null;
+      if (!trips.some((t) => t.status === 'ACTIVE')) {
+        const pendingLegs = await ctx.db
+          .query('dispatchLegs')
+          .withIndex('by_driver', (q) =>
+            q.eq('driverId', session.driverId).eq('status', 'PENDING')
+          )
+          .collect();
+        const sessionLegIds = new Set(trips.map((t) => t.legId as string));
+        const nextLeg = pendingLegsForShift(
+          pendingLegs.filter(
+            (l) => l.workosOrgId === callerOrgId && !sessionLegIds.has(l._id as string)
+          ),
+          session.startedAt
+        )[0];
+        if (nextLeg) {
+          const [load, startStop, endStop, facets, trackingRow] = await Promise.all([
+            ctx.db.get(nextLeg.loadId),
+            ctx.db.get(nextLeg.startStopId),
+            ctx.db.get(nextLeg.endStopId),
+            getLoadFacets(ctx, nextLeg.loadId),
+            ctx.db
+              .query('loadTrackingState')
+              .withIndex('by_load', (q) => q.eq('loadId', nextLeg.loadId))
+              .first(),
+          ]);
+          if (load) {
+            upNext = {
+              legId: nextLeg._id,
+              loadId: nextLeg.loadId,
+              loadInternalId: load.internalId,
+              orderNumber: load.orderNumber ?? null,
+              hcr: facets.hcr ?? null,
+              tripNumber: facets.trip ?? null,
+              plannedStartAt: nextLeg.plannedStartAt ?? null,
+              pickup: startStop
+                ? { city: startStop.city ?? null, state: startStop.state ?? null }
+                : null,
+              drop: endStop
+                ? { city: endStop.city ?? null, state: endStop.state ?? null }
+                : null,
+              fenceArmed: trackingRow?.preTrip === true,
+            };
+          }
+        }
+      }
+
       out.push({
         sessionId: session._id,
         driverId: session.driverId,
@@ -390,6 +463,7 @@ export const listLiveSessions = query({
 
         trips,
         incidents,
+        upNext,
       });
     }
 
