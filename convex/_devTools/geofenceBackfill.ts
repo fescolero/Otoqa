@@ -15,7 +15,8 @@ import {
   GEOFENCE_MAX_ACCURACY_METERS,
   exitRadiusFor,
 } from '../lib/geo';
-import { facilityArrivalRadius } from '../loadTrackingState';
+import { facilityArrivalRadius, facilityFence } from '../loadTrackingState';
+import { pointInPolygon } from '../lib/polygonGeo';
 
 /**
  * Geofence event backfill (DEV/OPS TOOL).
@@ -709,6 +710,174 @@ export const repairDepartedPositions = internalMutation({
  * — orphans from the pre-departure-watch era, when session-end paths could
  * leave the frontier row behind. List by default; commit=true deletes.
  */
+// How far back an inherited arrival can reach, mirroring the live rule
+// in loadTrackingState.inheritArrivalOnCheckIn.
+const INHERIT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Retroactive arrival inheritance — applies the same-dock back-to-back
+ * rule (see loadTrackingState.inheritArrivalOnCheckIn) to check-ins that
+ * happened BEFORE the rule shipped: a stop with a check-in tap but no
+ * ARRIVED, whose session's newest inside-fence fix at tap time was an
+ * ARRIVED for a different load (≤6h earlier, no departure since), gets
+ * that physical arrival copied forward flagged `inherited`. Dry-run by
+ * default; commit env-gated like the other tools here.
+ *
+ *   npx convex run _devTools/geofenceBackfill:backfillInheritedArrivals '{"organizationId": "org_..."}'
+ *   npx convex run _devTools/geofenceBackfill:backfillInheritedArrivals '{"organizationId": "org_...", "commit": true}'
+ */
+export const backfillInheritedArrivals = internalMutation({
+  args: {
+    organizationId: v.string(),
+    sinceDays: v.optional(v.number()), // default 2
+    commit: v.optional(v.boolean()),
+  },
+  returns: v.object({
+    mode: v.string(),
+    stopsExamined: v.number(),
+    inherited: v.number(),
+    candidates: v.array(
+      v.object({
+        loadInternalId: v.string(),
+        stopSequenceNumber: v.number(),
+        inheritedFromLoad: v.string(),
+        arrivedAt: v.number(),
+        checkInAt: v.number(),
+      }),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    const commit = args.commit ?? false;
+    if (commit && process.env.OTOQA_ENABLE_DEV_TOOLS !== 'true') {
+      throw new Error(
+        'Commit disabled in this deployment — set OTOQA_ENABLE_DEV_TOOLS=true to enable writes ' +
+          '(dry runs need no flag)',
+      );
+    }
+    const sinceMs = Date.now() - (args.sinceDays ?? 2) * 24 * 60 * 60 * 1000;
+
+    // Recent loads for the org (newest first, bounded).
+    const loads = await ctx.db
+      .query('loadInformation')
+      .withIndex('by_organization', (q) => q.eq('workosOrgId', args.organizationId))
+      .order('desc')
+      .take(300);
+    const recent = loads.filter((l) => l.updatedAt >= sinceMs);
+
+    let stopsExamined = 0;
+    let inheritedCount = 0;
+    const candidates = [];
+    const loadNameCache = new Map<string, string>();
+
+    for (const load of recent) {
+      const stops = await ctx.db
+        .query('loadStops')
+        .withIndex('by_load', (q) => q.eq('loadId', load._id))
+        .collect();
+      for (const stop of stops) {
+        if (!stop.checkedInAt || stop.latitude === undefined || stop.longitude === undefined) {
+          continue;
+        }
+        const checkInMs = Date.parse(stop.checkedInAt);
+        if (!Number.isFinite(checkInMs) || checkInMs < sinceMs) continue;
+        stopsExamined++;
+
+        const existing = await ctx.db
+          .query('geofenceEvents')
+          .withIndex('by_load_stop_event', (q) =>
+            q
+              .eq('loadId', load._id)
+              .eq('stopSequenceNumber', stop.sequenceNumber)
+              .eq('eventType', 'ARRIVED'),
+          )
+          .first();
+        if (existing) continue;
+
+        // Session of this load's own events (any type) — needed to scan
+        // the shift's history around the tap.
+        const anyEvent = await ctx.db
+          .query('geofenceEvents')
+          .withIndex('by_load', (q) => q.eq('loadId', load._id))
+          .first();
+        const sessionId = anyEvent?.sessionId;
+        if (!sessionId) continue;
+
+        const fence = await facilityFence(ctx, stop);
+        const radius = fence.radiusMeters ?? INNER_RING_METERS;
+        const insideFence = (lat: number, lng: number) =>
+          fence.polygon && fence.polygon.length >= 3
+            ? pointInPolygon({ lat, lng }, fence.polygon)
+            : calculateDistanceMeters(lat, lng, stop.latitude!, stop.longitude!) < radius;
+
+        // Newest fix inside this fence BEFORE the tap decides continuity.
+        const before = await ctx.db
+          .query('geofenceEvents')
+          .withIndex('by_session', (q) =>
+            q.eq('sessionId', sessionId).lt('triggeredAt', checkInMs),
+          )
+          .order('desc')
+          .take(30);
+        const newestInside = before.find((e) => insideFence(e.latitude, e.longitude));
+        if (
+          !newestInside ||
+          newestInside.eventType !== 'ARRIVED' ||
+          newestInside.loadId === load._id ||
+          checkInMs - newestInside.triggeredAt > INHERIT_MAX_AGE_MS
+        ) {
+          continue;
+        }
+
+        const srcKey = newestInside.loadId as string;
+        if (!loadNameCache.has(srcKey)) {
+          const srcLoad = await ctx.db.get(newestInside.loadId);
+          loadNameCache.set(srcKey, srcLoad?.internalId ?? 'unknown');
+        }
+        candidates.push({
+          loadInternalId: load.internalId,
+          stopSequenceNumber: stop.sequenceNumber,
+          inheritedFromLoad: loadNameCache.get(srcKey)!,
+          arrivedAt: newestInside.triggeredAt,
+          checkInAt: checkInMs,
+        });
+        if (commit) {
+          await ctx.db.insert('geofenceEvents', {
+            sessionId: newestInside.sessionId,
+            loadId: load._id,
+            stopSequenceNumber: stop.sequenceNumber,
+            driverId: newestInside.driverId,
+            organizationId: args.organizationId,
+            eventType: 'ARRIVED',
+            triggeredAt: newestInside.triggeredAt,
+            latitude: newestInside.latitude,
+            longitude: newestInside.longitude,
+            distanceMeters: calculateDistanceMeters(
+              newestInside.latitude,
+              newestInside.longitude,
+              stop.latitude,
+              stop.longitude,
+            ),
+            accuracy: newestInside.accuracy,
+            inherited: true,
+            backfilled: true,
+          });
+          inheritedCount++;
+        }
+      }
+    }
+
+    console.log(
+      `[geofenceBackfill.backfillInheritedArrivals] ${commit ? 'COMMIT' : 'DRY_RUN'}: ` +
+        `${candidates.length} candidates across ${stopsExamined} tapped stops; inserted ${inheritedCount}`,
+    );
+    return {
+      mode: commit ? 'COMMIT' : 'DRY_RUN',
+      stopsExamined,
+      inherited: inheritedCount,
+      candidates,
+    };
+  },
+});
+
 export const cleanupTrackingState = internalMutation({
   args: {
     commit: v.optional(v.boolean()),

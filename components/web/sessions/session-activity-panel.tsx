@@ -666,80 +666,80 @@ function TripStopRow({
 function StopTimelineLine({ timeline }: { timeline: StopTimeline }) {
   const hhmm = (ms: number) =>
     new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-  const tapTime = timeline.checkedInAt
-    ? hhmm(Date.parse(timeline.checkedInAt))
-    : null;
-
-  const parts: React.ReactNode[] = [];
-  if (timeline.arrivedAt != null) {
-    parts.push(
-      <span key="gps" style={{ color: '#0F8C5F', fontWeight: 600 }}>
-        GPS {hhmm(timeline.arrivedAt)}
-      </span>,
-    );
-  }
-  if (tapTime) {
-    const deltaMin =
-      timeline.arrivedAt != null && timeline.checkedInAt
-        ? Math.round((Date.parse(timeline.checkedInAt) - timeline.arrivedAt) / 60_000)
-        : null;
-    parts.push(
-      <span key="tap">
-        tap {tapTime}
-        {deltaMin != null && deltaMin !== 0 && (
-          <span style={{ color: 'var(--text-tertiary)' }}>
-            {' '}
-            ({deltaMin > 0 ? `+${deltaMin}m` : `${deltaMin}m`})
-          </span>
-        )}
-      </span>,
-    );
-  }
-  // Departure half — same detected-vs-reported pairing as the arrival:
-  // GPS exit next to the checkout tap, with the gap when both exist.
+  const inTapMs = timeline.checkedInAt ? Date.parse(timeline.checkedInAt) : null;
   const outTapMs = timeline.checkedOutAt ? Date.parse(timeline.checkedOutAt) : null;
-  if (timeline.departedAt != null || outTapMs != null) {
-    const outDeltaMin =
-      timeline.departedAt != null && outTapMs != null
-        ? Math.round((outTapMs - timeline.departedAt) / 60_000)
-        : null;
-    parts.push(
-      <span key="dep">
-        out{' '}
-        {timeline.departedAt != null && (
-          <span style={{ color: '#0F8C5F', fontWeight: 600 }}>GPS {hhmm(timeline.departedAt)}</span>
-        )}
-        {timeline.departedAt != null && outTapMs != null && (
-          <span style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}> · </span>
-        )}
-        {outTapMs != null && <span>tap {hhmm(outTapMs)}</span>}
-        {outDeltaMin != null && outDeltaMin !== 0 && (
-          <span style={{ color: 'var(--text-tertiary)' }}>
-            {' '}
-            ({outDeltaMin > 0 ? `+${outDeltaMin}m` : `${outDeltaMin}m`})
-          </span>
-        )}
-      </span>,
-    );
-  }
-  if (parts.length === 0) return null;
+
+  const rows: Array<{
+    label: string;
+    gpsMs: number | null;
+    tapMs: number | null;
+    gpsTitle: string;
+  }> = [
+    {
+      label: 'in',
+      gpsMs: timeline.arrivedAt,
+      tapMs: inTapMs,
+      gpsTitle: 'Arrival detected by geofence',
+    },
+    {
+      label: 'out',
+      gpsMs: timeline.departedAt,
+      tapMs: outTapMs,
+      gpsTitle: 'Departure detected by geofence',
+    },
+  ].filter((r) => r.gpsMs != null || r.tapMs != null);
+  if (rows.length === 0) return null;
 
   return (
-    <div
-      className="mt-0.5 flex flex-wrap items-center gap-x-2 pl-[calc(10.5px+8px)] text-[10.5px] tabular-nums"
-      style={{ color: 'var(--text-secondary)' }}
-    >
-      {parts.map((p, i) => (
-        <React.Fragment key={i}>
-          {i > 0 && <span style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>·</span>}
-          {p}
-        </React.Fragment>
-      ))}
+    <div className="mt-0.5 flex flex-col gap-y-0.5 pl-[calc(10.5px+8px)] text-[10.5px] tabular-nums">
+      {rows.map((r) => {
+        const deltaMin =
+          r.gpsMs != null && r.tapMs != null ? Math.round((r.tapMs - r.gpsMs) / 60_000) : null;
+        return (
+          <div key={r.label} className="flex flex-wrap items-baseline gap-x-1.5">
+            <span
+              className="w-6 shrink-0 uppercase tracking-[0.05em]"
+              style={{ color: 'var(--text-tertiary)', fontSize: 9.5, fontWeight: 600 }}
+            >
+              {r.label}
+            </span>
+            {r.gpsMs != null ? (
+              <span title={r.gpsTitle} style={{ color: '#0F8C5F', fontWeight: 600 }}>
+                GPS {hhmm(r.gpsMs)}
+              </span>
+            ) : (
+              <span
+                title="No geofence detection for this crossing"
+                style={{ color: 'var(--text-tertiary)' }}
+              >
+                GPS —
+              </span>
+            )}
+            {r.tapMs != null && (
+              <>
+                <span style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>·</span>
+                <span title="Driver tap" style={{ color: 'var(--text-secondary)' }}>
+                  tap {hhmm(r.tapMs)}
+                </span>
+              </>
+            )}
+            {deltaMin != null && deltaMin !== 0 && (
+              <span
+                title={`Driver tapped ${Math.abs(deltaMin)} min ${deltaMin > 0 ? 'after' : 'before'} the geofence detection`}
+                style={{
+                  color: Math.abs(deltaMin) >= 15 ? '#A66800' : 'var(--text-tertiary)',
+                }}
+              >
+                ({deltaMin > 0 ? `+${deltaMin}m` : `${deltaMin}m`})
+              </span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-/** Small neutral pill for load facet tags (HCR / Trip) on a trip card. */
 function TagBadge({ label, value }: { label: string; value: string }) {
   return (
     <span
