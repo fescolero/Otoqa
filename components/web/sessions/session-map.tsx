@@ -58,6 +58,91 @@ import {
  * boundary. Fetches its own ring data (the session rows don't carry stop
  * coordinates) and draws imperatively, cleaning up on unmount/load switch.
  */
+/**
+ * The fences ARMED RIGHT NOW for the selected live session — read from the
+ * tracking watches, so rings appear/advance/disappear exactly as the
+ * evaluator's targets do: the pickup ring vanishes once the exit confirms,
+ * the next stop's ring takes its place, and same-place fences (drop of one
+ * load = pickup of the next) arrive pre-merged from the server, so the map
+ * never stacks duplicate rings.
+ */
+function ActiveFencesLayer({ sessionId }: { sessionId: string }) {
+  const map = useMap();
+  const mapsLibrary = useMapsLibrary('maps');
+  const colorScheme = useMapColorScheme();
+  const fences = useAuthQuery(api.geofenceEvents.activeFencesForSession, {
+    sessionId: sessionId as Id<'driverSessions'>,
+  });
+
+  React.useEffect(() => {
+    if (!map || !mapsLibrary || !fences || fences.length === 0) return;
+
+    const dark = colorScheme === 'DARK';
+    const fenceColor = dark ? '#059669' : '#10B981';
+    const neutralStroke = dark ? '#5A6172' : '#94a3b8';
+
+    const shapes: (google.maps.Circle | google.maps.Polygon)[] = [];
+    for (const fence of fences) {
+      if (fence.hasArrival) {
+        if (fence.polygon && fence.polygon.length >= 3) {
+          shapes.push(
+            new mapsLibrary.Polygon({
+              paths: fence.polygon,
+              strokeColor: fenceColor,
+              strokeOpacity: 0.55,
+              strokeWeight: 2,
+              fillColor: fenceColor,
+              fillOpacity: 0.07,
+              map,
+            }),
+          );
+        } else if (fence.arrivalRadiusMeters != null) {
+          shapes.push(
+            new mapsLibrary.Circle({
+              center: { lat: fence.latitude, lng: fence.longitude },
+              radius: fence.arrivalRadiusMeters,
+              strokeColor: fenceColor,
+              strokeOpacity: 0.55,
+              strokeWeight: 2,
+              fillColor: fenceColor,
+              fillOpacity: 0.07,
+              map,
+            }),
+          );
+        }
+      }
+      // Exit boundary — faint. Drawn once per merged place (max radius).
+      if (fence.exitPolygon && fence.exitPolygon.length >= 3) {
+        shapes.push(
+          new mapsLibrary.Polygon({
+            paths: fence.exitPolygon,
+            strokeColor: neutralStroke,
+            strokeOpacity: 0.3,
+            strokeWeight: 1.5,
+            fillOpacity: 0,
+            map,
+          }),
+        );
+      } else {
+        shapes.push(
+          new mapsLibrary.Circle({
+            center: { lat: fence.latitude, lng: fence.longitude },
+            radius: fence.exitRadiusMeters,
+            strokeColor: neutralStroke,
+            strokeOpacity: 0.3,
+            strokeWeight: 1.5,
+            fillOpacity: 0,
+            map,
+          }),
+        );
+      }
+    }
+    return () => shapes.forEach((s) => s.setMap(null));
+  }, [map, mapsLibrary, fences, colorScheme]);
+
+  return null;
+}
+
 function StopFencesLayer({ loadId }: { loadId: Id<'loadInformation'> }) {
   const map = useMap();
   const mapsLibrary = useMapsLibrary('maps');
@@ -1415,13 +1500,10 @@ function MapInner(
     const selectedSession = props.selectedId
       ? props.sessions.find((s) => s.sessionId === props.selectedId)
       : null;
-    // Fence overlay target: the pinned trip if the dispatcher focused one,
-    // else the leg being driven right now. Same learned fences as the load
-    // map — polygon when the facility has earned one, circle otherwise.
-    const fenceTrip =
-      props.focusedTripIndex != null
-        ? trips[props.focusedTripIndex]
-        : trips.find((t) => t.status === 'ACTIVE');
+    // Fence overlay: a pinned trip shows its load's FULL fence set (all
+    // stops, review context); the default view shows only the fences
+    // armed right now (ActiveFencesLayer) — the pickup ring disappears
+    // once the exit confirms and the next target's ring takes its place.
 
     return (
       <>
@@ -1464,11 +1546,14 @@ function MapInner(
             longitude={props.hoveredPing.longitude}
           />
         )}
-        {selectedSession && fenceTrip && (
+        {selectedSession && focusedTrip?.loadId && (
           <StopFencesLayer
-            key={fenceTrip.loadId}
-            loadId={fenceTrip.loadId as Id<'loadInformation'>}
+            key={focusedTrip.loadId}
+            loadId={focusedTrip.loadId as Id<'loadInformation'>}
           />
+        )}
+        {selectedSession && !focusedTrip?.loadId && (
+          <ActiveFencesLayer sessionId={selectedSession.sessionId} />
         )}
       </>
     );

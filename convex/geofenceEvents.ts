@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { requireCallerOrgId } from './lib/auth';
+import { Id } from './_generated/dataModel';
 import { facilityFence } from './loadTrackingState';
 import { INNER_RING_METERS, exitRadiusFor } from './lib/geo';
 
@@ -164,5 +165,126 @@ export const ringsForLoad = query({
       });
     }
     return out;
+  },
+});
+
+const latLngValidator = v.object({ lat: v.number(), lng: v.number() });
+
+/**
+ * The fences that are ARMED RIGHT NOW for one session — read straight from
+ * the loadTrackingState watches, so the map shows exactly what the
+ * evaluator is evaluating: the arrival fence advances stop by stop, and a
+ * departure fence disappears the moment the exit confirms. Fences sharing
+ * a location (drop of one load = pickup of the next, shuttle runs) are
+ * merged into one entry with combined labels, so the map never draws
+ * duplicate rings on the same spot.
+ */
+export const activeFencesForSession = query({
+  args: { sessionId: v.id('driverSessions') },
+  returns: v.array(
+    v.object({
+      key: v.string(),
+      hasArrival: v.boolean(),
+      hasDeparture: v.boolean(),
+      latitude: v.number(),
+      longitude: v.number(),
+      arrivalRadiusMeters: v.union(v.number(), v.null()),
+      exitRadiusMeters: v.number(),
+      polygon: v.union(v.array(latLngValidator), v.null()),
+      exitPolygon: v.union(v.array(latLngValidator), v.null()),
+      labels: v.array(v.string()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const callerOrgId = await requireCallerOrgId(ctx);
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.organizationId !== callerOrgId) return [];
+
+    const rows = await ctx.db
+      .query('loadTrackingState')
+      .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+      .collect();
+
+    type Fence = {
+      key: string;
+      hasArrival: boolean;
+      hasDeparture: boolean;
+      latitude: number;
+      longitude: number;
+      arrivalRadiusMeters: number | null;
+      exitRadiusMeters: number;
+      polygon: { lat: number; lng: number }[] | null;
+      exitPolygon: { lat: number; lng: number }[] | null;
+      labels: string[];
+    };
+    const byPlace = new Map<string, Fence>();
+    const merge = (fence: Fence) => {
+      const existing = byPlace.get(fence.key);
+      if (!existing) {
+        byPlace.set(fence.key, fence);
+        return;
+      }
+      existing.hasArrival = existing.hasArrival || fence.hasArrival;
+      existing.hasDeparture = existing.hasDeparture || fence.hasDeparture;
+      existing.arrivalRadiusMeters = existing.arrivalRadiusMeters ?? fence.arrivalRadiusMeters;
+      existing.exitRadiusMeters = Math.max(existing.exitRadiusMeters, fence.exitRadiusMeters);
+      existing.polygon = existing.polygon ?? fence.polygon;
+      existing.exitPolygon = existing.exitPolygon ?? fence.exitPolygon;
+      for (const label of fence.labels) {
+        if (!existing.labels.includes(label)) existing.labels.push(label);
+      }
+    };
+    // ~11 m grid: fences within it are "the same place" visually.
+    const placeKey = (lat: number, lng: number) => `${lat.toFixed(4)}|${lng.toFixed(4)}`;
+
+    const loadNameCache = new Map<string, string>();
+    const loadName = async (loadId: Id<'loadInformation'>) => {
+      const k = loadId as string;
+      if (!loadNameCache.has(k)) {
+        const load = await ctx.db.get(loadId);
+        loadNameCache.set(k, load ? (load.orderNumber ?? load.internalId) : 'load');
+      }
+      return loadNameCache.get(k)!;
+    };
+
+    for (const row of rows) {
+      const name = await loadName(row.loadId);
+      if (row.currentStopLat !== undefined && row.currentStopLng !== undefined) {
+        const radius = row.currentStopArrivalRadiusMeters ?? INNER_RING_METERS;
+        merge({
+          key: placeKey(row.currentStopLat, row.currentStopLng),
+          hasArrival: true,
+          hasDeparture: false,
+          latitude: row.currentStopLat,
+          longitude: row.currentStopLng,
+          arrivalRadiusMeters: radius,
+          exitRadiusMeters: exitRadiusFor(row.currentStopArrivalRadiusMeters),
+          polygon:
+            row.currentStopPolygon && row.currentStopPolygon.length >= 3
+              ? row.currentStopPolygon
+              : null,
+          exitPolygon: null,
+          labels: [`#${name} · Stop ${row.currentStopSequenceNumber}`],
+        });
+      }
+      const watch = row.departureWatch;
+      if (watch) {
+        merge({
+          key: placeKey(watch.lat, watch.lng),
+          hasArrival: false,
+          hasDeparture: true,
+          latitude: watch.lat,
+          longitude: watch.lng,
+          arrivalRadiusMeters: null,
+          exitRadiusMeters: watch.exitRadiusMeters ?? exitRadiusFor(undefined),
+          polygon: null,
+          exitPolygon:
+            watch.exitPolygon && watch.exitPolygon.length >= 3 ? watch.exitPolygon : null,
+          labels: [`#${name} · Stop ${watch.stopSequenceNumber} exit`],
+        });
+      }
+    }
+
+    return [...byPlace.values()];
   },
 });
