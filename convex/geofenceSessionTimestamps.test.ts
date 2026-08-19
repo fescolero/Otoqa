@@ -429,6 +429,133 @@ describe('geofenceEvaluator.evaluatePing — departure watch', () => {
   });
 });
 
+describe('arrival inheritance for same-dock back-to-back loads', () => {
+  async function insertSecondLoad(ctx: MutationCtx, f: Awaited<ReturnType<typeof insertFixtures>>) {
+    const now = Date.now();
+    const loadId = await ctx.db.insert('loadInformation', {
+      internalId: 'L-2002',
+      orderNumber: 'ORD-2002',
+      status: 'Assigned',
+      trackingStatus: 'In Transit',
+      customerId: f.customerId,
+      fleet: 'Test Fleet',
+      units: 'Pallets',
+      workosOrgId: ORG,
+      createdBy: 'user_test',
+      createdAt: now,
+      updatedAt: now,
+    });
+    // Load 2's pickup is the SAME place as load 1's STOP.
+    const stopId = await ctx.db.insert('loadStops', {
+      loadId,
+      internalId: 'L-2002',
+      sequenceNumber: 1,
+      stopType: 'PICKUP',
+      loadingType: 'APPT',
+      address: '1 Dock St',
+      city: 'Philadelphia',
+      state: 'PA',
+      latitude: STOP.lat,
+      longitude: STOP.lng,
+      workosOrgId: ORG,
+      createdBy: 'user_test',
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { loadId, stopId };
+  }
+
+  it("copies the prior load's ARRIVED when the truck never left the fence", async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const second = await insertSecondLoad(ctx, f);
+      // Prior load's detected arrival at this dock, 20 min ago.
+      const arrivedAt = Date.now() - 20 * 60_000;
+      await ctx.db.insert('geofenceEvents', {
+        sessionId: f.sessionId,
+        loadId: f.loadId,
+        stopSequenceNumber: 2,
+        driverId: f.driverId,
+        organizationId: ORG,
+        eventType: 'ARRIVED',
+        triggeredAt: arrivedAt,
+        latitude: STOP.lat,
+        longitude: STOP.lng,
+        distanceMeters: 40,
+        accuracy: 6,
+      });
+
+      const stop = (await ctx.db.get(second.stopId))!;
+      await setFrontierOnCheckIn(ctx, {
+        stop,
+        sessionId: f.sessionId,
+        driverId: f.driverId,
+        organizationId: ORG,
+        now: Date.now(),
+      });
+
+      const inherited = (await ctx.db.query('geofenceEvents').collect()).filter(
+        (e) => e.loadId === second.loadId && e.eventType === 'ARRIVED',
+      );
+      expect(inherited).toHaveLength(1);
+      expect(inherited[0].triggeredAt).toBe(arrivedAt); // physical arrival carried forward
+      expect(inherited[0].inherited).toBe(true);
+      expect(inherited[0].accuracy).toBe(6);
+    });
+  });
+
+  it('does NOT inherit when the truck departed in between', async () => {
+    const t = convexTest(schema);
+    await t.run(async (ctx) => {
+      const f = await insertFixtures(ctx);
+      const second = await insertSecondLoad(ctx, f);
+      const base = Date.now() - 30 * 60_000;
+      await ctx.db.insert('geofenceEvents', {
+        sessionId: f.sessionId,
+        loadId: f.loadId,
+        stopSequenceNumber: 2,
+        driverId: f.driverId,
+        organizationId: ORG,
+        eventType: 'ARRIVED',
+        triggeredAt: base,
+        latitude: STOP.lat,
+        longitude: STOP.lng,
+        distanceMeters: 40,
+      });
+      // Newer DEPARTED near the dock (just outside jitter, still within the
+      // scan) breaks continuity — the newest inside-fence fix must be the
+      // deciding one, so put the departure fix INSIDE the fence edge.
+      await ctx.db.insert('geofenceEvents', {
+        sessionId: f.sessionId,
+        loadId: f.loadId,
+        stopSequenceNumber: 2,
+        driverId: f.driverId,
+        organizationId: ORG,
+        eventType: 'DEPARTED',
+        triggeredAt: base + 10 * 60_000,
+        latitude: STOP.lat + 0.5 * KM,
+        longitude: STOP.lng,
+        distanceMeters: 500,
+      });
+
+      const stop = (await ctx.db.get(second.stopId))!;
+      await setFrontierOnCheckIn(ctx, {
+        stop,
+        sessionId: f.sessionId,
+        driverId: f.driverId,
+        organizationId: ORG,
+        now: Date.now(),
+      });
+
+      const inherited = (await ctx.db.query('geofenceEvents').collect()).filter(
+        (e) => e.loadId === second.loadId,
+      );
+      expect(inherited).toHaveLength(0);
+    });
+  });
+});
+
 describe('loadTrackingState frontier helpers', () => {
   it('check-in at stop 1 aims arrival at stop 2 and departure at stop 1', async () => {
     const t = convexTest(schema);

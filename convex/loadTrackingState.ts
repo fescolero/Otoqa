@@ -1,7 +1,12 @@
 import { QueryCtx, MutationCtx } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { exitRadiusFor, EXIT_RADIUS_RATIO, INNER_RING_METERS } from './lib/geo';
-import { expandPolygon } from './lib/polygonGeo';
+import {
+  exitRadiusFor,
+  EXIT_RADIUS_RATIO,
+  INNER_RING_METERS,
+  calculateDistanceMeters,
+} from './lib/geo';
+import { expandPolygon, pointInPolygon } from './lib/polygonGeo';
 import { pendingLegsForShift } from './lib/legTracking';
 
 /**
@@ -195,6 +200,93 @@ export async function buildDepartureWatch(
  * check-in keeps the evaluator read-free per ping and makes each leg's
  * thresholds stable even if a dispatcher retunes the facility mid-drive.
  */
+// Arrival inheritance limits: how far back a prior same-dock ARRIVED can
+// be carried forward, and how many recent session events to scan for it.
+const INHERIT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const INHERIT_EVENT_SCAN = 20;
+
+/**
+ * Back-to-back loads at the same dock never get a GPS arrival for the
+ * second load's first stop: its fence is created BY the check-in, with
+ * the truck already inside, so "entering" is unobservable. The physical
+ * truth is still known — the previous load's ARRIVED at this place, with
+ * no departure since, means the truck has occupied this fence
+ * continuously. At check-in, when this stop has no ARRIVED of its own
+ * and the session's newest geofence fix inside this stop's fence is an
+ * ARRIVED for a different load, copy it forward (flagged `inherited`) so
+ * dwell for this load counts from dock occupancy, not the paperwork tap.
+ */
+async function inheritArrivalOnCheckIn(
+  ctx: MutationCtx,
+  args: {
+    stop: Doc<'loadStops'>;
+    sessionId: Id<'driverSessions'>;
+    driverId: Id<'drivers'>;
+    organizationId: string;
+    now: number;
+  }
+): Promise<void> {
+  const { stop } = args;
+  if (stop.latitude === undefined || stop.longitude === undefined) return;
+
+  const existing = await ctx.db
+    .query('geofenceEvents')
+    .withIndex('by_load_stop_event', (q) =>
+      q
+        .eq('loadId', stop.loadId)
+        .eq('stopSequenceNumber', stop.sequenceNumber)
+        .eq('eventType', 'ARRIVED')
+    )
+    .first();
+  if (existing) return;
+
+  const fence = await facilityFence(ctx, stop);
+  const radius = fence.radiusMeters ?? INNER_RING_METERS;
+  const insideThisFence = (lat: number, lng: number) =>
+    fence.polygon && fence.polygon.length >= 3
+      ? pointInPolygon({ lat, lng }, fence.polygon)
+      : calculateDistanceMeters(lat, lng, stop.latitude!, stop.longitude!) < radius;
+
+  const recent = await ctx.db
+    .query('geofenceEvents')
+    .withIndex('by_session', (q) => q.eq('sessionId', args.sessionId))
+    .order('desc')
+    .take(INHERIT_EVENT_SCAN);
+
+  // The newest fix inside this fence decides: an ARRIVED means the truck
+  // has been here since then; a DEPARTED (or anything else) breaks the
+  // continuity claim, so no inheritance.
+  const newestInside = recent.find((e) => insideThisFence(e.latitude, e.longitude));
+  if (
+    !newestInside ||
+    newestInside.eventType !== 'ARRIVED' ||
+    newestInside.loadId === stop.loadId ||
+    args.now - newestInside.triggeredAt > INHERIT_MAX_AGE_MS
+  ) {
+    return;
+  }
+
+  await ctx.db.insert('geofenceEvents', {
+    sessionId: args.sessionId,
+    loadId: stop.loadId,
+    stopSequenceNumber: stop.sequenceNumber,
+    driverId: args.driverId,
+    organizationId: args.organizationId,
+    eventType: 'ARRIVED',
+    triggeredAt: newestInside.triggeredAt,
+    latitude: newestInside.latitude,
+    longitude: newestInside.longitude,
+    distanceMeters: calculateDistanceMeters(
+      newestInside.latitude,
+      newestInside.longitude,
+      stop.latitude,
+      stop.longitude
+    ),
+    accuracy: newestInside.accuracy,
+    inherited: true,
+  });
+}
+
 export async function setFrontierOnCheckIn(
   ctx: MutationCtx,
   args: {
@@ -206,6 +298,10 @@ export async function setFrontierOnCheckIn(
   }
 ): Promise<void> {
   const { stop } = args;
+
+  // Same-dock back-to-back loads: carry the physical arrival forward
+  // before the watches re-arm (see inheritArrivalOnCheckIn).
+  await inheritArrivalOnCheckIn(ctx, args);
 
   const siblingStops = await ctx.db
     .query('loadStops')

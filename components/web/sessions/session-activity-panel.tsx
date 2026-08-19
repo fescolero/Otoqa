@@ -601,6 +601,7 @@ function TripCard({
 
 type StopTimeline = {
   checkedInAt: string | null;
+  checkedOutAt: string | null;
   arrivedAt: number | null;
   departedAt: number | null;
 };
@@ -694,8 +695,32 @@ function StopTimelineLine({ timeline }: { timeline: StopTimeline }) {
       </span>,
     );
   }
-  if (timeline.departedAt != null) {
-    parts.push(<span key="dep">out {hhmm(timeline.departedAt)}</span>);
+  // Departure half — same detected-vs-reported pairing as the arrival:
+  // GPS exit next to the checkout tap, with the gap when both exist.
+  const outTapMs = timeline.checkedOutAt ? Date.parse(timeline.checkedOutAt) : null;
+  if (timeline.departedAt != null || outTapMs != null) {
+    const outDeltaMin =
+      timeline.departedAt != null && outTapMs != null
+        ? Math.round((outTapMs - timeline.departedAt) / 60_000)
+        : null;
+    parts.push(
+      <span key="dep">
+        out{' '}
+        {timeline.departedAt != null && (
+          <span style={{ color: '#0F8C5F', fontWeight: 600 }}>GPS {hhmm(timeline.departedAt)}</span>
+        )}
+        {timeline.departedAt != null && outTapMs != null && (
+          <span style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}> · </span>
+        )}
+        {outTapMs != null && <span>tap {hhmm(outTapMs)}</span>}
+        {outDeltaMin != null && outDeltaMin !== 0 && (
+          <span style={{ color: 'var(--text-tertiary)' }}>
+            {' '}
+            ({outDeltaMin > 0 ? `+${outDeltaMin}m` : `${outDeltaMin}m`})
+          </span>
+        )}
+      </span>,
+    );
   }
   if (parts.length === 0) return null;
 

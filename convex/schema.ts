@@ -3281,6 +3281,12 @@ export default defineSchema({
     // historical GPS). Absent on live-detected events — the audit trail
     // always distinguishes "detected live" from "computed after the fact".
     backfilled: v.optional(v.boolean()),
+    // True when the ARRIVED was inherited from the previous load at the
+    // same dock (back-to-back loads, truck never left the fence): the
+    // physical arrival belongs to the earlier load's detection; this row
+    // carries it forward so dwell for THIS load counts from dock
+    // occupancy, not the paperwork tap.
+    inherited: v.optional(v.boolean()),
   })
     .index('by_load_stop_event', ['loadId', 'stopSequenceNumber', 'eventType'])
     .index('by_load', ['loadId', 'triggeredAt'])
