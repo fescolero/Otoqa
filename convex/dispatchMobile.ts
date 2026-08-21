@@ -664,7 +664,42 @@ export const declineOffer = mutation({
   },
 });
 
-/** Fleet list — active drivers + last ping + current load (mirrors getDrivers). */
+/**
+ * Fleet list (v8 design, `lib-dispatch/drivers.jsx`). Beyond the name and
+ * phone the old version returned, each row now carries what the design's
+ * DriverRow actually renders: a data-backed status, the truck, the route
+ * they're running, an HOS estimate and today's leg count.
+ *
+ * Legs are fetched once per org scope and grouped in memory rather than
+ * queried per driver — the per-driver fan-out is already 3 reads (location
+ * + the two HOS session queries), and this list renders the whole fleet.
+ */
+const STALE_FIX_MS = 30 * 60_000;
+const LATE_GRACE_MS = 15 * 60_000;
+
+export type DriverListStatus = 'moving' | 'idle' | 'late' | 'offline';
+
+/**
+ * Every state is a checkable condition, never a guess:
+ *   offline — rolling, but the GPS went quiet (this is "tracking lost")
+ *   moving  — rolling with a fresh fix
+ *   late    — should have started a leg by now and hasn't
+ *   idle    — nothing active: genuinely available
+ */
+function driverStatus(
+  hasActiveLeg: boolean,
+  lastFixAt: number | null,
+  earliestPendingStartMs: number | null,
+  now: number,
+): DriverListStatus {
+  if (hasActiveLeg) {
+    if (lastFixAt == null || now - lastFixAt > STALE_FIX_MS) return 'offline';
+    return 'moving';
+  }
+  if (earliestPendingStartMs != null && earliestPendingStartMs < now - LATE_GRACE_MS) return 'late';
+  return 'idle';
+}
+
 export const listDrivers = query({
   args: {},
   handler: async (ctx) => {
@@ -672,11 +707,102 @@ export const listDrivers = query({
     const drivers = await orgDrivers(ctx, resolved);
     const inProgress = await assignmentsByStatus(ctx, resolved.externalId, 'IN_PROGRESS');
 
-    return Promise.all(
+    // One pass for the org's open legs, then group by driver.
+    const orgScopes = [...new Set([...resolved.driverOrgIds, resolved.externalId])];
+    const openLegs: Doc<'dispatchLegs'>[] = [];
+    for (const orgId of orgScopes) {
+      for (const status of ['PENDING', 'ACTIVE'] as const) {
+        openLegs.push(
+          ...(await ctx.db
+            .query('dispatchLegs')
+            .withIndex('by_org_status', (q) => q.eq('workosOrgId', orgId).eq('status', status))
+            .collect()),
+        );
+      }
+    }
+    const legsByDriver = new Map<string, Doc<'dispatchLegs'>[]>();
+    for (const leg of openLegs) {
+      if (!leg.driverId) continue;
+      const key = leg.driverId as string;
+      const list = legsByDriver.get(key);
+      if (list) list.push(leg);
+      else legsByDriver.set(key, [leg]);
+    }
+
+    const now = Date.now();
+    const dayStart = new Date(now).setHours(0, 0, 0, 0);
+    const dayEnd = dayStart + 86_400_000;
+
+    // Trucks and stops repeat across drivers/legs — read each at most once.
+    const truckCache = new Map<string, string | null>();
+    const truckUnit = async (truckId: Id<'trucks'> | undefined) => {
+      if (!truckId) return null;
+      const key = truckId as string;
+      if (truckCache.has(key)) return truckCache.get(key)!;
+      const truck = await ctx.db.get(truckId);
+      const unit = truck?.unitId ?? null;
+      truckCache.set(key, unit);
+      return unit;
+    };
+    const cityOf = async (stopId: Id<'loadStops'>) => {
+      const stop = await ctx.db.get(stopId);
+      return stop?.city ?? stop?.state ?? null;
+    };
+
+    return await Promise.all(
       drivers.map(async (driver) => {
-        const lastLocation = await latestLocation(ctx, driver._id);
-        const currentAssignment = inProgress.find((a) => a.assignedDriverId === driver._id) ?? null;
-        const load = currentAssignment ? await ctx.db.get(currentAssignment.loadId) : null;
+        const legs = legsByDriver.get(driver._id as string) ?? [];
+        const activeLeg = legs.find((l) => l.status === 'ACTIVE') ?? null;
+        const pendingStarts = legs
+          .filter((l) => l.status === 'PENDING' && l.scheduledStartMs != null)
+          .map((l) => l.scheduledStartMs!)
+          .sort((a, b) => a - b);
+        // Both work models are live (see listActiveAssignments, which merges
+        // the same two): web-TMS legs, and carrier assignments for the Clerk
+        // owner-operator path. A driver rolling on an assignment is rolling.
+        const activeAssignment =
+          inProgress.find((a) => a.assignedDriverId === driver._id) ?? null;
+        const onActiveWork = !!activeLeg || !!activeAssignment;
+
+        const location = await latestLocation(ctx, driver._id);
+        const lastFixAt = location?.recordedAt ?? null;
+        const status = driverStatus(onActiveWork, lastFixAt, pendingStarts[0] ?? null, now);
+
+        // The route the design puts under the name — only knowable while
+        // work is running. Idle drivers have no route line (GPS gives us
+        // coordinates, not a city; there is no reverse geocode here).
+        let route: { from: string | null; to: string | null } | null = null;
+        let currentLoad: { _id: Id<'loadInformation'>; internalId: string } | null = null;
+        if (activeLeg) {
+          const [from, to] = await Promise.all([
+            cityOf(activeLeg.startStopId),
+            cityOf(activeLeg.endStopId),
+          ]);
+          route = { from, to };
+          const load = await ctx.db.get(activeLeg.loadId);
+          if (load) currentLoad = { _id: load._id, internalId: load.internalId };
+        } else if (activeAssignment) {
+          const load = await ctx.db.get(activeAssignment.loadId);
+          if (load) {
+            currentLoad = { _id: load._id, internalId: load.internalId };
+            const stops = await ctx.db
+              .query('loadStops')
+              .withIndex('by_load', (q) => q.eq('loadId', load._id))
+              .collect();
+            const ordered = stops.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+            if (ordered.length > 0) {
+              const first = ordered[0];
+              const last = ordered[ordered.length - 1];
+              route = {
+                from: first.city ?? first.state ?? null,
+                to: last.city ?? last.state ?? null,
+              };
+            }
+          }
+        }
+
+        const hos = await hosForDriver(ctx, driver._id);
+
         return {
           _id: driver._id,
           firstName: driver.firstName,
@@ -684,8 +810,26 @@ export const listDrivers = query({
           phone: driver.phone,
           employmentStatus: driver.employmentStatus,
           currentTruckId: driver.currentTruckId,
-          lastLocation,
-          currentLoad: load ? { _id: load._id, internalId: load.internalId } : null,
+          truckUnitId: await truckUnit(activeLeg?.truckId ?? driver.currentTruckId),
+          status,
+          route,
+          currentLoad,
+          /**
+           * What's on their plate today, not a completed count: legs scheduled
+           * to start today, plus an in-progress carrier assignment when no leg
+           * already represents it (the two models don't overlap per driver).
+           */
+          loadsToday:
+            legs.filter(
+              (l) =>
+                l.scheduledStartMs != null &&
+                l.scheduledStartMs >= dayStart &&
+                l.scheduledStartMs < dayEnd,
+            ).length + (!activeLeg && activeAssignment ? 1 : 0),
+          hos,
+          hosLabel: hosChipLabel(hos),
+          lastFixAt,
+          lastLocation: location,
         };
       }),
     );
