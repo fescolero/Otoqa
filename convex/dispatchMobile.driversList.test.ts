@@ -191,7 +191,9 @@ function setup() {
   return { t, ready: t.run(insertFixtures) };
 }
 
-const byName = (rows: { firstName: string }[], name: string) =>
+/** Generic so the row keeps its full query type — a `{ firstName: string }[]`
+ *  parameter would widen every hit and hide the fields under test. */
+const byName = <T extends { firstName: string }>(rows: T[], name: string): T =>
   rows.find((r) => r.firstName === name)!;
 
 describe('listDrivers — v8 fleet-list enrichment', () => {
