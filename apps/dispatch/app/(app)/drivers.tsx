@@ -214,6 +214,9 @@ export default function DriversScreen() {
           <FlatList
             data={list}
             keyExtractor={(r) => r._id}
+            // The list is what absorbs the leftover column space, so the
+            // filter row above it isn't the thing that gets compressed.
+            style={{ flex: 1 }}
             contentContainerStyle={{ padding: 24, paddingTop: 14, gap: 10 }}
             keyboardShouldPersistTaps="handled"
             renderItem={({ item }) => (

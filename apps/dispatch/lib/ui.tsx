@@ -215,6 +215,13 @@ export interface SegItem<K extends string> {
  * both worlds — the last chip looks sliced off rather than scrollable, and
  * nobody discovers the gesture. The ScrollView stays for narrow screens and
  * for surfaces that add a fifth filter, where scrolling is unmistakable.
+ *
+ * The row pins its own height. A horizontal ScrollView placed in a flex
+ * column between fixed content and a growing list will otherwise be
+ * compressed by its siblings, cropping the chips along their bottom edge —
+ * and `minHeight` on a child cannot push back against a parent that has
+ * already been shrunk. Hence flexGrow/flexShrink 0 here and a fixed height
+ * on the chip rather than a minimum.
  */
 export function SegRow<K extends string>({
   items,
@@ -231,7 +238,14 @@ export function SegRow<K extends string>({
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
-      contentContainerStyle={{ gap: 6, paddingLeft: 24, paddingRight: 16 }}
+      style={{ flexGrow: 0, flexShrink: 0 }}
+      contentContainerStyle={{
+        gap: 6,
+        paddingLeft: 24,
+        paddingRight: 16,
+        alignItems: 'center',
+        paddingVertical: 3,
+      }}
     >
       {items.map((it) => {
         const on = it.k === value;
@@ -240,7 +254,7 @@ export function SegRow<K extends string>({
             key={it.k}
             onPress={() => onChange(it.k)}
             style={{
-              minHeight: 34,
+              height: 34,
               paddingHorizontal: 11,
               borderRadius: borderRadius.full,
               backgroundColor: on ? colors.primary : colors.muted,
